@@ -244,6 +244,75 @@ class DictionaryEvaluator(BaseEvaluator):
             if self.spanish_dict_es.check(lowercase_word) or self.spanish_dict_mx.check(lowercase_word):
                 return True
 
+        # Morphological fallback: diminutives, clitics, etc.
+        if self._check_spanish_morphology(word.lower()):
+            return True
+
+        return False
+
+    def _check_spanish_morphology(self, word_lower: str) -> bool:
+        """
+        Morphological fallback for words not found in the dictionary.
+
+        Handles two common cases:
+        - Diminutive suffixes (-ito/-ita/-itos/-itas, -illo/-illa, -cito/-cita, etc.)
+        - Verb + clitic pronouns (-lo/-la/-los/-las/-le/-les/-me/-te/-se/-nos/-os/-monos)
+
+        Args:
+            word_lower: Lowercase word to check
+
+        Returns:
+            True if a valid Spanish base form can be recovered
+        """
+        def _is_valid(candidate: str) -> bool:
+            return bool(
+                self.spanish_dict_es.check(candidate)
+                or self.spanish_dict_mx.check(candidate)
+            )
+
+        def _normalize_accents(s: str) -> str:
+            return s.translate(str.maketrans("áéíóúü", "aeiouu"))
+
+        # Pass A — Diminutive suffix stripping (longest first)
+        diminutive_suffixes = [
+            "citos", "citas", "cito", "cita",
+            "itos", "itas", "illos", "illas", "illo", "illa",
+            "ito", "ita",
+        ]
+        for suffix in diminutive_suffixes:
+            if word_lower.endswith(suffix):
+                stem = word_lower[: -len(suffix)]
+                if len(stem) < 3:
+                    continue
+                candidates = [
+                    stem,
+                    stem + "o",
+                    stem + "a",
+                    stem + "e",
+                ]
+                # If stem ends in a vowel, try vowel-swap (e.g. amigu → amigo)
+                if stem[-1] in "aeiouáéíóú":
+                    candidates.append(stem[:-1] + "o")
+                    candidates.append(stem[:-1] + "a")
+                for candidate in candidates:
+                    if _is_valid(candidate):
+                        return True
+
+        # Pass B — Verb clitic stripping (longest first)
+        clitic_suffixes = [
+            "monos", "selos", "melo", "mela", "telo", "tela",
+            "nos", "los", "las", "les",
+            "me", "te", "se", "lo", "la", "le", "os",
+        ]
+        for suffix in clitic_suffixes:
+            if word_lower.endswith(suffix):
+                stem = word_lower[: -len(suffix)]
+                if len(stem) < 3:
+                    continue
+                for candidate in (stem, _normalize_accents(stem)):
+                    if _is_valid(candidate):
+                        return True
+
         return False
 
     def _check_english_word(self, word: str) -> bool:
