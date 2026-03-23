@@ -21,72 +21,68 @@ from src.utils.file_io import (
 
 
 def extract_previous_chapter_context(
-    previous_chapter_translation: Optional[str],
-    context_paragraphs: int = 2,
-    context_words: Optional[int] = None
+    previous_section_text: Optional[str],
+    min_paragraphs: int = 3,
+    min_chars: int = 200,
+    source_language: str = "English",
 ) -> str:
     """
-    Extract context from the end of the previous chapter's translation.
+    Extract context from the end of the previous section's source text.
 
-    Provides continuity between chapters by including the last few paragraphs
-    or words from the previous chapter's translated text.
+    Uses dual-constraint strategy: adds paragraphs from the end until BOTH
+    min_paragraphs AND min_chars are satisfied. If paragraphs run out before
+    both constraints are met, returns everything available.
 
     Args:
-        previous_chapter_translation: Translated text from previous chapter (None if first chapter)
-        context_paragraphs: Number of paragraphs to extract from end (default: 2)
-        context_words: Alternative to paragraphs - extract N words from end (overrides paragraphs)
+        previous_section_text: Source-language text from previous chunk/chapter.
+        min_paragraphs: Minimum number of paragraphs to include (default: 3).
+        min_chars: Minimum total characters to include (default: 200).
+        source_language: Language name for the context header label.
 
     Returns:
-        Formatted context string for prompt, or empty string if no context available
+        Formatted context block for prompt insertion, or "" if no text provided.
 
     Example:
         >>> prev_text = "Paragraph 1.\\n\\nParagraph 2.\\n\\nParagraph 3."
-        >>> context = extract_previous_chapter_context(prev_text, context_paragraphs=2)
+        >>> context = extract_previous_chapter_context(prev_text, min_paragraphs=2)
         >>> "Paragraph 2" in context
         True
     """
-    # No context if no previous chapter
-    if not previous_chapter_translation or not previous_chapter_translation.strip():
+    if not previous_section_text or not previous_section_text.strip():
         return ""
 
-    text = previous_chapter_translation.strip()
-
-    # Extract context based on method
-    if context_words is not None and context_words > 0:
-        # Extract last N words
-        words = text.split()
-        if len(words) <= context_words:
-            context_text = text
-        else:
-            context_text = ' '.join(words[-context_words:])
-
-    elif context_paragraphs > 0:
-        # Extract last N paragraphs
-        # Split on double newlines (paragraph breaks)
-        paragraphs = re.split(r'\n\s*\n', text)
-        # Filter out empty paragraphs
-        paragraphs = [p.strip() for p in paragraphs if p.strip()]
-
-        if len(paragraphs) <= context_paragraphs:
-            context_text = text
-        else:
-            context_text = '\n\n'.join(paragraphs[-context_paragraphs:])
-
-    else:
-        # No context requested
+    paragraphs = [
+        p.strip()
+        for p in re.split(r'\n\s*\n', previous_section_text.strip())
+        if p.strip()
+    ]
+    if not paragraphs:
         return ""
 
-    # Format the context for inclusion in prompt
-    formatted_context = f"""
-Previous Chapter Ending (Translated):
-─────────────────────────────────────
+    selected = []
+    char_count = 0
+
+    for para in reversed(paragraphs):
+        selected.insert(0, para)
+        char_count += len(para)
+
+        paras_met = len(selected) >= min_paragraphs
+        chars_met = char_count >= min_chars
+
+        if paras_met and chars_met:
+            break
+
+    context_text = '\n\n'.join(selected)
+
+    return f"""
+Previous Section (Original {source_language}):
+─────────────────────────────────────────────
 {context_text}
-─────────────────────────────────────
+─────────────────────────────────────────────
 
-This provides continuity context for the current chapter's opening.
+This provides continuity context. Do not re-translate it — use it only to
+maintain consistent voice, terminology, and narrative flow.
 """
-
-    return formatted_context
 
 
 def generate_workbook(
@@ -97,9 +93,9 @@ def generate_workbook(
     source_language: str = "English",
     target_language: str = "Spanish",
     book_context: str = "",
-    previous_chapter_translation: Optional[str] = None,
-    context_paragraphs: int = 2,
-    context_words: Optional[int] = None,
+    previous_chapter_source: Optional[str] = None,
+    context_paragraphs: int = 3,
+    min_context_chars: int = 200,
 ) -> str:
     """
     Generate a formatted workbook for manual translation.
@@ -115,9 +111,9 @@ def generate_workbook(
         source_language: Source language (default: English)
         target_language: Target language (default: Spanish)
         book_context: Optional context about the book
-        previous_chapter_translation: Optional translated text from previous chapter
-        context_paragraphs: Number of paragraphs from previous chapter to include (default: 2)
-        context_words: Alternative to paragraphs - number of words to include
+        previous_chapter_source: Optional source text from end of previous chapter
+        context_paragraphs: Minimum paragraphs of context to include (default: 3)
+        min_context_chars: Minimum characters of context to include (default: 200)
 
     Returns:
         Formatted workbook content as string
@@ -125,8 +121,8 @@ def generate_workbook(
     Example:
         >>> chunks = [chunk1, chunk2, chunk3]
         >>> glossary = load_glossary("glossary.json")
-        >>> prev_chapter = Path("chapters/translated/chapter_01.txt").read_text()
-        >>> workbook = generate_workbook(chunks, glossary, previous_chapter_translation=prev_chapter)
+        >>> prev_chapter = Path("chapters/source/chapter_01.txt").read_text()
+        >>> workbook = generate_workbook(chunks, glossary, previous_chapter_source=prev_chapter)
         >>> Path("workbook.md").write_text(workbook)
     """
     if not chunks:
@@ -156,18 +152,19 @@ def generate_workbook(
     if style_guide:
         sections.append(_generate_style_guide_section(style_guide))
 
-    # Extract previous chapter context if provided
-    previous_context = extract_previous_chapter_context(
-        previous_chapter_translation,
-        context_paragraphs=context_paragraphs,
-        context_words=context_words
-    )
-
     # Separator before chunks
     sections.append("\n" + "═" * 70 + "\n")
 
-    # Generate section for each chunk
+    # Thread source context through chunks: each chunk receives the previous chunk's
+    # source text as context (or the previous chapter's source for the first chunk).
+    prev_source = previous_chapter_source
     for chunk in sorted_chunks:
+        previous_context = extract_previous_chapter_context(
+            prev_source,
+            min_paragraphs=context_paragraphs,
+            min_chars=min_context_chars,
+            source_language=source_language,
+        )
         sections.append(_generate_chunk_section(
             chunk=chunk,
             glossary=glossary,
@@ -179,6 +176,7 @@ def generate_workbook(
             total_chunks=len(sorted_chunks),
             previous_chapter_context=previous_context
         ))
+        prev_source = chunk.source_text
 
     # Footer
     sections.append(_generate_footer(timestamp=datetime.now()))

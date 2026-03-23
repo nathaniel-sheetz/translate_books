@@ -196,23 +196,51 @@ def test_render_chunk_prompt_with_glossary(temp_chunks_dir, glossary_fixture):
     assert "Harry" in prompt or "CHARACTER" in prompt
 
 
-def test_render_chunk_prompt_with_previous_context(temp_chunks_dir):
-    """Test rendering prompt with previous chapter context."""
-    prev_chapter_text = "Previous chapter ending.\n\nLast paragraph of chapter."
+def test_render_chunk_prompt_with_previous_context(tmp_path):
+    """Test that previous_chapter source text is used as context when no chunk has been translated."""
+    from src.utils.file_io import save_chunk
+    # Create a chunks dir with only untranslated chunks so last_source_text stays None
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    chunk = Chunk(
+        id="fresh_chunk_001",
+        chapter_id="chapter_01",
+        position=1,
+        source_text="First untranslated chunk.",
+        translated_text=None,
+        metadata=ChunkMetadata(
+            char_start=0, char_end=25, overlap_start=0, overlap_end=0,
+            paragraph_count=1, word_count=3,
+        ),
+        status=ChunkStatus.PENDING,
+    )
+    save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
 
+    prev_chapter_text = "Previous chapter ending.\n\nLast paragraph of chapter."
     session = TranslationSession(
-        chunks_dir=str(temp_chunks_dir),
+        chunks_dir=str(chunks_dir),
         previous_chapter=prev_chapter_text,
         include_context=True,
         context_paragraphs=1,
     )
 
-    chunk = session.chunks[0]
-    prompt = session.render_chunk_prompt(chunk)
+    prompt = session.render_chunk_prompt(session.chunks[0])
 
-    # Verify context is included
-    assert "Previous Chapter Ending" in prompt
+    # previous_chapter is used as fallback when no chunk has been translated yet
+    assert "Previous Section (Original English)" in prompt
     assert "Last paragraph of chapter" in prompt
+
+
+def test_render_chunk_prompt_context_uses_last_source_text(temp_chunks_dir):
+    """Test that last translated chunk's source text takes priority as context."""
+    session = TranslationSession(chunks_dir=str(temp_chunks_dir))
+
+    # temp_chunks_dir has chunk_002 already translated, so last_source_text is seeded
+    assert session.last_source_text == "This is the second chunk of English text."
+
+    prompt = session.render_chunk_prompt(session.chunks[0])
+    assert "Previous Section (Original English)" in prompt
+    assert "second chunk of English text" in prompt
 
 
 def test_save_translation(temp_chunks_dir):

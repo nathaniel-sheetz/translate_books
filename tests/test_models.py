@@ -1,7 +1,13 @@
 """Tests for core data models."""
 
 import pytest
-from src.models import Glossary, GlossaryTerm, GlossaryTermType
+from src.models import (
+    ChapterDetectionConfig,
+    ChunkingConfig,
+    Glossary,
+    GlossaryTerm,
+    GlossaryTermType,
+)
 
 
 class TestGlossaryFindTermBySpanish:
@@ -136,3 +142,45 @@ class TestGlossaryFindTerm:
         result = glossary.find_term("MAGIC")
         assert result is not None
         assert result.english == "magic"
+
+
+class TestChunkingConfigDefaults:
+    """Tests for ChunkingConfig zero-overlap defaults."""
+
+    def test_overlap_paragraphs_default_is_zero(self):
+        config = ChunkingConfig()
+        assert config.overlap_paragraphs == 0
+
+    def test_min_overlap_words_default_is_zero(self):
+        config = ChunkingConfig()
+        assert config.min_overlap_words == 0
+
+    def test_explicit_nonzero_overlap_still_works(self):
+        config = ChunkingConfig(overlap_paragraphs=2, min_overlap_words=100)
+        assert config.overlap_paragraphs == 2
+        assert config.min_overlap_words == 100
+
+
+class TestChapterDetectionConfigDefaults:
+    """Tests for ChapterDetectionConfig min_context_chars field."""
+
+    def test_min_context_chars_default(self):
+        config = ChapterDetectionConfig()
+        assert config.min_context_chars == 200
+
+    def test_context_paragraphs_default_is_three(self):
+        config = ChapterDetectionConfig()
+        assert config.context_paragraphs == 3
+
+    def test_context_words_field_removed(self):
+        """context_words should no longer be a recognised field."""
+        config = ChapterDetectionConfig()
+        assert not hasattr(config, "context_words")
+
+    def test_custom_min_context_chars(self):
+        config = ChapterDetectionConfig(min_context_chars=500)
+        assert config.min_context_chars == 500
+
+    def test_min_context_chars_zero_allowed(self):
+        config = ChapterDetectionConfig(min_context_chars=0)
+        assert config.min_context_chars == 0

@@ -18,6 +18,7 @@ from src.models import (
     StyleGuide,
 )
 from src.translator import (
+    extract_previous_chapter_context,
     generate_workbook,
     save_workbook,
 )
@@ -871,3 +872,102 @@ def test_import_translations_validation_fails(tmp_path):
 
     with pytest.raises(ValueError, match="Workbook validation failed"):
         import_translations(workbook_path, [wrong_chunk], tmp_path / "translated")
+
+
+# ============================================================================
+# extract_previous_chapter_context Tests
+# ============================================================================
+
+
+class TestExtractPreviousChapterContext:
+    """Tests for the dual-constraint source-language context extraction."""
+
+    THREE_PARAS = "First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph here."
+
+    def test_returns_empty_for_none(self):
+        assert extract_previous_chapter_context(None) == ""
+
+    def test_returns_empty_for_blank(self):
+        assert extract_previous_chapter_context("   ") == ""
+
+    def test_includes_source_language_label(self):
+        result = extract_previous_chapter_context(self.THREE_PARAS)
+        assert "Previous Section (Original English)" in result
+
+    def test_custom_source_language_label(self):
+        result = extract_previous_chapter_context(self.THREE_PARAS, source_language="French")
+        assert "Previous Section (Original French)" in result
+
+    def test_do_not_retranslate_instruction(self):
+        result = extract_previous_chapter_context(self.THREE_PARAS)
+        assert "Do not re-translate" in result
+
+    def test_dual_constraint_paragraphs_met_first(self):
+        """Long paragraphs — paragraph count is the binding constraint."""
+        # Each paragraph is 300 chars, so 1 paragraph already exceeds min_chars=200
+        # but we still need min_paragraphs=3
+        long_para = "x" * 300
+        text = f"{long_para}\n\n{long_para}\n\n{long_para}\n\n{long_para}"
+        result = extract_previous_chapter_context(text, min_paragraphs=3, min_chars=200)
+        # Should include exactly 3 paragraphs (stops as soon as both met)
+        selected = [p for p in result.split("\n\n") if "x" * 10 in p]
+        assert len(selected) == 3
+
+    def test_dual_constraint_chars_met_first(self):
+        """Short paragraphs — char count is the binding constraint."""
+        # 15-char paragraphs; need min_paragraphs=2 and min_chars=200
+        # So loop runs until 200 chars accumulated (~14 paragraphs)
+        short_para = "Short line.    "  # 15 chars
+        paragraphs = [short_para] * 20
+        text = "\n\n".join(paragraphs)
+        result = extract_previous_chapter_context(text, min_paragraphs=2, min_chars=200)
+        # Should include more than 2 paragraphs
+        lines = [p for p in result.split("\n\n") if short_para.strip() in p]
+        assert len(lines) > 2
+
+    def test_fewer_paragraphs_than_min_returns_all(self):
+        """If the text has fewer paragraphs than min_paragraphs, return all."""
+        text = "Only one paragraph."
+        result = extract_previous_chapter_context(text, min_paragraphs=3, min_chars=200)
+        assert "Only one paragraph." in result
+
+    def test_takes_from_end_not_beginning(self):
+        """Context must come from the END of the previous section."""
+        text = "First para.\n\nMiddle para.\n\nLast para."
+        result = extract_previous_chapter_context(text, min_paragraphs=1, min_chars=1)
+        assert "Last para." in result
+
+    def test_selects_last_n_paragraphs(self):
+        """With min_paragraphs=2 and short text, takes the last 2."""
+        text = "Para A.\n\nPara B.\n\nPara C."
+        result = extract_previous_chapter_context(text, min_paragraphs=2, min_chars=1)
+        assert "Para B." in result
+        assert "Para C." in result
+        assert "Para A." not in result
+
+    def test_generate_workbook_threads_context_between_chunks(self, sample_chunk, sample_chunk_2):
+        """Each chunk in the workbook should receive the previous chunk's source as context."""
+        workbook = generate_workbook(
+            chunks=[sample_chunk, sample_chunk_2],
+            project_name="Test",
+            context_paragraphs=1,
+            min_context_chars=1,
+        )
+        # The second chunk's prompt should contain text from the END of the first chunk's source.
+        # sample_chunk has two paragraphs; with min_paragraphs=1 and min_chars=1, only the
+        # last paragraph is taken.
+        second_chunk_start = workbook.find("CHUNK 2:")
+        second_chunk_section = workbook[second_chunk_start:]
+        assert "However little known the feelings" in second_chunk_section
+
+    def test_generate_workbook_previous_chapter_source_for_first_chunk(self, sample_chunk):
+        """First chunk should receive previous_chapter_source as context."""
+        prev_source = "End of previous chapter.\n\nFinal paragraph."
+        workbook = generate_workbook(
+            chunks=[sample_chunk],
+            project_name="Test",
+            previous_chapter_source=prev_source,
+            context_paragraphs=1,
+            min_context_chars=1,
+        )
+        assert "Final paragraph." in workbook

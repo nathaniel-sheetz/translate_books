@@ -62,7 +62,8 @@ class TranslationSession:
         style_guide: Optional[StyleGuide] = None,
         previous_chapter: Optional[str] = None,
         include_context: bool = False,
-        context_paragraphs: int = 2,
+        context_paragraphs: int = 3,
+        min_context_chars: int = 200,
         project_name: str = "Translation Project",
         source_language: str = "English",
         target_language: str = "Spanish",
@@ -73,6 +74,7 @@ class TranslationSession:
         self.previous_chapter = previous_chapter
         self.include_context = include_context
         self.context_paragraphs = context_paragraphs
+        self.min_context_chars = min_context_chars
         self.project_name = project_name
         self.source_language = source_language
         self.target_language = target_language
@@ -86,7 +88,7 @@ class TranslationSession:
             (c for c in reversed(self.chunks) if c.translated_text and c.translated_text.strip()),
             None,
         )
-        self.last_translation: Optional[str] = last_done.translated_text if last_done else None
+        self.last_source_text: Optional[str] = last_done.source_text if last_done else None
 
     def _load_all_chunks(self) -> list[Chunk]:
         """Load and sort all chunk JSON files."""
@@ -123,13 +125,16 @@ class TranslationSession:
 
     def render_chunk_prompt(self, chunk: Chunk) -> str:
         """Render complete prompt for a chunk."""
-        # Use last saved translation as context (auto-threading), or fall back to
-        # a static previous chapter file if configured and no translation yet saved.
-        prev_source = self.last_translation or (
+        # Use last chunk's source text as context (auto-threading), or fall back to
+        # a static previous chapter source file if configured and no chunk translated yet.
+        prev_source = self.last_source_text or (
             self.previous_chapter if self.include_context else None
         )
         prev_context = extract_previous_chapter_context(
-            prev_source, context_paragraphs=self.context_paragraphs
+            prev_source,
+            min_paragraphs=self.context_paragraphs,
+            min_chars=self.min_context_chars,
+            source_language=self.source_language,
         ) if prev_source else ""
 
         # Prepare variables
@@ -184,10 +189,10 @@ class TranslationSession:
         chunk_path = Path(self.chunks_dir) / f"{chunk_id}.json"
         save_chunk(updated_chunk, chunk_path)
 
-        # Update in-memory list and track last translation for context threading
+        # Update in-memory list and track last source text for context threading
         idx = next(i for i, c in enumerate(self.chunks) if c.id == chunk_id)
         self.chunks[idx] = updated_chunk
-        self.last_translation = translation
+        self.last_source_text = self.chunks[idx].source_text
 
         return True
 
