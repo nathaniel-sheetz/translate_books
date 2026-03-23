@@ -402,7 +402,7 @@ def save_chapters_to_files(
         filepath = output_path / filename
 
         # Write chapter content
-        filepath.write_text(chapter.content, encoding='utf-8')
+        filepath.write_text(f"{chapter.chapter_title}\n\n{chapter.content}", encoding='utf-8')
 
         created_files.append(str(filepath))
 
