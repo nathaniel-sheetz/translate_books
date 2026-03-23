@@ -353,7 +353,13 @@ class DictionaryEvaluator(BaseEvaluator):
         """
         word_lower = word.lower()
         for term in glossary.terms:
+            # Exact match on the full term (single-word terms, or exact multi-word match)
             if term.spanish.lower() == word_lower or term.english.lower() == word_lower:
+                return True
+            # Token match: word is one component of a multi-word term
+            spanish_tokens = {t.lower() for t in term.spanish.split()}
+            english_tokens = {t.lower() for t in term.english.split()}
+            if word_lower in spanish_tokens or word_lower in english_tokens:
                 return True
         return False
 
