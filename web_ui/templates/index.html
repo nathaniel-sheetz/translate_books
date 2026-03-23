@@ -101,6 +101,11 @@
                         max="5">
                     <small data-i18n="setup.contextParagraphsHelp">Number of paragraphs from end of previous chapter</small>
                 </div>
+                <div class="form-group">
+                    <label for="min-context-chars" data-i18n="setup.minContextChars">Min Context Characters:</label>
+                    <input type="number" id="min-context-chars" value="200" min="0" step="50">
+                    <small class="form-hint" data-i18n="setup.minContextCharsHint">Minimum characters of context (dual-constraint with paragraph count)</small>
+                </div>
             </div>
 
             <button type="submit" class="btn-primary" data-i18n="setup.loadButton">Load Project</button>

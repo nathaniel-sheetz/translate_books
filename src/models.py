@@ -436,8 +436,8 @@ class ChunkingConfig(BaseModel):
     """Configuration for chunking chapters."""
     method: ChunkingMethod = ChunkingMethod.PARAGRAPH
     target_size: int = Field(default=2000, ge=100, description="Target words per chunk")
-    overlap_paragraphs: int = Field(default=2, ge=0, le=5, description="Minimum paragraphs of overlap")
-    min_overlap_words: int = Field(default=100, ge=0, description="Minimum words in overlap")
+    overlap_paragraphs: int = Field(default=0, ge=0, le=5, description="Minimum paragraphs of overlap")
+    min_overlap_words: int = Field(default=0, ge=0, description="Minimum words in overlap")
     min_chunk_size: int = Field(default=500, ge=50, description="Minimum words per chunk")
     max_chunk_size: int = Field(default=3000, ge=100, description="Maximum words per chunk")
 
@@ -517,15 +517,15 @@ class ChapterDetectionConfig(BaseModel):
         description="Include previous chapter ending in translation prompts"
     )
     context_paragraphs: int = Field(
-        default=2,
+        default=3,
         ge=0,
         le=10,
-        description="Number of paragraphs from end of previous chapter to include"
+        description="Number of paragraphs from end of previous section to include"
     )
-    context_words: Optional[int] = Field(
-        default=None,
+    min_context_chars: int = Field(
+        default=200,
         ge=0,
-        description="Alternative to context_paragraphs: number of words from end of previous chapter"
+        description="Minimum characters of context from previous section (dual-constraint with context_paragraphs)"
     )
 
 

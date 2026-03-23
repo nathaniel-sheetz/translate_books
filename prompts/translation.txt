@@ -14,7 +14,7 @@
 #   style_guide - Style guide content (tone, formality, dialect preferences)
 #   context - Book context (genre, time period, style notes)
 #   chapter_info - Optional chapter information for additional context
-#   previous_chapter_context - Context from end of previous chapter (for continuity)
+#   previous_chapter_context - Context from end of previous section (Original source language; do not re-translate)
 #
 # Instructions:
 # - All variables must be provided when rendering this template
