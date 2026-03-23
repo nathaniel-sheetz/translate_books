@@ -1,0 +1,983 @@
+/**
+ * Styles for Translation Web UI
+ * Clean, minimal design focused on usability
+ */
+
+/* ============================================================================
+   Base Styles
+   ============================================================================ */
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+    line-height: 1.6;
+    color: #333;
+    background-color: #f5f5f5;
+}
+
+h1 {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+    color: #2c3e50;
+}
+
+h2 {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+    color: #34495e;
+}
+
+h3 {
+    font-size: 1.25rem;
+    margin-bottom: 0.75rem;
+    color: #34495e;
+}
+
+small {
+    display: block;
+    color: #666;
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+
+/* ============================================================================
+   Setup Panel
+   ============================================================================ */
+
+#setup-panel {
+    background: white;
+    padding: 40px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    max-width: 700px;
+    margin: 50px auto;
+}
+
+#setup-panel h1 {
+    margin-bottom: 1.5rem;
+    text-align: center;
+}
+
+#setup-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.form-group label {
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #2c3e50;
+}
+
+.form-group input[type="text"],
+.form-group input[type="number"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+    transition: border-color 0.2s;
+}
+
+.form-group input[type="text"]:focus,
+.form-group input[type="number"]:focus {
+    outline: none;
+    border-color: #007bff;
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.checkbox-group {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.checkbox-group input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+}
+
+.checkbox-group label {
+    margin-bottom: 0;
+    cursor: pointer;
+    font-weight: normal;
+}
+
+#context-options {
+    padding-left: 2rem;
+    border-left: 3px solid #007bff;
+    margin-left: 0.5rem;
+}
+
+/* ============================================================================
+   Buttons
+   ============================================================================ */
+
+button {
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    border-radius: 4px;
+    padding: 12px 24px;
+    transition: all 0.2s;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background: #007bff;
+    color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: #0056b3;
+}
+
+.btn-success {
+    background: #28a745;
+    color: white;
+}
+
+.btn-success:hover:not(:disabled) {
+    background: #218838;
+}
+
+.btn-success.copied {
+    background: #20c997;
+}
+
+/* ============================================================================
+   Workspace
+   ============================================================================ */
+
+#workspace {
+    background: white;
+    padding: 0;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    display: grid;
+    grid-template-columns: 250px 1fr;
+    min-height: 600px;
+}
+
+/* Chunk Navigation Sidebar */
+#chunk-sidebar {
+    border-right: 2px solid #ddd;
+    padding: 20px;
+    background: #f8f9fa;
+    border-radius: 8px 0 0 8px;
+    overflow-y: auto;
+    max-height: calc(100vh - 100px);
+}
+
+#chunk-sidebar h3 {
+    margin-bottom: 1rem;
+    font-size: 1.1rem;
+    color: #2c3e50;
+}
+
+#chunks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.chunk-item {
+    padding: 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+    font-size: 0.9rem;
+}
+
+.chunk-item:hover {
+    background: #e9ecef;
+}
+
+.chunk-item.active {
+    background: #007bff;
+    color: white;
+    border-color: #0056b3;
+}
+
+.chunk-item.translated {
+    background: #d4edda;
+    border-color: #c3e6cb;
+}
+
+.chunk-item.translated:hover {
+    background: #c3e6cb;
+}
+
+.chunk-item.translated.active {
+    background: #28a745;
+    color: white;
+    border-color: #1e7e34;
+}
+
+.chunk-item.pending {
+    background: #e9ecef;
+    border-color: #dee2e6;
+}
+
+.chunk-item.pending:hover {
+    background: #dee2e6;
+}
+
+.chunk-item.pending.active {
+    background: #6c757d;
+    color: white;
+    border-color: #5a6268;
+}
+
+/* In Review status - blue theme */
+.chunk-item.in_review {
+    background: #cfe2ff;                    /* Light blue */
+    border-color: #9ec5fe;
+}
+
+.chunk-item.in_review:hover {
+    background: #9ec5fe;                    /* Medium blue */
+}
+
+.chunk-item.in_review.active {
+    background: #0d6efd;                    /* Dark blue */
+    color: white;
+    border-color: #0a58ca;
+}
+
+.chunk-number {
+    font-weight: bold;
+    display: block;
+}
+
+.chunk-status {
+    font-size: 0.75rem;
+    opacity: 0.8;
+}
+
+/* Main Content Area */
+#main-content {
+    padding: 30px;
+    overflow-y: auto;
+}
+
+#header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #007bff;
+}
+
+#header h1 {
+    margin-bottom: 0;
+}
+
+#project-title {
+    color: #666;
+    font-size: 0.95rem;
+    margin-top: 0.25rem;
+}
+
+#progress-container {
+    text-align: right;
+    min-width: 250px;
+}
+
+#progress-text {
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+/* Segmented progress bar */
+#progress-bar-container {
+    width: 100%;
+    height: 24px;
+    display: flex;
+    border-radius: 4px;
+    overflow: hidden;
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+}
+
+.progress-segment {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+#progress-bar-complete {
+    background-color: #28a745;  /* Green */
+}
+
+#progress-bar-review {
+    background-color: #0d6efd;  /* Blue */
+}
+
+#progress-bar-pending {
+    background-color: #adb5bd;  /* Gray */
+}
+
+/* ============================================================================
+   Chunk Info
+   ============================================================================ */
+
+#chunk-info {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 6px;
+    margin-bottom: 25px;
+    border-left: 4px solid #007bff;
+}
+
+.chunk-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+}
+
+#chunk-info h2 {
+    margin-bottom: 0.75rem;
+}
+
+.chunk-metadata {
+    color: #555;
+    font-size: 0.95rem;
+}
+
+/* ============================================================================
+   Mode Toggle Button
+   ============================================================================ */
+
+#mode-toggle-container {
+    display: flex;
+    align-items: center;
+}
+
+#mode-toggle-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: #f8f9fa;
+    border: 2px solid #007bff;
+    color: #007bff;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+#mode-toggle-btn:hover:not(:disabled) {
+    background: #007bff;
+    color: white;
+}
+
+#mode-toggle-icon {
+    font-size: 1.1rem;
+}
+
+#mode-toggle-btn.in-review-mode {
+    background: #28a745;
+    border-color: #28a745;
+    color: white;
+}
+
+#mode-toggle-btn.in-review-mode:hover:not(:disabled) {
+    background: #218838;
+    border-color: #1e7e34;
+}
+
+@media (max-width: 768px) {
+    .chunk-header-row {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    #mode-toggle-btn {
+        width: 100%;
+        justify-content: center;
+    }
+}
+
+/* ============================================================================
+   Prompt Section
+   ============================================================================ */
+
+#prompt-section {
+    margin-bottom: 30px;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.section-header h3 {
+    margin-bottom: 0;
+}
+
+#prompt-display {
+    background: #f8f9fa;
+    border: 1px solid #ddd;
+    padding: 20px;
+    border-radius: 6px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+/* ============================================================================
+   Translation Section
+   ============================================================================ */
+
+#translation-section {
+    margin-bottom: 30px;
+}
+
+#translation-section h3 {
+    margin-bottom: 1rem;
+}
+
+#translation-input {
+    width: 100%;
+    padding: 15px;
+    border: 2px solid #ddd;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-family: inherit;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+    resize: vertical;
+    min-height: 200px;
+    transition: border-color 0.2s;
+}
+
+#translation-input:focus {
+    outline: none;
+    border-color: #007bff;
+}
+
+#translation-input::placeholder {
+    color: #999;
+}
+
+#submit-btn {
+    width: 100%;
+    padding: 15px;
+    font-size: 1.1rem;
+}
+
+/* ============================================================================
+   Completion
+   ============================================================================ */
+
+#completion {
+    text-align: center;
+    padding: 60px 20px;
+}
+
+#completion h2 {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    color: #28a745;
+}
+
+#completion p {
+    font-size: 1.25rem;
+    color: #666;
+    margin-bottom: 2rem;
+}
+
+/* ============================================================================
+   Responsive Design
+   ============================================================================ */
+
+@media (max-width: 768px) {
+    body {
+        padding: 10px;
+    }
+
+    #setup-panel {
+        padding: 25px;
+        margin: 20px auto;
+    }
+
+    #workspace {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+    }
+
+    #chunk-sidebar {
+        border-right: none;
+        border-bottom: 2px solid #ddd;
+        border-radius: 8px 8px 0 0;
+        max-height: 200px;
+    }
+
+    #main-content {
+        padding: 20px;
+    }
+
+    #header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+
+    #progress-container {
+        width: 100%;
+        text-align: left;
+    }
+
+    .form-row {
+        grid-template-columns: 1fr;
+    }
+
+    #prompt-display {
+        font-size: 0.85rem;
+        padding: 15px;
+    }
+
+    #completion h2 {
+        font-size: 2rem;
+    }
+}
+
+/* ============================================================================
+   Utility Classes
+   ============================================================================ */
+
+.hidden {
+    display: none !important;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.mt-1 { margin-top: 0.5rem; }
+.mt-2 { margin-top: 1rem; }
+.mt-3 { margin-top: 1.5rem; }
+
+.mb-1 { margin-bottom: 0.5rem; }
+.mb-2 { margin-bottom: 1rem; }
+.mb-3 { margin-bottom: 1.5rem; }
+
+.button-group {
+    display: flex;
+    gap: 10px;
+}
+
+/* Make translation action buttons equal width */
+#translation-section .button-group button {
+    flex: 1;
+    min-width: 0;
+}
+
+.btn-secondary {
+    background: #6c757d;
+    color: white;
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background: #5a6268;
+}
+
+.btn-danger {
+    background: #dc3545;
+    color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+    background: #c82333;
+}
+
+/* ============================================================================
+   Review Mode
+   ============================================================================ */
+
+#review-mode {
+    /* Review mode is now inside main-content, no need for extra padding/shadow */
+}
+
+.review-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #007bff;
+}
+
+.review-header h2 {
+    margin-bottom: 0;
+}
+
+.review-actions {
+    display: flex;
+    gap: 10px;
+}
+
+/* Side-by-side paragraph view - paired rows for alignment */
+.side-by-side-header h3 {
+    margin-bottom: 1rem;
+    color: #2c3e50;
+    font-size: 1.1rem;
+}
+
+.side-by-side-container {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #f9f9f9;
+    padding: 20px;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.paired-paragraphs {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.paragraph-row {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+    border-bottom: 1px solid #e0e0e0;
+    padding-bottom: 15px;
+}
+
+.paragraph-row:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.source-para,
+.translation-para {
+    flex: 1;
+    position: relative;
+    padding: 10px;
+    padding-left: 35px;
+    background: white;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    min-height: 60px;
+}
+
+.source-para {
+    background: #f8f9fa;
+}
+
+.para-number {
+    position: absolute;
+    left: 10px;
+    top: 10px;
+    color: #999;
+    font-weight: bold;
+    font-size: 0.85rem;
+}
+
+.para-text {
+    line-height: 1.6;
+    font-size: 1rem;
+}
+
+/* Editable translation paragraphs */
+.translation-para .para-text {
+    min-height: 40px;
+    border: 1px solid transparent;
+    padding: 8px;
+    border-radius: 4px;
+    transition: border-color 0.2s;
+}
+
+.translation-para .para-text:focus {
+    outline: none;
+    border-color: #007bff;
+    background: #fffef8;
+}
+
+.translation-para .para-text .empty-para {
+    color: #999;
+    font-style: italic;
+}
+
+/* Word-level interaction */
+.word {
+    cursor: pointer;
+    padding: 2px 0;
+    border-bottom: 1px solid transparent;
+    transition: all 0.2s;
+}
+
+.word:hover {
+    background: #e3f2fd;
+    border-bottom-color: #2196f3;
+}
+
+.word.annotated {
+    background: #fff9c4;
+    border-bottom: 2px dotted #ff9800;
+    font-weight: 500;
+}
+
+.word.annotated:hover {
+    background: #fff59d;
+}
+
+/* Paragraph split/merge action buttons */
+.para-actions {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: none;
+    gap: 4px;
+}
+
+.translation-para:hover .para-actions,
+.source-para:hover .source-para-actions {
+    display: flex;
+}
+
+.para-btn {
+    background: #e8e8e8;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    cursor: pointer;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: normal;
+    line-height: 1;
+}
+
+.para-btn:hover {
+    background: #d0d0d0;
+}
+
+/* Source paragraphs: allow cursor placement for split, but prevent text editing */
+.source-text-locked {
+    cursor: text;
+    user-select: text;
+    background: #eef2f7;
+}
+
+/* Evaluation Summary */
+#eval-summary {
+    background: #fff;
+    border: 1px solid #ddd;
+    padding: 20px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+}
+
+#eval-summary h3 {
+    margin-bottom: 1rem;
+}
+
+.eval-overview {
+    padding: 12px 15px;
+    border-radius: 4px;
+    margin-bottom: 15px;
+    font-size: 1.05rem;
+    border-left: 4px solid;
+}
+
+.eval-overview.passed {
+    background: #d4edda;
+    border-color: #28a745;
+    color: #155724;
+}
+
+.eval-overview.failed {
+    background: #f8d7da;
+    border-color: #dc3545;
+    color: #721c24;
+}
+
+.eval-evaluators {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.evaluator {
+    padding: 10px;
+    border-radius: 3px;
+    font-size: 0.9rem;
+}
+
+.evaluator.passed {
+    background: #d4edda;
+    color: #155724;
+}
+
+.evaluator.failed {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.eval-issues h4 {
+    font-size: 1.1rem;
+    margin-bottom: 0.75rem;
+    color: #2c3e50;
+}
+
+.issue {
+    padding: 12px;
+    margin: 10px 0;
+    border-radius: 4px;
+    border-left: 4px solid;
+    font-size: 0.95rem;
+}
+
+.issue.error {
+    background: #f8d7da;
+    border-color: #dc3545;
+    color: #721c24;
+}
+
+.issue.warning {
+    background: #fff3cd;
+    border-color: #ffc107;
+    color: #856404;
+}
+
+.issue.info {
+    background: #d1ecf1;
+    border-color: #17a2b8;
+    color: #0c5460;
+}
+
+.no-issues {
+    color: #28a745;
+    font-weight: 600;
+    font-size: 1.05rem;
+}
+
+/* Annotation Panel */
+#annotation-panel {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: white;
+    border: 2px solid #333;
+    padding: 25px;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    max-width: 500px;
+    width: 90%;
+}
+
+#annotation-panel h3 {
+    margin-bottom: 1rem;
+}
+
+#annotation-form label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #2c3e50;
+}
+
+#annotation-form select,
+#annotation-form input[type="text"],
+#annotation-form textarea {
+    width: 100%;
+    margin-bottom: 1rem;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 1rem;
+}
+
+#annotation-form select:focus,
+#annotation-form input[type="text"]:focus,
+#annotation-form textarea:focus {
+    outline: none;
+    border-color: #007bff;
+}
+
+#annotation-form textarea {
+    min-height: 100px;
+    resize: vertical;
+}
+
+/* Responsive Design for Review Mode */
+@media (max-width: 1024px) {
+    .paragraph-row {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .source-para,
+    .translation-para {
+        width: 100%;
+    }
+
+    .review-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+
+    .review-actions {
+        width: 100%;
+        flex-direction: column;
+    }
+
+    .review-actions button {
+        width: 100%;
+    }
+}
+
+@media (max-width: 768px) {
+    #review-mode {
+        padding: 15px;
+    }
+
+    .side-by-side-container {
+        padding: 15px;
+    }
+}

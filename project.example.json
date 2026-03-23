@@ -1,0 +1,9 @@
+{
+    "chunks_dir": "projects/my-book/chunks/",
+    "project_name": "My Book Title",
+    "source_language": "English",
+    "target_language": "Spanish",
+    "glossary_path": "projects/my-book/glossary.json",
+    "style_guide_path": "projects/my-book/style.json",
+    "ui_language": "en"
+}

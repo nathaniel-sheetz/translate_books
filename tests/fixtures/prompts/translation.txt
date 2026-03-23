@@ -1,0 +1,115 @@
+# Translation Prompt Template
+# Version: 1.0
+# Last Updated: 2025-11-02
+#
+# This template uses {{variable}} syntax for simple string substitution.
+#
+# Available variables:
+#   {{book_title}} - Title of the book being translated
+#   {{source_language}} - Source language (typically "English")
+#   {{target_language}} - Target language (e.g., "Spanish", "Español")
+#   {{source_text}} - The text chunk to translate
+#   {{glossary}} - Formatted glossary terms for consistent translation
+#   {{style_guide}} - Style guide content (tone, formality, dialect preferences)
+#   {{context}} - Book context (genre, time period, style notes)
+#   {{chapter_info}} - Optional chapter information for additional context
+#
+# Instructions:
+# - All variables must be provided when rendering this template
+# - Use format_glossary_for_prompt() to prepare the glossary variable
+# - StyleGuide.content should be used for the style_guide variable
+
+================================================================================
+BOOK TRANSLATION TASK
+================================================================================
+
+You are translating the classic book "{{book_title}}" from {{source_language}}
+to {{target_language}}. This is a professional translation for publication.
+
+================================================================================
+SOURCE TEXT TO TRANSLATE
+================================================================================
+
+{{source_text}}
+
+================================================================================
+GLOSSARY TERMS
+================================================================================
+
+Use these translations for specific terms to ensure consistency throughout
+the book. These terms have been carefully chosen and must be used exactly
+as specified:
+
+{{glossary}}
+
+================================================================================
+STYLE GUIDE
+================================================================================
+
+Follow these style guidelines for this translation:
+
+{{style_guide}}
+
+================================================================================
+BOOK CONTEXT
+================================================================================
+
+{{context}}
+
+================================================================================
+TRANSLATION INSTRUCTIONS
+================================================================================
+
+1. STRUCTURE PRESERVATION:
+   - Preserve all paragraph breaks exactly as they appear in the source
+   - Maintain the same number of paragraphs
+   - Keep the same paragraph structure and flow
+   - Do not merge or split paragraphs
+
+2. GLOSSARY COMPLIANCE:
+   - Use the exact translations provided in the glossary for all specified terms
+   - Pay special attention to character names, place names, and key concepts
+   - If a glossary term has alternatives, you may use them when appropriate
+   - Do not translate glossary terms differently than specified
+
+3. STYLE AND TONE:
+   - Follow the style guide specifications exactly
+   - Maintain the tone and register of the original text
+   - Preserve the author's voice and literary style
+   - Keep period-appropriate language and expressions where applicable
+
+4. TRANSLATION QUALITY:
+   - Translate for meaning, not word-for-word
+   - Ensure natural-sounding {{target_language}}
+   - Preserve literary devices (metaphors, allusions, wordplay when possible)
+   - Maintain cultural context while making it accessible to target audience
+   - Ensure grammatical correctness in {{target_language}}
+
+5. PUNCTUATION AND FORMATTING:
+   - Preserve intentional formatting (emphasis, capitalization for effect)
+   - Adapt punctuation to {{target_language}} conventions
+   - Maintain dialogue formatting and quotation marks
+   - Keep any special formatting like letters, signs, or inscriptions
+
+6. LENGTH AND COMPLETENESS:
+   - Translate the complete text - do not skip or summarize
+   - {{target_language}} translations are typically 10-30% longer than English
+   - This is normal and expected - do not artificially compress the translation
+
+================================================================================
+OUTPUT FORMAT
+================================================================================
+
+Provide ONLY the translated text in {{target_language}}.
+
+Do not include:
+- Explanations or notes
+- The original English text
+- Commentary on translation choices
+- Section headers or labels
+
+Simply provide the clean translated text with proper paragraph breaks.
+
+================================================================================
+TRANSLATION
+================================================================================

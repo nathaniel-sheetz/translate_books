@@ -1,0 +1,15 @@
+{
+  "id": "grammar_errors",
+  "source_text": "Mr. Darcy and Mr. Bingley were good friends.",
+  "translated_text": "El Sr. Darcy y el Sr. Bingley eran buenos amigo. Ellos fueron muy muy feliz.",
+  "chapter_id": "test",
+  "position": 0,
+  "metadata": {
+    "char_start": 0,
+    "char_end": 100,
+    "overlap_start": 0,
+    "overlap_end": 0,
+    "paragraph_count": 1,
+    "word_count": 15
+  }
+}

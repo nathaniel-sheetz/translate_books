@@ -1,0 +1,15 @@
+{
+  "id": "test_clean",
+  "source_text": "He picked up the book and took it with him. The scoundrel had stolen it.",
+  "translated_text": "Él tomó el libro y lo llevó consigo. El canalla lo había robado. También quería un jugo de naranja.",
+  "chapter_id": "test",
+  "position": 0,
+  "metadata": {
+    "char_start": 0,
+    "char_end": 100,
+    "overlap_start": 0,
+    "overlap_end": 0,
+    "paragraph_count": 2,
+    "word_count": 15
+  }
+}

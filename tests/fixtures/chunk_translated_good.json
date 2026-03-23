@@ -1,0 +1,32 @@
+{
+  "_comment": "Good Spanish translation of chunk_english.json - should PASS all evaluators",
+  "_purpose": "Reference fixture for testing evaluators with correct translation",
+  "_validation_notes": {
+    "length_ratio": "~1.16x (80/69 words) - within expected 1.1-1.3x range",
+    "paragraph_count": "2 paragraphs - matches source",
+    "dictionary": "All valid Spanish words, no English words remaining",
+    "glossary": "Character names preserved according to glossary rules"
+  },
+  "id": "ch01_chunk_001",
+  "chapter_id": "chapter_01",
+  "position": 1,
+  "source_text": "It is a truth universally acknowledged, that a single man in possession of a good fortune must be in want of a wife.\n\nHowever little known the feelings or views of such a man may be on his first entering a neighbourhood, this truth is so well fixed in the minds of the surrounding families, that he is considered as the rightful property of some one or other of their daughters.",
+  "translated_text": "Es una verdad universalmente reconocida que todo hombre soltero que se encuentra en posesión de una buena fortuna debe necesariamente estar en busca de una esposa.\n\nPor poco que se conozcan los sentimientos o las opiniones particulares de semejante hombre al establecerse por primera vez en un vecindario, esta verdad se encuentra tan firmemente arraigada en las mentes de todas las familias de los alrededores, que él es considerado inmediatamente como la propiedad legítima de una u otra de sus hijas.",
+  "metadata": {
+    "char_start": 0,
+    "char_end": 372,
+    "overlap_start": 0,
+    "overlap_end": 45,
+    "paragraph_count": 2,
+    "word_count": 69
+  },
+  "status": "translated",
+  "created_at": "2025-10-30T16:00:00",
+  "translated_at": "2025-10-30T17:15:00",
+  "prompt_metadata": {
+    "template_version": "1.0",
+    "glossary_version": "1.0",
+    "style_guide_version": "1.0",
+    "timestamp": "2025-10-30T17:15:00"
+  }
+}

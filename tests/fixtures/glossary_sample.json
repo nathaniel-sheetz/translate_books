@@ -1,0 +1,78 @@
+{
+  "_comment": "Sample glossary for 'Pride and Prejudice' translation",
+  "_purpose": "Reference fixture for testing glossary evaluator with character names, places, and period concepts",
+  "terms": [
+    {
+      "english": "Elizabeth Bennet",
+      "spanish": "Elizabeth Bennet",
+      "type": "character",
+      "context": "Main protagonist - keep full name in English",
+      "alternatives": []
+    },
+    {
+      "english": "Lizzy",
+      "spanish": "Lizzy",
+      "type": "character",
+      "context": "Elizabeth's nickname - keep in English",
+      "alternatives": ["Liza"]
+    },
+    {
+      "english": "Mr. Bennet",
+      "spanish": "Sr. Bennet",
+      "type": "character",
+      "context": "Father of the Bennet sisters - translate title, keep surname",
+      "alternatives": ["señor Bennet"]
+    },
+    {
+      "english": "Mrs. Bennet",
+      "spanish": "Sra. Bennet",
+      "type": "character",
+      "context": "Mother of the Bennet sisters - translate title, keep surname",
+      "alternatives": ["señora Bennet"]
+    },
+    {
+      "english": "Mr. Darcy",
+      "spanish": "Sr. Darcy",
+      "type": "character",
+      "context": "Male protagonist - translate title, keep surname",
+      "alternatives": ["señor Darcy"]
+    },
+    {
+      "english": "Netherfield Park",
+      "spanish": "Netherfield Park",
+      "type": "place",
+      "context": "Bingley's estate - keep name in English",
+      "alternatives": []
+    },
+    {
+      "english": "Longbourn",
+      "spanish": "Longbourn",
+      "type": "place",
+      "context": "Bennet family estate - keep in English",
+      "alternatives": []
+    },
+    {
+      "english": "Pemberley",
+      "spanish": "Pemberley",
+      "type": "place",
+      "context": "Darcy's estate in Derbyshire - keep in English",
+      "alternatives": []
+    },
+    {
+      "english": "entailment",
+      "spanish": "vinculación",
+      "type": "concept",
+      "context": "Legal restriction on inheritance of property",
+      "alternatives": ["mayorazgo", "vínculo sucesorio"]
+    },
+    {
+      "english": "assembly",
+      "spanish": "baile",
+      "type": "concept",
+      "context": "Public social gathering or dance in Regency England",
+      "alternatives": ["reunión social", "asamblea"]
+    }
+  ],
+  "version": "1.0.0",
+  "updated_at": "2025-10-30T16:00:00"
+}

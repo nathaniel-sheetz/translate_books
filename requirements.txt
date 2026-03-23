@@ -1,0 +1,26 @@
+# Core dependencies
+pydantic>=2.0.0
+python-dateutil>=2.8.0
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Dictionary and grammar checking
+pyenchant>=3.2.0
+language-tool-python>=2.7.0  # Grammar checking with LanguageTool
+
+# Terminal formatting (for evaluation reports)
+rich>=13.0.0
+
+# Web UI
+Flask>=3.0.0
+
+# API clients
+anthropic>=0.8.0      # Claude API
+openai>=1.0.0         # OpenAI API
+python-dotenv>=1.0.0  # Environment variable management
+
+# Future dependencies (commented out for now)
+# click>=8.0.0          # CLI framework
+# spacy>=3.7.0          # NLP for Spanish

@@ -1,0 +1,41 @@
+{
+  "entries": [
+    {
+      "term": "zumo",
+      "variations": ["zumo", "zumos"],
+      "reason": "Use 'jugo' instead for Latin American Spanish",
+      "severity": "error",
+      "case_sensitive": false,
+      "whole_word": true,
+      "alternatives": ["jugo", "jugos"]
+    },
+    {
+      "term": "coger",
+      "variations": ["coger", "coge", "cojo", "coges", "cogió", "cogería", "cogían", "coja", "cojan", "cogiendo"],
+      "reason": "Offensive in Latin America - use 'tomar' or 'agarrar' instead",
+      "severity": "warning",
+      "case_sensitive": false,
+      "whole_word": true,
+      "alternatives": ["tomar", "agarrar"]
+    },
+    {
+      "term": "bastardo",
+      "variations": ["bastardo", "bastardos", "bastarda", "bastardas"],
+      "reason": "Offensive language not appropriate for this translation",
+      "severity": "error",
+      "case_sensitive": false,
+      "whole_word": true,
+      "alternatives": ["canalla", "bribón"]
+    },
+    {
+      "term": "tío",
+      "variations": ["tío", "tíos", "tía", "tías"],
+      "reason": "Informal slang - use 'hombre' or 'tipo' instead",
+      "severity": "warning",
+      "case_sensitive": false,
+      "whole_word": true,
+      "alternatives": ["hombre", "tipo", "mujer"]
+    }
+  ],
+  "version": "1.0"
+}
