@@ -53,7 +53,8 @@ document.getElementById('setup-form').addEventListener('submit', async (e) => {
             glossary_path: document.getElementById('glossary-path').value || null,
             style_guide_path: document.getElementById('style-guide-path').value || null,
             include_context: document.getElementById('include-context').checked,
-            context_paragraphs: parseInt(document.getElementById('context-paragraphs').value) || 3
+            context_paragraphs: parseInt(document.getElementById('context-paragraphs').value) || 3,
+            min_context_chars: parseInt(document.getElementById('min-context-chars').value) || 200
         };
 
         const response = await fetch('/api/load-project', {

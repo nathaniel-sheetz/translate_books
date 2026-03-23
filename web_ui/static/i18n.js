@@ -35,6 +35,8 @@ const I18N = {
             'setup.includeContext': 'Include previous chapter context',
             'setup.contextParagraphs': 'Context Paragraphs:',
             'setup.contextParagraphsHelp': 'Number of paragraphs from end of previous chapter',
+            'setup.minContextChars': 'Min Context Characters:',
+            'setup.minContextCharsHint': 'Minimum characters of context (dual-constraint with paragraph count)',
             'setup.loadButton': 'Load Project',
             'setup.loadingButton': 'Loading...',
 
@@ -155,6 +157,8 @@ const I18N = {
             'setup.includeContext': 'Incluir contexto del capítulo anterior',
             'setup.contextParagraphs': 'Párrafos de Contexto:',
             'setup.contextParagraphsHelp': 'Número de párrafos del final del capítulo anterior',
+            'setup.minContextChars': 'Mín. Caracteres de Contexto:',
+            'setup.minContextCharsHint': 'Mínimo de caracteres de contexto (restricción dual con el conteo de párrafos)',
             'setup.loadButton': 'Cargar Proyecto',
             'setup.loadingButton': 'Cargando...',
 

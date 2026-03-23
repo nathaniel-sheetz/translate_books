@@ -334,6 +334,7 @@ def load_project():
         style_guide_path = data.get("style_guide_path")
         include_context = data.get("include_context", True)
         context_paragraphs = data.get("context_paragraphs", 3)
+        min_context_chars = data.get("min_context_chars", 200)
         project_name = data.get("project_name", "Translation Project")
         source_language = data.get("source_language", "English")
         target_language = data.get("target_language", "Spanish")
@@ -362,6 +363,7 @@ def load_project():
                 previous_chapter=None,
                 include_context=include_context,
                 context_paragraphs=context_paragraphs,
+                min_context_chars=min_context_chars,
                 project_name=project_name,
                 source_language=source_language,
                 target_language=target_language,
