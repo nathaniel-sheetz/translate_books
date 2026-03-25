@@ -82,8 +82,11 @@ class DictionaryEvaluator(BaseEvaluator):
         glossary = context.get("glossary")
         case_sensitive = context.get("case_sensitive", False)
 
+        # Strip image placeholders before tokenizing (e.g. [IMAGE:images/i010.jpg])
+        text_to_check = re.sub(r'\[IMAGE:[^\]]*\]', '', chunk.translated_text)
+
         # Tokenize and get word positions
-        words_with_positions = self._tokenize_with_positions(chunk.translated_text)
+        words_with_positions = self._tokenize_with_positions(text_to_check)
 
         # Track issues by word (to avoid duplicate reporting)
         english_words = {}  # word -> list of positions
