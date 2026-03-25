@@ -361,6 +361,7 @@ class DictionaryEvaluator(BaseEvaluator):
             if term.spanish.lower() == word_lower or term.english.lower() == word_lower:
                 return True
             # Token match: word is one component of a multi-word term
+            # e.g. "Paul" matches when "Uncle Paul" is in the glossary
             spanish_tokens = {t.lower() for t in term.spanish.split()}
             english_tokens = {t.lower() for t in term.english.split()}
             if word_lower in spanish_tokens or word_lower in english_tokens:
