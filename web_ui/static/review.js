@@ -543,7 +543,7 @@ const ReviewMode = {
      * Uses a two-pass approach: exact word match first, then context-only match.
      * Returns {relocated: number, orphaned: number}.
      */
-    relocateAnnotations(oldText, newText) {
+    relocateAnnotations(newText) {
         if (!this.annotations.length) return { relocated: 0, orphaned: 0 };
 
         const newWords = newText.split(/\s+/).filter(w => w.length > 0);
@@ -685,14 +685,14 @@ const ReviewMode = {
             return false;
         }
 
-        const result = this.relocateAnnotations(this._lastKnownTranslationText, currentText);
+        const result = this.relocateAnnotations(currentText);
         this._lastKnownTranslationText = currentText;
 
         if (result.orphaned > 0) {
             console.warn(`Annotation relocation: ${result.relocated} relocated, ${result.orphaned} orphaned`);
         }
 
-        return true;
+        return result;
     },
 
     /**
@@ -786,7 +786,10 @@ const ReviewMode = {
         this._syncWorkingArraysFromDOM();
 
         // Relocate annotations if text was edited inline before split
-        this._relocateIfChanged();
+        const splitResult = this._relocateIfChanged();
+        if (splitResult && splitResult.orphaned > 0) {
+            this.annotations = this.annotations.filter(a => !a._orphaned);
+        }
 
         const paraText = this.workingTranslationParagraphs[idx] || '';
         const paraWords = paraText.split(/\s+/).filter(w => w.length > 0);
@@ -810,7 +813,10 @@ const ReviewMode = {
         this._syncWorkingArraysFromDOM();
 
         // Relocate annotations if text was edited inline before merge
-        this._relocateIfChanged();
+        const mergeResult = this._relocateIfChanged();
+        if (mergeResult && mergeResult.orphaned > 0) {
+            this.annotations = this.annotations.filter(a => !a._orphaned);
+        }
 
         const textPrev = this.workingTranslationParagraphs[idx - 1] || '';
         const textCurr = this.workingTranslationParagraphs[idx] || '';
@@ -990,34 +996,18 @@ document.getElementById('save-review-btn').addEventListener('click', async () =>
 
     try {
         // Relocate annotations if text was edited inline
-        const didRelocate = ReviewMode._relocateIfChanged();
-        if (didRelocate) {
-            // Filter out orphaned annotations and warn user
+        const relocateResult = ReviewMode._relocateIfChanged();
+        if (relocateResult && relocateResult.orphaned > 0) {
             const orphaned = ReviewMode.annotations.filter(a => a._orphaned);
-            if (orphaned.length > 0) {
-                const proceed = confirm(
-                    `${orphaned.length} annotation(s) could not be matched to words after your edits and will be removed. Continue saving?`
-                );
-                if (!proceed) {
-                    btn.disabled = false;
-                    btn.textContent = originalText;
-                    return;
-                }
-                ReviewMode.annotations = ReviewMode.annotations.filter(a => !a._orphaned);
+            const proceed = confirm(
+                `${orphaned.length} annotation(s) could not be matched to words after your edits and will be removed. Continue saving?`
+            );
+            if (!proceed) {
+                btn.disabled = false;
+                btn.textContent = originalText;
+                return;
             }
-            // Save relocated annotations to backend
-            await fetch('/api/save-annotations', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    session_id: ReviewMode.sessionId,
-                    chunk_id: ReviewMode.currentChunk.chunk_id,
-                    annotations: ReviewMode._serializableAnnotations()
-                })
-            });
-            if (window.updateChunkAnnotationCount) {
-                window.updateChunkAnnotationCount(ReviewMode.currentChunk.chunk_id, ReviewMode.annotations.filter(a => a.annotation_type !== 'footnote').length);
-            }
+            ReviewMode.annotations = ReviewMode.annotations.filter(a => !a._orphaned);
         }
 
         // Get current translation text
@@ -1040,8 +1030,21 @@ document.getElementById('save-review-btn').addEventListener('click', async () =>
             throw new Error(error.error || 'Failed to save');
         }
 
-        // Re-render to refresh word spans after annotation relocation
-        if (didRelocate) {
+        // Save annotations (always, to persist any relocations)
+        if (relocateResult) {
+            await fetch('/api/save-annotations', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: ReviewMode.sessionId,
+                    chunk_id: ReviewMode.currentChunk.chunk_id,
+                    annotations: ReviewMode._serializableAnnotations()
+                })
+            });
+            if (window.updateChunkAnnotationCount) {
+                window.updateChunkAnnotationCount(ReviewMode.currentChunk.chunk_id, ReviewMode.annotations.filter(a => a.annotation_type !== 'footnote').length);
+            }
+            // Re-render to refresh word spans after annotation relocation
             ReviewMode.renderSideBySide(
                 ReviewMode.getCurrentSourceText(),
                 currentTranslation,
