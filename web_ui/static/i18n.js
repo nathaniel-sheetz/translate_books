@@ -102,6 +102,7 @@ const I18N = {
             'annotationType.translationDoubt': 'Translation doubt',
             'annotationType.problem': 'Problem',
             'annotationType.other': 'Other',
+            'annotationType.footnote': 'Footnote',
 
             // Evaluation results
             'eval.passed': 'Passed',
@@ -222,6 +223,7 @@ const I18N = {
             'annotationType.translationDoubt': 'Duda de traducción',
             'annotationType.problem': 'Problema',
             'annotationType.other': 'Otro',
+            'annotationType.footnote': 'Nota al pie',
 
             // Resultados de evaluación
             'eval.passed': 'Aprobado',

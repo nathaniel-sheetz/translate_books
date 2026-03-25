@@ -27,6 +27,7 @@ class AnnotationType(str, Enum):
     TRANSLATION_DOUBT = "translation_doubt"
     PROBLEM = "problem"
     OTHER = "other"
+    FOOTNOTE = "footnote"
     # Legacy categories (kept for backward compatibility)
     NOTE = "note"
     ISSUE = "issue"
@@ -195,7 +196,10 @@ class Chunk(BaseModel):
 
         annotation_count = 0
         if self.review_data and self.review_data.annotations:
-            annotation_count = len(self.review_data.annotations)
+            annotation_count = sum(
+                1 for a in self.review_data.annotations
+                if a.annotation_type != AnnotationType.FOOTNOTE
+            )
 
         if annotation_count > 0:
             return "in_review"
@@ -208,7 +212,10 @@ class Chunk(BaseModel):
         """Count of active annotations on this chunk."""
         if not self.review_data or not self.review_data.annotations:
             return 0
-        return len(self.review_data.annotations)
+        return sum(
+            1 for a in self.review_data.annotations
+            if a.annotation_type != AnnotationType.FOOTNOTE
+        )
 
 
 class EvalResult(BaseModel):

@@ -145,8 +145,10 @@ const ReviewMode = {
                 const cleanWord = this.escapeHtml(word);
 
                 // Check if this word has an annotation
-                const hasAnnotation = this.annotations.some(ann => ann.word_index === globalWordIndex);
-                const annotationClass = hasAnnotation ? 'annotated' : '';
+                const annotation = this.annotations.find(ann => ann.word_index === globalWordIndex);
+                const annotationClass = annotation
+                    ? (annotation.annotation_type === 'footnote' ? 'annotated-footnote' : 'annotated')
+                    : '';
 
                 return `<span class="word ${annotationClass}" data-word-index="${globalWordIndex}" data-word="${cleanWord}">${cleanWord}</span>`;
             }).join(' ');
@@ -425,7 +427,7 @@ const ReviewMode = {
 
             // Update chunk status in sidebar
             if (window.updateChunkAnnotationCount) {
-                window.updateChunkAnnotationCount(this.currentChunk.chunk_id, this.annotations.length);
+                window.updateChunkAnnotationCount(this.currentChunk.chunk_id, this.annotations.filter(a => a.annotation_type !== 'footnote').length);
             }
 
             // Hide panel
@@ -469,7 +471,7 @@ const ReviewMode = {
 
             // Update sidebar
             if (window.updateChunkAnnotationCount) {
-                window.updateChunkAnnotationCount(this.currentChunk.chunk_id, this.annotations.length);
+                window.updateChunkAnnotationCount(this.currentChunk.chunk_id, this.annotations.filter(a => a.annotation_type !== 'footnote').length);
             }
 
             // Hide panel and refresh highlights
@@ -487,8 +489,8 @@ const ReviewMode = {
      */
     highlightAnnotatedWords() {
         // Remove all existing highlights
-        document.querySelectorAll('.word.annotated').forEach(el => {
-            el.classList.remove('annotated');
+        document.querySelectorAll('.word.annotated, .word.annotated-footnote').forEach(el => {
+            el.classList.remove('annotated', 'annotated-footnote');
             el.removeAttribute('title');
         });
 
@@ -496,7 +498,8 @@ const ReviewMode = {
         this.annotations.forEach(ann => {
             const wordEl = document.querySelector(`[data-word-index="${ann.word_index}"]`);
             if (wordEl) {
-                wordEl.classList.add('annotated');
+                const cssClass = ann.annotation_type === 'footnote' ? 'annotated-footnote' : 'annotated';
+                wordEl.classList.add(cssClass);
                 const typeLabel = ann.annotation_type.replace('_', ' ').toUpperCase();
                 wordEl.title = ann.content ? `${typeLabel}: ${ann.content}` : typeLabel;
             }
@@ -1013,7 +1016,7 @@ document.getElementById('save-review-btn').addEventListener('click', async () =>
                 })
             });
             if (window.updateChunkAnnotationCount) {
-                window.updateChunkAnnotationCount(ReviewMode.currentChunk.chunk_id, ReviewMode.annotations.length);
+                window.updateChunkAnnotationCount(ReviewMode.currentChunk.chunk_id, ReviewMode.annotations.filter(a => a.annotation_type !== 'footnote').length);
             }
         }
 
