@@ -82,8 +82,16 @@ class DictionaryEvaluator(BaseEvaluator):
         glossary = context.get("glossary")
         case_sensitive = context.get("case_sensitive", False)
 
+        # Replace image placeholders with equal-length whitespace before tokenizing
+        # (e.g. [IMAGE:images/i010.jpg]) — preserves character offsets for all subsequent words
+        text_to_check = re.sub(
+            r'\[IMAGE:[^\]]*\]',
+            lambda m: ' ' * len(m.group()),
+            chunk.translated_text
+        )
+
         # Tokenize and get word positions
-        words_with_positions = self._tokenize_with_positions(chunk.translated_text)
+        words_with_positions = self._tokenize_with_positions(text_to_check)
 
         # Track issues by word (to avoid duplicate reporting)
         english_words = {}  # word -> list of positions
@@ -361,6 +369,7 @@ class DictionaryEvaluator(BaseEvaluator):
             if term.spanish.lower() == word_lower or term.english.lower() == word_lower:
                 return True
             # Token match: word is one component of a multi-word term
+            # e.g. "Paul" matches when "Uncle Paul" is in the glossary
             spanish_tokens = {t.lower() for t in term.spanish.split()}
             english_tokens = {t.lower() for t in term.english.split()}
             if word_lower in spanish_tokens or word_lower in english_tokens:
