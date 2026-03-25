@@ -65,6 +65,8 @@ TRANSLATION INSTRUCTIONS
    - Maintain the same number of paragraphs
    - Keep the same paragraph structure and flow
    - Do not merge or split paragraphs
+   - If the source contains image placeholders in the format [IMAGE:filename], copy
+     them into the translation exactly as-is at the same position in the text
 
 2. GLOSSARY COMPLIANCE:
    - Use the exact translations provided in the glossary for all specified terms
