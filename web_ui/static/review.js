@@ -35,6 +35,7 @@ const ReviewMode = {
     sessionId: null,
     workingSourceParagraphs: [],
     workingTranslationParagraphs: [],
+    _lastKnownTranslationText: '',
 
     /**
      * Enter review mode for a chunk
@@ -103,6 +104,9 @@ const ReviewMode = {
         // Store working arrays for split/merge operations
         this.workingSourceParagraphs = [...sourceParagraphs];
         this.workingTranslationParagraphs = [...translationParagraphs];
+
+        // Snapshot for annotation relocation
+        this._lastKnownTranslationText = translationParagraphs.join('\n\n');
 
         // Warn if paragraph counts don't match
         if (!suppressMismatchAlert && sourceParagraphs.length !== translationParagraphs.length) {
@@ -377,6 +381,7 @@ const ReviewMode = {
      * Save annotation
      */
     async saveAnnotation(wordIndex, wordText, type, content, tags) {
+        const context = this._captureWordContext(wordIndex);
         const annotation = {
             id: `ann_${Date.now()}`,
             word_index: wordIndex,
@@ -384,6 +389,8 @@ const ReviewMode = {
             annotation_type: type,
             content: content || null,
             tags: tags.split(',').map(t => t.trim()).filter(t => t),
+            context_before: context.context_before,
+            context_after: context.context_after,
             created_at: new Date().toISOString()
         };
 
@@ -407,7 +414,7 @@ const ReviewMode = {
                 body: JSON.stringify({
                     session_id: this.sessionId,
                     chunk_id: this.currentChunk.chunk_id,
-                    annotations: this.annotations
+                    annotations: this._serializableAnnotations()
                 })
             });
 
@@ -452,7 +459,7 @@ const ReviewMode = {
                 body: JSON.stringify({
                     session_id: this.sessionId,
                     chunk_id: this.currentChunk.chunk_id,
-                    annotations: this.annotations
+                    annotations: this._serializableAnnotations()
                 })
             });
 
@@ -494,6 +501,195 @@ const ReviewMode = {
                 wordEl.title = ann.content ? `${typeLabel}: ${ann.content}` : typeLabel;
             }
         });
+    },
+
+    /**
+     * Return annotations array cleaned of internal flags (e.g., _orphaned) for backend serialization.
+     */
+    _serializableAnnotations() {
+        return this.annotations.map(({ _orphaned, ...rest }) => rest);
+    },
+
+    /**
+     * Capture surrounding word context for an annotation at the given word index.
+     * Returns {context_before: string[], context_after: string[]} with up to 2 words each.
+     */
+    _captureWordContext(wordIndex) {
+        const context_before = [];
+        const context_after = [];
+        for (let offset = 2; offset >= 1; offset--) {
+            const el = document.querySelector(`[data-word-index="${wordIndex - offset}"]`);
+            if (el) context_before.push(el.textContent.trim());
+        }
+        for (let offset = 1; offset <= 2; offset++) {
+            const el = document.querySelector(`[data-word-index="${wordIndex + offset}"]`);
+            if (el) context_after.push(el.textContent.trim());
+        }
+        return { context_before, context_after };
+    },
+
+    /**
+     * Strip trailing punctuation from a word for fuzzy matching.
+     */
+    _normalizeWord(word) {
+        return word.replace(/[.,;:!?"""''()[\]{}—–-]+$/g, '').toLowerCase();
+    },
+
+    /**
+     * Relocate annotations after text has been edited.
+     * Uses a two-pass approach: exact word match first, then context-only match.
+     * Returns {relocated: number, orphaned: number}.
+     */
+    relocateAnnotations(oldText, newText) {
+        if (!this.annotations.length) return { relocated: 0, orphaned: 0 };
+
+        const newWords = newText.split(/\s+/).filter(w => w.length > 0);
+        let relocated = 0;
+        let orphaned = 0;
+
+        // Track which new positions are already claimed
+        const claimed = new Set();
+
+        // Pass 1: Exact word match
+        const unresolvedAnnotations = [];
+        for (const ann of this.annotations) {
+            // Find all positions where word_text matches
+            const candidates = [];
+            const normAnn = this._normalizeWord(ann.word_text);
+            for (let i = 0; i < newWords.length; i++) {
+                if (claimed.has(i)) continue;
+                if (newWords[i] === ann.word_text || this._normalizeWord(newWords[i]) === normAnn) {
+                    candidates.push(i);
+                }
+            }
+
+            if (candidates.length === 1) {
+                ann.word_index = candidates[0];
+                claimed.add(candidates[0]);
+                relocated++;
+            } else if (candidates.length > 1) {
+                // Score by context alignment
+                const best = this._pickBestCandidate(candidates, ann, newWords);
+                ann.word_index = best;
+                claimed.add(best);
+                relocated++;
+            } else {
+                unresolvedAnnotations.push(ann);
+            }
+        }
+
+        // Pass 2: Context-only match (for edited/renamed words)
+        for (const ann of unresolvedAnnotations) {
+            if (!ann.context_before?.length && !ann.context_after?.length) {
+                ann._orphaned = true;
+                orphaned++;
+                continue;
+            }
+
+            let bestIdx = -1;
+            let bestScore = 0;
+            let bestDist = Infinity;
+
+            for (let i = 0; i < newWords.length; i++) {
+                if (claimed.has(i)) continue;
+                const score = this._contextScore(i, ann, newWords);
+                const dist = Math.abs(i - ann.word_index);
+                if (score > bestScore || (score === bestScore && dist < bestDist)) {
+                    bestScore = score;
+                    bestIdx = i;
+                    bestDist = dist;
+                }
+            }
+
+            if (bestScore >= 2 && bestIdx >= 0) {
+                ann.word_index = bestIdx;
+                ann.word_text = newWords[bestIdx];
+                ann.updated_at = new Date().toISOString();
+                claimed.add(bestIdx);
+                relocated++;
+            } else {
+                ann._orphaned = true;
+                orphaned++;
+            }
+        }
+
+        return { relocated, orphaned };
+    },
+
+    /**
+     * Score a candidate position by how well surrounding words match annotation context.
+     */
+    _contextScore(candidateIdx, ann, words) {
+        let score = 0;
+        const before = ann.context_before || [];
+        const after = ann.context_after || [];
+
+        // Check context_before: before[0] is 2 words back, before[1] is 1 word back
+        for (let i = 0; i < before.length; i++) {
+            const offset = before.length - i; // 2, 1
+            const wordIdx = candidateIdx - offset;
+            if (wordIdx >= 0 && wordIdx < words.length) {
+                if (this._normalizeWord(words[wordIdx]) === this._normalizeWord(before[i])) {
+                    score++;
+                }
+            }
+        }
+
+        // Check context_after: after[0] is 1 word forward, after[1] is 2 words forward
+        for (let i = 0; i < after.length; i++) {
+            const offset = i + 1; // 1, 2
+            const wordIdx = candidateIdx + offset;
+            if (wordIdx >= 0 && wordIdx < words.length) {
+                if (this._normalizeWord(words[wordIdx]) === this._normalizeWord(after[i])) {
+                    score++;
+                }
+            }
+        }
+
+        return score;
+    },
+
+    /**
+     * Pick the best candidate position from multiple exact matches using context scoring.
+     */
+    _pickBestCandidate(candidates, ann, words) {
+        let bestIdx = candidates[0];
+        let bestScore = -1;
+        let bestDist = Infinity;
+
+        for (const idx of candidates) {
+            const score = this._contextScore(idx, ann, words);
+            const dist = Math.abs(idx - ann.word_index);
+            if (score > bestScore || (score === bestScore && dist < bestDist)) {
+                bestScore = score;
+                bestIdx = idx;
+                bestDist = dist;
+            }
+        }
+
+        return bestIdx;
+    },
+
+    /**
+     * Run relocation if the translation text has changed since last snapshot.
+     * Returns true if relocation was performed.
+     */
+    _relocateIfChanged() {
+        const currentText = this.getCurrentTranslationText();
+        if (currentText === this._lastKnownTranslationText) return false;
+        if (!this.annotations.length) {
+            this._lastKnownTranslationText = currentText;
+            return false;
+        }
+
+        const result = this.relocateAnnotations(this._lastKnownTranslationText, currentText);
+        this._lastKnownTranslationText = currentText;
+
+        if (result.orphaned > 0) {
+            console.warn(`Annotation relocation: ${result.relocated} relocated, ${result.orphaned} orphaned`);
+        }
+
+        return true;
     },
 
     /**
@@ -583,16 +779,11 @@ const ReviewMode = {
             return;
         }
 
-        // Warn before clearing annotations
-        if (this.annotations.length > 0) {
-            if (!confirm('This chunk has annotations. Splitting will shift word indices — existing annotations may point to incorrect words. Proceed anyway?')) {
-                return;
-            }
-            this.annotations = [];
-        }
-
         // Sync any manual text edits from DOM before mutating
         this._syncWorkingArraysFromDOM();
+
+        // Relocate annotations if text was edited inline before split
+        this._relocateIfChanged();
 
         const paraText = this.workingTranslationParagraphs[idx] || '';
         const paraWords = paraText.split(/\s+/).filter(w => w.length > 0);
@@ -613,14 +804,10 @@ const ReviewMode = {
     mergeParagraph(idx) {
         if (idx === 0) return;
 
-        if (this.annotations.length > 0) {
-            if (!confirm('This chunk has annotations. Merging will shift word indices — existing annotations may point to incorrect words. Proceed anyway?')) {
-                return;
-            }
-            this.annotations = [];
-        }
-
         this._syncWorkingArraysFromDOM();
+
+        // Relocate annotations if text was edited inline before merge
+        this._relocateIfChanged();
 
         const textPrev = this.workingTranslationParagraphs[idx - 1] || '';
         const textCurr = this.workingTranslationParagraphs[idx] || '';
@@ -799,6 +986,37 @@ document.getElementById('save-review-btn').addEventListener('click', async () =>
     btn.textContent = I18N.t('translation.savingButton');
 
     try {
+        // Relocate annotations if text was edited inline
+        const didRelocate = ReviewMode._relocateIfChanged();
+        if (didRelocate) {
+            // Filter out orphaned annotations and warn user
+            const orphaned = ReviewMode.annotations.filter(a => a._orphaned);
+            if (orphaned.length > 0) {
+                const proceed = confirm(
+                    `${orphaned.length} annotation(s) could not be matched to words after your edits and will be removed. Continue saving?`
+                );
+                if (!proceed) {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                    return;
+                }
+                ReviewMode.annotations = ReviewMode.annotations.filter(a => !a._orphaned);
+            }
+            // Save relocated annotations to backend
+            await fetch('/api/save-annotations', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: ReviewMode.sessionId,
+                    chunk_id: ReviewMode.currentChunk.chunk_id,
+                    annotations: ReviewMode._serializableAnnotations()
+                })
+            });
+            if (window.updateChunkAnnotationCount) {
+                window.updateChunkAnnotationCount(ReviewMode.currentChunk.chunk_id, ReviewMode.annotations.length);
+            }
+        }
+
         // Get current translation text
         const currentTranslation = ReviewMode.getCurrentTranslationText();
 
@@ -817,6 +1035,15 @@ document.getElementById('save-review-btn').addEventListener('click', async () =>
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || 'Failed to save');
+        }
+
+        // Re-render to refresh word spans after annotation relocation
+        if (didRelocate) {
+            ReviewMode.renderSideBySide(
+                ReviewMode.getCurrentSourceText(),
+                currentTranslation,
+                true
+            );
         }
 
         alert(I18N.t('alert.reviewSaved'));

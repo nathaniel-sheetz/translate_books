@@ -75,6 +75,8 @@ class Annotation(BaseModel):
     annotation_type: AnnotationType
     content: Optional[str] = Field(default=None, description="Optional note/comment text")
     tags: list[str] = Field(default_factory=list, description="Tags for categorization")
+    context_before: list[str] = Field(default_factory=list, description="Up to 2 words before the annotated word, for relocation")
+    context_after: list[str] = Field(default_factory=list, description="Up to 2 words after the annotated word, for relocation")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: Optional[datetime] = None
 
