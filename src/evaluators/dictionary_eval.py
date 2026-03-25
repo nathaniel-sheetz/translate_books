@@ -82,8 +82,13 @@ class DictionaryEvaluator(BaseEvaluator):
         glossary = context.get("glossary")
         case_sensitive = context.get("case_sensitive", False)
 
-        # Strip image placeholders before tokenizing (e.g. [IMAGE:images/i010.jpg])
-        text_to_check = re.sub(r'\[IMAGE:[^\]]*\]', '', chunk.translated_text)
+        # Replace image placeholders with equal-length whitespace before tokenizing
+        # (e.g. [IMAGE:images/i010.jpg]) — preserves character offsets for all subsequent words
+        text_to_check = re.sub(
+            r'\[IMAGE:[^\]]*\]',
+            lambda m: ' ' * len(m.group()),
+            chunk.translated_text
+        )
 
         # Tokenize and get word positions
         words_with_positions = self._tokenize_with_positions(text_to_check)
