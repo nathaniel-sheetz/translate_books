@@ -215,6 +215,10 @@ class DictionaryEvaluator(BaseEvaluator):
         if re.match(r'^\d+([.,]\d+)*$', word):
             return True
 
+        # Roman numerals (e.g. chapter headings like I, II, XIV, LXXX)
+        if re.match(r'^[IVXLCDMivxlcdm]+$', word):
+            return True
+
         return False
 
     def _check_spanish_word(self, word: str) -> bool:
