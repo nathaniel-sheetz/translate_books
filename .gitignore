@@ -50,6 +50,9 @@ batch_jobs.json
 # Per-user project config (copy from project.example.json)
 project.json
 
+# Backlog
+backlog/
+
 # Scratch files
 test.txt
 workbook.md

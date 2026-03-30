@@ -65,8 +65,7 @@ TRANSLATION INSTRUCTIONS
 ================================================================================
 
 1. STRUCTURE PRESERVATION:
-   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs
-   - The only exception would be to conform to standard dialogue handling in {{target_language}}, if necessary
+   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (refer to style guide for details)
    - If the source contains image placeholders in the format [IMAGE:filename], copy
      them into the translation exactly as-is at the same position in the text
 
