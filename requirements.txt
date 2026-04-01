@@ -25,6 +25,9 @@ anthropic>=0.8.0      # Claude API
 openai>=1.0.0         # OpenAI API
 python-dotenv>=1.0.0  # Environment variable management
 
+# EPUB generation
+ebooklib>=0.18
+
 # Future dependencies (commented out for now)
 # click>=8.0.0          # CLI framework
 # spacy>=3.7.0          # NLP for Spanish
