@@ -67,6 +67,7 @@ class TranslationSession:
         project_name: str = "Translation Project",
         source_language: str = "English",
         target_language: str = "Spanish",
+        context_language: str = "both",
     ):
         self.chunks_dir = chunks_dir
         self.glossary = glossary
@@ -78,17 +79,11 @@ class TranslationSession:
         self.project_name = project_name
         self.source_language = source_language
         self.target_language = target_language
+        self.context_language = context_language
 
         # Load all chunks from directory
         self.chunks = self._load_all_chunks()
         self.template = load_prompt_template()
-
-        # Seed from last translated chunk so context survives server restarts
-        last_done = next(
-            (c for c in reversed(self.chunks) if c.translated_text and c.translated_text.strip()),
-            None,
-        )
-        self.last_source_text: Optional[str] = last_done.source_text if last_done else None
 
     def _load_all_chunks(self) -> list[Chunk]:
         """Load and sort all chunk JSON files."""
@@ -125,17 +120,27 @@ class TranslationSession:
 
     def render_chunk_prompt(self, chunk: Chunk) -> str:
         """Render complete prompt for a chunk."""
-        # Use last chunk's source text as context (auto-threading), or fall back to
-        # a static previous chapter source file if configured and no chunk translated yet.
-        prev_source = self.last_source_text or (
-            self.previous_chapter if self.include_context else None
-        )
+        # Look up the sequentially previous chunk (by sorted position, not by
+        # most-recently-translated) so context always comes from the right place.
+        idx = self.chunks.index(chunk)
+        if idx > 0:
+            prev_chunk = self.chunks[idx - 1]
+            prev_source = prev_chunk.source_text
+            prev_translated = prev_chunk.translated_text
+        else:
+            # First chunk — use previous chapter file if configured
+            prev_source = self.previous_chapter if self.include_context else None
+            prev_translated = None
+
         prev_context = extract_previous_chapter_context(
             prev_source,
+            previous_translated_text=prev_translated,
+            context_language=self.context_language,
             min_paragraphs=self.context_paragraphs,
             min_chars=self.min_context_chars,
             source_language=self.source_language,
-        ) if prev_source else ""
+            target_language=self.target_language,
+        ) if prev_source or prev_translated else ""
 
         # Prepare variables
         variables = {
@@ -189,10 +194,9 @@ class TranslationSession:
         chunk_path = Path(self.chunks_dir) / f"{chunk_id}.json"
         save_chunk(updated_chunk, chunk_path)
 
-        # Update in-memory list and track last source text for context threading
+        # Update in-memory list
         idx = next(i for i, c in enumerate(self.chunks) if c.id == chunk_id)
         self.chunks[idx] = updated_chunk
-        self.last_source_text = self.chunks[idx].source_text
 
         return True
 
@@ -332,9 +336,11 @@ def load_project():
         # Optional fields
         glossary_path = data.get("glossary_path")
         style_guide_path = data.get("style_guide_path")
+        previous_chapter_path = data.get("previous_chapter_path")
         include_context = data.get("include_context", True)
         context_paragraphs = data.get("context_paragraphs", 3)
         min_context_chars = data.get("min_context_chars", 200)
+        context_language = data.get("context_language", "both")
         project_name = data.get("project_name", "Translation Project")
         source_language = data.get("source_language", "English")
         target_language = data.get("target_language", "Spanish")
@@ -354,19 +360,28 @@ def load_project():
             except Exception as e:
                 return jsonify({"error": f"Failed to load style guide: {e}"}), 400
 
+        # Load previous chapter text if provided
+        previous_chapter = None
+        if previous_chapter_path and Path(previous_chapter_path).exists():
+            try:
+                previous_chapter = Path(previous_chapter_path).read_text(encoding='utf-8')
+            except Exception as e:
+                return jsonify({"error": f"Failed to load previous chapter: {e}"}), 400
+
         # Create session
         try:
             trans_session = TranslationSession(
                 chunks_dir=chunks_dir,
                 glossary=glossary,
                 style_guide=style_guide,
-                previous_chapter=None,
+                previous_chapter=previous_chapter,
                 include_context=include_context,
                 context_paragraphs=context_paragraphs,
                 min_context_chars=min_context_chars,
                 project_name=project_name,
                 source_language=source_language,
                 target_language=target_language,
+                context_language=context_language,
             )
         except Exception as e:
             return jsonify({"error": f"Failed to create session: {e}"}), 500

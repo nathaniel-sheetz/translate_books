@@ -231,16 +231,19 @@ def test_render_chunk_prompt_with_previous_context(tmp_path):
     assert "Last paragraph of chapter" in prompt
 
 
-def test_render_chunk_prompt_context_uses_last_source_text(temp_chunks_dir):
-    """Test that last translated chunk's source text takes priority as context."""
+def test_render_chunk_prompt_context_uses_previous_chunk(temp_chunks_dir):
+    """Test that context comes from the sequentially previous chunk, not most recent."""
     session = TranslationSession(chunks_dir=str(temp_chunks_dir))
 
-    # temp_chunks_dir has chunk_002 already translated, so last_source_text is seeded
-    assert session.last_source_text == "This is the second chunk of English text."
+    # Chunk 0 is first in sequence — no previous chunk context
+    prompt_0 = session.render_chunk_prompt(session.chunks[0])
+    assert "Previous Section" not in prompt_0
 
-    prompt = session.render_chunk_prompt(session.chunks[0])
-    assert "Previous Section (Original English)" in prompt
-    assert "second chunk of English text" in prompt
+    # Chunk 2 (index 2) should get context from chunk 1 (index 1), not
+    # from whatever was most recently translated
+    prompt_2 = session.render_chunk_prompt(session.chunks[2])
+    assert "Previous Section (Original English)" in prompt_2
+    assert "second chunk of English text" in prompt_2
 
 
 def test_save_translation(temp_chunks_dir):

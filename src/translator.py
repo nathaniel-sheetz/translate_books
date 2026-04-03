@@ -20,40 +20,32 @@ from src.utils.file_io import (
 )
 
 
-def extract_previous_chapter_context(
-    previous_section_text: Optional[str],
+def _extract_tail_paragraphs(
+    text: str,
     min_paragraphs: int = 3,
     min_chars: int = 200,
-    source_language: str = "English",
 ) -> str:
     """
-    Extract context from the end of the previous section's source text.
+    Extract paragraphs from the end of text using dual-constraint strategy.
 
-    Uses dual-constraint strategy: adds paragraphs from the end until BOTH
-    min_paragraphs AND min_chars are satisfied. If paragraphs run out before
-    both constraints are met, returns everything available.
+    Adds paragraphs from the end until BOTH min_paragraphs AND min_chars are
+    satisfied. If paragraphs run out before both constraints are met, returns
+    everything available.
 
     Args:
-        previous_section_text: Source-language text from previous chunk/chapter.
-        min_paragraphs: Minimum number of paragraphs to include (default: 3).
-        min_chars: Minimum total characters to include (default: 200).
-        source_language: Language name for the context header label.
+        text: Text to extract from.
+        min_paragraphs: Minimum number of paragraphs to include.
+        min_chars: Minimum total characters to include.
 
     Returns:
-        Formatted context block for prompt insertion, or "" if no text provided.
-
-    Example:
-        >>> prev_text = "Paragraph 1.\\n\\nParagraph 2.\\n\\nParagraph 3."
-        >>> context = extract_previous_chapter_context(prev_text, min_paragraphs=2)
-        >>> "Paragraph 2" in context
-        True
+        Extracted paragraphs joined by double newlines, or "" if text is empty.
     """
-    if not previous_section_text or not previous_section_text.strip():
+    if not text or not text.strip():
         return ""
 
     paragraphs = [
         p.strip()
-        for p in re.split(r'\n\s*\n', previous_section_text.strip())
+        for p in re.split(r'\n\s*\n', text.strip())
         if p.strip()
     ]
     if not paragraphs:
@@ -72,13 +64,83 @@ def extract_previous_chapter_context(
         if paras_met and chars_met:
             break
 
-    context_text = '\n\n'.join(selected)
+    return '\n\n'.join(selected)
+
+
+def extract_previous_chapter_context(
+    previous_section_text: Optional[str],
+    previous_translated_text: Optional[str] = None,
+    context_language: str = "both",
+    min_paragraphs: int = 3,
+    min_chars: int = 200,
+    source_language: str = "English",
+    target_language: str = "Spanish",
+) -> str:
+    """
+    Extract context from the end of the previous section for prompt insertion.
+
+    Uses dual-constraint strategy: adds paragraphs from the end until BOTH
+    min_paragraphs AND min_chars are satisfied.
+
+    Args:
+        previous_section_text: Source-language text from previous chunk/chapter.
+        previous_translated_text: Target-language translation of previous section.
+        context_language: Which text to include: "both", "source", or "translation".
+        min_paragraphs: Minimum number of paragraphs to include (default: 3).
+        min_chars: Minimum total characters to include (default: 200).
+        source_language: Source language name for labeling.
+        target_language: Target language name for labeling.
+
+    Returns:
+        Formatted context block for prompt insertion, or "" if no text provided.
+
+    Example:
+        >>> prev_text = "Paragraph 1.\\n\\nParagraph 2.\\n\\nParagraph 3."
+        >>> context = extract_previous_chapter_context(prev_text, min_paragraphs=2)
+        >>> "Paragraph 2" in context
+        True
+    """
+    source_tail = _extract_tail_paragraphs(
+        previous_section_text, min_paragraphs, min_chars
+    ) if previous_section_text else ""
+
+    translated_tail = _extract_tail_paragraphs(
+        previous_translated_text, min_paragraphs, min_chars
+    ) if previous_translated_text else ""
+
+    # Determine what to show based on context_language and what's available
+    show_source = context_language in ("both", "source") and source_tail
+    show_translation = context_language in ("both", "translation") and translated_tail
+
+    if not show_source and not show_translation:
+        # Fall back: show whatever is available
+        if source_tail:
+            show_source = True
+        elif translated_tail:
+            show_translation = True
+        else:
+            return ""
+
+    sections = []
+    if show_source:
+        sections.append(
+            f"Previous Section (Original {source_language}):\n"
+            f"─────────────────────────────────────────────\n"
+            f"{source_tail}\n"
+            f"─────────────────────────────────────────────"
+        )
+    if show_translation:
+        sections.append(
+            f"Previous Section ({target_language} Translation):\n"
+            f"─────────────────────────────────────────────\n"
+            f"{translated_tail}\n"
+            f"─────────────────────────────────────────────"
+        )
+
+    body = "\n\n".join(sections)
 
     return f"""
-Previous Section (Original {source_language}):
-─────────────────────────────────────────────
-{context_text}
-─────────────────────────────────────────────
+{body}
 
 This provides continuity context. Do not re-translate it — use it only to
 maintain consistent voice, terminology, and narrative flow.
@@ -94,8 +156,10 @@ def generate_workbook(
     target_language: str = "Spanish",
     book_context: str = "",
     previous_chapter_source: Optional[str] = None,
+    previous_chapter_translated: Optional[str] = None,
     context_paragraphs: int = 3,
     min_context_chars: int = 200,
+    context_language: str = "both",
 ) -> str:
     """
     Generate a formatted workbook for manual translation.
@@ -112,8 +176,10 @@ def generate_workbook(
         target_language: Target language (default: Spanish)
         book_context: Optional context about the book
         previous_chapter_source: Optional source text from end of previous chapter
+        previous_chapter_translated: Optional translated text from end of previous chapter
         context_paragraphs: Minimum paragraphs of context to include (default: 3)
         min_context_chars: Minimum characters of context to include (default: 200)
+        context_language: What to include in context: "both", "source", or "translation"
 
     Returns:
         Formatted workbook content as string
@@ -155,15 +221,19 @@ def generate_workbook(
     # Separator before chunks
     sections.append("\n" + "═" * 70 + "\n")
 
-    # Thread source context through chunks: each chunk receives the previous chunk's
-    # source text as context (or the previous chapter's source for the first chunk).
+    # Thread context through chunks: each chunk receives the previous chunk's
+    # source and translated text (or the previous chapter's for the first chunk).
     prev_source = previous_chapter_source
+    prev_translated = previous_chapter_translated
     for chunk in sorted_chunks:
         previous_context = extract_previous_chapter_context(
             prev_source,
+            previous_translated_text=prev_translated,
+            context_language=context_language,
             min_paragraphs=context_paragraphs,
             min_chars=min_context_chars,
             source_language=source_language,
+            target_language=target_language,
         )
         sections.append(_generate_chunk_section(
             chunk=chunk,
@@ -177,6 +247,7 @@ def generate_workbook(
             previous_chapter_context=previous_context
         ))
         prev_source = chunk.source_text
+        prev_translated = chunk.translated_text
 
     # Footer
     sections.append(_generate_footer(timestamp=datetime.now()))
