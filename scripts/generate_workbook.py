@@ -127,7 +127,20 @@ After translation, import using:
     parser.add_argument(
         '--previous-chapter',
         type=Path,
-        help='Path to previous chapter translation (for continuity context)',
+        help='Path to previous chapter source text (for continuity context)',
+    )
+
+    parser.add_argument(
+        '--previous-chapter-translated',
+        type=Path,
+        help='Path to previous chapter translated text (for continuity context)',
+    )
+
+    parser.add_argument(
+        '--context-language',
+        choices=['both', 'source', 'translation'],
+        default='both',
+        help='What previous context to include: both, source, or translation (default: both)',
     )
 
     parser.add_argument(
@@ -135,12 +148,6 @@ After translation, import using:
         type=int,
         default=2,
         help='Number of paragraphs from previous chapter to include (default: 2)',
-    )
-
-    parser.add_argument(
-        '--context-words',
-        type=int,
-        help='Alternative to --context-paragraphs: number of words to include',
     )
 
     parser.add_argument(
@@ -254,34 +261,50 @@ def main():
             print(f"Error loading style guide: {e}", file=sys.stderr)
             sys.exit(1)
 
-    # Load previous chapter translation if provided
-    previous_chapter_translation = None
+    # Load previous chapter source if provided
+    previous_chapter_source = None
     if args.previous_chapter:
         if not args.previous_chapter.exists():
             print(f"Error: Previous chapter file not found: {args.previous_chapter}", file=sys.stderr)
             sys.exit(1)
 
         if args.verbose:
-            print(f"\nLoading previous chapter: {args.previous_chapter}")
+            print(f"\nLoading previous chapter source: {args.previous_chapter}")
 
         try:
-            previous_chapter_translation = args.previous_chapter.read_text(encoding='utf-8')
+            previous_chapter_source = args.previous_chapter.read_text(encoding='utf-8')
             if args.verbose:
-                word_count = len(previous_chapter_translation.split())
+                word_count = len(previous_chapter_source.split())
                 print(f"  Word count: {word_count:,}")
-                if args.context_words:
-                    print(f"  Including last {args.context_words} words for context")
-                else:
-                    print(f"  Including last {args.context_paragraphs} paragraphs for context")
+                print(f"  Including last {args.context_paragraphs} paragraphs for context")
         except Exception as e:
             print(f"Error loading previous chapter: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Load previous chapter translation if provided
+    previous_chapter_translated = None
+    if args.previous_chapter_translated:
+        if not args.previous_chapter_translated.exists():
+            print(f"Error: Previous chapter translation not found: {args.previous_chapter_translated}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.verbose:
+            print(f"Loading previous chapter translation: {args.previous_chapter_translated}")
+
+        try:
+            previous_chapter_translated = args.previous_chapter_translated.read_text(encoding='utf-8')
+            if args.verbose:
+                word_count = len(previous_chapter_translated.split())
+                print(f"  Word count: {word_count:,}")
+        except Exception as e:
+            print(f"Error loading previous chapter translation: {e}", file=sys.stderr)
             sys.exit(1)
 
     # Generate workbook
     if args.verbose:
         print(f"\nGenerating workbook for {len(chunks)} chunks...")
-        if previous_chapter_translation:
-            print("  Including previous chapter context for continuity")
+        if previous_chapter_source or previous_chapter_translated:
+            print(f"  Including previous chapter context (mode: {args.context_language})")
 
     try:
         workbook = generate_workbook(
@@ -292,9 +315,10 @@ def main():
             source_language=args.source_lang,
             target_language=args.target_lang,
             book_context=args.context,
-            previous_chapter_translation=previous_chapter_translation,
+            previous_chapter_source=previous_chapter_source,
+            previous_chapter_translated=previous_chapter_translated,
             context_paragraphs=args.context_paragraphs,
-            context_words=args.context_words,
+            context_language=args.context_language,
         )
     except Exception as e:
         print(f"Error generating workbook: {e}", file=sys.stderr)
@@ -326,9 +350,8 @@ def main():
     if style_guide:
         print(f"Style Guide: v{style_guide.version}")
 
-    if previous_chapter_translation:
-        context_type = f"{args.context_words} words" if args.context_words else f"{args.context_paragraphs} paragraphs"
-        print(f"Previous Chapter Context: {context_type}")
+    if previous_chapter_source or previous_chapter_translated:
+        print(f"Previous Chapter Context: {args.context_paragraphs} paragraphs ({args.context_language})")
 
     print(f"\nOutput: {args.output}")
     print(f"Size: {args.output.stat().st_size:,} bytes")
