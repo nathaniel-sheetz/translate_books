@@ -33,12 +33,31 @@
 <div class="nav-page">
     <a href="/read/" class="back-link">&larr; Projects</a>
     <h1>{{ project_id }}</h1>
+    {% if has_corrections %}
+    <div class="chapter-banner banner-warn">Pending corrections not yet applied</div>
+    {% endif %}
     <ul class="nav-list">
         {% for ch in chapters %}
         <li>
             <a href="/read/{{ project_id }}/{{ ch.id }}">
                 <span class="nav-title">{{ ch.id | replace('_', ' ') | title }}</span>
-                <span class="nav-meta">{{ ch.es_count }} sentences &middot; {{ ch.high_confidence_pct }}% aligned</span>
+                <span class="nav-meta">
+                    {%- if ch.review_count > 0 -%}
+                        <span class="badge badge-review">{{ ch.review_count }} to review</span>
+                    {%- endif -%}
+                    {%- if ch.footnote_count > 0 -%}
+                        <span class="badge badge-footnote">{{ ch.footnote_count }} fn</span>
+                    {%- endif -%}
+                    {%- if ch.flag_count > 0 -%}
+                        <span class="badge badge-flag">{{ ch.flag_count }} flag</span>
+                    {%- endif -%}
+                    {%- if ch.low_confidence -%}
+                        <span class="badge badge-warn">{{ ch.confidence }}% aligned</span>
+                    {%- endif -%}
+                    {%- if ch.total_ann == 0 and not ch.low_confidence -%}
+                        <span class="badge badge-clean">clean</span>
+                    {%- endif -%}
+                </span>
             </a>
         </li>
         {% endfor %}

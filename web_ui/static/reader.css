@@ -74,6 +74,10 @@ body {
 }
 
 .nav-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     font-size: 14px;
     color: #888;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -84,6 +88,57 @@ body {
     font-size: 16px;
     font-style: italic;
     margin-top: 40px;
+}
+
+/* Chapter list badges */
+
+.badge {
+    display: inline-block;
+    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
+.badge-review {
+    background: rgba(100, 149, 237, 0.15);
+    color: #4a7abf;
+}
+
+.badge-footnote {
+    background: rgba(140, 100, 180, 0.12);
+    color: #8a6aaf;
+}
+
+.badge-flag {
+    background: rgba(180, 180, 180, 0.2);
+    color: #888;
+}
+
+.badge-warn {
+    background: rgba(220, 140, 40, 0.12);
+    color: #b07020;
+}
+
+.badge-clean {
+    background: rgba(90, 158, 111, 0.1);
+    color: #5a9e6f;
+}
+
+/* Chapter list banner */
+
+.chapter-banner {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+}
+
+.banner-warn {
+    background: rgba(220, 140, 40, 0.1);
+    color: #b07020;
 }
 
 /* Reader view */
@@ -151,9 +206,8 @@ body {
     background: #f0ece7;
 }
 
-.sentence:active {
-    background: #e8e0d5;
-}
+/* Active state only applied via JS .active class, not CSS :active,
+   to avoid flash on scroll gestures */
 
 .sentence.active {
     background: #e0d8cc;

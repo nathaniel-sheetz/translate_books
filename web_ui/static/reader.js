@@ -113,7 +113,23 @@
                 span.classList.add('ann-' + ann.type);
             }
 
-            span.addEventListener('click', () => onSentenceTap(a));
+            // Use touch tracking to ignore scroll gestures
+            let _touchStart = null;
+            span.addEventListener('touchstart', e => {
+                _touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            }, { passive: true });
+            span.addEventListener('touchend', e => {
+                if (!_touchStart) return;
+                const dx = Math.abs(e.changedTouches[0].clientX - _touchStart.x);
+                const dy = Math.abs(e.changedTouches[0].clientY - _touchStart.y);
+                _touchStart = null;
+                if (dx < 10 && dy < 10) onSentenceTap(a);
+            });
+            // Keep click for desktop/mouse
+            span.addEventListener('click', e => {
+                if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+                onSentenceTap(a);
+            });
 
             content.appendChild(span);
         }
@@ -174,7 +190,13 @@
         annRemoveBtn.classList.remove('has-annotation');
     }
 
-    function closeSheet() {
+    function closeSheet(scrollToIdx) {
+        // Remember which sentence to scroll to before closing
+        const targetIdx = scrollToIdx !== undefined ? scrollToIdx : activeIdx;
+        const targetEl = targetIdx !== null
+            ? content.querySelector(`[data-es-idx="${targetIdx}"]`)
+            : null;
+
         bottomSheet.classList.remove('visible', 'expanded');
         sheetOverlay.classList.remove('visible');
 
@@ -183,6 +205,16 @@
 
         activeIdx = null;
         resetAnnotationUI();
+
+        // Scroll the sentence to the top of the viewport so the reader
+        // can continue from where they left off.
+        // Wait for the sheet close transition (250ms) to finish first.
+        if (targetEl) {
+            setTimeout(() => {
+                const top = targetEl.getBoundingClientRect().top + window.scrollY - 60;
+                window.scrollTo({ top, behavior: 'instant' });
+            }, 280);
+        }
     }
 
     function expandSheet() {

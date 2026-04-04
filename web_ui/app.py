@@ -655,15 +655,52 @@ def reader_chapters(project_id):
     if not align_dir.exists():
         return render_template("reader.html", mode="not_found", project_id=project_id), 404
 
+    # Load all annotations for this project
+    project_dir = _get_projects_dir() / project_id
+    all_annotations = {}  # chapter_id -> {type -> count}
+    ann_path = project_dir / "annotations.jsonl"
+    if ann_path.exists():
+        live = {}  # es_idx -> record (latest wins, removed deletes)
+        for line in ann_path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            ch = r.get("chapter_id", "")
+            key = (ch, r.get("es_idx"))
+            if r.get("removed"):
+                live.pop(key, None)
+            else:
+                live[key] = r
+        from collections import defaultdict
+        ann_counts = defaultdict(lambda: defaultdict(int))
+        for (ch, _), r in live.items():
+            ann_counts[ch][r.get("type", "flag")] += 1
+        all_annotations = dict(ann_counts)
+
+    # Check for pending corrections
+    has_corrections = (project_dir / "corrections.jsonl").exists()
+
     chapters = []
     for f in sorted(align_dir.glob("*.json")):
         try:
             with open(f, encoding="utf-8") as fh:
                 data = json.load(fh)
+            ch_id = f.stem
+            confidence = data.get("high_confidence_pct", 0)
+            ann = all_annotations.get(ch_id, {})
+            review_count = ann.get("word_choice", 0) + ann.get("inconsistency", 0)
+            footnote_count = ann.get("footnote", 0)
+            flag_count = ann.get("flag", 0)
+            total_ann = sum(ann.values())
+
             chapters.append({
-                "id": f.stem,
-                "es_count": data.get("es_count", 0),
-                "high_confidence_pct": data.get("high_confidence_pct", 0),
+                "id": ch_id,
+                "confidence": confidence,
+                "low_confidence": confidence < 90,
+                "review_count": review_count,
+                "footnote_count": footnote_count,
+                "flag_count": flag_count,
+                "total_ann": total_ann,
             })
         except (json.JSONDecodeError, OSError):
             continue
@@ -671,6 +708,7 @@ def reader_chapters(project_id):
     return render_template(
         "reader.html", mode="chapters",
         project_id=project_id, chapters=chapters,
+        has_corrections=has_corrections,
     )
 
 
@@ -1039,4 +1077,4 @@ if __name__ == "__main__":
     print("=" * 70)
     print("\nStarting server on http://localhost:5000")
     print("Press Ctrl+C to stop\n")
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5000)
