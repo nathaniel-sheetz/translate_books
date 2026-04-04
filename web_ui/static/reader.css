@@ -126,6 +126,11 @@ body {
     color: #5a9e6f;
 }
 
+.badge-unread {
+    background: rgba(180, 180, 180, 0.12);
+    color: #aaa;
+}
+
 /* Chapter list banner */
 
 .chapter-banner {
@@ -514,6 +519,36 @@ body {
 .btn-save:disabled {
     background: #ccc;
     cursor: not-allowed;
+}
+
+/* Mark as reviewed button at bottom of chapter */
+
+.review-marker {
+    text-align: center;
+    padding: 40px 0 20px;
+    border-top: 1px solid #e8e4df;
+    margin-top: 2em;
+}
+
+.btn-reviewed {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 15px;
+    padding: 12px 32px;
+    background: #f5f3f0;
+    color: #555;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.btn-reviewed:active {
+    background: #ece8e3;
+}
+
+.btn-reviewed.is-reviewed {
+    background: rgba(90, 158, 111, 0.1);
+    color: #5a9e6f;
+    border-color: rgba(90, 158, 111, 0.3);
 }
 
 /* Tablet responsiveness */

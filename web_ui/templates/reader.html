@@ -54,8 +54,10 @@
                     {%- if ch.low_confidence -%}
                         <span class="badge badge-warn">{{ ch.confidence }}% aligned</span>
                     {%- endif -%}
-                    {%- if ch.total_ann == 0 and not ch.low_confidence -%}
-                        <span class="badge badge-clean">clean</span>
+                    {%- if ch.reviewed and ch.total_ann == 0 and not ch.low_confidence -%}
+                        <span class="badge badge-clean">reviewed</span>
+                    {%- elif not ch.reviewed and ch.total_ann == 0 and not ch.low_confidence -%}
+                        <span class="badge badge-unread">unread</span>
                     {%- endif -%}
                 </span>
             </a>

@@ -680,6 +680,9 @@ def reader_chapters(project_id):
     # Check for pending corrections
     has_corrections = (project_dir / "corrections.jsonl").exists()
 
+    # Load reviewed status
+    reviewed = _load_reviewed(project_dir)
+
     chapters = []
     for f in sorted(align_dir.glob("*.json")):
         try:
@@ -701,6 +704,7 @@ def reader_chapters(project_id):
                 "footnote_count": footnote_count,
                 "flag_count": flag_count,
                 "total_ann": total_ann,
+                "reviewed": ch_id in reviewed,
             })
         except (json.JSONDecodeError, OSError):
             continue
@@ -1069,6 +1073,58 @@ def remove_annotation():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _load_reviewed(project_dir: Path) -> dict:
+    """Load reviewed.json → {chapter_id: timestamp}."""
+    p = project_dir / "reviewed.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+@app.route("/api/reviewed/<project_id>/<chapter>", methods=["GET"])
+def get_reviewed(project_id, chapter):
+    """Check if a chapter is reviewed."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _get_projects_dir() / project_id
+    reviewed = _load_reviewed(project_dir)
+    return jsonify({"reviewed": chapter in reviewed})
+
+
+@app.route("/api/reviewed/<project_id>/<chapter>", methods=["POST"])
+def mark_reviewed(project_id, chapter):
+    """Mark a chapter as reviewed."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    reviewed = _load_reviewed(project_dir)
+    reviewed[chapter] = datetime.now().isoformat()
+    (project_dir / "reviewed.json").write_text(
+        json.dumps(reviewed, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return jsonify({"marked": True})
+
+
+@app.route("/api/reviewed/<project_id>/<chapter>", methods=["DELETE"])
+def unmark_reviewed(project_id, chapter):
+    """Unmark a chapter as reviewed."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _get_projects_dir() / project_id
+    reviewed = _load_reviewed(project_dir)
+    reviewed.pop(chapter, None)
+    (project_dir / "reviewed.json").write_text(
+        json.dumps(reviewed, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return jsonify({"unmarked": True})
 
 
 if __name__ == "__main__":

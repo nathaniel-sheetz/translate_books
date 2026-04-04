@@ -60,6 +60,7 @@
             }
 
             renderSentences(data.alignments);
+            addReviewButton();
             if (readerStats) {
                 const annCount = Object.keys(annotationsMap).length;
                 let stats = `${data.es_count} sentences`;
@@ -421,4 +422,50 @@
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape') closeSheet();
     });
+
+    // --- Mark as reviewed button ---
+
+    function addReviewButton() {
+        const marker = document.createElement('div');
+        marker.className = 'review-marker';
+
+        const btn = document.createElement('button');
+        btn.className = 'btn-reviewed';
+
+        // Check current status
+        fetch(`/api/reviewed/${projectId}/${chapter}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.reviewed) {
+                    btn.classList.add('is-reviewed');
+                    btn.textContent = 'Reviewed \u2713';
+                } else {
+                    btn.textContent = 'Mark as reviewed';
+                }
+            })
+            .catch(() => {
+                btn.textContent = 'Mark as reviewed';
+            });
+
+        btn.addEventListener('click', () => {
+            const isReviewed = btn.classList.contains('is-reviewed');
+            fetch(`/api/reviewed/${projectId}/${chapter}`, {
+                method: isReviewed ? 'DELETE' : 'POST',
+            })
+                .then(r => r.json())
+                .then(() => {
+                    if (isReviewed) {
+                        btn.classList.remove('is-reviewed');
+                        btn.textContent = 'Mark as reviewed';
+                    } else {
+                        btn.classList.add('is-reviewed');
+                        btn.textContent = 'Reviewed \u2713';
+                    }
+                })
+                .catch(err => alert('Error: ' + err.message));
+        });
+
+        marker.appendChild(btn);
+        content.appendChild(marker);
+    }
 })();
