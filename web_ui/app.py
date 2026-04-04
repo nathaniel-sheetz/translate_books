@@ -16,7 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, render_template, request, send_from_directory, session
+from flask import Flask, jsonify, make_response, render_template, request, send_from_directory, session
+
+from web_ui.i18n import get_strings
 
 # Import existing utilities
 import sys
@@ -623,12 +625,34 @@ def _safe_id(value: str) -> bool:
     return bool(value) and ".." not in value and "/" not in value and "\\" not in value
 
 
+def _get_ui_lang() -> str:
+    """Read UI language from cookie, default to English."""
+    return request.cookies.get("reader_lang", "en")
+
+
+def _reader_strings() -> dict:
+    """Get i18n strings for the current request."""
+    return get_strings(_get_ui_lang())
+
+
+@app.route("/api/set-lang", methods=["POST"])
+def set_language():
+    """Set the UI language via cookie."""
+    lang = (request.json or {}).get("lang", "en")
+    if lang not in ("en", "es"):
+        lang = "en"
+    resp = make_response(jsonify({"lang": lang}))
+    resp.set_cookie("reader_lang", lang, max_age=365 * 24 * 3600, samesite="Lax")
+    return resp
+
+
 @app.route("/read/")
 def reader_projects():
     """List available projects that have alignment data."""
+    t = _reader_strings()
     projects_dir = _get_projects_dir()
     if not projects_dir.exists():
-        return render_template("reader.html", mode="no_projects")
+        return render_template("reader.html", mode="no_projects", t=t, lang=_get_ui_lang())
 
     projects = []
     for proj_dir in sorted(projects_dir.iterdir()):
@@ -643,7 +667,7 @@ def reader_projects():
                     "chapter_count": len(alignment_files),
                 })
 
-    return render_template("reader.html", mode="projects", projects=projects)
+    return render_template("reader.html", mode="projects", projects=projects, t=t, lang=_get_ui_lang())
 
 
 @app.route("/read/<project_id>")
@@ -652,8 +676,9 @@ def reader_chapters(project_id):
     if not _safe_id(project_id):
         return "Bad request", 400
     align_dir = _get_projects_dir() / project_id / "alignments"
+    t = _reader_strings()
     if not align_dir.exists():
-        return render_template("reader.html", mode="not_found", project_id=project_id), 404
+        return render_template("reader.html", mode="not_found", project_id=project_id, t=t, lang=_get_ui_lang()), 404
 
     # Load all annotations for this project
     project_dir = _get_projects_dir() / project_id
@@ -712,25 +737,26 @@ def reader_chapters(project_id):
     return render_template(
         "reader.html", mode="chapters",
         project_id=project_id, chapters=chapters,
-        has_corrections=has_corrections,
+        has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
     )
 
 
 @app.route("/read/<project_id>/<chapter>")
 def reader_view(project_id, chapter):
     """Render the reader view for a chapter."""
+    t = _reader_strings()
     if not _safe_id(project_id) or not _safe_id(chapter):
         return "Bad request", 400
     align_path = _get_projects_dir() / project_id / "alignments" / f"{chapter}.json"
     if not align_path.exists():
         return render_template(
             "reader.html", mode="not_found",
-            project_id=project_id, chapter=chapter,
+            project_id=project_id, chapter=chapter, t=t, lang=_get_ui_lang(),
         ), 404
 
     return render_template(
         "reader.html", mode="read",
-        project_id=project_id, chapter=chapter,
+        project_id=project_id, chapter=chapter, t=t, lang=_get_ui_lang(),
     )
 
 

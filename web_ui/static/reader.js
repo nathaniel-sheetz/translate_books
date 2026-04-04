@@ -12,6 +12,9 @@
     const projectId = app.dataset.project;
     const chapter = app.dataset.chapter;
 
+    // i18n strings injected by the template
+    const i = window.__i18n || {};
+
     const content = document.getElementById('reader-content');
     const bottomSheet = document.getElementById('bottom-sheet');
     const sheetOverlay = document.getElementById('sheet-overlay');
@@ -35,17 +38,10 @@
     let activeIdx = null;
     let selectedAnnType = null;
 
-    const ANN_LABELS = {
-        word_choice: '\u{1f4ac} Word choice',
-        inconsistency: '\u26a0 Inconsistency',
-        footnote: '\u{1f4d6} Footnote',
-        flag: '\u{1f6a9} Flag',
-    };
-
     // Load alignment data and annotations in parallel
     Promise.all([
         fetch(`/api/alignment/${projectId}/${chapter}`).then(r => {
-            if (!r.ok) throw new Error('Alignment not found');
+            if (!r.ok) throw new Error(i.error_alignment || 'Alignment not found');
             return r.json();
         }),
         fetch(`/api/annotations/${projectId}/${chapter}`).then(r => r.json()),
@@ -61,15 +57,10 @@
 
             renderSentences(data.alignments);
             addReviewButton();
-            if (readerStats) {
-                const annCount = Object.keys(annotationsMap).length;
-                let stats = `${data.es_count} sentences`;
-                if (annCount > 0) stats += ` · ${annCount} annotated`;
-                readerStats.textContent = stats;
-            }
+            updateStats();
         })
         .catch(err => {
-            content.innerHTML = `<p class="empty-state">Error: ${err.message}</p>`;
+            content.innerHTML = `<p class="empty-state">${i.error_prefix || 'Error: '}${err.message}</p>`;
         });
 
     function renderSentences(alignments) {
@@ -114,23 +105,7 @@
                 span.classList.add('ann-' + ann.type);
             }
 
-            // Use touch tracking to ignore scroll gestures
-            let _touchStart = null;
-            span.addEventListener('touchstart', e => {
-                _touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-            }, { passive: true });
-            span.addEventListener('touchend', e => {
-                if (!_touchStart) return;
-                const dx = Math.abs(e.changedTouches[0].clientX - _touchStart.x);
-                const dy = Math.abs(e.changedTouches[0].clientY - _touchStart.y);
-                _touchStart = null;
-                if (dx < 10 && dy < 10) onSentenceTap(a);
-            });
-            // Keep click for desktop/mouse
-            span.addEventListener('click', e => {
-                if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
-                onSentenceTap(a);
-            });
+            span.addEventListener('click', () => onSentenceTap(a));
 
             content.appendChild(span);
         }
@@ -284,10 +259,10 @@
                     closeSheet();
                 }
             })
-            .catch(err => alert('Error: ' + err.message))
+            .catch(err => alert((i.error_prefix || 'Error: ') + err.message))
             .finally(() => {
                 btnAnnSave.disabled = false;
-                btnAnnSave.textContent = 'Save';
+                btnAnnSave.textContent = i.save || 'Save';
             });
     });
 
@@ -326,14 +301,14 @@
                     closeSheet();
                 }
             })
-            .catch(err => alert('Error: ' + err.message));
+            .catch(err => alert((i.error_prefix || 'Error: ') + err.message));
     });
 
     function updateStats() {
         if (!readerStats || !alignmentData) return;
         const annCount = Object.keys(annotationsMap).length;
-        let stats = `${alignmentData.es_count} sentences`;
-        if (annCount > 0) stats += ` · ${annCount} annotated`;
+        let stats = `${alignmentData.es_count} ${i.sentences || 'sentences'}`;
+        if (annCount > 0) stats += ` \u00b7 ${annCount} ${i.annotated || 'annotated'}`;
         readerStats.textContent = stats;
     }
 
@@ -376,7 +351,7 @@
         }
 
         btnSave.disabled = true;
-        btnSave.textContent = 'Saving...';
+        btnSave.textContent = i.saving || 'Saving...';
 
         const payload = {
             project_id: projectId,
@@ -406,15 +381,15 @@
 
                     closeSheet();
                 } else {
-                    alert('Error saving: ' + (result.error || 'Unknown error'));
+                    alert((i.error_saving || 'Error saving: ') + (result.error || 'Unknown error'));
                 }
             })
             .catch(err => {
-                alert('Network error: ' + err.message);
+                alert((i.network_error || 'Network error: ') + err.message);
             })
             .finally(() => {
                 btnSave.disabled = false;
-                btnSave.textContent = 'Save';
+                btnSave.textContent = i.save || 'Save';
             });
     });
 
@@ -438,13 +413,13 @@
             .then(data => {
                 if (data.reviewed) {
                     btn.classList.add('is-reviewed');
-                    btn.textContent = 'Reviewed \u2713';
+                    btn.textContent = i.reviewed_check || 'Reviewed \u2713';
                 } else {
-                    btn.textContent = 'Mark as reviewed';
+                    btn.textContent = i.mark_reviewed || 'Mark as reviewed';
                 }
             })
             .catch(() => {
-                btn.textContent = 'Mark as reviewed';
+                btn.textContent = i.mark_reviewed || 'Mark as reviewed';
             });
 
         btn.addEventListener('click', () => {
@@ -456,13 +431,13 @@
                 .then(() => {
                     if (isReviewed) {
                         btn.classList.remove('is-reviewed');
-                        btn.textContent = 'Mark as reviewed';
+                        btn.textContent = i.mark_reviewed || 'Mark as reviewed';
                     } else {
                         btn.classList.add('is-reviewed');
-                        btn.textContent = 'Reviewed \u2713';
+                        btn.textContent = i.reviewed_check || 'Reviewed \u2713';
                     }
                 })
-                .catch(err => alert('Error: ' + err.message));
+                .catch(err => alert((i.error_prefix || 'Error: ') + err.message));
         });
 
         marker.appendChild(btn);

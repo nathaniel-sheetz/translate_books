@@ -23,11 +23,55 @@ body {
     padding: 40px 24px;
 }
 
+.nav-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.nav-header h1 {
+    font-size: 28px;
+    font-weight: 400;
+    color: #1a1a1a;
+    margin-bottom: 0;
+}
+
 .nav-page h1 {
     font-size: 28px;
     font-weight: 400;
     margin-bottom: 24px;
     color: #1a1a1a;
+}
+
+.lang-toggle {
+    display: flex;
+    gap: 2px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.lang-btn {
+    background: #f0ece7;
+    border: 1px solid #ddd;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #888;
+    cursor: pointer;
+}
+
+.lang-btn:first-child {
+    border-radius: 6px 0 0 6px;
+}
+
+.lang-btn:last-child {
+    border-radius: 0 6px 6px 0;
+}
+
+.lang-btn.active {
+    background: #5a9e6f;
+    border-color: #5a9e6f;
+    color: #fff;
 }
 
 .back-link {
@@ -207,8 +251,10 @@ body {
     margin: 0 -2px;
 }
 
-.sentence:hover {
-    background: #f0ece7;
+@media (hover: hover) {
+    .sentence:hover {
+        background: #f0ece7;
+    }
 }
 
 /* Active state only applied via JS .active class, not CSS :active,
