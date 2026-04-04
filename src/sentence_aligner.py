@@ -84,6 +84,9 @@ def _monotonic_alignment(
 
     Each target sentence maps to exactly one source sentence.
     Source sentences can be skipped or shared (many-to-one).
+
+    Uses a prefix-max trick to avoid the inner k-loop, reducing
+    complexity from O(n_tgt * n_src^2) to O(n_tgt * n_src).
     """
     n_tgt, n_src = similarity.shape
 
@@ -94,22 +97,48 @@ def _monotonic_alignment(
     for j in range(n_src):
         dp[0][j] = similarity[0][j]
 
-    # Fill
+    # Fill — for each (i, j), best previous k falls into three cases:
+    #   k < j-1: skip penalty applies, use prefix-max of
+    #            dp[i-1][k] + (k+1)*SKIP_PENALTY, subtract j*SKIP_PENALTY
+    #   k = j-1: skipped=0, no penalty
+    #   k = j:   same source sentence, no penalty
     for i in range(1, n_tgt):
+        pmax_val = -np.inf  # prefix max of val[k] for k in [0, j-2]
+        pmax_k = -1
+
         for j in range(n_src):
-            sim = similarity[i][j]
-            best_prev = -np.inf
+            best_score = -np.inf
             best_k = -1
-            for k in range(j + 1):
-                score = dp[i - 1][k]
-                skipped = j - k - 1
-                if skipped > 0:
-                    score -= skipped * SKIP_PENALTY
-                if score > best_prev:
-                    best_prev = score
-                    best_k = k
-            dp[i][j] = best_prev + sim
+
+            # Case 1: k in [0, j-2] with skip penalty
+            if j >= 2 and pmax_val > -np.inf:
+                score = pmax_val - j * SKIP_PENALTY
+                if score > best_score:
+                    best_score = score
+                    best_k = pmax_k
+
+            # Case 2: k = j-1, no penalty
+            if j >= 1:
+                score = dp[i - 1][j - 1]
+                if score > best_score:
+                    best_score = score
+                    best_k = j - 1
+
+            # Case 3: k = j (many-to-one), no penalty
+            score = dp[i - 1][j]
+            if score > best_score:
+                best_score = score
+                best_k = j
+
+            dp[i][j] = best_score + similarity[i][j]
             backtrack[i][j] = best_k
+
+            # Extend prefix max to include k = j-1 for next iteration
+            if j >= 1:
+                val = dp[i - 1][j - 1] + j * SKIP_PENALTY
+                if val > pmax_val:
+                    pmax_val = val
+                    pmax_k = j - 1
 
     # Backtrack
     best_end = int(np.argmax(dp[n_tgt - 1]))
