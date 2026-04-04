@@ -10,12 +10,13 @@ Provides a simple web interface for translating book chunks:
 
 import glob
 import json
+import re
 import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify, render_template, request, send_from_directory, session
 
 # Import existing utilities
 import sys
@@ -607,10 +608,435 @@ def api_load_chunk():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# Reader Mode Routes
+# ============================================================================
+
+
+def _get_projects_dir() -> Path:
+    """Return the projects/ directory relative to project root."""
+    return _PROJECT_ROOT / "projects"
+
+
+def _safe_id(value: str) -> bool:
+    """Return False if ID contains path traversal characters."""
+    return bool(value) and ".." not in value and "/" not in value and "\\" not in value
+
+
+@app.route("/read/")
+def reader_projects():
+    """List available projects that have alignment data."""
+    projects_dir = _get_projects_dir()
+    if not projects_dir.exists():
+        return render_template("reader.html", mode="no_projects")
+
+    projects = []
+    for proj_dir in sorted(projects_dir.iterdir()):
+        if not proj_dir.is_dir():
+            continue
+        align_dir = proj_dir / "alignments"
+        if align_dir.exists():
+            alignment_files = sorted(align_dir.glob("*.json"))
+            if alignment_files:
+                projects.append({
+                    "id": proj_dir.name,
+                    "chapter_count": len(alignment_files),
+                })
+
+    return render_template("reader.html", mode="projects", projects=projects)
+
+
+@app.route("/read/<project_id>")
+def reader_chapters(project_id):
+    """List chapters with alignments for a project."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    align_dir = _get_projects_dir() / project_id / "alignments"
+    if not align_dir.exists():
+        return render_template("reader.html", mode="not_found", project_id=project_id), 404
+
+    chapters = []
+    for f in sorted(align_dir.glob("*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                data = json.load(fh)
+            chapters.append({
+                "id": f.stem,
+                "es_count": data.get("es_count", 0),
+                "high_confidence_pct": data.get("high_confidence_pct", 0),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    return render_template(
+        "reader.html", mode="chapters",
+        project_id=project_id, chapters=chapters,
+    )
+
+
+@app.route("/read/<project_id>/<chapter>")
+def reader_view(project_id, chapter):
+    """Render the reader view for a chapter."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return "Bad request", 400
+    align_path = _get_projects_dir() / project_id / "alignments" / f"{chapter}.json"
+    if not align_path.exists():
+        return render_template(
+            "reader.html", mode="not_found",
+            project_id=project_id, chapter=chapter,
+        ), 404
+
+    return render_template(
+        "reader.html", mode="read",
+        project_id=project_id, chapter=chapter,
+    )
+
+
+@app.route("/api/alignment/<project_id>/<chapter>")
+def get_alignment(project_id, chapter):
+    """Return alignment JSON for a chapter, enriched with paragraph breaks."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Invalid ID"}), 400
+    projects_dir = _get_projects_dir()
+    align_path = projects_dir / project_id / "alignments" / f"{chapter}.json"
+    if not align_path.exists():
+        return jsonify({"error": f"Alignment not found: {project_id}/{chapter}"}), 404
+
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        # Enrich with paragraph break info from combined chapter text
+        # Check chapters/ (orchestrator output) first, then translated/ (legacy)
+        chapter_text_path = projects_dir / project_id / "chapters" / f"{chapter}.txt"
+        if not chapter_text_path.exists():
+            chapter_text_path = projects_dir / project_id / "translated" / f"{chapter}.txt"
+        if chapter_text_path.exists():
+            _enrich_alignment(data, chapter_text_path, project_id)
+
+        return jsonify(data)
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": str(e)}), 500
+
+
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]")
+
+
+def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id: str):
+    """Enrich alignment records with paragraph breaks and inline images.
+
+    Parses the combined chapter text to detect paragraph boundaries and
+    [IMAGE:...] placeholders, then tags alignment records with para_start
+    and inserts image records at the correct positions.
+    """
+    text = chapter_text_path.read_text(encoding="utf-8")
+
+    # Split into paragraphs (separated by blank lines)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paragraphs) <= 1:
+        return
+
+    # Build ordered list of paragraph events: either a text paragraph
+    # (with its first-2-words key) or an image placeholder.
+    # Skip the first paragraph since it never gets a para_start marker.
+    events = []  # list of ("para", first_2_words) or ("image", src, alt)
+    for i in range(1, len(paragraphs)):
+        para = paragraphs[i]
+        img_match = _IMAGE_PLACEHOLDER_RE.fullmatch(para)
+        if img_match:
+            src = img_match.group(1)  # e.g. "images/i010.jpg"
+            alt = img_match.group(2) or ""
+            events.append(("image", src, alt))
+        else:
+            words = para.split()[:2]
+            if words:
+                events.append(("para", " ".join(words)))
+
+    # Filter out [IMAGE:...] placeholder sentences from alignment records.
+    # The aligner treats them as sentences but they're not readable text.
+    alignments = [
+        a for a in alignment_data.get("alignments", [])
+        if not _IMAGE_PLACEHOLDER_RE.fullmatch(a.get("es", "").strip())
+    ]
+    alignment_data["alignments"] = alignments
+
+    # Walk alignment records and match events in order.
+    # For "para" events, tag the matching sentence with para_start.
+    # Pending images are flushed just before the next para_start match
+    # so they render between paragraphs.
+    event_idx = 0
+    insert_queue = []  # (alignment_list_index, image_record)
+    pending_images = []  # image records waiting for next para match
+
+    for ai, a in enumerate(alignments):
+        if event_idx >= len(events):
+            break
+
+        es_text = a.get("es", "").strip()
+        if not es_text:
+            continue
+        es_words = " ".join(es_text.split()[:2])
+
+        # Drain leading image events
+        while event_idx < len(events) and events[event_idx][0] == "image":
+            _, src, alt = events[event_idx]
+            pending_images.append({
+                "type": "image",
+                "src": f"/projects/{project_id}/{src}",
+                "alt": alt,
+            })
+            event_idx += 1
+
+        # Check for paragraph match
+        if event_idx < len(events) and events[event_idx][0] == "para":
+            event_key = events[event_idx][1]
+            matched = False
+
+            if es_words == event_key:
+                # Exact 2-word match
+                matched = True
+            elif len(event_key.split()) >= 2:
+                # Try first-word fallback only when the 2-word key has no
+                # exact match anywhere ahead (avoids grabbing wrong sentence)
+                event_first = event_key.split()[0]
+                es_first = es_text.split()[0] if es_text else ""
+                if event_first and es_first == event_first:
+                    # Check if an exact 2-word match exists later
+                    has_exact_later = any(
+                        " ".join(alignments[j].get("es", "").split()[:2]) == event_key
+                        for j in range(ai + 1, len(alignments))
+                    )
+                    if not has_exact_later:
+                        matched = True
+
+            if matched:
+                # Flush pending images before this paragraph starts
+                for img in pending_images:
+                    insert_queue.append((ai, img))
+                pending_images = []
+
+                a["para_start"] = True
+                event_idx += 1
+
+    # Flush any remaining pending images at the end
+    for img in pending_images:
+        insert_queue.append((len(alignments), img))
+
+    # Drain any remaining image events
+    while event_idx < len(events):
+        if events[event_idx][0] == "image":
+            _, src, alt = events[event_idx]
+            insert_queue.append((len(alignments), {
+                "type": "image",
+                "src": f"/projects/{project_id}/{src}",
+                "alt": alt,
+            }))
+        event_idx += 1
+
+    # Insert image records (reverse order to preserve indices)
+    for insert_idx, img_record in reversed(insert_queue):
+        alignments.insert(insert_idx, img_record)
+
+
+@app.route("/projects/<project_id>/images/<path:filename>")
+def serve_project_image(project_id, filename):
+    """Serve an image file from a project's images/ directory."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    images_dir = _get_projects_dir() / project_id / "images"
+    if not images_dir.exists():
+        return jsonify({"error": "Images directory not found"}), 404
+    return send_from_directory(str(images_dir), filename)
+
+
+@app.route("/api/correction", methods=["POST"])
+def save_correction():
+    """Save a correction and patch the alignment file."""
+    try:
+        data = request.json
+        project_id = data.get("project_id")
+        chapter_id = data.get("chapter_id")
+        es_idx = data.get("es_idx")
+        original_es = data.get("original_es")
+        corrected_es = data.get("corrected_es")
+        en_reference = data.get("en_reference")
+
+        if not all([project_id, chapter_id, es_idx is not None, original_es, corrected_es]):
+            return jsonify({"error": "Missing required fields"}), 400
+        es_idx = int(es_idx)
+        if not _safe_id(project_id) or not _safe_id(chapter_id):
+            return jsonify({"error": "Invalid ID"}), 400
+
+        projects_dir = _get_projects_dir()
+        project_dir = projects_dir / project_id
+
+        if not project_dir.exists():
+            return jsonify({"error": f"Project not found: {project_id}"}), 404
+
+        # 1. Append to corrections.jsonl
+        corrections_path = project_dir / "corrections.jsonl"
+        correction_record = {
+            "project_id": project_id,
+            "chapter_id": chapter_id,
+            "es_idx": es_idx,
+            "original_es": original_es,
+            "corrected_es": corrected_es,
+            "en_reference": en_reference or "",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Read alignment to get chunk_id for this es_idx
+        align_path = project_dir / "alignments" / f"{chapter_id}.json"
+        chunk_id = None
+        if align_path.exists():
+            with open(align_path, encoding="utf-8") as f:
+                alignment = json.load(f)
+
+            # Find the alignment record and get chunk_id
+            for a in alignment.get("alignments", []):
+                if a.get("es_idx") == es_idx:
+                    chunk_id = a.get("chunk_id")
+                    break
+
+            # 2. Patch the alignment JSON in-place
+            patched = False
+            for a in alignment.get("alignments", []):
+                if a.get("es_idx") == es_idx:
+                    a["es"] = corrected_es
+                    a["corrected"] = True
+                    patched = True
+                    break
+
+            if patched:
+                with open(align_path, "w", encoding="utf-8") as f:
+                    json.dump(alignment, f, ensure_ascii=False, indent=2)
+
+        correction_record["chunk_id"] = chunk_id or ""
+
+        with open(corrections_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(correction_record, ensure_ascii=False) + "\n")
+
+        return jsonify({"saved": True, "chunk_id": chunk_id})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, dict]:
+    """Load annotations for a chapter, keyed by es_idx. Latest per es_idx wins."""
+    annotations_path = project_dir / "annotations.jsonl"
+    if not annotations_path.exists():
+        return {}
+
+    by_idx: dict[int, dict] = {}
+    for line in annotations_path.read_text(encoding="utf-8").strip().split("\n"):
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("chapter_id") != chapter_id:
+            continue
+        if record.get("removed"):
+            by_idx.pop(record.get("es_idx"), None)
+        else:
+            by_idx[record["es_idx"]] = record
+    return by_idx
+
+
+@app.route("/api/annotations/<project_id>/<chapter>")
+def get_annotations(project_id, chapter):
+    """Return annotations for a chapter."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Invalid ID"}), 400
+    projects_dir = _get_projects_dir()
+    project_dir = projects_dir / project_id
+    if not project_dir.exists():
+        return jsonify({"error": f"Project not found: {project_id}"}), 404
+
+    annotations = _load_annotations(project_dir, chapter)
+    return jsonify({"annotations": list(annotations.values())})
+
+
+@app.route("/api/annotation", methods=["POST"])
+def save_annotation():
+    """Create or update a sentence-level annotation."""
+    try:
+        data = request.json
+        project_id = data.get("project_id")
+        chapter_id = data.get("chapter_id")
+        es_idx = data.get("es_idx")
+        ann_type = data.get("type", "flag")
+        content = data.get("content", "")
+
+        if not all([project_id, chapter_id, es_idx is not None]):
+            return jsonify({"error": "Missing required fields"}), 400
+        if not _safe_id(project_id) or not _safe_id(chapter_id):
+            return jsonify({"error": "Invalid ID"}), 400
+
+        projects_dir = _get_projects_dir()
+        project_dir = projects_dir / project_id
+        if not project_dir.exists():
+            return jsonify({"error": f"Project not found: {project_id}"}), 404
+
+        record = {
+            "project_id": project_id,
+            "chapter_id": chapter_id,
+            "es_idx": es_idx,
+            "type": ann_type,
+            "content": content or "",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        annotations_path = project_dir / "annotations.jsonl"
+        with open(annotations_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        return jsonify({"saved": True})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/annotation", methods=["DELETE"])
+def remove_annotation():
+    """Remove an annotation by marking it as removed."""
+    try:
+        data = request.json
+        project_id = data.get("project_id")
+        chapter_id = data.get("chapter_id")
+        es_idx = data.get("es_idx")
+
+        if not all([project_id, chapter_id, es_idx is not None]):
+            return jsonify({"error": "Missing required fields"}), 400
+        if not _safe_id(project_id) or not _safe_id(chapter_id):
+            return jsonify({"error": "Invalid ID"}), 400
+
+        projects_dir = _get_projects_dir()
+        project_dir = projects_dir / project_id
+        if not project_dir.exists():
+            return jsonify({"error": f"Project not found: {project_id}"}), 404
+
+        record = {
+            "project_id": project_id,
+            "chapter_id": chapter_id,
+            "es_idx": es_idx,
+            "removed": True,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        annotations_path = project_dir / "annotations.jsonl"
+        with open(annotations_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        return jsonify({"removed": True})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Translation Web UI")
     print("=" * 70)
     print("\nStarting server on http://localhost:5000")
     print("Press Ctrl+C to stop\n")
-    app.run(debug=True, port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5000)

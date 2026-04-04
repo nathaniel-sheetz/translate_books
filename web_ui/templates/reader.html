@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Reader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+</head>
+<body>
+
+{% if mode == "projects" %}
+<!-- Project list -->
+<div class="nav-page">
+    <h1>Reader</h1>
+    {% if projects %}
+    <ul class="nav-list">
+        {% for p in projects %}
+        <li>
+            <a href="/read/{{ p.id }}">
+                <span class="nav-title">{{ p.id }}</span>
+                <span class="nav-meta">{{ p.chapter_count }} chapters</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty-state">No projects with alignment data found. Run the pipeline first.</p>
+    {% endif %}
+</div>
+
+{% elif mode == "chapters" %}
+<!-- Chapter list -->
+<div class="nav-page">
+    <a href="/read/" class="back-link">&larr; Projects</a>
+    <h1>{{ project_id }}</h1>
+    <ul class="nav-list">
+        {% for ch in chapters %}
+        <li>
+            <a href="/read/{{ project_id }}/{{ ch.id }}">
+                <span class="nav-title">{{ ch.id | replace('_', ' ') | title }}</span>
+                <span class="nav-meta">{{ ch.es_count }} sentences &middot; {{ ch.high_confidence_pct }}% aligned</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+
+{% elif mode == "read" %}
+<!-- Reader view -->
+<div id="reader-app"
+     data-project="{{ project_id }}"
+     data-chapter="{{ chapter }}"
+>
+    <!-- Top bar -->
+    <div class="reader-topbar">
+        <a href="/read/{{ project_id }}" class="back-link">&larr;</a>
+        <span class="reader-title">{{ chapter | replace('_', ' ') | title }}</span>
+        <span class="reader-stats" id="reader-stats"></span>
+    </div>
+
+    <!-- Main reading area -->
+    <div class="reader-content" id="reader-content">
+        <div class="loading">Loading...</div>
+    </div>
+
+    <!-- Bottom sheet for English reference + editing -->
+    <div class="bottom-sheet" id="bottom-sheet">
+        <div class="sheet-handle" id="sheet-handle"></div>
+        <div class="sheet-header">
+            <span class="sheet-label">Original</span>
+            <button class="sheet-close" id="sheet-close">&times;</button>
+        </div>
+        <div class="sheet-en" id="sheet-en"></div>
+
+        <!-- Annotation controls -->
+        <div class="sheet-annotation" id="sheet-annotation">
+            <div class="ann-type-row">
+                <button class="ann-type-btn" data-type="word_choice" title="Word choice">&#x1f4ac;</button>
+                <button class="ann-type-btn" data-type="inconsistency" title="Inconsistency">&#x26a0;</button>
+                <button class="ann-type-btn" data-type="footnote" title="Needs footnote">&#x1f4d6;</button>
+                <button class="ann-type-btn" data-type="flag" title="Flag">&#x1f6a9;</button>
+                <button class="ann-remove-btn" id="ann-remove" title="Remove annotation">&#x2715;</button>
+            </div>
+            <div class="ann-note-row" id="ann-note-row" style="display:none;">
+                <input type="text" id="ann-note" placeholder="Optional note..." maxlength="200">
+                <button class="btn-ann-save" id="btn-ann-save">Save</button>
+            </div>
+            <div class="ann-existing" id="ann-existing" style="display:none;"></div>
+        </div>
+
+        <div class="sheet-edit-area" id="sheet-edit-area">
+            <textarea id="sheet-textarea" rows="3" placeholder="Edit translation..."></textarea>
+            <div class="sheet-actions">
+                <button class="btn-save" id="btn-save">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Overlay for dismissing bottom sheet -->
+    <div class="sheet-overlay" id="sheet-overlay"></div>
+</div>
+<script src="{{ url_for('static', filename='reader.js') }}"></script>
+
+{% elif mode == "not_found" %}
+<div class="nav-page">
+    <a href="/read/" class="back-link">&larr; Projects</a>
+    <h1>Not Found</h1>
+    <p class="empty-state">
+        {% if chapter %}
+        Chapter "{{ chapter }}" not found in project "{{ project_id }}".
+        {% else %}
+        Project "{{ project_id }}" has no alignment data.
+        {% endif %}
+        Run the alignment step first.
+    </p>
+</div>
+
+{% elif mode == "no_projects" %}
+<div class="nav-page">
+    <h1>Reader</h1>
+    <p class="empty-state">No projects directory found. Create a project and run the pipeline first.</p>
+</div>
+{% endif %}
+
+</body>
+</html>

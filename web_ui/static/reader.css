@@ -1,0 +1,489 @@
+/* Reader Mode — tablet-optimized reading view */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+body {
+    font-family: Georgia, 'Times New Roman', serif;
+    background: #faf8f5;
+    color: #2c2c2c;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+/* Navigation pages (project list, chapter list) */
+
+.nav-page {
+    max-width: 600px;
+    margin: 0 auto;
+    padding: 40px 24px;
+}
+
+.nav-page h1 {
+    font-size: 28px;
+    font-weight: 400;
+    margin-bottom: 24px;
+    color: #1a1a1a;
+}
+
+.back-link {
+    display: inline-block;
+    color: #666;
+    text-decoration: none;
+    font-size: 16px;
+    margin-bottom: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.back-link:hover {
+    color: #333;
+}
+
+.nav-list {
+    list-style: none;
+}
+
+.nav-list li {
+    border-bottom: 1px solid #e8e4df;
+}
+
+.nav-list li:first-child {
+    border-top: 1px solid #e8e4df;
+}
+
+.nav-list a {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 4px;
+    text-decoration: none;
+    color: inherit;
+}
+
+.nav-list a:active {
+    background: #f0ece7;
+}
+
+.nav-title {
+    font-size: 18px;
+    color: #1a1a1a;
+}
+
+.nav-meta {
+    font-size: 14px;
+    color: #888;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.empty-state {
+    color: #888;
+    font-size: 16px;
+    font-style: italic;
+    margin-top: 40px;
+}
+
+/* Reader view */
+
+.reader-topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 48px;
+    background: #faf8f5;
+    border-bottom: 1px solid #e8e4df;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    z-index: 100;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.reader-topbar .back-link {
+    margin-bottom: 0;
+    margin-right: 12px;
+    font-size: 20px;
+}
+
+.reader-title {
+    font-size: 16px;
+    color: #555;
+    flex: 1;
+}
+
+.reader-stats {
+    font-size: 13px;
+    color: #999;
+}
+
+/* Main reading content */
+
+.reader-content {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 64px 24px 120px;
+    line-height: 1.8;
+    font-size: 20px;
+}
+
+.reader-content .loading {
+    text-align: center;
+    color: #999;
+    font-style: italic;
+    padding: 80px 0;
+}
+
+/* Individual sentences */
+
+.sentence {
+    cursor: pointer;
+    transition: background 0.15s ease;
+    border-radius: 3px;
+    padding: 1px 2px;
+    margin: 0 -2px;
+}
+
+.sentence:hover {
+    background: #f0ece7;
+}
+
+.sentence:active {
+    background: #e8e0d5;
+}
+
+.sentence.active {
+    background: #e0d8cc;
+}
+
+.sentence.corrected {
+    position: relative;
+}
+
+.sentence.corrected::after {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: #5a9e6f;
+    border-radius: 50%;
+    margin-left: 3px;
+    vertical-align: super;
+}
+
+.sentence.low-confidence {
+    border-bottom: 1px dashed #ccc;
+}
+
+/* Annotated sentences — subtle background tints */
+
+.sentence.ann-word_choice {
+    background: rgba(100, 149, 237, 0.12);
+}
+
+.sentence.ann-inconsistency {
+    background: rgba(230, 160, 50, 0.12);
+}
+
+.sentence.ann-footnote {
+    background: rgba(140, 100, 180, 0.12);
+}
+
+.sentence.ann-flag {
+    background: rgba(180, 180, 180, 0.15);
+}
+
+/* Keep hover/active visible on annotated sentences */
+.sentence[class*="ann-"]:hover {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+.sentence[class*="ann-"].active {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+/* Annotation controls in bottom sheet */
+
+.sheet-annotation {
+    padding: 10px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.ann-type-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.ann-type-btn {
+    background: #f5f3f0;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.ann-type-btn:hover {
+    background: #ece8e3;
+}
+
+.ann-type-btn.selected {
+    border-color: #5a9e6f;
+    background: #eef6f0;
+}
+
+.ann-remove-btn {
+    background: none;
+    border: none;
+    font-size: 16px;
+    color: #ccc;
+    cursor: pointer;
+    margin-left: auto;
+    padding: 6px 10px;
+    display: none;
+}
+
+.ann-remove-btn.has-annotation {
+    display: block;
+    color: #c66;
+}
+
+.ann-remove-btn:hover {
+    color: #a33;
+}
+
+.ann-note-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    align-items: center;
+}
+
+.ann-note-row input {
+    flex: 1;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #faf8f5;
+    color: #2c2c2c;
+}
+
+.ann-note-row input:focus {
+    outline: none;
+    border-color: #5a9e6f;
+}
+
+.btn-ann-save {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    padding: 8px 16px;
+    background: #5a9e6f;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.btn-ann-save:active {
+    background: #4a8e5f;
+}
+
+.ann-existing {
+    margin-top: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: #777;
+    font-style: italic;
+}
+
+/* Inline images */
+
+.reader-image {
+    text-align: center;
+    margin: 1.5em 0;
+}
+
+.reader-image img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+}
+
+/* Paragraph breaks between sentence groups */
+
+.para-break {
+    display: block;
+    height: 1.2em;
+}
+
+/* Bottom sheet */
+
+.sheet-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.2);
+    z-index: 200;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+
+.sheet-overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.bottom-sheet {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1);
+    z-index: 300;
+    transform: translateY(100%);
+    transition: transform 0.25s ease;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: 0 20px 24px;
+}
+
+.bottom-sheet.visible {
+    transform: translateY(0);
+}
+
+.bottom-sheet.expanded {
+    max-height: 85vh;
+}
+
+.sheet-handle {
+    width: 36px;
+    height: 4px;
+    background: #ddd;
+    border-radius: 2px;
+    margin: 10px auto 12px;
+    cursor: grab;
+}
+
+.sheet-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.sheet-label {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #999;
+}
+
+.sheet-close {
+    background: none;
+    border: none;
+    font-size: 24px;
+    color: #999;
+    cursor: pointer;
+    padding: 4px 8px;
+}
+
+.sheet-en {
+    font-size: 17px;
+    line-height: 1.6;
+    color: #555;
+    padding: 12px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+/* Edit area — hidden by default, shown when sheet expanded */
+
+.sheet-edit-area {
+    display: none;
+    padding-top: 16px;
+}
+
+.bottom-sheet.expanded .sheet-edit-area {
+    display: block;
+}
+
+#sheet-textarea {
+    width: 100%;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 17px;
+    line-height: 1.6;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 12px;
+    resize: vertical;
+    color: #2c2c2c;
+    background: #faf8f5;
+}
+
+#sheet-textarea:focus {
+    outline: none;
+    border-color: #5a9e6f;
+}
+
+.sheet-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12px;
+}
+
+.btn-save {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 15px;
+    padding: 10px 28px;
+    background: #5a9e6f;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.btn-save:active {
+    background: #4a8e5f;
+}
+
+.btn-save:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+/* Tablet responsiveness */
+
+@media (min-width: 768px) {
+    .reader-content {
+        font-size: 22px;
+        padding: 72px 40px 140px;
+    }
+
+    .bottom-sheet {
+        max-width: 680px;
+        left: 50%;
+        transform: translateX(-50%) translateY(100%);
+    }
+
+    .bottom-sheet.visible {
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+@media (max-width: 480px) {
+    .reader-content {
+        font-size: 18px;
+        padding: 56px 16px 100px;
+    }
+}
