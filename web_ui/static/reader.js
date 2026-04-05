@@ -15,6 +15,42 @@
     // i18n strings injected by the template
     const i = window.__i18n || {};
 
+    // --- Offline retry queue ---
+    const QUEUE_KEY = 'reader_save_queue';
+
+    function getQueue() {
+        try { return JSON.parse(localStorage.getItem(QUEUE_KEY)) || []; }
+        catch { return []; }
+    }
+
+    function enqueue(url, method, payload) {
+        const q = getQueue();
+        q.push({ url, method, payload, ts: Date.now() });
+        localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
+    }
+
+    function flushQueue() {
+        const q = getQueue();
+        if (!q.length) return;
+        localStorage.removeItem(QUEUE_KEY);
+        let remaining = [];
+        q.forEach(item => {
+            fetch(item.url, {
+                method: item.method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(item.payload),
+            }).catch(() => { remaining.push(item); })
+              .finally(() => {
+                  if (remaining.length) {
+                      const prev = getQueue();
+                      localStorage.setItem(QUEUE_KEY, JSON.stringify(prev.concat(remaining)));
+                  }
+              });
+        });
+    }
+
+    flushQueue();
+
     const content = document.getElementById('reader-content');
     const bottomSheet = document.getElementById('bottom-sheet');
     const sheetOverlay = document.getElementById('sheet-overlay');
@@ -258,23 +294,28 @@
             .then(r => r.json())
             .then(result => {
                 if (result.saved) {
-                    // Update local state
                     annotationsMap[activeIdx] = payload;
-
-                    // Update sentence highlight
                     const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
                     if (el) {
-                        // Remove any existing annotation class
                         el.className = el.className.replace(/\bann-\w+/g, '');
                         el.classList.add('ann-' + selectedAnnType);
                     }
-
-                    // Update stats
                     updateStats();
                     closeSheet();
                 }
             })
-            .catch(err => alert((i.error_prefix || 'Error: ') + err.message))
+            .catch(() => {
+                enqueue('/api/annotation', 'POST', payload);
+                // Still update UI optimistically
+                annotationsMap[activeIdx] = payload;
+                const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
+                if (el) {
+                    el.className = el.className.replace(/\bann-\w+/g, '');
+                    el.classList.add('ann-' + selectedAnnType);
+                }
+                updateStats();
+                closeSheet();
+            })
             .finally(() => {
                 btnAnnSave.disabled = false;
                 btnAnnSave.textContent = i.save || 'Save';
@@ -293,30 +334,32 @@
     annRemoveBtn.addEventListener('click', () => {
         if (activeIdx === null) return;
 
+        const deletePayload = {
+            project_id: projectId,
+            chapter_id: chapter,
+            es_idx: activeIdx,
+        };
+        const idxToRemove = activeIdx;
+
+        function applyRemoveUI() {
+            delete annotationsMap[idxToRemove];
+            const el = content.querySelector(`[data-es-idx="${idxToRemove}"]`);
+            if (el) el.className = el.className.replace(/\bann-\w+/g, '');
+            updateStats();
+            closeSheet();
+        }
+
         fetch('/api/annotation', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                project_id: projectId,
-                chapter_id: chapter,
-                es_idx: activeIdx,
-            }),
+            body: JSON.stringify(deletePayload),
         })
             .then(r => r.json())
-            .then(result => {
-                if (result.removed) {
-                    delete annotationsMap[activeIdx];
-
-                    const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
-                    if (el) {
-                        el.className = el.className.replace(/\bann-\w+/g, '');
-                    }
-
-                    updateStats();
-                    closeSheet();
-                }
-            })
-            .catch(err => alert((i.error_prefix || 'Error: ') + err.message));
+            .then(result => { if (result.removed) applyRemoveUI(); })
+            .catch(() => {
+                enqueue('/api/annotation', 'DELETE', deletePayload);
+                applyRemoveUI();
+            });
     });
 
     const STICKY_NOTE_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M2 2h12v8l-4 4H2z"/><path d="M10 10v4"/></svg>';
@@ -399,8 +442,17 @@
                     alert((i.error_saving || 'Error saving: ') + (result.error || 'Unknown error'));
                 }
             })
-            .catch(err => {
-                alert((i.network_error || 'Network error: ') + err.message);
+            .catch(() => {
+                enqueue('/api/correction', 'POST', payload);
+                // Optimistic UI update
+                alignment.es = correctedEs;
+                alignment.corrected = true;
+                const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
+                if (el) {
+                    el.textContent = correctedEs + ' ';
+                    el.classList.add('corrected');
+                }
+                closeSheet();
             })
             .finally(() => {
                 btnSave.disabled = false;
