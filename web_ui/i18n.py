@@ -17,6 +17,11 @@ STRINGS = {
 
         # Chapter list
         "pending_corrections": "Pending corrections not yet applied",
+        "apply_corrections": "Apply",
+        "applying": "Applying...",
+        "apply_first_time": "First run may take ~1 min to load the alignment model.",
+        "apply_done": "corrections applied to",
+        "apply_chapters": "chapters",
         "badge_review": "to review",
         "badge_fn": "fn",
         "badge_flag": "flag",
@@ -65,6 +70,11 @@ STRINGS = {
 
         # Chapter list
         "pending_corrections": "Correcciones pendientes sin aplicar",
+        "apply_corrections": "Aplicar",
+        "applying": "Aplicando...",
+        "apply_first_time": "La primera vez puede tardar ~1 min en cargar el modelo de alineaci\u00f3n.",
+        "apply_done": "correcciones aplicadas a",
+        "apply_chapters": "cap\u00edtulos",
         "badge_review": "por revisar",
         "badge_fn": "nota",
         "badge_flag": "marca",

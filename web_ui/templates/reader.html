@@ -51,7 +51,39 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
     <a href="/read/" class="back-link">&larr; {{ t.projects_back }}</a>
     <h1>{{ project_id }}</h1>
     {% if has_corrections %}
-    <div class="chapter-banner banner-warn">{{ t.pending_corrections }}</div>
+    <div class="chapter-banner banner-warn" id="corrections-banner">
+        <span>{{ t.pending_corrections }}</span>
+        <button class="btn-apply" id="btn-apply">{{ t.apply_corrections }}</button>
+    </div>
+    <script>
+    document.getElementById('btn-apply').addEventListener('click', function() {
+        var btn = this;
+        var banner = document.getElementById('corrections-banner');
+        btn.disabled = true;
+        btn.textContent = '{{ t.applying }}';
+        banner.insertAdjacentHTML('beforeend',
+            '<div style="font-size:12px;margin-top:4px;opacity:0.7">{{ t.apply_first_time }}</div>');
+        fetch('/api/apply-corrections/{{ project_id }}', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    alert(data.error);
+                    btn.disabled = false;
+                    btn.textContent = '{{ t.apply_corrections }}';
+                } else {
+                    banner.className = 'chapter-banner banner-success';
+                    banner.innerHTML = data.applied + ' {{ t.apply_done }} ' +
+                        data.chapters.length + ' {{ t.apply_chapters }}';
+                    setTimeout(function() { location.reload(); }, 1500);
+                }
+            })
+            .catch(function(err) {
+                alert(err.message);
+                btn.disabled = false;
+                btn.textContent = '{{ t.apply_corrections }}';
+            });
+    });
+    </script>
     {% endif %}
     <ul class="nav-list">
         {% for ch in chapters %}

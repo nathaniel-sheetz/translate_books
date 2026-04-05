@@ -1153,6 +1153,92 @@ def unmark_reviewed(project_id, chapter):
     return jsonify({"unmarked": True})
 
 
+@app.route("/api/apply-corrections/<project_id>", methods=["POST"])
+def apply_corrections(project_id):
+    """Apply pending corrections: patch chunks, recombine, realign."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Invalid ID"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    corrections_path = project_dir / "corrections.jsonl"
+    if not corrections_path.exists():
+        return jsonify({"error": "No corrections to apply"}), 404
+
+    try:
+        import time
+        from collections import defaultdict
+
+        from scripts.apply_corrections import (
+            apply_to_chunk,
+            load_corrections,
+            realign_chapter,
+            recombine_chapter,
+        )
+        from src.utils.file_io import load_chunk, save_chunk
+
+        corrections = load_corrections(project_dir)
+        if not corrections:
+            return jsonify({"error": "No corrections found"}), 404
+
+        # Group by chunk
+        by_chunk = defaultdict(list)
+        for c in corrections:
+            chunk_id = c.get("chunk_id", "")
+            if chunk_id:
+                by_chunk[chunk_id].append(c)
+
+        affected_chapters = set()
+        total_applied = 0
+        log = []
+
+        # 1. Patch chunks
+        for chunk_id, chunk_corrections in sorted(by_chunk.items()):
+            chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+            if not chunk_path.exists():
+                log.append(f"{chunk_id}: skipped (not found)")
+                continue
+
+            chunk = load_chunk(chunk_path)
+            updated_chunk, applied = apply_to_chunk(chunk, chunk_corrections)
+
+            chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
+            affected_chapters.add(chapter_id)
+
+            if applied > 0:
+                save_chunk(updated_chunk, chunk_path)
+
+            total_applied += applied
+            log.append(f"{chunk_id}: {applied}/{len(chunk_corrections)}")
+
+        # 2. Recombine affected chapters
+        for chapter_id in sorted(affected_chapters):
+            recombine_chapter(project_dir, chapter_id)
+
+        # 3. Realign affected chapters
+        for chapter_id in sorted(affected_chapters):
+            realign_chapter(project_dir, chapter_id)
+
+        # 4. Archive corrections
+        archive_path = project_dir / "corrections_applied.jsonl"
+        with open(archive_path, "a", encoding="utf-8") as f:
+            for corr in corrections:
+                corr["applied_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                f.write(json.dumps(corr, ensure_ascii=False) + "\n")
+
+        if total_applied == len(corrections):
+            corrections_path.unlink()
+
+        return jsonify({
+            "applied": total_applied,
+            "total": len(corrections),
+            "chapters": sorted(affected_chapters),
+            "log": log,
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Translation Web UI")

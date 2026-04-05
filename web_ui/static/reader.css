@@ -183,11 +183,38 @@ body {
     padding: 8px 12px;
     border-radius: 6px;
     margin-bottom: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
 }
 
 .banner-warn {
     background: rgba(220, 140, 40, 0.1);
     color: #b07020;
+}
+
+.banner-success {
+    background: rgba(90, 158, 111, 0.1);
+    color: #5a9e6f;
+}
+
+.btn-apply {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    padding: 5px 16px;
+    background: #b07020;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.btn-apply:disabled {
+    opacity: 0.6;
+    cursor: wait;
 }
 
 /* Reader view */
