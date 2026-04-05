@@ -747,16 +747,24 @@ def reader_view(project_id, chapter):
     t = _reader_strings()
     if not _safe_id(project_id) or not _safe_id(chapter):
         return "Bad request", 400
-    align_path = _get_projects_dir() / project_id / "alignments" / f"{chapter}.json"
+    align_dir = _get_projects_dir() / project_id / "alignments"
+    align_path = align_dir / f"{chapter}.json"
     if not align_path.exists():
         return render_template(
             "reader.html", mode="not_found",
             project_id=project_id, chapter=chapter, t=t, lang=_get_ui_lang(),
         ), 404
 
+    # Build prev/next chapter links
+    all_chapters = sorted(f.stem for f in align_dir.glob("*.json"))
+    idx = all_chapters.index(chapter) if chapter in all_chapters else -1
+    prev_chapter = all_chapters[idx - 1] if idx > 0 else None
+    next_chapter = all_chapters[idx + 1] if idx < len(all_chapters) - 1 else None
+
     return render_template(
         "reader.html", mode="read",
         project_id=project_id, chapter=chapter, t=t, lang=_get_ui_lang(),
+        prev_chapter=prev_chapter, next_chapter=next_chapter,
     )
 
 

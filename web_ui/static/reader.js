@@ -305,11 +305,9 @@
     });
 
     function updateStats() {
-        if (!readerStats || !alignmentData) return;
+        if (!readerStats) return;
         const annCount = Object.keys(annotationsMap).length;
-        let stats = `${alignmentData.es_count} ${i.sentences || 'sentences'}`;
-        if (annCount > 0) stats += ` \u00b7 ${annCount} ${i.annotated || 'annotated'}`;
-        readerStats.textContent = stats;
+        readerStats.textContent = annCount > 0 ? `\u{1f4cc} ${annCount}` : '';
     }
 
     // Tap overlay to close

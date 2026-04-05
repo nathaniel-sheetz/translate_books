@@ -236,19 +236,42 @@ body {
 
 .reader-topbar .back-link {
     margin-bottom: 0;
-    margin-right: 12px;
     font-size: 20px;
+}
+
+.reader-nav {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+}
+
+.nav-chevron {
+    font-size: 22px;
+    color: #555;
+    text-decoration: none;
+    padding: 4px 8px;
+    line-height: 1;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.nav-chevron.disabled {
+    color: #ddd;
+    pointer-events: none;
 }
 
 .reader-title {
     font-size: 16px;
     color: #555;
-    flex: 1;
+    white-space: nowrap;
 }
 
 .reader-stats {
-    font-size: 13px;
+    font-size: 14px;
     color: #999;
+    white-space: nowrap;
+    margin-left: 8px;
 }
 
 /* Main reading content */

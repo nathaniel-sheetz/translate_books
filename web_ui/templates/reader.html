@@ -124,7 +124,19 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
     <!-- Top bar -->
     <div class="reader-topbar">
         <a href="/read/{{ project_id }}" class="back-link">&larr;</a>
-        <span class="reader-title">{{ chapter | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+        <div class="reader-nav">
+            {% if prev_chapter %}
+            <a href="/read/{{ project_id }}/{{ prev_chapter }}" class="nav-chevron">&lsaquo;</a>
+            {% else %}
+            <span class="nav-chevron disabled">&lsaquo;</span>
+            {% endif %}
+            <span class="reader-title">{{ chapter | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+            {% if next_chapter %}
+            <a href="/read/{{ project_id }}/{{ next_chapter }}" class="nav-chevron">&rsaquo;</a>
+            {% else %}
+            <span class="nav-chevron disabled">&rsaquo;</span>
+            {% endif %}
+        </div>
         <span class="reader-stats" id="reader-stats"></span>
     </div>
 
