@@ -377,19 +377,25 @@ body {
     background: #f5f3f0;
     border: 2px solid transparent;
     border-radius: 8px;
-    padding: 6px 12px;
+    padding: 8px 12px;
     font-size: 16px;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
+    color: #999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .ann-type-btn:hover {
     background: #ece8e3;
+    color: #666;
 }
 
 .ann-type-btn.selected {
     border-color: #5a9e6f;
     background: #eef6f0;
+    color: #5a9e6f;
 }
 
 .ann-remove-btn {
@@ -410,6 +416,15 @@ body {
 
 .ann-remove-btn:hover {
     color: #a33;
+}
+
+.ann-type-label {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 8px;
 }
 
 .ann-note-row {

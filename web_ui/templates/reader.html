@@ -157,12 +157,34 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
         <!-- Annotation controls -->
         <div class="sheet-annotation" id="sheet-annotation">
             <div class="ann-type-row">
-                <button class="ann-type-btn" data-type="word_choice" title="Word choice">&#x1f4ac;</button>
-                <button class="ann-type-btn" data-type="inconsistency" title="Inconsistency">&#x26a0;</button>
-                <button class="ann-type-btn" data-type="footnote" title="Needs footnote">&#x1f4d6;</button>
-                <button class="ann-type-btn" data-type="flag" title="Flag">&#x1f6a9;</button>
+                <button class="ann-type-btn" data-type="word_choice" title="Word choice">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="10" cy="10" r="8.5"/>
+                        <path d="M7.5 7.5a2.5 2.5 0 0 1 4.5 1.5c0 1.5-2 2-2 3.5"/>
+                        <circle cx="10" cy="15" r="0.5" fill="currentColor" stroke="none"/>
+                    </svg>
+                </button>
+                <button class="ann-type-btn" data-type="inconsistency" title="Inconsistency">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="2,14 5,6 8,14 11,6 14,14 17,6"/>
+                    </svg>
+                </button>
+                <button class="ann-type-btn" data-type="footnote" title="Footnote">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <text x="3" y="16" font-size="14" font-family="Georgia, serif" fill="currentColor" stroke="none">a</text>
+                        <text x="12" y="10" font-size="9" font-family="-apple-system, sans-serif" fill="currentColor" stroke="none">1</text>
+                    </svg>
+                </button>
+                <button class="ann-type-btn" data-type="flag" title="Other">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" stroke="none">
+                        <circle cx="5" cy="10" r="1.5"/>
+                        <circle cx="10" cy="10" r="1.5"/>
+                        <circle cx="15" cy="10" r="1.5"/>
+                    </svg>
+                </button>
                 <button class="ann-remove-btn" id="ann-remove" title="Remove annotation">&#x2715;</button>
             </div>
+            <div class="ann-type-label" id="ann-type-label" style="display:none;"></div>
             <div class="ann-note-row" id="ann-note-row" style="display:none;">
                 <input type="text" id="ann-note" placeholder="{{ t.note_placeholder }}" maxlength="200">
                 <button class="btn-ann-save" id="btn-ann-save">{{ t.btn_save }}</button>
@@ -182,7 +204,7 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
     <div class="sheet-overlay" id="sheet-overlay"></div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=7"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

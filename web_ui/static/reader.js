@@ -31,6 +31,7 @@
     const annNoteRow = document.getElementById('ann-note-row');
     const annNoteInput = document.getElementById('ann-note');
     const btnAnnSave = document.getElementById('btn-ann-save');
+    const annTypeLabel = document.getElementById('ann-type-label');
     const annExisting = document.getElementById('ann-existing');
 
     let alignmentData = null;
@@ -136,6 +137,8 @@
             const matchBtn = document.querySelector(`.ann-type-btn[data-type="${ann.type}"]`);
             if (matchBtn) matchBtn.classList.add('selected');
             selectedAnnType = ann.type;
+            annTypeLabel.textContent = ANN_TYPE_NAMES[ann.type] || ann.type;
+            annTypeLabel.style.display = 'block';
 
             // Show existing note
             if (ann.content) {
@@ -159,6 +162,8 @@
     function resetAnnotationUI() {
         selectedAnnType = null;
         annTypeButtons.forEach(btn => btn.classList.remove('selected'));
+        annTypeLabel.style.display = 'none';
+        annTypeLabel.textContent = '';
         annNoteRow.style.display = 'none';
         annNoteInput.value = '';
         annExisting.style.display = 'none';
@@ -200,6 +205,13 @@
 
     // --- Annotation type button handling ---
 
+    const ANN_TYPE_NAMES = {
+        word_choice: i.ann_word_choice || 'Word choice',
+        inconsistency: i.ann_inconsistency || 'Inconsistency',
+        footnote: i.ann_footnote || 'Footnote',
+        flag: i.ann_flag || 'Other',
+    };
+
     annTypeButtons.forEach(btn => {
         btn.addEventListener('click', () => {
             const type = btn.dataset.type;
@@ -208,12 +220,15 @@
                 // Deselect
                 btn.classList.remove('selected');
                 selectedAnnType = null;
+                annTypeLabel.style.display = 'none';
                 annNoteRow.style.display = 'none';
             } else {
                 // Select this type
                 annTypeButtons.forEach(b => b.classList.remove('selected'));
                 btn.classList.add('selected');
                 selectedAnnType = type;
+                annTypeLabel.textContent = ANN_TYPE_NAMES[type] || type;
+                annTypeLabel.style.display = 'block';
                 annNoteRow.style.display = 'flex';
                 annNoteInput.focus();
             }
@@ -304,10 +319,12 @@
             .catch(err => alert((i.error_prefix || 'Error: ') + err.message));
     });
 
+    const STICKY_NOTE_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M2 2h12v8l-4 4H2z"/><path d="M10 10v4"/></svg>';
+
     function updateStats() {
         if (!readerStats) return;
         const annCount = Object.keys(annotationsMap).length;
-        readerStats.textContent = annCount > 0 ? `\u{1f4cc} ${annCount}` : '';
+        readerStats.innerHTML = annCount > 0 ? STICKY_NOTE_SVG + annCount : '';
     }
 
     // Tap overlay to close
