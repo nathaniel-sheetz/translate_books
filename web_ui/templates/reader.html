@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>{{ t.reader_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+</head>
+<body>
+
+{% if mode == "projects" %}
+<!-- Project list -->
+<div class="nav-page">
+    <div class="nav-header">
+        <h1>{{ t.reader_title }}</h1>
+        <div class="lang-toggle">
+            <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
+            <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
+        </div>
+    </div>
+    {% if projects %}
+    <ul class="nav-list">
+        {% for p in projects %}
+        <li>
+            <a href="/read/{{ p.id }}">
+                <span class="nav-title">{{ p.id }}</span>
+                <span class="nav-meta">{{ p.chapter_count }} {{ t.chapters_count }}</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty-state">{{ t.no_projects }}</p>
+    {% endif %}
+</div>
+<script>
+document.querySelectorAll('.lang-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+        fetch('/api/set-lang', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lang: btn.dataset.lang }),
+        }).then(function() { location.reload(); });
+    });
+});
+</script>
+
+{% elif mode == "chapters" %}
+<!-- Chapter list -->
+<div class="nav-page">
+    <a href="/read/" class="back-link">&larr; {{ t.projects_back }}</a>
+    <h1>{{ project_id }}</h1>
+    {% if has_corrections %}
+    <div class="chapter-banner banner-warn" id="corrections-banner">
+        <span>{{ t.pending_corrections }}</span>
+        <button class="btn-apply" id="btn-apply">{{ t.apply_corrections }}</button>
+    </div>
+    <script>
+    document.getElementById('btn-apply').addEventListener('click', function() {
+        var btn = this;
+        var banner = document.getElementById('corrections-banner');
+        btn.disabled = true;
+        btn.textContent = '{{ t.applying }}';
+        banner.insertAdjacentHTML('beforeend',
+            '<div style="font-size:12px;margin-top:4px;opacity:0.7">{{ t.apply_first_time }}</div>');
+        fetch('/api/apply-corrections/{{ project_id }}', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    alert(data.error);
+                    btn.disabled = false;
+                    btn.textContent = '{{ t.apply_corrections }}';
+                } else {
+                    banner.className = 'chapter-banner banner-success';
+                    banner.innerHTML = data.applied + ' {{ t.apply_done }} ' +
+                        data.chapters.length + ' {{ t.apply_chapters }}';
+                    setTimeout(function() { location.reload(); }, 1500);
+                }
+            })
+            .catch(function(err) {
+                alert(err.message);
+                btn.disabled = false;
+                btn.textContent = '{{ t.apply_corrections }}';
+            });
+    });
+    </script>
+    {% endif %}
+    <ul class="nav-list">
+        {% for ch in chapters %}
+        <li>
+            <a href="/read/{{ project_id }}/{{ ch.id }}">
+                <span class="nav-title">{{ ch.id | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+                <span class="nav-meta">
+                    {%- if ch.review_count > 0 -%}
+                        <span class="badge badge-review">{{ ch.review_count }} {{ t.badge_review }}</span>
+                    {%- endif -%}
+                    {%- if ch.footnote_count > 0 -%}
+                        <span class="badge badge-footnote">{{ ch.footnote_count }} {{ t.badge_fn }}</span>
+                    {%- endif -%}
+                    {%- if ch.flag_count > 0 -%}
+                        <span class="badge badge-flag">{{ ch.flag_count }} {{ t.badge_flag }}</span>
+                    {%- endif -%}
+                    {%- if ch.low_confidence -%}
+                        <span class="badge badge-warn">{{ ch.confidence }}% {{ t.badge_aligned }}</span>
+                    {%- endif -%}
+                    {%- if ch.reviewed and ch.total_ann == 0 and not ch.low_confidence -%}
+                        <span class="badge badge-clean">{{ t.badge_reviewed }}</span>
+                    {%- elif not ch.reviewed and ch.total_ann == 0 and not ch.low_confidence -%}
+                        <span class="badge badge-unread">{{ t.badge_unread }}</span>
+                    {%- endif -%}
+                </span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+
+{% elif mode == "read" %}
+<!-- Reader view -->
+<div id="reader-app"
+     data-project="{{ project_id }}"
+     data-chapter="{{ chapter }}"
+>
+    <!-- Top bar -->
+    <div class="reader-topbar">
+        <a href="/read/{{ project_id }}" class="back-link">&larr;</a>
+        <div class="reader-nav">
+            {% if prev_chapter %}
+            <a href="/read/{{ project_id }}/{{ prev_chapter }}" class="nav-chevron">&lsaquo;</a>
+            {% else %}
+            <span class="nav-chevron disabled">&lsaquo;</span>
+            {% endif %}
+            <span class="reader-title">{{ chapter | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+            {% if next_chapter %}
+            <a href="/read/{{ project_id }}/{{ next_chapter }}" class="nav-chevron">&rsaquo;</a>
+            {% else %}
+            <span class="nav-chevron disabled">&rsaquo;</span>
+            {% endif %}
+        </div>
+        <span class="reader-stats" id="reader-stats"></span>
+    </div>
+
+    <!-- Main reading area -->
+    <div class="reader-content" id="reader-content">
+        <div class="loading">{{ t.loading }}</div>
+    </div>
+
+    <!-- Bottom sheet for English reference + editing -->
+    <div class="bottom-sheet" id="bottom-sheet">
+        <div class="sheet-handle" id="sheet-handle"></div>
+        <div class="sheet-header">
+            <span class="sheet-label">{{ t.sheet_label }}</span>
+            <button class="sheet-close" id="sheet-close">&times;</button>
+        </div>
+        <div class="sheet-en" id="sheet-en"></div>
+
+        <!-- Annotation controls -->
+        <div class="sheet-annotation" id="sheet-annotation">
+            <div class="ann-type-row">
+                <button class="ann-type-btn" data-type="word_choice" title="Word choice">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="10" cy="10" r="8.5"/>
+                        <path d="M7.5 7.5a2.5 2.5 0 0 1 4.5 1.5c0 1.5-2 2-2 3.5"/>
+                        <circle cx="10" cy="15" r="0.5" fill="currentColor" stroke="none"/>
+                    </svg>
+                </button>
+                <button class="ann-type-btn" data-type="inconsistency" title="Inconsistency">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="2,14 5,6 8,14 11,6 14,14 17,6"/>
+                    </svg>
+                </button>
+                <button class="ann-type-btn" data-type="footnote" title="Footnote">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <text x="3" y="16" font-size="14" font-family="Georgia, serif" fill="currentColor" stroke="none">a</text>
+                        <text x="12" y="10" font-size="9" font-family="-apple-system, sans-serif" fill="currentColor" stroke="none">1</text>
+                    </svg>
+                </button>
+                <button class="ann-type-btn" data-type="flag" title="Other">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" stroke="none">
+                        <circle cx="5" cy="10" r="1.5"/>
+                        <circle cx="10" cy="10" r="1.5"/>
+                        <circle cx="15" cy="10" r="1.5"/>
+                    </svg>
+                </button>
+                <button class="ann-remove-btn" id="ann-remove" title="Remove annotation">&#x2715;</button>
+            </div>
+            <div class="ann-type-label" id="ann-type-label" style="display:none;"></div>
+            <div class="ann-note-row" id="ann-note-row" style="display:none;">
+                <input type="text" id="ann-note" placeholder="{{ t.note_placeholder }}" maxlength="200">
+                <button class="btn-ann-save" id="btn-ann-save">{{ t.btn_save }}</button>
+            </div>
+            <div class="ann-existing" id="ann-existing" style="display:none;"></div>
+        </div>
+
+        <div class="sheet-edit-area" id="sheet-edit-area">
+            <textarea id="sheet-textarea" rows="3" placeholder="{{ t.edit_placeholder }}"></textarea>
+            <div class="sheet-actions">
+                <button class="btn-save" id="btn-save">{{ t.btn_save }}</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Overlay for dismissing bottom sheet -->
+    <div class="sheet-overlay" id="sheet-overlay"></div>
+</div>
+<script>window.__i18n = {{ t.js | tojson }};</script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=8"></script>
+
+{% elif mode == "not_found" %}
+<div class="nav-page">
+    <a href="/read/" class="back-link">&larr; {{ t.projects_back }}</a>
+    <h1>{{ t.not_found }}</h1>
+    <p class="empty-state">
+        {% if chapter %}
+        {{ t.chapter_not_found.format(chapter=chapter, project=project_id) }}
+        {% else %}
+        {{ t.project_not_found.format(project=project_id) }}
+        {% endif %}
+        {{ t.run_alignment }}
+    </p>
+</div>
+
+{% elif mode == "no_projects" %}
+<div class="nav-page">
+    <h1>{{ t.reader_title }}</h1>
+    <p class="empty-state">{{ t.no_projects_dir }}</p>
+</div>
+{% endif %}
+
+</body>
+</html>

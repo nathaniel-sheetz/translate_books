@@ -28,6 +28,10 @@ python-dotenv>=1.0.0  # Environment variable management
 # EPUB generation
 ebooklib>=0.18
 
+# Sentence alignment (for reader mode)
+pysbd>=0.3.4                   # Sentence boundary detection
+sentence-transformers>=5.0.0   # Multilingual sentence embeddings
+
 # Future dependencies (commented out for now)
 # click>=8.0.0          # CLI framework
 # spacy>=3.7.0          # NLP for Spanish
