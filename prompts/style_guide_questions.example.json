@@ -61,8 +61,8 @@
         "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using standard Spanish raya conventions (—). Break character speech into a new paragraph when it follows narrative. Use guillemets (« ») for nested speech (dialogue within dialogue)."
       },
       {
-        "label": "Quotation marks ("...")",
-        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using quotation marks ("..."). Use single quotes ('...') for nested speech."
+        "label": "Quotation marks (\"...\")",
+        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using quotation marks (\"...\"). Use single quotes ('...') for nested speech."
       },
       {
         "label": "Guillemets («...»)",
