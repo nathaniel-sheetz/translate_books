@@ -646,9 +646,229 @@ def set_language():
     return resp
 
 
+# ============================================================================
+# Setup routes — style guide wizard + glossary bootstrap
+# ============================================================================
+
+
+@app.route("/setup/<project_id>")
+def setup_page(project_id):
+    """Render the setup page for a project."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return "Project not found", 404
+
+    # Load fixed questions
+    from src.style_guide_wizard import load_fixed_questions
+    fixed_questions = load_fixed_questions()
+
+    # Check existing style guide
+    style_path = project_dir / "style.json"
+    existing_style = None
+    if style_path.exists():
+        try:
+            sg = load_style_guide(style_path)
+            existing_style = sg.content
+        except Exception:
+            pass
+
+    # Check existing glossary
+    glossary_path = project_dir / "glossary.json"
+    existing_glossary_count = 0
+    if glossary_path.exists():
+        try:
+            g = load_glossary(glossary_path)
+            existing_glossary_count = len(g.terms)
+        except Exception:
+            pass
+
+    t = _reader_strings()
+    return render_template(
+        "setup.html",
+        project_id=project_id,
+        fixed_questions=fixed_questions,
+        existing_style=existing_style,
+        existing_glossary_count=existing_glossary_count,
+        t=t,
+        lang=_get_ui_lang(),
+    )
+
+
+@app.route("/api/setup/<project_id>/prompts/questions", methods=["POST"])
+def setup_questions_prompt(project_id):
+    """Return the full prompt for LLM question generation (for copy/paste)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.style_guide_wizard import load_fixed_questions, build_question_prompt, load_source_sample
+    data = request.get_json()
+    answers = data.get("answers", {})
+    # Convert string indices back to int
+    answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
+
+    fixed_questions = load_fixed_questions()
+    source_text = load_source_sample(project_dir)
+    target_lang = data.get("target_lang", "Spanish")
+    locale = data.get("locale", "mx")
+
+    prompt = build_question_prompt(source_text, target_lang, locale, fixed_questions, answers)
+    return jsonify({"prompt": prompt})
+
+
+@app.route("/api/setup/<project_id>/prompts/style-guide", methods=["POST"])
+def setup_style_guide_prompt(project_id):
+    """Return the full prompt for style guide generation (for copy/paste)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.style_guide_wizard import (
+        load_fixed_questions, build_style_guide_prompt, load_source_sample,
+    )
+    data = request.get_json()
+    answers = data.get("answers", {})
+    answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
+    extra_questions = data.get("extra_questions", [])
+
+    fixed_questions = load_fixed_questions()
+    all_questions = fixed_questions + extra_questions
+    source_text = load_source_sample(project_dir)
+    target_lang = data.get("target_lang", "Spanish")
+    locale = data.get("locale", "mx")
+
+    prompt = build_style_guide_prompt(all_questions, answers, source_text, target_lang, locale)
+    return jsonify({"prompt": prompt})
+
+
+@app.route("/api/setup/<project_id>/style-guide", methods=["POST"])
+def setup_save_style_guide(project_id):
+    """Save style guide content to style.json."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.style_guide_wizard import save_style_guide_json
+    data = request.get_json()
+    content = data.get("content", "")
+    if not content.strip():
+        return jsonify({"error": "Empty style guide"}), 400
+
+    output_path = project_dir / "style.json"
+    save_style_guide_json(content, output_path)
+    return jsonify({"ok": True, "path": str(output_path)})
+
+
+@app.route("/api/setup/<project_id>/style-guide/fallback", methods=["POST"])
+def setup_style_guide_fallback(project_id):
+    """Generate style guide from answers using fallback (no LLM)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    from src.style_guide_wizard import load_fixed_questions, answers_to_style_guide_fallback
+    data = request.get_json()
+    answers = data.get("answers", {})
+    answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
+    extra_questions = data.get("extra_questions", [])
+
+    fixed_questions = load_fixed_questions()
+    all_questions = fixed_questions + extra_questions
+    content = answers_to_style_guide_fallback(all_questions, answers)
+    return jsonify({"content": content})
+
+
+@app.route("/api/setup/<project_id>/extract-candidates", methods=["POST"])
+def setup_extract_candidates(project_id):
+    """Run heuristic glossary extraction and return candidates."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from scripts.extract_glossary_candidates import extract_candidates
+    from src.style_guide_wizard import load_source_sample
+    text = load_source_sample(project_dir, max_words=200000)  # High cap — use all available chunks
+    if not text:
+        return jsonify({"error": "No source text found (add chunks/ or source.txt)"}), 404
+
+    glossary = None
+    glossary_path = project_dir / "glossary.json"
+    if glossary_path.exists():
+        glossary = load_glossary(glossary_path)
+
+    report = extract_candidates(text, glossary=glossary)
+    candidates = [
+        {"term": c.term, "type_guess": c.type_guess.value, "frequency": c.frequency,
+         "context_sentence": c.context_sentence}
+        for c in report.candidates
+    ]
+    return jsonify({"candidates": candidates, "total": len(candidates)})
+
+
+@app.route("/api/setup/<project_id>/prompts/glossary", methods=["POST"])
+def setup_glossary_prompt(project_id):
+    """Return the full prompt for glossary bootstrap (for copy/paste)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.glossary_bootstrap import build_glossary_prompt
+    from src.style_guide_wizard import load_source_sample
+    data = request.get_json()
+    candidates = data.get("candidates", [])
+    target_lang = data.get("target_lang", "Spanish")
+    glossary_guidance = data.get("glossary_guidance", "")
+
+    # Load style guide if exists
+    style_content = ""
+    style_path = project_dir / "style.json"
+    if style_path.exists():
+        try:
+            sg = load_style_guide(style_path)
+            style_content = sg.content
+        except Exception:
+            pass
+
+    source_text = load_source_sample(project_dir)
+    prompt = build_glossary_prompt(candidates, source_text, style_content, target_lang, glossary_guidance)
+    return jsonify({"prompt": prompt})
+
+
+@app.route("/api/setup/<project_id>/glossary", methods=["POST"])
+def setup_save_glossary(project_id):
+    """Save glossary terms to glossary.json."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
+    from src.utils.file_io import save_glossary as _save_glossary
+    data = request.get_json()
+    terms_data = data.get("terms", [])
+    if not terms_data:
+        return jsonify({"error": "No terms provided"}), 400
+
+    terms = glossary_terms_from_proposals(terms_data)
+    glossary_path = project_dir / "glossary.json"
+
+    # Merge with existing if present
+    if glossary_path.exists():
+        existing = load_glossary(glossary_path)
+        existing_set = {t.english.lower() for t in existing.terms}
+        new_terms = [t for t in terms if t.english.lower() not in existing_set]
+        existing.terms.extend(new_terms)
+        _save_glossary(existing, glossary_path)
+        return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
+    else:
+        glossary = proposals_to_glossary(terms)
+        _save_glossary(glossary, glossary_path)
+        return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
+
+
 @app.route("/read/")
 def reader_projects():
-    """List available projects that have alignment data."""
+    """List available projects with status dashboard."""
     t = _reader_strings()
     projects_dir = _get_projects_dir()
     if not projects_dir.exists():
@@ -658,14 +878,55 @@ def reader_projects():
     for proj_dir in sorted(projects_dir.iterdir()):
         if not proj_dir.is_dir():
             continue
+
+        # Include any project dir with chunks/ or source.txt
+        has_chunks = (proj_dir / "chunks").exists()
+        has_source = (proj_dir / "source.txt").exists()
+        if not has_chunks and not has_source:
+            continue
+
+        # Count alignment chapters (for Read link)
         align_dir = proj_dir / "alignments"
-        if align_dir.exists():
-            alignment_files = sorted(align_dir.glob("*.json"))
-            if alignment_files:
-                projects.append({
-                    "id": proj_dir.name,
-                    "chapter_count": len(alignment_files),
-                })
+        alignment_count = len(list(align_dir.glob("*.json"))) if align_dir.exists() else 0
+
+        # Style guide status
+        has_style_guide = (proj_dir / "style.json").exists()
+
+        # Glossary status
+        glossary_count = 0
+        glossary_path = proj_dir / "glossary.json"
+        if glossary_path.exists():
+            try:
+                with open(glossary_path, "r", encoding="utf-8") as f:
+                    gdata = json.load(f)
+                glossary_count = len(gdata.get("terms", []))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Translation progress
+        total_chunks = 0
+        translated_chunks = 0
+        chunks_dir = proj_dir / "chunks"
+        if chunks_dir.exists():
+            for cf in chunks_dir.glob("*_chunk_*.json"):
+                total_chunks += 1
+                try:
+                    with open(cf, "r", encoding="utf-8") as f:
+                        cdata = json.load(f)
+                    if cdata.get("translated_text"):
+                        translated_chunks += 1
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        projects.append({
+            "id": proj_dir.name,
+            "chapter_count": alignment_count,
+            "has_style_guide": has_style_guide,
+            "glossary_count": glossary_count,
+            "total_chunks": total_chunks,
+            "translated_chunks": translated_chunks,
+            "has_alignments": alignment_count > 0,
+        })
 
     return render_template("reader.html", mode="projects", projects=projects, t=t, lang=_get_ui_lang())
 

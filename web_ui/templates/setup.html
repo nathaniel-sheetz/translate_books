@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup — {{ project_id }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='setup.css') }}">
+</head>
+<body>
+
+<div class="setup-page">
+    <a href="/read/" class="back-link">&larr; Projects</a>
+    <h1>{{ project_id }} — Setup</h1>
+
+    <!-- Tabs -->
+    <div class="tab-bar">
+        <button class="tab-btn active" data-tab="style-guide">Style Guide</button>
+        <button class="tab-btn" data-tab="glossary">Glossary</button>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- STYLE GUIDE TAB -->
+    <!-- ============================================================ -->
+    <div class="tab-panel active" id="tab-style-guide">
+
+        {% if existing_style %}
+        <div class="existing-banner">
+            Existing style guide loaded. Editing will overwrite it.
+        </div>
+        {% endif %}
+
+        <!-- Step 1: Fixed Questions -->
+        <div class="setup-section">
+            <h2>1. Answer Style Questions</h2>
+            <div id="fixed-questions">
+                {% for q in fixed_questions %}
+                <div class="question-block" data-qid="{{ q.id }}">
+                    <label class="question-label">{{ q.question }}</label>
+                    {% for opt in q.options %}
+                    <label class="option-label">
+                        <input type="radio" name="q_{{ q.id }}" value="{{ loop.index0 }}"
+                               {% if loop.index0 == q.get('default', 0) %}checked{% endif %}>
+                        {{ opt.label }}
+                    </label>
+                    {% endfor %}
+                    {% if q.get('allow_custom') %}
+                    <label class="option-label">
+                        <input type="radio" name="q_{{ q.id }}" value="custom">
+                        Custom
+                    </label>
+                    <input type="text" class="custom-input" data-qid="{{ q.id }}"
+                           placeholder="{{ q.get('custom_prompt', 'Enter custom value') }}" style="display:none">
+                    {% endif %}
+                    <div class="effect-preview" data-qid="{{ q.id }}"></div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Step 2: LLM-generated questions (optional) -->
+        <div class="setup-section">
+            <h2>2. Additional Questions from Text (Optional)</h2>
+            <p class="section-hint">Generate text-specific questions via LLM, or skip to use only the fixed questions above.</p>
+
+            <div class="prompt-block">
+                <button class="btn-secondary" id="btn-show-questions-prompt">Show Prompt to Copy</button>
+                <div class="prompt-area" id="questions-prompt-area" style="display:none">
+                    <textarea readonly id="questions-prompt-text" rows="10"></textarea>
+                    <button class="btn-copy" data-target="questions-prompt-text">Copy</button>
+                </div>
+            </div>
+
+            <div class="paste-block">
+                <label>Paste LLM Response (JSON array of questions):</label>
+                <textarea id="questions-paste" rows="6" placeholder='[{"id": "...", "question": "...", "options": [...], "default": 0}]'></textarea>
+                <button class="btn-primary" id="btn-parse-questions">Parse Questions</button>
+            </div>
+
+            <div id="extra-questions"></div>
+        </div>
+
+        <!-- Step 3: Generate style guide -->
+        <div class="setup-section">
+            <h2>3. Generate Style Guide</h2>
+
+            <div class="action-row">
+                <button class="btn-primary" id="btn-generate-fallback">Generate from Answers (No LLM)</button>
+            </div>
+
+            <div class="prompt-block">
+                <button class="btn-secondary" id="btn-show-style-prompt">Show Prompt to Copy</button>
+                <div class="prompt-area" id="style-prompt-area" style="display:none">
+                    <textarea readonly id="style-prompt-text" rows="10"></textarea>
+                    <button class="btn-copy" data-target="style-prompt-text">Copy</button>
+                </div>
+            </div>
+
+            <div class="paste-block">
+                <label>Paste Style Guide Text:</label>
+                <textarea id="style-paste" rows="8" placeholder="Paste the LLM-generated style guide here..."></textarea>
+                <button class="btn-primary" id="btn-use-pasted-style">Use Pasted Text</button>
+            </div>
+        </div>
+
+        <!-- Step 4: Preview & Save -->
+        <div class="setup-section">
+            <h2>4. Preview & Save</h2>
+            <pre id="style-preview" class="preview-box">{{ existing_style or '(no style guide yet)' }}</pre>
+            <button class="btn-save" id="btn-save-style">Save style.json</button>
+            <span id="style-save-status"></span>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- GLOSSARY TAB -->
+    <!-- ============================================================ -->
+    <div class="tab-panel" id="tab-glossary">
+
+        {% if existing_glossary_count > 0 %}
+        <div class="existing-banner">
+            Existing glossary: {{ existing_glossary_count }} terms. New terms will be merged.
+        </div>
+        {% endif %}
+
+        <!-- Step 1: Extract candidates -->
+        <div class="setup-section">
+            <h2>1. Extract Candidates</h2>
+            <button class="btn-primary" id="btn-extract">Extract from Source Text</button>
+            <span id="extract-status"></span>
+        </div>
+
+        <!-- Step 1b: Style guide guidance selection -->
+        <div class="setup-section" id="glossary-qa-section" style="display:none">
+            <h2>1b. Style Guide Guidance for Glossary</h2>
+            <p class="section-hint">Select which style guide answers should inform the LLM's translation proposals. Uncheck any that are not relevant to term-by-term decisions.</p>
+            <div id="glossary-qa-checks"></div>
+        </div>
+
+        <!-- Step 2: Bootstrap via LLM -->
+        <div class="setup-section" id="glossary-bootstrap-section" style="display:none">
+            <h2>2. Get Translation Proposals</h2>
+
+            <div class="prompt-block">
+                <button class="btn-secondary" id="btn-show-glossary-prompt">Show Prompt to Copy</button>
+                <div class="prompt-area" id="glossary-prompt-area" style="display:none">
+                    <textarea readonly id="glossary-prompt-text" rows="10"></textarea>
+                    <button class="btn-copy" data-target="glossary-prompt-text">Copy</button>
+                </div>
+            </div>
+
+            <div class="paste-block">
+                <label>Paste LLM Response (JSON array of terms):</label>
+                <textarea id="glossary-paste" rows="6" placeholder='[{"english": "...", "spanish": "...", "type": "...", "context": "...", "alternatives": []}]'></textarea>
+                <button class="btn-primary" id="btn-parse-glossary">Parse Proposals</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Review & Save -->
+        <div class="setup-section" id="glossary-review-section" style="display:none">
+            <h2>3. Review & Save</h2>
+            <div id="glossary-table-container"></div>
+            <button class="btn-save" id="btn-save-glossary">Save Accepted Terms</button>
+            <span id="glossary-save-status"></span>
+        </div>
+    </div>
+</div>
+
+<script>
+var PROJECT_ID = {{ project_id | tojson }};
+var FIXED_QUESTIONS = {{ fixed_questions | tojson }};
+</script>
+<script src="{{ url_for('static', filename='setup.js') }}"></script>
+
+</body>
+</html>
