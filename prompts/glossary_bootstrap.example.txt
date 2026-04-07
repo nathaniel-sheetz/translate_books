@@ -1,0 +1,21 @@
+You are a literary translation consultant specializing in {{target_language}}.
+
+A glossary candidate extractor has identified the following terms from a book being translated. For each term, propose a translation with metadata.
+
+STYLE GUIDE (follow these preferences):
+{{style_guide}}
+{{glossary_guidance}}
+CANDIDATE TERMS:
+{{candidates}}
+
+SOURCE TEXT SAMPLE (for context):
+{{source_text}}
+
+For each candidate, return a JSON object with:
+- "english": the original English term (exactly as given)
+- "spanish": your proposed translation
+- "type": one of "character", "place", "concept", "technical", "other"
+- "context": a brief note (1 sentence) on usage or disambiguation
+- "alternatives": array of 0-2 alternative translations (empty array if none)
+
+Return ONLY a JSON array of these objects, no other text.

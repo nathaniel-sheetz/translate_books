@@ -1,0 +1,98 @@
+[
+  {
+    "id": "dialect",
+    "glossary_relevant": false,
+    "question": "What dialect and region should the translation target?",
+    "options": [
+      {
+        "label": "Mexican Spanish",
+        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into standard, educated Mexican Spanish. Use tú or Usted forms (not vos or vosotros). Avoid Iberian-specific vocabulary and expressions, prefer MX-standard lexical choices throughout."
+      },
+      {
+        "label": "Castilian Spanish",
+        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into standard Castilian Spanish. Use tú/vosotros forms as appropriate. Prefer Iberian vocabulary and idiomatic expressions."
+      },
+      {
+        "label": "Rioplatense Spanish",
+        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into Rioplatense Spanish. Use vos/ustedes forms. Prefer Argentine/Uruguayan vocabulary and expressions."
+      },
+      {
+        "label": "Colombian Spanish",
+        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into standard Colombian Spanish. Use usted and tú forms as appropriate regionally. Prefer Colombian vocabulary."
+      }
+    ],
+    "allow_custom": true,
+    "custom_prompt": "Describe the dialect and region:",
+    "default": 0
+  },
+  {
+    "id": "forms_of_address",
+    "glossary_relevant": false,
+    "question": "How should forms of address (you/your) be handled?",
+    "options": [
+      {
+        "label": "Tú throughout (informal)",
+        "style_guide_effect": "FORMS OF ADDRESS\nUse tú forms for all second-person address. This creates an informal, intimate tone throughout."
+      },
+      {
+        "label": "Usted throughout (formal)",
+        "style_guide_effect": "FORMS OF ADDRESS\nUse usted forms for all second-person address. This maintains formal, respectful distance throughout."
+      },
+      {
+        "label": "Mixed: tú for family/friends, usted for strangers",
+        "style_guide_effect": "FORMS OF ADDRESS\nUse tú for characters in close relationships (family, friends, children) and usted for strangers, authority figures, and formal contexts. This reflects natural social register switching."
+      },
+      {
+        "label": "Vos (regional informal)",
+        "style_guide_effect": "FORMS OF ADDRESS\nUse vos forms for informal second-person address, matching regional usage. Use usted for formal contexts."
+      }
+    ],
+    "allow_custom": true,
+    "custom_prompt": "Describe the forms of address rules:",
+    "default": 2
+  },
+  {
+    "id": "dialogue_formatting",
+    "glossary_relevant": false,
+    "question": "How should dialogue be formatted?",
+    "options": [
+      {
+        "label": "Raya (—) — standard Spanish convention",
+        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using standard Spanish raya conventions (—). Break character speech into a new paragraph when it follows narrative. Use guillemets (« ») for nested speech (dialogue within dialogue)."
+      },
+      {
+        "label": "Quotation marks ("...")",
+        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using quotation marks ("..."). Use single quotes ('...') for nested speech."
+      },
+      {
+        "label": "Guillemets («...»)",
+        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using guillemets («...»). Use quotation marks for nested speech within guillemets."
+      }
+    ],
+    "allow_custom": true,
+    "custom_prompt": "Describe the dialogue formatting rules:",
+    "default": 0
+  },
+  {
+    "id": "name_handling",
+    "glossary_relevant": true,
+    "question": "How should personal and place names be handled?",
+    "options": [
+      {
+        "label": "Keep original names unchanged",
+        "style_guide_effect": "NAME HANDLING\nKeep all personal names and place names in their original form. Do not translate or adapt names."
+      },
+      {
+        "label": "Translate names when a standard equivalent exists",
+        "style_guide_effect": "NAME HANDLING\nTranslate names when a widely recognized equivalent exists in the target language (e.g., Peter → Pedro, London → Londres). Keep names without standard equivalents in their original form."
+      },
+      {
+        "label": "Translate all names",
+        "style_guide_effect": "NAME HANDLING\nTranslate or adapt all personal and place names to the target language. Create natural-sounding equivalents where standard translations don't exist."
+      }
+    ],
+    "allow_custom": true,
+    "custom_prompt": "Describe the name handling rules:",
+    "default": 0
+  }
+]
