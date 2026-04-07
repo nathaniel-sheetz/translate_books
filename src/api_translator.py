@@ -15,13 +15,35 @@ from typing import Optional, Literal
 from dotenv import load_dotenv
 
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
-from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt
+from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
 
 # Load environment variables from .env file
 load_dotenv()
 
 # API Provider types
 Provider = Literal["anthropic", "openai"]
+
+
+# Pricing per 1M tokens (updated April 2026)
+PRICING_TABLE = {
+    "anthropic": {
+        "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
+        "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
+        "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
+        "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.00},
+    },
+    "openai": {
+        "gpt-4o": {"input": 2.50, "output": 10.00},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    },
+}
+
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+
+def get_pricing_table() -> dict:
+    """Return the pricing table for all known models."""
+    return PRICING_TABLE
 
 
 class APIError(Exception):
@@ -105,16 +127,20 @@ def estimate_cost(
     total_output_tokens_estimate = 0
 
     for chunk in chunks:
+        # Filter glossary to terms relevant to this chunk
+        chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+
         # Build prompt variables
         variables = {
             "book_title": "Sample Book",
             "source_text": chunk.source_text,
             "target_language": "Spanish",
             "source_language": "English",
-            "glossary": format_glossary_for_prompt(glossary) if glossary else "No glossary provided.",
+            "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
             "style_guide": style_guide.content if style_guide else "No style guide provided.",
             "context": "",
-            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}"
+            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+            "previous_chapter_context": "",
         }
 
         # Render prompt
@@ -128,24 +154,12 @@ def estimate_cost(
         total_input_tokens += input_tokens
         total_output_tokens_estimate += output_tokens
 
-    # Pricing per 1M tokens (as of Nov 2024)
-    pricing = {
-        "anthropic": {
-            "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
-            "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.00},
-        },
-        "openai": {
-            "gpt-4o": {"input": 2.50, "output": 10.00},
-            "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-        }
-    }
-
     # Get pricing for this model
-    if provider not in pricing or model not in pricing[provider]:
+    if provider not in PRICING_TABLE or model not in PRICING_TABLE[provider]:
         # Unknown model, use conservative estimate
         model_pricing = {"input": 5.00, "output": 15.00}
     else:
-        model_pricing = pricing[provider][model]
+        model_pricing = PRICING_TABLE[provider][model]
 
     # Calculate cost
     input_cost = (total_input_tokens / 1_000_000) * model_pricing["input"]
@@ -167,7 +181,7 @@ def estimate_cost(
 
 def call_anthropic_api(
     prompt: str,
-    model: str = "claude-3-5-sonnet-20241022",
+    model: str = DEFAULT_MODEL,
     max_tokens: int = 4096,
     temperature: float = 0.3,
 ) -> str:
@@ -281,6 +295,43 @@ def call_openai_api(
         raise APIError(f"OpenAI API error: {e}")
 
 
+def call_llm(
+    prompt: str,
+    provider: Provider = "anthropic",
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = 4096,
+    temperature: float = 0.3,
+    max_retries: int = 3,
+) -> str:
+    """Call an LLM and return the text response.
+
+    Generic wrapper around call_anthropic_api/call_openai_api with retry logic.
+    Use this for non-translation LLM calls (style wizard, glossary bootstrap, etc.).
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            if provider == "anthropic":
+                return call_anthropic_api(prompt, model, max_tokens, temperature)
+            elif provider == "openai":
+                return call_openai_api(prompt, model, max_tokens, temperature)
+            else:
+                raise ValueError(f"Unknown provider: {provider}")
+        except RateLimitError as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+            else:
+                raise
+        except APIError as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(2)
+            else:
+                raise
+    raise last_error or APIError("LLM call failed")
+
+
 def translate_chunk_realtime(
     chunk: Chunk,
     provider: Provider,
@@ -291,6 +342,7 @@ def translate_chunk_realtime(
     source_language: str = "English",
     target_language: str = "Spanish",
     max_retries: int = 3,
+    previous_chapter_context: str = "",
 ) -> Chunk:
     """
     Translate a single chunk using real-time API.
@@ -312,6 +364,9 @@ def translate_chunk_realtime(
     Raises:
         APIError: If translation fails after retries
     """
+    # Filter glossary to terms relevant to this chunk
+    chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+
     # Load and render prompt
     template = load_prompt_template()
     variables = {
@@ -319,10 +374,11 @@ def translate_chunk_realtime(
         "source_text": chunk.source_text,
         "target_language": target_language,
         "source_language": source_language,
-        "glossary": format_glossary_for_prompt(glossary) if glossary else "No glossary provided.",
+        "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
         "style_guide": style_guide.content if style_guide else "No style guide provided.",
         "context": "",
-        "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}"
+        "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+        "previous_chapter_context": previous_chapter_context,
     }
 
     prompt = render_prompt(template, variables)
@@ -467,7 +523,8 @@ def _submit_anthropic_batch(
             "glossary": format_glossary_for_prompt(glossary) if glossary else "No glossary provided.",
             "style_guide": style_guide.content if style_guide else "No style guide provided.",
             "context": "",
-            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}"
+            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+            "previous_chapter_context": "",
         }
 
         prompt = render_prompt(template, variables)
@@ -547,7 +604,8 @@ def _submit_openai_batch(
             "glossary": format_glossary_for_prompt(glossary) if glossary else "No glossary provided.",
             "style_guide": style_guide.content if style_guide else "No style guide provided.",
             "context": "",
-            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}"
+            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+            "previous_chapter_context": "",
         }
 
         prompt = render_prompt(template, variables)

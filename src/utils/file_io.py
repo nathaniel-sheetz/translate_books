@@ -232,6 +232,53 @@ def render_prompt(template: str, variables: dict[str, Any]) -> str:
     return result
 
 
+def filter_glossary_for_chunk(glossary: Glossary, source_text: str) -> Glossary:
+    """
+    Filter a glossary to only include terms that appear in the chunk's source text.
+
+    Matches case-insensitively and handles common English variants:
+    plural (+s, +es), possessive ('s), and past tense (+d, +ed).
+
+    Args:
+        glossary: Full project glossary
+        source_text: The chunk's English source text
+
+    Returns:
+        A new Glossary containing only matching terms
+    """
+    if not glossary.terms:
+        return glossary
+
+    text_lower = source_text.lower()
+
+    matching_terms = []
+    for term in glossary.terms:
+        english_lower = term.english.lower()
+        if english_lower in text_lower:
+            matching_terms.append(term)
+            continue
+        # Check common variants: plural, possessive, past tense
+        variants = [
+            english_lower + "s",
+            english_lower + "es",
+            english_lower + "'s",
+            english_lower + "\u2019s",  # curly apostrophe
+        ]
+        # Past tense variants (only if not already ending in e/d)
+        if not english_lower.endswith("e"):
+            variants.append(english_lower + "ed")
+        if not english_lower.endswith("d"):
+            variants.append(english_lower + "d")
+        if any(v in text_lower for v in variants):
+            matching_terms.append(term)
+
+    return Glossary(
+        terms=matching_terms,
+        version=glossary.version,
+        updated_at=glossary.updated_at,
+    )
+
+
 def format_glossary_for_prompt(glossary: Glossary) -> str:
     """
     Format a Glossary into human-readable text for prompt inclusion.
