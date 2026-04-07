@@ -19,16 +19,41 @@
         </div>
     </div>
     {% if projects %}
-    <ul class="nav-list">
+    <div class="project-grid">
         {% for p in projects %}
-        <li>
-            <a href="/read/{{ p.id }}">
+        <div class="project-card">
+            <div class="project-card-header">
                 <span class="nav-title">{{ p.id }}</span>
-                <span class="nav-meta">{{ p.chapter_count }} {{ t.chapters_count }}</span>
-            </a>
-        </li>
+            </div>
+            <div class="project-status">
+                <div class="status-row">
+                    <span class="status-label">Style guide</span>
+                    <span class="status-value {% if p.has_style_guide %}status-ok{% else %}status-missing{% endif %}">
+                        {{ "✓" if p.has_style_guide else "✗" }}
+                    </span>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">Glossary</span>
+                    <span class="status-value {% if p.glossary_count > 0 %}status-ok{% else %}status-missing{% endif %}">
+                        {% if p.glossary_count > 0 %}{{ p.glossary_count }} terms{% else %}✗{% endif %}
+                    </span>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">Translated</span>
+                    <span class="status-value">{{ p.translated_chunks }}/{{ p.total_chunks }} chunks</span>
+                </div>
+            </div>
+            <div class="project-card-actions">
+                {% if p.has_alignments %}
+                <a href="/read/{{ p.id }}" class="btn-card">Read</a>
+                {% else %}
+                <span class="btn-card btn-disabled">Read</span>
+                {% endif %}
+                <a href="/setup/{{ p.id }}" class="btn-card btn-setup">Setup</a>
+            </div>
+        </div>
         {% endfor %}
-    </ul>
+    </div>
     {% else %}
     <p class="empty-state">{{ t.no_projects }}</p>
     {% endif %}

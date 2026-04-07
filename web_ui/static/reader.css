@@ -127,6 +127,95 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
+/* Project dashboard cards */
+
+.project-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.project-card {
+    border: 1px solid #e8e4df;
+    border-radius: 8px;
+    padding: 16px;
+    background: #fff;
+}
+
+.project-card-header {
+    margin-bottom: 10px;
+}
+
+.project-card-header .nav-title {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.project-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+}
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+}
+
+.status-label {
+    color: #666;
+}
+
+.status-value {
+    color: #333;
+}
+
+.status-ok {
+    color: #2d8a4e;
+}
+
+.status-missing {
+    color: #b33;
+}
+
+.project-card-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-card {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 4px;
+    text-decoration: none;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    color: #1a1a1a;
+    border: 1px solid #ccc;
+    cursor: pointer;
+}
+
+.btn-card:hover {
+    background: #f0ece7;
+}
+
+.btn-setup {
+    background: #f7f5f2;
+}
+
+.btn-disabled {
+    color: #aaa;
+    border-color: #ddd;
+    cursor: default;
+}
+
+.btn-disabled:hover {
+    background: transparent;
+}
+
 .empty-state {
     color: #888;
     font-size: 16px;
