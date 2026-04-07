@@ -36,7 +36,7 @@ from src.combiner import combine_chunks
 from src.epub_builder import build_epub
 from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
 from src.sentence_aligner import align_chapter_chunks
-from src.utils.file_io import load_chunk, save_chunk, load_glossary, load_style_guide
+from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
 
 
 # Pipeline stages in order
@@ -67,6 +67,24 @@ def save_pipeline_state(project_dir: Path, state: dict):
     state_path = project_dir / "pipeline_state.json"
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+
+
+def parse_chapter_range(spec: str) -> set[str]:
+    """Parse a chapter range spec like '1-5' or '3,7,12' into chapter IDs.
+
+    Returns a set of chapter IDs like {'chapter_01', 'chapter_05'}.
+    Supports: '1-5', '3,7,12', '1-3,7,10-12'.
+    """
+    numbers = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            start, end = part.split("-", 1)
+            for n in range(int(start), int(end) + 1):
+                numbers.add(n)
+        else:
+            numbers.add(int(part))
+    return {f"chapter_{n:02d}" for n in numbers}
 
 
 def discover_chapters(chunks_dir: Path) -> dict[str, list[Path]]:
@@ -211,6 +229,17 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     chunks_dir = project_dir / "chunks"
     chapters = discover_chapters(chunks_dir)
 
+    # Filter to requested chapters
+    chapter_filter = None
+    if getattr(args, "chapters", None):
+        chapter_filter = parse_chapter_range(args.chapters)
+        chapters = {k: v for k, v in chapters.items() if k in chapter_filter}
+        if not chapters:
+            print(f"  No matching chapters found for --chapters {args.chapters}")
+            print(f"  Available: {', '.join(sorted(discover_chapters(chunks_dir).keys()))}")
+            state["stage_completed"] = "translate"
+            return state
+
     provider = args.provider
     model = args.model
 
@@ -263,6 +292,7 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     target_lang = getattr(args, "target_lang", "Spanish") or "Spanish"
     source_lang = getattr(args, "source_lang", "English") or "English"
 
+    previous_context = ""
     for i, (chunk_path, chunk) in enumerate(untranslated, 1):
         print(f"  [{i}/{len(untranslated)}] Translating {chunk.id} ...", end=" ", flush=True)
         t0 = time.time()
@@ -276,19 +306,50 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             project_name=project_name,
             source_language=source_lang,
             target_language=target_lang,
+            previous_chapter_context=previous_context,
         )
 
         save_chunk(translated, chunk_path)
         elapsed = time.time() - t0
         print(f"done ({elapsed:.1f}s, {translated.translation_word_count} words)")
 
+        # Use tail of this chunk's source as context for the next chunk
+        paragraphs = chunk.source_text.strip().split("\n\n")
+        previous_context = "\n\n".join(paragraphs[-2:]) if len(paragraphs) >= 2 else chunk.source_text.strip()
+
         # Checkpoint after each chunk
         state["last_translated_chunk"] = chunk.id
         state["translated_count"] = i
         save_pipeline_state(project_dir, state)
 
+    # Batch summary
+    cost_per_chunk = cost_info["cost_per_chunk_usd"]
+    actual_cost = cost_per_chunk * len(untranslated)
+    chapter_ids_done = sorted({cid for _, c in untranslated for cid in [c.chapter_id]})
+    print(f"\n  Batch complete: {len(untranslated)} chunks across {len(chapter_ids_done)} chapter(s)")
+    print(f"  Estimated cost: ${actual_cost:.2f}")
+
+    # If there are remaining untranslated chunks beyond this batch, show remaining estimate
+    all_chapters = discover_chapters(project_dir / "chunks")
+    remaining = 0
+    for ch_id, paths in all_chapters.items():
+        for cp in paths:
+            c = load_chunk(cp)
+            if not c.has_translation:
+                remaining += 1
+    if remaining > 0:
+        print(f"  Remaining: {remaining} untranslated chunks (~${remaining * cost_per_chunk:.2f})")
+
     state["stage_completed"] = "translate"
     return state
+
+
+def _filter_chapters(args, chapters: dict) -> dict:
+    """Apply --chapters filter if set."""
+    if getattr(args, "chapters", None):
+        requested = parse_chapter_range(args.chapters)
+        return {k: v for k, v in chapters.items() if k in requested}
+    return chapters
 
 
 def stage_evaluate(args, project_dir: Path, state: dict) -> dict:
@@ -296,7 +357,7 @@ def stage_evaluate(args, project_dir: Path, state: dict) -> dict:
     from src.evaluators import run_all_evaluators, aggregate_results
 
     chunks_dir = project_dir / "chunks"
-    chapters = discover_chapters(chunks_dir)
+    chapters = _filter_chapters(args, discover_chapters(chunks_dir))
 
     glossary = None
     glossary_path = project_dir / "glossary.json"
@@ -341,7 +402,7 @@ def stage_combine(args, project_dir: Path, state: dict) -> dict:
     chapters_dir = project_dir / "chapters"
     chapters_dir.mkdir(exist_ok=True)
 
-    chapters = discover_chapters(chunks_dir)
+    chapters = _filter_chapters(args, discover_chapters(chunks_dir))
 
     for chapter_id, chunk_paths in chapters.items():
         chunks = [load_chunk(cp) for cp in chunk_paths]
@@ -459,8 +520,8 @@ def main():
     # Translation API
     parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"],
                         help="API provider (default: anthropic)")
-    parser.add_argument("--model", default="claude-3-5-sonnet-20241022",
-                        help="Model identifier (default: claude-3-5-sonnet-20241022)")
+    parser.add_argument("--model", default="claude-sonnet-4-20250514",
+                        help="Model identifier (default: claude-sonnet-4-20250514)")
     parser.add_argument("--cost-limit", type=float, default=5.0,
                         help="Cost limit in USD, prompts if exceeded (default: $5.00)")
     parser.add_argument("--cost-only", action="store_true",
@@ -482,7 +543,15 @@ def main():
     parser.add_argument("--min-overlap-words", type=int, default=50,
                         help="Minimum overlap words (default: 50)")
 
+    # Setup (style guide + glossary)
+    parser.add_argument("--generate-style-guide", action="store_true",
+                        help="Generate style guide from fixed questions before translating (no LLM needed)")
+    parser.add_argument("--bootstrap-glossary", action="store_true",
+                        help="Extract glossary candidates and bootstrap via LLM before translating")
+
     # Pipeline control
+    parser.add_argument("--chapters",
+                        help="Translate only these chapters (e.g., '1-5' or '3,7,12')")
     parser.add_argument("--start-stage", choices=STAGES,
                         help="Start from this stage (skip earlier stages)")
     parser.add_argument("--resume", action="store_true",
@@ -535,6 +604,90 @@ def main():
     # Clear stale error state from previous runs
     state.pop("last_error", None)
     state.pop("failed_stage", None)
+
+    # --generate-style-guide: create style.json from fixed questions if it doesn't exist
+    if getattr(args, "generate_style_guide", False):
+        style_path = project_dir / "style.json"
+        if style_path.exists():
+            print("\nStyle guide already exists, skipping generation.")
+        else:
+            print("\n" + "=" * 60)
+            print("SETUP: Generate Style Guide (fixed questions, no LLM)")
+            print("=" * 60)
+            from src.style_guide_wizard import (
+                load_fixed_questions, answers_to_style_guide_fallback,
+                save_style_guide_json, load_source_sample,
+            )
+            questions = load_fixed_questions()
+            # Use default answers for all questions
+            answers = {}
+            for q in questions:
+                answers[q["id"]] = q.get("default", 0)
+            content = answers_to_style_guide_fallback(questions, answers)
+            save_style_guide_json(content, style_path)
+            print(f"  Style guide saved to {style_path}")
+            print(f"  ({len(content)} chars from {len(questions)} questions with default answers)")
+
+    # --bootstrap-glossary: extract candidates and bootstrap via LLM
+    if getattr(args, "bootstrap_glossary", False):
+        glossary_path = project_dir / "glossary.json"
+        if glossary_path.exists():
+            print("\nGlossary already exists, skipping bootstrap.")
+        else:
+            print("\n" + "=" * 60)
+            print("SETUP: Bootstrap Glossary")
+            print("=" * 60)
+            from src.style_guide_wizard import load_source_sample
+            from src.glossary_bootstrap import (
+                build_glossary_prompt, parse_glossary_response,
+                glossary_terms_from_proposals, proposals_to_glossary,
+            )
+
+            # Need chunks to exist for extraction — check if we've chunked yet
+            chunks_dir = project_dir / "chunks"
+            source_path = project_dir / "source.txt"
+            if not source_path.exists() and not chunks_dir.exists():
+                print("  No source text found. Run ingest/split/chunk stages first.")
+            else:
+                # Extract candidates using the extraction script
+                if source_path.exists():
+                    source_text = source_path.read_text(encoding="utf-8")
+                else:
+                    source_text = load_source_sample(project_dir, max_words=50000)
+
+                sys.path.insert(0, str(Path(__file__).parent))
+                from extract_glossary_candidates import extract_candidates
+                report = extract_candidates(source_text, verbose=True)
+                candidates = [c.model_dump() for c in report.candidates[:200]]
+                print(f"  {len(candidates)} candidates extracted")
+
+                if candidates:
+                    # Load style guide for context if available
+                    style_content = ""
+                    style_path = project_dir / "style.json"
+                    if style_path.exists():
+                        sg = load_style_guide(style_path)
+                        style_content = sg.content
+
+                    sample = load_source_sample(project_dir)
+                    target_lang = getattr(args, "target_lang", "Spanish") or "Spanish"
+
+                    prompt = build_glossary_prompt(candidates, sample, style_content, target_lang)
+                    print(f"  Calling LLM for glossary proposals ({len(candidates)} candidates)...")
+
+                    from src.api_translator import call_llm
+                    response = call_llm(
+                        prompt,
+                        provider=args.provider,
+                        model=args.model,
+                        max_tokens=8192,
+                    )
+
+                    proposals = parse_glossary_response(response)
+                    terms = glossary_terms_from_proposals(proposals)
+                    glossary = proposals_to_glossary(terms)
+                    save_glossary(glossary, glossary_path)
+                    print(f"  Glossary saved: {len(terms)} terms to {glossary_path}")
 
     # Run pipeline stages
     t_total = time.time()

@@ -702,6 +702,26 @@ Examples:
         "--dry-run", action="store_true",
         help="Print summary but do not write output file"
     )
+    parser.add_argument(
+        "--bootstrap", action="store_true",
+        help="Send candidates to LLM for translation proposals"
+    )
+    parser.add_argument(
+        "--bootstrap-output", type=Path, default=None,
+        help="Output path for bootstrapped glossary.json (default: same dir as -o)"
+    )
+    parser.add_argument(
+        "--style-guide", type=Path, default=None,
+        help="Style guide JSON for bootstrap context"
+    )
+    parser.add_argument(
+        "--provider", default="anthropic", choices=["anthropic", "openai"],
+        help="API provider for bootstrap (default: anthropic)"
+    )
+    parser.add_argument(
+        "--model", default="claude-sonnet-4-20250514",
+        help="Model for bootstrap (default: claude-sonnet-4-20250514)"
+    )
     return parser.parse_args()
 
 
@@ -792,6 +812,84 @@ def main():
 
     if not args.dry_run:
         save_report(report, args.output)
+
+    # Bootstrap: send candidates to LLM for translation proposals
+    if args.bootstrap and report.candidates:
+        from src.glossary_bootstrap import (
+            build_glossary_prompt,
+            parse_glossary_response,
+            glossary_terms_from_proposals,
+            proposals_to_glossary,
+        )
+        from src.utils.file_io import save_glossary
+
+        # Load style guide if provided
+        style_content = ""
+        if args.style_guide and args.style_guide.exists():
+            from src.utils.file_io import load_style_guide
+            sg = load_style_guide(args.style_guide)
+            style_content = sg.content
+
+        # Build candidate list for prompt
+        candidates = [
+            {"term": c.term, "type_guess": c.type_guess.value, "frequency": c.frequency}
+            for c in report.candidates
+        ]
+
+        # Truncate source text for context
+        source_sample = text[:10000]
+
+        print("\nBootstrapping glossary translations via LLM...")
+        try:
+            from src.api_translator import call_llm
+            prompt = build_glossary_prompt(candidates, source_sample, style_content, "Spanish")
+            response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=4096)
+            proposals = parse_glossary_response(response)
+            terms = glossary_terms_from_proposals(proposals)
+            glossary_obj = proposals_to_glossary(terms)
+
+            # Interactive review
+            accepted = []
+            for term in glossary_obj.terms:
+                print(f"\n  {term.english} -> {term.spanish} ({term.type})")
+                if term.context:
+                    print(f"    Context: {term.context}")
+                if term.alternatives:
+                    print(f"    Alternatives: {', '.join(term.alternatives)}")
+
+                choice = input("  [y]es / [n]o / [e]dit / [s]kip: ").strip().lower()
+                if choice in ("y", "yes", ""):
+                    accepted.append(term)
+                elif choice in ("e", "edit"):
+                    new_spanish = input(f"  New translation [{term.spanish}]: ").strip()
+                    if new_spanish:
+                        term.spanish = new_spanish
+                    accepted.append(term)
+                elif choice in ("s", "skip"):
+                    continue
+                # 'n' or 'no' = reject, don't add
+
+            if accepted:
+                result_glossary = proposals_to_glossary(accepted)
+                out_path = args.bootstrap_output or args.output.parent / "glossary.json"
+
+                # If glossary already exists, merge
+                if out_path.exists():
+                    existing = load_glossary(out_path)
+                    existing_terms = {t.english.lower() for t in existing.terms}
+                    new_terms = [t for t in accepted if t.english.lower() not in existing_terms]
+                    existing.terms.extend(new_terms)
+                    save_glossary(existing, out_path)
+                    print(f"\nMerged {len(new_terms)} new terms into {out_path} ({len(existing.terms)} total)")
+                else:
+                    save_glossary(result_glossary, out_path)
+                    print(f"\nSaved {len(accepted)} terms to {out_path}")
+            else:
+                print("\nNo terms accepted.")
+
+        except Exception as e:
+            print(f"\nError during bootstrap: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
