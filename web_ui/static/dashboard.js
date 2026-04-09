@@ -9,19 +9,84 @@
     var projectStatus = null;
     var SPLIT_PATTERNS = null;
 
-    // Model options per provider
-    var MODELS = {
-        anthropic: [
-            { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
-            { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' },
-            { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' },
-            { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
-        ],
-        openai: [
-            { id: 'gpt-4o', name: 'GPT-4o' },
-            { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-        ],
-    };
+    // LLM config — loaded dynamically from /api/llm-config
+    var LLM_CONFIG = null;
+    var MODELS = {};  // provider_id -> [{id, name}]
+
+    function loadLLMConfig() {
+        return apiGet('/api/llm-config').then(function(config) {
+            LLM_CONFIG = config;
+            MODELS = {};
+            config.providers.forEach(function(p) {
+                MODELS[p.id] = p.models.map(function(m) {
+                    return { id: m.id, name: m.name };
+                });
+            });
+            return config;
+        });
+    }
+
+    function populateProviderSelect(selectId) {
+        var select = document.getElementById(selectId);
+        if (!select || !LLM_CONFIG) return;
+        select.innerHTML = '';
+        LLM_CONFIG.providers.forEach(function(p) {
+            var opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name + (p.available ? '' : ' (no API key)');
+            opt.disabled = !p.available;
+            select.appendChild(opt);
+        });
+        select.value = LLM_CONFIG.default_provider;
+    }
+
+    function populateModelSelect(providerSelectId, modelSelectId) {
+        var providerSelect = document.getElementById(providerSelectId);
+        var modelSelect = document.getElementById(modelSelectId);
+        if (!providerSelect || !modelSelect) return;
+        var provider = providerSelect.value;
+        modelSelect.innerHTML = '';
+        (MODELS[provider] || []).forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name;
+            modelSelect.appendChild(opt);
+        });
+        // Pre-select the default model if it belongs to this provider
+        if (LLM_CONFIG && provider === LLM_CONFIG.default_provider) {
+            modelSelect.value = LLM_CONFIG.default_model;
+        }
+    }
+
+    function bindProviderModelPair(providerSelectId, modelSelectId, onChange) {
+        var providerSelect = document.getElementById(providerSelectId);
+        if (!providerSelect) return;
+        providerSelect.addEventListener('change', function() {
+            populateModelSelect(providerSelectId, modelSelectId);
+            if (onChange) onChange();
+        });
+        if (onChange) {
+            var modelSelect = document.getElementById(modelSelectId);
+            if (modelSelect) modelSelect.addEventListener('change', onChange);
+        }
+    }
+
+    function initAllLLMSelectors() {
+        // Style guide
+        populateProviderSelect('style-provider');
+        populateModelSelect('style-provider', 'style-model');
+        bindProviderModelPair('style-provider', 'style-model');
+
+        // Glossary
+        populateProviderSelect('glossary-provider');
+        populateModelSelect('glossary-provider', 'glossary-model');
+        bindProviderModelPair('glossary-provider', 'glossary-model');
+
+        // Batch translate
+        populateProviderSelect('batch-provider');
+        populateModelSelect('batch-provider', 'batch-model');
+        bindProviderModelPair('batch-provider', 'batch-model', updateBatchCostEstimate);
+    }
 
     // ========================================================================
     // Helpers
@@ -682,6 +747,40 @@
         }
     });
 
+    // Generate questions via API
+    document.getElementById('btn-generate-questions-api').addEventListener('click', function() {
+        var btn = this;
+        var answers = collectAnswers();
+        var provider = document.getElementById('style-provider').value;
+        var model = document.getElementById('style-model').value;
+        btn.disabled = true;
+        setStatus('questions-api-status', 'Generating questions...', 'info');
+
+        apiPost('/api/setup/' + PROJECT + '/questions/generate', {
+            answers: answers,
+            provider: provider,
+            model: model,
+        }).then(function(data) {
+            btn.disabled = false;
+            if (data.error && !data.questions && !data.raw_text) {
+                setStatus('questions-api-status', data.error, 'error');
+                return;
+            }
+            if (data.questions) {
+                extraQuestions = data.questions;
+                renderExtraQuestions(data.questions);
+                buildGlossaryQASelection();
+                setStatus('questions-api-status', data.questions.length + ' questions generated', 'success');
+            } else if (data.raw_text) {
+                document.getElementById('questions-paste').value = data.raw_text;
+                setStatus('questions-api-status', 'Response was not valid JSON. Pasted raw text for manual editing.', 'error');
+            }
+        }).catch(function() {
+            btn.disabled = false;
+            setStatus('questions-api-status', 'Request failed', 'error');
+        });
+    });
+
     function renderExtraQuestions(questions) {
         var container = document.getElementById('extra-questions');
         container.innerHTML = '';
@@ -737,6 +836,36 @@
                 document.getElementById('style-result-preview').textContent = data.content;
                 document.getElementById('style-guide-result').style.display = '';
             });
+    });
+
+    // Generate style guide via API
+    document.getElementById('btn-generate-style-api').addEventListener('click', function() {
+        var btn = this;
+        var answers = collectAnswers();
+        var provider = document.getElementById('style-provider').value;
+        var model = document.getElementById('style-model').value;
+        btn.disabled = true;
+        setStatus('style-api-status', 'Generating style guide...', 'info');
+
+        apiPost('/api/setup/' + PROJECT + '/style-guide/generate', {
+            answers: answers,
+            extra_questions: extraQuestions,
+            provider: provider,
+            model: model,
+        }).then(function(data) {
+            btn.disabled = false;
+            if (data.error) {
+                setStatus('style-api-status', data.error, 'error');
+                return;
+            }
+            pendingStyleContent = data.content;
+            document.getElementById('style-result-preview').textContent = data.content;
+            document.getElementById('style-guide-result').style.display = '';
+            setStatus('style-api-status', 'Generated successfully', 'success');
+        }).catch(function() {
+            btn.disabled = false;
+            setStatus('style-api-status', 'Request failed', 'error');
+        });
     });
 
     // Show LLM prompt for style guide
@@ -870,6 +999,39 @@
         } else {
             area.style.display = 'none';
         }
+    });
+
+    // Generate glossary via API
+    document.getElementById('btn-generate-glossary-api').addEventListener('click', function() {
+        var btn = this;
+        var provider = document.getElementById('glossary-provider').value;
+        var model = document.getElementById('glossary-model').value;
+        btn.disabled = true;
+        setStatus('glossary-api-status', 'Generating glossary...', 'info');
+
+        apiPost('/api/setup/' + PROJECT + '/glossary/generate', {
+            candidates: glossaryCandidates,
+            glossary_guidance: collectGlossaryGuidance(),
+            provider: provider,
+            model: model,
+        }).then(function(data) {
+            btn.disabled = false;
+            if (data.error && !data.terms && !data.raw_text) {
+                setStatus('glossary-api-status', data.error, 'error');
+                return;
+            }
+            if (data.terms) {
+                glossaryProposals = data.terms;
+                renderGlossaryProposals(glossaryProposals);
+                setStatus('glossary-api-status', data.terms.length + ' terms generated', 'success');
+            } else if (data.raw_text) {
+                document.getElementById('glossary-paste').value = data.raw_text;
+                setStatus('glossary-api-status', 'Response was not valid JSON. Pasted raw text for manual editing.', 'error');
+            }
+        }).catch(function() {
+            btn.disabled = false;
+            setStatus('glossary-api-status', 'Request failed', 'error');
+        });
     });
 
     // Parse glossary response
@@ -1247,24 +1409,7 @@
         document.getElementById('batch-modal').classList.remove('visible');
     }
 
-    function populateModelDropdown() {
-        var provider = document.getElementById('batch-provider').value;
-        var modelSelect = document.getElementById('batch-model');
-        modelSelect.innerHTML = '';
-        (MODELS[provider] || []).forEach(function(m) {
-            var opt = document.createElement('option');
-            opt.value = m.id;
-            opt.textContent = m.name;
-            modelSelect.appendChild(opt);
-        });
-    }
-
-    document.getElementById('batch-provider').addEventListener('change', function() {
-        populateModelDropdown();
-        updateBatchCostEstimate();
-    });
-    document.getElementById('batch-model').addEventListener('change', updateBatchCostEstimate);
-    populateModelDropdown();
+    // (provider/model dropdown setup is handled by initAllLLMSelectors)
 
     function updateBatchCostEstimate() {
         var ids = getSelectedChapterIds();
@@ -1497,7 +1642,10 @@
     // Init
     // ========================================================================
 
-    loadSplitPatterns().then(function() { return loadStatus(); }).then(function() {
+    loadLLMConfig().then(function() {
+        initAllLLMSelectors();
+        return loadSplitPatterns();
+    }).then(function() { return loadStatus(); }).then(function() {
         var hash = location.hash.replace('#', '');
         if (hash && stages.indexOf(hash) !== -1) {
             navigateTo(hash);

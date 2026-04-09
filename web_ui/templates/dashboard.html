@@ -230,6 +230,13 @@
             </div>
 
             <div id="style-guide-wizard">
+                <!-- LLM model selector (shared across style guide steps) -->
+                <div class="llm-selector-row" style="margin-bottom:16px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <label style="font-weight:600; font-size:13px;">LLM:</label>
+                    <select id="style-provider" class="llm-provider-select" style="padding:4px 8px;"></select>
+                    <select id="style-model" class="llm-model-select" style="padding:4px 8px;"></select>
+                </div>
+
                 <!-- Step 1: Fixed Questions -->
                 <div class="setup-section">
                     <h2>1. Answer Style Questions</h2>
@@ -263,6 +270,11 @@
                     <h2>2. Additional Questions from Text (Optional)</h2>
                     <p class="section-hint">Generate text-specific questions via LLM, or skip to use only the fixed questions above.</p>
 
+                    <div class="action-row" style="margin-bottom:8px;">
+                        <button class="btn-primary" id="btn-generate-questions-api">Generate via API</button>
+                        <span class="status-msg" id="questions-api-status"></span>
+                    </div>
+
                     <div class="prompt-block">
                         <button class="btn-secondary" id="btn-show-questions-prompt">Show Prompt to Copy</button>
                         <div class="prompt-area" id="questions-prompt-area" style="display:none">
@@ -284,8 +296,10 @@
                 <div class="setup-section">
                     <h2>3. Generate Style Guide</h2>
 
-                    <div class="action-row">
-                        <button class="btn-primary" id="btn-generate-fallback">Generate from Answers (no LLM)</button>
+                    <div class="action-row" style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-primary" id="btn-generate-style-api">Generate via API</button>
+                        <button class="btn-secondary" id="btn-generate-fallback">Generate from Answers (no LLM)</button>
+                        <span class="status-msg" id="style-api-status"></span>
                     </div>
 
                     <div class="prompt-block">
@@ -351,6 +365,17 @@
                 <!-- Step 3: Bootstrap via LLM -->
                 <div class="setup-section">
                     <h2>3. Bootstrap Translations via LLM</h2>
+
+                    <div class="llm-selector-row" style="margin-bottom:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        <label style="font-weight:600; font-size:13px;">LLM:</label>
+                        <select id="glossary-provider" class="llm-provider-select" style="padding:4px 8px;"></select>
+                        <select id="glossary-model" class="llm-model-select" style="padding:4px 8px;"></select>
+                    </div>
+
+                    <div class="action-row" style="margin-bottom:8px;">
+                        <button class="btn-primary" id="btn-generate-glossary-api">Generate via API</button>
+                        <span class="status-msg" id="glossary-api-status"></span>
+                    </div>
 
                     <div class="prompt-block">
                         <button class="btn-secondary" id="btn-show-glossary-prompt">Show Prompt to Copy</button>
@@ -477,10 +502,7 @@
 
         <div class="dash-field">
             <label>Provider</label>
-            <select id="batch-provider">
-                <option value="anthropic">Anthropic (Claude)</option>
-                <option value="openai">OpenAI (GPT)</option>
-            </select>
+            <select id="batch-provider"></select>
         </div>
         <div class="dash-field">
             <label>Model</label>

@@ -39,6 +39,14 @@ from src.translator import extract_previous_chapter_context
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # For session management
 
+
+def _strip_json_fences(text: str) -> str:
+    """Strip markdown code fences from LLM output before JSON parsing."""
+    text = text.strip()
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text)
+    return text.strip()
+
 # In-memory session storage (simple approach for local-only use)
 translation_sessions = {}
 
@@ -672,6 +680,28 @@ def set_language():
 
 
 # ============================================================================
+# LLM config endpoint
+# ============================================================================
+
+
+@app.route("/api/llm-config")
+def api_llm_config():
+    """Return the LLM provider/model config for the frontend.
+
+    Strips ``api_key_env_var`` for security and adds an ``available``
+    flag per provider indicating whether the API key is set.
+    """
+    import os, copy
+    from src.api_translator import load_llm_config
+
+    config = copy.deepcopy(load_llm_config())
+    for provider in config.get("providers", []):
+        env_var = provider.pop("api_key_env_var", None)
+        provider["available"] = bool(os.getenv(env_var)) if env_var else False
+    return jsonify(config)
+
+
+# ============================================================================
 # Setup routes — style guide wizard + glossary bootstrap
 # ============================================================================
 
@@ -851,6 +881,119 @@ def setup_save_glossary(project_id):
         glossary = proposals_to_glossary(terms)
         _save_glossary(glossary, glossary_path)
         return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
+
+
+# ============================================================================
+# Generate via API endpoints (direct LLM calls from the UI)
+# ============================================================================
+
+
+@app.route("/api/setup/<project_id>/questions/generate", methods=["POST"])
+def setup_questions_generate(project_id):
+    """Generate additional style-guide questions via LLM (direct API call)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.style_guide_wizard import load_fixed_questions, build_question_prompt, load_source_sample
+    from src.api_translator import call_llm
+
+    data = request.get_json()
+    answers = data.get("answers", {})
+    answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
+    provider = data.get("provider", "anthropic")
+    model = data.get("model")
+
+    fixed_questions = load_fixed_questions()
+    source_text = load_source_sample(project_dir)
+    target_lang = data.get("target_lang", "Spanish")
+    locale = data.get("locale", "mx")
+
+    prompt = build_question_prompt(source_text, target_lang, locale, fixed_questions, answers)
+
+    try:
+        result = call_llm(prompt, provider=provider, model=model)
+        # Try to parse as JSON
+        questions = json.loads(_strip_json_fences(result))
+        return jsonify({"questions": questions})
+    except json.JSONDecodeError:
+        return jsonify({"raw_text": result, "error": "LLM response was not valid JSON."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/setup/<project_id>/style-guide/generate", methods=["POST"])
+def setup_style_guide_generate(project_id):
+    """Generate a style guide via LLM (direct API call)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.style_guide_wizard import load_fixed_questions, build_style_guide_prompt, load_source_sample
+    from src.api_translator import call_llm
+
+    data = request.get_json()
+    answers = data.get("answers", {})
+    answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
+    extra_questions = data.get("extra_questions", [])
+    provider = data.get("provider", "anthropic")
+    model = data.get("model")
+
+    fixed_questions = load_fixed_questions()
+    all_questions = fixed_questions + extra_questions
+    source_text = load_source_sample(project_dir)
+    target_lang = data.get("target_lang", "Spanish")
+    locale = data.get("locale", "mx")
+
+    prompt = build_style_guide_prompt(all_questions, answers, source_text, target_lang, locale)
+
+    try:
+        content = call_llm(prompt, provider=provider, model=model)
+        return jsonify({"content": content})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/setup/<project_id>/glossary/generate", methods=["POST"])
+def setup_glossary_generate(project_id):
+    """Generate glossary translations via LLM (direct API call)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.glossary_bootstrap import build_glossary_prompt
+    from src.style_guide_wizard import load_source_sample
+    from src.api_translator import call_llm
+
+    data = request.get_json()
+    candidates = data.get("candidates", [])
+    target_lang = data.get("target_lang", "Spanish")
+    glossary_guidance = data.get("glossary_guidance", "")
+    provider = data.get("provider", "anthropic")
+    model = data.get("model")
+
+    # Load style guide if exists
+    style_content = ""
+    style_path = project_dir / "style.json"
+    if style_path.exists():
+        try:
+            sg = load_style_guide(style_path)
+            style_content = sg.content
+        except Exception:
+            pass
+
+    source_text = load_source_sample(project_dir)
+    prompt = build_glossary_prompt(candidates, source_text, style_content, target_lang, glossary_guidance)
+
+    try:
+        result = call_llm(prompt, provider=provider, model=model, max_tokens=8192)
+        # Try to parse as JSON
+        terms = json.loads(_strip_json_fences(result))
+        return jsonify({"terms": terms})
+    except json.JSONDecodeError:
+        return jsonify({"raw_text": result, "error": "LLM response was not valid JSON. Showing raw text for manual editing."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/projects/create", methods=["POST"])
