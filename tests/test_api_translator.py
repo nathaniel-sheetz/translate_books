@@ -259,56 +259,49 @@ def test_call_openai_api_rate_limit():
 # ============================================================================
 
 
-@patch('src.api_translator.call_anthropic_api')
-def test_translate_chunk_realtime_anthropic(mock_call_api, sample_chunk):
+@patch('src.api_translator._dispatch_llm_call')
+def test_translate_chunk_realtime_anthropic(mock_dispatch, sample_chunk):
     """Test real-time translation with Anthropic."""
-    # Mock API response
-    mock_call_api.return_value = "Es una verdad universalmente reconocida que un hombre soltero en posesión de una gran fortuna debe estar necesitado de esposa."
+    mock_dispatch.return_value = "Es una verdad universalmente reconocida que un hombre soltero en posesión de una gran fortuna debe estar necesitado de esposa."
 
-    # Translate
     updated_chunk = translate_chunk_realtime(
         chunk=sample_chunk,
         provider='anthropic',
         model='claude-3-5-sonnet-20241022'
     )
 
-    # Verify
     assert updated_chunk.translated_text is not None
     assert "verdad universalmente reconocida" in updated_chunk.translated_text
     assert updated_chunk.status == ChunkStatus.TRANSLATED
     assert updated_chunk.translated_at is not None
-    mock_call_api.assert_called_once()
+    mock_dispatch.assert_called_once()
 
 
-@patch('src.api_translator.call_openai_api')
-def test_translate_chunk_realtime_openai(mock_call_api, sample_chunk):
+@patch('src.api_translator._dispatch_llm_call')
+def test_translate_chunk_realtime_openai(mock_dispatch, sample_chunk):
     """Test real-time translation with OpenAI."""
-    # Mock API response
-    mock_call_api.return_value = "Es una verdad universalmente reconocida..."
+    mock_dispatch.return_value = "Es una verdad universalmente reconocida..."
 
-    # Translate
     updated_chunk = translate_chunk_realtime(
         chunk=sample_chunk,
         provider='openai',
         model='gpt-4o'
     )
 
-    # Verify
     assert updated_chunk.translated_text is not None
     assert updated_chunk.status == ChunkStatus.TRANSLATED
-    mock_call_api.assert_called_once()
+    mock_dispatch.assert_called_once()
 
 
-@patch('src.api_translator.call_anthropic_api')
-def test_translate_chunk_with_retry(mock_call_api, sample_chunk):
+@patch('src.api_translator._dispatch_llm_call')
+def test_translate_chunk_with_retry(mock_dispatch, sample_chunk):
     """Test retry logic on temporary failure."""
-    # First call fails, second succeeds
-    mock_call_api.side_effect = [
+    mock_dispatch.side_effect = [
         RateLimitError("Rate limit"),
         "Es una verdad universalmente reconocida..."
     ]
 
-    with patch('time.sleep'):  # Don't actually sleep in tests
+    with patch('time.sleep'):
         updated_chunk = translate_chunk_realtime(
             chunk=sample_chunk,
             provider='anthropic',
@@ -317,16 +310,15 @@ def test_translate_chunk_with_retry(mock_call_api, sample_chunk):
         )
 
     assert updated_chunk.translated_text is not None
-    assert mock_call_api.call_count == 2
+    assert mock_dispatch.call_count == 2
 
 
-@patch('src.api_translator.call_anthropic_api')
-def test_translate_chunk_max_retries_exceeded(mock_call_api, sample_chunk):
+@patch('src.api_translator._dispatch_llm_call')
+def test_translate_chunk_max_retries_exceeded(mock_dispatch, sample_chunk):
     """Test failure after max retries."""
-    # All calls fail
-    mock_call_api.side_effect = RateLimitError("Rate limit")
+    mock_dispatch.side_effect = RateLimitError("Rate limit")
 
-    with patch('time.sleep'):  # Don't actually sleep in tests
+    with patch('time.sleep'):
         with pytest.raises(RateLimitError):
             translate_chunk_realtime(
                 chunk=sample_chunk,
@@ -335,7 +327,7 @@ def test_translate_chunk_max_retries_exceeded(mock_call_api, sample_chunk):
                 max_retries=3
             )
 
-    assert mock_call_api.call_count == 3
+    assert mock_dispatch.call_count == 3
 
 
 # ============================================================================

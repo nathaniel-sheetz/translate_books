@@ -1,8 +1,10 @@
 """
-API-based translation using Anthropic Claude or OpenAI GPT models.
+API-based translation using Anthropic Claude, OpenAI GPT, or any
+OpenAI-compatible provider (DeepInfra, Together, Groq, etc.).
 
 This module provides functions to translate chunks using AI APIs in both
-real-time and batch modes.
+real-time and batch modes.  Provider and model configuration is loaded from
+``llm_config.json`` at the project root.
 """
 
 import json
@@ -10,7 +12,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -20,30 +22,100 @@ from src.utils.file_io import render_prompt, load_prompt_template, format_glossa
 # Load environment variables from .env file
 load_dotenv()
 
-# API Provider types
-Provider = Literal["anthropic", "openai"]
+# Provider is now a plain string (validated against llm_config.json)
+Provider = str
 
+# ---------------------------------------------------------------------------
+# LLM config loading
+# ---------------------------------------------------------------------------
 
-# Pricing per 1M tokens (updated April 2026)
-PRICING_TABLE = {
-    "anthropic": {
-        "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
-        "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
-        "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
-        "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.00},
-    },
-    "openai": {
-        "gpt-4o": {"input": 2.50, "output": 10.00},
-        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    },
+_LLM_CONFIG_CACHE: dict | None = None
+
+_FALLBACK_CONFIG = {
+    "default_provider": "anthropic",
+    "default_model": "claude-sonnet-4-20250514",
+    "providers": [
+        {
+            "id": "anthropic",
+            "name": "Anthropic (Claude)",
+            "type": "anthropic",
+            "api_key_env_var": "ANTHROPIC_API_KEY",
+            "models": [
+                {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "pricing": {"input": 3.00, "output": 15.00}},
+                {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "pricing": {"input": 1.00, "output": 5.00}},
+            ],
+        },
+        {
+            "id": "openai",
+            "name": "OpenAI (GPT)",
+            "type": "openai-compatible",
+            "api_key_env_var": "OPENAI_API_KEY",
+            "base_url": None,
+            "models": [
+                {"id": "gpt-4o", "name": "GPT-4o", "pricing": {"input": 2.50, "output": 10.00}},
+                {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "pricing": {"input": 0.15, "output": 0.60}},
+            ],
+        },
+    ],
 }
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+def load_llm_config(*, force_reload: bool = False) -> dict:
+    """Load LLM provider/model configuration from ``llm_config.json``."""
+    global _LLM_CONFIG_CACHE
+    if _LLM_CONFIG_CACHE is not None and not force_reload:
+        return _LLM_CONFIG_CACHE
+
+    config_path = Path(__file__).resolve().parent.parent / "llm_config.json"
+    if config_path.exists():
+        _LLM_CONFIG_CACHE = json.loads(config_path.read_text(encoding="utf-8"))
+    else:
+        _LLM_CONFIG_CACHE = _FALLBACK_CONFIG
+    return _LLM_CONFIG_CACHE
+
+
+def get_provider_config(provider_id: str) -> dict:
+    """Return the config dict for a specific provider, or raise ValueError."""
+    config = load_llm_config()
+    for p in config["providers"]:
+        if p["id"] == provider_id:
+            return p
+    raise ValueError(f"Unknown provider '{provider_id}'. Check llm_config.json.")
+
+
+def get_default_model() -> str:
+    return load_llm_config().get("default_model", "claude-sonnet-4-20250514")
+
+
+def get_default_provider() -> str:
+    return load_llm_config().get("default_provider", "anthropic")
+
+
+def get_model_pricing(provider_id: str, model_id: str) -> dict:
+    """Return ``{"input": ..., "output": ...}`` for the given provider/model."""
+    try:
+        pconfig = get_provider_config(provider_id)
+    except ValueError:
+        return {"input": 5.00, "output": 15.00}
+    for m in pconfig.get("models", []):
+        if m["id"] == model_id:
+            return m.get("pricing", {"input": 5.00, "output": 15.00})
+    return {"input": 5.00, "output": 15.00}
 
 
 def get_pricing_table() -> dict:
-    """Return the pricing table for all known models."""
-    return PRICING_TABLE
+    """Build and return a ``PRICING_TABLE``-shaped dict from config."""
+    config = load_llm_config()
+    table: dict = {}
+    for p in config["providers"]:
+        table[p["id"]] = {}
+        for m in p.get("models", []):
+            table[p["id"]][m["id"]] = m.get("pricing", {"input": 5.00, "output": 15.00})
+    return table
+
+
+# Keep module-level constant for backward compat in scripts that import it
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
 
 class APIError(Exception):
@@ -67,27 +139,23 @@ class CostLimitError(APIError):
 
 
 def get_api_key(provider: Provider) -> str:
+    """Get API key for *provider* from environment variables.
+
+    The env-var name is read from ``llm_config.json`` (field
+    ``api_key_env_var``).  Falls back to ``<PROVIDER>_API_KEY``.
     """
-    Get API key for the specified provider from environment variables.
+    try:
+        pconfig = get_provider_config(provider)
+        key_var = pconfig.get("api_key_env_var", f"{provider.upper()}_API_KEY")
+    except ValueError:
+        key_var = f"{provider.upper()}_API_KEY"
 
-    Args:
-        provider: API provider ("anthropic" or "openai")
-
-    Returns:
-        API key string
-
-    Raises:
-        APIKeyError: If API key is not found in environment
-    """
-    key_var = f"{provider.upper()}_API_KEY"
     api_key = os.getenv(key_var)
-
     if not api_key:
         raise APIKeyError(
             f"{key_var} not found in environment. "
             f"Please set it in your .env file or environment variables."
         )
-
     return api_key
 
 
@@ -155,11 +223,7 @@ def estimate_cost(
         total_output_tokens_estimate += output_tokens
 
     # Get pricing for this model
-    if provider not in PRICING_TABLE or model not in PRICING_TABLE[provider]:
-        # Unknown model, use conservative estimate
-        model_pricing = {"input": 5.00, "output": 15.00}
-    else:
-        model_pricing = PRICING_TABLE[provider][model]
+    model_pricing = get_model_pricing(provider, model)
 
     # Calculate cost
     input_cost = (total_input_tokens / 1_000_000) * model_pricing["input"]
@@ -184,24 +248,9 @@ def call_anthropic_api(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 4096,
     temperature: float = 0.3,
+    api_key: str | None = None,
 ) -> str:
-    """
-    Call Anthropic Claude API for real-time translation.
-
-    Args:
-        prompt: The translation prompt
-        model: Claude model identifier
-        max_tokens: Maximum tokens to generate
-        temperature: Sampling temperature (0-1)
-
-    Returns:
-        Translated text from Claude
-
-    Raises:
-        APIKeyError: If API key is missing
-        RateLimitError: If rate limit is exceeded
-        APIError: For other API errors
-    """
+    """Call the Anthropic Claude API and return the text response."""
     try:
         import anthropic
     except ImportError:
@@ -210,7 +259,8 @@ def call_anthropic_api(
             "Install it with: pip install anthropic"
         )
 
-    api_key = get_api_key("anthropic")
+    if api_key is None:
+        api_key = get_api_key("anthropic")
     client = anthropic.Anthropic(api_key=api_key)
 
     try:
@@ -242,23 +292,13 @@ def call_openai_api(
     model: str = "gpt-4o",
     max_tokens: int = 4096,
     temperature: float = 0.3,
+    api_key: str | None = None,
+    base_url: str | None = None,
 ) -> str:
-    """
-    Call OpenAI API for real-time translation.
+    """Call an OpenAI-compatible API and return the text response.
 
-    Args:
-        prompt: The translation prompt
-        model: OpenAI model identifier
-        max_tokens: Maximum tokens to generate
-        temperature: Sampling temperature (0-1)
-
-    Returns:
-        Translated text from OpenAI
-
-    Raises:
-        APIKeyError: If API key is missing
-        RateLimitError: If rate limit is exceeded
-        APIError: For other API errors
+    Works with native OpenAI, DeepInfra, Together, Groq, or any endpoint
+    that speaks the OpenAI chat-completions protocol.
     """
     try:
         import openai
@@ -268,8 +308,9 @@ def call_openai_api(
             "Install it with: pip install openai"
         )
 
-    api_key = get_api_key("openai")
-    client = openai.OpenAI(api_key=api_key)
+    if api_key is None:
+        api_key = get_api_key("openai")
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
 
     try:
         response = client.chat.completions.create(
@@ -295,28 +336,49 @@ def call_openai_api(
         raise APIError(f"OpenAI API error: {e}")
 
 
+def _dispatch_llm_call(
+    prompt: str,
+    provider: str,
+    model: str,
+    max_tokens: int = 4096,
+    temperature: float = 0.3,
+) -> str:
+    """Low-level dispatcher — routes a single LLM call to the right SDK."""
+    pconfig = get_provider_config(provider)
+    ptype = pconfig.get("type", provider)
+    api_key = get_api_key(provider)
+
+    if ptype == "anthropic":
+        return call_anthropic_api(prompt, model, max_tokens, temperature, api_key=api_key)
+    elif ptype == "openai-compatible":
+        return call_openai_api(
+            prompt, model, max_tokens, temperature,
+            api_key=api_key, base_url=pconfig.get("base_url"),
+        )
+    else:
+        raise ValueError(f"Unknown provider type '{ptype}' for provider '{provider}'")
+
+
 def call_llm(
     prompt: str,
     provider: Provider = "anthropic",
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_tokens: int = 4096,
     temperature: float = 0.3,
     max_retries: int = 3,
 ) -> str:
     """Call an LLM and return the text response.
 
-    Generic wrapper around call_anthropic_api/call_openai_api with retry logic.
-    Use this for non-translation LLM calls (style wizard, glossary bootstrap, etc.).
+    Generic wrapper with retry logic.  Dispatches to the correct SDK based
+    on the provider's ``type`` field in ``llm_config.json``.
     """
+    if model is None:
+        model = get_default_model()
+
     last_error = None
     for attempt in range(max_retries):
         try:
-            if provider == "anthropic":
-                return call_anthropic_api(prompt, model, max_tokens, temperature)
-            elif provider == "openai":
-                return call_openai_api(prompt, model, max_tokens, temperature)
-            else:
-                raise ValueError(f"Unknown provider: {provider}")
+            return _dispatch_llm_call(prompt, provider, model, max_tokens, temperature)
         except RateLimitError as e:
             last_error = e
             if attempt < max_retries - 1:
@@ -390,44 +452,13 @@ def translate_chunk_realtime(
         if len(parts) > 1:
             prompt = separator + parts[1]
 
-    # Retry logic with exponential backoff
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            # Call appropriate API
-            if provider == "anthropic":
-                translation = call_anthropic_api(prompt, model)
-            elif provider == "openai":
-                translation = call_openai_api(prompt, model)
-            else:
-                raise ValueError(f"Unknown provider: {provider}")
+    # Use call_llm which handles retry + config-based dispatch
+    translation = call_llm(prompt, provider=provider, model=model, max_retries=max_retries)
 
-            # Update chunk with translation
-            chunk.translated_text = translation.strip()
-            chunk.status = ChunkStatus.TRANSLATED
-            chunk.translated_at = datetime.now()
-
-            return chunk
-
-        except RateLimitError as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                # Exponential backoff: 2s, 4s, 8s
-                wait_time = 2 ** (attempt + 1)
-                time.sleep(wait_time)
-            else:
-                raise
-
-        except APIError as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                # Brief wait before retry
-                time.sleep(2)
-            else:
-                raise
-
-    # Should not reach here, but just in case
-    raise last_error or APIError("Translation failed")
+    chunk.translated_text = translation.strip()
+    chunk.status = ChunkStatus.TRANSLATED
+    chunk.translated_at = datetime.now()
+    return chunk
 
 
 # ============================================================================
