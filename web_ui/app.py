@@ -620,6 +620,31 @@ def _get_projects_dir() -> Path:
     return _PROJECT_ROOT / "projects"
 
 
+def _load_project_config(project_id: str) -> dict:
+    """Load per-project config from projects/<id>/project.json."""
+    config_path = _get_projects_dir() / project_id / "project.json"
+    if config_path.exists():
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_project_config(project_id: str, config: dict) -> None:
+    """Save per-project config to projects/<id>/project.json."""
+    config_path = _get_projects_dir() / project_id / "project.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def _project_title(project_id: str) -> str:
+    """Return the display title for a project, falling back to the folder name."""
+    return _load_project_config(project_id).get("title") or project_id
+
+
 def _safe_id(value: str) -> bool:
     """Return False if ID contains path traversal characters."""
     return bool(value) and ".." not in value and "/" not in value and "\\" not in value
@@ -653,47 +678,9 @@ def set_language():
 
 @app.route("/setup/<project_id>")
 def setup_page(project_id):
-    """Render the setup page for a project."""
-    if not _safe_id(project_id):
-        return "Bad request", 400
-    project_dir = _get_projects_dir() / project_id
-    if not project_dir.exists():
-        return "Project not found", 404
-
-    # Load fixed questions
-    from src.style_guide_wizard import load_fixed_questions
-    fixed_questions = load_fixed_questions()
-
-    # Check existing style guide
-    style_path = project_dir / "style.json"
-    existing_style = None
-    if style_path.exists():
-        try:
-            sg = load_style_guide(style_path)
-            existing_style = sg.content
-        except Exception:
-            pass
-
-    # Check existing glossary
-    glossary_path = project_dir / "glossary.json"
-    existing_glossary_count = 0
-    if glossary_path.exists():
-        try:
-            g = load_glossary(glossary_path)
-            existing_glossary_count = len(g.terms)
-        except Exception:
-            pass
-
-    t = _reader_strings()
-    return render_template(
-        "setup.html",
-        project_id=project_id,
-        fixed_questions=fixed_questions,
-        existing_style=existing_style,
-        existing_glossary_count=existing_glossary_count,
-        t=t,
-        lang=_get_ui_lang(),
-    )
+    """Redirect to dashboard style-guide tab."""
+    from flask import redirect
+    return redirect(f"/project/{project_id}#style-guide")
 
 
 @app.route("/api/setup/<project_id>/prompts/questions", methods=["POST"])
@@ -866,6 +853,31 @@ def setup_save_glossary(project_id):
         return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
 
 
+@app.route("/api/projects/create", methods=["POST"])
+def create_project():
+    """Create a blank project directory and return its ID."""
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "Title is required"}), 400
+
+    slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or "project"
+
+    projects_dir = _get_projects_dir()
+    candidate = slug
+    suffix = 2
+    while (projects_dir / candidate).exists():
+        candidate = f"{slug}-{suffix}"
+        suffix += 1
+    project_id = candidate
+
+    project_dir = projects_dir / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    _save_project_config(project_id, {"title": title})
+
+    return jsonify({"id": project_id, "redirect": f"/project/{project_id}"})
+
+
 @app.route("/read/")
 def reader_projects():
     """List available projects with status dashboard."""
@@ -918,8 +930,10 @@ def reader_projects():
                 except (json.JSONDecodeError, OSError):
                     pass
 
+        proj_config = _load_project_config(proj_dir.name)
         projects.append({
             "id": proj_dir.name,
+            "title": proj_config.get("title") or proj_dir.name,
             "chapter_count": alignment_count,
             "has_style_guide": has_style_guide,
             "glossary_count": glossary_count,
@@ -997,7 +1011,8 @@ def reader_chapters(project_id):
 
     return render_template(
         "reader.html", mode="chapters",
-        project_id=project_id, chapters=chapters,
+        project_id=project_id, project_title=_project_title(project_id),
+        chapters=chapters,
         has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
     )
 
@@ -1024,7 +1039,8 @@ def reader_view(project_id, chapter):
 
     return render_template(
         "reader.html", mode="read",
-        project_id=project_id, chapter=chapter, t=t, lang=_get_ui_lang(),
+        project_id=project_id, project_title=_project_title(project_id),
+        chapter=chapter, t=t, lang=_get_ui_lang(),
         prev_chapter=prev_chapter, next_chapter=next_chapter,
     )
 
@@ -1506,6 +1522,988 @@ def apply_corrections(project_id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# Dashboard routes — unified project workflow
+# ============================================================================
+
+
+def _get_project_status(project_id: str) -> dict:
+    """Scan filesystem to derive full project status."""
+    project_dir = _get_projects_dir() / project_id
+
+    status = {
+        "project_id": project_id,
+        "has_source": False,
+        "source_words": 0,
+        "source_size": 0,
+        "source_preview": "",
+        "chapter_count": 0,
+        "chapters": [],
+        "total_chunks": 0,
+        "translated_chunks": 0,
+        "has_style_guide": False,
+        "style_guide_content": None,
+        "glossary_count": 0,
+        "alignment_count": 0,
+    }
+
+    # Source
+    source_path = project_dir / "source.txt"
+    if source_path.exists():
+        status["has_source"] = True
+        status["source_size"] = source_path.stat().st_size
+        text = source_path.read_text(encoding="utf-8")
+        status["source_words"] = len(text.split())
+        status["source_preview"] = text[:500]
+
+    # Gutenberg metadata (for provenance + Stage 2 auto-populate)
+    config = _load_project_config(project_id)
+    status["gutenberg_url"] = config.get("gutenberg_url")
+    status["suggested_split_pattern"] = config.get("suggested_split_pattern")
+
+    # Style guide
+    style_path = project_dir / "style.json"
+    if style_path.exists():
+        status["has_style_guide"] = True
+        try:
+            sg = load_style_guide(style_path)
+            status["style_guide_content"] = sg.content
+        except Exception:
+            pass
+
+    # Glossary
+    glossary_path = project_dir / "glossary.json"
+    if glossary_path.exists():
+        try:
+            g = load_glossary(glossary_path)
+            status["glossary_count"] = len(g.terms)
+        except Exception:
+            pass
+
+    # Chapters + chunks
+    chapters_dir = project_dir / "chapters"
+    chunks_dir = project_dir / "chunks"
+    align_dir = project_dir / "alignments"
+
+    # Load annotations for review info
+    annotations_by_chapter = {}
+    ann_path = project_dir / "annotations.jsonl"
+    if ann_path.exists():
+        try:
+            with open(ann_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    ann = json.loads(line)
+                    ch = ann.get("chapter_id", "")
+                    if ch:
+                        annotations_by_chapter[ch] = annotations_by_chapter.get(ch, 0) + 1
+        except Exception:
+            pass
+
+    # Reviewed chapters
+    reviewed_chapters = set()
+    reviewed_path = project_dir / "reviewed.json"
+    if reviewed_path.exists():
+        try:
+            with open(reviewed_path, "r", encoding="utf-8") as f:
+                reviewed_chapters = set(json.load(f))
+        except Exception:
+            pass
+
+    # Build chunk index: chapter_id -> {total, translated}
+    chunk_index = {}
+    if chunks_dir.exists():
+        for cf in sorted(chunks_dir.glob("*_chunk_*.json")):
+            try:
+                with open(cf, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                chapter_id = cdata.get("chapter_id", "")
+                if chapter_id not in chunk_index:
+                    chunk_index[chapter_id] = {"total": 0, "translated": 0}
+                chunk_index[chapter_id]["total"] += 1
+                status["total_chunks"] += 1
+                if cdata.get("translated_text"):
+                    chunk_index[chapter_id]["translated"] += 1
+                    status["translated_chunks"] += 1
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    if chapters_dir.exists():
+        for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
+            ch_id = ch_file.stem
+            text = ch_file.read_text(encoding="utf-8")
+            words = len(text.split())
+            chunk_info = chunk_index.get(ch_id, {"total": 0, "translated": 0})
+
+            # Alignment info
+            has_alignment = (align_dir / f"{ch_id}.json").exists() if align_dir.exists() else False
+            alignment_confidence = None
+            if has_alignment:
+                status["alignment_count"] += 1
+                try:
+                    with open(align_dir / f"{ch_id}.json", "r", encoding="utf-8") as f:
+                        adata = json.load(f)
+                    scores = [p.get("score", 1.0) for p in adata.get("pairs", [])]
+                    alignment_confidence = round(sum(scores) / len(scores) * 100) if scores else None
+                except Exception:
+                    pass
+
+            status["chapters"].append({
+                "id": ch_id,
+                "name": ch_id.replace("_", " ").title(),
+                "words": words,
+                "preview": text[:200],
+                "chunk_count": chunk_info["total"],
+                "translated_count": chunk_info["translated"],
+                "has_alignment": has_alignment,
+                "alignment_confidence": alignment_confidence,
+                "annotation_count": annotations_by_chapter.get(ch_id, 0),
+                "reviewed": ch_id in reviewed_chapters,
+            })
+
+    status["chapter_count"] = len(status["chapters"])
+    return status
+
+
+@app.route("/project/<project_id>")
+def dashboard_page(project_id):
+    """Render the unified project dashboard."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return "Project not found", 404
+
+    from src.style_guide_wizard import load_fixed_questions
+    fixed_questions = load_fixed_questions()
+    t = _reader_strings()
+
+    return render_template(
+        "dashboard.html",
+        project_id=project_id,
+        project_title=_project_title(project_id),
+        fixed_questions=fixed_questions,
+        t=t,
+        lang=_get_ui_lang(),
+    )
+
+
+@app.route("/api/project/<project_id>/status")
+def project_status(project_id):
+    """Return full project status as JSON."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify(_get_project_status(project_id))
+
+
+@app.route("/api/project/<project_id>/config", methods=["GET"])
+def project_config_get(project_id):
+    """Return per-project configuration."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    return jsonify(_load_project_config(project_id))
+
+
+@app.route("/api/project/<project_id>/config", methods=["POST"])
+def project_config_save(project_id):
+    """Save per-project configuration."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    data = request.get_json() or {}
+    # Merge with existing config so callers can do partial updates
+    config = _load_project_config(project_id)
+    config.update({k: v for k, v in data.items() if k in ("title",)})
+    _save_project_config(project_id, config)
+    return jsonify({"ok": True, "config": config})
+
+
+@app.route("/api/project/<project_id>/ingest", methods=["POST"])
+def project_ingest(project_id):
+    """Upload/paste source text."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    data = request.json or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    source_path = project_dir / "source.txt"
+    source_path.write_text(text, encoding="utf-8")
+    return jsonify({"ok": True, "words": len(text.split())})
+
+
+@app.route("/api/project/<project_id>/ingest-gutenberg", methods=["POST"])
+def project_ingest_gutenberg(project_id):
+    """Import a Project Gutenberg HTML page as source text."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+
+    download_images = data.get("download_images", True)
+
+    try:
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "ingest_gutenberg",
+            Path(__file__).parent.parent / "scripts" / "ingest_gutenberg.py",
+        )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        fetch_html = _mod.fetch_html
+        find_book_body = _mod.find_book_body
+        Converter = _mod.Converter
+        build_chapter_report = _mod.build_chapter_report
+        suggest_split_pattern = _mod.suggest_split_pattern
+        from bs4 import BeautifulSoup
+
+        project_dir = _get_projects_dir() / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        images_dir = project_dir / "images"
+
+        html, base_url = fetch_html(url)
+        soup = BeautifulSoup(html, "html.parser")
+        body = find_book_body(soup)
+
+        converter = Converter(base_url, images_dir, download_images)
+        text = converter.convert(body)
+        total_words = len(text.split())
+
+        source_path = project_dir / "source.txt"
+        source_path.write_text(text, encoding="utf-8")
+
+        report = build_chapter_report(converter.chapters, total_words)
+        pattern = suggest_split_pattern(converter.chapters)
+
+        # Save metadata into project config
+        config = _load_project_config(project_id)
+        config["gutenberg_url"] = url
+        config["suggested_split_pattern"] = pattern
+        config["gutenberg_chapter_report"] = report
+        _save_project_config(project_id, config)
+
+        return jsonify({
+            "ok": True,
+            "words": total_words,
+            "chapter_report": report,
+            "suggested_pattern": pattern,
+            "images_downloaded": converter._images_downloaded,
+            "images_skipped": converter._images_skipped,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/split-patterns", methods=["GET"])
+def get_split_patterns():
+    """Return available split pattern definitions for the UI."""
+    from src.book_splitter import get_pattern_definitions
+    patterns = get_pattern_definitions()
+    patterns["custom"] = {
+        "label": "Custom regex",
+        "numbering": "sequential",
+    }
+    return jsonify({"patterns": patterns})
+
+
+@app.route("/api/project/<project_id>/split/preview", methods=["POST"])
+def project_split_preview(project_id):
+    """Preview chapter splits without writing files."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    source_path = project_dir / "source.txt"
+    if not source_path.exists():
+        return jsonify({"error": "No source.txt found"}), 404
+
+    try:
+        from src.book_splitter import split_book_into_chapters
+        data = request.json or {}
+        text = source_path.read_text(encoding="utf-8")
+        chapters = split_book_into_chapters(
+            text,
+            pattern_type=data.get("pattern_type", "roman"),
+            custom_regex=data.get("custom_regex"),
+            min_chapter_size=data.get("min_chapter_size", 500),
+        )
+        result = []
+        for ch in chapters:
+            result.append({
+                "name": ch.chapter_title or f"Chapter {ch.chapter_number}",
+                "words": len(ch.content.split()),
+                "preview": ch.content[:200],
+            })
+        return jsonify({"chapters": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/split", methods=["POST"])
+def project_split(project_id):
+    """Execute chapter split and write files."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    source_path = project_dir / "source.txt"
+    if not source_path.exists():
+        return jsonify({"error": "No source.txt found"}), 404
+
+    try:
+        from src.book_splitter import save_chapters_to_files, split_book_into_chapters
+        data = request.json or {}
+        text = source_path.read_text(encoding="utf-8")
+        chapters = split_book_into_chapters(
+            text,
+            pattern_type=data.get("pattern_type", "roman"),
+            custom_regex=data.get("custom_regex"),
+            min_chapter_size=data.get("min_chapter_size", 500),
+        )
+        chapters_dir = project_dir / "chapters"
+        save_chapters_to_files(chapters, chapters_dir)
+        return jsonify({"ok": True, "chapter_count": len(chapters)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/chunk-all", methods=["POST"])
+def project_chunk_all(project_id):
+    """Chunk all (or selected) chapters."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    chapters_dir = project_dir / "chapters"
+    if not chapters_dir.exists():
+        return jsonify({"error": "No chapters directory"}), 404
+
+    try:
+        from src.chunker import chunk_chapter
+        from src.models import ChunkingConfig
+        from src.utils.file_io import save_chunk
+
+        data = request.json or {}
+        config = ChunkingConfig(
+            target_size=data.get("target_size", 2000),
+            overlap_paragraphs=data.get("overlap_paragraphs", 2),
+            min_overlap_words=data.get("min_overlap_words", 100),
+        )
+
+        chunks_dir = project_dir / "chunks"
+        chunks_dir.mkdir(exist_ok=True)
+
+        total_chunks = 0
+        for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
+            chapter_id = ch_file.stem
+            text = ch_file.read_text(encoding="utf-8")
+            chunks = chunk_chapter(text, config, chapter_id)
+            for chunk in chunks:
+                save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
+                total_chunks += 1
+
+        return jsonify({"ok": True, "total_chunks": total_chunks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/chapters/<chapter_id>/chunks")
+def project_chapter_chunks(project_id, chapter_id):
+    """List chunks for a chapter with status."""
+    if not _safe_id(project_id) or not _safe_id(chapter_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    chunks_dir = _get_projects_dir() / project_id / "chunks"
+    if not chunks_dir.exists():
+        return jsonify({"error": "No chunks directory"}), 404
+
+    chunks = []
+    for cf in sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json")):
+        try:
+            chunk = load_chunk(cf)
+            chunks.append({
+                "id": chunk.id,
+                "position": chunk.position,
+                "word_count": chunk.metadata.word_count if chunk.metadata else len(chunk.source_text.split()),
+                "source_text": chunk.source_text,
+                "translated_text": chunk.translated_text or "",
+                "has_translation": bool(chunk.translated_text and chunk.translated_text.strip()),
+            })
+        except Exception:
+            pass
+
+    return jsonify({"chunks": chunks})
+
+
+@app.route("/api/project/<project_id>/chunks/<chunk_id>/prompt")
+def project_chunk_prompt(project_id, chunk_id):
+    """Get the rendered translation prompt for a chunk."""
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    try:
+        chunk = load_chunk(chunk_path)
+        template = load_prompt_template()
+
+        # Load glossary and style guide
+        glossary = None
+        style_guide = None
+        glossary_path = project_dir / "glossary.json"
+        style_path = project_dir / "style.json"
+        if glossary_path.exists():
+            try:
+                glossary = load_glossary(glossary_path)
+            except Exception:
+                pass
+        if style_path.exists():
+            try:
+                style_guide = load_style_guide(style_path)
+            except Exception:
+                pass
+
+        # Previous chunk context
+        from src.utils.file_io import filter_glossary_for_chunk
+        from src.translator import extract_previous_chapter_context
+
+        chunks_dir = project_dir / "chunks"
+        chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
+        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        prev_context = ""
+        for i, cf in enumerate(chunk_files):
+            if cf.stem == chunk_id and i > 0:
+                prev_chunk = load_chunk(chunk_files[i - 1])
+                prev_context = extract_previous_chapter_context(
+                    prev_chunk.source_text,
+                    previous_translated_text=prev_chunk.translated_text,
+                    context_language="both",
+                    min_paragraphs=3,
+                    min_chars=200,
+                    source_language="English",
+                    target_language="Spanish",
+                )
+                break
+
+        # Filter glossary for this chunk
+        chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+
+        variables = {
+            "book_title": _project_title(project_id),
+            "source_text": chunk.source_text,
+            "target_language": "Spanish",
+            "source_language": "English",
+            "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
+            "style_guide": style_guide.content if style_guide else "No style guide provided.",
+            "context": "",
+            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+            "previous_chapter_context": prev_context,
+        }
+
+        rendered = render_prompt(template, variables)
+        separator = "=" * 80
+        if separator in rendered:
+            parts = rendered.split(separator, 1)
+            if len(parts) > 1:
+                rendered = separator + parts[1]
+
+        return jsonify({"prompt": rendered})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/chunks/<chunk_id>/translate", methods=["POST"])
+def project_chunk_translate(project_id, chunk_id):
+    """Save a manual translation for a chunk."""
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    data = request.json or {}
+    translated_text = data.get("translated_text", "").strip()
+    if not translated_text:
+        return jsonify({"error": "No translation text"}), 400
+
+    try:
+        chunk = load_chunk(chunk_path)
+        chunk_data = chunk.model_dump()
+        chunk_data["translated_text"] = translated_text
+        chunk_data["status"] = ChunkStatus.TRANSLATED
+        chunk_data["translated_at"] = datetime.now()
+        updated = Chunk(**chunk_data)
+        save_chunk(updated, chunk_path)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/translate/cost-estimate", methods=["POST"])
+def project_translate_cost_estimate(project_id):
+    """Estimate translation cost for selected chapters."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    data = request.json or {}
+    chapter_ids = data.get("chapter_ids", [])
+    provider = data.get("provider", "anthropic")
+    model = data.get("model", "")
+
+    try:
+        from src.api_translator import estimate_cost
+
+        chunks_dir = project_dir / "chunks"
+        chunks = []
+        for ch_id in chapter_ids:
+            for cf in sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")):
+                chunk = load_chunk(cf)
+                if not chunk.translated_text or not chunk.translated_text.strip():
+                    chunks.append(chunk)
+
+        if not chunks:
+            return jsonify({"chunk_count": 0, "estimated_cost": 0})
+
+        # Load glossary and style guide for accurate estimation
+        glossary = None
+        style_guide = None
+        glossary_path = project_dir / "glossary.json"
+        style_path = project_dir / "style.json"
+        if glossary_path.exists():
+            try:
+                glossary = load_glossary(glossary_path)
+            except Exception:
+                pass
+        if style_path.exists():
+            try:
+                style_guide = load_style_guide(style_path)
+            except Exception:
+                pass
+
+        from src.api_translator import DEFAULT_MODEL
+        result = estimate_cost(chunks, provider=provider, model=model or DEFAULT_MODEL,
+                               glossary=glossary, style_guide=style_guide)
+        return jsonify({
+            "chunk_count": len(chunks),
+            "estimated_cost": result.get("cost_usd", 0),
+            "total_tokens": result.get("input_tokens", 0),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/translate/realtime", methods=["POST"])
+def project_translate_realtime(project_id):
+    """Translate a single chunk via API."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    data = request.json or {}
+    chunk_id = data.get("chunk_id", "")
+
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    try:
+        from src.api_translator import translate_chunk_realtime
+
+        chunk = load_chunk(chunk_path)
+
+        glossary = None
+        style_guide = None
+        glossary_path = project_dir / "glossary.json"
+        style_path = project_dir / "style.json"
+        if glossary_path.exists():
+            try:
+                glossary = load_glossary(glossary_path)
+            except Exception:
+                pass
+        if style_path.exists():
+            try:
+                style_guide = load_style_guide(style_path)
+            except Exception:
+                pass
+
+        provider = data.get("provider", "anthropic")
+        model = data.get("model", None)
+
+        translated = translate_chunk_realtime(
+            chunk=chunk,
+            provider=provider,
+            model=model,
+            glossary=glossary,
+            style_guide=style_guide,
+            project_name=_project_title(project_id),
+            source_language="English",
+            target_language="Spanish",
+        )
+
+        save_chunk(translated, chunk_path)
+        return jsonify({
+            "ok": True,
+            "translated_text": translated.translated_text,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Batch translation with SSE ──
+
+import queue
+import threading
+import uuid
+
+_batch_jobs = {}  # job_id -> {"queue": Queue, "thread": Thread, "status": str}
+
+
+@app.route("/api/project/<project_id>/translate/batch", methods=["POST"])
+def project_translate_batch(project_id):
+    """Start batch translation. Returns job_id for SSE tracking."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    data = request.json or {}
+    chapter_ids = data.get("chapter_ids", [])
+    provider = data.get("provider", "anthropic")
+    model = data.get("model", None)
+
+    # Collect untranslated chunks
+    chunks_dir = project_dir / "chunks"
+    chunk_paths = []
+    for ch_id in chapter_ids:
+        for cf in sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")):
+            chunk = load_chunk(cf)
+            if not chunk.translated_text or not chunk.translated_text.strip():
+                chunk_paths.append(cf)
+
+    if not chunk_paths:
+        return jsonify({"error": "No untranslated chunks found"}), 400
+
+    # Load glossary and style guide
+    glossary = None
+    style_guide = None
+    glossary_path = project_dir / "glossary.json"
+    style_path = project_dir / "style.json"
+    if glossary_path.exists():
+        try:
+            glossary = load_glossary(glossary_path)
+        except Exception:
+            pass
+    if style_path.exists():
+        try:
+            style_guide = load_style_guide(style_path)
+        except Exception:
+            pass
+
+    job_id = str(uuid.uuid4())[:8]
+    job_queue = queue.Queue()
+
+    def run_batch():
+        from src.api_translator import translate_chunk_realtime
+        for cp in chunk_paths:
+            try:
+                chunk = load_chunk(cp)
+                job_queue.put(json.dumps({
+                    "event": "chunk_started",
+                    "chunk_id": chunk.id,
+                    "chapter_id": chunk.chapter_id,
+                }))
+                translated = translate_chunk_realtime(
+                    chunk=chunk,
+                    provider=provider,
+                    model=model,
+                    glossary=glossary,
+                    style_guide=style_guide,
+                    project_name=_project_title(project_id),
+                    source_language="English",
+                    target_language="Spanish",
+                )
+                save_chunk(translated, cp)
+                job_queue.put(json.dumps({
+                    "event": "chunk_done",
+                    "chunk_id": chunk.id,
+                    "chapter_id": chunk.chapter_id,
+                }))
+            except Exception as e:
+                job_queue.put(json.dumps({
+                    "event": "chunk_error",
+                    "chunk_id": chunk.id if chunk else "",
+                    "error": str(e),
+                }))
+        job_queue.put(json.dumps({"event": "batch_complete"}))
+
+    t = threading.Thread(target=run_batch, daemon=True)
+    _batch_jobs[job_id] = {"queue": job_queue, "thread": t, "status": "running"}
+    t.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "total_chunks": len(chunk_paths),
+    })
+
+
+@app.route("/api/project/<project_id>/translate/sse")
+def project_translate_sse(project_id):
+    """SSE endpoint for batch translation progress."""
+    job_id = request.args.get("job_id", "")
+    if job_id not in _batch_jobs:
+        return "Job not found", 404
+
+    job = _batch_jobs[job_id]
+
+    def generate():
+        while True:
+            try:
+                msg = job["queue"].get(timeout=30)
+                data = json.loads(msg)
+                event_type = data.get("event", "message")
+                yield f"event: {event_type}\ndata: {msg}\n\n"
+                if event_type == "batch_complete":
+                    job["status"] = "complete"
+                    break
+            except queue.Empty:
+                yield ": keepalive\n\n"
+
+    from flask import Response
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/project/<project_id>/combine/<chapter_id>", methods=["POST"])
+def project_combine(project_id, chapter_id):
+    """Combine translated chunks back into a chapter file."""
+    if not _safe_id(project_id) or not _safe_id(chapter_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    chunks_dir = project_dir / "chunks"
+
+    try:
+        from src.combiner import combine_chunks
+
+        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        chunks = [load_chunk(cf) for cf in chunk_files]
+
+        if not chunks:
+            return jsonify({"error": "No chunks found"}), 404
+
+        combined_text = combine_chunks(chunks)
+        chapters_dir = project_dir / "chapters"
+        chapters_dir.mkdir(exist_ok=True)
+        (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/align/<chapter_id>", methods=["POST"])
+def project_align(project_id, chapter_id):
+    """Combine chunks and run sentence alignment for a chapter."""
+    if not _safe_id(project_id) or not _safe_id(chapter_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    chunks_dir = project_dir / "chunks"
+
+    try:
+        from src.sentence_aligner import align_chapter_chunks
+
+        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        if not chunk_files:
+            return jsonify({"error": "No chunks found"}), 404
+
+        align_dir = project_dir / "alignments"
+        align_dir.mkdir(exist_ok=True)
+        output_path = align_dir / f"{chapter_id}.json"
+
+        result = align_chapter_chunks(
+            chunk_paths=[str(cf) for cf in chunk_files],
+            project_id=project_id,
+            chapter_id=chapter_id,
+            source_lang="en",
+            target_lang="es",
+            output_path=str(output_path),
+        )
+
+        return jsonify({"ok": True, "pairs": len(result.get("pairs", []))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/epub-status")
+def epub_status(project_id):
+    """Return epub readiness: which chapters are fully translated."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    chunks_dir = project_dir / "chunks"
+    chapters_dir = project_dir / "chapters"
+
+    # Build per-chapter translation completeness from chunks
+    chunk_index = {}  # chapter_id -> {total, translated}
+    if chunks_dir.exists():
+        for cf in sorted(chunks_dir.glob("*_chunk_*.json")):
+            try:
+                with open(cf, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                ch_id = cdata.get("chapter_id", "")
+                if ch_id not in chunk_index:
+                    chunk_index[ch_id] = {"total": 0, "translated": 0}
+                chunk_index[ch_id]["total"] += 1
+                if cdata.get("translated_text"):
+                    chunk_index[ch_id]["translated"] += 1
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Enumerate chapters from the chapters dir (source files from split)
+    chapters = []
+    if chapters_dir.exists():
+        for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
+            ch_id = ch_file.stem
+            info = chunk_index.get(ch_id, {"total": 0, "translated": 0})
+            fully_translated = info["total"] > 0 and info["translated"] == info["total"]
+            chapters.append({
+                "id": ch_id,
+                "name": ch_id.replace("_", " ").title(),
+                "translated": fully_translated,
+            })
+
+    translated_count = sum(1 for c in chapters if c["translated"])
+
+    # Check if epub already exists
+    config = _load_project_config(project_id)
+
+    # Find existing epub (filename may be based on title, not folder name)
+    epub_files = list(project_dir.glob("*.epub"))
+    epub_file = max(epub_files, key=lambda p: p.stat().st_mtime) if epub_files else None
+
+    return jsonify({
+        "total_chapters": len(chapters),
+        "translated_chapters": translated_count,
+        "chapters": chapters,
+        "epub_exists": epub_file is not None,
+        "epub_filename": epub_file.name if epub_file else None,
+        "title": config.get("title", ""),
+        "author": config.get("author", ""),
+    })
+
+
+@app.route("/api/project/<project_id>/build-epub", methods=["POST"])
+def build_epub_route(project_id):
+    """Build EPUB from translated chapters."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    config = _load_project_config(project_id)
+    title = data.get("title") or config.get("title") or project_id
+    author = data.get("author") or config.get("author", "")
+    language = data.get("language") or config.get("target_lang_code", "es")
+
+    chunks_dir = project_dir / "chunks"
+
+    # Determine which chapters are fully translated
+    chunk_index = {}
+    if chunks_dir.exists():
+        for cf in sorted(chunks_dir.glob("*_chunk_*.json")):
+            try:
+                with open(cf, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                ch_id = cdata.get("chapter_id", "")
+                if ch_id not in chunk_index:
+                    chunk_index[ch_id] = {"total": 0, "translated": 0, "files": []}
+                chunk_index[ch_id]["total"] += 1
+                chunk_index[ch_id]["files"].append(cf)
+                if cdata.get("translated_text"):
+                    chunk_index[ch_id]["translated"] += 1
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    translated_chapter_ids = [
+        ch_id for ch_id, info in chunk_index.items()
+        if info["total"] > 0 and info["translated"] == info["total"]
+    ]
+
+    if not translated_chapter_ids:
+        return jsonify({"error": "No fully translated chapters found"}), 400
+
+    # Auto-combine translated chapters into a temp directory for epub building
+    import shutil
+    import tempfile
+    from src.combiner import combine_chunks
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="epub_"))
+    try:
+        for ch_id in translated_chapter_ids:
+            chunk_files = sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json"))
+            chunks = [load_chunk(cf) for cf in chunk_files]
+            combined_text = combine_chunks(chunks)
+            (temp_dir / f"{ch_id}.txt").write_text(combined_text, encoding="utf-8")
+
+        from src.epub_builder import build_epub
+        epub_filename = title + ".epub"
+        epub_output = project_dir / epub_filename
+        epub_path = build_epub(
+            project_path=project_dir,
+            title=title,
+            author=author,
+            language=language,
+            chapters_dir=temp_dir,
+            output_path=epub_output,
+        )
+
+        size_bytes = epub_path.stat().st_size
+
+        return jsonify({
+            "ok": True,
+            "filename": epub_path.name,
+            "size_bytes": size_bytes,
+            "chapters_included": len(translated_chapter_ids),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.route("/api/project/<project_id>/download-epub")
+def download_epub(project_id):
+    """Serve the built EPUB file for download."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    epub_files = list(project_dir.glob("*.epub"))
+    if not epub_files:
+        return jsonify({"error": "EPUB not found. Build it first."}), 404
+    # Use the most recently modified epub
+    epub_file = max(epub_files, key=lambda p: p.stat().st_mtime)
+    return send_from_directory(str(project_dir), epub_file.name, as_attachment=True)
 
 
 if __name__ == "__main__":
