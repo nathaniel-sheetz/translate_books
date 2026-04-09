@@ -1,494 +1,149 @@
-# Getting Started - Manual Translation Workflow
+# Getting Started
 
-This guide will walk you through translating a book chapter manually using the workbook-based workflow.
+This guide walks you through translating your first book using the web dashboard.
 
 ## Prerequisites
 
-### 1. Install Python Dependencies
-
 ```bash
-cd C:\Users\Nathaniel\Cursor\book_translation
 pip install -r requirements.txt
 ```
 
-This installs:
-- `pydantic` - Data models
-- `pyenchant` - Dictionary checking
-- `rich` - Terminal formatting
-- `pytest` - Testing (optional)
+For API translation, copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
 
-### 2. Install Spanish Dictionaries
+## Step 0: Create a Project
 
-For dictionary evaluation, install Spanish dictionaries:
-
-**Windows:**
-```bash
-# Download and install enchant from: https://github.com/AbiWord/enchant/releases
-# Then install Spanish dictionaries via enchant
-```
-
-**macOS/Linux:**
-```bash
-# Install via package manager
-brew install enchant        # macOS
-sudo apt install enchant    # Ubuntu/Debian
-
-# Dictionaries are typically auto-installed with enchant
-```
-
-See [DICTIONARY_SETUP.md](DICTIONARY_SETUP.md) for detailed instructions.
-
-## Workflows
-
-There are two main workflows depending on your needs:
-
-1. **Single Chapter Workflow** - For translating one chapter at a time
-2. **Multi-Chapter Book Workflow** - For translating entire books with automatic chapter detection and context
-
-## Multi-Chapter Book Workflow (NEW!)
-
-If you're translating a full book with multiple chapters (especially large books with 50+ chapters), use this streamlined workflow.
-
-### Step 0: Split Your Book into Chapters
-
-If you have a single book file, automatically detect and split chapters:
+Projects are directories under `projects/`. You can create one ahead of time or let the dashboard do it:
 
 ```bash
-# For books with Roman numeral chapters (Chapter I, Chapter II, etc.)
-python split_book.py full_book.txt --output chapters/
+# Option A: Start from scratch — the dashboard will create the directory
+# Just navigate to http://localhost:5000/project/my-book
 
-# For books with numeric chapters (Chapter 1, Chapter 2, etc.)
-python split_book.py book.txt --output chapters/ --pattern numeric
+# Option B: CLI — Gutenberg ingestor (downloads + cleans HTML, extracts images)
+python scripts/ingest_gutenberg.py https://www.gutenberg.org/files/41350/41350-h/41350-h.htm \
+    --output projects/my-book/
 
-# With custom filename prefix
-python split_book.py book.txt --output chapters/ --prefix little_princess
+# Option C: Manual
+mkdir -p projects/my-book
+cp my_book.txt projects/my-book/source.txt
 ```
 
-**What this does:**
-- Automatically detects chapter boundaries
-- Creates individual chapter files (chapter_01.txt, chapter_02.txt, etc.)
-- Validates chapter sequence (detects gaps or duplicates)
-- Saves you from manually creating 100+ files!
-
-**Output:**
-```
-chapters/
-  ├── chapter_01.txt
-  ├── chapter_02.txt
-  ├── chapter_03.txt
-  └── ...
-```
-
-### Multi-Chapter Workflow with Context
-
-The key benefit: **previous chapter context**. When translating Chapter 2, the system can include the ending of Chapter 1 (translated) in the prompt, providing continuity for better narrative flow.
-
-**Example: Translating a 100-chapter book**
+## Step 1: Start the Server
 
 ```bash
-# === CHAPTER 1 (no previous context) ===
-python chunk_chapter.py chapters/chapter_01.txt --chapter-id chapter_01
-python generate_workbook.py chunks/chapter_01_*.json \
-    --glossary glossary.json \
-    --output workbook_ch01.md
-
-# Translate manually (copy/paste into Claude.ai, etc.)
-
-python import_workbook.py workbook_ch01.md --output chunks/translated/
-python combine_chunks.py chunks/translated/chapter_01_*.json \
-    --output chapters/translated/chapter_01.txt
-
-# === CHAPTER 2 (with Chapter 1 context!) ===
-python chunk_chapter.py chapters/chapter_02.txt --chapter-id chapter_02
-python generate_workbook.py chunks/chapter_02_*.json \
-    --glossary glossary.json \
-    --previous-chapter chapters/translated/chapter_01.txt \
-    --context-paragraphs 2 \
-    --output workbook_ch02.md
-
-# The workbook prompts now include the last 2 paragraphs from Chapter 1!
-# This helps maintain continuity when Chapter 2 references Chapter 1 events.
-
-# Translate, import, combine...
-
-# === CHAPTER 3 (with Chapter 2 context) ===
-# Repeat pattern...
+cd web_ui && python app.py
 ```
 
-**Context Options:**
-- `--context-paragraphs N` - Include last N paragraphs from previous chapter (default: 2)
-- `--context-words N` - Alternative: include last N words from previous chapter
+Open `http://localhost:5000/project/my-book` in your browser. You'll see the pipeline dashboard with 8 stages in a vertical stepper on the left.
 
-**When to use context:**
-- Books with strong continuity between chapters
-- Stories where chapters flow into each other
-- First sentence of chapter X often references last events of chapter X-1
+## Step 2: Source
 
-## Single Chapter Workflow
+If you already have `source.txt` in your project directory, this stage shows a preview and word count. Otherwise, the Source stage offers two import modes via a tab toggle:
 
-For translating individual chapters without multi-chapter context:
+### File / Paste
 
-### Overview
-
-The complete workflow has 5 main steps:
+- **Upload** a `.txt` file via drag-and-drop
+- **Paste** text into the textarea
 
-1. **Chunk** - Split chapter into translation-sized pieces
-2. **Generate Workbook** - Create prompts for manual translation
-3. **Translate** - Copy/paste prompts into any LLM (Claude.ai, ChatGPT, etc.)
-4. **Import & Evaluate** - Import translations and check quality
-5. **Combine** - Merge chunks into final chapter
+Click "Upload Source" and the source is written to `projects/my-book/source.txt`.
 
-### Step 1: Prepare Your Source Text
+### Gutenberg URL
 
-Create a plain text file (UTF-8) with your English chapter:
+Import directly from Project Gutenberg without leaving the dashboard:
 
-```
-chapters/chapter_01.txt
-```
-
-**Example:**
-```
-Sara stood near her father and listened while he and Miss Minchin talked...
-```
+1. Click the **Gutenberg URL** tab
+2. Paste a Gutenberg HTML URL (e.g. `https://www.gutenberg.org/files/41350/41350-h/41350-h.htm`)
+3. Click **Import from Gutenberg**
 
-### Step 2: Chunk Your Chapter
+The system fetches the page, strips boilerplate, converts to clean text, and downloads images. After import you'll see a chapter report with word counts, and the detected heading pattern is automatically applied to the Split stage.
 
-Split the chapter into smaller pieces suitable for translation:
+## Step 3: Split into Chapters
 
-```bash
-python chunk_chapter.py chapters/chapter_01.txt --chapter-id chapter_01 --output chunks/
-```
+Configure the chapter detection pattern:
 
-**Options:**
-- `--target-size 1500` - Target words per chunk (default: 1500)
-- `--overlap 2` - Paragraph overlap between chunks (default: 2)
-- `--verbose` - Show detailed output
+- **Roman** — "Chapter I", "Chapter II", etc. (default)
+- **Numeric** — "Chapter 1", "Chapter 2", etc.
+- **Bare Roman** — Just "I", "II" on their own line
+- **Custom** — Your own regex
 
-**Output:**
-Creates JSON files in `chunks/`:
-```
-chunks/chapter_01_chunk_000.json
-chunks/chapter_01_chunk_001.json
-chunks/chapter_01_chunk_002.json
-```
+Click **Preview** to see detected chapters with word counts. If it looks right, click **Confirm & Split** to write the chapter files.
 
-Each chunk includes:
-- Source text
-- Metadata (word count, paragraph count, position)
-- Overlap regions for smooth recombination
-
-### Step 3: Generate Translation Workbook
+## Step 4: Chunk Chapters
 
-Create a workbook with complete prompts for each chunk:
+Configure chunking parameters (defaults are usually fine):
 
-```bash
-python generate_workbook.py chunks/chapter_01_*.json --output workbook.md --project "Your Book Title"
-```
+- **Target size**: ~2000 words per chunk
+- **Overlap paragraphs**: 0 (overlap disabled by default)
 
-**With glossary (recommended):**
-```bash
-python generate_workbook.py chunks/chapter_01_*.json \
-    --glossary glossary.json \
-    --project "Little Princess" \
-    --output workbook.md
-```
+Click **Chunk All** to break every chapter into translation-sized JSON chunks.
 
-**Output:**
-Creates `workbook.md` with:
-- Complete translation prompts for each chunk
-- Glossary terms (if provided)
-- Placeholder sections for pasting translations
-- Clear instructions
+## Step 5: Style Guide
 
-### Step 4: Translate Manually
+The style guide tells the LLM how to translate — formality, tone, regional variant, etc.
 
-Open `workbook.md` in any text editor. For each chunk:
+1. Answer the fixed questions (radio buttons for register, dialect, era, etc.)
+2. Optionally generate additional LLM-powered questions: click **Generate Questions**, copy the prompt into your LLM, paste the response back
+3. Click **Generate Style Guide** — this creates a prompt you copy/paste through your LLM, or uses a built-in fallback if you prefer not to use an LLM for this step
+4. The style guide is saved to `projects/my-book/style.json`
 
-1. **Copy the prompt** - Find the "PROMPT TO COPY" section
-2. **Paste into LLM** - Use Claude.ai, ChatGPT, or any LLM interface
-3. **Copy translation** - Copy the LLM's Spanish translation
-4. **Paste into workbook** - Paste into the "PASTE TRANSLATION HERE" section
-5. **Save** - Save the workbook regularly
+## Step 6: Glossary
 
-**Example workflow:**
-```
-## CHUNK 1: chapter_01_chunk_000
-
-### PROMPT TO COPY:
-─────────────────────────────────────────
-[Complete prompt with glossary and source text]
-─────────────────────────────────────────
-
-### PASTE TRANSLATION HERE:
-─────────────────────────────────────────
-[Paste the Spanish translation here]
-─────────────────────────────────────────
-```
-
-**Tips:**
-- Translate chunks in order for consistency
-- Save frequently
-- Don't edit the chunk metadata sections
-- Keep separator lines intact
+The glossary ensures consistent translation of names, places, and terms.
 
-### Step 5: Import Translations
-
-Once all chunks are translated, import them back:
+1. Select which style guide Q&A pairs to include as context
+2. Click **Extract Candidates** — the system scans your source text for proper nouns and recurring terms
+3. Copy the generated prompt, paste into your LLM, paste the response back
+4. Review the proposals table — accept or reject each term
+5. Click **Save Glossary** to write `projects/my-book/glossary.json`
 
-```bash
-python import_workbook.py workbook.md --output chunks/translated/ --verbose
-```
+## Step 7: Translate
 
-**Output:**
-Creates translated chunk files:
-```
-chunks/translated/chapter_01_chunk_000.json
-chunks/translated/chapter_01_chunk_001.json
-chunks/translated/chapter_01_chunk_002.json
-```
+This is the main work stage. You'll see a table of all chapters with translation status.
 
-Each file now contains both source and translation.
+### Manual translation (per chunk)
 
-### Step 6: Evaluate Quality
+1. Click a chapter row to expand it
+2. Click a chunk tab to see its content
+3. Click **Copy Prompt** to copy the fully rendered translation prompt (includes style guide, glossary, previous chunk context)
+4. Paste into your LLM, copy the response
+5. Paste the translation and click **Save**
 
-Run quality checks on translated chunks:
+### Batch API translation
 
-```bash
-python evaluate_chunk.py chunks/translated/chapter_01_chunk_000.json
-```
+1. Check the boxes next to chapters you want to translate
+2. Click **Batch Translate Selected**
+3. Choose provider (Anthropic/OpenAI) and model
+4. Review the cost estimate
+5. Click **Start** — progress updates in real-time via SSE
 
-**With glossary:**
-```bash
-python evaluate_chunk.py chunks/translated/chapter_01_chunk_000.json --glossary glossary.json
-```
+## Step 8: Review
 
-**Generate HTML report:**
-```bash
-python evaluate_chunk.py chunks/translated/chapter_01_chunk_000.json \
-    --format html \
-    --output report.html
-```
+After translation, align and review:
 
-**Evaluators run automatically:**
-- **Length** - Checks translation is 1.1x-1.3x source length (typical for Spanish)
-- **Paragraph** - Verifies paragraph structure preserved
-- **Dictionary** - Flags English words and Spanish misspellings
-- **Completeness** - Detects missing content or placeholders
-- **Glossary** - Checks term consistency (requires `--glossary`)
+1. Click **Combine + Align** on a translated chapter — this merges chunks and runs sentence alignment
+2. Click **Read** to open the bilingual reader in a new tab
 
-### Step 7: Combine Chunks
+In the reader (`/read/my-book/chapter_01`):
+- Tap any Spanish sentence to see the English source below
+- Edit translations inline
+- Add annotations (word choice, inconsistency, footnote, flag)
+- Mark chapters as reviewed when you're satisfied
 
-Merge translated chunks into final chapter:
+## Step 9: Export
 
-```bash
-python combine_chunks.py chunks/translated/chapter_01_*.json --output chapter_01_translated.txt
-```
+Build a downloadable EPUB from your translated chapters.
 
-**Output:**
-Creates `chapter_01_translated.txt` with:
-- All chunks combined in order
-- Overlap regions handled (keeps text from chunk ending, not chunk starting)
-- Plain text ready for review
+1. The stage shows how many chapters will be included (only fully-translated chapters are packaged)
+2. Title and author are pre-filled from your project config — edit if needed
+3. Click **Build EPUB** — the system auto-combines chunks and builds the EPUB with embedded images
+4. Click **Download** to save the file, or find it at `projects/my-book/my-book.epub`
 
-## Example: Complete Workflow
+## What's Next
 
-Here's a real example translating Chapter 1:
+- Translate remaining chapters (batch or manual)
+- Use the reader to review and annotate
+- Apply corrections if needed (banner appears on chapter list)
+- Re-export the EPUB after making changes
 
-```bash
-# 1. Chunk the source chapter
-python chunk_chapter.py chapters/chapter_01.txt \
-    --chapter-id chapter_01 \
-    --output chunks/
+## CLI Alternative
 
-# 2. Generate workbook with glossary
-python generate_workbook.py chunks/chapter_01_*.json \
-    --glossary glossary.json \
-    --project "Little Princess" \
-    --output workbook.md
-
-# 3. Translate manually
-# Open workbook.md, copy/paste prompts to Claude.ai, paste translations back
-
-# 4. Import translations
-python import_workbook.py workbook.md \
-    --output chunks/translated/ \
-    --verbose
-
-# 5. Evaluate each chunk
-python evaluate_chunk.py chunks/translated/chapter_01_chunk_000.json --glossary glossary.json
-python evaluate_chunk.py chunks/translated/chapter_01_chunk_001.json --glossary glossary.json
-
-# 6. Combine into final chapter
-python combine_chunks.py chunks/translated/chapter_01_*.json \
-    --output chapters/translated/chapter_01.txt
-```
-
-## Try It With Sample Files
-
-Test the workflow with included examples:
-
-### Simple Evaluation Test
-
-```bash
-# Should PASS - good translation
-python evaluate_chunk.py tests/fixtures/chunk_translated_good.json
-
-# Should FAIL - has errors
-python evaluate_chunk.py tests/fixtures/chunk_translated_errors.json
-```
-
-### Understanding Evaluation Results
-
-#### Example: Good Translation (PASS)
-
-```
-======================================================================
-EVALUATION RESULTS
-======================================================================
-
-Chunk ID: chapter_01_chunk_000
-Chapter: chapter_01
-
-Evaluators Run: 5
-  ✓ length        Score: 1.00
-  ✓ paragraph     Score: 1.00
-  ✓ dictionary    Score: 1.00
-  ✓ completeness  Score: 1.00
-  ✓ glossary      Score: 1.00
-
-Overall Score: 1.00 / 1.00
-
-----------------------------------------------------------------------
-[PASSED] All evaluations passed
-----------------------------------------------------------------------
-
-No issues found!
-======================================================================
-```
-
-**What this means:**
-- All 5 evaluators passed
-- Translation is complete, properly formatted, and uses correct Spanish
-- Glossary terms used correctly
-- Ready to combine
-
-#### Example: Translation With Issues (FAIL)
-
-```
-======================================================================
-EVALUATION RESULTS
-======================================================================
-
-Overall Score: 0.72 / 1.00
-
-----------------------------------------------------------------------
-[FAILED] Translation has issues
-----------------------------------------------------------------------
-
-3 issue(s) found:
-
-[dictionary] ERROR: English word in translation: 'friend'
-  Location: Character position 234
-  Suggestion: Translate to Spanish or add to glossary
-
-[completeness] ERROR: Placeholder detected
-  Location: Line 5
-  Suggestion: Replace "[TODO: translate]" with actual translation
-
-[glossary] WARNING: Inconsistent term usage
-  Expected: "Sara"
-  Found: "Sarah"
-  Location: Paragraph 3
-======================================================================
-```
-
-**What this means:**
-- Translation needs fixes before combining
-- Fix the 2 errors (untranslated word, placeholder)
-- Review the warning (name spelling inconsistency)
-
-## Creating a Glossary
-
-A glossary ensures consistent translation of character names, places, and special terms.
-
-### Basic Glossary Structure
-
-Create `glossary.json`:
-
-```json
-{
-  "terms": [
-    {
-      "english": "Sara Crewe",
-      "spanish": "Sara Crewe",
-      "term_type": "character",
-      "context": "Main character, young girl",
-      "alternatives": []
-    },
-    {
-      "english": "Miss Minchin",
-      "spanish": "la señorita Minchin",
-      "term_type": "character",
-      "context": "Headmistress of the seminary",
-      "alternatives": []
-    },
-    {
-      "english": "Emily",
-      "spanish": "Emily",
-      "term_type": "character",
-      "context": "Sara's doll",
-      "alternatives": []
-    }
-  ],
-  "version": "1.0.0",
-  "updated_at": "2025-01-07T00:00:00"
-}
-```
-
-### Using the Glossary
-
-The glossary is automatically included in workbook prompts:
-
-```bash
-python generate_workbook.py chunks/*.json --glossary glossary.json --output workbook.md
-```
-
-And used for evaluation:
-
-```bash
-python evaluate_chunk.py chunk.json --glossary glossary.json
-```
-
-## Common Questions
-
-**Q: Do I need to use an LLM API?**
-No! The manual workflow uses copy/paste with any LLM interface (Claude.ai, ChatGPT, etc.). No API key required.
-
-**Q: What's a good chunk size?**
-Default is 1500 words (~3-5 pages). Larger chunks give more context but cost more per LLM request.
-
-**Q: Can I edit translations after import?**
-Yes! Edit the JSON files directly or re-import from an edited workbook.
-
-**Q: How do I handle footnotes or special formatting?**
-Include them in the source text. Add instructions in a custom translation prompt if needed.
-
-**Q: What if evaluation fails?**
-Review the specific issues reported. Common fixes:
-- Re-translate sections with placeholders
-- Fix untranslated English words
-- Adjust length if significantly off (may indicate missing content)
-
-**Q: Can I translate to other languages besides Spanish?**
-Yes, but you'll need appropriate dictionaries and may need to adjust length ratio thresholds.
-
-## Next Steps
-
-- Read [USAGE.md](USAGE.md) for detailed command reference
-- See [PROMPT_GUIDE.md](PROMPT_GUIDE.md) for customizing translation prompts
-- Check [README.md](README.md) for architecture and development info
-- Review [DESIGN.md](DESIGN.md) for technical details
-
----
-
-Happy translating!
+Every dashboard stage has a CLI equivalent. See the [README](../README.md#cli-workflow) for commands and [`docs/BATCH_PIPELINE.md`](BATCH_PIPELINE.md) for batch processing.

@@ -1,358 +1,338 @@
-# Translation Web UI Guide
+# Dashboard & Reader Guide
 
-A simple web interface for translating book chunks one-by-one with automatic progress tracking.
+Complete reference for the web-based pipeline dashboard and bilingual reader.
 
-## Overview
-
-The web UI streamlines the manual translation workflow by:
-- Auto-loading the next untranslated chunk
-- Displaying complete prompts with one-click copy
-- Saving translations directly to chunk JSON files
-- Auto-advancing to the next chunk after save
-- Tracking progress across sessions
-
-## Quick Start
-
-### 1. Install Dependencies
+## Starting the Server
 
 ```bash
-pip install -r requirements.txt
-```
-
-### 2. Start the Server
-
-```bash
-cd web_ui
-python app.py
-```
-
-The server will start on `http://localhost:5000`.
-
-### 3. Open in Browser
-
-Navigate to `http://localhost:5000` in your web browser.
-
-## Usage Workflow
-
-### Step 1: Project Setup
-
-When you first load the UI, you'll see the project setup form:
-
-**Required:**
-- **Chunks Folder**: Path to folder containing chunk JSON files (e.g., `chunks/`)
-
-**Optional:**
-- **Project Name**: Name displayed in the UI (default: "Translation Project")
-- **Source Language**: Source language (default: "English")
-- **Target Language**: Target language (default: "Spanish")
-- **Glossary**: Path to glossary JSON file (e.g., `glossary.json`)
-- **Style Guide**: Path to style guide JSON file (e.g., `style_guide.json`)
-
-**Previous Chapter Context** (optional):
-- Check "Include previous chapter context" to add continuity context
-- Provide path to previous chapter's translated text
-- Set number of paragraphs to include from end of previous chapter
-
-Click **Load Project** to initialize the session.
-
-### Step 2: Translate Chunks
-
-Once loaded, the UI shows:
-
-1. **Chunk Information**: Chapter, position, word count, paragraph count
-2. **Progress Bar**: Visual indicator of completion (e.g., "Chunk 3 of 10")
-3. **Prompt Display**: Complete rendered prompt ready to copy
-4. **Translation Input**: Textarea for pasting translations
-
-**Translation Workflow:**
-
-1. Click **Copy to Clipboard** to copy the prompt
-2. Paste the prompt into your LLM (Claude.ai, ChatGPT, etc.)
-3. Copy the LLM's translation response
-4. Paste the translation into the "Paste Translation Here" textarea
-5. Click **Save & Continue**
-
-The UI will:
-- Save the translation to the chunk's JSON file
-- Update the chunk status to "translated"
-- Immediately load the next untranslated chunk
-
-### Step 3: Completion
-
-When all chunks are translated, the UI displays a completion message:
-
-```
-🎉 All Chunks Completed!
-All 10 chunks have been translated.
-```
-
-You can click **Start New Project** to reload the page and begin a new translation session.
-
-## Features
-
-### Automatic Progress Tracking
-
-Progress is tracked via the chunk JSON files on disk:
-- Chunks with `translated_text` are considered complete
-- The UI always loads the first chunk where `translated_text` is null/empty
-- If you close the browser and reopen the UI, it picks up where you left off
-
-### Keyboard Shortcuts
-
-- **Ctrl/Cmd + Enter**: Submit translation (when textarea is focused)
-- **Ctrl/Cmd + Shift + C**: Copy prompt to clipboard
-
-### Previous Chapter Context
-
-When enabled, the UI includes the last N paragraphs from the previous chapter's translation in each prompt. This provides continuity context for the LLM.
-
-Example use case:
-```
-Chunks folder: chunks/chapter_02/
-Previous chapter: chapters/translated/chapter_01.txt
-Context paragraphs: 2
-```
-
-The prompt for the first chunk of Chapter 2 will include the last 2 paragraphs from Chapter 1's translation.
-
-## File Structure
-
-```
-web_ui/
-├── app.py              # Flask backend server
-├── templates/
-│   └── index.html      # Main UI page
-└── static/
-    ├── app.js          # Frontend JavaScript logic
-    └── style.css       # Styling
-```
-
-## Configuration
-
-### Changing the Port
-
-Edit `app.py` and change the port in the last line:
-
-```python
-app.run(debug=True, port=5000)  # Change 5000 to your preferred port
-```
-
-### Custom Prompt Template
-
-The UI uses the prompt template from `prompts/translation.txt`. To customize:
-
-1. Edit `prompts/translation.txt`
-2. Restart the server
-3. Reload the project in the UI
-
-Changes to the template take effect immediately for new chunks.
-
-## Troubleshooting
-
-### "No chunk files found in {folder}"
-
-- Verify the chunks folder path is correct
-- Ensure the folder contains `.json` files
-- Check that the JSON files are valid chunk files (created by chunking scripts)
-
-### "Invalid or expired session"
-
-- This happens if the server restarts while you're translating
-- Click "Start New Project" to create a new session
-- Your progress is safe - translations are saved to disk immediately
-
-### "Failed to load glossary/style guide"
-
-- Verify the file path is correct
-- Check that the file is valid JSON
-- Check that the JSON matches the expected schema (Glossary or StyleGuide)
-
-### Browser compatibility issues
-
-- The UI uses modern JavaScript (async/await, fetch)
-- Requires a recent browser version (Chrome 55+, Firefox 52+, Safari 11+)
-- Clipboard API requires HTTPS or localhost
-
-## Example Session
-
-### Translating Chapter 2 of a Book
-
-1. **Prepare files:**
-   ```
-   chunks/chapter_02_chunk_000.json
-   chunks/chapter_02_chunk_001.json
-   chunks/chapter_02_chunk_002.json
-   chapters/translated/chapter_01.txt  (previous chapter)
-   glossary.json
-   style_guide.json
-   ```
-
-2. **Start server:**
-   ```bash
-   cd web_ui
-   python app.py
-   ```
-
-3. **Configure in browser:**
-   - Chunks Folder: `chunks/`
-   - Project Name: `My Book - Chapter 2`
-   - Glossary: `glossary.json`
-   - Style Guide: `style_guide.json`
-   - ✅ Include previous chapter context
-   - Previous Chapter: `chapters/translated/chapter_01.txt`
-   - Context Paragraphs: `2`
-
-4. **Translate:**
-   - UI loads chunk 000
-   - Copy prompt → paste into Claude.ai
-   - Copy translation → paste into UI
-   - Click "Save & Continue"
-   - UI automatically loads chunk 001
-   - Repeat until all chunks complete
-
-5. **Result:**
-   - All chunk JSON files updated with translations
-   - Status set to "translated"
-   - Timestamps recorded
-   - Ready to combine chunks into final chapter
-
-## Integration with Existing Workflow
-
-The web UI integrates seamlessly with the existing manual workflow:
-
-### Before Web UI
-
-```bash
-# 1. Generate workbook
-python generate_workbook.py
-
-# 2. Manually copy/paste prompts and translations
-
-# 3. Import completed workbook
-python import_workbook.py workbook.md --output chunks/translated/
-```
-
-### With Web UI
-
-```bash
-# 1. Start web UI
 cd web_ui && python app.py
-
-# 2. Open browser and translate (no file juggling!)
-
-# 3. Chunks are already saved - combine directly
-python combine_chunks.py chunks/ --output chapters/translated/chapter_02.txt
 ```
 
-## Comparison: Workbook vs Web UI
+Runs on `http://localhost:5000`. Local use only — no authentication.
 
-| Feature | Workbook | Web UI |
-|---------|----------|--------|
-| Setup time | Low | Low |
-| Copy/paste steps | 2 per chunk | 2 per chunk |
-| Progress tracking | Manual | Automatic |
-| Context switching | High (file → LLM → file) | Low (same window) |
-| Resume capability | Manual (find your place) | Automatic |
-| Multi-chapter | One workbook per chapter | Load any chapter |
-| Best for | Small projects (1-10 chunks) | Large projects (10+ chunks) |
+## Routes
 
-## Tips for Efficient Translation
+| Route | Purpose |
+|---|---|
+| `/read/` | Project list (cards with status) |
+| `/project/<id>` | Pipeline dashboard (8 stages) |
+| `/read/<id>` | Chapter list for a project |
+| `/read/<id>/<chapter>` | Bilingual reader view |
 
-1. **Use a second monitor**: Keep the web UI on one screen and your LLM on the other
+The old `/setup/<id>` route redirects to `/project/<id>#style-guide`.
 
-2. **Keyboard shortcuts**: Learn Ctrl+Enter (submit) and Ctrl+Shift+C (copy) for faster workflow
+---
 
-3. **Browser zoom**: Adjust zoom level (Ctrl/Cmd + +/-) for comfortable reading
+## Pipeline Dashboard
 
-4. **Save regularly**: The UI auto-saves, but keep your browser tab open to maintain session
+### Layout
 
-5. **Review before submitting**: Quickly scan the translation for obvious errors before clicking "Save & Continue"
+Vertical stepper sidebar on the left, main content area on the right. Click any stage to jump to it. Hash-based navigation (`#source`, `#split`, `#chunk`, `#style-guide`, `#glossary`, `#translate`, `#review`, `#export`) keeps stages bookmarkable.
 
-6. **Use previous chapter context**: Enable context for better continuity, especially at chapter boundaries
+On initial load, the dashboard auto-navigates to the first incomplete stage.
 
-7. **Batch sessions**: Translate multiple chunks in one sitting to maintain consistency and flow
+### Status Badges
 
-## Advanced Usage
+Each stepper step shows a badge derived from the filesystem:
+- Source: checkmark if `source.txt` exists
+- Split: chapter count
+- Chunk: chunk count
+- Style Guide: checkmark if `style.json` exists
+- Glossary: term count
+- Translate: `X/Y chunks` translated
+- Review: count of aligned chapters
+- Export: "ready" if EPUB has been built
 
-### Multiple Projects
+---
 
-To work on multiple books/chapters simultaneously:
+## Stage 1: Source
 
-1. Open multiple browser tabs
-2. Load different chunks folders in each tab
-3. Each tab maintains its own session
+**Files:** `projects/<id>/source.txt`, `projects/<id>/project.json`
 
-### Custom Session Management
+**Book Title field:** At the top of this stage, enter a human-readable title for the book. This replaces the folder name everywhere it was previously shown: the sidebar, browser tab, project cards on `/read/`, the chapter list heading, and the `book_title` variable in all translation prompts. The title is saved to `project.json` and the folder name is only used as an ID in URLs.
 
-The server stores sessions in memory. To persist sessions across server restarts, you could:
+**If source exists:** Shows word count and a preview of the first 500 characters. If the source was imported from Gutenberg, a provenance link to the original URL is shown. "Replace" button to upload a new file.
 
-1. Store session data in JSON files
-2. Use a lightweight database (SQLite)
-3. Implement session recovery from chunk progress
+**If no source:** A tab toggle offers two import modes:
 
-(These features are not implemented by default - the simple in-memory approach works well for local use.)
+### File / Paste (default)
 
-### API-Only Usage
+Upload zone (drag-drop or click), paste textarea. Same as before.
 
-You can also use the API directly without the web UI:
+### Gutenberg URL
 
-```python
-import requests
+Import directly from a Project Gutenberg HTML page:
 
-# Load project
-response = requests.post('http://localhost:5000/api/load-project', json={
-    'chunks_dir': 'chunks/',
-    'glossary_path': 'glossary.json'
-})
-session_id = response.json()['session_id']
+1. Paste a Gutenberg URL (e.g. `https://www.gutenberg.org/files/41350/41350-h/41350-h.htm`)
+2. Optionally uncheck **Download images** to insert placeholders without fetching image files
+3. Click **Import from Gutenberg**
 
-# Get next chunk
-response = requests.get(f'http://localhost:5000/api/next-chunk?session_id={session_id}')
-chunk = response.json()
+The backend fetches the HTML, strips PG boilerplate (headers/footers), converts to clean plain text, downloads images into `projects/<id>/images/`, and writes `source.txt`. After import, a **Chapter Report** table shows detected chapters with word counts and estimated chunk counts. The detected heading pattern (roman, numeric, etc.) is saved to `project.json` and auto-applied to the Stage 2 pattern selector.
 
-# Save translation
-response = requests.post('http://localhost:5000/api/save-translation', json={
-    'session_id': session_id,
-    'chunk_id': chunk['chunk_id'],
-    'translation': 'La traducción...'
-})
+**APIs:**
+- `POST /api/project/<id>/ingest` — accepts multipart file upload or JSON `{ "text": "..." }`
+- `POST /api/project/<id>/ingest-gutenberg` — `{ "url": "...", "download_images": true }` → `{ "ok": true, "words": N, "chapter_report": [...], "suggested_pattern": "roman", "images_downloaded": N, "images_skipped": N }`
+- `GET /api/project/<id>/config` — returns project config JSON (e.g. `{ "title": "..." }`)
+- `POST /api/project/<id>/config` — saves project config; currently accepts `{ "title": "..." }`
+
+---
+
+## Stage 2: Split into Chapters
+
+**Files:** `projects/<id>/chapters/chapter_*.txt`
+
+**Config options:**
+- Pattern type: `roman` (default), `numeric`, `bare_roman`, `custom`
+- Custom regex (when pattern is `custom`)
+- Minimum chapter size in characters
+
+**Workflow:**
+1. Click **Preview** to dry-run detection — shows cards with chapter title, word count, and first 200 characters
+2. Click **Confirm & Split** to write files
+3. If already split: shows existing chapters with a "Re-split" option (warns about overwrite)
+
+**APIs:**
+- `POST /api/project/<id>/split/preview` — `{ "pattern_type": "roman" }` → list of detected chapters
+- `POST /api/project/<id>/split` — same body → writes files, returns count
+
+**Backend:** `split_book_into_chapters()` and `save_chapters_to_files()` from `src/book_splitter.py`.
+
+---
+
+## Stage 3: Chunk Chapters
+
+**Files:** `projects/<id>/chunks/<chapter_id>_chunk_*.json`
+
+**Config options:**
+- Target size in words (default: 2000)
+- Overlap paragraphs (default: 0)
+- Minimum overlap words (default: 150)
+
+**Workflow:**
+1. Configure chunking parameters
+2. Click **Chunk All** to process every chapter
+3. Shows chapter list with chunk counts after completion
+
+**API:** `POST /api/project/<id>/chunk-all` — `{ "target_size": 2000, "overlap": 0, "min_overlap_words": 150 }`
+
+**Backend:** `chunk_chapter()` from `src/chunker.py`. Each chunk is a `Chunk` Pydantic model serialized to JSON.
+
+---
+
+## Stage 4: Style Guide
+
+**File:** `projects/<id>/style.json`
+
+Uses the same wizard as the old setup page — all existing `/api/setup/<id>/*` endpoints are reused.
+
+**Workflow:**
+1. Answer fixed questions (register, dialect, era, audience, etc.)
+2. Optionally generate LLM questions: copies a prompt → paste response → parses additional questions
+3. Generate style guide: either via LLM (copy/paste) or built-in fallback
+4. Save to `style.json`
+
+**APIs (existing):**
+- `POST /api/setup/<id>/prompts/questions` — generate additional questions prompt
+- `POST /api/setup/<id>/prompts/style-guide` — generate style guide prompt
+- `POST /api/setup/<id>/style-guide` — save style guide JSON
+- `POST /api/setup/<id>/style-guide/fallback` — generate without LLM
+
+---
+
+## Stage 5: Glossary
+
+**File:** `projects/<id>/glossary.json`
+
+**Workflow:**
+1. Select which style guide Q&A pairs to use as context
+2. Click **Extract Candidates** — scans source text for proper nouns and terms
+3. Copy the generated glossary prompt, paste into LLM, paste response back
+4. Review proposals table — accept/reject each term
+5. Save glossary
+
+**APIs (existing):**
+- `POST /api/setup/<id>/extract-candidates` — extract candidate terms
+- `POST /api/setup/<id>/prompts/glossary` — generate glossary prompt
+- `POST /api/setup/<id>/glossary` — save glossary JSON
+
+**Backend:** `extract_glossary_candidates()` from `src/glossary_bootstrap.py`.
+
+---
+
+## Stage 6: Translate
+
+The most complex stage. Two sub-views: chapter overview and chunk detail.
+
+### Chapter Overview
+
+Table of all chapters with columns: checkbox, chapter name, chunk count, translated count, status, actions.
+
+**Status pills:** `done` (green), `partial` (yellow), `pending` (gray).
+
+**Actions per chapter:**
+- Click row to expand → shows chunk detail
+- "Read" link (if alignment exists)
+
+### Chunk Detail (Expanded Chapter)
+
+Tabs across the top, one per chunk. Each tab shows:
+
+1. **Source text** — first 500 chars with "Show full" toggle
+2. **Prompt** — fully rendered translation prompt (readonly textarea) with **Copy Prompt** button
+3. **Translation** — textarea for pasting, with **Save Translation** and **Auto-Translate** buttons
+
+The prompt includes: style guide, filtered glossary (only terms appearing in this chunk), previous chunk context, and source text.
+
+**Chunk tab indicators:** filled dot = translated, empty dot = pending.
+
+**APIs:**
+- `GET /api/project/<id>/chapters/<chapter>/chunks` — list chunks with status
+- `GET /api/project/<id>/chunks/<chunk_id>/prompt` — rendered translation prompt
+- `POST /api/project/<id>/chunks/<chunk_id>/translate` — `{ "translated_text": "..." }` save manual translation
+- `POST /api/project/<id>/translate/realtime` — `{ "chunk_id": "...", "provider": "anthropic", "model": "..." }` single-chunk API translation
+
+### Batch Translation
+
+1. Select chapters via checkboxes
+2. Click **Batch Translate Selected** → opens modal
+3. Choose provider (Anthropic / OpenAI) and model
+4. Cost estimate auto-calculates (input tokens × model pricing)
+5. Click **Start** → launches background translation thread
+6. Real-time progress via Server-Sent Events (SSE)
+
+**APIs:**
+- `POST /api/project/<id>/translate/cost-estimate` — `{ "chapters": [...], "provider": "anthropic", "model": "..." }` → `{ "cost_usd": 0.12, "input_tokens": 5000, "chunk_count": 8 }`
+- `POST /api/project/<id>/translate/batch` — `{ "chapters": [...], "provider": "...", "model": "..." }` → `{ "job_id": "abc123" }`
+- `GET /api/project/<id>/translate/sse?job_id=abc123` — SSE stream with events: `chunk_started`, `chunk_done`, `chunk_error`, `batch_complete`
+
+**Available models:**
+- Anthropic: Claude Sonnet 4, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku
+- OpenAI: GPT-4o, GPT-4o Mini
+
+**Backend:** `translate_chunk_realtime()` and `estimate_cost()` from `src/api_translator.py`. Glossary filtering via `filter_glossary_for_chunk()` from `src/glossary_bootstrap.py`.
+
+---
+
+## Stage 7: Review
+
+Table of translated chapters with columns: chapter, alignment status, annotation count, reviewed status, actions.
+
+**Actions:**
+- **Combine + Align** — merges chunks into full chapter text, then runs sentence alignment
+- **Read** — opens bilingual reader in a new tab
+
+**APIs:**
+- `POST /api/project/<id>/combine/<chapter>` — combine chunks → `translated/<chapter>.txt`
+- `POST /api/project/<id>/align/<chapter>` — sentence alignment → `alignments/<chapter>.json`
+
+**Backend:** `combine_chunks()` from `src/combiner.py`, `align_chapter_chunks()` from `src/sentence_aligner.py`.
+
+---
+
+## Stage 8: Export
+
+**File:** `projects/<id>/<id>.epub`
+
+Build a downloadable EPUB from all fully-translated chapters. The stage shows how many chapters (out of the total) will be included — only chapters where every chunk has been translated are packaged.
+
+**Workflow:**
+1. Title and author fields are pre-populated from `project.json`
+2. The coverage line shows "X of Y chapters will be included"
+3. Click **Build EPUB** — the backend auto-combines translated chunks and calls the epub builder
+4. On success, a **Download** link appears and the file is saved to the project folder
+
+Images referenced via `[IMAGE:...]` placeholders in translated text are embedded in the EPUB. A cover image is auto-detected from `images/cover.jpg` (or `.png`) if present.
+
+**APIs:**
+- `GET /api/project/<id>/epub-status` — chapter coverage, existing epub info, title/author from config
+- `POST /api/project/<id>/build-epub` — `{ "title": "...", "author": "..." }` → `{ "ok": true, "filename": "...", "size_bytes": N, "chapters_included": N }`
+- `GET /api/project/<id>/download-epub` — serves the EPUB file as a download
+
+**Backend:** `build_epub()` from `src/epub_builder.py`, `combine_chunks()` from `src/combiner.py`.
+
+---
+
+## Bilingual Reader
+
+Served at `/read/<project_id>/<chapter>`. Separate from the dashboard — uses serif, reading-optimized CSS.
+
+### Navigation
+
+- `/read/` — project cards with style guide, glossary, and translation status
+- `/read/<id>` — chapter list with badges (annotation counts, confidence, reviewed status)
+- `/read/<id>/<chapter>` — reading view with prev/next chapter navigation
+
+### Reading View
+
+Sentences are displayed as a vertical list of Spanish text. Tap any sentence to open the bottom sheet showing:
+
+1. **English source** — the aligned original sentence
+2. **Edit area** — textarea pre-filled with Spanish text, save button to persist changes
+3. **Annotation controls** — 4 types:
+   - Word choice (question mark icon)
+   - Inconsistency (zigzag icon)
+   - Footnote (superscript icon)
+   - Flag/other (ellipsis icon)
+
+Annotated sentences get a subtle colored background tint. Each annotation has an optional note field.
+
+### Chapter Status
+
+- **Unread** — no annotations, not reviewed
+- **Reviewed** — marked complete (checkmark badge)
+- **Badge counts** — review annotations, footnotes, flags, low-confidence alignment
+
+### Corrections
+
+When corrections are saved from the reader, a banner appears on the chapter list page with an **Apply Corrections** button that batch-applies all pending edits.
+
+### Reader APIs
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/alignment/<id>/<chapter>` | GET | Alignment data with enrichments |
+| `/api/correction` | POST | Save a sentence correction |
+| `/api/annotations/<id>/<chapter>` | GET | Get chapter annotations |
+| `/api/annotation` | POST | Save annotation |
+| `/api/annotation` | DELETE | Remove annotation |
+| `/api/reviewed/<id>/<chapter>` | GET/POST/DELETE | Reviewed status |
+| `/api/apply-corrections/<id>` | POST | Batch apply corrections |
+
+---
+
+## Internationalization
+
+The UI supports English and Spanish. Toggle via the language buttons on the project list page. Reader strings are managed server-side in `web_ui/i18n.py`; dashboard strings are in-page.
+
+---
+
+## Security
+
+This is a **local-only** application. No authentication, no HTTPS, no rate limiting. Not suitable for public deployment.
+
+---
+
+## Project Data Layout
+
+All state is derived from the filesystem — no database.
+
 ```
-
-This allows integration with automated translation scripts or custom UIs.
-
-## Security Note
-
-**This web UI is intended for local use only.**
-
-- Runs on localhost (not accessible from network)
-- No authentication or authorization
-- Session secrets are generated randomly each run
-- Not suitable for deployment to public servers
-
-If you need to deploy this for team use:
-1. Add authentication (Flask-Login, OAuth)
-2. Use a proper session store (Redis, PostgreSQL)
-3. Add HTTPS support
-4. Implement proper error handling and logging
-5. Add rate limiting and input validation
-
-## Support
-
-For issues or questions:
-1. Check this guide
-2. Review the plan document for implementation details
-3. Check the Flask logs in the terminal
-4. Inspect browser console for JavaScript errors
-
-## Future Enhancements
-
-Potential improvements (not implemented):
-
-- **Direct LLM API integration**: Call Claude/OpenAI APIs directly from UI
-- **Translation memory**: Suggest translations from similar chunks
-- **Real-time evaluation**: Show quality scores as you type
-- **Collaborative mode**: Multiple translators on same project
-- **Export options**: Generate final chapters directly from UI
-- **Dark mode**: For late-night translation sessions
-- **Undo/redo**: Revert to previous translations
-- **Keyboard-only mode**: Full keyboard navigation
+projects/<id>/
+├── project.json            # Project config (title, gutenberg_url, suggested_split_pattern)
+├── source.txt              # Raw source text
+├── chapters/               # Split chapter .txt files
+│   ├── chapter_01.txt
+│   └── ...
+├── chunks/                 # Chunk JSON files
+│   ├── chapter_01_chunk_000.json
+│   └── ...
+├── style.json              # Style guide
+├── glossary.json           # Term glossary
+├── translated/             # Combined translated chapter .txt files
+├── alignments/             # Sentence alignment JSON
+├── annotations.jsonl       # Reader annotations (append-only)
+├── reviewed.json           # Chapter reviewed status
+├── corrections/            # Pending corrections
+├── images/                 # Downloaded images (Gutenberg)
+└── <id>.epub               # Built EPUB (Stage 8 Export)
+```

@@ -1,135 +1,92 @@
-# Translation Web UI
+# web_ui/
 
-Simple web interface for translating book chunks one-by-one.
+Flask web application providing the pipeline dashboard and bilingual reader.
 
 ## Quick Start
 
 ```bash
-# Start the server
 python app.py
+# Open http://localhost:5000/project/<project_id>
 ```
-
-Then open your browser to `http://localhost:5000`.
-
-## Features
-
-- 🎯 Auto-loads next untranslated chunk
-- 📋 One-click prompt copying
-- ⚡ Auto-advance after saving
-- 📊 Visual progress tracking
-- 🔄 Resume capability (progress saved to disk)
-- ⌨️ Keyboard shortcuts (Ctrl+Enter, Ctrl+Shift+C)
 
 ## File Structure
 
 ```
 web_ui/
-├── app.py              # Flask backend server
+├── app.py              # All routes and API endpoints
+├── i18n.py             # Server-side EN/ES translations
 ├── templates/
-│   └── index.html      # Main UI page
+│   ├── dashboard.html  # Pipeline wizard (7-stage stepper)
+│   ├── reader.html     # Bilingual reader + project/chapter lists
+│   ├── index.html      # Legacy translation workspace
+│   └── setup.html      # Legacy setup (redirects to dashboard)
 └── static/
-    ├── app.js          # Frontend JavaScript logic
-    └── style.css       # Styling
+    ├── dashboard.js    # Dashboard stage logic, batch SSE, prompts
+    ├── dashboard.css   # Dashboard layout and styles
+    ├── reader.js       # Reader interactions, annotations, corrections
+    ├── reader.css      # Reader serif/reading styles
+    ├── setup.js        # Style guide + glossary wizard logic
+    ├── setup.css       # Setup wizard styles
+    ├── app.js          # Legacy workspace logic
+    ├── style.css       # Legacy workspace styles
+    ├── review.js       # Legacy review mode
+    └── i18n.js         # Client-side translations (legacy workspace)
 ```
 
-## Documentation
+## Key Routes
 
-See [WEB_UI_GUIDE.md](../WEB_UI_GUIDE.md) for complete documentation including:
-- Detailed usage instructions
-- Configuration options
-- Troubleshooting guide
-- Integration with existing workflow
+| Route | Template | Purpose |
+|---|---|---|
+| `/project/<id>` | dashboard.html | Pipeline dashboard |
+| `/read/` | reader.html | Project list |
+| `/read/<id>` | reader.html | Chapter list |
+| `/read/<id>/<ch>` | reader.html | Bilingual reader |
+| `/` | index.html | Legacy workspace |
 
 ## API Endpoints
 
-### `POST /api/load-project`
-Initialize translation session with chunks folder.
+### Dashboard (`/api/project/<id>/...`)
 
-**Request:**
-```json
-{
-  "chunks_dir": "chunks/",
-  "glossary_path": "glossary.json",
-  "style_guide_path": "style_guide.json",
-  "include_context": true,
-  "context_paragraphs": 2
-}
-```
+- `GET /status` — Full project status from filesystem
+- `POST /ingest` — Upload/paste source text
+- `POST /ingest-gutenberg` — Import from Gutenberg URL (fetches HTML, strips boilerplate, downloads images)
+- `POST /split/preview` — Dry-run chapter detection
+- `POST /split` — Execute chapter split
+- `POST /chunk-all` — Chunk all chapters
+- `GET /chapters/<ch>/chunks` — List chunks with status
+- `GET /chunks/<chunk_id>/prompt` — Rendered translation prompt
+- `POST /chunks/<chunk_id>/translate` — Save manual translation
+- `POST /translate/cost-estimate` — Estimate batch cost
+- `POST /translate/realtime` — Single-chunk API translation
+- `POST /translate/batch` — Start batch translation (returns job_id)
+- `GET /translate/sse?job_id=...` — SSE progress stream
+- `POST /combine/<ch>` — Combine chunks into chapter
+- `POST /align/<ch>` — Run sentence alignment
 
-**Response:**
-```json
-{
-  "session_id": "abc123...",
-  "total_chunks": 10,
-  "completed_chunks": 3,
-  "next_chunk": { ... }
-}
-```
+### Setup (`/api/setup/<id>/...`)
 
-### `GET /api/next-chunk?session_id=abc123`
-Get next untranslated chunk with rendered prompt.
+- `POST /prompts/questions` — Generate LLM questions prompt
+- `POST /prompts/style-guide` — Generate style guide prompt
+- `POST /style-guide` — Save style guide
+- `POST /style-guide/fallback` — Generate without LLM
+- `POST /extract-candidates` — Extract glossary candidates
+- `POST /prompts/glossary` — Generate glossary prompt
+- `POST /glossary` — Save glossary
 
-**Response:**
-```json
-{
-  "chunk_id": "chapter_01_chunk_003",
-  "position": 3,
-  "total_chunks": 10,
-  "chapter_id": "chapter_01",
-  "source_text": "...",
-  "word_count": 150,
-  "paragraph_count": 3,
-  "rendered_prompt": "...",
-  "has_next": true
-}
-```
+### Reader
 
-### `POST /api/save-translation`
-Save translation and get next chunk.
+- `GET /api/alignment/<id>/<ch>` — Alignment data
+- `POST /api/correction` — Save correction
+- `GET/POST/DELETE /api/annotations/<id>/<ch>` — Annotations
+- `GET/POST/DELETE /api/reviewed/<id>/<ch>` — Reviewed status
+- `POST /api/apply-corrections/<id>` — Batch apply corrections
 
-**Request:**
-```json
-{
-  "session_id": "abc123...",
-  "chunk_id": "chapter_01_chunk_003",
-  "translation": "Spanish translation..."
-}
-```
+## Documentation
 
-**Response:**
-```json
-{
-  "saved": true,
-  "next_chunk": { ... }
-}
-```
+See [`docs/WEB_UI_GUIDE.md`](../docs/WEB_UI_GUIDE.md) for full reference.
 
-Or if all complete:
-```json
-{
-  "saved": true,
-  "all_complete": true,
-  "total_chunks": 10
-}
-```
-
-## Testing
-
-Run the web UI backend tests:
+## Tests
 
 ```bash
 pytest tests/test_web_ui.py -v
 ```
-
-## Security Note
-
-**This web UI is for local use only.**
-- Runs on localhost (not accessible from network)
-- No authentication
-- Not suitable for public deployment
-
-## Requirements
-
-- Python 3.9+
-- Flask 3.0+
-- All dependencies from main `requirements.txt`
