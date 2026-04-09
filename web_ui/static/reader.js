@@ -15,6 +15,9 @@
     // i18n strings injected by the template
     const i = window.__i18n || {};
 
+    // On desktop (mouse/trackpad), auto-expand the sheet on tap — no keyboard popup concern
+    const isDesktop = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
     // --- Offline retry queue ---
     const QUEUE_KEY = 'reader_save_queue';
 
@@ -189,10 +192,14 @@
             annNoteInput.value = ann.content || '';
         }
 
-        // Show sheet (collapsed)
+        // Show sheet — auto-expand on desktop, collapsed on mobile (avoids keyboard popup)
         bottomSheet.classList.add('visible');
-        bottomSheet.classList.remove('expanded');
         sheetOverlay.classList.add('visible');
+        if (isDesktop) {
+            expandSheet();
+        } else {
+            bottomSheet.classList.remove('expanded');
+        }
     }
 
     function resetAnnotationUI() {
