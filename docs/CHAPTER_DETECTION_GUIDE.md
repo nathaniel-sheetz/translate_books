@@ -427,8 +427,8 @@ Translated Chapter (chapter_02_translated.txt)
 ## Related Documentation
 
 - [GETTING_STARTED.md](GETTING_STARTED.md) - Complete workflow guide
+- [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md) - How chapters are split into translation-sized chunks
 - [README.md](README.md) - Project overview
-- [USAGE.md](USAGE.md) - Detailed command reference
 - [PROMPT_GUIDE.md](PROMPT_GUIDE.md) - Customizing translation prompts
 
 ---

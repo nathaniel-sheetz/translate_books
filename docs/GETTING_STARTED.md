@@ -73,6 +73,9 @@ Configure chunking parameters (defaults are usually fine):
 
 - **Target size**: ~2000 words per chunk
 - **Overlap paragraphs**: 0 (overlap disabled by default)
+- **Split quality weight**: 0.5 (balances even sizing with content-aware splitting)
+
+The chunker distributes words evenly across chunks and avoids splitting in the middle of dialogue or right before continuation paragraphs ("However...", "And then..."). See the [Chunking Guide](CHUNKING_GUIDE.md) for details on the algorithm and tuning.
 
 Click **Chunk All** to break every chapter into translation-sized JSON chunks.
 
