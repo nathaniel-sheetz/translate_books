@@ -8,7 +8,7 @@ This guide walks you through translating your first book using the web dashboard
 pip install -r requirements.txt
 ```
 
-For API translation, copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+For API translation, copy `.env.example` to `.env` and add your API keys (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPINFRA_API_KEY`). Copy `llm_config.example.json` to `llm_config.json` to configure available providers and models. See [LLM Providers](LLM_PROVIDERS.md) for details.
 
 ## Step 0: Create a Project
 
@@ -84,8 +84,8 @@ Click **Chunk All** to break every chapter into translation-sized JSON chunks.
 The style guide tells the LLM how to translate — formality, tone, regional variant, etc.
 
 1. Answer the fixed questions (radio buttons for register, dialect, era, etc.)
-2. Optionally generate additional LLM-powered questions: click **Generate Questions**, copy the prompt into your LLM, paste the response back
-3. Click **Generate Style Guide** — this creates a prompt you copy/paste through your LLM, or uses a built-in fallback if you prefer not to use an LLM for this step
+2. Optionally generate additional questions: click **Generate via API** (uses the selected LLM provider/model) or use the copy/paste workflow
+3. Generate the style guide: click **Generate via API**, use the **Generate from Answers (no LLM)** fallback, or copy/paste through an external LLM
 4. The style guide is saved to `projects/my-book/style.json`
 
 ## Step 6: Glossary
@@ -93,9 +93,9 @@ The style guide tells the LLM how to translate — formality, tone, regional var
 The glossary ensures consistent translation of names, places, and terms.
 
 1. Select which style guide Q&A pairs to include as context
-2. Click **Extract Candidates** — the system scans your source text for proper nouns and recurring terms
-3. Copy the generated prompt, paste into your LLM, paste the response back
-4. Review the proposals table — accept or reject each term
+2. Click **Extract Candidates** -- the system scans your source text for proper nouns and recurring terms
+3. Click **Generate via API** to translate candidates using the selected LLM, or use the copy/paste workflow
+4. Review the proposals table -- accept or reject each term
 5. Click **Save Glossary** to write `projects/my-book/glossary.json`
 
 ## Step 7: Translate
@@ -114,7 +114,7 @@ This is the main work stage. You'll see a table of all chapters with translation
 
 1. Check the boxes next to chapters you want to translate
 2. Click **Batch Translate Selected**
-3. Choose provider (Anthropic/OpenAI) and model
+3. Choose provider and model (configured in `llm_config.json`)
 4. Review the cost estimate
 5. Click **Start** — progress updates in real-time via SSE
 

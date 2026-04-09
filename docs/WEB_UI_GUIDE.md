@@ -123,17 +123,19 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 
 **File:** `projects/<id>/style.json`
 
-Uses the same wizard as the old setup page — all existing `/api/setup/<id>/*` endpoints are reused.
+A shared **LLM provider/model selector** appears at the top of the style guide wizard. It controls which model is used for both question generation and style guide generation. See [LLM Providers](LLM_PROVIDERS.md) for configuration.
 
 **Workflow:**
 1. Answer fixed questions (register, dialect, era, audience, etc.)
-2. Optionally generate LLM questions: copies a prompt → paste response → parses additional questions
-3. Generate style guide: either via LLM (copy/paste) or built-in fallback
+2. Generate additional questions: click **Generate via API** to call the selected LLM directly, or use the copy/paste workflow (Show Prompt to Copy → paste response)
+3. Generate style guide: click **Generate via API**, use **Generate from Answers (no LLM)** fallback, or copy/paste
 4. Save to `style.json`
 
-**APIs (existing):**
-- `POST /api/setup/<id>/prompts/questions` — generate additional questions prompt
-- `POST /api/setup/<id>/prompts/style-guide` — generate style guide prompt
+**APIs:**
+- `POST /api/setup/<id>/prompts/questions` — generate additional questions prompt (for copy/paste)
+- `POST /api/setup/<id>/questions/generate` — generate questions via direct LLM call; `{ "answers": {...}, "provider": "...", "model": "..." }`
+- `POST /api/setup/<id>/prompts/style-guide` — generate style guide prompt (for copy/paste)
+- `POST /api/setup/<id>/style-guide/generate` — generate style guide via direct LLM call; `{ "answers": {...}, "extra_questions": [...], "provider": "...", "model": "..." }`
 - `POST /api/setup/<id>/style-guide` — save style guide JSON
 - `POST /api/setup/<id>/style-guide/fallback` — generate without LLM
 
@@ -143,16 +145,19 @@ Uses the same wizard as the old setup page — all existing `/api/setup/<id>/*` 
 
 **File:** `projects/<id>/glossary.json`
 
+A **LLM provider/model selector** appears in Step 3 ("Bootstrap Translations via LLM").
+
 **Workflow:**
 1. Select which style guide Q&A pairs to use as context
 2. Click **Extract Candidates** — scans source text for proper nouns and terms
-3. Copy the generated glossary prompt, paste into LLM, paste response back
+3. Click **Generate via API** to translate candidates using the selected LLM, or use the copy/paste workflow
 4. Review proposals table — accept/reject each term
 5. Save glossary
 
-**APIs (existing):**
+**APIs:**
 - `POST /api/setup/<id>/extract-candidates` — extract candidate terms
-- `POST /api/setup/<id>/prompts/glossary` — generate glossary prompt
+- `POST /api/setup/<id>/prompts/glossary` — generate glossary prompt (for copy/paste)
+- `POST /api/setup/<id>/glossary/generate` — generate glossary via direct LLM call; `{ "candidates": [...], "provider": "...", "model": "..." }`
 - `POST /api/setup/<id>/glossary` — save glossary JSON
 
 **Backend:** `extract_glossary_candidates()` from `src/glossary_bootstrap.py`.
@@ -195,19 +200,18 @@ The prompt includes: style guide, filtered glossary (only terms appearing in thi
 
 1. Select chapters via checkboxes
 2. Click **Batch Translate Selected** → opens modal
-3. Choose provider (Anthropic / OpenAI) and model
-4. Cost estimate auto-calculates (input tokens × model pricing)
-5. Click **Start** → launches background translation thread
+3. Choose provider and model (dynamically populated from `llm_config.json` — see [LLM Providers](LLM_PROVIDERS.md))
+4. Cost estimate auto-calculates (input tokens x model pricing from config)
+5. Click **Start** — launches background translation thread
 6. Real-time progress via Server-Sent Events (SSE)
 
 **APIs:**
-- `POST /api/project/<id>/translate/cost-estimate` — `{ "chapters": [...], "provider": "anthropic", "model": "..." }` → `{ "cost_usd": 0.12, "input_tokens": 5000, "chunk_count": 8 }`
-- `POST /api/project/<id>/translate/batch` — `{ "chapters": [...], "provider": "...", "model": "..." }` → `{ "job_id": "abc123" }`
+- `GET /api/llm-config` — returns available providers/models with availability flags
+- `POST /api/project/<id>/translate/cost-estimate` — `{ "chapters": [...], "provider": "anthropic", "model": "..." }` -> `{ "cost_usd": 0.12, "input_tokens": 5000, "chunk_count": 8 }`
+- `POST /api/project/<id>/translate/batch` — `{ "chapters": [...], "provider": "...", "model": "..." }` -> `{ "job_id": "abc123" }`
 - `GET /api/project/<id>/translate/sse?job_id=abc123` — SSE stream with events: `chunk_started`, `chunk_done`, `chunk_error`, `batch_complete`
 
-**Available models:**
-- Anthropic: Claude Sonnet 4, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku
-- OpenAI: GPT-4o, GPT-4o Mini
+**Available models** are configured in `llm_config.json`. By default: Anthropic (Claude Sonnet 4, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku), OpenAI (GPT-4o, GPT-4o Mini), and DeepInfra (Llama 3.3 70B). Any OpenAI-compatible provider can be added.
 
 **Backend:** `translate_chunk_realtime()` and `estimate_cost()` from `src/api_translator.py`. Glossary filtering via `filter_glossary_for_chunk()` from `src/glossary_bootstrap.py`.
 
