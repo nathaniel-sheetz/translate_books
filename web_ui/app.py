@@ -2088,6 +2088,68 @@ def project_chapter_chunks(project_id, chapter_id):
     return jsonify({"chunks": chunks})
 
 
+def _build_previous_context(project_dir: Path, chunk) -> str:
+    """
+    Build previous_chapter_context for a chunk.
+
+    For non-first chunks within a chapter: uses the previous chunk.
+    For the first chunk of a chapter: uses the last chunk of the previous chapter.
+    Context window size is read from project.json (context_min_chars,
+    context_max_chars, context_min_paragraphs); falls back to defaults.
+    """
+    from src.translator import extract_previous_chapter_context
+
+    project_id = project_dir.name
+    cfg = _load_project_config(project_id)
+    min_chars = cfg.get("context_min_chars", 200)
+    max_chars = cfg.get("context_max_chars", None)
+    min_paragraphs = cfg.get("context_min_paragraphs", 3)
+
+    chunks_dir = project_dir / "chunks"
+    chapter_id = chunk.chapter_id
+    chapter_chunks = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+
+    prev_chunk = None
+    for i, cf in enumerate(chapter_chunks):
+        if cf.stem == chunk.id:
+            if i > 0:
+                prev_chunk = load_chunk(chapter_chunks[i - 1])
+            else:
+                # First chunk of chapter — look at last chunk of previous chapter
+                chapters_dir = project_dir / "chapters"
+                all_chapters = sorted(
+                    f.stem for f in chapters_dir.glob("chapter_*.txt")
+                ) if chapters_dir.exists() else []
+                try:
+                    ch_idx = all_chapters.index(chapter_id)
+                except ValueError:
+                    return ""
+                if ch_idx == 0:
+                    return ""
+                prev_chapter_id = all_chapters[ch_idx - 1]
+                prev_chapter_chunks = sorted(
+                    chunks_dir.glob(f"{prev_chapter_id}_chunk_*.json")
+                )
+                if not prev_chapter_chunks:
+                    return ""
+                prev_chunk = load_chunk(prev_chapter_chunks[-1])
+            break
+
+    if prev_chunk is None:
+        return ""
+
+    return extract_previous_chapter_context(
+        prev_chunk.source_text,
+        previous_translated_text=prev_chunk.translated_text,
+        context_language="both",
+        min_paragraphs=min_paragraphs,
+        min_chars=min_chars,
+        max_chars=max_chars,
+        source_language="English",
+        target_language="Spanish",
+    )
+
+
 @app.route("/api/project/<project_id>/chunks/<chunk_id>/prompt")
 def project_chunk_prompt(project_id, chunk_id):
     """Get the rendered translation prompt for a chunk."""
@@ -2119,27 +2181,9 @@ def project_chunk_prompt(project_id, chunk_id):
             except Exception:
                 pass
 
-        # Previous chunk context
         from src.utils.file_io import filter_glossary_for_chunk
-        from src.translator import extract_previous_chapter_context
 
-        chunks_dir = project_dir / "chunks"
-        chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
-        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
-        prev_context = ""
-        for i, cf in enumerate(chunk_files):
-            if cf.stem == chunk_id and i > 0:
-                prev_chunk = load_chunk(chunk_files[i - 1])
-                prev_context = extract_previous_chapter_context(
-                    prev_chunk.source_text,
-                    previous_translated_text=prev_chunk.translated_text,
-                    context_language="both",
-                    min_paragraphs=3,
-                    min_chars=200,
-                    source_language="English",
-                    target_language="Spanish",
-                )
-                break
+        prev_context = _build_previous_context(project_dir, chunk)
 
         # Filter glossary for this chunk
         chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
@@ -2287,6 +2331,7 @@ def project_translate_realtime(project_id):
 
         provider = data.get("provider", "anthropic")
         model = data.get("model", None)
+        prev_context = _build_previous_context(project_dir, chunk)
 
         translated = translate_chunk_realtime(
             chunk=chunk,
@@ -2297,6 +2342,7 @@ def project_translate_realtime(project_id):
             project_name=_project_title(project_id),
             source_language="English",
             target_language="Spanish",
+            previous_chapter_context=prev_context,
         )
 
         save_chunk(translated, chunk_path)
@@ -2370,6 +2416,7 @@ def project_translate_batch(project_id):
                     "chunk_id": chunk.id,
                     "chapter_id": chunk.chapter_id,
                 }))
+                prev_context = _build_previous_context(project_dir, chunk)
                 translated = translate_chunk_realtime(
                     chunk=chunk,
                     provider=provider,
@@ -2379,6 +2426,7 @@ def project_translate_batch(project_id):
                     project_name=_project_title(project_id),
                     source_language="English",
                     target_language="Spanish",
+                    previous_chapter_context=prev_context,
                 )
                 save_chunk(translated, cp)
                 job_queue.put(json.dumps({
