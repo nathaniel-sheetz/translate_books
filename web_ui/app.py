@@ -1202,11 +1202,11 @@ def get_alignment(project_id, chapter):
         with open(align_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        # Enrich with paragraph break info from combined chapter text
-        # Check chapters/ (orchestrator output) first, then translated/ (legacy)
+        # Enrich with paragraph break info from the combined chapter text.
+        # chapters/<chapter>.txt is the canonical output of Combine (see
+        # project_combine / project_align); align refreshes it before writing
+        # alignment JSON, so it should always be in sync here.
         chapter_text_path = projects_dir / project_id / "chapters" / f"{chapter}.txt"
-        if not chapter_text_path.exists():
-            chapter_text_path = projects_dir / project_id / "translated" / f"{chapter}.txt"
         if chapter_text_path.exists():
             _enrich_alignment(data, chapter_text_path, project_id)
 
