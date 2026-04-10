@@ -1109,6 +1109,13 @@
 
     function populateTranslateStage(status) {
         var tbody = document.getElementById('translate-chapter-tbody');
+        // If chunk-detail-container was moved into the tbody, rescue it before wiping
+        var container = document.getElementById('chunk-detail-container');
+        if (container && tbody.contains(container)) {
+            document.getElementById('stage-translate').appendChild(container);
+            container.innerHTML = '';
+        }
+        expandedChapter = null;
         tbody.innerHTML = '';
 
         if (!status.chapters || status.chapters.length === 0) {
@@ -1139,7 +1146,7 @@
                 '<td><span class="status-pill ' + statusClass + '">' + statusLabel + '</span></td>' +
                 '<td>' +
                     (total > 0 ? '<button class="btn-secondary ch-expand" style="padding:3px 10px;font-size:12px">Expand</button> ' : '') +
-                    (translated === total && total > 0 ? '<a href="/read/' + PROJECT + '/' + ch.id + '" target="_blank" class="btn-secondary" style="padding:3px 10px;font-size:12px;text-decoration:none">Read</a>' : '') +
+                    (ch.has_alignment ? '<a href="/read/' + PROJECT + '/' + ch.id + '" target="_blank" class="btn-secondary" style="padding:3px 10px;font-size:12px;text-decoration:none">Read</a>' : '') +
                 '</td>';
             tbody.appendChild(tr);
 
@@ -1290,6 +1297,12 @@
         html += '<div class="chunk-section-header"><h4>Translation</h4></div>';
         html += '<textarea class="chunk-translate-area" id="chunk-translate-textarea" placeholder="Paste translation here...">' +
             escapeHtml(chunk.translated_text || '') + '</textarea>';
+        html += '<div class="llm-selector-row" style="margin-bottom:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">';
+        html += '<label style="font-size:13px;color:#666">Provider</label>';
+        html += '<select id="chunk-provider" class="llm-provider-select" style="padding:4px 8px;"></select>';
+        html += '<label style="font-size:13px;color:#666">Model</label>';
+        html += '<select id="chunk-model" class="llm-model-select" style="padding:4px 8px;"></select>';
+        html += '</div>';
         html += '<div class="btn-row">';
         html += '<button class="btn-save" id="btn-save-chunk-translation">Save Translation</button>';
         html += '<button class="btn-primary" id="btn-auto-translate-chunk">Auto-Translate via API</button>';
@@ -1298,6 +1311,10 @@
         html += '</div>';
 
         area.innerHTML = html;
+
+        populateProviderSelect('chunk-provider');
+        populateModelSelect('chunk-provider', 'chunk-model');
+        bindProviderModelPair('chunk-provider', 'chunk-model');
 
         // Load prompt
         apiGet('/api/project/' + PROJECT + '/chunks/' + chunk.id + '/prompt').then(function(data) {
@@ -1362,6 +1379,8 @@
             var btn = this;
             apiPost('/api/project/' + PROJECT + '/translate/realtime', {
                 chunk_id: chunk.id,
+                provider: document.getElementById('chunk-provider').value,
+                model: document.getElementById('chunk-model').value,
             }).then(function(data) {
                 btn.disabled = false;
                 if (data.error) {
