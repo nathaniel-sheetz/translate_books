@@ -254,6 +254,8 @@ def extract_proper_nouns(
                     if term_lower not in first_forms:
                         first_forms[term_lower] = term
                         detection_reasons_map[term_lower] = ["capitalized_sequence"]
+                    elif first_forms[term_lower].isupper() and not term.isupper():
+                        first_forms[term_lower] = term
 
                     # Check for title prefix (token before the sequence)
                     if i >= 1 and tokens[i - 1].lower().rstrip('.') in TITLE_WORDS:
@@ -288,6 +290,8 @@ def extract_proper_nouns(
                 if t_lower not in first_forms:
                     first_forms[t_lower] = token
                     detection_reasons_map[t_lower] = ["capitalized_mid_sentence"]
+                elif first_forms[t_lower].isupper() and not token.isupper():
+                    first_forms[t_lower] = token
                 type_guesses.setdefault(t_lower, GlossaryTermType.OTHER)
 
             else:
@@ -349,6 +353,8 @@ def extract_uncommon_words(
         word_counts[lower] += 1
         if lower not in first_form:
             first_form[lower] = token
+        elif first_form[lower].isupper() and not token.isupper():
+            first_form[lower] = token
 
     candidates = {}
     for word_lower, count in word_counts.items():
@@ -406,8 +412,11 @@ def extract_frequent_ngrams(
 
                 key = " ".join(gram_lowers)
                 ngram_counts[key] += 1
+                surface = " ".join(gram_tokens)
                 if key not in first_form:
-                    first_form[key] = " ".join(gram_tokens)
+                    first_form[key] = surface
+                elif first_form[key].isupper() and not surface.isupper():
+                    first_form[key] = surface
 
     candidates = {}
     for ngram_lower, count in ngram_counts.items():
@@ -458,6 +467,8 @@ def extract_repeated_capitalized(
         else:
             lower_counts[lower] += 1
         if lower not in first_form and token[0].isupper():
+            first_form[lower] = token
+        elif lower in first_form and first_form[lower].isupper() and not token.isupper() and token[0].isupper():
             first_form[lower] = token
 
     candidates = {}
