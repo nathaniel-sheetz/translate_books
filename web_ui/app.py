@@ -1787,7 +1787,7 @@ def _get_project_status(project_id: str) -> dict:
                 try:
                     with open(align_dir / f"{ch_id}.json", "r", encoding="utf-8") as f:
                         adata = json.load(f)
-                    scores = [p.get("score", 1.0) for p in adata.get("pairs", [])]
+                    scores = [p.get("similarity", 1.0) for p in adata.get("alignments", [])]
                     alignment_confidence = round(sum(scores) / len(scores) * 100) if scores else None
                 except Exception:
                     pass
@@ -2469,11 +2469,21 @@ def project_align(project_id, chapter_id):
     chunks_dir = project_dir / "chunks"
 
     try:
+        from src.combiner import combine_chunks
         from src.sentence_aligner import align_chapter_chunks
 
         chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
         if not chunk_files:
             return jsonify({"error": "No chunks found"}), 404
+
+        # Refresh the combined chapter text before aligning so chapters/ is
+        # always in sync with the translated chunks. get_alignment reads this
+        # file to enrich alignment data with paragraph breaks.
+        chunks = [load_chunk(cf) for cf in chunk_files]
+        combined_text = combine_chunks(chunks)
+        chapters_dir = project_dir / "chapters"
+        chapters_dir.mkdir(exist_ok=True)
+        (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
 
         align_dir = project_dir / "alignments"
         align_dir.mkdir(exist_ok=True)
