@@ -24,18 +24,28 @@ def _extract_tail_paragraphs(
     text: str,
     min_paragraphs: int = 3,
     min_chars: int = 200,
+    max_chars: Optional[int] = None,
 ) -> str:
     """
-    Extract paragraphs from the end of text using dual-constraint strategy.
+    Extract paragraphs from the end of text.
 
-    Adds paragraphs from the end until BOTH min_paragraphs AND min_chars are
-    satisfied. If paragraphs run out before both constraints are met, returns
-    everything available.
+    Rules (applied in this priority order):
+    1. Always return complete paragraphs — never split mid-paragraph.
+    2. Keep adding paragraphs until BOTH min_paragraphs AND min_chars are met.
+       min_paragraphs overrides max_chars: we always include at least that many
+       full paragraphs even if their total exceeds max_chars.
+    3. Once both minimums are satisfied, stop before adding a paragraph that
+       would push the total over max_chars.
+    4. If no single full paragraph fits within [min_chars, max_chars] (e.g. all
+       paragraphs are larger than max_chars), include the paragraph anyway —
+       max_chars is a soft ceiling, not a hard truncation point.
 
     Args:
         text: Text to extract from.
-        min_paragraphs: Minimum number of paragraphs to include.
-        min_chars: Minimum total characters to include.
+        min_paragraphs: Minimum number of paragraphs to include (hard lower bound).
+        min_chars: Minimum total characters to include (soft lower bound).
+        max_chars: Maximum total characters to include (soft upper bound).
+                   None means no upper limit.
 
     Returns:
         Extracted paragraphs joined by double newlines, or "" if text is empty.
@@ -55,13 +65,16 @@ def _extract_tail_paragraphs(
     char_count = 0
 
     for para in reversed(paragraphs):
+        both_mins_met = len(selected) >= min_paragraphs and char_count >= min_chars
+        would_exceed_max = max_chars is not None and (char_count + len(para)) > max_chars
+
+        if both_mins_met and would_exceed_max:
+            break
+
         selected.insert(0, para)
         char_count += len(para)
 
-        paras_met = len(selected) >= min_paragraphs
-        chars_met = char_count >= min_chars
-
-        if paras_met and chars_met:
+        if len(selected) >= min_paragraphs and char_count >= min_chars:
             break
 
     return '\n\n'.join(selected)
@@ -73,6 +86,7 @@ def extract_previous_chapter_context(
     context_language: str = "both",
     min_paragraphs: int = 3,
     min_chars: int = 200,
+    max_chars: Optional[int] = None,
     source_language: str = "English",
     target_language: str = "Spanish",
 ) -> str:
@@ -101,11 +115,11 @@ def extract_previous_chapter_context(
         True
     """
     source_tail = _extract_tail_paragraphs(
-        previous_section_text, min_paragraphs, min_chars
+        previous_section_text, min_paragraphs, min_chars, max_chars
     ) if previous_section_text else ""
 
     translated_tail = _extract_tail_paragraphs(
-        previous_translated_text, min_paragraphs, min_chars
+        previous_translated_text, min_paragraphs, min_chars, max_chars
     ) if previous_translated_text else ""
 
     # Determine what to show based on context_language and what's available
