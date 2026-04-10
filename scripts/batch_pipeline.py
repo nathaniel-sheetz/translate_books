@@ -294,7 +294,7 @@ Examples:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Override combined chapter output directory (default: {project}/translated/)",
+        help="Override combined chapter output directory (default: {project}/chapters/)",
     )
 
     parser.add_argument(
@@ -380,7 +380,7 @@ def main():
         eval_config.enabled_evals = [e.strip() for e in args.evaluators.split(",")]
 
     # Output directory for combine
-    output_dir = args.output_dir or (project_dir / "translated")
+    output_dir = args.output_dir or (project_dir / "chapters")
 
     # Print plan
     print(f"\nProject: {project_dir}")

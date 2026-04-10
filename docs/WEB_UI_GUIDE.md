@@ -106,14 +106,14 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 **Config options:**
 - Target size in words (default: 2000)
 - Overlap paragraphs (default: 0)
-- Minimum overlap words (default: 150)
+- Minimum overlap words (default: 0)
 
 **Workflow:**
 1. Configure chunking parameters
 2. Click **Chunk All** to process every chapter
 3. Shows chapter list with chunk counts after completion
 
-**API:** `POST /api/project/<id>/chunk-all` — `{ "target_size": 2000, "overlap": 0, "min_overlap_words": 150 }`
+**API:** `POST /api/project/<id>/chunk-all` — `{ "target_size": 2000, "overlap": 0, "min_overlap_words": 0 }`
 
 **Backend:** `chunk_chapter()` from `src/chunker.py`. Each chunk is a `Chunk` Pydantic model serialized to JSON.
 
@@ -226,8 +226,8 @@ Table of translated chapters with columns: chapter, alignment status, annotation
 - **Read** — opens bilingual reader in a new tab
 
 **APIs:**
-- `POST /api/project/<id>/combine/<chapter>` — combine chunks → `translated/<chapter>.txt`
-- `POST /api/project/<id>/align/<chapter>` — sentence alignment → `alignments/<chapter>.json`
+- `POST /api/project/<id>/combine/<chapter>` — combine chunks → `chapters/<chapter>.txt`
+- `POST /api/project/<id>/align/<chapter>` — refreshes `chapters/<chapter>.txt` (re-combines chunks), then writes sentence alignment → `alignments/<chapter>.json`
 
 **Backend:** `combine_chunks()` from `src/combiner.py`, `align_chapter_chunks()` from `src/sentence_aligner.py`.
 
@@ -324,7 +324,7 @@ All state is derived from the filesystem — no database.
 projects/<id>/
 ├── project.json            # Project config (title, gutenberg_url, suggested_split_pattern)
 ├── source.txt              # Raw source text
-├── chapters/               # Split chapter .txt files
+├── chapters/               # Chapter .txt files (combined translated output)
 │   ├── chapter_01.txt
 │   └── ...
 ├── chunks/                 # Chunk JSON files
@@ -332,7 +332,6 @@ projects/<id>/
 │   └── ...
 ├── style.json              # Style guide
 ├── glossary.json           # Term glossary
-├── translated/             # Combined translated chapter .txt files
 ├── alignments/             # Sentence alignment JSON
 ├── annotations.jsonl       # Reader annotations (append-only)
 ├── reviewed.json           # Chapter reviewed status

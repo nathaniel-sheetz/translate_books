@@ -92,7 +92,7 @@ TRANSLATION INSTRUCTIONS
 
 6. LENGTH AND COMPLETENESS:
    - Translate the complete text - do not skip or summarize
-   - {{target_language}} translations are typically 10-30% longer than English
+   - {{target_language}} translations are typically 0-20% longer than English
    - This is normal and expected - do not artificially compress the translation
 
 ================================================================================
