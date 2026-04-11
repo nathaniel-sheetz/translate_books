@@ -2039,6 +2039,8 @@ def project_chunk_all(project_id):
         data = request.json or {}
         config = ChunkingConfig(
             target_size=data.get("target_size", 2000),
+            min_chunk_size=data.get("min_chunk_size", 500),
+            max_chunk_size=data.get("max_chunk_size", 3000),
             overlap_paragraphs=data.get("overlap_paragraphs", 2),
             min_overlap_words=data.get("min_overlap_words", 100),
         )
@@ -2056,6 +2058,58 @@ def project_chunk_all(project_id):
                 total_chunks += 1
 
         return jsonify({"ok": True, "total_chunks": total_chunks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/chapters/<chapter_id>/rechunk", methods=["POST"])
+def project_chapter_rechunk(project_id, chapter_id):
+    """Rechunk a single chapter, replacing its existing chunks.
+
+    Destructive: deletes all existing chunk files for this chapter before
+    writing new ones. The client is responsible for warning the user when
+    the chapter has translated chunks that would be lost.
+    """
+    if not _safe_id(project_id) or not _safe_id(chapter_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    chapter_path = project_dir / "chapters" / f"{chapter_id}.txt"
+    if not chapter_path.exists():
+        return jsonify({"error": "Chapter not found"}), 404
+
+    try:
+        from src.chunker import chunk_chapter
+        from src.models import ChunkingConfig
+        from src.utils.file_io import save_chunk
+
+        data = request.json or {}
+        config = ChunkingConfig(
+            target_size=data.get("target_size", 2000),
+            min_chunk_size=data.get("min_chunk_size", 500),
+            max_chunk_size=data.get("max_chunk_size", 3000),
+            overlap_paragraphs=data.get("overlap_paragraphs", 2),
+            min_overlap_words=data.get("min_overlap_words", 100),
+        )
+
+        chunks_dir = project_dir / "chunks"
+        chunks_dir.mkdir(exist_ok=True)
+
+        # Delete existing chunk files for this chapter so we don't leave
+        # stale higher-numbered chunks behind if the new chunking produces
+        # fewer chunks than before.
+        for old in chunks_dir.glob(f"{chapter_id}_chunk_*.json"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+        text = chapter_path.read_text(encoding="utf-8")
+        chunks = chunk_chapter(text, config, chapter_id)
+        for chunk in chunks:
+            save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
+
+        return jsonify({"ok": True, "chunk_count": len(chunks)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

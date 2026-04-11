@@ -605,6 +605,16 @@
     // Stage 3: Chunk
     // ========================================================================
 
+    function getChunkConfig() {
+        return {
+            target_size: parseInt(document.getElementById('chunk-target-size').value, 10) || 2000,
+            min_chunk_size: parseInt(document.getElementById('chunk-min-size').value, 10) || 500,
+            max_chunk_size: parseInt(document.getElementById('chunk-max-size').value, 10) || 3000,
+            overlap_paragraphs: parseInt(document.getElementById('chunk-overlap-para').value, 10) || 2,
+            min_overlap_words: parseInt(document.getElementById('chunk-overlap-words').value, 10) || 100,
+        };
+    }
+
     function populateChunkStage(status) {
         var list = document.getElementById('chunk-chapter-list');
         list.innerHTML = '';
@@ -617,22 +627,58 @@
         status.chapters.forEach(function(ch) {
             var card = document.createElement('div');
             card.className = 'chapter-card';
+            var translated = ch.translated_count || 0;
             var chunkInfo = ch.chunk_count > 0
-                ? ch.chunk_count + ' chunks'
+                ? ch.chunk_count + ' chunks' + (translated > 0 ? ' · ' + translated + ' translated' : '')
                 : 'Not chunked';
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = ch.chunk_count > 0
+                ? (translated > 0 ? 'btn-danger' : 'btn-secondary')
+                : 'btn-secondary';
+            btn.textContent = ch.chunk_count > 0 ? 'Rechunk' : 'Chunk';
+            btn.style.marginLeft = 'auto';
+            btn.dataset.chapterId = ch.id;
+            btn.dataset.chapterName = ch.name;
+            btn.dataset.translatedCount = String(translated);
+            btn.addEventListener('click', onRechunkChapterClick);
+
             card.innerHTML =
                 '<span class="ch-name">' + escapeHtml(ch.name) + '</span>' +
-                '<span class="ch-words">' + chunkInfo + '</span>';
+                '<span class="ch-words">' + (ch.words || ch.word_count || 0) + ' words · ' + chunkInfo + '</span>';
+            card.appendChild(btn);
             list.appendChild(card);
         });
     }
 
+    function onRechunkChapterClick(ev) {
+        var btn = ev.currentTarget;
+        var chapterId = btn.dataset.chapterId;
+        var chapterName = btn.dataset.chapterName || chapterId;
+        var translated = parseInt(btn.dataset.translatedCount, 10) || 0;
+
+        if (translated > 0) {
+            var msg = 'This chapter has ' + translated + ' translated chunk' +
+                (translated === 1 ? '' : 's') +
+                '. Rechunking will delete those translations. Continue?';
+            if (!confirm(msg)) return;
+        }
+
+        var config = getChunkConfig();
+        setStatus('chunk-status', 'Rechunking ' + chapterName + '...', '');
+        apiPost('/api/project/' + PROJECT + '/chapters/' + chapterId + '/rechunk', config).then(function(data) {
+            if (data.error) {
+                setStatus('chunk-status', data.error, 'error');
+            } else {
+                setStatus('chunk-status', 'Rechunked ' + chapterName + ' (' + (data.chunk_count || 0) + ' chunks)', 'success');
+                loadStatus();
+            }
+        });
+    }
+
     document.getElementById('btn-chunk-all').addEventListener('click', function() {
-        var config = {
-            target_size: parseInt(document.getElementById('chunk-target-size').value, 10) || 2000,
-            overlap_paragraphs: parseInt(document.getElementById('chunk-overlap-para').value, 10) || 2,
-            min_overlap_words: parseInt(document.getElementById('chunk-overlap-words').value, 10) || 100,
-        };
+        var config = getChunkConfig();
         setStatus('chunk-status', 'Chunking...', '');
         apiPost('/api/project/' + PROJECT + '/chunk-all', config).then(function(data) {
             if (data.error) {
