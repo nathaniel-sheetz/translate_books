@@ -235,6 +235,7 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
         <div class="sheet-handle" id="sheet-handle"></div>
         <div class="sheet-header">
             <span class="sheet-label">{{ t.sheet_label }}</span>
+            <button class="sheet-edit-chunk" id="sheet-edit-chunk" title="{{ t.edit_chunk }}">{{ t.edit_chunk }}</button>
             <button class="sheet-close" id="sheet-close">&times;</button>
         </div>
         <div class="sheet-en" id="sheet-en"></div>
@@ -289,7 +290,7 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
     <div class="sheet-overlay" id="sheet-overlay"></div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=8"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=9"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

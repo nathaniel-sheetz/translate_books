@@ -61,6 +61,7 @@
     const sheetTextarea = document.getElementById('sheet-textarea');
     const btnSave = document.getElementById('btn-save');
     const sheetClose = document.getElementById('sheet-close');
+    const sheetEditChunk = document.getElementById('sheet-edit-chunk');
     const sheetHandle = document.getElementById('sheet-handle');
     const readerStats = document.getElementById('reader-stats');
 
@@ -98,6 +99,7 @@
             renderSentences(data.alignments);
             addReviewButton();
             updateStats();
+            scrollToAnchorParam();
         })
         .catch(err => {
             content.innerHTML = `<p class="empty-state">${i.error_prefix || 'Error: '}${err.message}</p>`;
@@ -246,6 +248,38 @@
         sheetTextarea.focus();
     }
 
+    // After the initial load (or after returning from the chunk editor),
+    // scroll to the alignment whose es starts with ?anchor=<prefix>. This is
+    // keyed by text instead of es_idx because realign can renumber sentences.
+    function scrollToAnchorParam() {
+        const params = new URLSearchParams(window.location.search);
+        const anchor = params.get('anchor');
+        if (!anchor || !alignmentData) return;
+        const prefix = anchor.trim();
+        if (!prefix) return;
+
+        let match = null;
+        for (const a of alignmentData.alignments) {
+            if (a && typeof a.es === 'string' && a.es.startsWith(prefix)) {
+                match = a;
+                break;
+            }
+        }
+        if (!match) return;
+        const el = content.querySelector(`[data-es-idx="${match.es_idx}"]`);
+        if (!el) return;
+        // Strip the anchor param from the URL so refreshes don't keep jumping
+        params.delete('anchor');
+        const newSearch = params.toString();
+        const newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '');
+        window.history.replaceState({}, '', newUrl);
+        // Defer to give the browser a frame to lay out the content
+        setTimeout(() => {
+            const top = el.getBoundingClientRect().top + window.scrollY - 60;
+            window.scrollTo({ top, behavior: 'instant' });
+        }, 0);
+    }
+
     // --- Annotation type button handling ---
 
     const ANN_TYPE_NAMES = {
@@ -380,6 +414,22 @@
     // Tap overlay to close
     sheetOverlay.addEventListener('click', closeSheet);
     sheetClose.addEventListener('click', closeSheet);
+
+    // Open the full chunk editor for the tapped sentence's chunk.
+    if (sheetEditChunk) {
+        sheetEditChunk.addEventListener('click', () => {
+            if (activeIdx === null || !alignmentData) return;
+            const a = alignmentData.alignments.find(x => x.es_idx === activeIdx);
+            if (!a || !a.chunk_id) return;
+            const anchor = (a.es || '').slice(0, 30);
+            const params = new URLSearchParams({
+                anchor_idx: String(activeIdx),
+                anchor: anchor,
+            });
+            window.location.href =
+                `/read/${projectId}/${chapter}/chunk/${a.chunk_id}/edit?` + params.toString();
+        });
+    }
 
     // Tap handle or swipe up to expand
     sheetHandle.addEventListener('click', expandSheet);

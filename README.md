@@ -64,6 +64,7 @@ After translation and alignment, read chapters at `/read/<project_id>/<chapter>`
 
 - Side-by-side English/Spanish sentences
 - Tap any sentence to see the source and edit the translation
+- **Edit chunk** button in the bottom sheet opens a full-textarea editor for the surrounding chunk — use it to fix stray whitespace, wrong paragraph breaks, or other edits that don't fit one sentence at a time. Saves recombine and realign the chapter automatically and keep a backup under `.chunk_edits/`.
 - Annotation system (word choice, inconsistency, footnote, flag)
 - Mark chapters as reviewed
 - Correction workflow for batch fixes
@@ -160,6 +161,7 @@ book_translation/
 │       ├── alignments/         # Sentence alignment JSON
 │       ├── annotations.jsonl   # Reader annotations
 │       ├── reviewed.json       # Chapter review status
+│       ├── .chunk_edits/       # Pre-edit chunk backups from the chunk editor
 │       └── images/             # Downloaded images
 │
 ├── requirements.txt

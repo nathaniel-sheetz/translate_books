@@ -721,6 +721,23 @@ body {
     padding: 4px 8px;
 }
 
+.sheet-edit-chunk {
+    margin-left: auto;
+    margin-right: 8px;
+    background: #f0ece7;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    color: #555;
+    cursor: pointer;
+}
+
+.sheet-edit-chunk:hover {
+    background: #e6e0d8;
+}
+
 .sheet-en {
     font-size: 17px;
     line-height: 1.6;

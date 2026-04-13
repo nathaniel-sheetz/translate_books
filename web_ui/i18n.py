@@ -35,6 +35,15 @@ STRINGS = {
         "edit_placeholder": "Edit translation...",
         "btn_save": "Save",
         "loading": "Loading...",
+        "edit_chunk": "Edit chunk",
+        "edit_chunk_title": "Edit chunk",
+        "edit_chunk_back": "Back",
+        "edit_chunk_save": "Save",
+        "edit_chunk_source": "Source (read-only)",
+        "edit_chunk_dirty_confirm": "Discard unsaved changes?",
+        "edit_chunk_overlap_start": "The first {n} characters overlap with the previous chunk and are not editable.",
+        "edit_chunk_overlap_end": "The last {n} characters overlap with the next chunk and are not editable.",
+        "edit_chunk_saving": "Saving...",
 
         # JS strings (injected as window.__i18n)
         "js": {
@@ -88,6 +97,15 @@ STRINGS = {
         "edit_placeholder": "Editar traducci\u00f3n...",
         "btn_save": "Guardar",
         "loading": "Cargando...",
+        "edit_chunk": "Editar fragmento",
+        "edit_chunk_title": "Editar fragmento",
+        "edit_chunk_back": "Volver",
+        "edit_chunk_save": "Guardar",
+        "edit_chunk_source": "Fuente (s\u00f3lo lectura)",
+        "edit_chunk_dirty_confirm": "\u00bfDescartar cambios sin guardar?",
+        "edit_chunk_overlap_start": "Los primeros {n} caracteres se superponen con el fragmento anterior y no son editables.",
+        "edit_chunk_overlap_end": "Los \u00faltimos {n} caracteres se superponen con el siguiente fragmento y no son editables.",
+        "edit_chunk_saving": "Guardando...",
 
         # JS strings
         "js": {
