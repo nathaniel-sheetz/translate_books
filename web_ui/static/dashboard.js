@@ -1578,6 +1578,8 @@
     function populateReviewStage(status) {
         var tbody = document.getElementById('review-tbody');
         tbody.innerHTML = '';
+        var alignAllBtn = document.getElementById('btn-align-all');
+        alignAllBtn.style.display = 'none';
 
         if (!status.chapters || status.chapters.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5">No chapters available.</td></tr>';
@@ -1585,6 +1587,7 @@
         }
 
         var hasAnyTranslated = false;
+        var unalignedChapters = [];
 
         status.chapters.forEach(function(ch) {
             var translated = ch.translated_count || 0;
@@ -1593,6 +1596,7 @@
             hasAnyTranslated = true;
 
             var hasAlignment = ch.has_alignment;
+            if (!hasAlignment) unalignedChapters.push(ch.id);
             var confidence = ch.alignment_confidence;
             var annotations = ch.annotation_count || 0;
             var reviewed = ch.reviewed;
@@ -1614,6 +1618,39 @@
 
         if (!hasAnyTranslated) {
             tbody.innerHTML = '<tr><td colspan="5">No translated chapters yet.</td></tr>';
+        }
+
+        // Show "Align All Unaligned" button when there are unaligned chapters
+        if (unalignedChapters.length > 0) {
+            alignAllBtn.style.display = '';
+            alignAllBtn.textContent = 'Align All Unaligned (' + unalignedChapters.length + ')';
+            alignAllBtn.disabled = false;
+            // Replace listener by cloning
+            var fresh = alignAllBtn.cloneNode(true);
+            alignAllBtn.parentNode.replaceChild(fresh, alignAllBtn);
+            fresh.addEventListener('click', function() {
+                fresh.disabled = true;
+                var done = 0;
+                var total = unalignedChapters.length;
+                fresh.textContent = 'Aligning 1 of ' + total + '...';
+                function next(i) {
+                    if (i >= total) {
+                        fresh.textContent = 'Done';
+                        loadStatus();
+                        return;
+                    }
+                    fresh.textContent = 'Aligning ' + (i + 1) + ' of ' + total + '...';
+                    apiPost('/api/project/' + PROJECT + '/align/' + unalignedChapters[i], {}).then(function(data) {
+                        if (data.error) {
+                            fresh.textContent = 'Error on ' + unalignedChapters[i];
+                            alert('Error aligning ' + unalignedChapters[i] + ': ' + data.error);
+                            return;
+                        }
+                        next(i + 1);
+                    });
+                }
+                next(0);
+            });
         }
 
         // Align button handlers
