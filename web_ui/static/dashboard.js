@@ -467,9 +467,11 @@
     // Book title save
     document.getElementById('btn-save-title').addEventListener('click', function() {
         var titleInput = document.getElementById('book-title-input');
+        var spanishTitleInput = document.getElementById('book-spanish-title-input');
         var title = titleInput.value.trim();
+        var spanishTitle = spanishTitleInput.value.trim();
         setStatus('title-save-status', 'Saving...', '');
-        apiPost('/api/project/' + PROJECT + '/config', { title: title || PROJECT }).then(function(data) {
+        apiPost('/api/project/' + PROJECT + '/config', { title: title || PROJECT, spanish_title: spanishTitle }).then(function(data) {
             if (data.error) {
                 setStatus('title-save-status', data.error, 'error');
             } else {
@@ -1642,10 +1644,10 @@
             document.getElementById('epub-translated-count').textContent = data.translated_chapters;
             document.getElementById('epub-total-count').textContent = data.total_chapters;
 
-            // Pre-populate title/author
+            // Pre-populate title/author (prefer spanish_title for epub)
             var titleInput = document.getElementById('epub-title');
             var authorInput = document.getElementById('epub-author');
-            if (!titleInput.value && data.title) titleInput.value = data.title;
+            if (!titleInput.value && (data.spanish_title || data.title)) titleInput.value = data.spanish_title || data.title;
             if (!authorInput.value && data.author) authorInput.value = data.author;
 
             // Update badge

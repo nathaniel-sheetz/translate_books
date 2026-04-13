@@ -199,6 +199,15 @@
     flex: 1;
 }
 
+@media (max-width: 600px) {
+    .dash-field-row {
+        flex-wrap: wrap;
+    }
+    .dash-field-row .dash-field {
+        flex: 1 1 100%;
+    }
+}
+
 /* ── Buttons (extend setup.css pattern) ── */
 
 .btn-primary, .btn-secondary, .btn-save, .btn-danger {

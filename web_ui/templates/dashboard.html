@@ -71,11 +71,16 @@
             <h2>Source Text</h2>
             <p class="stage-subtitle">Upload or paste the source text for this project.</p>
 
-            <div class="dash-field-row" style="margin-bottom:20px; align-items:flex-end;">
-                <div class="dash-field" style="flex:1">
+            <div class="dash-field-row title-row" style="margin-bottom:20px; align-items:flex-end;">
+                <div class="dash-field">
                     <label>Book Title</label>
                     <input type="text" id="book-title-input" placeholder="{{ project_id }}"
                            value="{{ project_title if project_title != project_id else '' }}">
+                </div>
+                <div class="dash-field">
+                    <label>Spanish Title</label>
+                    <input type="text" id="book-spanish-title-input" placeholder="Título en español"
+                           value="{{ project_spanish_title }}">
                 </div>
                 <div style="padding-bottom:4px">
                     <button class="btn-primary" id="btn-save-title">Save Title</button>

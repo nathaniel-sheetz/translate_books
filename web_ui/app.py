@@ -1826,6 +1826,7 @@ def dashboard_page(project_id):
         "dashboard.html",
         project_id=project_id,
         project_title=_project_title(project_id),
+        project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
         fixed_questions=fixed_questions,
         t=t,
         lang=_get_ui_lang(),
@@ -1862,7 +1863,7 @@ def project_config_save(project_id):
     data = request.get_json() or {}
     # Merge with existing config so callers can do partial updates
     config = _load_project_config(project_id)
-    config.update({k: v for k, v in data.items() if k in ("title",)})
+    config.update({k: v for k, v in data.items() if k in ("title", "spanish_title")})
     _save_project_config(project_id, config)
     return jsonify({"ok": True, "config": config})
 
@@ -2605,6 +2606,341 @@ def project_align(project_id, chapter_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# Chunk editor (full-textarea edit of a single chunk's translated_text)
+# ============================================================================
+
+
+def _chapter_id_from_chunk_id(chunk_id: str) -> Optional[str]:
+    """Derive the parent chapter_id from a chunk_id like 'chapter_01_chunk_003'."""
+    marker = "_chunk_"
+    idx = chunk_id.rfind(marker)
+    if idx <= 0:
+        return None
+    return chunk_id[:idx]
+
+
+_IMAGE_TOKEN_RE = re.compile(r"\[IMAGE:[^\]]+\]")
+
+
+def _chapter_has_pending_corrections(project_dir: Path, chapter_id: str) -> bool:
+    """True if corrections.jsonl has any unapplied row for this chapter."""
+    corrections_path = project_dir / "corrections.jsonl"
+    if not corrections_path.exists():
+        return False
+    try:
+        for line in corrections_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("chapter_id") == chapter_id:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _load_alignment_es_map(project_dir: Path, chapter_id: str) -> dict[int, str]:
+    """Load {es_idx: es_text} for a chapter's current alignment, or {} if none."""
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    if not align_path.exists():
+        return {}
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    result: dict[int, str] = {}
+    for a in data.get("alignments", []):
+        idx = a.get("es_idx")
+        es_text = a.get("es")
+        if idx is not None and isinstance(es_text, str):
+            result[int(idx)] = es_text
+    return result
+
+
+def _reanchor_annotations_after_realign(
+    project_dir: Path,
+    chapter_id: str,
+    old_es_map: dict[int, str],
+) -> list[dict]:
+    """Re-anchor chapter annotations whose es_idx shifted after realign.
+
+    Appends remove+recreate rows to annotations.jsonl for shifted annotations
+    and returns a list of orphaned annotation records that couldn't be matched.
+    """
+    active = _load_annotations(project_dir, chapter_id)
+    if not active:
+        return []
+
+    new_es_map = _load_alignment_es_map(project_dir, chapter_id)
+    # Build reverse lookup from exact es text → new es_idx (first match wins)
+    text_to_new_idx: dict[str, int] = {}
+    for new_idx, es_text in new_es_map.items():
+        text_to_new_idx.setdefault(es_text, new_idx)
+
+    annotations_path = project_dir / "annotations.jsonl"
+    orphaned: list[dict] = []
+    appended: list[dict] = []
+
+    for old_idx, record in active.items():
+        old_es_text = old_es_map.get(old_idx)
+        if old_es_text is None:
+            # Annotation references a sentence we don't know about — leave it.
+            orphaned.append(record)
+            continue
+
+        new_idx = text_to_new_idx.get(old_es_text)
+        if new_idx is None:
+            # Try prefix match (first 30 chars) as a fallback
+            prefix = old_es_text[:30]
+            for candidate_idx, candidate_text in new_es_map.items():
+                if candidate_text.startswith(prefix):
+                    new_idx = candidate_idx
+                    break
+        if new_idx is None:
+            orphaned.append(record)
+            continue
+        if new_idx == old_idx:
+            continue
+
+        ts = datetime.now().isoformat()
+        # Mark the old index as removed
+        appended.append({
+            "project_id": record.get("project_id"),
+            "chapter_id": chapter_id,
+            "es_idx": old_idx,
+            "removed": True,
+            "timestamp": ts,
+        })
+        # Re-create at the new index with the same type/content
+        appended.append({
+            "project_id": record.get("project_id"),
+            "chapter_id": chapter_id,
+            "es_idx": new_idx,
+            "type": record.get("type", "flag"),
+            "content": record.get("content", ""),
+            "timestamp": ts,
+        })
+
+    if appended:
+        with open(annotations_path, "a", encoding="utf-8") as f:
+            for row in appended:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    return orphaned
+
+
+@app.route("/read/<project_id>/<chapter>/chunk/<chunk_id>/edit")
+def chunk_editor_view(project_id, chapter, chunk_id):
+    """Render the full-textarea editor for a single chunk's translated text."""
+    t = _reader_strings()
+    if not _safe_id(project_id) or not _safe_id(chapter) or not _safe_id(chunk_id):
+        return "Bad request", 400
+
+    derived_chapter = _chapter_id_from_chunk_id(chunk_id)
+    if derived_chapter != chapter:
+        return "Chunk does not belong to chapter", 400
+
+    project_dir = _get_projects_dir() / project_id
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return "Chunk not found", 404
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return f"Failed to load chunk: {e}", 500
+
+    anchor_idx = request.args.get("anchor_idx", "")
+    anchor_text = request.args.get("anchor", "")
+    pending = _chapter_has_pending_corrections(project_dir, chapter)
+
+    try:
+        mtime = chunk_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+
+    return render_template(
+        "chunk_edit.html",
+        project_id=project_id,
+        project_title=_project_title(project_id),
+        chapter=chapter,
+        chunk_id=chunk_id,
+        chunk_position=chunk.position,
+        translated_text=chunk.translated_text or "",
+        source_text=chunk.source_text,
+        overlap_start=chunk.metadata.overlap_start,
+        overlap_end=chunk.metadata.overlap_end,
+        mtime=mtime,
+        anchor_idx=anchor_idx,
+        anchor_text=anchor_text,
+        pending_corrections=pending,
+        t=t,
+        lang=_get_ui_lang(),
+    )
+
+
+@app.route("/api/chunk/<project_id>/<chunk_id>/edit", methods=["POST"])
+def save_chunk_edit(project_id, chunk_id):
+    """Persist a full-chunk text edit: update chunk, recombine, realign."""
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Invalid ID"}), 400
+
+    chapter_id = _chapter_id_from_chunk_id(chunk_id)
+    if not chapter_id or not _safe_id(chapter_id):
+        return jsonify({"error": "Cannot derive chapter from chunk_id"}), 400
+
+    data = request.json or {}
+    new_text = data.get("translated_text")
+    expected_mtime = data.get("expected_mtime")
+
+    if not isinstance(new_text, str) or not new_text.strip():
+        return jsonify({"error": "translated_text is required"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    # Guard: refuse if there are unapplied corrections for this chapter
+    if _chapter_has_pending_corrections(project_dir, chapter_id):
+        return jsonify({
+            "error": "This chapter has pending corrections. Apply corrections before editing the chunk.",
+        }), 409
+
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    # Concurrency check
+    try:
+        current_mtime = chunk_path.stat().st_mtime
+    except OSError as e:
+        return jsonify({"error": f"Cannot stat chunk file: {e}"}), 500
+    if expected_mtime is not None:
+        try:
+            if abs(float(expected_mtime) - current_mtime) > 1e-6:
+                return jsonify({
+                    "error": "Chunk was modified by another process. Reload and try again.",
+                }), 409
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid expected_mtime"}), 400
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load chunk: {e}"}), 500
+
+    old_text = chunk.translated_text or ""
+
+    # Guard: image placeholder set must be unchanged (order-preserving)
+    old_tokens = _IMAGE_TOKEN_RE.findall(old_text)
+    new_tokens = _IMAGE_TOKEN_RE.findall(new_text)
+    if old_tokens != new_tokens:
+        return jsonify({
+            "error": (
+                "[IMAGE:...] placeholders must not be added, removed, or reordered. "
+                f"Expected {old_tokens}, got {new_tokens}."
+            ),
+        }), 400
+
+    # Guard: overlap regions are read-only (combine_chunks would drop them anyway)
+    overlap_start = chunk.metadata.overlap_start
+    overlap_end = chunk.metadata.overlap_end
+    if overlap_start > 0 and new_text[:overlap_start] != old_text[:overlap_start]:
+        return jsonify({
+            "error": (
+                f"The first {overlap_start} characters overlap with the previous "
+                "chunk and cannot be edited here."
+            ),
+        }), 400
+    if overlap_end > 0 and new_text[-overlap_end:] != old_text[-overlap_end:]:
+        return jsonify({
+            "error": (
+                f"The last {overlap_end} characters overlap with the next chunk "
+                "and cannot be edited here."
+            ),
+        }), 400
+
+    if new_text == old_text:
+        return jsonify({"ok": True, "unchanged": True})
+
+    # Capture old alignment for annotation re-anchoring before we overwrite it
+    old_es_map = _load_alignment_es_map(project_dir, chapter_id)
+
+    # Backup the pre-edit chunk JSON
+    try:
+        backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
+        backup_root.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        backup_path = backup_root / f"{ts}.json"
+        backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
+        # Keep only the most recent 10 backups
+        backups = sorted(backup_root.glob("*.json"))
+        for stale in backups[:-10]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    except OSError as e:
+        return jsonify({"error": f"Failed to write backup: {e}"}), 500
+
+    # Update the chunk and persist
+    chunk.translated_text = new_text
+    try:
+        save_chunk(chunk, chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to save chunk: {e}"}), 500
+
+    # Recombine + realign the chapter (mirrors project_align)
+    try:
+        from src.combiner import combine_chunks
+        from src.sentence_aligner import align_chapter_chunks
+
+        chunks_dir = project_dir / "chunks"
+        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        chunks = [load_chunk(cf) for cf in chunk_files]
+        combined_text = combine_chunks(chunks)
+        chapters_dir = project_dir / "chapters"
+        chapters_dir.mkdir(exist_ok=True)
+        (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+
+        align_dir = project_dir / "alignments"
+        align_dir.mkdir(exist_ok=True)
+        output_path = align_dir / f"{chapter_id}.json"
+        align_chapter_chunks(
+            chunk_paths=[str(cf) for cf in chunk_files],
+            project_id=project_id,
+            chapter_id=chapter_id,
+            source_lang="en",
+            target_lang="es",
+            output_path=str(output_path),
+        )
+    except Exception as e:
+        return jsonify({"error": f"Recombine/realign failed: {e}"}), 500
+
+    # Re-anchor existing annotations by text match
+    try:
+        orphaned = _reanchor_annotations_after_realign(project_dir, chapter_id, old_es_map)
+    except Exception:
+        orphaned = []
+
+    try:
+        new_mtime = chunk_path.stat().st_mtime
+    except OSError:
+        new_mtime = 0.0
+
+    return jsonify({
+        "ok": True,
+        "mtime": new_mtime,
+        "orphaned_annotations": len(orphaned),
+    })
+
+
 @app.route("/api/project/<project_id>/epub-status")
 def epub_status(project_id):
     """Return epub readiness: which chapters are fully translated."""
@@ -2662,6 +2998,7 @@ def epub_status(project_id):
         "epub_exists": epub_file is not None,
         "epub_filename": epub_file.name if epub_file else None,
         "title": config.get("title", ""),
+        "spanish_title": config.get("spanish_title", ""),
         "author": config.get("author", ""),
     })
 
@@ -2677,7 +3014,7 @@ def build_epub_route(project_id):
 
     data = request.get_json(silent=True) or {}
     config = _load_project_config(project_id)
-    title = data.get("title") or config.get("title") or project_id
+    title = data.get("title") or config.get("spanish_title") or config.get("title") or project_id
     author = data.get("author") or config.get("author", "")
     language = data.get("language") or config.get("target_lang_code", "es")
 

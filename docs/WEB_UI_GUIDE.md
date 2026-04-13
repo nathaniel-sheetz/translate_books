@@ -18,6 +18,7 @@ Runs on `http://localhost:5000`. Local use only — no authentication.
 | `/project/<id>` | Pipeline dashboard (8 stages) |
 | `/read/<id>` | Chapter list for a project |
 | `/read/<id>/<chapter>` | Bilingual reader view |
+| `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
 
 The old `/setup/<id>` route redirects to `/project/<id>#style-guide`.
 
@@ -51,6 +52,8 @@ Each stepper step shows a badge derived from the filesystem:
 
 **Book Title field:** At the top of this stage, enter a human-readable title for the book. This replaces the folder name everywhere it was previously shown: the sidebar, browser tab, project cards on `/read/`, the chapter list heading, and the `book_title` variable in all translation prompts. The title is saved to `project.json` and the folder name is only used as an ID in URLs.
 
+**Spanish Title field:** Next to the Book Title, enter the translated title in Spanish. This is saved as `spanish_title` in `project.json`. When building an EPUB (Stage 8), the Spanish title is used as the default EPUB title and filename. If no Spanish title is set, the Book Title is used instead.
+
 **If source exists:** Shows word count and a preview of the first 500 characters. If the source was imported from Gutenberg, a provenance link to the original URL is shown. "Replace" button to upload a new file.
 
 **If no source:** A tab toggle offers two import modes:
@@ -73,7 +76,7 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 - `POST /api/project/<id>/ingest` — accepts multipart file upload or JSON `{ "text": "..." }`
 - `POST /api/project/<id>/ingest-gutenberg` — `{ "url": "...", "download_images": true }` → `{ "ok": true, "words": N, "chapter_report": [...], "suggested_pattern": "roman", "images_downloaded": N, "images_skipped": N }`
 - `GET /api/project/<id>/config` — returns project config JSON (e.g. `{ "title": "..." }`)
-- `POST /api/project/<id>/config` — saves project config; currently accepts `{ "title": "..." }`
+- `POST /api/project/<id>/config` — saves project config; accepts `{ "title": "...", "spanish_title": "..." }`
 
 ---
 
@@ -271,14 +274,36 @@ Served at `/read/<project_id>/<chapter>`. Separate from the dashboard — uses s
 Sentences are displayed as a vertical list of Spanish text. Tap any sentence to open the bottom sheet showing:
 
 1. **English source** — the aligned original sentence
-2. **Edit area** — textarea pre-filled with Spanish text, save button to persist changes
-3. **Annotation controls** — 4 types:
+2. **Edit chunk button** — opens the full chunk editor (see below) scrolled to the tapped sentence
+3. **Edit area** — textarea pre-filled with Spanish text, save button to persist changes
+4. **Annotation controls** — 4 types:
    - Word choice (question mark icon)
    - Inconsistency (zigzag icon)
    - Footnote (superscript icon)
    - Flag/other (ellipsis icon)
 
 Annotated sentences get a subtle colored background tint. Each annotation has an optional note field.
+
+### Chunk Editor
+
+For edits that don't fit the one-sentence-at-a-time flow — stray whitespace, wrong paragraph breaks, multi-sentence rewording — tap a sentence in the reader and click **Edit chunk** in the bottom sheet. That opens a full-textarea editor (`/read/<id>/<chapter>/chunk/<chunk_id>/edit`) for the chunk containing the tapped sentence, with the caret pre-positioned near that sentence.
+
+On save, the endpoint:
+
+1. Guards the edit: rejects if `corrections.jsonl` has unapplied rows for this chapter, if the chunk's file mtime has changed since the editor opened, if any `[IMAGE:...]` placeholder was added/removed/reordered, or if the edit touches a non-zero overlap region.
+2. Backs up the pre-edit chunk JSON to `projects/<id>/.chunk_edits/<chapter>/<chunk_id>/<timestamp>.json` (last 10 per chunk retained).
+3. Writes the new `translated_text` to the chunk file.
+4. Recombines the chapter into `chapters/<chapter>.txt` via `combine_chunks()`.
+5. Realigns the chapter via `align_chapter_chunks()`.
+6. Re-anchors annotations for this chapter: any annotation whose sentence still exists (matched by exact text, then by 30-char prefix) is rewritten to the new `es_idx`. Unmatched ones are reported in the response as orphaned and left in place.
+
+After a successful save the reader reopens scrolled to the same sentence via a text-prefix anchor (so the scroll point survives any index shift from realign).
+
+**Limitations:**
+
+- Edits that straddle a chunk boundary aren't possible — pick whichever chunk contains the issue.
+- Chunks with non-zero `overlap_start`/`overlap_end` have those regions locked (the server refuses to save any change inside them, since `combine_chunks()` would drop them anyway). Projects chunked with the current `overlap_paragraphs=0` default are unaffected.
+- Annotations that can't be re-anchored by text are left at their old `es_idx` and surfaced as orphaned in the API response.
 
 ### Chapter Status
 
@@ -301,6 +326,7 @@ When corrections are saved from the reader, a banner appears on the chapter list
 | `/api/annotation` | DELETE | Remove annotation |
 | `/api/reviewed/<id>/<chapter>` | GET/POST/DELETE | Reviewed status |
 | `/api/apply-corrections/<id>` | POST | Batch apply corrections |
+| `/api/chunk/<id>/<chunk_id>/edit` | POST | Save a full-chunk text edit (recombines + realigns the chapter) |
 
 ---
 
@@ -322,7 +348,7 @@ All state is derived from the filesystem — no database.
 
 ```
 projects/<id>/
-├── project.json            # Project config (title, gutenberg_url, suggested_split_pattern)
+├── project.json            # Project config (title, spanish_title, gutenberg_url, suggested_split_pattern)
 ├── source.txt              # Raw source text
 ├── chapters/               # Chapter .txt files (combined translated output)
 │   ├── chapter_01.txt
@@ -336,6 +362,7 @@ projects/<id>/
 ├── annotations.jsonl       # Reader annotations (append-only)
 ├── reviewed.json           # Chapter reviewed status
 ├── corrections/            # Pending corrections
+├── .chunk_edits/           # Pre-edit chunk backups from the chunk editor (last 10 per chunk)
 ├── images/                 # Downloaded images (Gutenberg)
 └── <id>.epub               # Built EPUB (Stage 8 Export)
 ```
