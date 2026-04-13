@@ -196,8 +196,8 @@ The prompt includes: style guide, filtered glossary (only terms appearing in thi
 **APIs:**
 - `GET /api/project/<id>/chapters/<chapter>/chunks` — list chunks with status
 - `GET /api/project/<id>/chunks/<chunk_id>/prompt` — rendered translation prompt
-- `POST /api/project/<id>/chunks/<chunk_id>/translate` — `{ "translated_text": "..." }` save manual translation
-- `POST /api/project/<id>/translate/realtime` — `{ "chunk_id": "...", "provider": "anthropic", "model": "..." }` single-chunk API translation
+- `POST /api/project/<id>/chunks/<chunk_id>/translate` — `{ "translated_text": "..." }` save manual translation. Runs the full post-save pipeline: backs up the chunk, purges stale corrections, recombines the chapter, realigns sentences, and re-anchors any existing annotations.
+- `POST /api/project/<id>/translate/realtime` — `{ "chunk_id": "...", "provider": "anthropic", "model": "..." }` single-chunk API translation. Runs the same post-save pipeline as the manual save above.
 
 ### Batch Translation
 
@@ -290,12 +290,14 @@ For edits that don't fit the one-sentence-at-a-time flow — stray whitespace, w
 
 On save, the endpoint:
 
-1. Guards the edit: rejects if `corrections.jsonl` has unapplied rows for this chapter, if the chunk's file mtime has changed since the editor opened, if any `[IMAGE:...]` placeholder was added/removed/reordered, or if the edit touches a non-zero overlap region.
-2. Backs up the pre-edit chunk JSON to `projects/<id>/.chunk_edits/<chapter>/<chunk_id>/<timestamp>.json` (last 10 per chunk retained).
-3. Writes the new `translated_text` to the chunk file.
-4. Recombines the chapter into `chapters/<chapter>.txt` via `combine_chunks()`.
-5. Realigns the chapter via `align_chapter_chunks()`.
-6. Re-anchors annotations for this chapter: any annotation whose sentence still exists (matched by exact text, then by 30-char prefix) is rewritten to the new `es_idx`. Unmatched ones are reported in the response as orphaned and left in place.
+1. Guards the edit: rejects if the chunk's file mtime has changed since the editor opened, if any `[IMAGE:...]` placeholder was added/removed/reordered, or if the edit touches a non-zero overlap region.
+2. Delegates to the shared `_replace_chunk_translation` pipeline (same pipeline used by the dashboard's manual save and auto-translate), which:
+   - Backs up the pre-edit chunk JSON to `projects/<id>/.chunk_edits/<chapter>/<chunk_id>/<timestamp>.json` (last 10 per chunk retained).
+   - Writes the new `translated_text` to the chunk file.
+   - Purges any stale corrections for this chunk from `corrections.jsonl` (they reference old text that no longer exists).
+   - Recombines the chapter into `chapters/<chapter>.txt` via `combine_chunks()`.
+   - Realigns the chapter via `align_chapter_chunks()`.
+   - Re-anchors annotations for this chapter: any annotation whose sentence still exists (matched by exact text, then by 30-char prefix) is rewritten to the new `es_idx`. Unmatched ones are reported in the response as orphaned and left in place.
 
 After a successful save the reader reopens scrolled to the same sentence via a text-prefix anchor (so the scroll point survives any index shift from realign).
 
@@ -361,8 +363,9 @@ projects/<id>/
 ├── alignments/             # Sentence alignment JSON
 ├── annotations.jsonl       # Reader annotations (append-only)
 ├── reviewed.json           # Chapter reviewed status
-├── corrections/            # Pending corrections
-├── .chunk_edits/           # Pre-edit chunk backups from the chunk editor (last 10 per chunk)
+├── corrections.jsonl       # Pending corrections (purged automatically when a chunk's translation is replaced)
+├── corrections_applied.jsonl # Archive of applied corrections
+├── .chunk_edits/           # Pre-edit chunk backups (last 10 per chunk, created by any translation save)
 ├── images/                 # Downloaded images (Gutenberg)
 └── <id>.epub               # Built EPUB (Stage 8 Export)
 ```

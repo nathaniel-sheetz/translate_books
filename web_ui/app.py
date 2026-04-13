@@ -1120,8 +1120,9 @@ def reader_chapters(project_id):
             ann_counts[ch][r.get("type", "flag")] += 1
         all_annotations = dict(ann_counts)
 
-    # Check for pending corrections
-    has_corrections = (project_dir / "corrections.jsonl").exists()
+    # Check for pending corrections (file must exist AND have content)
+    _corr_path = project_dir / "corrections.jsonl"
+    has_corrections = _corr_path.exists() and _corr_path.stat().st_size > 1
 
     # Load reviewed status
     reviewed = _load_reviewed(project_dir)
@@ -2269,7 +2270,7 @@ def project_chunk_prompt(project_id, chunk_id):
 
 @app.route("/api/project/<project_id>/chunks/<chunk_id>/translate", methods=["POST"])
 def project_chunk_translate(project_id, chunk_id):
-    """Save a manual translation for a chunk."""
+    """Save a manual translation for a chunk, then recombine + realign."""
     if not _safe_id(project_id) or not _safe_id(chunk_id):
         return jsonify({"error": "Bad request"}), 400
 
@@ -2285,13 +2286,12 @@ def project_chunk_translate(project_id, chunk_id):
 
     try:
         chunk = load_chunk(chunk_path)
-        chunk_data = chunk.model_dump()
-        chunk_data["translated_text"] = translated_text
-        chunk_data["status"] = ChunkStatus.TRANSLATED
-        chunk_data["translated_at"] = datetime.now()
-        updated = Chunk(**chunk_data)
-        save_chunk(updated, chunk_path)
-        return jsonify({"ok": True})
+        chunk.status = ChunkStatus.TRANSLATED
+        chunk.translated_at = datetime.now()
+        result = _replace_chunk_translation(
+            project_dir, project_id, chunk_id, chunk_path, chunk, translated_text,
+        )
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2400,11 +2400,12 @@ def project_translate_realtime(project_id):
             previous_chapter_context=prev_context,
         )
 
-        save_chunk(translated, chunk_path)
-        return jsonify({
-            "ok": True,
-            "translated_text": translated.translated_text,
-        })
+        new_text = translated.translated_text or ""
+        result = _replace_chunk_translation(
+            project_dir, project_id, chunk_id, chunk_path, chunk, new_text,
+        )
+        result["translated_text"] = new_text
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2735,6 +2736,134 @@ def _reanchor_annotations_after_realign(
     return orphaned
 
 
+def _purge_chunk_corrections(project_dir: Path, chunk_id: str) -> int:
+    """Remove all pending corrections for a chunk from corrections.jsonl.
+
+    Returns the number of corrections removed.
+    """
+    corrections_path = project_dir / "corrections.jsonl"
+    if not corrections_path.exists():
+        return 0
+    try:
+        lines = corrections_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+
+    kept = []
+    removed = 0
+    for line in lines:
+        line_s = line.strip()
+        if not line_s:
+            continue
+        try:
+            record = json.loads(line_s)
+        except json.JSONDecodeError:
+            kept.append(line)
+            continue
+        if record.get("chunk_id") == chunk_id:
+            removed += 1
+        else:
+            kept.append(line)
+
+    if removed > 0:
+        if kept:
+            corrections_path.write_text(
+                "\n".join(kept) + "\n", encoding="utf-8",
+            )
+        else:
+            corrections_path.unlink(missing_ok=True)
+
+    return removed
+
+
+def _replace_chunk_translation(
+    project_dir: Path,
+    project_id: str,
+    chunk_id: str,
+    chunk_path: Path,
+    chunk: "Chunk",
+    new_text: str,
+) -> dict:
+    """Shared pipeline for replacing a chunk's translation.
+
+    Performs: backup → save → purge corrections → recombine → realign →
+    re-anchor annotations.
+
+    Returns a result dict with keys: ok, mtime, orphaned_annotations,
+    corrections_purged.  On failure raises an exception.
+    """
+    from src.combiner import combine_chunks
+    from src.sentence_aligner import align_chapter_chunks
+
+    chapter_id = _chapter_id_from_chunk_id(chunk_id)
+
+    # 1. Capture old alignment for annotation re-anchoring
+    old_es_map = _load_alignment_es_map(project_dir, chapter_id)
+
+    # 2. Backup the pre-edit chunk JSON
+    backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
+    backup_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    backup_path = backup_root / f"{ts}.json"
+    backup_path.write_text(
+        chunk_path.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    backups = sorted(backup_root.glob("*.json"))
+    for stale in backups[:-10]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    # 3. Update the chunk and persist
+    chunk.translated_text = new_text
+    save_chunk(chunk, chunk_path)
+
+    # 4. Purge stale corrections for this chunk
+    corrections_purged = _purge_chunk_corrections(project_dir, chunk_id)
+
+    # 5. Recombine + realign the chapter
+    chunks_dir = project_dir / "chunks"
+    chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+    chunks = [load_chunk(cf) for cf in chunk_files]
+    combined_text = combine_chunks(chunks)
+    chapters_dir = project_dir / "chapters"
+    chapters_dir.mkdir(exist_ok=True)
+    (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+
+    align_dir = project_dir / "alignments"
+    align_dir.mkdir(exist_ok=True)
+    output_path = align_dir / f"{chapter_id}.json"
+    align_chapter_chunks(
+        chunk_paths=[str(cf) for cf in chunk_files],
+        project_id=project_id,
+        chapter_id=chapter_id,
+        source_lang="en",
+        target_lang="es",
+        output_path=str(output_path),
+    )
+
+    # 6. Re-anchor existing annotations by text match
+    try:
+        orphaned = _reanchor_annotations_after_realign(
+            project_dir, chapter_id, old_es_map,
+        )
+    except Exception:
+        orphaned = []
+
+    try:
+        new_mtime = chunk_path.stat().st_mtime
+    except OSError:
+        new_mtime = 0.0
+
+    return {
+        "ok": True,
+        "mtime": new_mtime,
+        "orphaned_annotations": len(orphaned),
+        "corrections_purged": corrections_purged,
+    }
+
+
 @app.route("/read/<project_id>/<chapter>/chunk/<chunk_id>/edit")
 def chunk_editor_view(project_id, chapter, chunk_id):
     """Render the full-textarea editor for a single chunk's translated text."""
@@ -2806,12 +2935,6 @@ def save_chunk_edit(project_id, chunk_id):
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
-    # Guard: refuse if there are unapplied corrections for this chapter
-    if _chapter_has_pending_corrections(project_dir, chapter_id):
-        return jsonify({
-            "error": "This chapter has pending corrections. Apply corrections before editing the chunk.",
-        }), 409
-
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
     if not chunk_path.exists():
         return jsonify({"error": "Chunk not found"}), 404
@@ -2869,76 +2992,13 @@ def save_chunk_edit(project_id, chunk_id):
     if new_text == old_text:
         return jsonify({"ok": True, "unchanged": True})
 
-    # Capture old alignment for annotation re-anchoring before we overwrite it
-    old_es_map = _load_alignment_es_map(project_dir, chapter_id)
-
-    # Backup the pre-edit chunk JSON
     try:
-        backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
-        backup_root.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
-        backup_path = backup_root / f"{ts}.json"
-        backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
-        # Keep only the most recent 10 backups
-        backups = sorted(backup_root.glob("*.json"))
-        for stale in backups[:-10]:
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-    except OSError as e:
-        return jsonify({"error": f"Failed to write backup: {e}"}), 500
-
-    # Update the chunk and persist
-    chunk.translated_text = new_text
-    try:
-        save_chunk(chunk, chunk_path)
-    except Exception as e:
-        return jsonify({"error": f"Failed to save chunk: {e}"}), 500
-
-    # Recombine + realign the chapter (mirrors project_align)
-    try:
-        from src.combiner import combine_chunks
-        from src.sentence_aligner import align_chapter_chunks
-
-        chunks_dir = project_dir / "chunks"
-        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
-        chunks = [load_chunk(cf) for cf in chunk_files]
-        combined_text = combine_chunks(chunks)
-        chapters_dir = project_dir / "chapters"
-        chapters_dir.mkdir(exist_ok=True)
-        (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
-
-        align_dir = project_dir / "alignments"
-        align_dir.mkdir(exist_ok=True)
-        output_path = align_dir / f"{chapter_id}.json"
-        align_chapter_chunks(
-            chunk_paths=[str(cf) for cf in chunk_files],
-            project_id=project_id,
-            chapter_id=chapter_id,
-            source_lang="en",
-            target_lang="es",
-            output_path=str(output_path),
+        result = _replace_chunk_translation(
+            project_dir, project_id, chunk_id, chunk_path, chunk, new_text,
         )
+        return jsonify(result)
     except Exception as e:
-        return jsonify({"error": f"Recombine/realign failed: {e}"}), 500
-
-    # Re-anchor existing annotations by text match
-    try:
-        orphaned = _reanchor_annotations_after_realign(project_dir, chapter_id, old_es_map)
-    except Exception:
-        orphaned = []
-
-    try:
-        new_mtime = chunk_path.stat().st_mtime
-    except OSError:
-        new_mtime = 0.0
-
-    return jsonify({
-        "ok": True,
-        "mtime": new_mtime,
-        "orphaned_annotations": len(orphaned),
-    })
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/project/<project_id>/epub-status")

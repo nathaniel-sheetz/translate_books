@@ -18,6 +18,7 @@ web_ui/
 ├── templates/
 │   ├── dashboard.html  # Pipeline wizard (7-stage stepper)
 │   ├── reader.html     # Bilingual reader + project/chapter lists
+│   ├── chunk_edit.html # Full-textarea chunk editor
 │   ├── index.html      # Legacy translation workspace
 │   └── setup.html      # Legacy setup (redirects to dashboard)
 └── static/
@@ -25,6 +26,8 @@ web_ui/
     ├── dashboard.css   # Dashboard layout and styles
     ├── reader.js       # Reader interactions, annotations, corrections
     ├── reader.css      # Reader serif/reading styles
+    ├── chunk_edit.js   # Chunk editor save flow + caret positioning
+    ├── chunk_edit.css  # Chunk editor layout
     ├── setup.js        # Style guide + glossary wizard logic
     ├── setup.css       # Setup wizard styles
     ├── app.js          # Legacy workspace logic
@@ -41,6 +44,7 @@ web_ui/
 | `/read/` | reader.html | Project list |
 | `/read/<id>` | reader.html | Chapter list |
 | `/read/<id>/<ch>` | reader.html | Bilingual reader |
+| `/read/<id>/<ch>/chunk/<chunk_id>/edit` | chunk_edit.html | Full-chunk text editor |
 | `/` | index.html | Legacy workspace |
 
 ## API Endpoints
@@ -55,9 +59,9 @@ web_ui/
 - `POST /chunk-all` — Chunk all chapters
 - `GET /chapters/<ch>/chunks` — List chunks with status
 - `GET /chunks/<chunk_id>/prompt` — Rendered translation prompt
-- `POST /chunks/<chunk_id>/translate` — Save manual translation
+- `POST /chunks/<chunk_id>/translate` — Save manual translation (recombines + realigns + re-anchors annotations)
 - `POST /translate/cost-estimate` — Estimate batch cost
-- `POST /translate/realtime` — Single-chunk API translation
+- `POST /translate/realtime` — Single-chunk API translation (recombines + realigns + re-anchors annotations)
 - `POST /translate/batch` — Start batch translation (returns job_id)
 - `GET /translate/sse?job_id=...` — SSE progress stream
 - `POST /combine/<ch>` — Combine chunks into chapter
@@ -80,6 +84,7 @@ web_ui/
 - `GET/POST/DELETE /api/annotations/<id>/<ch>` — Annotations
 - `GET/POST/DELETE /api/reviewed/<id>/<ch>` — Reviewed status
 - `POST /api/apply-corrections/<id>` — Batch apply corrections
+- `POST /api/chunk/<id>/<chunk_id>/edit` — Save a full-chunk text edit (recombines + realigns)
 
 ## Documentation
 
