@@ -14,13 +14,12 @@ Runs on `http://localhost:5000`. Local use only — no authentication.
 
 | Route | Purpose |
 |---|---|
+| `/` | Redirects to `/read/` |
 | `/read/` | Project list (cards with status) |
 | `/project/<id>` | Pipeline dashboard (8 stages) |
 | `/read/<id>` | Chapter list for a project |
 | `/read/<id>/<chapter>` | Bilingual reader view |
 | `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
-
-The old `/setup/<id>` route redirects to `/project/<id>#style-guide`.
 
 ---
 

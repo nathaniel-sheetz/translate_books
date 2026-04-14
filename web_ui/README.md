@@ -16,11 +16,9 @@ web_ui/
 ├── app.py              # All routes and API endpoints
 ├── i18n.py             # Server-side EN/ES translations
 ├── templates/
-│   ├── dashboard.html  # Pipeline wizard (7-stage stepper)
+│   ├── dashboard.html  # Pipeline wizard (8-stage stepper)
 │   ├── reader.html     # Bilingual reader + project/chapter lists
-│   ├── chunk_edit.html # Full-textarea chunk editor
-│   ├── index.html      # Legacy translation workspace
-│   └── setup.html      # Legacy setup (redirects to dashboard)
+│   └── chunk_edit.html # Full-textarea chunk editor
 └── static/
     ├── dashboard.js    # Dashboard stage logic, batch SSE, prompts
     ├── dashboard.css   # Dashboard layout and styles
@@ -29,23 +27,19 @@ web_ui/
     ├── chunk_edit.js   # Chunk editor save flow + caret positioning
     ├── chunk_edit.css  # Chunk editor layout
     ├── setup.js        # Style guide + glossary wizard logic
-    ├── setup.css       # Setup wizard styles
-    ├── app.js          # Legacy workspace logic
-    ├── style.css       # Legacy workspace styles
-    ├── review.js       # Legacy review mode
-    └── i18n.js         # Client-side translations (legacy workspace)
+    └── setup.css       # Setup wizard styles
 ```
 
 ## Key Routes
 
 | Route | Template | Purpose |
 |---|---|---|
-| `/project/<id>` | dashboard.html | Pipeline dashboard |
+| `/` | — | Redirects to `/read/` |
 | `/read/` | reader.html | Project list |
+| `/project/<id>` | dashboard.html | Pipeline dashboard |
 | `/read/<id>` | reader.html | Chapter list |
 | `/read/<id>/<ch>` | reader.html | Bilingual reader |
 | `/read/<id>/<ch>/chunk/<chunk_id>/edit` | chunk_edit.html | Full-chunk text editor |
-| `/` | index.html | Legacy workspace |
 
 ## API Endpoints
 

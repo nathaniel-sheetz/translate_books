@@ -13,7 +13,7 @@ pip install -r requirements.txt
 cd web_ui && python app.py
 ```
 
-Open `http://localhost:5000/read/` to see your projects, or go directly to `http://localhost:5000/project/<project_id>` for the pipeline dashboard.
+Open `http://localhost:5000` to see your projects, or go directly to `http://localhost:5000/project/<project_id>` for the pipeline dashboard.
 
 ### Create a project (CLI)
 
@@ -124,13 +124,11 @@ book_translation/
 │   ├── templates/
 │   │   ├── dashboard.html      # Pipeline wizard (8 stages)
 │   │   ├── reader.html         # Bilingual reader + project/chapter lists
-│   │   ├── index.html          # Legacy translation workspace
-│   │   └── setup.html          # Legacy setup (redirects to dashboard)
+│   │   └── chunk_edit.html     # Full-textarea chunk editor
 │   └── static/
 │       ├── dashboard.js/css    # Dashboard logic and styles
 │       ├── reader.js/css       # Reader logic and styles
-│       ├── setup.js/css        # Setup wizard (used by dashboard)
-│       └── app.js, style.css   # Legacy workspace
+│       └── setup.js/css        # Setup wizard (used by dashboard)
 │
 ├── src/                        # Core library
 │   ├── models.py               # Pydantic data models
