@@ -405,10 +405,26 @@
 
     const STICKY_NOTE_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M2 2h12v8l-4 4H2z"/><path d="M10 10v4"/></svg>';
 
+    let annotatedIndices = [];
+    let annCyclePos = -1;
+
     function updateStats() {
         if (!readerStats) return;
         const annCount = Object.keys(annotationsMap).length;
         readerStats.innerHTML = annCount > 0 ? STICKY_NOTE_SVG + annCount : '';
+        annotatedIndices = Object.keys(annotationsMap).map(Number).sort((a, b) => a - b);
+        annCyclePos = -1;
+    }
+
+    if (readerStats) {
+        readerStats.addEventListener('click', () => {
+            if (annotatedIndices.length === 0) return;
+            annCyclePos = (annCyclePos + 1) % annotatedIndices.length;
+            const idx = annotatedIndices[annCyclePos];
+            const el = content.querySelector(`[data-es-idx="${idx}"]`);
+            if (!el) return;
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
     }
 
     // Tap overlay to close
