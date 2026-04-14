@@ -118,7 +118,7 @@ def main():
         try:
             from src.api_translator import call_llm
             prompt = build_question_prompt(source_text, args.target_lang, args.locale, fixed_questions, answers)
-            response = call_llm(prompt, provider=args.provider, model=args.model)
+            response = call_llm(prompt, provider=args.provider, model=args.model, call_type="style_questions")
             llm_questions = parse_llm_questions(response)
             all_questions.extend(llm_questions)
 
@@ -144,7 +144,7 @@ def main():
         try:
             from src.api_translator import call_llm
             prompt = build_style_guide_prompt(all_questions, answers, source_text, args.target_lang, args.locale)
-            response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=2048)
+            response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=2048, call_type="style_guide_generate")
             content = parse_style_guide_response(response)
         except Exception as e:
             print(f"  Warning: LLM generation failed: {e}")

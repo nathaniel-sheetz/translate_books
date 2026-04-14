@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
+from src.utils.prompt_logger import log_prompt
 
 # Load environment variables from .env file
 load_dotenv()
@@ -342,21 +343,37 @@ def _dispatch_llm_call(
     model: str,
     max_tokens: int = 4096,
     temperature: float = 0.3,
+    call_type: str = "unknown",
 ) -> str:
     """Low-level dispatcher — routes a single LLM call to the right SDK."""
     pconfig = get_provider_config(provider)
     ptype = pconfig.get("type", provider)
     api_key = get_api_key(provider)
 
+    t0 = time.time()
     if ptype == "anthropic":
-        return call_anthropic_api(prompt, model, max_tokens, temperature, api_key=api_key)
+        response = call_anthropic_api(prompt, model, max_tokens, temperature, api_key=api_key)
     elif ptype == "openai-compatible":
-        return call_openai_api(
+        response = call_openai_api(
             prompt, model, max_tokens, temperature,
             api_key=api_key, base_url=pconfig.get("base_url"),
         )
     else:
         raise ValueError(f"Unknown provider type '{ptype}' for provider '{provider}'")
+
+    duration = time.time() - t0
+    log_prompt(
+        prompt=prompt,
+        response=response,
+        provider=provider,
+        model=model,
+        call_type=call_type,
+        mode="realtime",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        duration_seconds=duration,
+    )
+    return response
 
 
 def call_llm(
@@ -366,6 +383,7 @@ def call_llm(
     max_tokens: int = 4096,
     temperature: float = 0.3,
     max_retries: int = 3,
+    call_type: str = "unknown",
 ) -> str:
     """Call an LLM and return the text response.
 
@@ -378,7 +396,7 @@ def call_llm(
     last_error = None
     for attempt in range(max_retries):
         try:
-            return _dispatch_llm_call(prompt, provider, model, max_tokens, temperature)
+            return _dispatch_llm_call(prompt, provider, model, max_tokens, temperature, call_type=call_type)
         except RateLimitError as e:
             last_error = e
             if attempt < max_retries - 1:
@@ -453,7 +471,7 @@ def translate_chunk_realtime(
             prompt = separator + parts[1]
 
     # Use call_llm which handles retry + config-based dispatch
-    translation = call_llm(prompt, provider=provider, model=model, max_retries=max_retries)
+    translation = call_llm(prompt, provider=provider, model=model, max_retries=max_retries, call_type="translation")
 
     chunk.translated_text = translation.strip()
     chunk.status = ChunkStatus.TRANSLATED
@@ -584,6 +602,20 @@ def _submit_anthropic_batch(
         # Submit batch
         batch = client.messages.batches.create(requests=requests)
 
+        # Log each prompt (response will arrive later)
+        for req, chunk in zip(requests, chunks):
+            prompt_text = req["params"]["messages"][0]["content"]
+            log_prompt(
+                prompt=prompt_text,
+                response=None,
+                provider="anthropic",
+                model=model,
+                call_type="translation",
+                mode="batch",
+                batch_job_id=batch.id,
+                chunk_id=chunk.id,
+            )
+
         # Return job info
         return {
             "job_id": batch.id,
@@ -683,6 +715,21 @@ def _submit_openai_batch(
 
         # Clean up temp file
         jsonl_path.unlink()
+
+        # Log each prompt (response will arrive later)
+        for req_line, chunk in zip(jsonl_lines, chunks):
+            req_obj = json.loads(req_line)
+            prompt_text = req_obj["body"]["messages"][0]["content"]
+            log_prompt(
+                prompt=prompt_text,
+                response=None,
+                provider="openai",
+                model=model,
+                call_type="translation",
+                mode="batch",
+                batch_job_id=batch.id,
+                chunk_id=chunk.id,
+            )
 
         # Return job info
         return {

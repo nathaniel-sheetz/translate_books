@@ -912,7 +912,7 @@ def setup_questions_generate(project_id):
     prompt = build_question_prompt(source_text, target_lang, locale, fixed_questions, answers)
 
     try:
-        result = call_llm(prompt, provider=provider, model=model)
+        result = call_llm(prompt, provider=provider, model=model, call_type="style_questions")
         # Try to parse as JSON
         questions = json.loads(_strip_json_fences(result))
         return jsonify({"questions": questions})
@@ -948,7 +948,7 @@ def setup_style_guide_generate(project_id):
     prompt = build_style_guide_prompt(all_questions, answers, source_text, target_lang, locale)
 
     try:
-        content = call_llm(prompt, provider=provider, model=model)
+        content = call_llm(prompt, provider=provider, model=model, call_type="style_guide_generate")
         return jsonify({"content": content})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -986,7 +986,7 @@ def setup_glossary_generate(project_id):
     prompt = build_glossary_prompt(candidates, source_text, style_content, target_lang, glossary_guidance)
 
     try:
-        result = call_llm(prompt, provider=provider, model=model, max_tokens=8192)
+        result = call_llm(prompt, provider=provider, model=model, max_tokens=8192, call_type="glossary")
         # Try to parse as JSON
         terms = json.loads(_strip_json_fences(result))
         return jsonify({"terms": terms})

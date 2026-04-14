@@ -63,6 +63,10 @@ prompts/style_guide_generate.txt
 prompts/glossary_bootstrap.txt
 prompts/translation.txt
 
+# Prompt history logs (can be large)
+prompts/history/
+!prompts/history/.gitkeep
+
 # Backlog
 backlog/
 

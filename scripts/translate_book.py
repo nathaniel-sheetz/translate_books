@@ -681,6 +681,7 @@ def main():
                         provider=args.provider,
                         model=args.model,
                         max_tokens=8192,
+                        call_type="glossary",
                     )
 
                     proposals = parse_glossary_response(response)

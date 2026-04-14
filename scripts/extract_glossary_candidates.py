@@ -854,7 +854,7 @@ def main():
         try:
             from src.api_translator import call_llm
             prompt = build_glossary_prompt(candidates, source_sample, style_content, "Spanish")
-            response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=4096)
+            response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=4096, call_type="glossary")
             proposals = parse_glossary_response(response)
             terms = glossary_terms_from_proposals(proposals)
             glossary_obj = proposals_to_glossary(terms)
