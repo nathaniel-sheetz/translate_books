@@ -195,7 +195,12 @@ def test_call_anthropic_api_rate_limit():
 
     with patch('anthropic.Anthropic') as mock_anthropic_class:
         mock_client = Mock()
-        mock_client.messages.create.side_effect = anthropic.RateLimitError("Rate limit exceeded")
+        mock_response = Mock()
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        mock_client.messages.create.side_effect = anthropic.RateLimitError(
+            "Rate limit exceeded", response=mock_response, body={}
+        )
         mock_anthropic_class.return_value = mock_client
 
         with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
@@ -209,7 +214,12 @@ def test_call_anthropic_api_auth_error():
 
     with patch('anthropic.Anthropic') as mock_anthropic_class:
         mock_client = Mock()
-        mock_client.messages.create.side_effect = anthropic.AuthenticationError("Invalid key")
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_response.headers = {}
+        mock_client.messages.create.side_effect = anthropic.AuthenticationError(
+            "Invalid key", response=mock_response, body={}
+        )
         mock_anthropic_class.return_value = mock_client
 
         with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'invalid-key'}):
@@ -246,7 +256,12 @@ def test_call_openai_api_rate_limit():
 
     with patch('openai.OpenAI') as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.side_effect = openai.RateLimitError("Rate limit exceeded")
+        mock_response = Mock()
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        mock_client.chat.completions.create.side_effect = openai.RateLimitError(
+            "Rate limit exceeded", response=mock_response, body={}
+        )
         mock_openai_class.return_value = mock_client
 
         with patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}):

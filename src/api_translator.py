@@ -699,7 +699,8 @@ def _submit_openai_batch(
 
     try:
         # Write JSONL to temporary file
-        jsonl_path = Path(f"/tmp/openai_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
+        import tempfile
+        jsonl_path = Path(tempfile.gettempdir()) / f"openai_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         jsonl_path.write_text("\n".join(jsonl_lines))
 
         # Upload file
