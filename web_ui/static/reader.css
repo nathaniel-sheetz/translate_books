@@ -127,6 +127,45 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
+/* Filter bar */
+
+.filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    flex-wrap: wrap;
+}
+
+.filter-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #666;
+    margin-right: 2px;
+}
+
+.filter-btn {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    padding: 4px 12px;
+    border: 1px solid #ddd;
+    border-radius: 14px;
+    background: #f5f3f0;
+    color: #888;
+    cursor: pointer;
+}
+
+.filter-btn:hover {
+    background: #ece8e3;
+}
+
+.filter-btn.active {
+    background: #5a9e6f;
+    border-color: #5a9e6f;
+    color: #fff;
+}
+
 /* Project dashboard cards */
 
 .project-grid {
@@ -149,6 +188,57 @@ body {
 .project-card-header .nav-title {
     font-size: 18px;
     font-weight: 600;
+}
+
+.nav-subtitle {
+    display: block;
+    font-size: 14px;
+    color: #888;
+    font-style: italic;
+    margin-top: 2px;
+}
+
+/* Status select dropdown */
+
+.status-select {
+    margin-left: auto;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 10px;
+    border: 1px solid #ddd;
+    cursor: pointer;
+    font-weight: 500;
+    appearance: auto;
+}
+
+.status-select.status-pending {
+    background: #f5f3f0;
+    color: #888;
+}
+
+.status-select.status-in_progress {
+    background: #e8f0fe;
+    color: #1a73e8;
+    border-color: #c5d9f5;
+}
+
+.status-select.status-complete {
+    background: #e6f4ea;
+    color: #2d8a4e;
+    border-color: #b7dfbf;
+}
+
+.status-select.status-archived {
+    background: #f0ece7;
+    color: #aaa;
+    border-color: #ddd;
+}
+
+/* Archived card */
+
+.card-archived {
+    opacity: 0.6;
 }
 
 .project-status {

@@ -120,6 +120,23 @@ def set_language():
     return resp
 
 
+_VALID_STATUSES = {"pending", "in_progress", "complete", "archived"}
+
+
+@app.route("/api/project/<project_id>/status", methods=["PATCH"])
+def update_project_status(project_id):
+    """Update the status field in a project's config."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    status = (request.json or {}).get("status", "")
+    if status not in _VALID_STATUSES:
+        return jsonify({"error": f"Invalid status. Must be one of: {', '.join(sorted(_VALID_STATUSES))}"}), 400
+    config = _load_project_config(project_id)
+    config["status"] = status
+    _save_project_config(project_id, config)
+    return jsonify({"ok": True, "status": status})
+
+
 # ============================================================================
 # LLM config endpoint
 # ============================================================================
@@ -511,6 +528,8 @@ def reader_projects():
         projects.append({
             "id": proj_dir.name,
             "title": proj_config.get("title") or proj_dir.name,
+            "spanish_title": proj_config.get("spanish_title", ""),
+            "status": proj_config.get("status", "pending"),
             "chapter_count": alignment_count,
             "has_style_guide": has_style_guide,
             "glossary_count": glossary_count,
