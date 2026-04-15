@@ -26,7 +26,7 @@ def check_flask():
 
 def check_templates():
     """Check if template files exist."""
-    template_path = Path(__file__).parent / "templates" / "index.html"
+    template_path = Path(__file__).parent / "templates" / "dashboard.html"
     if template_path.exists():
         print(f"[OK] Template found: {template_path}")
         return True
@@ -37,8 +37,8 @@ def check_templates():
 def check_static_files():
     """Check if static files exist."""
     static_dir = Path(__file__).parent / "static"
-    js_file = static_dir / "app.js"
-    css_file = static_dir / "style.css"
+    js_file = static_dir / "dashboard.js"
+    css_file = static_dir / "dashboard.css"
 
     all_ok = True
 

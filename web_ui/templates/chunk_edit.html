@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t.edit_chunk_title }} — {{ chunk_id }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='chunk_edit.css') }}?v=1">
+</head>
+<body>
+
+<div id="chunk-edit-app"
+     data-project="{{ project_id }}"
+     data-chapter="{{ chapter }}"
+     data-chunk-id="{{ chunk_id }}"
+     data-mtime="{{ mtime }}"
+     data-overlap-start="{{ overlap_start }}"
+     data-overlap-end="{{ overlap_end }}"
+     data-anchor-idx="{{ anchor_idx }}"
+     data-anchor-text="{{ anchor_text }}"
+     data-dirty-confirm="{{ t.edit_chunk_dirty_confirm }}"
+     data-saving-label="{{ t.edit_chunk_saving }}"
+>
+    <div class="chunk-edit-topbar">
+        <button class="chunk-edit-back" id="chunk-edit-back">&larr; {{ t.edit_chunk_back }}</button>
+        <div class="chunk-edit-title">
+            <span class="chunk-edit-chapter">{{ chapter | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+            <span class="chunk-edit-sep">·</span>
+            <span class="chunk-edit-chunkid">{{ chunk_id }}</span>
+        </div>
+        <button class="chunk-edit-save" id="chunk-edit-save">{{ t.edit_chunk_save }}</button>
+    </div>
+
+    {% if pending_corrections %}
+    <div class="chunk-edit-banner banner-warn">
+        {{ t.pending_corrections }} — {{ t.apply_corrections }}
+    </div>
+    {% endif %}
+
+    {% if overlap_start > 0 %}
+    <div class="chunk-edit-banner banner-info">
+        {{ t.edit_chunk_overlap_start.format(n=overlap_start) }}
+    </div>
+    {% endif %}
+    {% if overlap_end > 0 %}
+    <div class="chunk-edit-banner banner-info">
+        {{ t.edit_chunk_overlap_end.format(n=overlap_end) }}
+    </div>
+    {% endif %}
+
+    <details class="chunk-edit-source">
+        <summary>{{ t.edit_chunk_source }}</summary>
+        <pre>{{ source_text }}</pre>
+    </details>
+
+    <textarea id="chunk-edit-textarea" spellcheck="true">{{ translated_text }}</textarea>
+
+    <div class="chunk-edit-status" id="chunk-edit-status"></div>
+</div>
+
+<script src="{{ url_for('static', filename='chunk_edit.js') }}?v=1"></script>
+</body>
+</html>

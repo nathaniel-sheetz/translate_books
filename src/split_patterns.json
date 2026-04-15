@@ -1,0 +1,51 @@
+{
+  "patterns": {
+    "roman": {
+      "label": "Roman numerals (Chapter I, Chapter II...)",
+      "regex": "^\\s*chapter\\s+([IVXLCDM]+)[\\.:,\\s]*$",
+      "flags": ["IGNORECASE", "MULTILINE"],
+      "numbering": "roman",
+      "detect_regex": "\\b(chapter|chapitre|cap[íi]tulo)\\s+[IVXLCDM]+[\\.:,\\s]*$",
+      "detect_min_ratio": null
+    },
+    "numeric": {
+      "label": "Numeric (Chapter 1, Chapter 2...)",
+      "regex": "^\\s*chapter\\s+(\\d+)[\\.:,\\s]*$",
+      "flags": ["IGNORECASE", "MULTILINE"],
+      "numbering": "numeric",
+      "detect_regex": "\\b(chapter|chapitre|cap[íi]tulo)\\s+\\d+[\\.:,\\s]*$",
+      "detect_min_ratio": null
+    },
+    "chapter_roman_titled": {
+      "label": "Roman + title (CHAPTER I SOME TITLE)",
+      "regex": "^\\s*chapter\\s+([IVXLCDM]+)\\b.+$",
+      "flags": ["IGNORECASE", "MULTILINE"],
+      "numbering": "roman",
+      "detect_regex": "\\bchapter\\s+[IVXLCDM]+\\s+[A-Za-z]",
+      "detect_min_ratio": null
+    },
+    "allcaps_heading": {
+      "label": "All-caps section headings",
+      "regex": "(?<=\\n\\n)([A-Z][A-Z ,'!?\\u2014\\-]{2,})(?=\\n\\n)",
+      "flags": [],
+      "numbering": "sequential",
+      "detect_regex": "^[A-Z][A-Z ,'!?\\u2014\\-]{2,}$",
+      "detect_min_ratio": 0.5
+    },
+    "bare_roman": {
+      "label": "Bare Roman numerals (I, II, III...)",
+      "regex": "^([IVXLCDM]+)$",
+      "flags": ["MULTILINE"],
+      "numbering": "roman",
+      "detect_regex": "^[IVXLCDM]+$",
+      "detect_min_ratio": 0.5
+    }
+  },
+  "detection_order": [
+    "chapter_roman_titled",
+    "roman",
+    "numeric",
+    "bare_roman",
+    "allcaps_heading"
+  ]
+}

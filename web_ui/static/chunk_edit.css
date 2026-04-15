@@ -1,0 +1,153 @@
+/* Chunk editor — full-textarea editor for a single chunk's translated text */
+
+html, body {
+    height: 100%;
+}
+
+body {
+    font-family: Georgia, 'Times New Roman', serif;
+    background: #faf8f5;
+    color: #2c2c2c;
+    margin: 0;
+}
+
+#chunk-edit-app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    padding: 0 16px 16px;
+    max-width: 900px;
+    margin: 0 auto;
+    box-sizing: border-box;
+}
+
+.chunk-edit-topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid #e8e4df;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.chunk-edit-back,
+.chunk-edit-save {
+    background: #f0ece7;
+    border: 1px solid #ddd;
+    padding: 8px 14px;
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 4px;
+    color: #444;
+    font-family: inherit;
+}
+
+.chunk-edit-save {
+    background: #2c5f2d;
+    color: white;
+    border-color: #2c5f2d;
+    margin-left: auto;
+}
+
+.chunk-edit-save:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.chunk-edit-title {
+    font-size: 14px;
+    color: #666;
+    flex: 1;
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.chunk-edit-chunkid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: #999;
+}
+
+.chunk-edit-sep {
+    margin: 0 6px;
+    color: #bbb;
+}
+
+.chunk-edit-banner {
+    margin: 12px 0 0;
+    padding: 10px 14px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    border-radius: 4px;
+}
+
+.chunk-edit-banner.banner-warn {
+    background: #fff4d6;
+    border: 1px solid #e8c870;
+    color: #6b4e00;
+}
+
+.chunk-edit-banner.banner-info {
+    background: #eef4fb;
+    border: 1px solid #cfdff2;
+    color: #2b4a6b;
+}
+
+.chunk-edit-source {
+    margin: 12px 0;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: #666;
+}
+
+.chunk-edit-source summary {
+    cursor: pointer;
+    padding: 6px 0;
+    user-select: none;
+}
+
+.chunk-edit-source pre {
+    white-space: pre-wrap;
+    background: #f3efe9;
+    padding: 12px;
+    border-radius: 4px;
+    max-height: 240px;
+    overflow: auto;
+    font-family: Georgia, serif;
+    font-size: 14px;
+    color: #333;
+}
+
+#chunk-edit-textarea {
+    flex: 1;
+    min-height: 400px;
+    width: 100%;
+    margin-top: 12px;
+    padding: 16px;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 17px;
+    line-height: 1.7;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: #fff;
+    color: #2c2c2c;
+    resize: vertical;
+    box-sizing: border-box;
+}
+
+#chunk-edit-textarea:focus {
+    outline: 2px solid #2c5f2d;
+    outline-offset: -1px;
+}
+
+.chunk-edit-status {
+    margin-top: 8px;
+    min-height: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: #a33;
+}
+
+.chunk-edit-status.ok {
+    color: #2c5f2d;
+}

@@ -12,6 +12,7 @@ from scripts.translate_book import (
     load_pipeline_state,
     save_pipeline_state,
     discover_chapters,
+    parse_chapter_range,
     STAGES,
 )
 
@@ -76,6 +77,27 @@ class TestDiscoverChapters:
         chapters = discover_chapters(tmp_path)
         keys = list(chapters.keys())
         assert keys == ["chapter_01", "chapter_02", "chapter_03"]
+
+
+class TestParseChapterRange:
+    """Tests for --chapters argument parsing."""
+
+    def test_single_chapter(self):
+        assert parse_chapter_range("3") == {"chapter_03"}
+
+    def test_range(self):
+        assert parse_chapter_range("1-3") == {"chapter_01", "chapter_02", "chapter_03"}
+
+    def test_comma_separated(self):
+        assert parse_chapter_range("3,7,12") == {"chapter_03", "chapter_07", "chapter_12"}
+
+    def test_mixed(self):
+        result = parse_chapter_range("1-3,7,10-12")
+        assert result == {"chapter_01", "chapter_02", "chapter_03", "chapter_07",
+                          "chapter_10", "chapter_11", "chapter_12"}
+
+    def test_large_chapter_number(self):
+        assert parse_chapter_range("99") == {"chapter_99"}
 
 
 class TestStageOrder:

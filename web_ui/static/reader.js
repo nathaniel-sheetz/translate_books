@@ -15,6 +15,9 @@
     // i18n strings injected by the template
     const i = window.__i18n || {};
 
+    // On desktop (mouse/trackpad), auto-expand the sheet on tap — no keyboard popup concern
+    const isDesktop = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
     // --- Offline retry queue ---
     const QUEUE_KEY = 'reader_save_queue';
 
@@ -58,6 +61,7 @@
     const sheetTextarea = document.getElementById('sheet-textarea');
     const btnSave = document.getElementById('btn-save');
     const sheetClose = document.getElementById('sheet-close');
+    const sheetEditChunk = document.getElementById('sheet-edit-chunk');
     const sheetHandle = document.getElementById('sheet-handle');
     const readerStats = document.getElementById('reader-stats');
 
@@ -95,6 +99,7 @@
             renderSentences(data.alignments);
             addReviewButton();
             updateStats();
+            scrollToAnchorParam();
         })
         .catch(err => {
             content.innerHTML = `<p class="empty-state">${i.error_prefix || 'Error: '}${err.message}</p>`;
@@ -189,10 +194,14 @@
             annNoteInput.value = ann.content || '';
         }
 
-        // Show sheet (collapsed)
+        // Show sheet — auto-expand on desktop, collapsed on mobile (avoids keyboard popup)
         bottomSheet.classList.add('visible');
-        bottomSheet.classList.remove('expanded');
         sheetOverlay.classList.add('visible');
+        if (isDesktop) {
+            expandSheet();
+        } else {
+            bottomSheet.classList.remove('expanded');
+        }
     }
 
     function resetAnnotationUI() {
@@ -237,6 +246,38 @@
     function expandSheet() {
         bottomSheet.classList.add('expanded');
         sheetTextarea.focus();
+    }
+
+    // After the initial load (or after returning from the chunk editor),
+    // scroll to the alignment whose es starts with ?anchor=<prefix>. This is
+    // keyed by text instead of es_idx because realign can renumber sentences.
+    function scrollToAnchorParam() {
+        const params = new URLSearchParams(window.location.search);
+        const anchor = params.get('anchor');
+        if (!anchor || !alignmentData) return;
+        const prefix = anchor.trim();
+        if (!prefix) return;
+
+        let match = null;
+        for (const a of alignmentData.alignments) {
+            if (a && typeof a.es === 'string' && a.es.startsWith(prefix)) {
+                match = a;
+                break;
+            }
+        }
+        if (!match) return;
+        const el = content.querySelector(`[data-es-idx="${match.es_idx}"]`);
+        if (!el) return;
+        // Strip the anchor param from the URL so refreshes don't keep jumping
+        params.delete('anchor');
+        const newSearch = params.toString();
+        const newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '');
+        window.history.replaceState({}, '', newUrl);
+        // Defer to give the browser a frame to lay out the content
+        setTimeout(() => {
+            const top = el.getBoundingClientRect().top + window.scrollY - 60;
+            window.scrollTo({ top, behavior: 'instant' });
+        }, 0);
     }
 
     // --- Annotation type button handling ---
@@ -364,15 +405,47 @@
 
     const STICKY_NOTE_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M2 2h12v8l-4 4H2z"/><path d="M10 10v4"/></svg>';
 
+    let annotatedIndices = [];
+    let annCyclePos = -1;
+
     function updateStats() {
         if (!readerStats) return;
         const annCount = Object.keys(annotationsMap).length;
         readerStats.innerHTML = annCount > 0 ? STICKY_NOTE_SVG + annCount : '';
+        annotatedIndices = Object.keys(annotationsMap).map(Number).sort((a, b) => a - b);
+        annCyclePos = -1;
+    }
+
+    if (readerStats) {
+        readerStats.addEventListener('click', () => {
+            if (annotatedIndices.length === 0) return;
+            annCyclePos = (annCyclePos + 1) % annotatedIndices.length;
+            const idx = annotatedIndices[annCyclePos];
+            const el = content.querySelector(`[data-es-idx="${idx}"]`);
+            if (!el) return;
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
     }
 
     // Tap overlay to close
     sheetOverlay.addEventListener('click', closeSheet);
     sheetClose.addEventListener('click', closeSheet);
+
+    // Open the full chunk editor for the tapped sentence's chunk.
+    if (sheetEditChunk) {
+        sheetEditChunk.addEventListener('click', () => {
+            if (activeIdx === null || !alignmentData) return;
+            const a = alignmentData.alignments.find(x => x.es_idx === activeIdx);
+            if (!a || !a.chunk_id) return;
+            const anchor = (a.es || '').slice(0, 30);
+            const params = new URLSearchParams({
+                anchor_idx: String(activeIdx),
+                anchor: anchor,
+            });
+            window.location.href =
+                `/read/${projectId}/${chapter}/chunk/${a.chunk_id}/edit?` + params.toString();
+        });
+    }
 
     // Tap handle or swipe up to expand
     sheetHandle.addEventListener('click', expandSheet);

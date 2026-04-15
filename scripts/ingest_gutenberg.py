@@ -331,26 +331,34 @@ def build_chapter_report(chapters: list[dict], total_words: int) -> list[dict]:
 def suggest_split_pattern(chapters: list[dict]) -> str | None:
     """
     Inspect heading text to suggest a --pattern value for split_book.py.
-    Returns "roman", "numeric", or None.
+    Uses pattern definitions from split_patterns.json.
     """
-    # "Chapter I / II / III" style
-    roman_word_re = re.compile(r"\b(chapter|chapitre|cap[íi]tulo)\s+[IVXLCDM]+\b", re.I)
-    # "Chapter 1 / 2 / 3" style
-    numeric_re = re.compile(r"\b(chapter|chapitre|cap[íi]tulo)\s+\d+\b", re.I)
-    # Bare Roman numeral headings: heading IS just "I", "II", "IV" etc.
-    bare_roman_re = re.compile(r"^[IVXLCDM]+$")
+    from src.book_splitter import load_split_patterns
 
-    roman_word_hits = sum(1 for c in chapters if roman_word_re.search(c["heading"]))
-    numeric_hits = sum(1 for c in chapters if numeric_re.search(c["heading"]))
-    bare_roman_hits = sum(1 for c in chapters if bare_roman_re.match(c["heading"].strip()))
+    data = load_split_patterns()
+    patterns = data["patterns"]
+    detection_order = data.get("detection_order", list(patterns.keys()))
 
-    if roman_word_hits > 0:
-        return "roman"
-    if numeric_hits > 0:
-        return "numeric"
-    # Bare Roman numerals: suggest a custom regex
-    if bare_roman_hits > len(chapters) * 0.5:
-        return "bare_roman"
+    for pattern_name in detection_order:
+        defn = patterns.get(pattern_name)
+        if not defn:
+            continue
+        detect_regex = defn.get("detect_regex")
+        if not detect_regex:
+            continue
+
+        compiled = re.compile(detect_regex, re.I)
+        min_ratio = defn.get("detect_min_ratio")
+
+        if min_ratio is not None:
+            hits = sum(1 for c in chapters if compiled.match(c["heading"].strip()))
+            if hits > len(chapters) * min_ratio:
+                return pattern_name
+        else:
+            hits = sum(1 for c in chapters if compiled.search(c["heading"]))
+            if hits > 0:
+                return pattern_name
+
     return None
 
 

@@ -53,6 +53,20 @@ batch_jobs.json
 # Per-user project config (copy from project.example.json)
 project.json
 
+# Per-user LLM config (copy from llm_config.example.json)
+llm_config.json
+
+# Per-user prompt configs (copy from *.example.json / *.example.txt)
+prompts/style_guide_questions.json
+prompts/style_guide_questions.txt
+prompts/style_guide_generate.txt
+prompts/glossary_bootstrap.txt
+prompts/translation.txt
+
+# Prompt history logs (can be large)
+prompts/history/
+!prompts/history/.gitkeep
+
 # Backlog
 backlog/
 

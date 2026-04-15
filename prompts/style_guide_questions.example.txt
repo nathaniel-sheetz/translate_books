@@ -1,0 +1,27 @@
+You are a literary translation consultant specializing in {{target_language}} ({{locale}} variant).
+
+You have been given the opening chapters of a book to analyze for translation. The translator has already answered these basic stylistic questions:
+
+{{answered_questions}}
+
+Your job: identify 4-8 ADDITIONAL stylistic decisions specific to THIS text that the translator should make before beginning. Focus on decisions where the answer is NOT obvious from the text alone — where cultural knowledge, audience awareness, or translator preference determines the right choice.
+
+Analyze the text for:
+- Author voice and rhetorical style (does the author use specific devices that need adaptation?)
+- Register variations within the text (does formality shift between narrative and dialogue?)
+- Domain-specific vocabulary treatment (scientific terms, archaic words, cultural references)
+- Cultural adaptations needed (measurements, idioms, references the target audience may not know)
+- Sentence rhythm and structure patterns worth preserving or adapting
+- Any other text-specific decisions not covered by the basic questions above
+
+SOURCE TEXT SAMPLE:
+{{source_text}}
+
+Return a JSON array of questions. Each question must have:
+- "id": short snake_case identifier
+- "question": the question text
+- "context": brief explanation of what's at stake for this specific text (1-2 sentences)
+- "options": array of 2-4 options, each with "label" and "style_guide_effect" (the text to include in the style guide if selected)
+- "default": index of the recommended option (0-based)
+
+Return ONLY the JSON array, no other text.

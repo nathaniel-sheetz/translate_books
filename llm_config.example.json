@@ -1,0 +1,39 @@
+{
+  "default_provider": "anthropic",
+  "default_model": "claude-sonnet-4-20250514",
+  "providers": [
+    {
+      "id": "anthropic",
+      "name": "Anthropic (Claude)",
+      "type": "anthropic",
+      "api_key_env_var": "ANTHROPIC_API_KEY",
+      "models": [
+        { "id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "pricing": { "input": 3.00, "output": 15.00 } },
+        { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "pricing": { "input": 1.00, "output": 5.00 } },
+        { "id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "pricing": { "input": 3.00, "output": 15.00 } },
+        { "id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "pricing": { "input": 0.80, "output": 4.00 } }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI (GPT)",
+      "type": "openai-compatible",
+      "api_key_env_var": "OPENAI_API_KEY",
+      "base_url": null,
+      "models": [
+        { "id": "gpt-4o", "name": "GPT-4o", "pricing": { "input": 2.50, "output": 10.00 } },
+        { "id": "gpt-4o-mini", "name": "GPT-4o Mini", "pricing": { "input": 0.15, "output": 0.60 } }
+      ]
+    },
+    {
+      "id": "deepinfra",
+      "name": "DeepInfra",
+      "type": "openai-compatible",
+      "api_key_env_var": "DEEPINFRA_API_KEY",
+      "base_url": "https://api.deepinfra.com/v1/openai",
+      "models": [
+        { "id": "meta-llama/Llama-3.3-70B-Instruct", "name": "Llama 3.3 70B", "pricing": { "input": 0.35, "output": 0.40 } }
+      ]
+    }
+  ]
+}

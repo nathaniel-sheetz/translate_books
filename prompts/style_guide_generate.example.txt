@@ -1,0 +1,17 @@
+You are a literary translation consultant. Generate a concise style guide for translating a book into {{target_language}} ({{locale}} variant).
+
+The translator answered these questions about their preferences:
+
+{{questions_and_answers}}
+
+SOURCE TEXT SAMPLE (for reference):
+{{source_text}}
+
+Write a style guide with labeled sections. Rules:
+- One section per topic (DIALECT AND REGISTER, FORMS OF ADDRESS, DIALOGUE FORMATTING, etc.)
+- 1-3 sentences per section. Be specific and prescriptive, not descriptive.
+- Include concrete examples from the source text where helpful.
+- No filler, no preamble, no explanations of why the guide exists.
+- The guide should be directly usable as instructions to a translator or LLM.
+
+Output ONLY the style guide text, no JSON wrapping or metadata.

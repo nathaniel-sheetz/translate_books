@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project_title }} — Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='setup.css') }}">
+</head>
+<body>
+
+<div class="dashboard">
+
+    <!-- ── Sidebar stepper ── -->
+    <nav class="dash-sidebar">
+        <div class="dash-project-name">
+            <a href="/read/">&larr; Projects</a>
+            <span id="sidebar-project-title">{{ project_title }}</span>
+        </div>
+        <ul class="stepper" id="stepper">
+            <li data-stage="source">
+                <span class="step-number"><span>1</span></span>
+                <span class="step-label">Source</span>
+                <span class="step-badge" id="badge-source"></span>
+            </li>
+            <li data-stage="split">
+                <span class="step-number"><span>2</span></span>
+                <span class="step-label">Split</span>
+                <span class="step-badge" id="badge-split"></span>
+            </li>
+            <li data-stage="chunk">
+                <span class="step-number"><span>3</span></span>
+                <span class="step-label">Chunk</span>
+                <span class="step-badge" id="badge-chunk"></span>
+            </li>
+            <li data-stage="style-guide">
+                <span class="step-number"><span>4</span></span>
+                <span class="step-label">Style</span>
+                <span class="step-badge" id="badge-style-guide"></span>
+            </li>
+            <li data-stage="glossary">
+                <span class="step-number"><span>5</span></span>
+                <span class="step-label">Glossary</span>
+                <span class="step-badge" id="badge-glossary"></span>
+            </li>
+            <li data-stage="translate">
+                <span class="step-number"><span>6</span></span>
+                <span class="step-label">Translate</span>
+                <span class="step-badge" id="badge-translate"></span>
+            </li>
+            <li data-stage="review">
+                <span class="step-number"><span>7</span></span>
+                <span class="step-label">Review</span>
+                <span class="step-badge" id="badge-review"></span>
+            </li>
+            <li data-stage="export">
+                <span class="step-number"><span>8</span></span>
+                <span class="step-label">Export</span>
+                <span class="step-badge" id="badge-export"></span>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- ── Main content ── -->
+    <main class="dash-main">
+
+        <!-- ============================================================ -->
+        <!-- STAGE 1: SOURCE -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-source">
+            <h2>Source Text</h2>
+            <p class="stage-subtitle">Upload or paste the source text for this project.</p>
+
+            <div class="dash-field-row title-row" style="margin-bottom:20px; align-items:flex-end;">
+                <div class="dash-field">
+                    <label>Book Title</label>
+                    <input type="text" id="book-title-input" placeholder="{{ project_id }}"
+                           value="{{ project_title if project_title != project_id else '' }}">
+                </div>
+                <div class="dash-field">
+                    <label>Spanish Title</label>
+                    <input type="text" id="book-spanish-title-input" placeholder="Título en español"
+                           value="{{ project_spanish_title }}">
+                </div>
+                <div style="padding-bottom:4px">
+                    <button class="btn-primary" id="btn-save-title">Save Title</button>
+                    <span class="status-msg" id="title-save-status"></span>
+                </div>
+            </div>
+
+            <div id="source-loaded" style="display:none">
+                <div class="source-stats" id="source-stats"></div>
+                <div class="source-origin" id="source-origin" style="display:none"></div>
+                <div class="source-preview" id="source-preview"></div>
+                <div class="btn-row">
+                    <button class="btn-secondary" id="btn-replace-source">Replace Source</button>
+                </div>
+            </div>
+
+            <div id="source-upload">
+                <div class="source-mode-toggle">
+                    <button class="mode-btn active" data-mode="file">File / Paste</button>
+                    <button class="mode-btn" data-mode="gutenberg">Gutenberg URL</button>
+                </div>
+
+                <div id="source-mode-file">
+                    <div class="upload-zone" id="upload-zone">
+                        Drop a .txt file here, or click to browse
+                        <input type="file" id="source-file-input" accept=".txt" style="display:none">
+                    </div>
+                    <div class="dash-field">
+                        <label>Or paste text directly:</label>
+                        <textarea id="source-paste" rows="8" placeholder="Paste source text here..."></textarea>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn-primary" id="btn-ingest">Upload Source</button>
+                        <span class="status-msg" id="ingest-status"></span>
+                    </div>
+                </div>
+
+                <div id="source-mode-gutenberg" style="display:none">
+                    <div class="dash-field">
+                        <label>Project Gutenberg URL</label>
+                        <input type="text" id="gutenberg-url"
+                               placeholder="https://www.gutenberg.org/files/12345/12345-h/12345-h.htm">
+                    </div>
+                    <div class="dash-field-row" style="margin-bottom:0">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="gutenberg-download-images" checked>
+                            Download images
+                        </label>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn-primary" id="btn-gutenberg-ingest">Import from Gutenberg</button>
+                        <span class="status-msg" id="gutenberg-status"></span>
+                    </div>
+                    <div id="gutenberg-report" style="display:none; margin-top:20px">
+                        <h3>Chapter Report</h3>
+                        <div id="gutenberg-report-table"></div>
+                        <div id="gutenberg-suggested-pattern" style="margin-top:8px; font-size:13px; color:#555"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 2: SPLIT -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-split">
+            <h2>Split into Chapters</h2>
+            <p class="stage-subtitle">Detect chapter boundaries and split the source text.</p>
+
+            <div class="dash-field-row">
+                <div class="dash-field">
+                    <label>Pattern Type</label>
+                    <select id="split-pattern">
+                        <!-- Populated dynamically from /api/split-patterns -->
+                        <option value="roman">Roman numerals (Chapter I, Chapter II...)</option>
+                    </select>
+                </div>
+                <div class="dash-field">
+                    <label>Min Chapter Size (chars)</label>
+                    <input type="number" id="split-min-size" value="500" min="100">
+                </div>
+            </div>
+
+            <div class="dash-field" id="custom-regex-field" style="display:none">
+                <label>Custom Regex</label>
+                <input type="text" id="split-custom-regex" placeholder="e.g. ^CHAPTER\s+\d+">
+            </div>
+
+            <div class="btn-row">
+                <button class="btn-secondary" id="btn-split-preview">Preview Split</button>
+                <button class="btn-primary" id="btn-split-confirm" style="display:none">Confirm &amp; Split</button>
+                <span class="status-msg" id="split-status"></span>
+            </div>
+
+            <div id="split-preview-area" style="display:none">
+                <h3 id="split-preview-count"></h3>
+                <div class="chapter-cards" id="split-preview-cards"></div>
+            </div>
+
+            <div id="split-existing" style="display:none">
+                <h3 id="split-existing-count"></h3>
+                <div class="chapter-cards" id="split-existing-cards"></div>
+                <div class="btn-row">
+                    <button class="btn-danger" id="btn-resplit">Re-split (overwrites existing chapters)</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 3: CHUNK -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-chunk">
+            <h2>Chunk Chapters</h2>
+            <p class="stage-subtitle">Divide chapters into translation-sized chunks with overlap.</p>
+
+            <div class="dash-field-row">
+                <div class="dash-field">
+                    <label>Target Size (words)</label>
+                    <input type="number" id="chunk-target-size" value="2000" min="100">
+                </div>
+                <div class="dash-field">
+                    <label>Min Chunk Size (words)</label>
+                    <input type="number" id="chunk-min-size" value="500" min="1">
+                </div>
+                <div class="dash-field">
+                    <label>Max Chunk Size (words)</label>
+                    <input type="number" id="chunk-max-size" value="3000" min="1">
+                </div>
+                <div class="dash-field">
+                    <label>Overlap Paragraphs</label>
+                    <input type="number" id="chunk-overlap-para" value="0" min="0">
+                </div>
+                <div class="dash-field">
+                    <label>Min Overlap Words</label>
+                    <input type="number" id="chunk-overlap-words" value="0" min="0">
+                </div>
+            </div>
+
+            <div id="chunk-chapter-list"></div>
+
+            <div class="btn-row">
+                <button class="btn-primary" id="btn-chunk-all">Chunk All</button>
+                <span class="status-msg" id="chunk-status"></span>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 4: STYLE GUIDE -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-style-guide">
+            <h2>Style Guide</h2>
+            <p class="stage-subtitle">Configure translation style preferences.</p>
+
+            <div id="style-guide-existing" style="display:none">
+                <div class="existing-banner">
+                    Existing style guide loaded.
+                    <button class="btn-secondary" id="btn-edit-style" style="margin-left:8px; padding:4px 10px; font-size:12px;">Edit</button>
+                </div>
+                <div class="preview-box" id="style-guide-preview"></div>
+            </div>
+
+            <div id="style-guide-wizard">
+                <!-- LLM model selector (shared across style guide steps) -->
+                <div class="llm-selector-row" style="margin-bottom:16px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <label style="font-weight:600; font-size:13px;">LLM:</label>
+                    <select id="style-provider" class="llm-provider-select" style="padding:4px 8px;"></select>
+                    <select id="style-model" class="llm-model-select" style="padding:4px 8px;"></select>
+                </div>
+
+                <!-- Step 1: Fixed Questions -->
+                <div class="setup-section">
+                    <h2>1. Answer Style Questions</h2>
+                    <div id="fixed-questions">
+                        {% for q in fixed_questions %}
+                        <div class="question-block" data-qid="{{ q.id }}">
+                            <label class="question-label">{{ q.question }}</label>
+                            {% for opt in q.options %}
+                            <label class="option-label">
+                                <input type="radio" name="q_{{ q.id }}" value="{{ loop.index0 }}"
+                                       {% if loop.index0 == q.get('default', 0) %}checked{% endif %}>
+                                {{ opt.label }}
+                            </label>
+                            {% endfor %}
+                            {% if q.get('allow_custom') %}
+                            <label class="option-label">
+                                <input type="radio" name="q_{{ q.id }}" value="custom">
+                                Custom
+                            </label>
+                            <input type="text" class="custom-input" data-qid="{{ q.id }}"
+                                   placeholder="{{ q.get('custom_prompt', 'Enter custom value') }}" style="display:none">
+                            {% endif %}
+                            <div class="effect-preview" data-qid="{{ q.id }}"></div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <!-- Step 2: LLM-generated questions (optional) -->
+                <div class="setup-section">
+                    <h2>2. Additional Questions from Text (Optional)</h2>
+                    <p class="section-hint">Generate text-specific questions via LLM, or skip to use only the fixed questions above.</p>
+
+                    <div class="action-row" style="margin-bottom:8px;">
+                        <button class="btn-primary" id="btn-generate-questions-api">Generate via API</button>
+                        <span class="status-msg" id="questions-api-status"></span>
+                    </div>
+
+                    <div class="prompt-block">
+                        <button class="btn-secondary" id="btn-show-questions-prompt">Show Prompt to Copy</button>
+                        <div class="prompt-area" id="questions-prompt-area" style="display:none">
+                            <textarea readonly id="questions-prompt-text" rows="10"></textarea>
+                            <button class="btn-copy" data-target="questions-prompt-text">Copy</button>
+                        </div>
+                    </div>
+
+                    <div class="paste-block">
+                        <label>Paste LLM Response (JSON array of questions):</label>
+                        <textarea id="questions-paste" rows="6" placeholder='[{"id": "...", "question": "...", "options": [...], "default": 0}]'></textarea>
+                        <button class="btn-primary" id="btn-parse-questions">Parse Questions</button>
+                    </div>
+
+                    <div id="extra-questions"></div>
+                </div>
+
+                <!-- Step 3: Generate style guide -->
+                <div class="setup-section">
+                    <h2>3. Generate Style Guide</h2>
+
+                    <div class="action-row" style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-primary" id="btn-generate-style-api">Generate via API</button>
+                        <button class="btn-secondary" id="btn-generate-fallback">Generate from Answers (no LLM)</button>
+                        <span class="status-msg" id="style-api-status"></span>
+                    </div>
+
+                    <div class="prompt-block">
+                        <button class="btn-secondary" id="btn-show-style-prompt">Show LLM Prompt to Copy</button>
+                        <div class="prompt-area" id="style-prompt-area" style="display:none">
+                            <textarea readonly id="style-prompt-text" rows="10"></textarea>
+                            <button class="btn-copy" data-target="style-prompt-text">Copy</button>
+                        </div>
+                    </div>
+
+                    <div class="paste-block">
+                        <label>Paste LLM-generated style guide:</label>
+                        <textarea id="style-paste" rows="6" placeholder="Paste the generated style guide text here..."></textarea>
+                        <button class="btn-primary" id="btn-use-pasted-style">Use Pasted Style Guide</button>
+                    </div>
+
+                    <div id="style-guide-result" style="display:none">
+                        <h3>Preview</h3>
+                        <div class="preview-box" id="style-result-preview"></div>
+                        <div class="btn-row">
+                            <button class="btn-save" id="btn-save-style">Save Style Guide</button>
+                            <span class="status-msg" id="style-save-status"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 5: GLOSSARY -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-glossary">
+            <h2>Glossary</h2>
+            <p class="stage-subtitle">Extract and translate key terms for consistent translation.</p>
+
+            <div id="glossary-existing" style="display:none">
+                <div class="existing-banner">
+                    Existing glossary loaded (<span id="glossary-existing-count">0</span> terms).
+                    <button class="btn-secondary" id="btn-add-more-terms" style="margin-left:8px; padding:4px 10px; font-size:12px;">Add More</button>
+                </div>
+            </div>
+
+            <div id="glossary-wizard">
+                <!-- Step 1: Extract candidates -->
+                <div class="setup-section">
+                    <h2>1. Extract Candidates</h2>
+                    <p class="section-hint">Scan source text for proper nouns, repeated terms, and technical vocabulary.</p>
+
+                    <div class="btn-row">
+                        <button class="btn-primary" id="btn-extract-candidates">Extract Candidates</button>
+                        <span class="status-msg" id="extract-status"></span>
+                    </div>
+                    <div id="candidates-count" style="display:none"></div>
+                </div>
+
+                <!-- Step 2: Choose relevant questions -->
+                <div class="setup-section">
+                    <h2>2. Choose Relevant Questions</h2>
+                    <p class="section-hint">Select which style guide answers to include as context for glossary translation.</p>
+                    <div id="glossary-qa-selection"></div>
+                </div>
+
+                <!-- Step 3: Bootstrap via LLM -->
+                <div class="setup-section">
+                    <h2>3. Bootstrap Translations via LLM</h2>
+
+                    <div class="llm-selector-row" style="margin-bottom:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        <label style="font-weight:600; font-size:13px;">LLM:</label>
+                        <select id="glossary-provider" class="llm-provider-select" style="padding:4px 8px;"></select>
+                        <select id="glossary-model" class="llm-model-select" style="padding:4px 8px;"></select>
+                    </div>
+
+                    <div class="action-row" style="margin-bottom:8px;">
+                        <button class="btn-primary" id="btn-generate-glossary-api">Generate via API</button>
+                        <span class="status-msg" id="glossary-api-status"></span>
+                    </div>
+
+                    <div class="prompt-block">
+                        <button class="btn-secondary" id="btn-show-glossary-prompt">Show Prompt to Copy</button>
+                        <div class="prompt-area" id="glossary-prompt-area" style="display:none">
+                            <textarea readonly id="glossary-prompt-text" rows="10"></textarea>
+                            <button class="btn-copy" data-target="glossary-prompt-text">Copy</button>
+                        </div>
+                    </div>
+
+                    <div class="paste-block">
+                        <label>Paste LLM Response (JSON array of terms):</label>
+                        <textarea id="glossary-paste" rows="6" placeholder='[{"english": "...", "spanish": "...", "type": "...", "context": "..."}]'></textarea>
+                        <button class="btn-primary" id="btn-parse-glossary">Parse &amp; Review</button>
+                    </div>
+
+                    <div id="glossary-review" style="display:none">
+                        <table class="glossary-table" id="glossary-proposals-table">
+                            <thead>
+                                <tr>
+                                    <th>English</th>
+                                    <th>Spanish</th>
+                                    <th>Type</th>
+                                    <th>Context</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                        <div class="btn-row">
+                            <button class="btn-save" id="btn-save-glossary">Save Glossary</button>
+                            <span class="status-msg" id="glossary-save-status"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 6: TRANSLATE -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-translate">
+            <h2>Translate</h2>
+            <p class="stage-subtitle">Translate chapters via API or manually with copy/paste.</p>
+
+            <div class="btn-row" style="margin-bottom:16px">
+                <button class="btn-primary" id="btn-batch-translate" disabled>Batch Translate Selected</button>
+                <button class="btn-secondary" id="btn-translate-all-untranslated">Translate All Untranslated</button>
+                <span class="status-msg" id="translate-batch-status"></span>
+            </div>
+
+            <table class="chapter-table" id="translate-chapter-table">
+                <thead>
+                    <tr>
+                        <th style="width:30px"><input type="checkbox" id="select-all-chapters"></th>
+                        <th>Chapter</th>
+                        <th>Chunks</th>
+                        <th>Translated</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="translate-chapter-tbody"></tbody>
+            </table>
+
+            <div id="chunk-detail-container"></div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 7: REVIEW -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-review">
+            <h2>Review</h2>
+            <p class="stage-subtitle">Align, read, and annotate translated chapters.</p>
+
+            <button class="btn-primary" id="btn-align-all" style="margin-bottom:12px;display:none">Align All Unaligned</button>
+
+            <table class="review-table" id="review-table">
+                <thead>
+                    <tr>
+                        <th>Chapter</th>
+                        <th>Alignment</th>
+                        <th>Annotations</th>
+                        <th>Reviewed</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="review-tbody"></tbody>
+            </table>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STAGE 8: EXPORT -->
+        <!-- ============================================================ -->
+        <div class="stage-panel" id="stage-export">
+            <h2>Export</h2>
+            <p class="stage-subtitle">Build an EPUB from your translated chapters.</p>
+
+            <div id="epub-coverage" style="margin-bottom:16px;">
+                <p><strong><span id="epub-translated-count">0</span> of <span id="epub-total-count">0</span></strong> chapters will be included in the EPUB.</p>
+            </div>
+
+            <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
+                <label>Title</label>
+                <input type="text" id="epub-title" placeholder="Book title">
+            </div>
+            <div class="dash-field" style="max-width:400px; margin-bottom:16px;">
+                <label>Author</label>
+                <input type="text" id="epub-author" placeholder="Author name">
+            </div>
+
+            <div class="btn-row">
+                <button class="btn-primary" id="btn-build-epub">Build EPUB</button>
+                <a class="btn-secondary" id="btn-download-epub" style="display:none; text-decoration:none;" download>Download EPUB</a>
+                <span class="status-msg" id="epub-status"></span>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<!-- ── Batch translate modal ── -->
+<div class="modal-overlay" id="batch-modal">
+    <div class="modal">
+        <button class="modal-close" id="batch-modal-close">&times;</button>
+        <h3>Batch Translate</h3>
+
+        <div class="dash-field">
+            <label>Provider</label>
+            <select id="batch-provider"></select>
+        </div>
+        <div class="dash-field">
+            <label>Model</label>
+            <select id="batch-model"></select>
+        </div>
+
+        <div id="batch-cost-estimate" style="margin:12px 0; font-size:14px;"></div>
+
+        <div id="batch-progress" style="display:none">
+            <div style="font-size:14px; margin-bottom:4px;">
+                <span class="spinner"></span>
+                <span id="batch-progress-text">Translating...</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="batch-progress-fill" style="width:0%"></div>
+            </div>
+        </div>
+
+        <div class="btn-row">
+            <button class="btn-primary" id="btn-start-batch">Start Translation</button>
+            <button class="btn-secondary" id="btn-cancel-batch" style="display:none">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    window.DASHBOARD_PROJECT_ID = {{ project_id | tojson }};
+    window.DASHBOARD_PROJECT_TITLE = {{ project_title | tojson }};
+    window.DASHBOARD_FIXED_QUESTIONS = {{ fixed_questions | tojson }};
+</script>
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+
+</body>
+</html>

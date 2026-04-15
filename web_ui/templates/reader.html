@@ -13,26 +13,93 @@
 <div class="nav-page">
     <div class="nav-header">
         <h1>{{ t.reader_title }}</h1>
-        <div class="lang-toggle">
-            <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
-            <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
+        <div class="nav-header-actions">
+            <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project }}</button>
+            <div class="lang-toggle">
+                <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
+                <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
+            </div>
         </div>
     </div>
+
+    <!-- Status filter bar -->
+    <div class="filter-bar" id="filter-bar">
+        <span class="filter-label">{{ t.filter_label }}:</span>
+        <button class="filter-btn active" data-status="all">{{ t.filter_all }}</button>
+        <button class="filter-btn active" data-status="pending">{{ t.status_pending }}</button>
+        <button class="filter-btn active" data-status="in_progress">{{ t.status_in_progress }}</button>
+        <button class="filter-btn" data-status="complete">{{ t.status_complete }}</button>
+        <button class="filter-btn" data-status="archived">{{ t.status_archived }}</button>
+    </div>
+
     {% if projects %}
-    <ul class="nav-list">
+    <div class="project-grid" id="project-grid">
         {% for p in projects %}
-        <li>
-            <a href="/read/{{ p.id }}">
-                <span class="nav-title">{{ p.id }}</span>
-                <span class="nav-meta">{{ p.chapter_count }} {{ t.chapters_count }}</span>
-            </a>
-        </li>
+        <div class="project-card{% if p.status == 'archived' %} card-archived{% endif %}" data-status="{{ p.status }}">
+            <div class="project-card-header">
+                {% if lang == 'es' and p.spanish_title %}
+                <span class="nav-title">{{ p.spanish_title }}</span>
+                <span class="nav-subtitle">{{ p.title }}</span>
+                {% else %}
+                <span class="nav-title">{{ p.title }}</span>
+                {% if p.spanish_title %}
+                <span class="nav-subtitle">{{ p.spanish_title }}</span>
+                {% endif %}
+                {% endif %}
+            </div>
+            <div class="project-status">
+                <div class="status-row">
+                    <span class="status-label">{{ t.style_guide_label }}</span>
+                    <span class="status-value {% if p.has_style_guide %}status-ok{% else %}status-missing{% endif %}">
+                        {{ "✓" if p.has_style_guide else "✗" }}
+                    </span>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">{{ t.glossary_label }}</span>
+                    <span class="status-value {% if p.glossary_count > 0 %}status-ok{% else %}status-missing{% endif %}">
+                        {% if p.glossary_count > 0 %}{{ p.glossary_count }} {{ t.terms_suffix }}{% else %}✗{% endif %}
+                    </span>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">{{ t.translated_label }}</span>
+                    <span class="status-value">{{ p.translated_chunks }}/{{ p.total_chunks }} {{ t.chunks_suffix }}</span>
+                </div>
+            </div>
+            <div class="project-card-actions">
+                <a href="/project/{{ p.id }}" class="btn-card btn-setup">{{ t.dashboard_btn }}</a>
+                {% if p.has_alignments %}
+                <a href="/read/{{ p.id }}" class="btn-card">{{ t.read_btn }}</a>
+                {% else %}
+                <span class="btn-card btn-disabled">{{ t.read_btn }}</span>
+                {% endif %}
+                <select class="status-select status-{{ p.status }}" data-project-id="{{ p.id }}">
+                    <option value="pending"{% if p.status == 'pending' %} selected{% endif %}>{{ t.status_pending }}</option>
+                    <option value="in_progress"{% if p.status == 'in_progress' %} selected{% endif %}>{{ t.status_in_progress }}</option>
+                    <option value="complete"{% if p.status == 'complete' %} selected{% endif %}>{{ t.status_complete }}</option>
+                    <option value="archived"{% if p.status == 'archived' %} selected{% endif %}>{{ t.status_archived }}</option>
+                </select>
+            </div>
+        </div>
         {% endfor %}
-    </ul>
+    </div>
     {% else %}
     <p class="empty-state">{{ t.no_projects }}</p>
     {% endif %}
 </div>
+
+<div id="new-project-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+        <h2>{{ t.new_project }}</h2>
+        <label for="new-project-title">{{ t.new_project_title_label }}</label>
+        <input id="new-project-title" type="text" placeholder="e.g. Don Quixote" autocomplete="off">
+        <div class="modal-actions">
+            <button id="btn-cancel-project" class="btn-card">{{ t.new_project_cancel }}</button>
+            <button id="btn-create-project" class="btn-card btn-setup">{{ t.new_project_create }}</button>
+        </div>
+        <p id="new-project-error" style="color:red;display:none"></p>
+    </div>
+</div>
+
 <script>
 document.querySelectorAll('.lang-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
@@ -43,13 +110,128 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
         }).then(function() { location.reload(); });
     });
 });
+
+(function() {
+    var overlay = document.getElementById('new-project-modal');
+    var titleInput = document.getElementById('new-project-title');
+    var errEl = document.getElementById('new-project-error');
+
+    document.getElementById('btn-new-project').addEventListener('click', function() {
+        titleInput.value = '';
+        errEl.style.display = 'none';
+        overlay.style.display = 'flex';
+        titleInput.focus();
+    });
+
+    document.getElementById('btn-cancel-project').addEventListener('click', function() {
+        overlay.style.display = 'none';
+    });
+
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) overlay.style.display = 'none';
+    });
+
+    titleInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') document.getElementById('btn-create-project').click();
+    });
+
+    document.getElementById('btn-create-project').addEventListener('click', function() {
+        var title = titleInput.value.trim();
+        if (!title) { errEl.textContent = {{ t.new_project_error | tojson }}; errEl.style.display = ''; return; }
+        var btn = this;
+        btn.disabled = true;
+        fetch('/api/projects/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: title })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) { errEl.textContent = data.error; errEl.style.display = ''; btn.disabled = false; return; }
+            window.location.href = data.redirect;
+        })
+        .catch(function(err) { errEl.textContent = err.message; errEl.style.display = ''; btn.disabled = false; });
+    });
+})();
+
+/* ── Status filter ── */
+(function() {
+    var filterBar = document.getElementById('filter-bar');
+    if (!filterBar) return;
+    var buttons = filterBar.querySelectorAll('.filter-btn');
+    var allBtn = filterBar.querySelector('[data-status="all"]');
+    var cards = document.querySelectorAll('.project-card[data-status]');
+
+    function getActiveStatuses() {
+        var active = [];
+        buttons.forEach(function(b) {
+            if (b.dataset.status !== 'all' && b.classList.contains('active')) active.push(b.dataset.status);
+        });
+        return active;
+    }
+
+    function applyFilter() {
+        var active = getActiveStatuses();
+        var allActive = active.length === 4;
+        var noneActive = active.length === 0;
+        allBtn.classList.toggle('active', allActive);
+        cards.forEach(function(card) {
+            card.style.display = (noneActive || active.indexOf(card.dataset.status) !== -1) ? '' : 'none';
+        });
+    }
+
+    buttons.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            if (btn.dataset.status === 'all') {
+                var turnOn = !btn.classList.contains('active');
+                buttons.forEach(function(b) { b.classList.toggle('active', turnOn); });
+            } else {
+                btn.classList.toggle('active');
+                /* sync "All" button */
+                allBtn.classList.toggle('active', getActiveStatuses().length === 4);
+            }
+            applyFilter();
+        });
+    });
+
+    applyFilter();
+})();
+
+/* ── Status dropdown change ── */
+document.querySelectorAll('.status-select').forEach(function(sel) {
+    sel.addEventListener('change', function() {
+        var projectId = sel.dataset.projectId;
+        var newStatus = sel.value;
+        var card = sel.closest('.project-card');
+        fetch('/api/project/' + projectId + '/status', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: newStatus })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.ok) {
+                card.dataset.status = newStatus;
+                sel.className = 'status-select status-' + newStatus;
+                card.classList.toggle('card-archived', newStatus === 'archived');
+                /* re-apply filter to hide/show if needed */
+                var filterBar = document.getElementById('filter-bar');
+                if (filterBar) {
+                    var active = [];
+                    filterBar.querySelectorAll('.filter-btn').forEach(function(b) {
+                        if (b.dataset.status !== 'all' && b.classList.contains('active')) active.push(b.dataset.status);
+                    });
+                    card.style.display = (active.length === 0 || active.indexOf(newStatus) !== -1) ? '' : 'none';
+                }
+            }
+        });
+    });
+});
 </script>
 
 {% elif mode == "chapters" %}
 <!-- Chapter list -->
 <div class="nav-page">
     <a href="/read/" class="back-link">&larr; {{ t.projects_back }}</a>
-    <h1>{{ project_id }}</h1>
+    <h1>{{ project_title or project_id }}</h1>
     {% if has_corrections %}
     <div class="chapter-banner banner-warn" id="corrections-banner">
         <span>{{ t.pending_corrections }}</span>
@@ -150,6 +332,7 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
         <div class="sheet-handle" id="sheet-handle"></div>
         <div class="sheet-header">
             <span class="sheet-label">{{ t.sheet_label }}</span>
+            <button class="sheet-edit-chunk" id="sheet-edit-chunk" title="{{ t.edit_chunk }}">{{ t.edit_chunk }}</button>
             <button class="sheet-close" id="sheet-close">&times;</button>
         </div>
         <div class="sheet-en" id="sheet-en"></div>
@@ -204,7 +387,7 @@ document.querySelectorAll('.lang-btn').forEach(function(btn) {
     <div class="sheet-overlay" id="sheet-overlay"></div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=8"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=9"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

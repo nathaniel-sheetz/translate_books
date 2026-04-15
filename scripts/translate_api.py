@@ -24,6 +24,7 @@ from src.api_translator import (
     check_batch_status,
     retrieve_batch_results,
     estimate_cost,
+    get_pricing_table,
     save_batch_job,
     get_batch_job,
     update_batch_job_status,
@@ -58,6 +59,101 @@ def load_chunks_from_patterns(patterns: list[str]) -> list[Chunk]:
                 console.print(f"[red]Error loading {file_path}: {e}[/red]")
 
     return chunks
+
+
+def translate_dry_run(args):
+    """Translate a single chunk and show cost comparison across models."""
+    console.print("\n[bold cyan]Dry-Run Mode[/bold cyan]")
+    console.print("Translating 1 chunk to preview quality and estimate cost.\n")
+
+    # Load chunks
+    chunks = load_chunks_from_patterns(args.chunk_files)
+    if not chunks:
+        console.print("[red]Error: No chunks loaded. Check your file patterns.[/red]")
+        return 1
+
+    # Load optional resources
+    glossary = None
+    if args.glossary:
+        try:
+            glossary = load_glossary(Path(args.glossary))
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not load glossary: {e}[/yellow]")
+
+    style_guide = None
+    if args.style_guide:
+        try:
+            style_guide = load_style_guide(Path(args.style_guide))
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not load style guide: {e}[/yellow]")
+
+    # Translate the first chunk
+    sample = chunks[0]
+    console.print(f"[bold]Translating sample chunk: {sample.id}[/bold]")
+    console.print(f"  Provider: {args.provider}, Model: {args.model}\n")
+
+    try:
+        translated = translate_chunk_realtime(
+            chunk=sample,
+            provider=args.provider,
+            model=args.model,
+            glossary=glossary,
+            style_guide=style_guide,
+            project_name=args.project_name,
+            source_language=args.source_language,
+            target_language=args.target_language,
+        )
+    except (APIKeyError, APIError) as e:
+        console.print(f"[red]Translation failed: {e}[/red]")
+        return 1
+
+    # Side-by-side display
+    side_by_side = Table(title="Source vs Translation", show_lines=True)
+    side_by_side.add_column("Source", style="dim", ratio=1)
+    side_by_side.add_column("Translation", style="green", ratio=1)
+
+    src_lines = sample.source_text.strip().split("\n\n")
+    tgt_lines = translated.translated_text.strip().split("\n\n")
+
+    max_rows = max(len(src_lines), len(tgt_lines))
+    for i in range(max_rows):
+        src = src_lines[i] if i < len(src_lines) else ""
+        tgt = tgt_lines[i] if i < len(tgt_lines) else ""
+        side_by_side.add_row(src, tgt)
+
+    console.print(side_by_side)
+
+    # Cost comparison across all models
+    console.print(f"\n[bold]Cost Estimate for {len(chunks)} chunks:[/bold]\n")
+
+    pricing = get_pricing_table()
+    cost_table = Table(title="Model Comparison")
+    cost_table.add_column("Provider")
+    cost_table.add_column("Model")
+    cost_table.add_column("Input $/M", justify="right")
+    cost_table.add_column("Output $/M", justify="right")
+    cost_table.add_column("Realtime Cost", justify="right")
+    cost_table.add_column("Batch Cost (50% off)", justify="right")
+
+    for provider, models in pricing.items():
+        for model_id, prices in models.items():
+            realtime = estimate_cost(chunks, provider, model_id, batch_mode=False, glossary=glossary, style_guide=style_guide)
+            batch = estimate_cost(chunks, provider, model_id, batch_mode=True, glossary=glossary, style_guide=style_guide)
+
+            highlight = " *" if model_id == args.model else ""
+            cost_table.add_row(
+                provider,
+                model_id + highlight,
+                f"${prices['input']:.2f}",
+                f"${prices['output']:.2f}",
+                f"${realtime['cost_usd']:.2f}",
+                f"${batch['cost_usd']:.2f}",
+            )
+
+    console.print(cost_table)
+    console.print("\n[dim]* = selected model[/dim]")
+
+    return 0
 
 
 def translate_realtime(args):
@@ -388,7 +484,7 @@ def main():
         epilog="""
 Examples:
   # Real-time translation with Claude
-  python translate_api.py chunks/*.json --provider anthropic --model claude-3-5-sonnet-20241022
+  python translate_api.py chunks/*.json --provider anthropic --model claude-sonnet-4-20250514
 
   # Batch translation (50% discount, ~24h processing)
   python translate_api.py chunks/*.json --provider openai --model gpt-4o --batch
@@ -433,8 +529,14 @@ Examples:
 
     parser.add_argument(
         '--model',
-        default='claude-3-5-sonnet-20241022',
-        help='Model to use (default: claude-3-5-sonnet-20241022)'
+        default='claude-sonnet-4-20250514',
+        help='Model to use (default: claude-sonnet-4-20250514)'
+    )
+
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Translate 1 chunk, show side-by-side, and print cost comparison for all models'
     )
 
     parser.add_argument(
@@ -518,7 +620,9 @@ Examples:
         return 1
 
     # Execute translation
-    if args.batch:
+    if args.dry_run:
+        return translate_dry_run(args)
+    elif args.batch:
         return translate_batch(args)
     else:
         return translate_realtime(args)

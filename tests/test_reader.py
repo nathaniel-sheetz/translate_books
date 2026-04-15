@@ -24,6 +24,8 @@ def project_with_alignment(tmp_path, monkeypatch):
     proj_dir = projects_dir / "test-project"
     align_dir = proj_dir / "alignments"
     align_dir.mkdir(parents=True)
+    # Create chunks dir so project appears in dashboard
+    (proj_dir / "chunks").mkdir(parents=True, exist_ok=True)
 
     alignment = {
         "chapter_id": "chapter_01",

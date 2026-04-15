@@ -2,11 +2,13 @@
 Book splitting functionality for automatic chapter detection.
 
 This module provides utilities to detect chapter boundaries in full book files
-and split them into individual chapter files. Supports Roman numerals, numeric
-chapter patterns, and custom regex patterns.
+and split them into individual chapter files. Patterns are defined in
+split_patterns.json and can be extended without code changes.
 """
 
+import json
 import re
+from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -38,6 +40,48 @@ ROMAN_NUMERALS = {
     'C': 100, 'CD': 400, 'D': 500, 'CM': 900,
     'M': 1000
 }
+
+
+_PATTERNS_CACHE = None
+
+_RE_FLAGS = {
+    "IGNORECASE": re.IGNORECASE,
+    "MULTILINE": re.MULTILINE,
+    "DOTALL": re.DOTALL,
+}
+
+
+def load_split_patterns() -> dict:
+    """Load split patterns from split_patterns.json. Caches after first load."""
+    global _PATTERNS_CACHE
+    if _PATTERNS_CACHE is not None:
+        return _PATTERNS_CACHE
+
+    patterns_file = Path(__file__).parent / "split_patterns.json"
+    if not patterns_file.exists():
+        raise FileNotFoundError(f"Split patterns file not found: {patterns_file}")
+
+    with open(patterns_file, "r", encoding="utf-8") as f:
+        _PATTERNS_CACHE = json.load(f)
+    return _PATTERNS_CACHE
+
+
+def get_pattern_names() -> list[str]:
+    """Return list of available pattern names (excluding 'custom')."""
+    data = load_split_patterns()
+    return list(data["patterns"].keys())
+
+
+def get_pattern_definitions() -> dict:
+    """Return pattern definitions for API/UI consumption."""
+    data = load_split_patterns()
+    result = {}
+    for name, defn in data["patterns"].items():
+        result[name] = {
+            "label": defn["label"],
+            "numbering": defn["numbering"],
+        }
+    return result
 
 
 def roman_to_int(roman: str) -> Optional[int]:
@@ -138,8 +182,11 @@ def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str]
     """
     Get compiled regex pattern for chapter detection.
 
+    Patterns are loaded from split_patterns.json. The special type "custom"
+    accepts an arbitrary user-provided regex.
+
     Args:
-        pattern_type: Type of pattern - "roman", "numeric", or "custom"
+        pattern_type: Named pattern from split_patterns.json, or "custom"
         custom_regex: Custom regex pattern (required if pattern_type is "custom")
 
     Returns:
@@ -147,42 +194,31 @@ def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str]
 
     Raises:
         ValueError: If pattern_type is invalid or custom_regex missing for "custom" type
-
-    Example:
-        >>> pattern = get_chapter_pattern("roman")
-        >>> match = pattern.search("Chapter I\\n\\nIt was the best of times...")
-        >>> match.group(1)  # Chapter number/title
-        'I'
     """
-    if pattern_type == "roman":
-        # Matches: "Chapter I", "CHAPTER II", "Chapter III", etc.
-        # Case-insensitive, allows optional colon or period after chapter
-        # Captures the Roman numeral
-        return re.compile(
-            r'^\s*chapter\s+([IVXLCDM]+)[\.\:\s]*$',
-            re.IGNORECASE | re.MULTILINE
-        )
-
-    elif pattern_type == "numeric":
-        # Matches: "Chapter 1", "CHAPTER 2", "Chapter 3", etc.
-        # Case-insensitive, allows optional colon or period
-        # Captures the number
-        return re.compile(
-            r'^\s*chapter\s+(\d+)[\.\:\s]*$',
-            re.IGNORECASE | re.MULTILINE
-        )
-
-    elif pattern_type == "custom":
+    if pattern_type == "custom":
         if not custom_regex:
             raise ValueError("custom_regex is required when pattern_type is 'custom'")
-
         try:
             return re.compile(custom_regex, re.IGNORECASE | re.MULTILINE)
         except re.error as e:
             raise ValueError(f"Invalid regex pattern: {e}")
 
-    else:
-        raise ValueError(f"Invalid pattern_type: {pattern_type}. Must be 'roman', 'numeric', or 'custom'")
+    data = load_split_patterns()
+    patterns = data.get("patterns", {})
+
+    if pattern_type not in patterns:
+        available = ", ".join(list(patterns.keys()) + ["custom"])
+        raise ValueError(f"Invalid pattern_type: {pattern_type}. Available: {available}")
+
+    defn = patterns[pattern_type]
+    flags = 0
+    for flag_name in defn.get("flags", []):
+        flags |= _RE_FLAGS.get(flag_name, 0)
+
+    try:
+        return re.compile(defn["regex"], flags)
+    except re.error as e:
+        raise ValueError(f"Invalid regex in pattern '{pattern_type}': {e}")
 
 
 def split_book_into_chapters(
@@ -233,33 +269,34 @@ def split_book_into_chapters(
             f"Check that your book uses the expected chapter format."
         )
 
-    # Split text into lines for line number tracking
-    lines = book_text.split('\n')
+    # Determine numbering strategy from pattern definition
+    if pattern_type == "custom":
+        numbering = "sequential"
+    else:
+        data = load_split_patterns()
+        defn = data["patterns"].get(pattern_type, {})
+        numbering = defn.get("numbering", "sequential")
 
     detected_chapters = []
 
     for i, match in enumerate(matches):
         # Extract chapter number/title from match
-        chapter_identifier = match.group(1)  # The captured group (Roman/number)
+        chapter_identifier = match.group(1)  # The captured group
 
-        # Determine chapter number
-        if pattern_type == "roman":
+        # Determine chapter number based on numbering strategy
+        if numbering == "roman":
             chapter_num = roman_to_int(chapter_identifier)
             if chapter_num is None:
-                # Skip invalid Roman numerals
                 continue
             chapter_title = f"Chapter {chapter_identifier.upper()}"
-
-        elif pattern_type == "numeric":
+        elif numbering == "numeric":
             try:
                 chapter_num = int(chapter_identifier)
                 chapter_title = f"Chapter {chapter_num}"
             except ValueError:
                 continue
-
-        else:  # custom
-            # For custom patterns, use sequential numbering
-            chapter_num = i + 1
+        else:  # sequential
+            chapter_num = len(detected_chapters) + 1
             chapter_title = match.group(0).strip()
 
         # Find start and end positions
