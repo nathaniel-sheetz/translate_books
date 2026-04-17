@@ -1761,19 +1761,26 @@ def project_translate_cost_estimate(project_id):
     provider = data.get("provider", "anthropic")
     model = data.get("model", "")
 
+    include_translated = data.get("include_translated", False)
+
     try:
         from src.api_translator import estimate_cost
 
         chunks_dir = project_dir / "chunks"
         chunks = []
+        already_translated_count = 0
         for ch_id in chapter_ids:
             for cf in sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")):
                 chunk = load_chunk(cf)
-                if not chunk.translated_text or not chunk.translated_text.strip():
+                has_translation = bool(chunk.translated_text and chunk.translated_text.strip())
+                if has_translation:
+                    already_translated_count += 1
+                if include_translated or not has_translation:
                     chunks.append(chunk)
 
         if not chunks:
-            return jsonify({"chunk_count": 0, "estimated_cost": 0})
+            return jsonify({"chunk_count": 0, "estimated_cost": 0,
+                            "already_translated_count": already_translated_count})
 
         # Load glossary and style guide for accurate estimation
         glossary = None
@@ -1798,6 +1805,7 @@ def project_translate_cost_estimate(project_id):
             "chunk_count": len(chunks),
             "estimated_cost": result.get("cost_usd", 0),
             "total_tokens": result.get("input_tokens", 0),
+            "already_translated_count": already_translated_count,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1884,17 +1892,20 @@ def project_translate_batch(project_id):
     provider = data.get("provider", "anthropic")
     model = data.get("model", None)
 
-    # Collect untranslated chunks
+    include_translated = data.get("include_translated", False)
+
+    # Collect chunks to translate
     chunks_dir = project_dir / "chunks"
     chunk_paths = []
     for ch_id in chapter_ids:
         for cf in sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")):
             chunk = load_chunk(cf)
-            if not chunk.translated_text or not chunk.translated_text.strip():
+            has_translation = bool(chunk.translated_text and chunk.translated_text.strip())
+            if include_translated or not has_translation:
                 chunk_paths.append(cf)
 
     if not chunk_paths:
-        return jsonify({"error": "No untranslated chunks found"}), 400
+        return jsonify({"error": "No chunks to translate"}), 400
 
     # Load glossary and style guide
     glossary = None
@@ -1986,6 +1997,290 @@ def project_translate_sse(project_id):
     from flask import Response
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Batch API (true async batch, 50% discount) ──
+
+_batch_api_tracking_lock = threading.Lock()
+
+
+def _batch_api_tracking_path(project_dir: Path) -> Path:
+    return project_dir / "batch_api_jobs.json"
+
+
+def _load_batch_api_jobs(project_dir: Path) -> list[dict]:
+    path = _batch_api_tracking_path(project_dir)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("jobs", [])
+    except Exception:
+        return []
+
+
+def _save_batch_api_jobs(project_dir: Path, jobs: list[dict]):
+    path = _batch_api_tracking_path(project_dir)
+    path.write_text(json.dumps({"jobs": jobs}, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+@app.route("/api/project/<project_id>/batch-api/submit", methods=["POST"])
+def batch_api_submit(project_id):
+    """Submit chunks to the provider's async batch API (50% discount)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    data = request.json or {}
+    chapter_ids = data.get("chapter_ids", [])
+    provider = data.get("provider", "anthropic")
+    model = data.get("model", None)
+
+    include_translated = data.get("include_translated", False)
+
+    # Collect chunks to translate
+    chunks_dir = project_dir / "chunks"
+    chunks = []
+    chunk_file_map = {}
+    for ch_id in chapter_ids:
+        for cf in sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")):
+            chunk = load_chunk(cf)
+            has_translation = bool(chunk.translated_text and chunk.translated_text.strip())
+            if include_translated or not has_translation:
+                chunks.append(chunk)
+                chunk_file_map[chunk.id] = str(cf.resolve())
+
+    if not chunks:
+        return jsonify({"error": "No chunks to translate"}), 400
+
+    # Load glossary and style guide
+    glossary = None
+    style_guide = None
+    glossary_path = project_dir / "glossary.json"
+    style_path = project_dir / "style.json"
+    if glossary_path.exists():
+        try:
+            glossary = load_glossary(glossary_path)
+        except Exception:
+            pass
+    if style_path.exists():
+        try:
+            style_guide = load_style_guide(style_path)
+        except Exception:
+            pass
+
+    # Build context map for previous chapter context
+    context_map = {}
+    for chunk in chunks:
+        ctx = _build_previous_context(project_dir, chunk)
+        if ctx:
+            context_map[chunk.id] = ctx
+
+    try:
+        from src.api_translator import submit_batch, DEFAULT_MODEL
+
+        job_info = submit_batch(
+            chunks=chunks,
+            provider=provider,
+            model=model or DEFAULT_MODEL,
+            output_dir=chunks_dir,
+            glossary=glossary,
+            style_guide=style_guide,
+            project_name=_project_title(project_id),
+            source_language="English",
+            target_language="Spanish",
+            context_map=context_map,
+        )
+
+        # Store chunk file map for retrieval
+        job_info["chunk_file_map"] = chunk_file_map
+
+        # Save to project-level tracking
+        with _batch_api_tracking_lock:
+            jobs = _load_batch_api_jobs(project_dir)
+            jobs.append(job_info)
+            _save_batch_api_jobs(project_dir, jobs)
+
+        return jsonify({
+            "job_id": job_info["job_id"],
+            "provider": provider,
+            "model": job_info["model"],
+            "chunk_count": job_info["chunk_count"],
+            "status": job_info["status"],
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/batch-api/jobs")
+def batch_api_list_jobs(project_id):
+    """List batch API jobs for this project."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    jobs = _load_batch_api_jobs(project_dir)
+
+    # Return jobs without the chunk_file_map (too verbose for listing)
+    summary = []
+    for j in jobs:
+        summary.append({
+            "job_id": j.get("job_id"),
+            "provider": j.get("provider"),
+            "model": j.get("model"),
+            "status": j.get("status"),
+            "chunk_count": j.get("chunk_count"),
+            "submitted_at": j.get("submitted_at"),
+            "completed_at": j.get("completed_at"),
+        })
+
+    return jsonify({"jobs": summary})
+
+
+@app.route("/api/project/<project_id>/batch-api/jobs/<job_id>/check", methods=["POST"])
+def batch_api_check_job(project_id, job_id):
+    """Check status of a batch API job."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+
+    # Find job in tracking
+    with _batch_api_tracking_lock:
+        jobs = _load_batch_api_jobs(project_dir)
+        job_info = next((j for j in jobs if j.get("job_id") == job_id), None)
+
+    if not job_info:
+        return jsonify({"error": "Job not found"}), 404
+
+    if job_info.get("status") == "completed":
+        return jsonify({
+            "job_id": job_id,
+            "status": "completed",
+            "completed_at": job_info.get("completed_at"),
+        })
+
+    try:
+        from src.api_translator import check_batch_status
+
+        status_info = check_batch_status(job_id, job_info["provider"])
+
+        # Update tracked status
+        with _batch_api_tracking_lock:
+            jobs = _load_batch_api_jobs(project_dir)
+            for j in jobs:
+                if j.get("job_id") == job_id:
+                    j["status"] = status_info["status"]
+                    break
+            _save_batch_api_jobs(project_dir, jobs)
+
+        return jsonify(status_info)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/batch-api/jobs/<job_id>/retrieve", methods=["POST"])
+def batch_api_retrieve_job(project_id, job_id):
+    """Retrieve results from a completed batch API job."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+
+    # Find job in tracking
+    with _batch_api_tracking_lock:
+        jobs = _load_batch_api_jobs(project_dir)
+        job_info = next((j for j in jobs if j.get("job_id") == job_id), None)
+
+    if not job_info:
+        return jsonify({"error": "Job not found"}), 404
+
+    if job_info.get("status") == "completed":
+        return jsonify({"error": "Results already retrieved", "already_done": True}), 400
+
+    try:
+        from src.api_translator import retrieve_batch_results
+
+        chunk_file_map = job_info.get("chunk_file_map", {})
+
+        # Load original chunks from stored paths
+        original_chunks = []
+        for chunk_id, file_path in chunk_file_map.items():
+            try:
+                original_chunks.append(load_chunk(Path(file_path)))
+            except Exception:
+                pass
+
+        if not original_chunks:
+            return jsonify({"error": "Could not load original chunks"}), 500
+
+        chunks_dir = project_dir / "chunks"
+        translated = retrieve_batch_results(
+            job_id=job_id,
+            provider=job_info["provider"],
+            original_chunks=original_chunks,
+            output_dir=chunks_dir,
+            model=job_info.get("model", ""),
+            prompt_map=job_info.get("prompt_map"),
+        )
+
+        # Save each translated chunk and run post-processing
+        affected_chapters = set()
+        for chunk in translated:
+            save_path = chunk_file_map.get(chunk.id)
+            if save_path:
+                save_chunk(chunk, Path(save_path))
+                chapter_id = chunk.chapter_id
+                if chapter_id:
+                    affected_chapters.add(chapter_id)
+
+        # Recombine + realign affected chapters
+        for chapter_id in affected_chapters:
+            try:
+                from src.combiner import combine_chunks
+                from src.sentence_aligner import align_chapter_chunks
+
+                chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+                ch_chunks = [load_chunk(cf) for cf in chunk_files]
+                combined_text = combine_chunks(ch_chunks)
+                chapters_dir = project_dir / "chapters"
+                chapters_dir.mkdir(exist_ok=True)
+                (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+
+                align_dir = project_dir / "alignments"
+                align_dir.mkdir(exist_ok=True)
+                align_chapter_chunks(
+                    chunk_paths=[str(cf) for cf in chunk_files],
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    source_lang="en",
+                    target_lang="es",
+                    output_path=str(align_dir / f"{chapter_id}.json"),
+                )
+            except Exception:
+                pass  # Non-fatal: alignment can be re-run from Review stage
+
+        # Update job status
+        with _batch_api_tracking_lock:
+            jobs = _load_batch_api_jobs(project_dir)
+            for j in jobs:
+                if j.get("job_id") == job_id:
+                    j["status"] = "completed"
+                    j["completed_at"] = datetime.now().isoformat()
+                    break
+            _save_batch_api_jobs(project_dir, jobs)
+
+        return jsonify({
+            "ok": True,
+            "translated_count": len(translated),
+            "total_count": len(original_chunks),
+            "chapters_affected": list(affected_chapters),
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/project/<project_id>/combine/<chapter_id>", methods=["POST"])

@@ -72,7 +72,10 @@ def log_prompt(
     """
     now = datetime.now()
     timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-    short = _short_hash(prompt)
+    # Include chunk_id and batch_job_id in hash to avoid collisions
+    # (e.g. batch retrieval logs share the same placeholder prompt)
+    hash_input = prompt + (chunk_id or "") + (batch_job_id or "")
+    short = _short_hash(hash_input)
     filename = f"{timestamp_str}_{call_type}_{short}.json"
 
     record = {

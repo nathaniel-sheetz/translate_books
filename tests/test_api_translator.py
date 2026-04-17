@@ -19,9 +19,11 @@ from src.api_translator import (
     call_openai_api,
     submit_batch,
     check_batch_status,
+    retrieve_batch_results,
     save_batch_job,
     load_batch_jobs,
     get_batch_job,
+    update_batch_job_status,
     APIError,
     APIKeyError,
     RateLimitError,
@@ -529,3 +531,224 @@ def test_check_openai_batch_status():
         assert status_info["job_id"] == "batch_def456"
         assert status_info["status"] == "completed"
         assert status_info["succeeded_count"] == 10
+
+
+# ============================================================================
+# Batch Result Retrieval Tests (Mocked)
+# ============================================================================
+
+
+def test_retrieve_anthropic_batch_results(sample_chunk, tmp_path):
+    """Test retrieving results from Anthropic batch."""
+    pytest.importorskip("anthropic")
+
+    # Mock a successful result
+    mock_result = Mock()
+    mock_result.custom_id = sample_chunk.id
+    mock_result.result.type = "succeeded"
+    mock_message = Mock()
+    mock_content_block = Mock()
+    mock_content_block.text = "Es una verdad universalmente reconocida..."
+    mock_message.content = [mock_content_block]
+    mock_result.result.message = mock_message
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        # Status check: return "ended"
+        mock_batch = Mock()
+        mock_batch.id = "batch_abc123"
+        mock_batch.processing_status = "ended"
+        mock_batch.request_counts = Mock(processing=0, succeeded=1, errored=0)
+        mock_client.messages.batches.retrieve.return_value = mock_batch
+        # Results: return our mock
+        mock_client.messages.batches.results.return_value = [mock_result]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            with patch('src.api_translator.log_prompt'):
+                chunks = retrieve_batch_results(
+                    job_id="batch_abc123",
+                    provider="anthropic",
+                    original_chunks=[sample_chunk],
+                    output_dir=tmp_path,
+                    model="claude-sonnet-4-6",
+                )
+
+    assert len(chunks) == 1
+    assert chunks[0].translated_text == "Es una verdad universalmente reconocida..."
+    assert chunks[0].status == ChunkStatus.TRANSLATED
+    assert chunks[0].translated_at is not None
+
+
+def test_retrieve_openai_batch_results(sample_chunk, tmp_path):
+    """Test retrieving results from OpenAI batch."""
+    pytest.importorskip("openai")
+
+    # Build JSONL output content
+    result_line = json.dumps({
+        "custom_id": sample_chunk.id,
+        "response": {
+            "status_code": 200,
+            "body": {
+                "choices": [{
+                    "message": {"content": "Es una verdad universalmente reconocida..."}
+                }]
+            }
+        }
+    })
+
+    mock_output_content = Mock()
+    mock_output_content.text = result_line
+
+    with patch('openai.OpenAI') as mock_openai_class:
+        mock_client = Mock()
+        # Status check: return "completed"
+        mock_batch = Mock()
+        mock_batch.id = "batch_def456"
+        mock_batch.status = "completed"
+        mock_batch.completed_at = "2025-11-13T10:00:00"
+        mock_batch.request_counts = Mock(total=1, completed=1, failed=0)
+        mock_batch.output_file_id = "file_out_123"
+        mock_client.batches.retrieve.return_value = mock_batch
+        mock_client.files.content.return_value = mock_output_content
+        mock_openai_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}):
+            with patch('src.api_translator.log_prompt'):
+                chunks = retrieve_batch_results(
+                    job_id="batch_def456",
+                    provider="openai",
+                    original_chunks=[sample_chunk],
+                    output_dir=tmp_path,
+                    model="gpt-4o",
+                )
+
+    assert len(chunks) == 1
+    assert chunks[0].translated_text == "Es una verdad universalmente reconocida..."
+    assert chunks[0].status == ChunkStatus.TRANSLATED
+
+
+def test_retrieve_batch_not_complete(sample_chunk, tmp_path):
+    """Test that retrieval raises when batch is not complete."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_abc123"
+        mock_batch.processing_status = "in_progress"
+        mock_batch.request_counts = Mock(processing=5, succeeded=0, errored=0)
+        mock_client.messages.batches.retrieve.return_value = mock_batch
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            with pytest.raises(APIError, match="not complete"):
+                retrieve_batch_results(
+                    job_id="batch_abc123",
+                    provider="anthropic",
+                    original_chunks=[sample_chunk],
+                    output_dir=tmp_path,
+                )
+
+
+def test_retrieve_logs_responses(sample_chunk, tmp_path):
+    """Test that batch retrieval logs each response to the prompt history."""
+    pytest.importorskip("anthropic")
+
+    mock_result = Mock()
+    mock_result.custom_id = sample_chunk.id
+    mock_result.result.type = "succeeded"
+    mock_content_block = Mock()
+    mock_content_block.text = "Translated text here"
+    mock_result.result.message = Mock(content=[mock_content_block])
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_log_test"
+        mock_batch.processing_status = "ended"
+        mock_batch.request_counts = Mock(processing=0, succeeded=1, errored=0)
+        mock_client.messages.batches.retrieve.return_value = mock_batch
+        mock_client.messages.batches.results.return_value = [mock_result]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            with patch('src.api_translator.log_prompt') as mock_log:
+                retrieve_batch_results(
+                    job_id="batch_log_test",
+                    provider="anthropic",
+                    original_chunks=[sample_chunk],
+                    output_dir=tmp_path,
+                    model="claude-sonnet-4-6",
+                    prompt_map={sample_chunk.id: "The original prompt for this chunk"},
+                )
+
+    # Should have been called once for the one successful result
+    mock_log.assert_called_once_with(
+        prompt="The original prompt for this chunk",
+        response="Translated text here",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        call_type="translation_result",
+        mode="batch",
+        batch_job_id="batch_log_test",
+        chunk_id=sample_chunk.id,
+    )
+
+
+def test_update_batch_job_status(tmp_path):
+    """Test updating batch job status in tracking file."""
+    tracking_file = tmp_path / "batch_jobs.json"
+
+    job_info = {
+        "job_id": "batch_123",
+        "provider": "anthropic",
+        "status": "in_progress",
+    }
+    save_batch_job(job_info, tracking_file)
+
+    update_batch_job_status("batch_123", "completed", tracking_file)
+
+    jobs = load_batch_jobs(tracking_file)
+    assert jobs[0]["status"] == "completed"
+    assert "completed_at" in jobs[0]
+
+
+def test_batch_submission_filters_glossary(sample_chunk, tmp_path):
+    """Test that batch submission filters glossary per chunk."""
+    pytest.importorskip("anthropic")
+
+    glossary = Glossary(terms=[
+        GlossaryTerm(english="truth", spanish="verdad", type=GlossaryTermType.CONCEPT),
+        GlossaryTerm(english="Hogwarts", spanish="Hogwarts", type=GlossaryTermType.PLACE),
+    ])
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_filter_test"
+        mock_batch.processing_status = "in_progress"
+        mock_client.messages.batches.create.return_value = mock_batch
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            submit_batch(
+                chunks=[sample_chunk],
+                provider='anthropic',
+                model='claude-sonnet-4-6',
+                output_dir=tmp_path,
+                glossary=glossary,
+            )
+
+        # Check the prompt in the batch request
+        call_args = mock_client.messages.batches.create.call_args
+        requests = call_args[1]["requests"]
+        prompt_text = requests[0]["params"]["messages"][0]["content"]
+
+        # "truth" appears in the chunk's source_text, "Hogwarts" does not
+        assert "truth" in prompt_text.lower() or "verdad" in prompt_text.lower()
+        # Hogwarts should NOT appear in the glossary section since it's not in the source text
+        # (The word "Hogwarts" won't be in the filtered glossary)
+        # We check that the full unfiltered glossary wasn't used by verifying
+        # "Hogwarts" doesn't appear in a glossary context
+        assert "Hogwarts" not in prompt_text
