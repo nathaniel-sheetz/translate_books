@@ -2038,6 +2038,10 @@ def batch_api_submit(project_id):
 
     include_translated = data.get("include_translated", False)
 
+    # Validate chapter IDs before using in glob patterns
+    if not all(_safe_id(ch_id) for ch_id in chapter_ids):
+        return jsonify({"error": "Invalid chapter ID"}), 400
+
     # Collect chunks to translate
     chunks_dir = project_dir / "chunks"
     chunks = []
@@ -2092,7 +2096,8 @@ def batch_api_submit(project_id):
             context_map=context_map,
         )
 
-        # Store chunk file map for retrieval
+        # Store chunk file map for retrieval (strip prompt_map — already persisted via prompt_logger)
+        job_info.pop("prompt_map", None)
         job_info["chunk_file_map"] = chunk_file_map
 
         # Save to project-level tracking
@@ -2141,7 +2146,7 @@ def batch_api_list_jobs(project_id):
 @app.route("/api/project/<project_id>/batch-api/jobs/<job_id>/check", methods=["POST"])
 def batch_api_check_job(project_id, job_id):
     """Check status of a batch API job."""
-    if not _safe_id(project_id):
+    if not _safe_id(project_id) or not _safe_id(job_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _get_projects_dir() / project_id
@@ -2184,7 +2189,7 @@ def batch_api_check_job(project_id, job_id):
 @app.route("/api/project/<project_id>/batch-api/jobs/<job_id>/retrieve", methods=["POST"])
 def batch_api_retrieve_job(project_id, job_id):
     """Retrieve results from a completed batch API job."""
-    if not _safe_id(project_id):
+    if not _safe_id(project_id) or not _safe_id(job_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _get_projects_dir() / project_id
@@ -2205,11 +2210,14 @@ def batch_api_retrieve_job(project_id, job_id):
 
         chunk_file_map = job_info.get("chunk_file_map", {})
 
-        # Load original chunks from stored paths
+        # Load original chunks from stored paths (validate paths stay inside project_dir)
         original_chunks = []
         for chunk_id, file_path in chunk_file_map.items():
             try:
-                original_chunks.append(load_chunk(Path(file_path)))
+                resolved = Path(file_path).resolve()
+                if not resolved.is_relative_to(project_dir.resolve()):
+                    continue
+                original_chunks.append(load_chunk(resolved))
             except Exception:
                 pass
 
@@ -2231,7 +2239,9 @@ def batch_api_retrieve_job(project_id, job_id):
         for chunk in translated:
             save_path = chunk_file_map.get(chunk.id)
             if save_path:
-                save_chunk(chunk, Path(save_path))
+                resolved_save = Path(save_path).resolve()
+                if resolved_save.is_relative_to(project_dir.resolve()):
+                    save_chunk(chunk, resolved_save)
                 chapter_id = chunk.chapter_id
                 if chapter_id:
                     affected_chapters.add(chapter_id)
@@ -2285,7 +2295,7 @@ def batch_api_retrieve_job(project_id, job_id):
 
 @app.route("/api/project/<project_id>/batch-api/jobs/<job_id>", methods=["DELETE"])
 def batch_api_delete_job(project_id, job_id):
-    if not _safe_id(project_id):
+    if not _safe_id(project_id) or not _safe_id(job_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
     with _batch_api_tracking_lock:

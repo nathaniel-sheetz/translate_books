@@ -1686,32 +1686,54 @@
 
                 jobs.forEach(function(job) {
                     var tr = document.createElement('tr');
+                    var safeJobId = escapeHtml(job.job_id || '');
                     var statusClass = job.status === 'completed' ? 'done' :
                         (job.status === 'failed' ? 'error' : 'partial');
 
                     var submitted = job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—';
 
-                    var dismissBtn = '<button class="btn-small" title="Remove from list" ' +
-                        'onclick="dismissBatchApiJob(\'' + job.job_id + '\')" ' +
-                        'style="margin-left:6px;background:none;border:1px solid #cbd5e1;color:#64748b;padding:2px 6px;">×</button>';
-                    var actions = '';
+                    // Build action buttons using data attributes to avoid inline JS injection
+                    var dismissBtn = document.createElement('button');
+                    dismissBtn.className = 'btn-small';
+                    dismissBtn.title = 'Remove from list';
+                    dismissBtn.style.cssText = 'margin-left:6px;background:none;border:1px solid #cbd5e1;color:#64748b;padding:2px 6px;';
+                    dismissBtn.textContent = '×';
+                    dismissBtn.addEventListener('click', (function(id) {
+                        return function() { dismissBatchApiJob(id); };
+                    })(job.job_id));
+
+                    var actionsTd = document.createElement('td');
                     if (job.status === 'completed') {
-                        actions = '<span style="color:#16a34a">Retrieved</span>' + dismissBtn;
+                        var retrievedSpan = document.createElement('span');
+                        retrievedSpan.style.color = '#16a34a';
+                        retrievedSpan.textContent = 'Retrieved';
+                        actionsTd.appendChild(retrievedSpan);
                     } else if (job.status === 'ended') {
-                        actions = '<button class="btn-small btn-primary" onclick="retrieveBatchApiJob(\'' +
-                            job.job_id + '\')">Retrieve Results</button>' + dismissBtn;
+                        var retrieveBtn = document.createElement('button');
+                        retrieveBtn.className = 'btn-small btn-primary';
+                        retrieveBtn.textContent = 'Retrieve Results';
+                        retrieveBtn.addEventListener('click', (function(id) {
+                            return function() { retrieveBatchApiJob(id); };
+                        })(job.job_id));
+                        actionsTd.appendChild(retrieveBtn);
                     } else {
-                        actions = '<button class="btn-small btn-secondary" onclick="checkBatchApiJob(\'' +
-                            job.job_id + '\')">Check Status</button>' + dismissBtn;
+                        var checkBtn = document.createElement('button');
+                        checkBtn.className = 'btn-small btn-secondary';
+                        checkBtn.textContent = 'Check Status';
+                        checkBtn.addEventListener('click', (function(id) {
+                            return function() { checkBatchApiJob(id); };
+                        })(job.job_id));
+                        actionsTd.appendChild(checkBtn);
                     }
+                    actionsTd.appendChild(dismissBtn);
 
                     tr.innerHTML =
-                        '<td><code style="font-size:12px">' + (job.job_id || '').substring(0, 16) + '</code></td>' +
-                        '<td>' + (job.provider || '') + ' / ' + (job.model || '').split('/').pop() + '</td>' +
+                        '<td><code style="font-size:12px">' + safeJobId.substring(0, 16) + '</code></td>' +
+                        '<td>' + escapeHtml(job.provider || '') + ' / ' + escapeHtml((job.model || '').split('/').pop()) + '</td>' +
                         '<td>' + (job.chunk_count || 0) + '</td>' +
-                        '<td><span class="status-pill ' + statusClass + '">' + (job.status || 'unknown') + '</span></td>' +
-                        '<td style="font-size:12px">' + submitted + '</td>' +
-                        '<td>' + actions + '</td>';
+                        '<td><span class="status-pill ' + escapeHtml(statusClass) + '">' + escapeHtml(job.status || 'unknown') + '</span></td>' +
+                        '<td style="font-size:12px">' + escapeHtml(submitted) + '</td>';
+                    tr.appendChild(actionsTd);
                     tbody.appendChild(tr);
                 });
             });

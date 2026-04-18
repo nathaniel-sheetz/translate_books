@@ -365,7 +365,8 @@ def translate_batch(args):
             target_language=args.target_language,
         )
 
-        # Store chunk file paths for later retrieval
+        # Store chunk file paths for later retrieval (strip prompt_map — already in prompt_logger)
+        job_info.pop("prompt_map", None)
         chunk_file_map = {chunk.id: str(Path(f).resolve())
                           for chunk, f in zip(chunks, _expand_patterns(args.chunk_files))}
         job_info["chunk_file_map"] = chunk_file_map
