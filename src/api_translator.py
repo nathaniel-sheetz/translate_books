@@ -494,6 +494,7 @@ def submit_batch(
     project_name: str = "Translation Project",
     source_language: str = "English",
     target_language: str = "Spanish",
+    context_map: Optional[dict[str, str]] = None,
 ) -> dict:
     """
     Submit a batch translation job to the API.
@@ -508,32 +509,26 @@ def submit_batch(
         project_name: Project name for context
         source_language: Source language
         target_language: Target language
+        context_map: Optional mapping of chunk ID to previous chapter context
 
     Returns:
-        Dictionary with batch job info:
-        {
-            "job_id": str,
-            "provider": str,
-            "model": str,
-            "submitted_at": str,
-            "status": str,
-            "chunk_count": int,
-            "chunk_ids": list[str],
-            "output_dir": str
-        }
+        Dictionary with batch job info
 
     Raises:
         APIError: If batch submission fails
     """
+    if context_map is None:
+        context_map = {}
+
     if provider == "anthropic":
         return _submit_anthropic_batch(
             chunks, model, output_dir, glossary, style_guide,
-            project_name, source_language, target_language
+            project_name, source_language, target_language, context_map
         )
     elif provider == "openai":
         return _submit_openai_batch(
             chunks, model, output_dir, glossary, style_guide,
-            project_name, source_language, target_language
+            project_name, source_language, target_language, context_map
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -548,12 +543,16 @@ def _submit_anthropic_batch(
     project_name: str,
     source_language: str,
     target_language: str,
+    context_map: dict[str, str] | None = None,
 ) -> dict:
     """Submit batch to Anthropic Message Batches API."""
     try:
         import anthropic
     except ImportError:
         raise APIError("anthropic package not installed")
+
+    if context_map is None:
+        context_map = {}
 
     api_key = get_api_key("anthropic")
     client = anthropic.Anthropic(api_key=api_key)
@@ -563,17 +562,20 @@ def _submit_anthropic_batch(
     requests = []
 
     for chunk in chunks:
+        # Filter glossary to terms relevant to this chunk
+        chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+
         # Render prompt for this chunk
         variables = {
             "book_title": project_name,
             "source_text": chunk.source_text,
             "target_language": target_language,
             "source_language": source_language,
-            "glossary": format_glossary_for_prompt(glossary) if glossary else "No glossary provided.",
+            "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
             "style_guide": style_guide.content if style_guide else "No style guide provided.",
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
-            "previous_chapter_context": "",
+            "previous_chapter_context": context_map.get(chunk.id, ""),
         }
 
         prompt = render_prompt(template, variables)
@@ -598,13 +600,17 @@ def _submit_anthropic_batch(
             }
         })
 
+    # Build prompt map for later retrieval logging
+    prompt_map = {}
+    for req, chunk in zip(requests, chunks):
+        prompt_map[chunk.id] = req["params"]["messages"][0]["content"]
+
     try:
         # Submit batch
         batch = client.messages.batches.create(requests=requests)
 
         # Log each prompt (response will arrive later)
-        for req, chunk in zip(requests, chunks):
-            prompt_text = req["params"]["messages"][0]["content"]
+        for chunk_id, prompt_text in prompt_map.items():
             log_prompt(
                 prompt=prompt_text,
                 response=None,
@@ -613,7 +619,7 @@ def _submit_anthropic_batch(
                 call_type="translation",
                 mode="batch",
                 batch_job_id=batch.id,
-                chunk_id=chunk.id,
+                chunk_id=chunk_id,
             )
 
         # Return job info
@@ -625,7 +631,8 @@ def _submit_anthropic_batch(
             "status": batch.processing_status,
             "chunk_count": len(chunks),
             "chunk_ids": [chunk.id for chunk in chunks],
-            "output_dir": str(output_dir)
+            "output_dir": str(output_dir),
+            "prompt_map": prompt_map,
         }
 
     except anthropic.AuthenticationError as e:
@@ -643,12 +650,16 @@ def _submit_openai_batch(
     project_name: str,
     source_language: str,
     target_language: str,
+    context_map: dict[str, str] | None = None,
 ) -> dict:
     """Submit batch to OpenAI Batch API."""
     try:
         import openai
     except ImportError:
         raise APIError("openai package not installed")
+
+    if context_map is None:
+        context_map = {}
 
     api_key = get_api_key("openai")
     client = openai.OpenAI(api_key=api_key)
@@ -658,17 +669,20 @@ def _submit_openai_batch(
     jsonl_lines = []
 
     for chunk in chunks:
+        # Filter glossary to terms relevant to this chunk
+        chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+
         # Render prompt for this chunk
         variables = {
             "book_title": project_name,
             "source_text": chunk.source_text,
             "target_language": target_language,
             "source_language": source_language,
-            "glossary": format_glossary_for_prompt(glossary) if glossary else "No glossary provided.",
+            "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
             "style_guide": style_guide.content if style_guide else "No style guide provided.",
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
-            "previous_chapter_context": "",
+            "previous_chapter_context": context_map.get(chunk.id, ""),
         }
 
         prompt = render_prompt(template, variables)
@@ -697,6 +711,12 @@ def _submit_openai_batch(
 
         jsonl_lines.append(json.dumps(request))
 
+    # Build prompt map for later retrieval logging
+    prompt_map = {}
+    for req_line, chunk in zip(jsonl_lines, chunks):
+        req_obj = json.loads(req_line)
+        prompt_map[chunk.id] = req_obj["body"]["messages"][0]["content"]
+
     try:
         # Write JSONL to temporary file
         import tempfile
@@ -718,9 +738,7 @@ def _submit_openai_batch(
         jsonl_path.unlink()
 
         # Log each prompt (response will arrive later)
-        for req_line, chunk in zip(jsonl_lines, chunks):
-            req_obj = json.loads(req_line)
-            prompt_text = req_obj["body"]["messages"][0]["content"]
+        for chunk_id, prompt_text in prompt_map.items():
             log_prompt(
                 prompt=prompt_text,
                 response=None,
@@ -729,7 +747,7 @@ def _submit_openai_batch(
                 call_type="translation",
                 mode="batch",
                 batch_job_id=batch.id,
-                chunk_id=chunk.id,
+                chunk_id=chunk_id,
             )
 
         # Return job info
@@ -741,7 +759,8 @@ def _submit_openai_batch(
             "status": batch.status,
             "chunk_count": len(chunks),
             "chunk_ids": [chunk.id for chunk in chunks],
-            "output_dir": str(output_dir)
+            "output_dir": str(output_dir),
+            "prompt_map": prompt_map,
         }
 
     except openai.AuthenticationError as e:
@@ -840,6 +859,8 @@ def retrieve_batch_results(
     provider: Provider,
     original_chunks: list[Chunk],
     output_dir: Path,
+    model: str = "",
+    prompt_map: dict[str, str] | None = None,
 ) -> list[Chunk]:
     """
     Retrieve and process results from a completed batch job.
@@ -849,6 +870,8 @@ def retrieve_batch_results(
         provider: API provider
         original_chunks: Original chunks (to get IDs and metadata)
         output_dir: Directory to save translated chunks
+        model: Model used (for logging)
+        prompt_map: Mapping of chunk ID to the original prompt sent at submission
 
     Returns:
         List of updated chunks with translations
@@ -865,10 +888,13 @@ def retrieve_batch_results(
             f"Status: {status['status']}"
         )
 
+    if prompt_map is None:
+        prompt_map = {}
+
     if provider == "anthropic":
-        return _retrieve_anthropic_results(job_id, original_chunks, output_dir)
+        return _retrieve_anthropic_results(job_id, original_chunks, output_dir, model, prompt_map)
     elif provider == "openai":
-        return _retrieve_openai_results(job_id, original_chunks, output_dir)
+        return _retrieve_openai_results(job_id, original_chunks, output_dir, model, prompt_map)
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -877,6 +903,8 @@ def _retrieve_anthropic_results(
     job_id: str,
     original_chunks: list[Chunk],
     output_dir: Path,
+    model: str = "",
+    prompt_map: dict[str, str] | None = None,
 ) -> list[Chunk]:
     """Retrieve results from Anthropic batch."""
     try:
@@ -914,6 +942,19 @@ def _retrieve_anthropic_results(
                     chunk.translated_at = datetime.now()
                     updated_chunks.append(chunk)
 
+                    # Log the complete prompt + response pair
+                    original_prompt = (prompt_map or {}).get(chunk_id, "")
+                    log_prompt(
+                        prompt=original_prompt,
+                        response=translation.strip(),
+                        provider="anthropic",
+                        model=model,
+                        call_type="translation_result",
+                        mode="batch",
+                        batch_job_id=job_id,
+                        chunk_id=chunk_id,
+                    )
+
         return updated_chunks
 
     except anthropic.APIError as e:
@@ -924,6 +965,8 @@ def _retrieve_openai_results(
     job_id: str,
     original_chunks: list[Chunk],
     output_dir: Path,
+    model: str = "",
+    prompt_map: dict[str, str] | None = None,
 ) -> list[Chunk]:
     """Retrieve results from OpenAI batch."""
     try:
@@ -951,6 +994,8 @@ def _retrieve_openai_results(
 
         # Process each result
         for line in output_lines:
+            if not line.strip():
+                continue
             result = json.loads(line)
             chunk_id = result.get("custom_id")
 
@@ -970,6 +1015,19 @@ def _retrieve_openai_results(
                     chunk.status = ChunkStatus.TRANSLATED
                     chunk.translated_at = datetime.now()
                     updated_chunks.append(chunk)
+
+                    # Log the complete prompt + response pair
+                    original_prompt = (prompt_map or {}).get(chunk_id, "")
+                    log_prompt(
+                        prompt=original_prompt,
+                        response=translation.strip(),
+                        provider="openai",
+                        model=model,
+                        call_type="translation_result",
+                        mode="batch",
+                        batch_job_id=job_id,
+                        chunk_id=chunk_id,
+                    )
 
         return updated_chunks
 

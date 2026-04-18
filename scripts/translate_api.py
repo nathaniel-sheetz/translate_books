@@ -38,27 +38,39 @@ from src.api_translator import (
 console = Console()
 
 
-def load_chunks_from_patterns(patterns: list[str]) -> list[Chunk]:
-    """Load chunks from file patterns (supports globs)."""
+def _expand_patterns(patterns: list[str]) -> list[str]:
+    """Expand glob patterns into a flat list of file paths."""
     import glob
 
-    chunks = []
+    paths = []
     for pattern in patterns:
-        # Expand glob pattern
-        matching_files = glob.glob(pattern)
-
+        matching_files = sorted(glob.glob(pattern))
         if not matching_files:
             console.print(f"[yellow]Warning: No files match pattern: {pattern}[/yellow]")
             continue
+        paths.extend(matching_files)
+    return paths
 
-        for file_path in matching_files:
-            try:
-                chunk = load_chunk(Path(file_path))
-                chunks.append(chunk)
-            except Exception as e:
-                console.print(f"[red]Error loading {file_path}: {e}[/red]")
 
-    return chunks
+def load_chunks_with_paths(patterns: list[str]) -> list[tuple[Chunk, str]]:
+    """Load chunks from file patterns, returning (chunk, resolved_path) pairs.
+
+    Keeps chunk and path together so the mapping is always correct even if
+    some files fail to parse (no zip-mismatch risk).
+    """
+    pairs = []
+    for file_path in _expand_patterns(patterns):
+        try:
+            chunk = load_chunk(Path(file_path))
+            pairs.append((chunk, str(Path(file_path).resolve())))
+        except Exception as e:
+            console.print(f"[red]Error loading {file_path}: {e}[/red]")
+    return pairs
+
+
+def load_chunks_from_patterns(patterns: list[str]) -> list[Chunk]:
+    """Load chunks from file patterns (supports globs)."""
+    return [chunk for chunk, _ in load_chunks_with_paths(patterns)]
 
 
 def translate_dry_run(args):
@@ -283,9 +295,10 @@ def translate_batch(args):
     console.print("\n[bold cyan]Batch Translation Mode[/bold cyan]\n")
     console.print("[yellow]Note: Batch results take ~24 hours. 50% cost discount applied.[/yellow]\n")
 
-    # Load chunks
+    # Load chunks — keep (chunk, path) pairs together to avoid zip-mismatch later
     console.print("[bold]Loading chunks...[/bold]")
-    chunks = load_chunks_from_patterns(args.chunk_files)
+    chunk_pairs = load_chunks_with_paths(args.chunk_files)
+    chunks = [c for c, _ in chunk_pairs]
 
     if not chunks:
         console.print("[red]Error: No chunks loaded. Check your file patterns.[/red]")
@@ -361,6 +374,11 @@ def translate_batch(args):
             target_language=args.target_language,
         )
 
+        # Store chunk file paths for later retrieval (strip prompt_map — already in prompt_logger)
+        job_info.pop("prompt_map", None)
+        chunk_file_map = {chunk.id: path for chunk, path in chunk_pairs}
+        job_info["chunk_file_map"] = chunk_file_map
+
         # Save job info
         save_batch_job(job_info)
 
@@ -378,6 +396,99 @@ def translate_batch(args):
         if isinstance(e, APIKeyError):
             console.print("[red]Check your API key configuration in .env file[/red]")
         return 1
+
+
+def _load_chunks_for_job(job_info: dict) -> list[Chunk]:
+    """Load original chunks for a batch job using stored file paths."""
+    chunk_file_map = job_info.get("chunk_file_map", {})
+    chunks = []
+
+    if chunk_file_map:
+        for chunk_id, file_path in chunk_file_map.items():
+            try:
+                chunk = load_chunk(Path(file_path))
+                chunks.append(chunk)
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not load chunk {chunk_id} from {file_path}: {e}[/yellow]")
+    else:
+        console.print("[yellow]Warning: Job was submitted before chunk paths were tracked.[/yellow]")
+        console.print("[yellow]Use --retrieve-batch JOB_ID with chunk files as arguments.[/yellow]")
+
+    return chunks
+
+
+def _do_retrieve(job_id: str, job_info: dict, chunks: list[Chunk]) -> int:
+    """Retrieve batch results and save translated chunks to disk."""
+    provider = job_info["provider"]
+    model = job_info.get("model", "")
+    output_dir = Path(job_info.get("output_dir", "chunks/translated"))
+    chunk_file_map = job_info.get("chunk_file_map", {})
+
+    console.print(f"\n[bold]Retrieving results for {len(chunks)} chunks...[/bold]")
+
+    try:
+        translated = retrieve_batch_results(
+            job_id=job_id,
+            provider=provider,
+            original_chunks=chunks,
+            output_dir=output_dir,
+            model=model,
+            prompt_map=job_info.get("prompt_map"),
+        )
+
+        # Save each translated chunk back to its original file
+        saved = 0
+        for chunk in translated:
+            save_path = chunk_file_map.get(chunk.id)
+            if save_path:
+                save_chunk(chunk, Path(save_path))
+                saved += 1
+            else:
+                # Fall back to output_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+                save_chunk(chunk, output_dir / f"{chunk.id}.json")
+                saved += 1
+
+        failed = len(chunks) - len(translated)
+        update_batch_job_status(job_id, "completed")
+
+        console.print(f"\n[bold green]✓ Retrieved {len(translated)} translations[/bold green]")
+        console.print(f"  Saved: {saved}")
+        if failed > 0:
+            console.print(f"  [yellow]Failed/missing: {failed}[/yellow]")
+
+        return 0
+
+    except APIError as e:
+        console.print(f"\n[red]Error retrieving results: {e}[/red]")
+        return 1
+
+
+def retrieve_batch_cli(args):
+    """Retrieve results from a completed batch job (CLI entry point)."""
+    job_id = args.retrieve_batch
+    console.print(f"\n[bold cyan]Retrieving Batch Job: {job_id}[/bold cyan]\n")
+
+    job_info = get_batch_job(job_id)
+    if not job_info:
+        console.print(f"[red]Error: Batch job {job_id} not found in batch_jobs.json[/red]")
+        return 1
+
+    if job_info.get("status") == "completed":
+        console.print("[yellow]Results already retrieved and saved.[/yellow]")
+        return 0
+
+    # Load chunks — prefer CLI args, fall back to stored paths
+    if args.chunk_files:
+        chunks = load_chunks_from_patterns(args.chunk_files)
+    else:
+        chunks = _load_chunks_for_job(job_info)
+
+    if not chunks:
+        console.print("[red]Error: No chunks loaded. Provide chunk files as arguments or ensure paths are stored in job info.[/red]")
+        return 1
+
+    return _do_retrieve(job_id, job_info, chunks)
 
 
 def check_batch(args):
@@ -409,7 +520,7 @@ def check_batch(args):
         if status_info['completed_at']:
             console.print(f"[bold]Completed at:[/bold] {status_info['completed_at']}")
 
-        # If completed, offer to retrieve results
+        # If completed, auto-retrieve
         if status_info['status'] in ['completed', 'ended']:
             console.print("\n[bold green]✓ Batch is complete![/bold green]")
 
@@ -418,18 +529,14 @@ def check_batch(args):
                 console.print("[yellow]Results already retrieved and saved.[/yellow]")
                 return 0
 
-            # Retrieve results
-            console.print("\n[bold]Retrieving results...[/bold]")
+            # Load chunks from stored paths
+            chunks = _load_chunks_for_job(job_info)
+            if not chunks:
+                console.print(f"\n[yellow]To retrieve results manually, run:[/yellow]")
+                console.print(f"  python translate_api.py --retrieve-batch {args.check_batch} <chunk_files>")
+                return 0
 
-            # Load original chunks
-            chunk_ids = job_info.get('chunk_ids', [])
-            # Try to reconstruct chunk paths
-            # This is a best-effort; ideally we'd save chunk paths in job_info
-            console.print(f"Need to load {len(chunk_ids)} original chunks...")
-
-            # For now, just tell user to re-run with chunk files
-            console.print("\n[yellow]To retrieve results, run:[/yellow]")
-            console.print(f"  python translate_api.py --retrieve-batch {args.check_batch} <chunk_files>")
+            return _do_retrieve(args.check_batch, job_info, chunks)
 
         else:
             console.print(f"\n[yellow]Batch is still processing. Check again later.[/yellow]")
@@ -492,8 +599,11 @@ Examples:
   # With glossary and style guide
   python translate_api.py chunks/*.json --provider anthropic --glossary glossary.json --style-guide style.md
 
-  # Check batch status
+  # Check batch status (auto-retrieves if complete)
   python translate_api.py --check-batch batch_abc123
+
+  # Retrieve batch results manually
+  python translate_api.py --retrieve-batch batch_abc123
 
   # List all batch jobs
   python translate_api.py --list-batches
@@ -511,6 +621,12 @@ Examples:
         '--list-batches',
         action='store_true',
         help='List all batch jobs'
+    )
+
+    parser.add_argument(
+        '--retrieve-batch',
+        metavar='JOB_ID',
+        help='Retrieve results from a completed batch job'
     )
 
     # Main arguments (for translation)
@@ -609,6 +725,9 @@ Examples:
     # Handle batch management commands
     if args.check_batch:
         return check_batch(args)
+
+    if args.retrieve_batch:
+        return retrieve_batch_cli(args)
 
     if args.list_batches:
         return list_batches(args)

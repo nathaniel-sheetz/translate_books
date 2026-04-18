@@ -434,9 +434,28 @@
             <p class="stage-subtitle">Translate chapters via API or manually with copy/paste.</p>
 
             <div class="btn-row" style="margin-bottom:16px">
-                <button class="btn-primary" id="btn-batch-translate" disabled>Batch Translate Selected</button>
+                <button class="btn-primary" id="btn-batch-translate" disabled>Translate Selected</button>
+                <button class="btn-primary" id="btn-batch-api" disabled style="background:#2563eb">Batch API (50% off)</button>
                 <button class="btn-secondary" id="btn-translate-all-untranslated">Translate All Untranslated</button>
                 <span class="status-msg" id="translate-batch-status"></span>
+            </div>
+
+            <!-- Batch API jobs panel -->
+            <div id="batch-api-jobs-panel" style="display:none; margin-bottom:16px; padding:12px; background:#f8f9fa; border-radius:8px; border:1px solid #e2e8f0;">
+                <h4 style="margin:0 0 8px 0; font-size:14px;">Batch API Jobs</h4>
+                <table class="chapter-table" id="batch-api-jobs-table" style="margin:0">
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Provider / Model</th>
+                            <th>Chunks</th>
+                            <th>Status</th>
+                            <th>Submitted</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="batch-api-jobs-tbody"></tbody>
+                </table>
             </div>
 
             <table class="chapter-table" id="translate-chapter-table">
@@ -509,11 +528,11 @@
     </main>
 </div>
 
-<!-- ── Batch translate modal ── -->
+<!-- ── Translate Selected modal (sequential realtime) ── -->
 <div class="modal-overlay" id="batch-modal">
     <div class="modal">
         <button class="modal-close" id="batch-modal-close">&times;</button>
-        <h3>Batch Translate</h3>
+        <h3>Translate Selected</h3>
 
         <div class="dash-field">
             <label>Provider</label>
@@ -540,6 +559,32 @@
             <button class="btn-primary" id="btn-start-batch">Start Translation</button>
             <button class="btn-secondary" id="btn-cancel-batch" style="display:none">Cancel</button>
         </div>
+    </div>
+</div>
+
+<!-- ── Batch API modal (async, 50% discount) ── -->
+<div class="modal-overlay" id="batch-api-modal">
+    <div class="modal">
+        <button class="modal-close" id="batch-api-modal-close">&times;</button>
+        <h3>Batch API (50% off)</h3>
+        <p style="font-size:13px; color:#666; margin-top:0;">Submits to the provider's async batch endpoint. Results are typically available in 1-24 hours at half price.</p>
+
+        <div class="dash-field">
+            <label>Provider</label>
+            <select id="batch-api-provider"></select>
+        </div>
+        <div class="dash-field">
+            <label>Model</label>
+            <select id="batch-api-model"></select>
+        </div>
+
+        <div id="batch-api-cost-estimate" style="margin:12px 0; font-size:14px;"></div>
+
+        <div class="btn-row">
+            <button class="btn-primary" id="btn-submit-batch-api">Submit Batch</button>
+        </div>
+
+        <div id="batch-api-submit-status" class="status-msg" style="margin-top:8px;"></div>
     </div>
 </div>
 

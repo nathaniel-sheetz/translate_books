@@ -82,10 +82,15 @@
         populateModelSelect('glossary-provider', 'glossary-model');
         bindProviderModelPair('glossary-provider', 'glossary-model');
 
-        // Batch translate
+        // Batch translate (sequential realtime)
         populateProviderSelect('batch-provider');
         populateModelSelect('batch-provider', 'batch-model');
         bindProviderModelPair('batch-provider', 'batch-model', updateBatchCostEstimate);
+
+        // Batch API (async, 50% off)
+        populateProviderSelect('batch-api-provider');
+        populateModelSelect('batch-api-provider', 'batch-api-model');
+        bindProviderModelPair('batch-api-provider', 'batch-api-model', updateBatchApiCostEstimate);
     }
 
     // ========================================================================
@@ -1229,6 +1234,7 @@
     function updateBatchButtonState() {
         var anyChecked = document.querySelectorAll('.ch-select:checked').length > 0;
         document.getElementById('btn-batch-translate').disabled = !anyChecked;
+        document.getElementById('btn-batch-api').disabled = !anyChecked;
     }
 
     function getSelectedChapterIds() {
@@ -1489,12 +1495,22 @@
             chapter_ids: ids,
             provider: provider,
             model: model,
+            include_translated: true,
         }).then(function(data) {
             if (data.error) {
                 el.textContent = data.error;
             } else {
-                el.innerHTML = '<strong>' + (data.chunk_count || 0) + '</strong> chunks to translate<br>' +
-                    'Estimated cost: <strong>$' + (data.estimated_cost || 0).toFixed(4) + '</strong>';
+                var cost = (data.estimated_cost || 0);
+                var already = data.already_translated_count || 0;
+                var html = '<strong>' + (data.chunk_count || 0) + '</strong> chunks to translate<br>' +
+                    'Estimated cost: <strong>$' + cost.toFixed(4) + '</strong>' +
+                    '<br><span style="font-size:12px;color:#666">Batch API would be $' +
+                    (cost * 0.5).toFixed(4) + ' (50% off)</span>';
+                if (already > 0) {
+                    html += '<br><span style="color:#b45309;font-size:13px;">' +
+                        already + ' chunk(s) already translated — existing translations will be replaced.</span>';
+                }
+                el.innerHTML = html;
             }
         });
     }
@@ -1513,6 +1529,7 @@
             chapter_ids: ids,
             provider: provider,
             model: model,
+            include_translated: true,
         }).then(function(data) {
             if (data.error) {
                 setStatus('translate-batch-status', data.error, 'error');
@@ -1570,6 +1587,214 @@
         this.style.display = 'none';
         document.getElementById('btn-start-batch').disabled = false;
     });
+
+    // ── Batch API (async, 50% discount) ──
+
+    document.getElementById('btn-batch-api').addEventListener('click', function() {
+        document.getElementById('batch-api-modal').classList.add('visible');
+        updateBatchApiCostEstimate();
+    });
+
+    document.getElementById('batch-api-modal-close').addEventListener('click', closeBatchApiModal);
+    document.getElementById('batch-api-modal').addEventListener('click', function(e) {
+        if (e.target === this) closeBatchApiModal();
+    });
+
+    function closeBatchApiModal() {
+        document.getElementById('batch-api-modal').classList.remove('visible');
+        document.getElementById('batch-api-submit-status').textContent = '';
+    }
+
+    function updateBatchApiCostEstimate() {
+        var ids = getSelectedChapterIds();
+        var provider = document.getElementById('batch-api-provider').value;
+        var model = document.getElementById('batch-api-model').value;
+        var el = document.getElementById('batch-api-cost-estimate');
+        el.textContent = 'Estimating cost...';
+
+        apiPost('/api/project/' + PROJECT + '/translate/cost-estimate', {
+            chapter_ids: ids,
+            provider: provider,
+            model: model,
+            include_translated: true,
+        }).then(function(data) {
+            if (data.error) {
+                el.textContent = data.error;
+            } else {
+                var fullCost = (data.estimated_cost || 0);
+                var batchCost = fullCost * 0.5;
+                var already = data.already_translated_count || 0;
+                var html = '<strong>' + (data.chunk_count || 0) + '</strong> chunks to translate<br>' +
+                    'Realtime cost: $' + fullCost.toFixed(4) + '<br>' +
+                    'Batch API cost: <strong>$' + batchCost.toFixed(4) + '</strong> (50% off)';
+                if (already > 0) {
+                    html += '<br><span style="color:#b45309;font-size:13px;">' +
+                        already + ' chunk(s) already translated — existing translations will be replaced.</span>';
+                }
+                el.innerHTML = html;
+            }
+        });
+    }
+
+    document.getElementById('btn-submit-batch-api').addEventListener('click', function() {
+        var ids = getSelectedChapterIds();
+        var provider = document.getElementById('batch-api-provider').value;
+        var model = document.getElementById('batch-api-model').value;
+        var statusEl = document.getElementById('batch-api-submit-status');
+        var btn = this;
+
+        btn.disabled = true;
+        statusEl.textContent = 'Submitting...';
+        statusEl.className = 'status-msg';
+
+        apiPost('/api/project/' + PROJECT + '/batch-api/submit', {
+            chapter_ids: ids,
+            provider: provider,
+            model: model,
+            include_translated: true,
+        }).then(function(data) {
+            btn.disabled = false;
+            if (data.error) {
+                statusEl.textContent = data.error;
+                statusEl.className = 'status-msg error';
+            } else {
+                statusEl.textContent = 'Batch submitted! Job ID: ' + data.job_id +
+                    ' (' + data.chunk_count + ' chunks). Check back in 1-24 hours.';
+                statusEl.className = 'status-msg success';
+                loadBatchApiJobs();
+            }
+        });
+    });
+
+    // Batch API jobs panel
+
+    function loadBatchApiJobs() {
+        fetch('/api/project/' + PROJECT + '/batch-api/jobs')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var jobs = data.jobs || [];
+                var panel = document.getElementById('batch-api-jobs-panel');
+                var tbody = document.getElementById('batch-api-jobs-tbody');
+
+                if (jobs.length === 0) {
+                    panel.style.display = 'none';
+                    return;
+                }
+
+                panel.style.display = '';
+                tbody.innerHTML = '';
+
+                jobs.forEach(function(job) {
+                    var tr = document.createElement('tr');
+                    var safeJobId = escapeHtml(job.job_id || '');
+                    var statusClass = job.status === 'completed' ? 'done' :
+                        (job.status === 'failed' ? 'error' : 'partial');
+
+                    var submitted = job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—';
+
+                    // Build action buttons using data attributes to avoid inline JS injection
+                    var dismissBtn = document.createElement('button');
+                    dismissBtn.className = 'btn-small';
+                    dismissBtn.title = 'Remove from list';
+                    dismissBtn.style.cssText = 'margin-left:6px;background:none;border:1px solid #cbd5e1;color:#64748b;padding:2px 6px;';
+                    dismissBtn.textContent = '×';
+                    dismissBtn.addEventListener('click', (function(id) {
+                        return function() { dismissBatchApiJob(id); };
+                    })(job.job_id));
+
+                    var actionsTd = document.createElement('td');
+                    if (job.status === 'completed') {
+                        var retrievedSpan = document.createElement('span');
+                        retrievedSpan.style.color = '#16a34a';
+                        retrievedSpan.textContent = 'Retrieved';
+                        actionsTd.appendChild(retrievedSpan);
+                    } else if (job.status === 'ended') {
+                        var retrieveBtn = document.createElement('button');
+                        retrieveBtn.className = 'btn-small btn-primary';
+                        retrieveBtn.textContent = 'Retrieve Results';
+                        retrieveBtn.addEventListener('click', (function(id) {
+                            return function() { retrieveBatchApiJob(id); };
+                        })(job.job_id));
+                        actionsTd.appendChild(retrieveBtn);
+                    } else {
+                        var checkBtn = document.createElement('button');
+                        checkBtn.className = 'btn-small btn-secondary';
+                        checkBtn.textContent = 'Check Status';
+                        checkBtn.addEventListener('click', (function(id) {
+                            return function() { checkBatchApiJob(id); };
+                        })(job.job_id));
+                        actionsTd.appendChild(checkBtn);
+                    }
+                    if (job.status === 'completed') {
+                        actionsTd.appendChild(dismissBtn);
+                    }
+
+                    tr.innerHTML =
+                        '<td><code style="font-size:12px">' + safeJobId.substring(0, 16) + '</code></td>' +
+                        '<td>' + escapeHtml(job.provider || '') + ' / ' + escapeHtml((job.model || '').split('/').pop()) + '</td>' +
+                        '<td>' + (job.chunk_count || 0) + '</td>' +
+                        '<td><span class="status-pill ' + escapeHtml(statusClass) + '">' + escapeHtml(job.status || 'unknown') + '</span></td>' +
+                        '<td style="font-size:12px">' + escapeHtml(submitted) + '</td>';
+                    tr.appendChild(actionsTd);
+                    tbody.appendChild(tr);
+                });
+            });
+    }
+
+    window.dismissBatchApiJob = function(jobId) {
+        fetch('/api/project/' + PROJECT + '/batch-api/jobs/' + jobId, { method: 'DELETE' })
+            .then(function() { loadBatchApiJobs(); });
+    };
+
+    // Make these accessible from inline onclick
+    window.checkBatchApiJob = function(jobId) {
+        apiPost('/api/project/' + PROJECT + '/batch-api/jobs/' + jobId + '/check', {})
+            .then(function(data) {
+                if (data.error) {
+                    setStatus('translate-batch-status', data.error, 'error');
+                } else if (data.status === 'completed' || data.status === 'ended') {
+                    setStatus('translate-batch-status', 'Batch complete! Click Retrieve Results.', 'success');
+                } else {
+                    setStatus('translate-batch-status',
+                        'Status: ' + data.status +
+                        ' (succeeded: ' + (data.succeeded_count || 0) +
+                        ', failed: ' + (data.failed_count || 0) + ')', 'info');
+                }
+                loadBatchApiJobs();
+            });
+    };
+
+    window.retrieveBatchApiJob = function(jobId) {
+        setStatus('translate-batch-status', 'Retrieving batch results...', 'info');
+        apiPost('/api/project/' + PROJECT + '/batch-api/jobs/' + jobId + '/retrieve', {})
+            .then(function(data) {
+                if (data.error) {
+                    setStatus('translate-batch-status', data.error, 'error');
+                } else {
+                    var msg = 'Retrieved ' + data.translated_count + '/' + data.total_count +
+                        ' translations. Chapters updated: ' + (data.chapters_affected || []).join(', ');
+                    var el = document.getElementById('translate-batch-status');
+                    if (el) {
+                        el.textContent = msg;
+                        el.className = 'status-msg success';
+                        var clearBtn = document.createElement('button');
+                        clearBtn.textContent = '×';
+                        clearBtn.title = 'Dismiss';
+                        clearBtn.style.cssText = 'margin-left:8px;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;color:inherit;opacity:0.6;';
+                        clearBtn.addEventListener('click', function() {
+                            el.textContent = '';
+                            el.className = 'status-msg';
+                        });
+                        el.appendChild(clearBtn);
+                    }
+                    loadStatus();
+                }
+                loadBatchApiJobs();
+            });
+    };
+
+    // Load batch API jobs when entering translate stage
+    loadBatchApiJobs();
 
     // ========================================================================
     // Stage 7: Review
