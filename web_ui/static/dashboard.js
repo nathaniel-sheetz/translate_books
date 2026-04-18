@@ -1725,7 +1725,9 @@
                         })(job.job_id));
                         actionsTd.appendChild(checkBtn);
                     }
-                    actionsTd.appendChild(dismissBtn);
+                    if (job.status === 'completed') {
+                        actionsTd.appendChild(dismissBtn);
+                    }
 
                     tr.innerHTML =
                         '<td><code style="font-size:12px">' + safeJobId.substring(0, 16) + '</code></td>' +
