@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0.0] - 2026-04-17
+
+### Added
+- Batch API job management panel: submit, check, retrieve, and dismiss jobs directly from the dashboard
+- Per-chunk glossary filtering for batch submissions — only relevant terms are sent with each chunk
+- Cross-chapter context map support for batch translation jobs
+- `--retrieve-batch` CLI flag to manually retrieve results from a completed batch job
+- Auto-retrieve in `--check-batch` when a batch completes, using stored chunk file paths
+
+### Changed
+- Batch job submission now stores chunk file paths at submit time, eliminating the need to re-specify files at retrieval
+- Retrieved status message has a dismiss (×) button to clear it from the UI
+- `chunk_file_map` paths validated against project directory before loading or saving during retrieval
+
+### Fixed
+- Double-retrieve race condition: status set to `"retrieving"` inside the lock before network call
+- Silent data corruption when a chunk file failed to parse: chunk↔path mapping now built together at load time
+- Blank JSONL lines from OpenAI batch output no longer crash the full retrieval
+- `batch_api_jobs.json` writes are now atomic (tmp + rename) — crash mid-write no longer zeros the file
+- `"ended"` status from provider no longer bypasses the already-retrieved guard on re-check
+- `job_id` and `chapter_id` inputs validated on all batch API endpoints
+- `prompt_map` (full prompt text) stripped from persisted job tracking files — logged via prompt logger instead
+- XSS: server-supplied job fields in the jobs table now escaped; action buttons use event listeners instead of inline onclick
+
 ## [0.1.0.0] - 2026-04-14
 
 ### Added
