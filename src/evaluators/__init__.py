@@ -31,13 +31,17 @@ _EVALUATOR_REGISTRY: dict[str, type[BaseEvaluator]] = {
     "grammar": GrammarEvaluator,
 }
 
+# Cache LanguageTool JVM instances by dialect to avoid repeated JVM startups
+_lt_cache: dict[str, GrammarEvaluator] = {}
 
-def get_evaluator(name: str) -> BaseEvaluator:
+
+def get_evaluator(name: str, dialect: Optional[str] = None) -> BaseEvaluator:
     """
     Get evaluator instance by name.
 
     Args:
         name: Evaluator name (e.g., "length", "paragraph", "dictionary", "glossary", "completeness", "blacklist", "grammar")
+        dialect: Optional dialect for grammar evaluator (e.g., "es", "es-MX"). Cached by dialect to avoid repeated JVM startups.
 
     Returns:
         Initialized evaluator instance
@@ -56,12 +60,29 @@ def get_evaluator(name: str) -> BaseEvaluator:
             f"Available evaluators: {available}"
         )
 
+    # Return cached GrammarEvaluator if available
+    if name == "grammar":
+        cache_key = dialect or "es"
+        if cache_key in _lt_cache:
+            logger.debug(f"Returning cached grammar evaluator for dialect: {cache_key}")
+            return _lt_cache[cache_key]
+
     evaluator_class = _EVALUATOR_REGISTRY[name]
 
     try:
         # Instantiate evaluator
         # DictionaryEvaluator may raise RuntimeError if enchant dicts not available
-        evaluator = evaluator_class()
+        if name == "grammar" and dialect:
+            evaluator = evaluator_class(dialect=dialect)
+        else:
+            evaluator = evaluator_class()
+
+        # Cache grammar evaluator instances
+        if name == "grammar":
+            cache_key = dialect or "es"
+            _lt_cache[cache_key] = evaluator
+            logger.debug(f"Cached grammar evaluator for dialect: {cache_key}")
+
         logger.debug(f"Initialized evaluator: {name} (v{evaluator.version})")
         return evaluator
     except RuntimeError as e:
