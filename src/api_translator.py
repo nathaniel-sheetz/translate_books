@@ -1040,6 +1040,88 @@ def _retrieve_openai_results(
 # ============================================================================
 
 
+def translate_chapter_with_model(
+    chunks: list[Chunk],
+    model_id: str,
+    project_path: Path,
+    provider: Provider | None = None,
+    glossary: Optional[Glossary] = None,
+    style_guide: Optional[StyleGuide] = None,
+    project_name: str = "Translation Project",
+    source_language: str = "English",
+    target_language: str = "Spanish",
+) -> list[Chunk]:
+    """Translate all chunks for a chapter using a specific model via batch API.
+
+    Thin wrapper around ``submit_batch`` + polling ``check_batch_status`` +
+    ``retrieve_batch_results``.  Surfaces per-model batch failure explicitly
+    (raises ``APIError`` rather than silently returning an empty list).
+
+    Args:
+        chunks: Source chunks to translate.
+        model_id: Model identifier (e.g. ``"claude-sonnet-4-6"``).
+        project_path: Path to the project directory (used for output_dir).
+        provider: LLM provider; defaults to ``get_default_provider()``.
+        glossary: Optional glossary.
+        style_guide: Optional style guide.
+        project_name: Project name for prompt context.
+        source_language: Source language name.
+        target_language: Target language name.
+
+    Returns:
+        List of chunks with ``translated_text`` populated.
+
+    Raises:
+        APIError: If batch submission, polling, or retrieval fails.
+    """
+    import copy
+
+    prov = provider or get_default_provider()
+    output_dir = project_path / "comparisons" / "_tmp_translations"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deep-copy chunks so the caller's originals stay untouched
+    work_chunks = [copy.deepcopy(c) for c in chunks]
+
+    job_info = submit_batch(
+        work_chunks, prov, model_id, output_dir,
+        glossary=glossary, style_guide=style_guide,
+        project_name=project_name,
+        source_language=source_language,
+        target_language=target_language,
+    )
+    job_id = job_info["job_id"]
+
+    # Poll until complete (30s intervals, ~30min max)
+    import time as _time
+    for _ in range(60):
+        status = check_batch_status(job_id, prov)
+        if status["status"] in ("completed", "ended"):
+            break
+        if status["status"] in ("failed", "expired", "cancelled"):
+            raise APIError(
+                f"Batch {job_id} for model {model_id} "
+                f"ended with status: {status['status']}"
+            )
+        _time.sleep(30)
+    else:
+        raise APIError(
+            f"Batch {job_id} for model {model_id} timed out after 30 minutes"
+        )
+
+    translated = retrieve_batch_results(
+        job_id, prov, work_chunks, output_dir,
+        model=model_id, prompt_map=job_info.get("prompt_map"),
+    )
+
+    if not translated:
+        raise APIError(
+            f"Batch {job_id} for model {model_id} returned zero translations"
+        )
+
+    return translated
+
+
 def save_batch_job(job_info: dict, tracking_file: Path = Path("batch_jobs.json")):
     """
     Save batch job information to tracking file.
