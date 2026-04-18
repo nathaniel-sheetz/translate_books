@@ -2020,8 +2020,11 @@ def _load_batch_api_jobs(project_dir: Path) -> list[dict]:
 
 
 def _save_batch_api_jobs(project_dir: Path, jobs: list[dict]):
+    import os
     path = _batch_api_tracking_path(project_dir)
-    path.write_text(json.dumps({"jobs": jobs}, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"jobs": jobs}, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 @app.route("/api/project/<project_id>/batch-api/submit", methods=["POST"])
@@ -2171,11 +2174,11 @@ def batch_api_check_job(project_id, job_id):
 
         status_info = check_batch_status(job_id, job_info["provider"])
 
-        # Update tracked status
+        # Update tracked status (never overwrite "completed" — retrieval already ran)
         with _batch_api_tracking_lock:
             jobs = _load_batch_api_jobs(project_dir)
             for j in jobs:
-                if j.get("job_id") == job_id:
+                if j.get("job_id") == job_id and j.get("status") != "completed":
                     j["status"] = status_info["status"]
                     break
             _save_batch_api_jobs(project_dir, jobs)
@@ -2194,16 +2197,19 @@ def batch_api_retrieve_job(project_id, job_id):
 
     project_dir = _get_projects_dir() / project_id
 
-    # Find job in tracking
+    # Find job and atomically mark it as "retrieving" to prevent double-retrieve
     with _batch_api_tracking_lock:
         jobs = _load_batch_api_jobs(project_dir)
         job_info = next((j for j in jobs if j.get("job_id") == job_id), None)
+        if job_info:
+            status = job_info.get("status")
+            if status in ("completed", "retrieving"):
+                return jsonify({"error": "Results already retrieved", "already_done": True}), 400
+            job_info["status"] = "retrieving"
+            _save_batch_api_jobs(project_dir, jobs)
 
     if not job_info:
         return jsonify({"error": "Job not found"}), 404
-
-    if job_info.get("status") == "completed":
-        return jsonify({"error": "Results already retrieved", "already_done": True}), 400
 
     try:
         from src.api_translator import retrieve_batch_results

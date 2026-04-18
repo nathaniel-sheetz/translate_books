@@ -52,17 +52,25 @@ def _expand_patterns(patterns: list[str]) -> list[str]:
     return paths
 
 
-def load_chunks_from_patterns(patterns: list[str]) -> list[Chunk]:
-    """Load chunks from file patterns (supports globs)."""
-    chunks = []
+def load_chunks_with_paths(patterns: list[str]) -> list[tuple[Chunk, str]]:
+    """Load chunks from file patterns, returning (chunk, resolved_path) pairs.
+
+    Keeps chunk and path together so the mapping is always correct even if
+    some files fail to parse (no zip-mismatch risk).
+    """
+    pairs = []
     for file_path in _expand_patterns(patterns):
         try:
             chunk = load_chunk(Path(file_path))
-            chunks.append(chunk)
+            pairs.append((chunk, str(Path(file_path).resolve())))
         except Exception as e:
             console.print(f"[red]Error loading {file_path}: {e}[/red]")
+    return pairs
 
-    return chunks
+
+def load_chunks_from_patterns(patterns: list[str]) -> list[Chunk]:
+    """Load chunks from file patterns (supports globs)."""
+    return [chunk for chunk, _ in load_chunks_with_paths(patterns)]
 
 
 def translate_dry_run(args):
@@ -287,9 +295,10 @@ def translate_batch(args):
     console.print("\n[bold cyan]Batch Translation Mode[/bold cyan]\n")
     console.print("[yellow]Note: Batch results take ~24 hours. 50% cost discount applied.[/yellow]\n")
 
-    # Load chunks
+    # Load chunks — keep (chunk, path) pairs together to avoid zip-mismatch later
     console.print("[bold]Loading chunks...[/bold]")
-    chunks = load_chunks_from_patterns(args.chunk_files)
+    chunk_pairs = load_chunks_with_paths(args.chunk_files)
+    chunks = [c for c, _ in chunk_pairs]
 
     if not chunks:
         console.print("[red]Error: No chunks loaded. Check your file patterns.[/red]")
@@ -367,8 +376,7 @@ def translate_batch(args):
 
         # Store chunk file paths for later retrieval (strip prompt_map — already in prompt_logger)
         job_info.pop("prompt_map", None)
-        chunk_file_map = {chunk.id: str(Path(f).resolve())
-                          for chunk, f in zip(chunks, _expand_patterns(args.chunk_files))}
+        chunk_file_map = {chunk.id: path for chunk, path in chunk_pairs}
         job_info["chunk_file_map"] = chunk_file_map
 
         # Save job info

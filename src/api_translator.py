@@ -994,6 +994,8 @@ def _retrieve_openai_results(
 
         # Process each result
         for line in output_lines:
+            if not line.strip():
+                continue
             result = json.loads(line)
             chunk_id = result.get("custom_id")
 
