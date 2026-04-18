@@ -369,3 +369,105 @@ class TestExtractJson:
     def test_with_preamble(self):
         raw = 'Here is my analysis:\n{"key": "value"}\nEnd.'
         assert json.loads(_extract_json(raw)) == {"key": "value"}
+
+
+# =========================================================================
+# Full-translator-prompt context mode
+# =========================================================================
+
+class TestJudgeFullPromptContext:
+    """Verify the judge_context_mode='full_prompt' routing path."""
+
+    @patch("src.judge.call_llm")
+    def test_absolute_full_prompt_uses_full_context_template(self, mock_call_llm):
+        mock_call_llm.return_value = json.dumps({
+            "fluency": 5, "fidelity": 5, "regional": 5, "voice": 5,
+            "rationale": "Excellent.",
+        })
+
+        translator_ctx = "GLOSSARY SENTINEL foo=bar STYLE GUIDE SENTINEL"
+        result = judge_absolute(
+            source_text="The beetle crawled.",
+            translation_text="El escarabajo se arrastró.",
+            judge_context_mode="full_prompt",
+            translator_context=translator_ctx,
+        )
+
+        prompt_sent = mock_call_llm.call_args[0][0]
+        assert "<translator_context>" in prompt_sent
+        assert "<voice_context>" not in prompt_sent
+        assert translator_ctx in prompt_sent
+        assert result.voice == 5
+
+    @patch("src.judge.call_llm")
+    def test_pairwise_full_prompt_uses_full_context_template(self, mock_call_llm):
+        mock_call_llm.return_value = json.dumps({
+            "fluency_winner": "A",
+            "fidelity_winner": "A",
+            "regional_winner": "tie",
+            "voice_winner": "B",
+            "overall_winner": "A",
+            "rationale": "A wins on fluency and fidelity.",
+        })
+
+        translator_ctx = "GLOSSARY SENTINEL foo=bar STYLE GUIDE SENTINEL"
+        result = judge_pairwise(
+            source_text="The beetle crawled.",
+            translation_a="El escarabajo se arrastró.",
+            translation_b="El escarabajo reptó.",
+            judge_context_mode="full_prompt",
+            translator_context=translator_ctx,
+        )
+
+        prompt_sent = mock_call_llm.call_args[0][0]
+        assert "<translator_context>" in prompt_sent
+        assert "<voice_context>" not in prompt_sent
+        assert translator_ctx in prompt_sent
+        assert result.overall_winner == "A"
+
+    def test_full_prompt_without_context_raises(self):
+        with pytest.raises(ValueError, match="translator_context"):
+            judge_absolute(
+                source_text="x",
+                translation_text="y",
+                judge_context_mode="full_prompt",
+                translator_context=None,
+            )
+
+    def test_full_prompt_pairwise_without_context_raises(self):
+        with pytest.raises(ValueError, match="translator_context"):
+            judge_pairwise(
+                source_text="x",
+                translation_a="y",
+                translation_b="z",
+                judge_context_mode="full_prompt",
+                translator_context=None,
+            )
+
+    @patch("src.judge.call_llm")
+    def test_style_mode_ignores_translator_context(self, mock_call_llm, tmp_path):
+        """In style mode, translator_context must not leak into the prompt."""
+        mock_call_llm.return_value = json.dumps({
+            "fluency": 3, "fidelity": 3, "regional": 3,
+            "rationale": "Average.",
+        })
+
+        judge_absolute(
+            source_text="The sun rose.",
+            translation_text="El sol salió.",
+            style_json_path=None,
+            judge_context_mode="style",
+            translator_context="SHOULD_NOT_APPEAR",
+        )
+
+        prompt_sent = mock_call_llm.call_args[0][0]
+        assert "SHOULD_NOT_APPEAR" not in prompt_sent
+        assert "<translator_context>" not in prompt_sent
+
+    def test_full_context_templates_hash_differs_from_voice_templates(self):
+        """Prompt versions must differ between modes so reruns don't conflate."""
+        from src.judge import get_prompt_version
+
+        style_hash = get_prompt_version("judge_pairwise.txt")
+        full_hash = get_prompt_version("judge_pairwise_full_context.txt")
+        assert style_hash != full_hash

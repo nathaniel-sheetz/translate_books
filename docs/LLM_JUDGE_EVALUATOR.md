@@ -16,13 +16,26 @@ python scripts/compare_models.py \
 
 This translates the chapter with each model, runs coded evaluators (grammar, glossary, etc.) on both, then asks the judge to pick a winner per chunk. Results go to `comparisons/<project_id>/<run_id>/`.
 
+To hold each translation to the same brief the translator received (glossary, style guide, instructions) instead of just the style guide, add `--judge-context full-prompt`:
+
+```bash
+python scripts/compare_models.py \
+    --source projects/fabre2/chapters/chapter_01.txt \
+    --models sonnet,haiku \
+    --project projects/fabre2 \
+    --judge-context full-prompt \
+    --chunk-size 1500 --overlap-paragraphs 0 --overlap-words 0
+```
+
+See [Judge context modes](#judge-context-modes) and [Chunking knobs](#chunking-knobs) for details.
+
 ## How It Works
 
 ```
 source chapter (txt)
       │
       ▼
-  [chunker] ─────────────────────────── existing pipeline
+  [chunker(target_size, overlap_paragraphs, overlap_words)] ─── configurable via CLI
       │
       ▼
   for each model in --models:
@@ -33,10 +46,18 @@ source chapter (txt)
      [run_all_evaluators] → coded signals (grammar, glossary, etc.)
       │
       ▼
+  if --judge-context full-prompt:
+     for each chunk:
+        [build translator context]        render prompts/translation.txt
+                                          with per-chunk glossary + style +
+                                          "[see <source>]" source placeholder
+      │
+      ▼
   pairwise loop (round-robin model pairs):
      for each chunk pair:
         randomize A/B order
-        [judge_pairwise] → PairwiseVerdict
+        [judge_pairwise(..., judge_context_mode, translator_context)]
+          → PairwiseVerdict
       │
       ▼
   [write CSV + raw JSONL]
@@ -47,10 +68,12 @@ source chapter (txt)
 
 ### Phases
 
-1. **Translate** — Each model translates the full chapter via the batch API. Models that fail are dropped; the harness continues as long as ≥2 models remain.
-2. **Coded evaluators** — Existing evaluators (length, paragraph, glossary) run on every translation. Their output is formatted as context signals for the judge.
-3. **Pairwise judging** — For every model pair and every chunk, the judge compares the two translations. A/B order is randomized per chunk to guard against position bias. Results are un-swapped before writing to CSV.
-4. **Summary** — Win rates with 95% bootstrap confidence intervals, per-dimension breakdowns, position bias warnings, and length-bucket analysis.
+1. **Chunk** — Split the source chapter using `ChunkingConfig(target_size=--chunk-size, overlap_paragraphs=--overlap-paragraphs, min_overlap_words=--overlap-words)`. Defaults match the production translator (2000-word target, 0 overlap).
+2. **Translate** — Each model translates the full chapter via the batch API. Models that fail are dropped; the harness continues as long as ≥2 models remain.
+3. **Coded evaluators** — Existing evaluators (length, paragraph, glossary) run on every translation. Their output is formatted as context signals for the judge.
+4. **(Optional) Translator context build** — When `--judge-context full-prompt` is set, the harness renders `prompts/translation.txt` per chunk with that chunk's filtered glossary and the project's style guide, then replaces the chunk's source text with a `[see <source> tag above]` pointer so it isn't duplicated in the judge prompt.
+5. **Pairwise judging** — For every model pair and every chunk, the judge compares the two translations. A/B order is randomized per chunk to guard against position bias. Results are un-swapped before writing to CSV.
+6. **Summary** — Win rates with 95% bootstrap confidence intervals, per-dimension breakdowns, position bias warnings, and length-bucket analysis.
 
 ## Rubric
 
@@ -69,11 +92,13 @@ In **absolute** mode: 1–5 per dimension, normalized to `[0.0, 1.0]` via `(avg(
 
 ### Voice dimension
 
-Voice context comes from the project's `style.json` (`content` field — the prose style guide already written for the translator LLM).
+In the default `--judge-context style` mode, voice context comes from the project's `style.json` (`content` field — the prose style guide already written for the translator LLM).
 
 - **`style.json` exists with non-empty `content`** — Voice dimension is scored. Content is passed to the judge prompt under a `<voice_context>` tag.
 - **`style.json` missing or `content` empty** — Voice dimension is omitted entirely. The judge uses a no-voice prompt variant and `voice_winner` is `N/A`.
 - **`content` > 4000 tokens (~16K chars)** — Truncated with a `[...truncated]` marker, warning logged.
+
+In `--judge-context full-prompt` mode, the style guide is part of the `<translator_context>` block (alongside the glossary and translation instructions), so the Voice dimension is always scored as long as `style.json` has content. The 4000-token voice cap does **not** apply; the full translator prompt is passed verbatim.
 
 ## CLI Reference
 
@@ -90,9 +115,28 @@ python scripts/compare_models.py [OPTIONS]
 | `--provider` | | from `llm_config.json` | LLM provider |
 | `--style` | | auto-detected from project | Path to `style.json` for voice context |
 | `--output` | | `comparisons/<project>/<run_id>/` | Output directory |
+| `--judge-context` | | `style` | Judge context mode: `style` or `full-prompt` (see [Judge context modes](#judge-context-modes)) |
+| `--chunk-size` | | `2000` | Target chunk size in words (maps to `ChunkingConfig.target_size`) |
+| `--overlap-paragraphs` | | `0` | Min paragraphs to overlap between chunks |
+| `--overlap-words` | | `0` | Min words to overlap between chunks |
 | `--cost-limit` | | `5.0` | Max estimated cost (USD) before requiring `--confirm` |
 | `--confirm` | | false | Proceed even if cost exceeds `--cost-limit` |
 | `--verbose` | | false | Debug logging |
+
+### Judge context modes
+
+`--judge-context` controls what context block the judge sees alongside the source and translations.
+
+| Mode | What the judge sees | When to use |
+|---|---|---|
+| `style` (default) | `style.json` `content` field as `<voice_context>`. Falls back to a no-voice prompt variant when `style.json` is missing or empty. | You want to evaluate voice/style adherence in isolation, or you haven't set up a glossary yet. |
+| `full-prompt` | The full translator prompt that was sent for each chunk — book title, per-chunk glossary, style guide, translation instructions — as `<translator_context>`. The source slot inside is replaced with a pointer to the `<source>` tag to avoid duplication. | You want the judge to evaluate each translation against the exact brief the translator received (glossary compliance, dialect, instructions). |
+
+Both modes score all four rubric dimensions (Fluency, Fidelity, Regional, Voice). The judge prompt template differs, so `judge_prompt_version` in the CSV/JSONL changes between modes — runs are not directly comparable across modes.
+
+### Chunking knobs
+
+Chunking defaults (`--chunk-size 2000`, `--overlap-paragraphs 0`, `--overlap-words 0`) match the defaults used by the production translator. Override them to experiment with how chunk granularity affects judge verdicts — e.g. `--chunk-size 500` to see if finer chunks surface more per-dimension variance.
 
 ### Model aliases
 
@@ -168,6 +212,7 @@ The first line of `raw.jsonl` is a run header capturing reproducibility metadata
 Before running, the harness prints a full cost breakdown:
 
 ```
+Judge context: style (~500 tokens from style.json)
 Estimated cost:
   Translation: $0.1200 (2 models × 20 chunks, batch 50% discount)
   Judge:       $0.0800 (1 pairs × 20 chunks × ~1200 tokens avg)
@@ -175,9 +220,15 @@ Estimated cost:
   Estimated prompt log size: ~0.1 MB (20 judge calls × ~4 KB each)
 ```
 
+In `--judge-context full-prompt` mode the context block is larger (typically 1-3K tokens depending on glossary size), so the per-judge-call token count and cost go up proportionally. The harness samples the first chunk's rendered translator prompt to estimate this:
+
+```
+Judge context: full-prompt (~2100 tokens per call, sampled from chunk 1)
+```
+
 If the estimate exceeds `--cost-limit` (default $5), the harness stops and asks you to pass `--confirm`.
 
-Pairwise judge calls grow `O(models² × chunks)`: 2 models = 1 pair, 3 models = 3 pairs, 4 models = 6 pairs per chunk.
+Pairwise judge calls grow `O(models² × chunks)`: 2 models = 1 pair, 3 models = 3 pairs, 4 models = 6 pairs per chunk. Changing `--chunk-size` changes the chunk count and therefore the total call count; check the printed estimate after each adjustment.
 
 ## Statistical Safeguards
 
@@ -245,16 +296,37 @@ print(result.score)            # 0.0–1.0 normalized
 print(result.metadata)         # {"fluency": 4, "fidelity": 5, ...}
 ```
 
+To call the judge primitive directly with the full translator prompt as context:
+
+```python
+from src.judge import judge_absolute, judge_pairwise
+
+verdict = judge_pairwise(
+    source_text=chunk.source_text,
+    translation_a=chunk_a.translated_text,
+    translation_b=chunk_b.translated_text,
+    coded_eval_results_a=evals_a,
+    coded_eval_results_b=evals_b,
+    judge_context_mode="full_prompt",     # note: underscore in the Python API
+    translator_context=rendered_prompt,   # the full prompt the translator saw
+    judge_model="claude-sonnet-4-6",
+)
+```
+
+When `judge_context_mode="full_prompt"`, `translator_context` is required; `style_json_path` is ignored.
+
 ## Prompt Templates
 
-Four prompt templates live in `prompts/`:
+Six prompt templates live in `prompts/`:
 
-| File | Mode | Voice |
+| File | Mode | Context block |
 |---|---|---|
-| `judge_pairwise.txt` | Pairwise | ✓ |
-| `judge_pairwise_no_voice.txt` | Pairwise | — |
-| `judge_absolute.txt` | Absolute | ✓ |
-| `judge_absolute_no_voice.txt` | Absolute | — |
+| `judge_pairwise.txt` | Pairwise | `<voice_context>` (style.json) |
+| `judge_pairwise_no_voice.txt` | Pairwise | none (no style.json) |
+| `judge_pairwise_full_context.txt` | Pairwise | `<translator_context>` (full translator prompt) |
+| `judge_absolute.txt` | Absolute | `<voice_context>` (style.json) |
+| `judge_absolute_no_voice.txt` | Absolute | none (no style.json) |
+| `judge_absolute_full_context.txt` | Absolute | `<translator_context>` (full translator prompt) |
 
 All prompts use XML-fenced inputs (`<source>`, `<translation_a>`, etc.) with an explicit instruction to treat tagged content as data, not instructions — a guard against prompt injection from book content.
 
@@ -302,3 +374,31 @@ python scripts/compare_models.py \
 ```
 
 Compare the voice dimension scores across runs to see if the richer guide helps.
+
+Judge each model against the exact translator brief (glossary, style, instructions) with zero chunk overlap, matching how translations actually get sent:
+
+```bash
+python scripts/compare_models.py \
+    --source projects/fabre2/chapters/chapter_01.txt \
+    --models sonnet,haiku \
+    --project projects/fabre2 \
+    --judge-context full-prompt \
+    --overlap-paragraphs 0 --overlap-words 0
+```
+
+Sweep chunk granularity to see whether finer chunks surface more per-dimension variance. Keep `--judge-context` and models fixed so only chunking changes:
+
+```bash
+for size in 500 1000 2000; do
+  python scripts/compare_models.py \
+      --source projects/fabre2/chapters/chapter_01.txt \
+      --models sonnet,haiku \
+      --project projects/fabre2 \
+      --judge-context full-prompt \
+      --chunk-size "$size" \
+      --overlap-paragraphs 0 --overlap-words 0 \
+      --output "comparisons/fabre2/chunk_sweep_${size}"
+done
+```
+
+Because the prompt template differs between `style` and `full-prompt`, `judge_prompt_version` in the CSV will change across modes — don't compare win rates between a `style`-mode run and a `full-prompt`-mode run directly.

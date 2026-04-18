@@ -84,7 +84,14 @@ from src.models import (
     EvaluationConfig,
     PairwiseVerdict,
 )
-from src.utils.file_io import load_glossary, load_style_guide
+from src.utils.file_io import (
+    filter_glossary_for_chunk,
+    format_glossary_for_prompt,
+    load_glossary,
+    load_prompt_template,
+    load_style_guide,
+    render_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +121,47 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_SOURCE_PLACEHOLDER = "[see <source> tag above]"
+
+
+def _build_translator_context(
+    chunk: Chunk,
+    glossary,
+    style_guide,
+    project_name: str,
+    source_language: str = "English",
+    target_language: str = "Spanish",
+) -> str:
+    """Render the translator prompt for this chunk with a source-text placeholder.
+
+    Mirrors the variables assembled in ``translate_chunk_realtime`` so the judge
+    sees the exact same glossary (filtered per chunk), style guide, book title,
+    and instructions the translator received. The chunk's source_text slot is
+    replaced with a pointer to the ``<source>`` tag to avoid duplicating the
+    text inside the judge prompt.
+    """
+    chunk_glossary = (
+        filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+    )
+    template = load_prompt_template()
+    variables = {
+        "book_title": project_name,
+        "source_text": _SOURCE_PLACEHOLDER,
+        "target_language": target_language,
+        "source_language": source_language,
+        "glossary": (
+            format_glossary_for_prompt(chunk_glossary)
+            if chunk_glossary
+            else "No glossary provided."
+        ),
+        "style_guide": style_guide.content if style_guide else "No style guide provided.",
+        "context": "",
+        "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+        "previous_chapter_context": "",
+    }
+    return render_prompt(template, variables)
+
+
 def _git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -134,11 +182,14 @@ def _estimate_total_cost(
     models: list[str],
     judge_model: str,
     provider: str,
-    voice_tokens: int,
+    context_tokens: int,
     n_coded_signal_tokens: int = 100,
     rubric_tokens: int = 300,
 ) -> dict:
     """Estimate total cost for translations + judge calls.
+
+    ``context_tokens`` covers whichever judge-context block is active (voice
+    context from style.json, or the full translator prompt).
 
     Returns dict with ``translation_cost``, ``judge_cost``, ``total_cost``,
     and ``breakdown`` string.
@@ -159,7 +210,7 @@ def _estimate_total_cost(
     prompt_tokens_per_call = (
         avg_source_tokens
         + avg_trans_tokens * 2  # pairwise: two translations
-        + voice_tokens
+        + context_tokens
         + n_coded_signal_tokens
         + rubric_tokens
     )
@@ -322,9 +373,17 @@ def run_comparison(args: argparse.Namespace) -> None:
 
     chapter_text = source_path.read_text(encoding="utf-8")
     chapter_id = source_path.stem
-    config = ChunkingConfig()
+    config = ChunkingConfig(
+        target_size=args.chunk_size,
+        overlap_paragraphs=args.overlap_paragraphs,
+        min_overlap_words=args.overlap_words,
+    )
     chunks = chunk_chapter(chapter_text, config, chapter_id=chapter_id)
-    print(f"Source: {source_path} → {len(chunks)} chunks")
+    print(
+        f"Source: {source_path} → {len(chunks)} chunks "
+        f"(target_size={config.target_size}w, overlap_paragraphs="
+        f"{config.overlap_paragraphs}, overlap_words={config.min_overlap_words})"
+    )
 
     eff_n = _effective_n(chunks)
     print(f"Effective independent N: ~{eff_n} (overlap-adjusted)")
@@ -371,9 +430,28 @@ def run_comparison(args: argparse.Namespace) -> None:
         except Exception:
             pass
 
+    # Judge context mode — sample a rendered translator prompt for cost estimation
+    judge_context_mode = args.judge_context.replace("-", "_")
+    translator_context_tokens = 0
+    if judge_context_mode == "full_prompt" and chunks:
+        sample_context = _build_translator_context(
+            chunks[0], glossary, style_guide, project_id,
+        )
+        translator_context_tokens = len(sample_context) // 4
+        print(
+            f"Judge context: full-prompt "
+            f"(~{translator_context_tokens} tokens per call, sampled from chunk 1)"
+        )
+    else:
+        print(f"Judge context: style (~{voice_tokens} tokens from style.json)")
+
+    context_tokens_for_cost = (
+        translator_context_tokens if judge_context_mode == "full_prompt" else voice_tokens
+    )
+
     # Cost estimate (C3)
     cost_est = _estimate_total_cost(
-        chunks, models, judge_model, provider, voice_tokens,
+        chunks, models, judge_model, provider, context_tokens_for_cost,
     )
     print(f"\n{cost_est['breakdown']}")
 
@@ -400,7 +478,12 @@ def run_comparison(args: argparse.Namespace) -> None:
 
     # Reproducibility metadata (C7)
     git_sha = _git_commit()
-    prompt_version = get_prompt_version("judge_pairwise.txt")
+    judge_template_name = (
+        "judge_pairwise_full_context.txt"
+        if judge_context_mode == "full_prompt"
+        else "judge_pairwise.txt"
+    )
+    prompt_version = get_prompt_version(judge_template_name)
 
     _write_csv_header(csv_path)
     _write_jsonl_header(jsonl_path, run_id, judge_model, prompt_version, git_sha)
@@ -480,6 +563,14 @@ def run_comparison(args: argparse.Namespace) -> None:
         for chunk in chunks:
             chunk_id = chunk.id
 
+            # Build the translator context once per chunk (same for A and B).
+            if judge_context_mode == "full_prompt":
+                translator_context = _build_translator_context(
+                    chunk, glossary, style_guide, project_id,
+                )
+            else:
+                translator_context = None
+
             # Check both models have this chunk (C5)
             tc_a = model_chunk_map[model_a].get(chunk_id)
             tc_b = model_chunk_map[model_b].get(chunk_id)
@@ -536,6 +627,8 @@ def run_comparison(args: argparse.Namespace) -> None:
                     coded_eval_results_b=evals_b,
                     judge_provider=provider,
                     judge_model=judge_model,
+                    judge_context_mode=judge_context_mode,
+                    translator_context=translator_context,
                 )
                 status = "success"
                 rationale_short = verdict.rationale[:200]
@@ -762,6 +855,28 @@ def main() -> None:
     parser.add_argument(
         "--confirm", action="store_true",
         help="Confirm and proceed even if cost estimate exceeds --cost-limit",
+    )
+    parser.add_argument(
+        "--judge-context", choices=["style", "full-prompt"], default="style",
+        help=(
+            "What the judge sees as context. 'style' (default) passes only "
+            "style.json content as voice context. 'full-prompt' passes the "
+            "full translator prompt (book title, glossary, style guide, "
+            "translation instructions) so the judge evaluates against the "
+            "same brief the translator received."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-size", type=int, default=2000,
+        help="Target chunk size in words for chunking (default: 2000)",
+    )
+    parser.add_argument(
+        "--overlap-paragraphs", type=int, default=0,
+        help="Minimum paragraphs to overlap between chunks (default: 0)",
+    )
+    parser.add_argument(
+        "--overlap-words", type=int, default=0,
+        help="Minimum words to overlap between chunks (default: 0)",
     )
     parser.add_argument(
         "--verbose", action="store_true",

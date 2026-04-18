@@ -17,10 +17,12 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from src.api_translator import call_llm, get_default_provider
 from src.models import EvalResult, JudgeScore, PairwiseVerdict
+
+JudgeContextMode = Literal["style", "full_prompt"]
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +209,8 @@ def judge_absolute(
     judge_provider: Optional[str] = None,
     judge_model: Optional[str] = None,
     max_retries: int = 3,
+    judge_context_mode: JudgeContextMode = "style",
+    translator_context: Optional[str] = None,
 ) -> JudgeScore:
     """Score a single translation on the four-dimension rubric.
 
@@ -214,35 +218,56 @@ def judge_absolute(
         source_text: Original English text.
         translation_text: Spanish translation.
         style_json_path: Path to the project's style.json (for voice context).
+            Ignored when ``judge_context_mode="full_prompt"``.
         coded_eval_results: Results from coded evaluators to feed the judge.
         judge_provider: LLM provider override (default from config).
         judge_model: LLM model override (default from config).
         max_retries: Retry budget for the LLM call.
+        judge_context_mode: ``"style"`` (default) uses style.json content as
+            voice context; ``"full_prompt"`` passes the full translator prompt
+            (glossary, style guide, instructions) as the context block.
+        translator_context: Required when ``judge_context_mode="full_prompt"``.
+            The rendered translator prompt for this chunk.
 
     Returns:
         JudgeScore with per-dimension scores and normalized_score.
 
     Raises:
         JudgeParseError: If the judge response cannot be parsed after retry.
+        ValueError: If ``judge_context_mode="full_prompt"`` but no
+            ``translator_context`` was supplied.
     """
-    voice_context, has_voice = _load_voice_context(style_json_path)
     coded_signals = format_signals_for_judge(coded_eval_results or [])
 
-    if has_voice:
-        template_name = "judge_absolute.txt"
+    if judge_context_mode == "full_prompt":
+        if not translator_context:
+            raise ValueError(
+                "judge_context_mode='full_prompt' requires translator_context"
+            )
+        template_name = "judge_absolute_full_context.txt"
         variables = {
             "source_text": source_text,
             "translation_text": translation_text,
-            "voice_context": voice_context,
+            "translator_context": translator_context,
             "coded_signals": coded_signals,
         }
     else:
-        template_name = "judge_absolute_no_voice.txt"
-        variables = {
-            "source_text": source_text,
-            "translation_text": translation_text,
-            "coded_signals": coded_signals,
-        }
+        voice_context, has_voice = _load_voice_context(style_json_path)
+        if has_voice:
+            template_name = "judge_absolute.txt"
+            variables = {
+                "source_text": source_text,
+                "translation_text": translation_text,
+                "voice_context": voice_context,
+                "coded_signals": coded_signals,
+            }
+        else:
+            template_name = "judge_absolute_no_voice.txt"
+            variables = {
+                "source_text": source_text,
+                "translation_text": translation_text,
+                "coded_signals": coded_signals,
+            }
 
     template = _load_template(template_name)
     prompt = _render(template, variables)
@@ -302,6 +327,8 @@ def judge_pairwise(
     judge_provider: Optional[str] = None,
     judge_model: Optional[str] = None,
     max_retries: int = 3,
+    judge_context_mode: JudgeContextMode = "style",
+    translator_context: Optional[str] = None,
 ) -> PairwiseVerdict:
     """Compare two translations and return a per-dimension verdict.
 
@@ -309,42 +336,66 @@ def judge_pairwise(
         source_text: Original English text.
         translation_a: First Spanish translation (position A).
         translation_b: Second Spanish translation (position B).
-        style_json_path: Path to style.json for voice context.
+        style_json_path: Path to style.json for voice context. Ignored when
+            ``judge_context_mode="full_prompt"``.
         coded_eval_results_a: Coded evaluator results for translation A.
         coded_eval_results_b: Coded evaluator results for translation B.
         judge_provider: LLM provider override.
         judge_model: LLM model override.
         max_retries: Retry budget for the LLM call.
+        judge_context_mode: ``"style"`` (default) uses style.json content as
+            voice context; ``"full_prompt"`` passes the full translator prompt
+            (glossary, style guide, instructions) as the context block.
+        translator_context: Required when ``judge_context_mode="full_prompt"``.
+            The rendered translator prompt for this chunk (both translations
+            received the same one).
 
     Returns:
         PairwiseVerdict with per-dimension winners and rationale.
 
     Raises:
         JudgeParseError: If the judge response cannot be parsed after retry.
+        ValueError: If ``judge_context_mode="full_prompt"`` but no
+            ``translator_context`` was supplied.
     """
-    voice_context, has_voice = _load_voice_context(style_json_path)
     signals_a = format_signals_for_judge(coded_eval_results_a or [])
     signals_b = format_signals_for_judge(coded_eval_results_b or [])
 
-    if has_voice:
-        template_name = "judge_pairwise.txt"
+    if judge_context_mode == "full_prompt":
+        if not translator_context:
+            raise ValueError(
+                "judge_context_mode='full_prompt' requires translator_context"
+            )
+        template_name = "judge_pairwise_full_context.txt"
         variables = {
             "source_text": source_text,
             "translation_a": translation_a,
             "translation_b": translation_b,
-            "voice_context": voice_context,
+            "translator_context": translator_context,
             "coded_signals_a": signals_a,
             "coded_signals_b": signals_b,
         }
     else:
-        template_name = "judge_pairwise_no_voice.txt"
-        variables = {
-            "source_text": source_text,
-            "translation_a": translation_a,
-            "translation_b": translation_b,
-            "coded_signals_a": signals_a,
-            "coded_signals_b": signals_b,
-        }
+        voice_context, has_voice = _load_voice_context(style_json_path)
+        if has_voice:
+            template_name = "judge_pairwise.txt"
+            variables = {
+                "source_text": source_text,
+                "translation_a": translation_a,
+                "translation_b": translation_b,
+                "voice_context": voice_context,
+                "coded_signals_a": signals_a,
+                "coded_signals_b": signals_b,
+            }
+        else:
+            template_name = "judge_pairwise_no_voice.txt"
+            variables = {
+                "source_text": source_text,
+                "translation_a": translation_a,
+                "translation_b": translation_b,
+                "coded_signals_a": signals_a,
+                "coded_signals_b": signals_b,
+            }
 
     template = _load_template(template_name)
     prompt = _render(template, variables)
