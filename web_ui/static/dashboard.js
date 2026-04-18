@@ -1691,15 +1691,18 @@
 
                     var submitted = job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—';
 
+                    var dismissBtn = '<button class="btn-small" title="Remove from list" ' +
+                        'onclick="dismissBatchApiJob(\'' + job.job_id + '\')" ' +
+                        'style="margin-left:6px;background:none;border:1px solid #cbd5e1;color:#64748b;padding:2px 6px;">×</button>';
                     var actions = '';
                     if (job.status === 'completed') {
-                        actions = '<span style="color:#16a34a">Retrieved</span>';
-                    } else if (job.status === 'ended' || job.status === 'completed') {
+                        actions = '<span style="color:#16a34a">Retrieved</span>' + dismissBtn;
+                    } else if (job.status === 'ended') {
                         actions = '<button class="btn-small btn-primary" onclick="retrieveBatchApiJob(\'' +
-                            job.job_id + '\')">Retrieve Results</button>';
+                            job.job_id + '\')">Retrieve Results</button>' + dismissBtn;
                     } else {
                         actions = '<button class="btn-small btn-secondary" onclick="checkBatchApiJob(\'' +
-                            job.job_id + '\')">Check Status</button>';
+                            job.job_id + '\')">Check Status</button>' + dismissBtn;
                     }
 
                     tr.innerHTML =
@@ -1713,6 +1716,11 @@
                 });
             });
     }
+
+    window.dismissBatchApiJob = function(jobId) {
+        fetch('/api/project/' + PROJECT + '/batch-api/jobs/' + jobId, { method: 'DELETE' })
+            .then(function() { loadBatchApiJobs(); });
+    };
 
     // Make these accessible from inline onclick
     window.checkBatchApiJob = function(jobId) {
@@ -1739,10 +1747,22 @@
                 if (data.error) {
                     setStatus('translate-batch-status', data.error, 'error');
                 } else {
-                    setStatus('translate-batch-status',
-                        'Retrieved ' + data.translated_count + '/' + data.total_count +
-                        ' translations. Chapters updated: ' + (data.chapters_affected || []).join(', '),
-                        'success');
+                    var msg = 'Retrieved ' + data.translated_count + '/' + data.total_count +
+                        ' translations. Chapters updated: ' + (data.chapters_affected || []).join(', ');
+                    var el = document.getElementById('translate-batch-status');
+                    if (el) {
+                        el.textContent = msg;
+                        el.className = 'status-msg success';
+                        var clearBtn = document.createElement('button');
+                        clearBtn.textContent = '×';
+                        clearBtn.title = 'Dismiss';
+                        clearBtn.style.cssText = 'margin-left:8px;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;color:inherit;opacity:0.6;';
+                        clearBtn.addEventListener('click', function() {
+                            el.textContent = '';
+                            el.className = 'status-msg';
+                        });
+                        el.appendChild(clearBtn);
+                    }
                     loadStatus();
                 }
                 loadBatchApiJobs();

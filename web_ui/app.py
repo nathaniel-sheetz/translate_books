@@ -2283,6 +2283,18 @@ def batch_api_retrieve_job(project_id, job_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/project/<project_id>/batch-api/jobs/<job_id>", methods=["DELETE"])
+def batch_api_delete_job(project_id, job_id):
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    with _batch_api_tracking_lock:
+        jobs = _load_batch_api_jobs(project_dir)
+        jobs = [j for j in jobs if j.get("job_id") != job_id]
+        _save_batch_api_jobs(project_dir, jobs)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/project/<project_id>/combine/<chapter_id>", methods=["POST"])
 def project_combine(project_id, chapter_id):
     """Combine translated chunks back into a chapter file."""
