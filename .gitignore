@@ -75,6 +75,9 @@ test.txt
 workbook.md
 clean_*.py
 
+# Comparison run outputs
+comparisons/
+
 # Claude Code project config
 CLAUDE.md
 .claude/
