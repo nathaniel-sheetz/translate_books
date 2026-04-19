@@ -45,6 +45,8 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
+import copy
 import csv
 import hashlib
 import itertools
@@ -64,9 +66,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.api_translator import (
     APIError,
+    await_translation_job,
     estimate_cost,
     get_default_provider,
     get_model_pricing,
+    resolve_provider_for_model,
+    submit_translation_job,
     translate_chapter_with_model,
 )
 from src.chunker import chunk_chapter
@@ -105,6 +110,8 @@ _MODEL_ALIASES: dict[str, str] = {
     "opus": "claude-opus-4-0-20250514",
     "gpt4o": "gpt-4o",
     "gpt4o-mini": "gpt-4o-mini",
+    "gemma4": "google/gemma-4-31B-it",
+    "gemma": "google/gemma-4-31B-it",
 }
 
 
@@ -162,6 +169,80 @@ def _build_translator_context(
     return render_prompt(template, variables)
 
 
+def _build_translator_prompt(
+    chunk: Chunk,
+    glossary,
+    style_guide,
+    project_name: str,
+    source_language: str = "English",
+    target_language: str = "Spanish",
+) -> str:
+    """Render the full translator prompt for a chunk (with real source text)."""
+    chunk_glossary = (
+        filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+    )
+    template = load_prompt_template()
+    variables = {
+        "book_title": project_name,
+        "source_text": chunk.source_text,
+        "target_language": target_language,
+        "source_language": source_language,
+        "glossary": (
+            format_glossary_for_prompt(chunk_glossary)
+            if chunk_glossary
+            else "No glossary provided."
+        ),
+        "style_guide": style_guide.content if style_guide else "No style guide provided.",
+        "context": "",
+        "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+        "previous_chapter_context": "",
+    }
+    prompt = render_prompt(template, variables)
+    # Strip header comments (same as translate_chunk_realtime)
+    separator = "=" * 80
+    if separator in prompt:
+        parts = prompt.split(separator, 1)
+        if len(parts) > 1:
+            prompt = separator + parts[1]
+    return prompt
+
+
+def _save_translation_logs(
+    output_dir: Path,
+    model: str,
+    chunks: list[Chunk],
+    translated_chunks: list[Chunk],
+    prompt_map: dict[str, str] | None,
+    glossary,
+    style_guide,
+    project_name: str,
+) -> None:
+    """Save full prompt/response pairs for each translated chunk as JSONL."""
+    trans_map = {c.id: c for c in translated_chunks}
+    log_path = output_dir / f"translations_{model.replace('/', '_')}.jsonl"
+    with log_path.open("w", encoding="utf-8") as f:
+        for chunk in chunks:
+            tc = trans_map.get(chunk.id)
+            if tc is None:
+                continue
+            # Get prompt: from prompt_map (batch) or reconstruct (realtime)
+            if prompt_map and chunk.id in prompt_map:
+                prompt = prompt_map[chunk.id]
+            else:
+                prompt = _build_translator_prompt(
+                    chunk, glossary, style_guide, project_name,
+                )
+            record = {
+                "chunk_id": chunk.id,
+                "chapter_id": chunk.chapter_id,
+                "model": model,
+                "prompt": prompt,
+                "response": tc.translated_text or "",
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"  Saved translation logs: {log_path}")
+
+
 def _git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -181,10 +262,11 @@ def _estimate_total_cost(
     chunks: list[Chunk],
     models: list[str],
     judge_model: str,
-    provider: str,
+    judge_provider: str,
     context_tokens: int,
     n_coded_signal_tokens: int = 100,
     rubric_tokens: int = 300,
+    model_providers: dict[str, str] | None = None,
 ) -> dict:
     """Estimate total cost for translations + judge calls.
 
@@ -194,10 +276,14 @@ def _estimate_total_cost(
     Returns dict with ``translation_cost``, ``judge_cost``, ``total_cost``,
     and ``breakdown`` string.
     """
+    _BATCH_CAPABLE = {"anthropic", "openai"}
+
     # Translation cost per model
     total_translation = 0.0
     for model in models:
-        est = estimate_cost(chunks, provider, model, batch_mode=True)
+        mp = (model_providers or {}).get(model, judge_provider)
+        batch_mode = mp in _BATCH_CAPABLE
+        est = estimate_cost(chunks, mp, model, batch_mode=batch_mode)
         total_translation += est["cost_usd"]
 
     # Judge cost: pairwise calls = C(n,2) * n_chunks * 2 swaps
@@ -215,7 +301,7 @@ def _estimate_total_cost(
         + rubric_tokens
     )
     judge_output_tokens = 300  # typical JSON response
-    judge_pricing = get_model_pricing(provider, judge_model)
+    judge_pricing = get_model_pricing(judge_provider, judge_model)
     judge_input_cost = (prompt_tokens_per_call * n_judge_calls / 1_000_000) * judge_pricing["input"]
     judge_output_cost = (judge_output_tokens * n_judge_calls / 1_000_000) * judge_pricing["output"]
     total_judge = judge_input_cost + judge_output_cost
@@ -224,7 +310,7 @@ def _estimate_total_cost(
 
     breakdown = (
         f"Estimated cost:\n"
-        f"  Translation: ${total_translation:.4f} ({len(models)} models × {n_chunks} chunks, batch 50% discount)\n"
+        f"  Translation: ${total_translation:.4f} ({len(models)} models × {n_chunks} chunks)\n"
         f"  Judge:       ${total_judge:.4f} ({n_pairs} pairs × {n_chunks} chunks × ~{int(prompt_tokens_per_call)} tokens avg)\n"
         f"  Total:       ${total:.4f}"
     )
@@ -349,17 +435,32 @@ def _append_jsonl(jsonl_path: Path, record: dict) -> None:
 # Main orchestration
 # ---------------------------------------------------------------------------
 
+_BATCH_CAPABLE_PROVIDERS = {"anthropic", "openai"}
+
+
 def run_comparison(args: argparse.Namespace) -> None:
     """Execute the full comparison pipeline."""
     run_id = str(uuid.uuid4())
-    source_path = Path(args.source)
+    source_paths = [Path(s) for s in args.source]
     project_path = Path(args.project)
     project_id = project_path.name
 
     # Resolve models
     models = [_resolve_model(m.strip()) for m in args.models.split(",")]
     judge_model = _resolve_model(args.judge)
-    provider = args.provider or get_default_provider()
+    default_provider = args.provider or get_default_provider()
+
+    # Resolve per-model providers (each model may live on a different provider)
+    model_providers: dict[str, str] = {}
+    for model in models:
+        try:
+            model_providers[model] = resolve_provider_for_model(model)
+        except ValueError:
+            model_providers[model] = default_provider
+    try:
+        judge_provider = resolve_provider_for_model(judge_model)
+    except ValueError:
+        judge_provider = default_provider
 
     if len(models) < 2:
         print("ERROR: Need at least 2 models to compare.")
@@ -371,16 +472,20 @@ def run_comparison(args: argparse.Namespace) -> None:
     print(f"  Run ID: {run_id}")
     print(f"{'='*60}\n")
 
-    chapter_text = source_path.read_text(encoding="utf-8")
-    chapter_id = source_path.stem
     config = ChunkingConfig(
         target_size=args.chunk_size,
         overlap_paragraphs=args.overlap_paragraphs,
         min_overlap_words=args.overlap_words,
     )
-    chunks = chunk_chapter(chapter_text, config, chapter_id=chapter_id)
+    chunks: list[Chunk] = []
+    for sp in source_paths:
+        chapter_text = sp.read_text(encoding="utf-8")
+        ch_id = sp.stem
+        ch_chunks = chunk_chapter(chapter_text, config, chapter_id=ch_id)
+        chunks.extend(ch_chunks)
+        print(f"Source: {sp} -> {len(ch_chunks)} chunks (chapter_id={ch_id})")
     print(
-        f"Source: {source_path} → {len(chunks)} chunks "
+        f"Total: {len(chunks)} chunks across {len(source_paths)} source(s) "
         f"(target_size={config.target_size}w, overlap_paragraphs="
         f"{config.overlap_paragraphs}, overlap_words={config.min_overlap_words})"
     )
@@ -451,7 +556,8 @@ def run_comparison(args: argparse.Namespace) -> None:
 
     # Cost estimate (C3)
     cost_est = _estimate_total_cost(
-        chunks, models, judge_model, provider, context_tokens_for_cost,
+        chunks, models, judge_model, judge_provider, context_tokens_for_cost,
+        model_providers=model_providers,
     )
     print(f"\n{cost_est['breakdown']}")
 
@@ -489,32 +595,90 @@ def run_comparison(args: argparse.Namespace) -> None:
     _write_jsonl_header(jsonl_path, run_id, judge_model, prompt_version, git_sha)
 
     print(f"\nOutput: {output_base}")
-    print(f"Models: {', '.join(models)}")
-    print(f"Judge:  {judge_model}")
+    for model in models:
+        mp = model_providers[model]
+        mode = "batch" if mp in ("anthropic", "openai") else "realtime"
+        print(f"  Model: {model} ({mp}, {mode})")
+    print(f"Judge:  {judge_model} ({judge_provider})")
     print(f"Git:    {git_sha[:12]}")
     print()
 
     # --- Phase 1: Translate with each model ---
+    # Batch-capable models (Anthropic, OpenAI) get submitted up front and polled
+    # concurrently so wall-clock time is dominated by the slowest batch rather
+    # than the sum. Realtime providers (DeepInfra, etc.) run sequentially after.
     print("Phase 1: Translating with each model...")
     translations: dict[str, list[Chunk]] = {}
     failed_models: list[str] = []
+    output_dir = project_path / "comparisons" / "_tmp_translations"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    for model in models:
-        print(f"  Translating with {model}...", end=" ", flush=True)
+    batch_models = [m for m in models if model_providers[m] in _BATCH_CAPABLE_PROVIDERS]
+    realtime_models = [m for m in models if model_providers[m] not in _BATCH_CAPABLE_PROVIDERS]
+
+    submitted: dict[str, tuple[dict, list[Chunk]]] = {}
+    batch_prompt_maps: dict[str, dict[str, str]] = {}
+    for model in batch_models:
+        mp = model_providers[model]
+        try:
+            work_chunks = [copy.deepcopy(c) for c in chunks]
+            job_info = submit_translation_job(
+                work_chunks, model, mp, output_dir,
+                glossary=glossary, style_guide=style_guide,
+                project_name=project_id,
+            )
+            submitted[model] = (job_info, work_chunks)
+            batch_prompt_maps[model] = job_info.get("prompt_map", {})
+            print(f"  Submitted {model} ({mp}, batch): job {job_info['job_id']}")
+        except APIError as exc:
+            print(f"  FAILED to submit {model} ({mp}, batch): {exc}")
+            failed_models.append(model)
+            logger.error("Submission failed for model %s: %s", model, exc)
+
+    if submitted:
+        print(f"  Waiting on {len(submitted)} batch job(s)...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(submitted)) as pool:
+            futures = {
+                pool.submit(await_translation_job, info, work, output_dir): model
+                for model, (info, work) in submitted.items()
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                model = futures[fut]
+                try:
+                    translated = fut.result()
+                    translations[model] = translated
+                    print(f"  OK {model}: {len(translated)}/{len(chunks)} chunks")
+                except APIError as exc:
+                    print(f"  FAILED {model}: {exc}")
+                    failed_models.append(model)
+                    logger.error("Translation failed for model %s: %s", model, exc)
+
+    for model in realtime_models:
+        mp = model_providers[model]
+        print(f"  Translating with {model} ({mp}, realtime)...", end=" ", flush=True)
         try:
             translated = translate_chapter_with_model(
                 chunks, model, project_path,
-                provider=provider,
+                provider=mp,
                 glossary=glossary,
                 style_guide=style_guide,
                 project_name=project_id,
             )
             translations[model] = translated
-            print(f"✓ {len(translated)}/{len(chunks)} chunks")
+            print(f"OK {len(translated)}/{len(chunks)} chunks")
         except APIError as exc:
-            print(f"✗ FAILED: {exc}")
+            print(f"FAILED: {exc}")
             failed_models.append(model)
             logger.error("Translation failed for model %s: %s", model, exc)
+
+    # Save full prompt/response logs for each model
+    for model, trans_chunks in translations.items():
+        _save_translation_logs(
+            output_base, model, chunks, trans_chunks,
+            prompt_map=batch_prompt_maps.get(model),
+            glossary=glossary, style_guide=style_guide,
+            project_name=project_id,
+        )
 
     # F3: skip failed models, abort if <2 remain
     surviving_models = [m for m in models if m not in failed_models]
@@ -542,7 +706,7 @@ def run_comparison(args: argparse.Namespace) -> None:
         for tc in translations[model]:
             results = run_all_evaluators(tc, eval_config, glossary=glossary)
             model_eval_results[model][tc.id] = results
-    print("  ✓ Coded evaluators complete")
+    print("  Coded evaluators complete")
 
     # --- Phase 3: Pairwise judge comparisons ---
     print("\nPhase 3: Pairwise judge comparisons...")
@@ -580,7 +744,7 @@ def run_comparison(args: argparse.Namespace) -> None:
                 row = {
                     "run_id": run_id,
                     "project_id": project_id,
-                    "chapter_id": chapter_id,
+                    "chapter_id": chunk.chapter_id,
                     "chunk_id": chunk_id,
                     "source_hash": _sha256(chunk.source_text),
                     "position_a_model": model_a,
@@ -625,7 +789,7 @@ def run_comparison(args: argparse.Namespace) -> None:
                     style_json_path=style_json_path,
                     coded_eval_results_a=evals_a,
                     coded_eval_results_b=evals_b,
-                    judge_provider=provider,
+                    judge_provider=judge_provider,
                     judge_model=judge_model,
                     judge_context_mode=judge_context_mode,
                     translator_context=translator_context,
@@ -681,7 +845,7 @@ def run_comparison(args: argparse.Namespace) -> None:
             row = {
                 "run_id": run_id,
                 "project_id": project_id,
-                "chapter_id": chapter_id,
+                "chapter_id": chunk.chapter_id,
                 "chunk_id": chunk_id,
                 "source_hash": _sha256(chunk.source_text),
                 "position_a_model": pos_a_model,
@@ -754,7 +918,7 @@ def run_comparison(args: argparse.Namespace) -> None:
         b_rate = position_b_wins / total_comparisons
         print(f"Position bias check: A-position wins {a_rate:.0%}, B-position wins {b_rate:.0%}")
         if a_rate > 0.70 or b_rate > 0.70:
-            print("  ⚠️  WARNING: Position bias detected (>70% for one position).")
+            print("  WARNING: Position bias detected (>70% for one position).")
             print("  Judge may be favoring A/B position rather than content.")
         print()
 
@@ -821,8 +985,12 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--source", required=True,
-        help="Path to source chapter text file (e.g. projects/fabre2/chapters/chapter_01.txt)",
+        "--source", required=True, nargs="+",
+        help=(
+            "One or more paths to source chapter text files. "
+            "When multiple are passed, all chunks across chapters are bundled "
+            "into a single batch per model (one Anthropic batch ID per model)."
+        ),
     )
     parser.add_argument(
         "--models", required=True,

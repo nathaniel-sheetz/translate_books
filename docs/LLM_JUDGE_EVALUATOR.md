@@ -108,7 +108,7 @@ python scripts/compare_models.py [OPTIONS]
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--source` | ✓ | — | Path to the source chapter text file |
+| `--source` | ✓ | — | One or more paths to source chapter text files. Pass multiple to bundle all chapters into a single batch per model (see [Multi-chapter runs](#multi-chapter-runs)). |
 | `--models` | ✓ | — | Comma-separated model IDs or aliases (e.g. `sonnet,haiku,opus`) |
 | `--project` | ✓ | — | Path to the project directory |
 | `--judge` | | `claude-sonnet-4-6` | Model used as the judge |
@@ -133,6 +133,22 @@ python scripts/compare_models.py [OPTIONS]
 | `full-prompt` | The full translator prompt that was sent for each chunk — book title, per-chunk glossary, style guide, translation instructions — as `<translator_context>`. The source slot inside is replaced with a pointer to the `<source>` tag to avoid duplication. | You want the judge to evaluate each translation against the exact brief the translator received (glossary compliance, dialect, instructions). |
 
 Both modes score all four rubric dimensions (Fluency, Fidelity, Regional, Voice). The judge prompt template differs, so `judge_prompt_version` in the CSV/JSONL changes between modes — runs are not directly comparable across modes.
+
+### Multi-chapter runs
+
+`--source` accepts multiple paths. Chunks from every chapter are concatenated and submitted as a single Anthropic batch per batch-capable model (rather than one batch per chapter), and all batches are polled concurrently. This is the right shape when you want to sweep many chapters in one harness invocation.
+
+```bash
+python scripts/compare_models.py \
+    --source projects/50-famous/chapters/chapter_27.txt \
+             projects/50-famous/chapters/chapter_28.txt \
+             projects/50-famous/chapters/chapter_29.txt \
+    --models sonnet,haiku \
+    --project projects/50-famous \
+    --judge-context full-prompt --chunk-size 10000
+```
+
+The Anthropic Batches console will show one batch per batch-capable model (each containing one request per chunk per chapter), running in parallel. The `chapter_id` column in `pairwise.csv` keys each row back to its source file, so per-chapter rollups can be done in post-processing.
 
 ### Chunking knobs
 
