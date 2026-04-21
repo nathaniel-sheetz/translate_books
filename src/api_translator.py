@@ -104,6 +104,18 @@ def get_model_pricing(provider_id: str, model_id: str) -> dict:
     return {"input": 5.00, "output": 15.00}
 
 
+def resolve_provider_for_model(model_id: str) -> str:
+    """Return the provider ID that owns *model_id*, or raise ValueError."""
+    config = load_llm_config()
+    for p in config["providers"]:
+        for m in p.get("models", []):
+            if m["id"] == model_id:
+                return p["id"]
+    raise ValueError(
+        f"Model '{model_id}' not found in any provider in llm_config.json"
+    )
+
+
 def get_pricing_table() -> dict:
     """Build and return a ``PRICING_TABLE``-shaped dict from config."""
     config = load_llm_config()
@@ -1038,6 +1050,188 @@ def _retrieve_openai_results(
 # ============================================================================
 # Batch Job Tracking
 # ============================================================================
+
+
+_BATCH_CAPABLE_PROVIDERS = {"anthropic", "openai"}
+
+
+def translate_chapter_with_model(
+    chunks: list[Chunk],
+    model_id: str,
+    project_path: Path,
+    provider: Provider | None = None,
+    glossary: Optional[Glossary] = None,
+    style_guide: Optional[StyleGuide] = None,
+    project_name: str = "Translation Project",
+    source_language: str = "English",
+    target_language: str = "Spanish",
+) -> list[Chunk]:
+    """Translate all chunks for a chapter using a specific model.
+
+    For batch-capable providers (Anthropic, OpenAI) uses the Batch API.
+    For other providers (DeepInfra, etc.) falls back to sequential realtime
+    calls so every model in ``llm_config.json`` can participate in
+    comparisons.
+
+    Args:
+        chunks: Source chunks to translate.
+        model_id: Model identifier (e.g. ``"claude-sonnet-4-6"``).
+        project_path: Path to the project directory (used for output_dir).
+        provider: LLM provider; auto-resolved from *model_id* if ``None``.
+        glossary: Optional glossary.
+        style_guide: Optional style guide.
+        project_name: Project name for prompt context.
+        source_language: Source language name.
+        target_language: Target language name.
+
+    Returns:
+        List of chunks with ``translated_text`` populated.
+
+    Raises:
+        APIError: If batch submission, polling, or retrieval fails.
+    """
+    import copy
+
+    if provider is None:
+        try:
+            prov = resolve_provider_for_model(model_id)
+        except ValueError:
+            prov = get_default_provider()
+    else:
+        prov = provider
+
+    output_dir = project_path / "comparisons" / "_tmp_translations"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deep-copy chunks so the caller's originals stay untouched
+    work_chunks = [copy.deepcopy(c) for c in chunks]
+
+    if prov in _BATCH_CAPABLE_PROVIDERS:
+        return _translate_via_batch(work_chunks, model_id, prov, output_dir,
+                                    glossary, style_guide, project_name,
+                                    source_language, target_language)
+    else:
+        return _translate_via_realtime(work_chunks, model_id, prov,
+                                       glossary, style_guide, project_name,
+                                       source_language, target_language)
+
+
+def submit_translation_job(
+    work_chunks: list[Chunk],
+    model_id: str,
+    prov: str,
+    output_dir: Path,
+    glossary: Optional[Glossary] = None,
+    style_guide: Optional[StyleGuide] = None,
+    project_name: str = "Translation Project",
+    source_language: str = "English",
+    target_language: str = "Spanish",
+) -> dict:
+    """Submit a batch translation job and return the job_info without polling.
+
+    Pair with ``await_translation_job`` to poll and retrieve results. Splitting
+    submit from wait lets callers fan out submissions for multiple models
+    concurrently before blocking on any of them.
+    """
+    return submit_batch(
+        work_chunks, prov, model_id, output_dir,
+        glossary=glossary, style_guide=style_guide,
+        project_name=project_name,
+        source_language=source_language,
+        target_language=target_language,
+    )
+
+
+def await_translation_job(
+    job_info: dict,
+    work_chunks: list[Chunk],
+    output_dir: Path,
+    poll_interval_seconds: int = 30,
+    max_polls: int = 60,
+) -> list[Chunk]:
+    """Poll a previously-submitted batch job until it completes, then retrieve results."""
+    job_id = job_info["job_id"]
+    prov = job_info["provider"]
+    model_id = job_info["model"]
+
+    import time as _time
+    for _ in range(max_polls):
+        status = check_batch_status(job_id, prov)
+        if status["status"] in ("completed", "ended"):
+            break
+        if status["status"] in ("failed", "expired", "cancelled"):
+            raise APIError(
+                f"Batch {job_id} for model {model_id} "
+                f"ended with status: {status['status']}"
+            )
+        _time.sleep(poll_interval_seconds)
+    else:
+        total_minutes = (poll_interval_seconds * max_polls) // 60
+        raise APIError(
+            f"Batch {job_id} for model {model_id} timed out after {total_minutes} minutes"
+        )
+
+    translated = retrieve_batch_results(
+        job_id, prov, work_chunks, output_dir,
+        model=model_id, prompt_map=job_info.get("prompt_map"),
+    )
+
+    if not translated:
+        raise APIError(
+            f"Batch {job_id} for model {model_id} returned zero translations"
+        )
+
+    return translated
+
+
+def _translate_via_batch(
+    work_chunks: list[Chunk],
+    model_id: str,
+    prov: str,
+    output_dir: Path,
+    glossary: Optional[Glossary],
+    style_guide: Optional[StyleGuide],
+    project_name: str,
+    source_language: str,
+    target_language: str,
+) -> list[Chunk]:
+    """Submit a batch job and poll until complete."""
+    job_info = submit_translation_job(
+        work_chunks, model_id, prov, output_dir,
+        glossary=glossary, style_guide=style_guide,
+        project_name=project_name,
+        source_language=source_language,
+        target_language=target_language,
+    )
+    return await_translation_job(job_info, work_chunks, output_dir)
+
+
+def _translate_via_realtime(
+    work_chunks: list[Chunk],
+    model_id: str,
+    prov: str,
+    glossary: Optional[Glossary],
+    style_guide: Optional[StyleGuide],
+    project_name: str,
+    source_language: str,
+    target_language: str,
+) -> list[Chunk]:
+    """Translate chunks one-by-one via realtime API calls."""
+    translated: list[Chunk] = []
+    for chunk in work_chunks:
+        result = translate_chunk_realtime(
+            chunk, prov, model_id,
+            glossary=glossary, style_guide=style_guide,
+            project_name=project_name,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        translated.append(result)
+    if not translated:
+        raise APIError(
+            f"Realtime translation for model {model_id} returned zero translations"
+        )
+    return translated
 
 
 def save_batch_job(job_info: dict, tracking_file: Path = Path("batch_jobs.json")):

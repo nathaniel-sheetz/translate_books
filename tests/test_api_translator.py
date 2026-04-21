@@ -18,6 +18,8 @@ from src.api_translator import (
     call_anthropic_api,
     call_openai_api,
     submit_batch,
+    submit_translation_job,
+    await_translation_job,
     check_batch_status,
     retrieve_batch_results,
     save_batch_job,
@@ -712,6 +714,90 @@ def test_update_batch_job_status(tmp_path):
     jobs = load_batch_jobs(tracking_file)
     assert jobs[0]["status"] == "completed"
     assert "completed_at" in jobs[0]
+
+
+def test_submit_translation_job_returns_job_info_without_polling(sample_chunk, tmp_path):
+    """submit_translation_job should call batches.create but never poll."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_submit_only"
+        mock_batch.processing_status = "in_progress"
+        mock_client.messages.batches.create.return_value = mock_batch
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            job_info = submit_translation_job(
+                work_chunks=[sample_chunk],
+                model_id='claude-sonnet-4-6',
+                prov='anthropic',
+                output_dir=tmp_path,
+            )
+
+        assert job_info["job_id"] == "batch_submit_only"
+        assert job_info["provider"] == "anthropic"
+        assert job_info["model"] == "claude-sonnet-4-6"
+        mock_client.messages.batches.create.assert_called_once()
+        # Crucially, no status retrieval happened — that's await_translation_job's job.
+        mock_client.messages.batches.retrieve.assert_not_called()
+
+
+def test_await_translation_job_polls_then_retrieves(sample_chunk, tmp_path):
+    """await_translation_job should poll until 'ended' then call retrieve_batch_results."""
+    job_info = {
+        "job_id": "batch_await_test",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "prompt_map": {sample_chunk.id: "rendered prompt"},
+    }
+
+    translated_sample = sample_chunk.model_copy(update={"translated_text": "traducción"})
+
+    with patch('src.api_translator.check_batch_status') as mock_check, \
+         patch('src.api_translator.retrieve_batch_results') as mock_retrieve, \
+         patch('time.sleep'):  # don't actually sleep between polls
+        # First poll: still running. Second poll: ended.
+        mock_check.side_effect = [
+            {"status": "in_progress"},
+            {"status": "ended"},
+        ]
+        mock_retrieve.return_value = [translated_sample]
+
+        result = await_translation_job(
+            job_info, [sample_chunk], tmp_path,
+            poll_interval_seconds=0,  # explicit no-wait for test speed
+            max_polls=5,
+        )
+
+        assert result == [translated_sample]
+        assert mock_check.call_count == 2
+        mock_retrieve.assert_called_once()
+        retrieve_kwargs = mock_retrieve.call_args.kwargs
+        assert retrieve_kwargs["model"] == "claude-sonnet-4-6"
+        assert retrieve_kwargs["prompt_map"] == {sample_chunk.id: "rendered prompt"}
+
+
+def test_await_translation_job_raises_on_failed_batch(sample_chunk, tmp_path):
+    """await_translation_job should raise APIError if the batch ends in a failed state."""
+    job_info = {
+        "job_id": "batch_failed",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+    }
+
+    with patch('src.api_translator.check_batch_status') as mock_check, \
+         patch('src.api_translator.retrieve_batch_results') as mock_retrieve, \
+         patch('time.sleep'):
+        mock_check.return_value = {"status": "failed"}
+
+        with pytest.raises(APIError, match="failed"):
+            await_translation_job(
+                job_info, [sample_chunk], tmp_path,
+                poll_interval_seconds=0, max_polls=5,
+            )
+        mock_retrieve.assert_not_called()
 
 
 def test_batch_submission_filters_glossary(sample_chunk, tmp_path):

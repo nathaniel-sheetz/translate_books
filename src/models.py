@@ -8,7 +8,7 @@ used throughout the translation pipeline.
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, computed_field
 
@@ -589,6 +589,36 @@ class ProjectStatistics(BaseModel):
     total_words: int = Field(default=0, ge=0)
     total_errors: int = Field(default=0, ge=0)
     total_warnings: int = Field(default=0, ge=0)
+
+
+class JudgeScore(BaseModel):
+    """Per-dimension absolute scores from the LLM judge (1-5 scale)."""
+    fluency: int = Field(ge=1, le=5)
+    fidelity: int = Field(ge=1, le=5)
+    regional: int = Field(ge=1, le=5)
+    voice: Optional[int] = Field(default=None, ge=1, le=5)
+    rationale: str
+    raw_response: str
+
+    @computed_field
+    @property
+    def normalized_score(self) -> float:
+        """Maps avg of present dims [1,5] to [0.0, 1.0] for EvalResult.score."""
+        dims = [self.fluency, self.fidelity, self.regional]
+        if self.voice is not None:
+            dims.append(self.voice)
+        return (sum(dims) / len(dims) - 1) / 4
+
+
+class PairwiseVerdict(BaseModel):
+    """Per-dimension pairwise winner verdicts from the LLM judge."""
+    fluency_winner: Literal['A', 'B', 'tie']
+    fidelity_winner: Literal['A', 'B', 'tie']
+    regional_winner: Literal['A', 'B', 'tie']
+    voice_winner: Literal['A', 'B', 'tie', 'N/A']
+    overall_winner: Literal['A', 'B', 'tie']
+    rationale: str
+    raw_response: str
 
 
 class PipelineStage(str, Enum):
