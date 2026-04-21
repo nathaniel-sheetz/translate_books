@@ -7,10 +7,168 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+/* Theme variables */
+
+:root {
+    --bg: #faf8f5;
+    --bg-card: #fff;
+    --bg-hover: #f0ece7;
+    --bg-active: #e0d8cc;
+    --bg-input: #faf8f5;
+    --bg-btn: #f0ece7;
+    --bg-btn-hover: #ece8e3;
+    --bg-filter: #f5f3f0;
+    --bg-filter-hover: #ece8e3;
+    --text: #2c2c2c;
+    --text-heading: #1a1a1a;
+    --text-muted: #888;
+    --text-muted2: #999;
+    --text-muted3: #666;
+    --text-muted4: #555;
+    --text-muted5: #777;
+    --text-muted6: #aaa;
+    --text-link: #666;
+    --text-link-hover: #333;
+    --border: #e8e4df;
+    --border-light: #ddd;
+    --border-divider: #f0f0f0;
+    --accent: #5a9e6f;
+    --accent-dark: #4a8e5f;
+    --accent-bg: rgba(90, 158, 111, 0.1);
+    --accent-border: rgba(90, 158, 111, 0.3);
+    --accent-btn-bg: #eef6f0;
+    --sheet-bg: #fff;
+    --sheet-shadow: rgba(0, 0, 0, 0.1);
+    --overlay-bg: rgba(0, 0, 0, 0.2);
+    --modal-overlay: rgba(0, 0, 0, 0.45);
+    --modal-shadow: rgba(0, 0, 0, 0.18);
+    --handle-bg: #ddd;
+    --btn-save-disabled: #ccc;
+    --status-pending-bg: #f5f3f0;
+    --status-pending-color: #888;
+    --status-progress-bg: #e8f0fe;
+    --status-progress-color: #1a73e8;
+    --status-progress-border: #c5d9f5;
+    --status-complete-bg: #e6f4ea;
+    --status-complete-color: #2d8a4e;
+    --status-complete-border: #b7dfbf;
+    --status-archived-bg: #f0ece7;
+    --status-archived-color: #aaa;
+    --status-ok: #2d8a4e;
+    --status-missing: #b33;
+    --btn-new-bg: #4f46e5;
+    --btn-card-border: #ccc;
+    --btn-setup-bg: #f7f5f2;
+    --modal-input-border: #d1d5db;
+    --ann-word-choice: rgba(100, 149, 237, 0.12);
+    --ann-word-choice-badge: rgba(100, 149, 237, 0.15);
+    --ann-word-choice-color: #4a7abf;
+    --ann-inconsistency: rgba(230, 160, 50, 0.12);
+    --ann-footnote: rgba(140, 100, 180, 0.12);
+    --ann-footnote-color: #8a6aaf;
+    --ann-flag: rgba(180, 180, 180, 0.15);
+    --ann-flag-badge: rgba(180, 180, 180, 0.2);
+    --ann-flag-color: #888;
+    --ann-hover: rgba(0, 0, 0, 0.06);
+    --ann-active: rgba(0, 0, 0, 0.08);
+    --ann-remove: #ccc;
+    --ann-remove-active: #c66;
+    --ann-remove-hover: #a33;
+    --badge-unread-bg: rgba(180, 180, 180, 0.12);
+    --badge-warn-bg: rgba(220, 140, 40, 0.12);
+    --badge-warn-color: #b07020;
+    --banner-warn-bg: rgba(220, 140, 40, 0.1);
+    --low-confidence-border: #ccc;
+    --corrected-dot: #5a9e6f;
+    --btn-reviewed-bg: #f5f3f0;
+    --btn-reviewed-color: #555;
+    --sheet-edit-hover: #e6e0d8;
+    --disabled-nav: #ddd;
+    --btn-disabled-color: #aaa;
+}
+
+[data-theme="dark"] {
+    --bg: #1a1a1a;
+    --bg-card: #252525;
+    --bg-hover: #333;
+    --bg-active: #444;
+    --bg-input: #1e1e1e;
+    --bg-btn: #333;
+    --bg-btn-hover: #3a3a3a;
+    --bg-filter: #2a2a2a;
+    --bg-filter-hover: #383838;
+    --text: #e0ddd8;
+    --text-heading: #f0ece7;
+    --text-muted: #999;
+    --text-muted2: #888;
+    --text-muted3: #aaa;
+    --text-muted4: #bbb;
+    --text-muted5: #999;
+    --text-muted6: #777;
+    --text-link: #aaa;
+    --text-link-hover: #ddd;
+    --border: #3a3a3a;
+    --border-light: #444;
+    --border-divider: #333;
+    --accent: #6ab87f;
+    --accent-dark: #5aa86f;
+    --accent-bg: rgba(106, 184, 127, 0.15);
+    --accent-border: rgba(106, 184, 127, 0.3);
+    --accent-btn-bg: rgba(106, 184, 127, 0.12);
+    --sheet-bg: #252525;
+    --sheet-shadow: rgba(0, 0, 0, 0.4);
+    --overlay-bg: rgba(0, 0, 0, 0.5);
+    --modal-overlay: rgba(0, 0, 0, 0.6);
+    --modal-shadow: rgba(0, 0, 0, 0.4);
+    --handle-bg: #555;
+    --btn-save-disabled: #555;
+    --status-pending-bg: #2a2a2a;
+    --status-pending-color: #888;
+    --status-progress-bg: rgba(26, 115, 232, 0.15);
+    --status-progress-color: #6aafff;
+    --status-progress-border: rgba(26, 115, 232, 0.3);
+    --status-complete-bg: rgba(45, 138, 78, 0.15);
+    --status-complete-color: #6ab87f;
+    --status-complete-border: rgba(45, 138, 78, 0.3);
+    --status-archived-bg: #2a2a2a;
+    --status-archived-color: #666;
+    --status-ok: #6ab87f;
+    --status-missing: #e06060;
+    --btn-new-bg: #6366f1;
+    --btn-card-border: #555;
+    --btn-setup-bg: #2a2a2a;
+    --modal-input-border: #444;
+    --ann-word-choice: rgba(100, 149, 237, 0.18);
+    --ann-word-choice-badge: rgba(100, 149, 237, 0.2);
+    --ann-word-choice-color: #7aa8e8;
+    --ann-inconsistency: rgba(230, 160, 50, 0.18);
+    --ann-footnote: rgba(140, 100, 180, 0.18);
+    --ann-footnote-color: #b08ad8;
+    --ann-flag: rgba(180, 180, 180, 0.1);
+    --ann-flag-badge: rgba(180, 180, 180, 0.15);
+    --ann-flag-color: #999;
+    --ann-hover: rgba(255, 255, 255, 0.06);
+    --ann-active: rgba(255, 255, 255, 0.08);
+    --ann-remove: #666;
+    --ann-remove-active: #e06060;
+    --ann-remove-hover: #ff6666;
+    --badge-unread-bg: rgba(180, 180, 180, 0.1);
+    --badge-warn-bg: rgba(220, 140, 40, 0.15);
+    --badge-warn-color: #d4943a;
+    --banner-warn-bg: rgba(220, 140, 40, 0.12);
+    --low-confidence-border: #555;
+    --corrected-dot: #6ab87f;
+    --btn-reviewed-bg: #2a2a2a;
+    --btn-reviewed-color: #bbb;
+    --sheet-edit-hover: #3a3a3a;
+    --disabled-nav: #555;
+    --btn-disabled-color: #555;
+}
+
 body {
     font-family: Georgia, 'Times New Roman', serif;
-    background: #faf8f5;
-    color: #2c2c2c;
+    background: var(--bg);
+    color: var(--text);
     min-height: 100vh;
     overflow-x: hidden;
 }
@@ -33,7 +191,7 @@ body {
 .nav-header h1 {
     font-size: 28px;
     font-weight: 400;
-    color: #1a1a1a;
+    color: var(--text-heading);
     margin-bottom: 0;
 }
 
@@ -41,7 +199,7 @@ body {
     font-size: 28px;
     font-weight: 400;
     margin-bottom: 24px;
-    color: #1a1a1a;
+    color: var(--text-heading);
 }
 
 .lang-toggle {
@@ -51,12 +209,12 @@ body {
 }
 
 .lang-btn {
-    background: #f0ece7;
-    border: 1px solid #ddd;
+    background: var(--bg-btn);
+    border: 1px solid var(--border-light);
     padding: 6px 12px;
     font-size: 13px;
     font-weight: 500;
-    color: #888;
+    color: var(--text-muted);
     cursor: pointer;
 }
 
@@ -69,14 +227,14 @@ body {
 }
 
 .lang-btn.active {
-    background: #5a9e6f;
-    border-color: #5a9e6f;
+    background: var(--accent);
+    border-color: var(--accent);
     color: #fff;
 }
 
 .back-link {
     display: inline-block;
-    color: #666;
+    color: var(--text-link);
     text-decoration: none;
     font-size: 16px;
     margin-bottom: 16px;
@@ -84,7 +242,7 @@ body {
 }
 
 .back-link:hover {
-    color: #333;
+    color: var(--text-link-hover);
 }
 
 .nav-list {
@@ -92,11 +250,11 @@ body {
 }
 
 .nav-list li {
-    border-bottom: 1px solid #e8e4df;
+    border-bottom: 1px solid var(--border);
 }
 
 .nav-list li:first-child {
-    border-top: 1px solid #e8e4df;
+    border-top: 1px solid var(--border);
 }
 
 .nav-list a {
@@ -109,12 +267,12 @@ body {
 }
 
 .nav-list a:active {
-    background: #f0ece7;
+    background: var(--bg-hover);
 }
 
 .nav-title {
     font-size: 18px;
-    color: #1a1a1a;
+    color: var(--text-heading);
 }
 
 .nav-meta {
@@ -123,7 +281,7 @@ body {
     flex-wrap: wrap;
     justify-content: flex-end;
     font-size: 14px;
-    color: #888;
+    color: var(--text-muted);
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
@@ -141,7 +299,7 @@ body {
 .filter-label {
     font-size: 13px;
     font-weight: 600;
-    color: #666;
+    color: var(--text-muted3);
     margin-right: 2px;
 }
 
@@ -149,20 +307,20 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
     padding: 4px 12px;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-light);
     border-radius: 14px;
-    background: #f5f3f0;
-    color: #888;
+    background: var(--bg-filter);
+    color: var(--text-muted);
     cursor: pointer;
 }
 
 .filter-btn:hover {
-    background: #ece8e3;
+    background: var(--bg-filter-hover);
 }
 
 .filter-btn.active {
-    background: #5a9e6f;
-    border-color: #5a9e6f;
+    background: var(--accent);
+    border-color: var(--accent);
     color: #fff;
 }
 
@@ -175,10 +333,10 @@ body {
 }
 
 .project-card {
-    border: 1px solid #e8e4df;
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 16px;
-    background: #fff;
+    background: var(--bg-card);
 }
 
 .project-card-header {
@@ -193,7 +351,7 @@ body {
 .nav-subtitle {
     display: block;
     font-size: 14px;
-    color: #888;
+    color: var(--text-muted);
     font-style: italic;
     margin-top: 2px;
 }
@@ -206,33 +364,33 @@ body {
     font-size: 12px;
     padding: 3px 8px;
     border-radius: 10px;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-light);
     cursor: pointer;
     font-weight: 500;
     appearance: auto;
 }
 
 .status-select.status-pending {
-    background: #f5f3f0;
-    color: #888;
+    background: var(--status-pending-bg);
+    color: var(--status-pending-color);
 }
 
 .status-select.status-in_progress {
-    background: #e8f0fe;
-    color: #1a73e8;
-    border-color: #c5d9f5;
+    background: var(--status-progress-bg);
+    color: var(--status-progress-color);
+    border-color: var(--status-progress-border);
 }
 
 .status-select.status-complete {
-    background: #e6f4ea;
-    color: #2d8a4e;
-    border-color: #b7dfbf;
+    background: var(--status-complete-bg);
+    color: var(--status-complete-color);
+    border-color: var(--status-complete-border);
 }
 
 .status-select.status-archived {
-    background: #f0ece7;
-    color: #aaa;
-    border-color: #ddd;
+    background: var(--status-archived-bg);
+    color: var(--status-archived-color);
+    border-color: var(--border-light);
 }
 
 /* Archived card */
@@ -256,19 +414,19 @@ body {
 }
 
 .status-label {
-    color: #666;
+    color: var(--text-muted3);
 }
 
 .status-value {
-    color: #333;
+    color: var(--text-link-hover);
 }
 
 .status-ok {
-    color: #2d8a4e;
+    color: var(--status-ok);
 }
 
 .status-missing {
-    color: #b33;
+    color: var(--status-missing);
 }
 
 .project-card-actions {
@@ -283,22 +441,22 @@ body {
     text-decoration: none;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
-    color: #1a1a1a;
-    border: 1px solid #ccc;
+    color: var(--text-heading);
+    border: 1px solid var(--btn-card-border);
     cursor: pointer;
 }
 
 .btn-card:hover {
-    background: #f0ece7;
+    background: var(--bg-hover);
 }
 
 .btn-setup {
-    background: #f7f5f2;
+    background: var(--btn-setup-bg);
 }
 
 .btn-disabled {
-    color: #aaa;
-    border-color: #ddd;
+    color: var(--btn-disabled-color);
+    border-color: var(--border-light);
     cursor: default;
 }
 
@@ -309,7 +467,7 @@ body {
 }
 
 .btn-new-project {
-    background: #4f46e5;
+    background: var(--btn-new-bg);
     color: #fff;
     border: none;
     border-radius: 6px;
@@ -327,7 +485,7 @@ body {
 .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--modal-overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -335,14 +493,14 @@ body {
 }
 
 .modal-box {
-    background: #fff;
+    background: var(--bg-card);
     border-radius: 10px;
     padding: 28px 32px;
     min-width: 320px;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+    box-shadow: 0 8px 32px var(--modal-shadow);
 }
 
 .modal-box h2 {
@@ -353,11 +511,13 @@ body {
 
 .modal-box input[type=text] {
     padding: 8px 10px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--modal-input-border);
     border-radius: 6px;
     font-size: 15px;
     width: 100%;
     box-sizing: border-box;
+    background: var(--bg-input);
+    color: var(--text);
 }
 
 .modal-actions {
@@ -371,7 +531,7 @@ body {
 }
 
 .empty-state {
-    color: #888;
+    color: var(--text-muted);
     font-size: 16px;
     font-style: italic;
     margin-top: 40px;
@@ -389,33 +549,33 @@ body {
 }
 
 .badge-review {
-    background: rgba(100, 149, 237, 0.15);
-    color: #4a7abf;
+    background: var(--ann-word-choice-badge);
+    color: var(--ann-word-choice-color);
 }
 
 .badge-footnote {
-    background: rgba(140, 100, 180, 0.12);
-    color: #8a6aaf;
+    background: var(--ann-footnote);
+    color: var(--ann-footnote-color);
 }
 
 .badge-flag {
-    background: rgba(180, 180, 180, 0.2);
-    color: #888;
+    background: var(--ann-flag-badge);
+    color: var(--ann-flag-color);
 }
 
 .badge-warn {
-    background: rgba(220, 140, 40, 0.12);
-    color: #b07020;
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-color);
 }
 
 .badge-clean {
-    background: rgba(90, 158, 111, 0.1);
-    color: #5a9e6f;
+    background: var(--accent-bg);
+    color: var(--accent);
 }
 
 .badge-unread {
-    background: rgba(180, 180, 180, 0.12);
-    color: #aaa;
+    background: var(--badge-unread-bg);
+    color: var(--text-muted6);
 }
 
 /* Chapter list banner */
@@ -434,20 +594,20 @@ body {
 }
 
 .banner-warn {
-    background: rgba(220, 140, 40, 0.1);
-    color: #b07020;
+    background: var(--banner-warn-bg);
+    color: var(--badge-warn-color);
 }
 
 .banner-success {
-    background: rgba(90, 158, 111, 0.1);
-    color: #5a9e6f;
+    background: var(--accent-bg);
+    color: var(--accent);
 }
 
 .btn-apply {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
     padding: 5px 16px;
-    background: #b07020;
+    background: var(--badge-warn-color);
     color: #fff;
     border: none;
     border-radius: 4px;
@@ -468,8 +628,8 @@ body {
     left: 0;
     right: 0;
     height: 48px;
-    background: #faf8f5;
-    border-bottom: 1px solid #e8e4df;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
     padding: 0 16px;
@@ -492,7 +652,7 @@ body {
 
 .nav-chevron {
     font-size: 22px;
-    color: #555;
+    color: var(--text-muted4);
     text-decoration: none;
     padding: 4px 8px;
     line-height: 1;
@@ -500,19 +660,19 @@ body {
 }
 
 .nav-chevron.disabled {
-    color: #ddd;
+    color: var(--disabled-nav);
     pointer-events: none;
 }
 
 .reader-title {
     font-size: 16px;
-    color: #555;
+    color: var(--text-muted4);
     white-space: nowrap;
 }
 
 .reader-stats {
     font-size: 14px;
-    color: #999;
+    color: var(--text-muted2);
     white-space: nowrap;
     margin-left: 8px;
     cursor: pointer;
@@ -530,7 +690,7 @@ body {
 
 .reader-content .loading {
     text-align: center;
-    color: #999;
+    color: var(--text-muted2);
     font-style: italic;
     padding: 80px 0;
 }
@@ -548,7 +708,7 @@ body {
 
 @media (hover: hover) {
     .sentence:hover {
-        background: #f0ece7;
+        background: var(--bg-hover);
     }
 }
 
@@ -556,7 +716,7 @@ body {
    to avoid flash on scroll gestures */
 
 .sentence.active {
-    background: #e0d8cc;
+    background: var(--bg-active);
 }
 
 .sentence.corrected {
@@ -568,48 +728,48 @@ body {
     display: inline-block;
     width: 6px;
     height: 6px;
-    background: #5a9e6f;
+    background: var(--corrected-dot);
     border-radius: 50%;
     margin-left: 3px;
     vertical-align: super;
 }
 
 .sentence.low-confidence {
-    border-bottom: 1px dashed #ccc;
+    border-bottom: 1px dashed var(--low-confidence-border);
 }
 
 /* Annotated sentences — subtle background tints */
 
 .sentence.ann-word_choice {
-    background: rgba(100, 149, 237, 0.12);
+    background: var(--ann-word-choice);
 }
 
 .sentence.ann-inconsistency {
-    background: rgba(230, 160, 50, 0.12);
+    background: var(--ann-inconsistency);
 }
 
 .sentence.ann-footnote {
-    background: rgba(140, 100, 180, 0.12);
+    background: var(--ann-footnote);
 }
 
 .sentence.ann-flag {
-    background: rgba(180, 180, 180, 0.15);
+    background: var(--ann-flag);
 }
 
 /* Keep hover/active visible on annotated sentences */
 .sentence[class*="ann-"]:hover {
-    background: rgba(0, 0, 0, 0.06);
+    background: var(--ann-hover);
 }
 
 .sentence[class*="ann-"].active {
-    background: rgba(0, 0, 0, 0.08);
+    background: var(--ann-active);
 }
 
 /* Annotation controls in bottom sheet */
 
 .sheet-annotation {
     padding: 10px 0;
-    border-bottom: 1px solid #f0f0f0;
+    border-bottom: 1px solid var(--border-divider);
 }
 
 .ann-type-row {
@@ -619,35 +779,35 @@ body {
 }
 
 .ann-type-btn {
-    background: #f5f3f0;
+    background: var(--bg-filter);
     border: 2px solid transparent;
     border-radius: 8px;
     padding: 8px 12px;
     font-size: 16px;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
-    color: #999;
+    color: var(--text-muted2);
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
 .ann-type-btn:hover {
-    background: #ece8e3;
-    color: #666;
+    background: var(--bg-filter-hover);
+    color: var(--text-muted3);
 }
 
 .ann-type-btn.selected {
-    border-color: #5a9e6f;
-    background: #eef6f0;
-    color: #5a9e6f;
+    border-color: var(--accent);
+    background: var(--accent-btn-bg);
+    color: var(--accent);
 }
 
 .ann-remove-btn {
     background: none;
     border: none;
     font-size: 16px;
-    color: #ccc;
+    color: var(--ann-remove);
     cursor: pointer;
     margin-left: auto;
     padding: 6px 10px;
@@ -656,17 +816,17 @@ body {
 
 .ann-remove-btn.has-annotation {
     display: block;
-    color: #c66;
+    color: var(--ann-remove-active);
 }
 
 .ann-remove-btn:hover {
-    color: #a33;
+    color: var(--ann-remove-hover);
 }
 
 .ann-type-label {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
-    color: #888;
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     margin-top: 8px;
@@ -684,22 +844,22 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
     padding: 8px 10px;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-light);
     border-radius: 6px;
-    background: #faf8f5;
-    color: #2c2c2c;
+    background: var(--bg-input);
+    color: var(--text);
 }
 
 .ann-note-row input:focus {
     outline: none;
-    border-color: #5a9e6f;
+    border-color: var(--accent);
 }
 
 .btn-ann-save {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
     padding: 8px 16px;
-    background: #5a9e6f;
+    background: var(--accent);
     color: #fff;
     border: none;
     border-radius: 6px;
@@ -708,14 +868,14 @@ body {
 }
 
 .btn-ann-save:active {
-    background: #4a8e5f;
+    background: var(--accent-dark);
 }
 
 .ann-existing {
     margin-top: 8px;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
-    color: #777;
+    color: var(--text-muted5);
     font-style: italic;
 }
 
@@ -744,7 +904,7 @@ body {
 .sheet-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--overlay-bg);
     z-index: 200;
     opacity: 0;
     pointer-events: none;
@@ -761,9 +921,9 @@ body {
     bottom: 0;
     left: 0;
     right: 0;
-    background: #fff;
+    background: var(--sheet-bg);
     border-radius: 16px 16px 0 0;
-    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 -4px 20px var(--sheet-shadow);
     z-index: 300;
     transform: translateY(100%);
     transition: transform 0.25s ease;
@@ -783,7 +943,7 @@ body {
 .sheet-handle {
     width: 36px;
     height: 4px;
-    background: #ddd;
+    background: var(--handle-bg);
     border-radius: 2px;
     margin: 10px auto 12px;
     cursor: grab;
@@ -801,14 +961,14 @@ body {
     font-size: 13px;
     text-transform: uppercase;
     letter-spacing: 1px;
-    color: #999;
+    color: var(--text-muted2);
 }
 
 .sheet-close {
     background: none;
     border: none;
     font-size: 24px;
-    color: #999;
+    color: var(--text-muted2);
     cursor: pointer;
     padding: 4px 8px;
 }
@@ -816,26 +976,26 @@ body {
 .sheet-edit-chunk {
     margin-left: auto;
     margin-right: 8px;
-    background: #f0ece7;
-    border: 1px solid #ddd;
+    background: var(--bg-btn);
+    border: 1px solid var(--border-light);
     border-radius: 4px;
     padding: 4px 10px;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 12px;
-    color: #555;
+    color: var(--text-muted4);
     cursor: pointer;
 }
 
 .sheet-edit-chunk:hover {
-    background: #e6e0d8;
+    background: var(--sheet-edit-hover);
 }
 
 .sheet-en {
     font-size: 17px;
     line-height: 1.6;
-    color: #555;
+    color: var(--text-muted4);
     padding: 12px 0;
-    border-bottom: 1px solid #f0f0f0;
+    border-bottom: 1px solid var(--border-divider);
 }
 
 /* Edit area — hidden by default, shown when sheet expanded */
@@ -854,17 +1014,17 @@ body {
     font-family: Georgia, 'Times New Roman', serif;
     font-size: 17px;
     line-height: 1.6;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-light);
     border-radius: 8px;
     padding: 12px;
     resize: vertical;
-    color: #2c2c2c;
-    background: #faf8f5;
+    color: var(--text);
+    background: var(--bg-input);
 }
 
 #sheet-textarea:focus {
     outline: none;
-    border-color: #5a9e6f;
+    border-color: var(--accent);
 }
 
 .sheet-actions {
@@ -877,7 +1037,7 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 15px;
     padding: 10px 28px;
-    background: #5a9e6f;
+    background: var(--accent);
     color: #fff;
     border: none;
     border-radius: 8px;
@@ -886,11 +1046,11 @@ body {
 }
 
 .btn-save:active {
-    background: #4a8e5f;
+    background: var(--accent-dark);
 }
 
 .btn-save:disabled {
-    background: #ccc;
+    background: var(--btn-save-disabled);
     cursor: not-allowed;
 }
 
@@ -899,7 +1059,7 @@ body {
 .review-marker {
     text-align: center;
     padding: 40px 0 20px;
-    border-top: 1px solid #e8e4df;
+    border-top: 1px solid var(--border);
     margin-top: 2em;
 }
 
@@ -907,21 +1067,33 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 15px;
     padding: 12px 32px;
-    background: #f5f3f0;
-    color: #555;
-    border: 1px solid #ddd;
+    background: var(--btn-reviewed-bg);
+    color: var(--btn-reviewed-color);
+    border: 1px solid var(--border-light);
     border-radius: 8px;
     cursor: pointer;
 }
 
 .btn-reviewed:active {
-    background: #ece8e3;
+    background: var(--bg-btn-hover);
 }
 
 .btn-reviewed.is-reviewed {
-    background: rgba(90, 158, 111, 0.1);
-    color: #5a9e6f;
-    border-color: rgba(90, 158, 111, 0.3);
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent-border);
+}
+
+/* Dark mode toggle */
+
+.theme-toggle {
+    background: var(--bg-btn);
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 16px;
+    cursor: pointer;
+    line-height: 1;
 }
 
 /* Tablet responsiveness */

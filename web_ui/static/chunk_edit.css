@@ -1,13 +1,55 @@
 /* Chunk editor — full-textarea editor for a single chunk's translated text */
 
+:root {
+    --chunk-save-bg: #2c5f2d;
+    --chunk-save-focus: #2c5f2d;
+    --chunk-back-color: #444;
+    --chunk-title-color: #666;
+    --chunk-id-color: #999;
+    --chunk-sep-color: #bbb;
+    --chunk-banner-warn-bg: #fff4d6;
+    --chunk-banner-warn-border: #e8c870;
+    --chunk-banner-warn-color: #6b4e00;
+    --chunk-banner-info-bg: #eef4fb;
+    --chunk-banner-info-border: #cfdff2;
+    --chunk-banner-info-color: #2b4a6b;
+    --chunk-source-color: #666;
+    --chunk-source-pre-bg: #f3efe9;
+    --chunk-source-pre-color: #333;
+    --chunk-textarea-bg: #fff;
+    --chunk-status-error: #a33;
+    --chunk-status-ok: #2c5f2d;
+}
+
+[data-theme="dark"] {
+    --chunk-save-bg: #3a7d3d;
+    --chunk-save-focus: #3a7d3d;
+    --chunk-back-color: #bbb;
+    --chunk-title-color: #aaa;
+    --chunk-id-color: #888;
+    --chunk-sep-color: #666;
+    --chunk-banner-warn-bg: rgba(220, 140, 40, 0.15);
+    --chunk-banner-warn-border: rgba(220, 140, 40, 0.3);
+    --chunk-banner-warn-color: #d4943a;
+    --chunk-banner-info-bg: rgba(100, 149, 237, 0.12);
+    --chunk-banner-info-border: rgba(100, 149, 237, 0.25);
+    --chunk-banner-info-color: #7aa8e8;
+    --chunk-source-color: #aaa;
+    --chunk-source-pre-bg: #2a2a2a;
+    --chunk-source-pre-color: #ccc;
+    --chunk-textarea-bg: #252525;
+    --chunk-status-error: #e06060;
+    --chunk-status-ok: #6ab87f;
+}
+
 html, body {
     height: 100%;
 }
 
 body {
     font-family: Georgia, 'Times New Roman', serif;
-    background: #faf8f5;
-    color: #2c2c2c;
+    background: var(--bg);
+    color: var(--text);
     margin: 0;
 }
 
@@ -26,26 +68,26 @@ body {
     align-items: center;
     gap: 12px;
     padding: 12px 0;
-    border-bottom: 1px solid #e8e4df;
+    border-bottom: 1px solid var(--border);
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 .chunk-edit-back,
 .chunk-edit-save {
-    background: #f0ece7;
-    border: 1px solid #ddd;
+    background: var(--bg-btn);
+    border: 1px solid var(--border-light);
     padding: 8px 14px;
     font-size: 14px;
     cursor: pointer;
     border-radius: 4px;
-    color: #444;
+    color: var(--chunk-back-color);
     font-family: inherit;
 }
 
 .chunk-edit-save {
-    background: #2c5f2d;
+    background: var(--chunk-save-bg);
     color: white;
-    border-color: #2c5f2d;
+    border-color: var(--chunk-save-bg);
     margin-left: auto;
 }
 
@@ -56,7 +98,7 @@ body {
 
 .chunk-edit-title {
     font-size: 14px;
-    color: #666;
+    color: var(--chunk-title-color);
     flex: 1;
     text-align: center;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -65,12 +107,12 @@ body {
 .chunk-edit-chunkid {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px;
-    color: #999;
+    color: var(--chunk-id-color);
 }
 
 .chunk-edit-sep {
     margin: 0 6px;
-    color: #bbb;
+    color: var(--chunk-sep-color);
 }
 
 .chunk-edit-banner {
@@ -82,40 +124,34 @@ body {
 }
 
 .chunk-edit-banner.banner-warn {
-    background: #fff4d6;
-    border: 1px solid #e8c870;
-    color: #6b4e00;
+    background: var(--chunk-banner-warn-bg);
+    border: 1px solid var(--chunk-banner-warn-border);
+    color: var(--chunk-banner-warn-color);
 }
 
 .chunk-edit-banner.banner-info {
-    background: #eef4fb;
-    border: 1px solid #cfdff2;
-    color: #2b4a6b;
+    background: var(--chunk-banner-info-bg);
+    border: 1px solid var(--chunk-banner-info-border);
+    color: var(--chunk-banner-info-color);
 }
 
 .chunk-edit-source {
     margin: 12px 0;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
-    color: #666;
-}
-
-.chunk-edit-source summary {
-    cursor: pointer;
-    padding: 6px 0;
-    user-select: none;
+    color: var(--chunk-source-color);
 }
 
 .chunk-edit-source pre {
     white-space: pre-wrap;
-    background: #f3efe9;
+    background: var(--chunk-source-pre-bg);
     padding: 12px;
     border-radius: 4px;
     max-height: 240px;
     overflow: auto;
     font-family: Georgia, serif;
     font-size: 14px;
-    color: #333;
+    color: var(--chunk-source-pre-color);
 }
 
 #chunk-edit-textarea {
@@ -127,16 +163,16 @@ body {
     font-family: Georgia, 'Times New Roman', serif;
     font-size: 17px;
     line-height: 1.7;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-light);
     border-radius: 4px;
-    background: #fff;
-    color: #2c2c2c;
+    background: var(--chunk-textarea-bg);
+    color: var(--text);
     resize: vertical;
     box-sizing: border-box;
 }
 
 #chunk-edit-textarea:focus {
-    outline: 2px solid #2c5f2d;
+    outline: 2px solid var(--chunk-save-focus);
     outline-offset: -1px;
 }
 
@@ -145,9 +181,9 @@ body {
     min-height: 20px;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
-    color: #a33;
+    color: var(--chunk-status-error);
 }
 
 .chunk-edit-status.ok {
-    color: #2c5f2d;
+    color: var(--chunk-status-ok);
 }
