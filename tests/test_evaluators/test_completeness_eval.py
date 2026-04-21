@@ -102,7 +102,7 @@ class TestPlaceholderDetection:
         """Test TODO placeholder is detected."""
         chunk = create_test_chunk(
             source_text="This is some text.",
-            translated_text="TODO: Translate this text"
+            translated_text="TODO: Translate this text."
         )
 
         evaluator = CompletenessEvaluator()
@@ -206,7 +206,7 @@ class TestPlaceholderDetection:
         """Test multiple placeholders are all detected."""
         chunk = create_test_chunk(
             source_text="This is some text with multiple sections.",
-            translated_text="TODO: First part [TRANSLATION HERE] second part"
+            translated_text="TODO: First part [TRANSLATION HERE] second part."
         )
 
         evaluator = CompletenessEvaluator()
@@ -315,7 +315,7 @@ class TestSpecialMarkers:
         """Test that horizontal rules are preserved."""
         chunk = create_test_chunk(
             source_text="Text before\n\n---\n\nText after",
-            translated_text="Texto antes\n\n---\n\nTexto después"
+            translated_text="Texto antes.\n\n---\n\nTexto después."
         )
 
         evaluator = CompletenessEvaluator()
@@ -342,7 +342,7 @@ class TestSpecialMarkers:
         """Test that star dividers are preserved."""
         chunk = create_test_chunk(
             source_text="Text before\n\n* * *\n\nText after",
-            translated_text="Texto antes\n\n* * *\n\nTexto después"
+            translated_text="Texto antes.\n\n* * *\n\nTexto después."
         )
 
         evaluator = CompletenessEvaluator()
@@ -367,7 +367,7 @@ class TestSpecialMarkers:
         """Test that markdown headers are preserved."""
         chunk = create_test_chunk(
             source_text="# Chapter One\n\nText here",
-            translated_text="# Capítulo Uno\n\nTexto aquí"
+            translated_text="# Capítulo Uno\n\nTexto aquí."
         )
 
         evaluator = CompletenessEvaluator()
@@ -379,7 +379,7 @@ class TestSpecialMarkers:
         """Test that numbered lists are preserved."""
         chunk = create_test_chunk(
             source_text="1. First item\n2. Second item",
-            translated_text="1. Primer elemento\n2. Segundo elemento"
+            translated_text="1. Primer elemento.\n2. Segundo elemento."
         )
 
         evaluator = CompletenessEvaluator()
@@ -391,7 +391,7 @@ class TestSpecialMarkers:
         """Test that bullet lists are preserved."""
         chunk = create_test_chunk(
             source_text="- First item\n- Second item",
-            translated_text="- Primer elemento\n- Segundo elemento"
+            translated_text="- Primer elemento.\n- Segundo elemento."
         )
 
         evaluator = CompletenessEvaluator()
@@ -403,7 +403,7 @@ class TestSpecialMarkers:
         """Test that multiple markers are all checked."""
         chunk = create_test_chunk(
             source_text="---\n\n# Header\n\n* * *\n\n- List item",
-            translated_text="---\n\n# Encabezado\n\n* * *\n\n- Elemento de lista"
+            translated_text="---\n\n# Encabezado\n\n* * *\n\n- Elemento de lista."
         )
 
         evaluator = CompletenessEvaluator()
@@ -512,7 +512,7 @@ class TestScoreCalculation:
         result = evaluator.evaluate(chunk, {})
 
         # 2 errors = -0.6, so score should be 0.4
-        assert result.score == 0.4
+        assert result.score == pytest.approx(0.4)
 
     def test_score_decreases_with_warnings(self):
         """Test that warnings decrease score by 0.1 each."""

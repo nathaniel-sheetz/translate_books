@@ -276,7 +276,7 @@ class TestCombineChunks:
     def test_unsorted_chunks(self):
         """Test that function sorts chunks correctly."""
         chunks = [
-            create_test_chunk(2, translated_text="Third", overlap_start=5),
+            create_test_chunk(2, translated_text="Second Third", overlap_start=6),
             create_test_chunk(0, translated_text="First chunk", overlap_start=0),
             create_test_chunk(1, translated_text="chunk Second", overlap_start=5),
         ]
@@ -366,7 +366,7 @@ class TestIntegration:
                 1,
                 source_text="Para 2\n\nPara 3\n\nPara 4",
                 translated_text="Párrafo 2\n\nPárrafo 3\n\nPárrafo 4",
-                overlap_start=13,  # Length of "Párrafo 2\n\n"
+                overlap_start=11,  # len("Párrafo 2\n\n") == 11
                 overlap_end=0
             )
         ]
@@ -421,7 +421,9 @@ class TestEdgeCases:
         ]
 
         result = combine_chunks(chunks)
-        assert all(f"Chunk {i}" in result for i in range(5))
+        # Chunk 0 keeps full text; for i>0 the first 5 chars ("Chunk") are stripped as overlap
+        assert "Chunk 0 text" in result
+        assert all(f"{i} text" in result for i in range(1, 5))
 
     def test_mixed_overlap_sizes(self):
         """Test with varying overlap sizes between chunks."""
