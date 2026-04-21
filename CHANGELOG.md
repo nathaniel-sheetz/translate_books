@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0.0] - 2026-04-21
+
+### Added
+- LLM-judge evaluator primitive (`src/judge.py`) with pairwise and absolute scoring modes, retry-on-parse-failure, and 4-dimension rubric (fluency, fidelity, regional, voice)
+- `src/evaluators/llm_judge_eval.py` wrapping the judge primitive for the evaluator pipeline
+- `scripts/compare_models.py` model comparison harness CLI with multi-chapter, multi-provider support and translation logs
+- `scripts/extract_translations.py` helper to pull translations from logs
+- Multi-provider support in `src/api_translator.py` (Anthropic + OpenAI) with split batch submit/await paths
+- Six judge prompt templates under `prompts/judge_*.txt` covering absolute/pairwise × default/full-context/no-voice
+- Configurable judge context modes (`style` vs `full_prompt`) and chunking in `compare_models`
+- `docs/LLM_JUDGE_EVALUATOR.md` usage guide
+- LanguageTool JVM instance cache in `src/evaluators/__init__.py` keyed by dialect
+- Test coverage: `tests/test_judge.py`, `tests/test_api_translator.py`, `tests/test_compare_models_cli.py`, `tests/test_evaluators/test_jvm_cache.py`
+
+### Changed
+- `get_evaluator()` accepts an optional `dialect` argument and caches grammar evaluators per dialect to avoid repeated JVM startups
+- `src/models.py` extended for multi-provider/judge workflows
+
 ## [0.2.0.0] - 2026-04-17
 
 ### Added
