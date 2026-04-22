@@ -701,6 +701,251 @@
     to { transform: rotate(360deg); }
 }
 
+/* ── Evaluator card ── */
+
+.eval-card {
+    margin-top: 12px;
+    padding: 12px 14px;
+    background: #fefdfb;
+    border: 1px solid #e8e4df;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.eval-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.eval-summary-chips {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.eval-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #f5f5f5;
+    color: #666;
+}
+
+.eval-chip.errors { background: #fdecea; color: #c0392b; }
+.eval-chip.warnings { background: #fff8e1; color: #d4a017; }
+.eval-chip.info { background: #e8f0fe; color: #1a73e8; }
+.eval-chip.score { background: #e8f5e9; color: #2d8a4e; }
+.eval-chip.pass { background: #e8f5e9; color: #2d8a4e; }
+
+.eval-card-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.eval-card-actions button {
+    padding: 3px 10px;
+    font-size: 12px;
+}
+
+.eval-section {
+    border-top: 1px solid #eee;
+    padding: 8px 0;
+}
+
+.eval-section:first-of-type {
+    border-top: none;
+}
+
+.eval-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    padding: 2px 0;
+    user-select: none;
+}
+
+.eval-section-header h5 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #333;
+}
+
+.eval-section-counts {
+    font-size: 11px;
+    color: #888;
+}
+
+.eval-section-body {
+    margin-top: 6px;
+    padding-left: 4px;
+}
+
+.eval-section.collapsed .eval-section-body {
+    display: none;
+}
+
+.eval-issue {
+    padding: 6px 8px;
+    margin: 4px 0;
+    border-left: 3px solid #ddd;
+    background: #fafafa;
+    border-radius: 0 3px 3px 0;
+}
+
+.eval-issue.severity-error { border-left-color: #c0392b; }
+.eval-issue.severity-warning { border-left-color: #d4a017; }
+.eval-issue.severity-info { border-left-color: #1a73e8; }
+.eval-issue.labeled { opacity: 0.55; }
+
+.eval-issue-head {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    font-size: 13px;
+}
+
+.eval-severity-icon {
+    font-weight: 700;
+}
+
+.eval-severity-icon.error { color: #c0392b; }
+.eval-severity-icon.warning { color: #d4a017; }
+.eval-severity-icon.info { color: #1a73e8; }
+
+.eval-evaluator-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: #888;
+    letter-spacing: 0.5px;
+}
+
+.eval-issue-message {
+    color: #222;
+}
+
+.eval-issue-context {
+    margin-top: 4px;
+    font-family: "Georgia", serif;
+    font-size: 13px;
+    color: #555;
+    padding: 4px 6px;
+    background: #fff;
+    border: 1px solid #eee;
+    border-radius: 3px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.eval-issue-context mark {
+    background: #fff3b0;
+    padding: 0 1px;
+    border-radius: 2px;
+}
+
+.eval-issue-context.no-location {
+    font-style: italic;
+    color: #999;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.eval-issue-suggestion {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #777;
+    font-style: italic;
+}
+
+.eval-issue-actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.eval-feedback-btn {
+    padding: 2px 8px;
+    font-size: 11px;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    cursor: pointer;
+    color: #666;
+}
+
+.eval-feedback-btn:hover {
+    background: #f5f5f5;
+    border-color: #bbb;
+}
+
+.eval-feedback-btn.labeled {
+    background: #e8f5e9;
+    border-color: #a5d6a7;
+    color: #2d8a4e;
+}
+
+.eval-raw-toggle {
+    font-size: 11px;
+    color: #888;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 2px 4px;
+}
+
+.eval-issue-raw {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: #f0f0f0;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 11px;
+    color: #444;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.eval-empty {
+    padding: 8px;
+    color: #888;
+    font-style: italic;
+    text-align: center;
+}
+
+.eval-feedback-flash {
+    font-size: 11px;
+    color: #2d8a4e;
+    margin-left: 4px;
+}
+
+/* Chapter-table eval badges */
+.eval-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    margin-left: 4px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.eval-badge.errors { background: #fdecea; color: #c0392b; }
+.eval-badge.warnings { background: #fff8e1; color: #d4a017; }
+
 /* ── Responsive ── */
 
 @media (max-width: 768px) {

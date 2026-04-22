@@ -1154,6 +1154,318 @@
     });
 
     // ========================================================================
+    // Evaluator card
+    // ========================================================================
+
+    var evalSummaryCache = null;  // {chunk_id: {errors, warnings, info}}
+    var evalChapterCache = null;  // {chapter_id: {errors, warnings, info}}
+    var EVAL_NAMES = ['length', 'paragraph', 'dictionary', 'glossary', 'completeness', 'blacklist', 'grammar'];
+
+    function loadExistingEvaluation(chunkId) {
+        apiGet('/api/project/' + PROJECT + '/evaluations/' + chunkId).then(function(data) {
+            if (data && !data.error && data.aggregated) {
+                renderEvalCard(chunkId, data);
+            }
+        });
+    }
+
+    function refreshEvalSummary() {
+        return apiGet('/api/project/' + PROJECT + '/evaluations/summary').then(function(data) {
+            if (data && !data.error) {
+                evalSummaryCache = data.summary || {};
+                evalChapterCache = data.by_chapter || {};
+            }
+            return evalSummaryCache;
+        });
+    }
+
+    function renderEvalCard(chunkId, evaluation) {
+        var container = document.getElementById('eval-card-container-' + chunkId);
+        if (!container) return;
+
+        var agg = evaluation.aggregated || {};
+        var bySeverity = agg.issues_by_severity || {};
+        var errors = bySeverity.error || 0;
+        var warnings = bySeverity.warning || 0;
+        var info = bySeverity.info || 0;
+        var score = agg.average_score;
+        var issues = evaluation.normalized_issues || evaluation.issues || [];
+
+        var html = '<article class="eval-card">';
+        html += '<header class="eval-card-header">';
+        html += '<div class="eval-summary-chips">';
+        if (errors > 0) html += '<span class="eval-chip errors">✗ ' + errors + '</span>';
+        if (warnings > 0) html += '<span class="eval-chip warnings">⚠ ' + warnings + '</span>';
+        if (info > 0) html += '<span class="eval-chip info">ℹ ' + info + '</span>';
+        if (errors === 0 && warnings === 0 && info === 0) {
+            html += '<span class="eval-chip pass">✓ all passed</span>';
+        }
+        if (score !== null && score !== undefined) {
+            html += '<span class="eval-chip score">score ' + score.toFixed(2) + '</span>';
+        }
+        html += '</div>';
+        html += '<div class="eval-card-actions">';
+        html += '<button class="btn-secondary" data-action="eval-rerun" data-chunk-id="' + escapeHtml(chunkId) + '">Rerun evaluators</button>';
+        html += '<button class="btn-secondary" data-action="eval-llm-judge" data-chunk-id="' + escapeHtml(chunkId) + '">Run LLM judge</button>';
+        html += '</div>';
+        html += '</header>';
+
+        html += '<div class="eval-card-body">';
+        if (issues.length === 0) {
+            html += '<div class="eval-empty">All evaluators passed.</div>';
+        } else {
+            html += renderEvalSections(chunkId, issues);
+        }
+
+        // Add LLM judge section if present
+        if (evaluation.llm_judge) {
+            html += renderLlmJudgeSection(evaluation.llm_judge);
+        }
+        html += '</div>';
+        html += '</article>';
+
+        container.innerHTML = html;
+
+        bindEvalCardHandlers(chunkId, container);
+    }
+
+    function renderEvalSections(chunkId, issues) {
+        // Group issues by eval_name
+        var grouped = {};
+        issues.forEach(function(issue) {
+            var name = issue.eval_name || 'unknown';
+            if (!grouped[name]) grouped[name] = [];
+            grouped[name].push(issue);
+        });
+
+        var html = '';
+        // Render in canonical evaluator order, then any extras
+        var allNames = EVAL_NAMES.slice();
+        Object.keys(grouped).forEach(function(name) {
+            if (allNames.indexOf(name) === -1) allNames.push(name);
+        });
+        allNames.forEach(function(name) {
+            if (!grouped[name]) return;
+            var list = grouped[name];
+            var sevCounts = { error: 0, warning: 0, info: 0 };
+            list.forEach(function(i) {
+                if (sevCounts[i.severity] !== undefined) sevCounts[i.severity] += 1;
+            });
+            html += '<section class="eval-section" data-eval-name="' + escapeHtml(name) + '">';
+            html += '<header class="eval-section-header" data-action="toggle-section">';
+            html += '<h5>' + escapeHtml(name) + ' <span class="eval-section-counts">';
+            html += (sevCounts.error ? sevCounts.error + ' err ' : '');
+            html += (sevCounts.warning ? sevCounts.warning + ' warn ' : '');
+            html += (sevCounts.info ? sevCounts.info + ' info' : '');
+            html += '</span></h5>';
+            html += '<span>' + list.length + '</span>';
+            html += '</header>';
+            html += '<div class="eval-section-body">';
+            list.forEach(function(issue, idx) {
+                html += renderIssueRow(chunkId, name, issue, idx);
+            });
+            html += '</div>';
+            html += '</section>';
+        });
+        return html;
+    }
+
+    function renderIssueRow(chunkId, evalName, issue, idx) {
+        var sev = issue.severity || 'info';
+        var sevIcon = sev === 'error' ? '✗' : sev === 'warning' ? '⚠' : 'ℹ';
+        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + '" ' +
+            'data-eval-name="' + escapeHtml(evalName) + '" ' +
+            'data-issue-index="' + (issue.issue_index !== undefined ? issue.issue_index : idx) + '">';
+
+        html += '<div class="eval-issue-head">';
+        html += '<span class="eval-severity-icon ' + escapeHtml(sev) + '">' + sevIcon + '</span>';
+        html += '<span class="eval-evaluator-tag">' + escapeHtml(evalName) + '</span>';
+        html += '<span class="eval-issue-message">' + escapeHtml(issue.message || '') + '</span>';
+        html += '</div>';
+
+        // Context line
+        var loc = issue.location;
+        if (loc && (loc.snippet_before || loc.match || loc.snippet_after)) {
+            html += '<div class="eval-issue-context">…' +
+                escapeHtml(loc.snippet_before || '') +
+                '<mark>' + escapeHtml(loc.match || '') + '</mark>' +
+                escapeHtml(loc.snippet_after || '') + '…</div>';
+        } else if (loc && loc.paragraph_text) {
+            html += '<div class="eval-issue-context">' + escapeHtml(loc.paragraph_text) + '</div>';
+        } else {
+            html += '<div class="eval-issue-context no-location">(no location — evaluator gap)</div>';
+        }
+
+        if (issue.suggestion) {
+            html += '<div class="eval-issue-suggestion">💡 ' + escapeHtml(issue.suggestion) + '</div>';
+        }
+
+        html += '<div class="eval-issue-actions">';
+        html += '<button class="eval-feedback-btn" data-action="feedback" data-type="false_positive">false positive</button>';
+        html += '<button class="eval-feedback-btn" data-action="feedback" data-type="bad_message">bad message</button>';
+        html += '<button class="eval-feedback-btn" data-action="feedback" data-type="missing_context_gap">gap</button>';
+        html += '<button class="eval-raw-toggle" data-action="toggle-raw">raw</button>';
+        html += '<span class="eval-feedback-flash" style="display:none"></span>';
+        html += '</div>';
+
+        // Raw metadata (hidden by default)
+        var rawParts = [];
+        if (loc && loc.raw_location) rawParts.push('location: ' + loc.raw_location);
+        if (issue.metadata_excerpt) {
+            try {
+                var meta = JSON.stringify(issue.metadata_excerpt, null, 2);
+                if (meta && meta !== '{}') rawParts.push('metadata: ' + meta);
+            } catch (e) {}
+        }
+        if (rawParts.length) {
+            html += '<pre class="eval-issue-raw" style="display:none">' + escapeHtml(rawParts.join('\n')) + '</pre>';
+        }
+
+        html += '</div>';
+        return html;
+    }
+
+    function renderLlmJudgeSection(judge) {
+        var html = '<section class="eval-section" data-eval-name="llm_judge">';
+        html += '<header class="eval-section-header">';
+        html += '<h5>LLM judge';
+        if (judge.score !== null && judge.score !== undefined) {
+            html += ' <span class="eval-section-counts">score ' + Number(judge.score).toFixed(2) + '</span>';
+        }
+        html += '</h5>';
+        html += '</header>';
+        html += '<div class="eval-section-body">';
+        if (judge.error) {
+            html += '<div class="eval-empty">Error: ' + escapeHtml(judge.error) + '</div>';
+        } else if (judge.issues && judge.issues.length) {
+            judge.issues.forEach(function(issue, idx) {
+                html += renderIssueRow('', 'llm_judge', issue, idx);
+            });
+        } else if (judge.notes) {
+            html += '<div class="eval-issue-suggestion">' + escapeHtml(judge.notes) + '</div>';
+        } else {
+            html += '<div class="eval-empty">No notes from LLM judge.</div>';
+        }
+        html += '</div>';
+        html += '</section>';
+        return html;
+    }
+
+    function bindEvalCardHandlers(chunkId, container) {
+        // Rerun
+        var rerunBtn = container.querySelector('[data-action="eval-rerun"]');
+        if (rerunBtn) {
+            rerunBtn.addEventListener('click', function() {
+                rerunBtn.disabled = true;
+                rerunBtn.textContent = 'Rerunning...';
+                apiPost('/api/project/' + PROJECT + '/evaluations/' + chunkId + '/rerun', {})
+                    .then(function(data) {
+                        rerunBtn.disabled = false;
+                        rerunBtn.textContent = 'Rerun evaluators';
+                        if (data && !data.error) {
+                            renderEvalCard(chunkId, data);
+                            refreshEvalSummary().then(updateChapterTableBadges);
+                        } else {
+                            alert('Rerun failed: ' + (data.error || 'unknown error'));
+                        }
+                    });
+            });
+        }
+
+        // LLM judge
+        var judgeBtn = container.querySelector('[data-action="eval-llm-judge"]');
+        if (judgeBtn) {
+            judgeBtn.addEventListener('click', function() {
+                judgeBtn.disabled = true;
+                judgeBtn.textContent = 'Running LLM judge...';
+                apiPost('/api/project/' + PROJECT + '/evaluations/' + chunkId + '/llm_judge', {})
+                    .then(function(data) {
+                        judgeBtn.disabled = false;
+                        judgeBtn.textContent = 'Run LLM judge';
+                        if (data && !data.error) {
+                            renderEvalCard(chunkId, data);
+                        } else {
+                            alert('LLM judge failed: ' + (data.error || 'unknown error'));
+                        }
+                    });
+            });
+        }
+
+        // Section toggles
+        container.querySelectorAll('[data-action="toggle-section"]').forEach(function(header) {
+            header.addEventListener('click', function() {
+                var section = header.closest('.eval-section');
+                if (section) section.classList.toggle('collapsed');
+            });
+        });
+
+        // Raw toggles
+        container.querySelectorAll('[data-action="toggle-raw"]').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var issueEl = btn.closest('.eval-issue');
+                if (!issueEl) return;
+                var raw = issueEl.querySelector('.eval-issue-raw');
+                if (raw) raw.style.display = raw.style.display === 'none' ? 'block' : 'none';
+            });
+        });
+
+        // Feedback
+        container.querySelectorAll('[data-action="feedback"]').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var issueEl = btn.closest('.eval-issue');
+                if (!issueEl) return;
+                var evalName = issueEl.dataset.evalName;
+                var issueIdx = parseInt(issueEl.dataset.issueIndex, 10);
+                var feedbackType = btn.dataset.type;
+                btn.disabled = true;
+                apiPost('/api/project/' + PROJECT + '/evaluations/' + chunkId + '/feedback', {
+                    eval_name: evalName,
+                    issue_index: isNaN(issueIdx) ? 0 : issueIdx,
+                    feedback_type: feedbackType,
+                }).then(function(data) {
+                    btn.disabled = false;
+                    if (data && !data.error) {
+                        btn.classList.add('labeled');
+                        issueEl.classList.add('labeled');
+                        var flash = issueEl.querySelector('.eval-feedback-flash');
+                        if (flash) {
+                            flash.textContent = '✓ thanks, logged';
+                            flash.style.display = 'inline';
+                            setTimeout(function() { flash.style.display = 'none'; }, 2500);
+                        }
+                    } else {
+                        alert('Feedback failed: ' + (data.error || 'unknown error'));
+                    }
+                });
+            });
+        });
+    }
+
+    function updateChapterTableBadges() {
+        if (!evalChapterCache) return;
+        var tbody = document.getElementById('translate-chapter-tbody');
+        if (!tbody) return;
+        tbody.querySelectorAll('tr[data-chapter-id]').forEach(function(tr) {
+            var cid = tr.dataset.chapterId;
+            var sum = evalChapterCache[cid];
+            var existing = tr.querySelector('.eval-badge-container');
+            if (existing) existing.remove();
+            if (!sum || (sum.errors === 0 && sum.warnings === 0)) return;
+            var nameCell = tr.children[1];
+            if (!nameCell) return;
+            var span = document.createElement('span');
+            span.className = 'eval-badge-container';
+            var h = '';
+            if (sum.errors > 0) h += '<span class="eval-badge errors">✗ ' + sum.errors + '</span>';
+            if (sum.warnings > 0) h += '<span class="eval-badge warnings">⚠ ' + sum.warnings + '</span>';
+            span.innerHTML = h;
+            nameCell.appendChild(span);
+        });
+    }
+
+    // ========================================================================
     // Stage 6: Translate
     // ========================================================================
 
@@ -1213,6 +1525,7 @@
         });
 
         updateBatchButtonState();
+        refreshEvalSummary().then(updateChapterTableBadges);
     }
 
     // Select all checkbox
@@ -1364,7 +1677,13 @@
         html += '</div>';
         html += '</div>';
 
+        // Evaluator card placeholder
+        html += '<div id="eval-card-container-' + chunk.id + '" class="eval-card-container"></div>';
+
         area.innerHTML = html;
+
+        // Load any existing evaluation for this chunk
+        loadExistingEvaluation(chunk.id);
 
         populateProviderSelect('chunk-provider');
         populateModelSelect('chunk-provider', 'chunk-model');
@@ -1422,6 +1741,10 @@
                     var tab = document.querySelector('.chunk-tab[data-chunk-index="' + index + '"]');
                     if (tab) tab.classList.add('translated');
                     loadStatus();
+                    if (data.evaluation) {
+                        renderEvalCard(chunk.id, data.evaluation);
+                        refreshEvalSummary().then(updateChapterTableBadges);
+                    }
                 }
             });
         });
@@ -1447,6 +1770,10 @@
                     var tab = document.querySelector('.chunk-tab[data-chunk-index="' + index + '"]');
                     if (tab) tab.classList.add('translated');
                     loadStatus();
+                    if (data.evaluation) {
+                        renderEvalCard(chunk.id, data.evaluation);
+                        refreshEvalSummary().then(updateChapterTableBadges);
+                    }
                 }
             });
         });

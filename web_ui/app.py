@@ -32,6 +32,14 @@ from src.utils.file_io import (
     render_prompt,
     save_chunk,
 )
+from web_ui.evaluations import (
+    append_feedback,
+    evaluate_and_persist_chunk,
+    load_chunk_evaluation,
+    load_project_summary,
+    merge_llm_judge_result,
+    run_coded_evaluators,
+)
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # For session management
@@ -2632,12 +2640,231 @@ def _replace_chunk_translation(
     except OSError:
         new_mtime = 0.0
 
+    evaluation: Optional[dict] = None
+    try:
+        evaluation = evaluate_and_persist_chunk(project_dir, chunk)
+    except Exception as e:
+        app.logger.warning(
+            "Evaluator pipeline failed for chunk %s: %s", chunk_id, e,
+        )
+        evaluation = {"error": str(e)}
+
     return {
         "ok": True,
         "mtime": new_mtime,
         "orphaned_annotations": len(orphaned),
         "corrections_purged": corrections_purged,
+        "evaluation": evaluation,
     }
+
+
+# ── Evaluation endpoints ──────────────────────────────────────────────────────
+
+
+def _llm_judge_is_configured() -> bool:
+    """Return True when ``llm_config.json`` exists at the project root."""
+    cfg = Path(__file__).resolve().parent.parent / "llm_config.json"
+    return cfg.exists()
+
+
+@app.route(
+    "/api/project/<project_id>/evaluations/<chunk_id>",
+    methods=["GET"],
+)
+def project_chunk_evaluation_get(project_id, chunk_id):
+    """Return the persisted evaluation JSON for ``chunk_id``.
+
+    Returns 404 when the chunk has never been evaluated — the frontend treats
+    404 as "no card yet" rather than an error.
+    """
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    payload = load_chunk_evaluation(project_dir, chunk_id)
+    if payload is None:
+        return jsonify({"error": "No evaluation yet"}), 404
+    return jsonify(payload)
+
+
+@app.route(
+    "/api/project/<project_id>/evaluations/<chunk_id>/rerun",
+    methods=["POST"],
+)
+def project_chunk_evaluation_rerun(project_id, chunk_id):
+    """Rerun the 7 coded evaluators on a chunk without re-translating."""
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load chunk: {e}"}), 500
+
+    if not (chunk.translated_text or "").strip():
+        return jsonify({"error": "Chunk has no translation yet"}), 409
+
+    try:
+        evaluation = evaluate_and_persist_chunk(project_dir, chunk)
+    except Exception as e:
+        app.logger.exception("Rerun evaluators failed for %s", chunk_id)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True, "evaluation": evaluation})
+
+
+@app.route(
+    "/api/project/<project_id>/evaluations/<chunk_id>/llm_judge",
+    methods=["POST"],
+)
+def project_chunk_evaluation_llm_judge(project_id, chunk_id):
+    """Run only the opt-in LLM judge evaluator against a chunk."""
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    if not _llm_judge_is_configured():
+        return jsonify({"error": "LLM judge is not configured"}), 409
+
+    project_dir = _get_projects_dir() / project_id
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load chunk: {e}"}), 500
+
+    if not (chunk.translated_text or "").strip():
+        return jsonify({"error": "Chunk has no translation yet"}), 409
+
+    data = request.json or {}
+    judge_provider = data.get("provider") or None
+    judge_model = data.get("model") or None
+
+    try:
+        from src.evaluators.llm_judge_eval import LLMJudgeEvaluator
+
+        # Build fresh coded-evaluator context so the judge can weigh the
+        # objective checks. Reloading the glossary here mirrors the post-save
+        # hook's behavior.
+        coded_results, _, _ = run_coded_evaluators(chunk)
+
+        style_path = project_dir / "style.json"
+        context = {
+            "style_json_path": style_path if style_path.exists() else None,
+            "coded_eval_results": coded_results,
+            "judge_provider": judge_provider,
+            "judge_model": judge_model,
+        }
+
+        judge = LLMJudgeEvaluator()
+        result = judge.evaluate(chunk, context)
+    except Exception as e:
+        app.logger.exception("LLM judge failed for %s", chunk_id)
+        return jsonify({"error": str(e)}), 500
+
+    try:
+        result_dict = result.model_dump(mode="json")
+    except Exception:
+        import json as _json
+
+        result_dict = _json.loads(result.model_dump_json())
+
+    try:
+        merge_llm_judge_result(project_dir, chunk_id, result_dict)
+    except Exception as e:
+        app.logger.exception("Failed to persist LLM judge for %s", chunk_id)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True, "llm_judge": result_dict})
+
+
+@app.route(
+    "/api/project/<project_id>/evaluations/<chunk_id>/feedback",
+    methods=["POST"],
+)
+def project_chunk_evaluation_feedback(project_id, chunk_id):
+    """Record user feedback on a specific evaluator issue."""
+    if not _safe_id(project_id) or not _safe_id(chunk_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.json or {}
+    eval_name = (data.get("eval_name") or "").strip()
+    feedback_type = (data.get("feedback_type") or "").strip()
+    raw_index = data.get("issue_index")
+    note = data.get("note")
+    message = data.get("message")
+
+    if not eval_name or not feedback_type:
+        return jsonify({"error": "eval_name and feedback_type are required"}), 400
+
+    try:
+        issue_index = int(raw_index)
+    except (TypeError, ValueError):
+        return jsonify({"error": "issue_index must be an integer"}), 400
+
+    try:
+        append_feedback(
+            project_dir,
+            chunk_id,
+            eval_name=eval_name,
+            issue_index=issue_index,
+            feedback_type=feedback_type,
+            message=message,
+            note=note,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Failed to append feedback for %s", chunk_id)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True})
+
+
+@app.route(
+    "/api/project/<project_id>/evaluations/summary",
+    methods=["GET"],
+)
+def project_evaluations_summary(project_id):
+    """Return a per-chunk summary map for badge rendering."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    try:
+        summary = load_project_summary(project_dir)
+    except Exception as e:
+        app.logger.exception("Summary walk failed for project %s", project_id)
+        return jsonify({"error": str(e)}), 500
+
+    by_chapter: dict[str, dict[str, int]] = {}
+    for chunk_id, counts in summary.items():
+        chapter_id = _chapter_id_from_chunk_id(chunk_id)
+        if not chapter_id:
+            continue
+        bucket = by_chapter.setdefault(chapter_id, {"errors": 0, "warnings": 0, "info": 0})
+        bucket["errors"] += counts.get("errors", 0) or 0
+        bucket["warnings"] += counts.get("warnings", 0) or 0
+        bucket["info"] += counts.get("info", 0) or 0
+
+    return jsonify({"ok": True, "summary": summary, "by_chapter": by_chapter})
 
 
 @app.route("/read/<project_id>/<chapter>/chunk/<chunk_id>/edit")
