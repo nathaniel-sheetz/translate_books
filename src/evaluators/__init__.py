@@ -15,7 +15,9 @@ from .blacklist_eval import BlacklistEvaluator
 from .grammar_eval import GrammarEvaluator
 
 # Import models for type hints and result creation
-from ..models import Chunk, EvalResult, Issue, IssueLevel, EvaluationConfig, Glossary
+from ..models import Chunk, EvalResult, Issue, IssueLevel, EvaluationConfig, Glossary, Blacklist
+from ..app_config import get_length_config, get_blacklist_path
+from ..utils.file_io import load_blacklist
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -204,7 +206,8 @@ def run_evaluator(
 
 def _build_context(
     config: EvaluationConfig,
-    glossary: Optional[Glossary] = None
+    glossary: Optional[Glossary] = None,
+    blacklist: Optional[Blacklist] = None,
 ) -> dict[str, Any]:
     """
     Build context dictionary for evaluators from configuration.
@@ -216,6 +219,9 @@ def _build_context(
     Args:
         config: Evaluation configuration with evaluator settings
         glossary: Optional glossary for dictionary/glossary evaluators
+        blacklist: Optional blacklist for the blacklist evaluator.
+            If not provided, attempts to load from ``blacklist_path``
+            in ``app_config.json``.
 
     Returns:
         Context dict with evaluator-specific configuration
@@ -231,8 +237,21 @@ def _build_context(
     if glossary is not None:
         context["glossary"] = glossary
 
-    # Future: Add evaluator-specific config sections here
-    # For now, evaluators use their own defaults and we keep this simple
+    # Add length evaluator config from app_config.json (if present)
+    length_cfg = get_length_config()
+    if length_cfg:
+        context["length_config"] = length_cfg
+
+    # Add blacklist (used by blacklist evaluator)
+    if blacklist is not None:
+        context["blacklist"] = blacklist
+    else:
+        bl_path = get_blacklist_path()
+        if bl_path and bl_path.exists():
+            try:
+                context["blacklist"] = load_blacklist(bl_path)
+            except Exception as e:
+                logger.warning("Failed to load blacklist from %s: %s", bl_path, e)
 
     return context
 
@@ -282,7 +301,8 @@ def run_evaluators(
 def run_all_evaluators(
     chunk: Chunk,
     config: EvaluationConfig,
-    glossary: Optional[Glossary] = None
+    glossary: Optional[Glossary] = None,
+    blacklist: Optional[Blacklist] = None,
 ) -> list[EvalResult]:
     """
     Run all enabled evaluators from configuration.
@@ -294,6 +314,8 @@ def run_all_evaluators(
         chunk: Chunk to evaluate
         config: Evaluation configuration specifying which evaluators to run
         glossary: Optional glossary for dictionary/glossary evaluators
+        blacklist: Optional blacklist for the blacklist evaluator.
+            Loaded from ``app_config.json`` if not provided.
 
     Returns:
         List of EvalResult objects from all enabled evaluators
@@ -304,7 +326,7 @@ def run_all_evaluators(
         >>> all_passed = all(r.passed for r in results)
     """
     # Build context from config and glossary
-    context = _build_context(config, glossary)
+    context = _build_context(config, glossary, blacklist)
 
     # Run all enabled evaluators
     results = run_evaluators(chunk, config.enabled_evals, context)

@@ -19,10 +19,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from src.app_config import get_enabled_evaluators, get_blacklist_path
 from src.evaluators import aggregate_results, run_all_evaluators
 from src.evaluators.location_normalizer import NormalizedIssue, fan_out_issues
-from src.models import Chunk, EvalResult, EvaluationConfig, Glossary
-from src.utils.file_io import load_glossary
+from src.models import Blacklist, Chunk, EvalResult, EvaluationConfig, Glossary
+from src.utils.file_io import load_blacklist, load_glossary
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,43 @@ def append_feedback(
     return path
 
 
+def load_feedback_for_chunk(
+    project_dir: Path, chunk_id: str
+) -> list[dict[str, Any]]:
+    """Return all feedback records for ``chunk_id`` from ``_feedback.jsonl``.
+
+    Records are returned in insertion order. Since feedback is append-only,
+    multiple records for the same ``(eval_name, issue_index)`` key may be
+    present — callers that want "the latest label" should iterate and keep
+    the last match per key.
+
+    Malformed lines and I/O errors are swallowed with a log (feedback is
+    best-effort UI state, not authoritative).
+    """
+    path = _feedback_file(project_dir)
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as e:
+                    logger.debug(
+                        "Skipping malformed feedback line in %s: %s", path, e
+                    )
+                    continue
+                if record.get("chunk_id") == chunk_id:
+                    out.append(record)
+    except OSError as e:
+        logger.warning("Failed to read feedback file %s: %s", path, e)
+    return out
+
+
 def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
     """Walk ``evaluations/*.json`` and return a per-chunk counts map.
 
@@ -285,10 +323,37 @@ def _load_project_glossary(project_dir: Path) -> Optional[Glossary]:
         return None
 
 
+def _load_project_blacklist(project_dir: Path) -> Optional[Blacklist]:
+    """Best-effort blacklist load.
+
+    Resolution order:
+    1. ``blacklist.json`` inside the project directory (per-project override).
+    2. ``blacklist_path`` from ``app_config.json`` (system-wide default).
+    """
+    # 1. Per-project override
+    project_bl = Path(project_dir) / "blacklist.json"
+    if project_bl.exists():
+        try:
+            return load_blacklist(project_bl)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to load project blacklist from %s: %s", project_bl, e)
+            return None
+
+    # 2. System-wide default from app_config.json
+    bl_path = get_blacklist_path()
+    if bl_path and bl_path.exists():
+        try:
+            return load_blacklist(bl_path)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to load blacklist from %s: %s", bl_path, e)
+    return None
+
+
 def run_coded_evaluators(
     chunk: Chunk,
     *,
     glossary: Optional[Glossary] = None,
+    blacklist: Optional[Blacklist] = None,
     enabled_evals: Optional[Iterable[str]] = None,
 ) -> tuple[list[EvalResult], dict[str, Any], list[NormalizedIssue]]:
     """Run the coded evaluators and return ``(results, aggregated, issues)``.
@@ -300,10 +365,17 @@ def run_coded_evaluators(
     try/except for evaluator crashes, only for programming errors in this
     pipeline.
     """
-    names = list(enabled_evals) if enabled_evals is not None else list(CODED_EVAL_NAMES)
+    if enabled_evals is not None:
+        names = list(enabled_evals)
+    else:
+        system_filter = get_enabled_evaluators()
+        if system_filter is not None:
+            names = [n for n in system_filter if n in CODED_EVAL_NAMES]
+        else:
+            names = list(CODED_EVAL_NAMES)
     config = EvaluationConfig(enabled_evals=names)
 
-    results = run_all_evaluators(chunk, config, glossary)
+    results = run_all_evaluators(chunk, config, glossary, blacklist)
     aggregated = aggregate_results(results)
 
     normalized: list[NormalizedIssue] = []
@@ -318,6 +390,7 @@ def evaluate_and_persist_chunk(
     chunk: Chunk,
     *,
     glossary: Optional[Glossary] = None,
+    blacklist: Optional[Blacklist] = None,
     preserve_llm_judge: bool = True,
 ) -> dict[str, Any]:
     """Run coded evaluators on ``chunk`` and persist results.
@@ -326,6 +399,8 @@ def evaluate_and_persist_chunk(
         project_dir: ``projects/<id>/`` directory.
         chunk: Chunk with a fresh ``translated_text`` to evaluate.
         glossary: Optional preloaded glossary. Loaded from disk if omitted.
+        blacklist: Optional preloaded blacklist. Loaded from disk if omitted
+            (project-level then app_config fallback).
         preserve_llm_judge: If ``True``, keep any existing ``llm_judge`` block
             from a previous run so rerunning the coded evaluators doesn't wipe
             out the LLM judge output.
@@ -338,8 +413,13 @@ def evaluate_and_persist_chunk(
     project_dir = Path(project_dir)
     if glossary is None:
         glossary = _load_project_glossary(project_dir)
+    if blacklist is None:
+        blacklist = _load_project_blacklist(project_dir)
 
-    results, aggregated, normalized = run_coded_evaluators(chunk, glossary=glossary)
+    results, aggregated, normalized = run_coded_evaluators(
+        chunk, glossary=glossary, blacklist=blacklist,
+    )
+    actually_ran = [r.eval_name for r in results]
 
     existing_llm = None
     if preserve_llm_judge:
@@ -353,14 +433,14 @@ def evaluate_and_persist_chunk(
         results,
         aggregated,
         normalized,
-        enabled_evals=list(CODED_EVAL_NAMES),
+        enabled_evals=actually_ran,
         llm_judge=existing_llm,
     )
 
     return {
         "aggregated": aggregated,
         "issues": [issue.to_dict() for issue in normalized],
-        "enabled_evals": list(CODED_EVAL_NAMES),
+        "enabled_evals": actually_ran,
     }
 
 
@@ -370,6 +450,7 @@ __all__ = [
     "load_chunk_evaluation",
     "merge_llm_judge_result",
     "append_feedback",
+    "load_feedback_for_chunk",
     "load_project_summary",
     "run_coded_evaluators",
     "evaluate_and_persist_chunk",
