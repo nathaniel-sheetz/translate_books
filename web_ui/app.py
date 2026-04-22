@@ -36,6 +36,7 @@ from web_ui.evaluations import (
     append_feedback,
     evaluate_and_persist_chunk,
     load_chunk_evaluation,
+    load_feedback_for_chunk,
     load_project_summary,
     merge_llm_judge_result,
     run_coded_evaluators,
@@ -2687,6 +2688,7 @@ def project_chunk_evaluation_get(project_id, chunk_id):
     payload = load_chunk_evaluation(project_dir, chunk_id)
     if payload is None:
         return jsonify({"error": "No evaluation yet"}), 404
+    payload["feedback"] = load_feedback_for_chunk(project_dir, chunk_id)
     return jsonify(payload)
 
 
@@ -2718,6 +2720,7 @@ def project_chunk_evaluation_rerun(project_id, chunk_id):
         app.logger.exception("Rerun evaluators failed for %s", chunk_id)
         return jsonify({"error": str(e)}), 500
 
+    evaluation["feedback"] = load_feedback_for_chunk(project_dir, chunk_id)
     return jsonify({"ok": True, "evaluation": evaluation})
 
 

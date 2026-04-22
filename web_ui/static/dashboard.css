@@ -898,6 +898,16 @@
     color: #2d8a4e;
 }
 
+.eval-feedback-tag {
+    font-size: 11px;
+    color: #2d8a4e;
+    background: #e8f5e9;
+    border: 1px solid #a5d6a7;
+    border-radius: 10px;
+    padding: 1px 8px;
+    margin-left: 4px;
+}
+
 .eval-raw-toggle {
     font-size: 11px;
     color: #888;

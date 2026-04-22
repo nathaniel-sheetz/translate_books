@@ -1179,6 +1179,21 @@
         });
     }
 
+    function buildFeedbackMap(feedbackRecords) {
+        // Build a lookup keyed by "<eval_name>\x00<issue_index>" -> feedback_type.
+        // Feedback is append-only; the last record for a given key wins so
+        // that users can "correct" their label.
+        var map = {};
+        if (!feedbackRecords || !feedbackRecords.length) return map;
+        for (var i = 0; i < feedbackRecords.length; i++) {
+            var r = feedbackRecords[i];
+            if (!r || !r.eval_name) continue;
+            var key = r.eval_name + '\x00' + (r.issue_index != null ? r.issue_index : 0);
+            map[key] = r.feedback_type || 'labeled';
+        }
+        return map;
+    }
+
     function renderEvalCard(chunkId, evaluation) {
         var container = document.getElementById('eval-card-container-' + chunkId);
         if (!container) return;
@@ -1190,6 +1205,7 @@
         var info = bySeverity.info || 0;
         var score = agg.average_score;
         var issues = evaluation.normalized_issues || evaluation.issues || [];
+        var feedbackMap = buildFeedbackMap(evaluation.feedback);
 
         var html = '<article class="eval-card">';
         html += '<header class="eval-card-header">';
@@ -1214,7 +1230,7 @@
         if (issues.length === 0) {
             html += '<div class="eval-empty">All evaluators passed.</div>';
         } else {
-            html += renderEvalSections(chunkId, issues);
+            html += renderEvalSections(chunkId, issues, feedbackMap);
         }
 
         // Add LLM judge section if present
@@ -1229,7 +1245,7 @@
         bindEvalCardHandlers(chunkId, container);
     }
 
-    function renderEvalSections(chunkId, issues) {
+    function renderEvalSections(chunkId, issues, feedbackMap) {
         // Group issues by eval_name
         var grouped = {};
         issues.forEach(function(issue) {
@@ -1262,7 +1278,7 @@
             html += '</header>';
             html += '<div class="eval-section-body">';
             list.forEach(function(issue, idx) {
-                html += renderIssueRow(chunkId, name, issue, idx);
+                html += renderIssueRow(chunkId, name, issue, idx, feedbackMap);
             });
             html += '</div>';
             html += '</section>';
@@ -1270,12 +1286,19 @@
         return html;
     }
 
-    function renderIssueRow(chunkId, evalName, issue, idx) {
+    function renderIssueRow(chunkId, evalName, issue, idx, feedbackMap) {
         var sev = issue.severity || 'info';
         var sevIcon = sev === 'error' ? '✗' : sev === 'warning' ? '⚠' : 'ℹ';
-        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + '" ' +
+        var issueIdx = issue.issue_index !== undefined ? issue.issue_index : idx;
+        var feedbackType = feedbackMap
+            ? feedbackMap[evalName + '\x00' + issueIdx]
+            : undefined;
+        var labeledClass = feedbackType ? ' labeled' : '';
+        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + labeledClass + '" ' +
             'data-eval-name="' + escapeHtml(evalName) + '" ' +
-            'data-issue-index="' + (issue.issue_index !== undefined ? issue.issue_index : idx) + '">';
+            'data-issue-index="' + issueIdx + '"' +
+            (feedbackType ? ' data-feedback-type="' + escapeHtml(feedbackType) + '"' : '') +
+            '>';
 
         html += '<div class="eval-issue-head">';
         html += '<span class="eval-severity-icon ' + escapeHtml(sev) + '">' + sevIcon + '</span>';
@@ -1301,10 +1324,21 @@
         }
 
         html += '<div class="eval-issue-actions">';
-        html += '<button class="eval-feedback-btn" data-action="feedback" data-type="false_positive">false positive</button>';
-        html += '<button class="eval-feedback-btn" data-action="feedback" data-type="bad_message">bad message</button>';
-        html += '<button class="eval-feedback-btn" data-action="feedback" data-type="missing_context_gap">gap</button>';
+        var feedbackTypes = [
+            { type: 'false_positive', label: 'false positive' },
+            { type: 'bad_message', label: 'bad message' },
+            { type: 'missing_context_gap', label: 'gap' },
+        ];
+        feedbackTypes.forEach(function(ft) {
+            var extra = feedbackType === ft.type ? ' labeled' : '';
+            html += '<button class="eval-feedback-btn' + extra + '" data-action="feedback" data-type="' +
+                ft.type + '">' + ft.label + '</button>';
+        });
         html += '<button class="eval-raw-toggle" data-action="toggle-raw">raw</button>';
+        if (feedbackType) {
+            html += '<span class="eval-feedback-tag" title="previous feedback">labeled: ' +
+                escapeHtml(feedbackType.replace(/_/g, ' ')) + '</span>';
+        }
         html += '<span class="eval-feedback-flash" style="display:none"></span>';
         html += '</div>';
 
@@ -1427,8 +1461,33 @@
                 }).then(function(data) {
                     btn.disabled = false;
                     if (data && !data.error) {
+                        // Clear any previously-labeled sibling so only the
+                        // current choice is highlighted (matches post-reload
+                        // rendering, which shows only the latest feedback).
+                        issueEl.querySelectorAll('.eval-feedback-btn.labeled').forEach(function(b) {
+                            if (b !== btn) b.classList.remove('labeled');
+                        });
                         btn.classList.add('labeled');
                         issueEl.classList.add('labeled');
+                        issueEl.dataset.feedbackType = feedbackType;
+
+                        // Update (or insert) the "labeled: <type>" tag so the
+                        // visual state matches what a reload would show.
+                        var actions = btn.parentNode;
+                        var tag = actions.querySelector('.eval-feedback-tag');
+                        var tagText = 'labeled: ' + feedbackType.replace(/_/g, ' ');
+                        if (tag) {
+                            tag.textContent = tagText;
+                        } else {
+                            tag = document.createElement('span');
+                            tag.className = 'eval-feedback-tag';
+                            tag.title = 'previous feedback';
+                            tag.textContent = tagText;
+                            var flashEl = actions.querySelector('.eval-feedback-flash');
+                            if (flashEl) actions.insertBefore(tag, flashEl);
+                            else actions.appendChild(tag);
+                        }
+
                         var flash = issueEl.querySelector('.eval-feedback-flash');
                         if (flash) {
                             flash.textContent = '✓ thanks, logged';
