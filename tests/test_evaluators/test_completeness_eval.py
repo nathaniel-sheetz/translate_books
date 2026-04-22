@@ -115,6 +115,32 @@ class TestPlaceholderDetection:
         assert "TODO" in result.issues[0].message
         assert result.metadata["has_placeholders"] is True
 
+    def test_lowercase_todo_not_detected(self):
+        """Test that Spanish 'todo' (meaning 'all') is not flagged."""
+        chunk = create_test_chunk(
+            source_text="This is some text.",
+            translated_text="Ante todo, debemos considerar las opciones."
+        )
+
+        evaluator = CompletenessEvaluator()
+        result = evaluator.evaluate(chunk, {})
+
+        placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+        assert len(placeholder_issues) == 0
+
+    def test_titlecase_todo_not_detected(self):
+        """Test that 'Todo' at sentence start is not flagged."""
+        chunk = create_test_chunk(
+            source_text="This is some text.",
+            translated_text="Todo el mundo sabe que es verdad."
+        )
+
+        evaluator = CompletenessEvaluator()
+        result = evaluator.evaluate(chunk, {})
+
+        placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+        assert len(placeholder_issues) == 0
+
     def test_fixme_placeholder_detected(self):
         """Test FIXME placeholder is detected."""
         chunk = create_test_chunk(
@@ -235,18 +261,18 @@ class TestPlaceholderDetection:
         assert result.passed is False
         assert any("CUSTOM_PLACEHOLDER" in issue.message for issue in result.issues)
 
-    def test_case_insensitive_placeholder_detection(self):
-        """Test placeholder detection is case-insensitive."""
+    def test_case_sensitive_placeholder_detection(self):
+        """Test placeholder detection is case-sensitive (only all-caps TODO)."""
         chunk = create_test_chunk(
             source_text="This is some text.",
-            translated_text="todo: lowercase placeholder"
+            translated_text="todo: lowercase is not a placeholder"
         )
 
         evaluator = CompletenessEvaluator()
         result = evaluator.evaluate(chunk, {})
 
-        assert result.passed is False
-        assert any("todo" in issue.message.lower() for issue in result.issues)
+        placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+        assert len(placeholder_issues) == 0
 
 
 class TestTruncationDetection:
