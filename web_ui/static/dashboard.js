@@ -233,6 +233,38 @@
         });
     }
 
+    function refreshStatusBadges() {
+        return apiGet('/api/project/' + PROJECT + '/status').then(function(data) {
+            projectStatus = data;
+            updateStepperBadges(data);
+            // Update chapter row translated counts in-place (without rebuilding the table)
+            if (data.chapters) {
+                data.chapters.forEach(function(ch) {
+                    var row = document.querySelector('tr[data-chapter-id="' + ch.id + '"]');
+                    if (!row) return;
+                    var total = ch.chunk_count || 0;
+                    var translated = ch.translated_count || 0;
+                    var cells = row.querySelectorAll('td');
+                    if (cells.length >= 5) {
+                        cells[3].textContent = translated + '/' + total;
+                        var pill = cells[4].querySelector('.status-pill');
+                        if (pill) {
+                            var statusClass = total === 0 ? 'pending'
+                                : translated === total ? 'done'
+                                : translated > 0 ? 'partial' : 'pending';
+                            var statusLabel = total === 0 ? 'no chunks'
+                                : translated === total ? 'done'
+                                : translated > 0 ? 'partial' : 'pending';
+                            pill.className = 'status-pill ' + statusClass;
+                            pill.textContent = statusLabel;
+                        }
+                    }
+                });
+            }
+            return data;
+        });
+    }
+
     function updateStepperBadges(status) {
         var steps = document.querySelectorAll('.stepper li');
 
@@ -1799,7 +1831,8 @@
                     // Update tab appearance
                     var tab = document.querySelector('.chunk-tab[data-chunk-index="' + index + '"]');
                     if (tab) tab.classList.add('translated');
-                    loadStatus();
+                    // Lightweight status refresh: update badges without rebuilding the translate stage
+                    refreshStatusBadges();
                     if (data.evaluation) {
                         renderEvalCard(chunk.id, data.evaluation);
                         refreshEvalSummary().then(updateChapterTableBadges);
@@ -1828,7 +1861,8 @@
                     chunk.translated_text = data.translated_text;
                     var tab = document.querySelector('.chunk-tab[data-chunk-index="' + index + '"]');
                     if (tab) tab.classList.add('translated');
-                    loadStatus();
+                    // Lightweight status refresh: update badges without rebuilding the translate stage
+                    refreshStatusBadges();
                     if (data.evaluation) {
                         renderEvalCard(chunk.id, data.evaluation);
                         refreshEvalSummary().then(updateChapterTableBadges);
