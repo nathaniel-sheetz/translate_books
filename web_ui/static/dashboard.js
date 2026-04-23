@@ -1397,7 +1397,7 @@
                         rerunBtn.disabled = false;
                         rerunBtn.textContent = 'Rerun evaluators';
                         if (data && !data.error) {
-                            renderEvalCard(chunkId, data);
+                            renderEvalCard(chunkId, data.evaluation || data);
                             refreshEvalSummary().then(updateChapterTableBadges);
                         } else {
                             alert('Rerun failed: ' + (data.error || 'unknown error'));
