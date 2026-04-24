@@ -710,78 +710,97 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
     ]
     alignment_data["alignments"] = alignments
 
-    # Walk alignment records and match events in order.
-    # For "para" events, tag the matching sentence with para_start.
-    # Pending images are flushed just before the next para_start match
-    # so they render between paragraphs.
-    event_idx = 0
     insert_queue = []  # (alignment_list_index, image_record)
-    pending_images = []  # image records waiting for next para match
 
-    for ai, a in enumerate(alignments):
-        if event_idx >= len(events):
-            break
+    # When the aligner has already set para_start flags, use positional
+    # correspondence between chapter-text para events and para_start records
+    # for image placement.  This avoids the fragile text-matching that breaks
+    # on encoding-corrupted .txt files.
+    has_aligner_para_start = any(a.get("para_start") for a in alignments)
 
-        es_text = a.get("es", "").strip()
-        if not es_text:
-            continue
-        es_words = " ".join(es_text.split()[:2])
+    if has_aligner_para_start:
+        para_start_positions = [i for i, a in enumerate(alignments) if a.get("para_start")]
+        para_event_counter = 0
+        pending_images = []
+        for event in events:
+            if event[0] == "image":
+                _, src, alt = event
+                pending_images.append({
+                    "type": "image",
+                    "src": f"/projects/{project_id}/{src}",
+                    "alt": alt,
+                })
+            else:  # "para"
+                if para_event_counter < len(para_start_positions):
+                    ai = para_start_positions[para_event_counter]
+                    for img in pending_images:
+                        insert_queue.append((ai, img))
+                    pending_images = []
+                para_event_counter += 1
+        for img in pending_images:
+            insert_queue.append((len(alignments), img))
 
-        # Drain leading image events
-        while event_idx < len(events) and events[event_idx][0] == "image":
-            _, src, alt = events[event_idx]
-            pending_images.append({
-                "type": "image",
-                "src": f"/projects/{project_id}/{src}",
-                "alt": alt,
-            })
-            event_idx += 1
+    else:
+        # Legacy path: text-matching for alignment files without aligner para_start.
+        event_idx = 0
+        pending_images = []
 
-        # Check for paragraph match
-        if event_idx < len(events) and events[event_idx][0] == "para":
-            event_key = events[event_idx][1]
-            matched = False
+        for ai, a in enumerate(alignments):
+            if event_idx >= len(events):
+                break
 
-            if es_words == event_key:
-                # Exact 2-word match
-                matched = True
-            elif len(event_key.split()) >= 2:
-                # Try first-word fallback only when the 2-word key has no
-                # exact match anywhere ahead (avoids grabbing wrong sentence)
-                event_first = event_key.split()[0]
-                es_first = es_text.split()[0] if es_text else ""
-                if event_first and es_first == event_first:
-                    # Check if an exact 2-word match exists later
-                    has_exact_later = any(
-                        " ".join(alignments[j].get("es", "").split()[:2]) == event_key
-                        for j in range(ai + 1, len(alignments))
-                    )
-                    if not has_exact_later:
-                        matched = True
+            es_text = a.get("es", "").strip()
+            if not es_text:
+                continue
+            es_words = " ".join(es_text.split()[:2])
 
-            if matched:
-                # Flush pending images before this paragraph starts
-                for img in pending_images:
-                    insert_queue.append((ai, img))
-                pending_images = []
-
-                a["para_start"] = True
+            # Drain leading image events
+            while event_idx < len(events) and events[event_idx][0] == "image":
+                _, src, alt = events[event_idx]
+                pending_images.append({
+                    "type": "image",
+                    "src": f"/projects/{project_id}/{src}",
+                    "alt": alt,
+                })
                 event_idx += 1
 
-    # Flush any remaining pending images at the end
-    for img in pending_images:
-        insert_queue.append((len(alignments), img))
+            # Check for paragraph match
+            if event_idx < len(events) and events[event_idx][0] == "para":
+                event_key = events[event_idx][1]
+                matched = False
 
-    # Drain any remaining image events
-    while event_idx < len(events):
-        if events[event_idx][0] == "image":
-            _, src, alt = events[event_idx]
-            insert_queue.append((len(alignments), {
-                "type": "image",
-                "src": f"/projects/{project_id}/{src}",
-                "alt": alt,
-            }))
-        event_idx += 1
+                if es_words == event_key:
+                    matched = True
+                elif len(event_key.split()) >= 2:
+                    event_first = event_key.split()[0]
+                    es_first = es_text.split()[0] if es_text else ""
+                    if event_first and es_first == event_first:
+                        has_exact_later = any(
+                            " ".join(alignments[j].get("es", "").split()[:2]) == event_key
+                            for j in range(ai + 1, len(alignments))
+                        )
+                        if not has_exact_later:
+                            matched = True
+
+                if matched:
+                    for img in pending_images:
+                        insert_queue.append((ai, img))
+                    pending_images = []
+                    a["para_start"] = True
+                    event_idx += 1
+
+        for img in pending_images:
+            insert_queue.append((len(alignments), img))
+
+        while event_idx < len(events):
+            if events[event_idx][0] == "image":
+                _, src, alt = events[event_idx]
+                insert_queue.append((len(alignments), {
+                    "type": "image",
+                    "src": f"/projects/{project_id}/{src}",
+                    "alt": alt,
+                }))
+            event_idx += 1
 
     # Insert image records (reverse order to preserve indices)
     for insert_idx, img_record in reversed(insert_queue):
