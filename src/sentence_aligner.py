@@ -92,6 +92,24 @@ def split_sentences(text: str, language: str) -> list[str]:
     return result
 
 
+def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[str], list[int]]:
+    """
+    Split multi-paragraph text into sentences, tracking which paragraph
+    each sentence came from.
+
+    Returns (sentences, para_indices) where para_indices[i] is the
+    zero-based paragraph number for sentence i.
+    """
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    sentences: list[str] = []
+    para_indices: list[int] = []
+    for para_idx, para in enumerate(paragraphs):
+        para_sents = split_sentences(para, language)
+        sentences.extend(para_sents)
+        para_indices.extend([para_idx] * len(para_sents))
+    return sentences, para_indices
+
+
 def _monotonic_alignment(
     similarity: np.ndarray,
 ) -> list[tuple[int, int, float]]:
@@ -173,6 +191,7 @@ def align_sentences(
     en_sentences: list[str],
     es_sentences: list[str],
     model=None,
+    es_para_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Align Spanish sentences to English sentences using embedding
@@ -187,6 +206,9 @@ def align_sentences(
             "similarity": float,
             "confidence": "high" | "low"
         }
+
+    es_para_indices: optional list of paragraph numbers per ES sentence.
+        When provided, N:1 grouping is blocked across paragraph boundaries.
     """
     if not en_sentences or not es_sentences:
         return []
@@ -209,6 +231,7 @@ def align_sentences(
         es_sentences,
         en_embeddings,
         model,
+        es_para_indices=es_para_indices,
     )
 
     return alignments
@@ -220,6 +243,7 @@ def _group_nto1(
     es_sentences: list[str],
     en_embeddings: np.ndarray,
     model,
+    es_para_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Collapse consecutive alignment rows that share the same en_idx into a
@@ -237,14 +261,26 @@ def _group_nto1(
     multiple sentences. `es` holds the joined text; `es_sentences` holds
     the original per-sentence texts for reader UIs that want to re-split
     them.
+
+    When es_para_indices is provided, sentences from different paragraphs
+    are never merged even if they map to the same en_idx.
     """
     if not raw_alignment:
         return []
 
-    # Partition consecutive same-en_idx rows into groups
+    # Partition consecutive same-en_idx rows into groups.
+    # Break a group when the next row crosses a paragraph boundary.
     groups: list[list[tuple[int, int, float]]] = []
     for row in raw_alignment:
-        if groups and groups[-1][-1][1] == row[1]:
+        can_extend = (
+            bool(groups)
+            and groups[-1][-1][1] == row[1]
+            and (
+                es_para_indices is None
+                or es_para_indices[row[0]] == es_para_indices[groups[-1][-1][0]]
+            )
+        )
+        if can_extend:
             groups[-1].append(row)
         else:
             groups.append([row])
@@ -299,6 +335,11 @@ def _group_nto1(
                 else "low",
             }
 
+        if es_para_indices is not None:
+            first_idx = es_indices[0]
+            if first_idx > 0 and es_para_indices[first_idx] != es_para_indices[first_idx - 1]:
+                record["para_start"] = True
+
         alignments.append(record)
 
     return alignments
@@ -336,12 +377,12 @@ def align_chunk(
         raise ValueError(f"Missing source or translated text in {chunk_path}")
 
     en_sentences = split_sentences(source_text, source_lang)
-    es_sentences = split_sentences(translated_text, target_lang)
+    es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
 
     if model is None:
         model = _get_model()
 
-    alignments = align_sentences(en_sentences, es_sentences, model)
+    alignments = align_sentences(en_sentences, es_sentences, model, es_para_indices=es_para_indices)
 
     high_conf_sentences = sum(
         len(a.get("es_indices", [a["es_idx"]]))
