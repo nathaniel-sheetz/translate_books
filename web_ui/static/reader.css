@@ -442,6 +442,7 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
     color: var(--text-heading);
+    background: var(--bg-btn);
     border: 1px solid var(--btn-card-border);
     cursor: pointer;
 }
@@ -584,9 +585,18 @@ body {
 }
 
 .remove-pane-label {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     font-size: 13px;
     color: var(--text-muted3);
     font-weight: 500;
+}
+
+.remove-status {
+    font-weight: 400;
+    font-size: 12px;
+    color: var(--text-muted);
 }
 
 .remove-pane {
@@ -656,8 +666,8 @@ body {
 .remove-unhighlight-btn {
     font-size: 12px;
     padding: 4px 10px;
-    background: #ffffff;
-    color: #333;
+    background: var(--bg-btn);
+    color: var(--text);
     border: 1px solid var(--border-light);
 }
 
@@ -665,6 +675,25 @@ body {
     color: #c62828;
     font-size: 13px;
     margin: 0;
+}
+
+[data-theme="dark"] .remove-apply-btn {
+    background: #b8960a;
+    color: #fff;
+    border-color: #8a7008;
+}
+
+[data-theme="dark"] .remove-apply-btn:hover {
+    background: #d4ad0e;
+}
+
+[data-theme="dark"] .remove-pane .hi {
+    background: rgba(184, 150, 10, 0.45);
+    box-shadow: 0 0 0 1px rgba(184, 150, 10, 0.5);
+}
+
+[data-theme="dark"] .remove-error {
+    color: #ef5350;
 }
 
 .empty-state {

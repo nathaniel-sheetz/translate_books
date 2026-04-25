@@ -415,10 +415,9 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
             <p class="remove-help" id="remove-help" style="display:none">{{ t.remove_modal_help }}</p>
 
             <div class="remove-pane-wrap">
-                <div class="remove-pane-label">{{ t.remove_es_label }}</div>
+                <div class="remove-pane-label">{{ t.remove_es_label }}<span class="remove-status" id="remove-es-status"></span></div>
                 <div class="remove-pane" id="remove-es" data-lang="es"></div>
                 <div class="remove-pane-meta">
-                    <span class="remove-status" id="remove-es-status"></span>
                     <span class="remove-pane-actions" data-lang="es">
                         <button type="button" class="btn-card remove-apply-btn" id="remove-es-apply" hidden>{{ t.remove_apply }}</button>
                         <button type="button" class="btn-card remove-unhighlight-btn" id="remove-es-unhighlight" hidden>{{ t.remove_unhighlight }}</button>
@@ -429,10 +428,9 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
             </div>
 
             <div class="remove-pane-wrap">
-                <div class="remove-pane-label">{{ t.remove_en_label }}</div>
+                <div class="remove-pane-label">{{ t.remove_en_label }}<span class="remove-status" id="remove-en-status"></span></div>
                 <div class="remove-pane" id="remove-en" data-lang="en"></div>
                 <div class="remove-pane-meta">
-                    <span class="remove-status" id="remove-en-status"></span>
                     <span class="remove-pane-actions" data-lang="en">
                         <button type="button" class="btn-card remove-apply-btn" id="remove-en-apply" hidden>{{ t.remove_apply }}</button>
                         <button type="button" class="btn-card remove-unhighlight-btn" id="remove-en-unhighlight" hidden>{{ t.remove_unhighlight }}</button>
@@ -451,7 +449,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=14"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=16"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

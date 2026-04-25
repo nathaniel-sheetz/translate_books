@@ -639,9 +639,9 @@
     }
 
     function statusForSel(sel) {
-        if (!sel || sel.start >= sel.end) return i.remove_empty || 'Select text to remove';
+        if (!sel || sel.start >= sel.end) return '';
         const n = sel.end - sel.start;
-        return (i.remove_chars || '{n} characters selected').replace('{n}', n);
+        return (i.remove_chars || '{n} char selected').replace('{n}', n);
     }
 
     function updateRemoveButtons() {
