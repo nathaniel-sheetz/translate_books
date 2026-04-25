@@ -79,6 +79,9 @@ scripts/run_eval_test.py
 # Comparison run outputs
 comparisons/
 
+# Design scratch/artifacts
+docs/design/
+
 # Claude Code project config
 CLAUDE.md
 .claude/

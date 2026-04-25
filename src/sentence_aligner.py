@@ -37,6 +37,23 @@ def _get_model():
     return _model
 
 
+def _normalize_for_embedding(text: str) -> str:
+    """
+    Lowercase sentences that are entirely uppercase (chapter titles).
+
+    The embedding model (paraphrase-multilingual-MiniLM-L12-v2) is trained on
+    mixed-case text; all-caps inputs like "KING ALFRED AND THE CAKES." tokenize
+    poorly and produce similarity scores in the 0.15-0.55 range even for
+    perfect translations. Lowercasing yields in-distribution tokens without
+    changing semantics. Sentences containing any lowercase letter (including
+    acronyms like "the USA") are left alone.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) >= 3 and all(c.isupper() for c in letters):
+        return text.lower()
+    return text
+
+
 def _split_long_sentence(text: str) -> list[str]:
     """
     Split a long sentence on sentence-ending punctuation followed by
@@ -73,6 +90,24 @@ def split_sentences(text: str, language: str) -> list[str]:
             result.append(sent)
 
     return result
+
+
+def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[str], list[int]]:
+    """
+    Split multi-paragraph text into sentences, tracking which paragraph
+    each sentence came from.
+
+    Returns (sentences, para_indices) where para_indices[i] is the
+    zero-based paragraph number for sentence i.
+    """
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    sentences: list[str] = []
+    para_indices: list[int] = []
+    for para_idx, para in enumerate(paragraphs):
+        para_sents = split_sentences(para, language)
+        sentences.extend(para_sents)
+        para_indices.extend([para_idx] * len(para_sents))
+    return sentences, para_indices
 
 
 def _monotonic_alignment(
@@ -156,6 +191,7 @@ def align_sentences(
     en_sentences: list[str],
     es_sentences: list[str],
     model=None,
+    es_para_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Align Spanish sentences to English sentences using embedding
@@ -170,6 +206,9 @@ def align_sentences(
             "similarity": float,
             "confidence": "high" | "low"
         }
+
+    es_para_indices: optional list of paragraph numbers per ES sentence.
+        When provided, N:1 grouping is blocked across paragraph boundaries.
     """
     if not en_sentences or not es_sentences:
         return []
@@ -177,26 +216,131 @@ def align_sentences(
     if model is None:
         model = _get_model()
 
-    en_embeddings = model.encode(en_sentences, normalize_embeddings=True)
-    es_embeddings = model.encode(es_sentences, normalize_embeddings=True)
+    en_for_embed = [_normalize_for_embedding(s) for s in en_sentences]
+    es_for_embed = [_normalize_for_embedding(s) for s in es_sentences]
+
+    en_embeddings = model.encode(en_for_embed, normalize_embeddings=True)
+    es_embeddings = model.encode(es_for_embed, normalize_embeddings=True)
 
     similarity = np.dot(es_embeddings, en_embeddings.T)
     raw_alignment = _monotonic_alignment(similarity)
 
-    alignments = []
-    for es_idx, en_idx, score in raw_alignment:
-        alignments.append(
-            {
-                "es_idx": int(es_idx),
-                "en_idx": int(en_idx),
-                "es": es_sentences[es_idx],
+    alignments = _group_nto1(
+        raw_alignment,
+        en_sentences,
+        es_sentences,
+        en_embeddings,
+        model,
+        es_para_indices=es_para_indices,
+    )
+
+    return alignments
+
+
+def _group_nto1(
+    raw_alignment: list[tuple[int, int, float]],
+    en_sentences: list[str],
+    es_sentences: list[str],
+    en_embeddings: np.ndarray,
+    model,
+    es_para_indices: list[int] | None = None,
+) -> list[dict]:
+    """
+    Collapse consecutive alignment rows that share the same en_idx into a
+    single output row. This happens naturally when Spanish renders one
+    English quotation as two or more sentences (em-dash dialogue).
+
+    For merged groups, recompute similarity on the concatenated Spanish text
+    against the single English sentence. This removes the per-fragment
+    scoring drag that shows up as low-confidence rows in the dashboard even
+    when the translation is correct.
+
+    Output rows expose an extended schema: `es_idx` remains the first
+    Spanish index in the group (scalar, for correction-endpoint and DOM
+    compatibility), with a new `es_indices` list when the group spans
+    multiple sentences. `es` holds the joined text; `es_sentences` holds
+    the original per-sentence texts for reader UIs that want to re-split
+    them.
+
+    When es_para_indices is provided, sentences from different paragraphs
+    are never merged even if they map to the same en_idx.
+    """
+    if not raw_alignment:
+        return []
+
+    # Partition consecutive same-en_idx rows into groups.
+    # Break a group when the next row crosses a paragraph boundary.
+    groups: list[list[tuple[int, int, float]]] = []
+    for row in raw_alignment:
+        can_extend = (
+            bool(groups)
+            and groups[-1][-1][1] == row[1]
+            and (
+                es_para_indices is None
+                or es_para_indices[row[0]] == es_para_indices[groups[-1][-1][0]]
+            )
+        )
+        if can_extend:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+
+    # Recompute similarity for multi-row groups using a single batched encode
+    merged_texts: list[str] = []
+    merged_group_idx: list[int] = []
+    for gi, grp in enumerate(groups):
+        if len(grp) > 1:
+            joined = " ".join(es_sentences[r[0]] for r in grp)
+            merged_texts.append(_normalize_for_embedding(joined))
+            merged_group_idx.append(gi)
+
+    merged_sims: dict[int, float] = {}
+    if merged_texts:
+        merged_embeds = model.encode(merged_texts, normalize_embeddings=True)
+        for local_i, gi in enumerate(merged_group_idx):
+            en_idx = groups[gi][0][1]
+            sim = float(np.dot(merged_embeds[local_i], en_embeddings[en_idx]))
+            merged_sims[gi] = sim
+
+    alignments: list[dict] = []
+    for gi, grp in enumerate(groups):
+        es_indices = [int(r[0]) for r in grp]
+        en_idx = int(grp[0][1])
+        es_texts = [es_sentences[i] for i in es_indices]
+
+        if len(grp) == 1:
+            score = float(grp[0][2])
+            record: dict = {
+                "es_idx": es_indices[0],
+                "en_idx": en_idx,
+                "es": es_texts[0],
                 "en": en_sentences[en_idx],
                 "similarity": round(score, 3),
                 "confidence": "high"
                 if score > HIGH_CONFIDENCE_THRESHOLD
                 else "low",
             }
-        )
+        else:
+            score = merged_sims[gi]
+            record = {
+                "es_idx": es_indices[0],
+                "es_indices": es_indices,
+                "en_idx": en_idx,
+                "es": " ".join(es_texts),
+                "es_sentences": es_texts,
+                "en": en_sentences[en_idx],
+                "similarity": round(score, 3),
+                "confidence": "high"
+                if score > HIGH_CONFIDENCE_THRESHOLD
+                else "low",
+            }
+
+        if es_para_indices is not None:
+            first_idx = es_indices[0]
+            if first_idx > 0 and es_para_indices[first_idx] != es_para_indices[first_idx - 1]:
+                record["para_start"] = True
+
+        alignments.append(record)
 
     return alignments
 
@@ -233,14 +377,18 @@ def align_chunk(
         raise ValueError(f"Missing source or translated text in {chunk_path}")
 
     en_sentences = split_sentences(source_text, source_lang)
-    es_sentences = split_sentences(translated_text, target_lang)
+    es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
 
     if model is None:
         model = _get_model()
 
-    alignments = align_sentences(en_sentences, es_sentences, model)
+    alignments = align_sentences(en_sentences, es_sentences, model, es_para_indices=es_para_indices)
 
-    high_conf = sum(1 for a in alignments if a["confidence"] == "high")
+    high_conf_sentences = sum(
+        len(a.get("es_indices", [a["es_idx"]]))
+        for a in alignments
+        if a["confidence"] == "high"
+    )
     similarities = [a["similarity"] for a in alignments]
 
     return {
@@ -249,7 +397,7 @@ def align_chunk(
         "en_count": len(en_sentences),
         "es_count": len(es_sentences),
         "high_confidence_pct": round(
-            high_conf / len(es_sentences) * 100, 1
+            high_conf_sentences / len(es_sentences) * 100, 1
         )
         if es_sentences
         else 0,
@@ -291,13 +439,19 @@ def align_chapter_chunks(
         for a in result["alignments"]:
             a["es_idx"] += total_es
             a["en_idx"] += total_en
+            if "es_indices" in a:
+                a["es_indices"] = [i + total_es for i in a["es_indices"]]
             a["chunk_id"] = result["chunk_id"]
 
         all_alignments.extend(result["alignments"])
         total_en += result["en_count"]
         total_es += result["es_count"]
 
-    high_conf = sum(1 for a in all_alignments if a["confidence"] == "high")
+    high_conf_sentences = sum(
+        len(a.get("es_indices", [a["es_idx"]]))
+        for a in all_alignments
+        if a["confidence"] == "high"
+    )
     similarities = [a["similarity"] for a in all_alignments]
 
     chapter_alignment = {
@@ -305,7 +459,7 @@ def align_chapter_chunks(
         "project_id": project_id,
         "en_count": total_en,
         "es_count": total_es,
-        "high_confidence_pct": round(high_conf / total_es * 100, 1)
+        "high_confidence_pct": round(high_conf_sentences / total_es * 100, 1)
         if total_es
         else 0,
         "avg_similarity": round(float(np.mean(similarities)), 3)
