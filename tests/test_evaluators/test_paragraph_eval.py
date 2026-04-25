@@ -78,7 +78,7 @@ Segundo y tercer párrafo combinados."""
     assert result.passed is False
     assert len(result.issues) == 1
     assert result.issues[0].severity == IssueLevel.ERROR
-    assert "merged" in result.issues[0].message.lower()
+    assert "merged or dropped" in result.issues[0].message.lower()
     assert "3" in result.issues[0].message  # source count
     assert "2" in result.issues[0].message  # translation count
     assert result.score < 1.0
@@ -102,7 +102,8 @@ Segunda parte dos."""
     assert result.passed is False
     assert len(result.issues) == 1
     assert result.issues[0].severity == IssueLevel.ERROR
-    assert "split" in result.issues[0].message.lower() or "extra" in result.issues[0].message.lower()
+    assert "beyond" in result.issues[0].message.lower() or "extra" in result.issues[0].message.lower()
+    assert result.metadata["dialogue_paragraphs"] == 0
     assert result.score < 1.0
 
 
@@ -320,6 +321,8 @@ def test_metadata_includes_all_fields(evaluator, base_chunk):
     assert "translation_paragraphs" in result.metadata
     assert "difference" in result.metadata
     assert "match" in result.metadata
+    assert "dialogue_paragraphs" in result.metadata
+    assert "unexplained_delta" in result.metadata
     assert result.metadata["difference"] == 1
     assert result.metadata["match"] is False
 
@@ -334,9 +337,10 @@ def test_issue_message_contains_useful_info(evaluator, base_chunk):
     assert len(result.issues) == 1
     issue = result.issues[0]
 
-    # Should contain paragraph counts
+    # Should contain paragraph counts and indicate merge/drop
     assert "3" in issue.message  # source count
     assert "1" in issue.message  # translation count
+    assert "merged or dropped" in issue.message.lower()
     assert issue.suggestion is not None
     assert len(issue.suggestion) > 0
     assert issue.location is not None
@@ -345,7 +349,7 @@ def test_issue_message_contains_useful_info(evaluator, base_chunk):
 def test_evaluator_name_and_version(evaluator):
     """Test that evaluator has correct name and version."""
     assert evaluator.name == "paragraph"
-    assert evaluator.version == "1.0.0"
+    assert evaluator.version == "1.1.0"
     assert evaluator.description is not None
 
 
@@ -382,3 +386,133 @@ El resto della concluían sayo de velarte, calzas de velludo para las fiestas co
     assert result.metadata["source_paragraphs"] == 3
     assert result.metadata["translation_paragraphs"] == 3
     assert result.score == 1.0
+
+
+def test_extra_raya_paragraphs_within_budget_passes(evaluator, base_chunk):
+    """Test that extra paragraphs led by raya (—) within dialogue budget pass."""
+    base_chunk.source_text = """He walked into the room and sat down.
+
+He looked around nervously before speaking."""
+
+    base_chunk.translated_text = """Entró en la habitación y se sentó.
+
+Miró a su alrededor nerviosamente antes de hablar.
+
+—¿Hay alguien aquí? —preguntó.
+
+—No, estás solo —respondió una voz."""
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    assert result.passed is True
+    assert result.score == 1.0
+    assert result.metadata["source_paragraphs"] == 2
+    assert result.metadata["translation_paragraphs"] == 4
+    assert result.metadata["dialogue_paragraphs"] == 2
+    assert result.metadata["unexplained_delta"] == 0
+    assert result.metadata["match"] is True
+
+
+def test_extra_paragraphs_exceed_dialogue_budget_errors(evaluator, base_chunk):
+    """Test that extra paragraphs beyond raya budget produce error."""
+    base_chunk.source_text = """First paragraph.
+
+Second paragraph."""
+
+    # 3 extra paragraphs but only 1 starts with raya
+    base_chunk.translated_text = """Primer párrafo.
+
+Segundo párrafo.
+
+—Diálogo aquí.
+
+Párrafo extra sin raya.
+
+Otro párrafo extra sin raya."""
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    assert result.passed is False
+    assert len(result.issues) == 1
+    assert result.issues[0].severity == IssueLevel.ERROR
+    assert "beyond" in result.issues[0].message.lower() or "extra" in result.issues[0].message.lower()
+    assert result.metadata["dialogue_paragraphs"] == 1
+    assert result.metadata["unexplained_delta"] == 2
+    assert result.score < 1.0
+
+
+def test_dropped_paragraph_still_errors_even_with_raya(evaluator, base_chunk):
+    """Test that dropped paragraphs error even when raya paragraphs exist."""
+    base_chunk.source_text = """First paragraph.
+
+Second paragraph.
+
+Third paragraph."""
+
+    # Only 2 paragraphs, one with raya, but still fewer than source
+    base_chunk.translated_text = """Primer párrafo.
+
+—Diálogo aquí."""
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    assert result.passed is False
+    assert len(result.issues) == 1
+    assert result.issues[0].severity == IssueLevel.ERROR
+    assert "merged or dropped" in result.issues[0].message.lower()
+    assert result.metadata["dialogue_paragraphs"] == 1
+    assert result.metadata["unexplained_delta"] == 1
+
+
+def test_metadata_includes_dialogue_count(evaluator, base_chunk):
+    """Test that metadata includes dialogue_paragraphs and unexplained_delta."""
+    base_chunk.source_text = "One paragraph."
+
+    base_chunk.translated_text = """Un párrafo.
+
+—Diálogo añadido."""
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    assert result.passed is True
+    assert result.metadata["dialogue_paragraphs"] == 1
+    assert result.metadata["unexplained_delta"] == 0
+    assert result.metadata["source_paragraphs"] == 1
+    assert result.metadata["translation_paragraphs"] == 2
+    assert result.metadata["difference"] == 1
+
+
+def test_real_world_dialogue_chunk_passes(evaluator):
+    """Test with a realistic dialogue chunk that has raya-led paragraphs."""
+    chunk = Chunk(
+        id="dialogue_test_001",
+        chapter_id="chapter_05",
+        position=1,
+        source_text="""The old man looked up from his desk. "Who are you?" he asked. "I'm nobody," the stranger replied. "Nobody at all."
+
+The silence stretched between them like a wire about to snap.""",
+        translated_text="""El anciano levantó la vista de su escritorio.
+
+—¿Quién eres? —preguntó.
+
+—No soy nadie —respondió el desconocido—. Nadie en absoluto.
+
+El silencio se extendió entre ellos como un alambre a punto de romperse.""",
+        metadata=ChunkMetadata(
+            char_start=0,
+            char_end=300,
+            overlap_start=0,
+            overlap_end=0,
+            paragraph_count=2,
+            word_count=40,
+        ),
+    )
+
+    result = evaluator.evaluate(chunk, {})
+
+    assert result.passed is True
+    assert result.score == 1.0
+    assert result.metadata["source_paragraphs"] == 2
+    assert result.metadata["translation_paragraphs"] == 4
+    assert result.metadata["dialogue_paragraphs"] == 2
+    assert result.metadata["unexplained_delta"] == 0

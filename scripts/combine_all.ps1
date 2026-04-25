@@ -1,0 +1,1 @@
+Get-ChildItem projects/lang-faerie/chunks/chapter_*_chunk_000.json | ForEach-Object { $id = $_.BaseName -replace '_chunk_000',''; $chunks = Get-ChildItem "projects/lang-faerie/chunks/$($id)_chunk_*.json"; python scripts/combine_chunks.py $chunks --output "projects/lang-faerie/translated/$($id).txt" }

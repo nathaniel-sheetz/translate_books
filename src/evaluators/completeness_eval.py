@@ -162,7 +162,7 @@ class CompletenessEvaluator(BaseEvaluator):
         all_patterns = self.PLACEHOLDER_PATTERNS + custom_patterns
 
         for pattern in all_patterns:
-            matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
+            matches = list(re.finditer(pattern, text, re.MULTILINE))
             for match in matches:
                 issues.append(Issue(
                     severity=IssueLevel.ERROR,

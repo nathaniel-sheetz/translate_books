@@ -56,6 +56,12 @@ project.json
 # Per-user LLM config (copy from llm_config.example.json)
 llm_config.json
 
+# Per-user app config (copy from app_config.example.json)
+app_config.json
+
+# Per-user blacklist (copy from blacklist.example.json)
+blacklist.json
+
 # Per-user prompt configs (copy from *.example.json / *.example.txt)
 prompts/style_guide_questions.json
 prompts/style_guide_questions.txt
@@ -74,6 +80,7 @@ backlog/
 test.txt
 workbook.md
 clean_*.py
+scripts/run_eval_test.py
 
 # Comparison run outputs
 comparisons/

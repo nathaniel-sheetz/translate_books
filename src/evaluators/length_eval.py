@@ -20,12 +20,12 @@ class LengthEvaluator(BaseEvaluator):
     Checks:
     - Translation is not suspiciously short (< 0.5x source)
     - Translation is not excessively long (> 2.0x source)
-    - Translation falls within expected range (1.1x-1.3x for Spanish)
+    - Translation falls within expected range (0.95x-1.3x)
 
     Configuration (passed in context dict):
     - min_ratio: Minimum acceptable ratio (default: 0.5)
     - max_ratio: Maximum acceptable ratio (default: 2.0)
-    - expected_min: Expected minimum ratio (default: 1.1)
+    - expected_min: Expected minimum ratio (default: 0.95)
     - expected_max: Expected maximum ratio (default: 1.3)
     - count_by: "words" or "chars" (default: "words")
     """
@@ -37,7 +37,7 @@ class LengthEvaluator(BaseEvaluator):
     # Default thresholds
     DEFAULT_MIN_RATIO = 0.5
     DEFAULT_MAX_RATIO = 2.0
-    DEFAULT_EXPECTED_MIN = 1.1
+    DEFAULT_EXPECTED_MIN = 0.95
     DEFAULT_EXPECTED_MAX = 1.3
 
     def evaluate(self, chunk: Chunk, context: dict[str, Any]) -> EvalResult:

@@ -102,7 +102,7 @@ class TestPlaceholderDetection:
         """Test TODO placeholder is detected."""
         chunk = create_test_chunk(
             source_text="This is some text.",
-            translated_text="TODO: Translate this text"
+            translated_text="TODO: Translate this text."
         )
 
         evaluator = CompletenessEvaluator()
@@ -114,6 +114,32 @@ class TestPlaceholderDetection:
         assert "placeholder" in result.issues[0].message.lower()
         assert "TODO" in result.issues[0].message
         assert result.metadata["has_placeholders"] is True
+
+    def test_lowercase_todo_not_detected(self):
+        """Test that Spanish 'todo' (meaning 'all') is not flagged."""
+        chunk = create_test_chunk(
+            source_text="This is some text.",
+            translated_text="Ante todo, debemos considerar las opciones."
+        )
+
+        evaluator = CompletenessEvaluator()
+        result = evaluator.evaluate(chunk, {})
+
+        placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+        assert len(placeholder_issues) == 0
+
+    def test_titlecase_todo_not_detected(self):
+        """Test that 'Todo' at sentence start is not flagged."""
+        chunk = create_test_chunk(
+            source_text="This is some text.",
+            translated_text="Todo el mundo sabe que es verdad."
+        )
+
+        evaluator = CompletenessEvaluator()
+        result = evaluator.evaluate(chunk, {})
+
+        placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+        assert len(placeholder_issues) == 0
 
     def test_fixme_placeholder_detected(self):
         """Test FIXME placeholder is detected."""
@@ -206,7 +232,7 @@ class TestPlaceholderDetection:
         """Test multiple placeholders are all detected."""
         chunk = create_test_chunk(
             source_text="This is some text with multiple sections.",
-            translated_text="TODO: First part [TRANSLATION HERE] second part"
+            translated_text="TODO: First part [TRANSLATION HERE] second part."
         )
 
         evaluator = CompletenessEvaluator()
@@ -235,18 +261,18 @@ class TestPlaceholderDetection:
         assert result.passed is False
         assert any("CUSTOM_PLACEHOLDER" in issue.message for issue in result.issues)
 
-    def test_case_insensitive_placeholder_detection(self):
-        """Test placeholder detection is case-insensitive."""
+    def test_case_sensitive_placeholder_detection(self):
+        """Test placeholder detection is case-sensitive (only all-caps TODO)."""
         chunk = create_test_chunk(
             source_text="This is some text.",
-            translated_text="todo: lowercase placeholder"
+            translated_text="todo: lowercase is not a placeholder"
         )
 
         evaluator = CompletenessEvaluator()
         result = evaluator.evaluate(chunk, {})
 
-        assert result.passed is False
-        assert any("todo" in issue.message.lower() for issue in result.issues)
+        placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+        assert len(placeholder_issues) == 0
 
 
 class TestTruncationDetection:
@@ -315,7 +341,7 @@ class TestSpecialMarkers:
         """Test that horizontal rules are preserved."""
         chunk = create_test_chunk(
             source_text="Text before\n\n---\n\nText after",
-            translated_text="Texto antes\n\n---\n\nTexto después"
+            translated_text="Texto antes.\n\n---\n\nTexto después."
         )
 
         evaluator = CompletenessEvaluator()
@@ -342,7 +368,7 @@ class TestSpecialMarkers:
         """Test that star dividers are preserved."""
         chunk = create_test_chunk(
             source_text="Text before\n\n* * *\n\nText after",
-            translated_text="Texto antes\n\n* * *\n\nTexto después"
+            translated_text="Texto antes.\n\n* * *\n\nTexto después."
         )
 
         evaluator = CompletenessEvaluator()
@@ -367,7 +393,7 @@ class TestSpecialMarkers:
         """Test that markdown headers are preserved."""
         chunk = create_test_chunk(
             source_text="# Chapter One\n\nText here",
-            translated_text="# Capítulo Uno\n\nTexto aquí"
+            translated_text="# Capítulo Uno\n\nTexto aquí."
         )
 
         evaluator = CompletenessEvaluator()
@@ -379,7 +405,7 @@ class TestSpecialMarkers:
         """Test that numbered lists are preserved."""
         chunk = create_test_chunk(
             source_text="1. First item\n2. Second item",
-            translated_text="1. Primer elemento\n2. Segundo elemento"
+            translated_text="1. Primer elemento.\n2. Segundo elemento."
         )
 
         evaluator = CompletenessEvaluator()
@@ -391,7 +417,7 @@ class TestSpecialMarkers:
         """Test that bullet lists are preserved."""
         chunk = create_test_chunk(
             source_text="- First item\n- Second item",
-            translated_text="- Primer elemento\n- Segundo elemento"
+            translated_text="- Primer elemento.\n- Segundo elemento."
         )
 
         evaluator = CompletenessEvaluator()
@@ -403,7 +429,7 @@ class TestSpecialMarkers:
         """Test that multiple markers are all checked."""
         chunk = create_test_chunk(
             source_text="---\n\n# Header\n\n* * *\n\n- List item",
-            translated_text="---\n\n# Encabezado\n\n* * *\n\n- Elemento de lista"
+            translated_text="---\n\n# Encabezado\n\n* * *\n\n- Elemento de lista."
         )
 
         evaluator = CompletenessEvaluator()
@@ -512,7 +538,7 @@ class TestScoreCalculation:
         result = evaluator.evaluate(chunk, {})
 
         # 2 errors = -0.6, so score should be 0.4
-        assert result.score == 0.4
+        assert result.score == pytest.approx(0.4)
 
     def test_score_decreases_with_warnings(self):
         """Test that warnings decrease score by 0.1 each."""
