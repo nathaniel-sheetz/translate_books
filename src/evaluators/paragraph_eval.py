@@ -14,12 +14,18 @@ from .base import BaseEvaluator
 
 class ParagraphEvaluator(BaseEvaluator):
     """
-    Evaluates paragraph structure preservation in translation.
+    Evaluates paragraph structure preservation in translation (dialogue-aware).
+
+    Spanish dialogue convention uses a raya (—) at the start of each speech
+    turn, which often adds paragraphs that have no counterpart in the English
+    source.  The evaluator grants a "dialogue budget" equal to the number of
+    translation paragraphs that begin with — so those extra splits are not
+    flagged as errors.
 
     Checks:
     - Paragraph count matches between source and translation
     - No merged paragraphs (fewer paragraphs in translation)
-    - No split paragraphs (more paragraphs in translation)
+    - No split paragraphs beyond the dialogue-raya budget
     - Handles different newline conventions (\n, \r\n)
 
     Configuration (passed in context dict):
@@ -28,7 +34,7 @@ class ParagraphEvaluator(BaseEvaluator):
     """
 
     name = "paragraph"
-    version = "1.0.0"
+    version = "1.1.0"
     description = "Checks paragraph structure preservation in translation"
 
     def evaluate(self, chunk: Chunk, context: dict[str, Any]) -> EvalResult:
@@ -60,40 +66,48 @@ class ParagraphEvaluator(BaseEvaluator):
         # Count paragraphs
         source_count = self._count_paragraphs(source_normalized)
         translation_count = self._count_paragraphs(translation_normalized)
+        dialogue_count = self._count_dialogue_paragraphs(translation_normalized)
+
+        # Determine unexplained delta (dialogue-aware)
+        if translation_count < source_count:
+            unexplained = source_count - translation_count  # dropped
+        elif translation_count > source_count + dialogue_count:
+            unexplained = translation_count - source_count - dialogue_count  # over-split beyond budget
+        else:
+            unexplained = 0  # within dialogue budget
 
         # Determine issues
         issues = []
 
-        if source_count != translation_count:
-            # Check if within allowed threshold
-            difference = abs(source_count - translation_count)
-
-            if allow_mismatch and difference <= mismatch_threshold:
-                # Within threshold, just a warning
+        if unexplained > 0:
+            if allow_mismatch and unexplained <= mismatch_threshold:
                 issue = self._create_paragraph_issue(
                     severity=IssueLevel.WARNING,
                     source_count=source_count,
                     translation_count=translation_count,
+                    dialogue_count=dialogue_count,
                 )
                 issues.append(issue)
             else:
-                # Outside threshold or mismatch not allowed, error
                 issue = self._create_paragraph_issue(
                     severity=IssueLevel.ERROR,
                     source_count=source_count,
                     translation_count=translation_count,
+                    dialogue_count=dialogue_count,
                 )
                 issues.append(issue)
 
         # Calculate score (1.0 if perfect match, decreases with difference)
-        score = self._calculate_score(source_count, translation_count)
+        score = self._calculate_score(source_count, translation_count, dialogue_count)
 
         # Create metadata
         metadata = {
             "source_paragraphs": source_count,
             "translation_paragraphs": translation_count,
+            "dialogue_paragraphs": dialogue_count,
             "difference": abs(source_count - translation_count),
-            "match": source_count == translation_count,
+            "unexplained_delta": unexplained,
+            "match": unexplained == 0,
         }
 
         return self.create_result(chunk, issues, score, metadata)
@@ -140,11 +154,29 @@ class ParagraphEvaluator(BaseEvaluator):
 
         return len(non_empty_paragraphs)
 
+    def _count_dialogue_paragraphs(self, text: str) -> int:
+        """
+        Count paragraphs that begin with a raya (—, U+2014).
+
+        These correspond to Spanish dialogue turns that may introduce
+        extra paragraph splits relative to the English source.
+
+        Args:
+            text: Text to inspect (should be newline-normalized)
+
+        Returns:
+            Number of paragraphs whose first non-whitespace character is —
+        """
+        paragraphs = re.split(r'\n\s*\n', text.strip())
+        non_empty = [p for p in paragraphs if p.strip()]
+        return sum(1 for p in non_empty if p.strip().startswith('\u2014'))
+
     def _create_paragraph_issue(
         self,
         severity: IssueLevel,
         source_count: int,
         translation_count: int,
+        dialogue_count: int,
     ) -> Issue:
         """
         Create an issue describing the paragraph mismatch.
@@ -153,6 +185,7 @@ class ParagraphEvaluator(BaseEvaluator):
             severity: Error or warning level
             source_count: Number of paragraphs in source
             translation_count: Number of paragraphs in translation
+            dialogue_count: Number of dialogue-led paragraphs in translation
 
         Returns:
             Issue instance
@@ -160,27 +193,22 @@ class ParagraphEvaluator(BaseEvaluator):
         difference = abs(source_count - translation_count)
 
         if translation_count < source_count:
-            # Fewer paragraphs - possible merge
+            # Fewer paragraphs - possible merge/drop
             message = (
-                f"Paragraph count mismatch: source has {source_count} paragraph(s), "
-                f"translation has {translation_count} paragraph(s). "
-                f"{difference} paragraph(s) appear to be merged."
+                f"source has {source_count} paragraph(s), "
+                f"translation has {translation_count} ({dialogue_count} dialogue-led). "
+                f"{difference} paragraph(s) appear to be merged or dropped."
             )
-            suggestion = (
-                "Check if paragraphs were incorrectly merged. "
-                "Ensure each source paragraph maps to a translation paragraph."
-            )
+            suggestion = "Check if paragraphs were incorrectly merged or dropped."
         elif translation_count > source_count:
-            # More paragraphs - possible split
+            # More paragraphs - possible over-split beyond dialogue budget
+            unexplained = translation_count - source_count - dialogue_count
             message = (
-                f"Paragraph count mismatch: source has {source_count} paragraph(s), "
-                f"translation has {translation_count} paragraph(s). "
-                f"{difference} extra paragraph(s) in translation."
+                f"source has {source_count}, "
+                f"translation has {translation_count} ({dialogue_count} dialogue-led). "
+                f"{unexplained} extra paragraph(s) beyond what Spanish dialogue convention explains."
             )
-            suggestion = (
-                "Check if paragraphs were incorrectly split. "
-                "Ensure translation maintains source paragraph structure."
-            )
+            suggestion = "Check for incorrectly split paragraphs beyond dialogue convention."
         else:
             # Should not happen, but handle it
             message = f"Paragraph counts match: {source_count} paragraph(s)."
@@ -189,7 +217,7 @@ class ParagraphEvaluator(BaseEvaluator):
         return self.create_issue(
             severity=severity,
             message=message,
-            location=f"{source_count} paragraphs -> {translation_count} paragraphs",
+            location=f"{source_count} paragraphs -> {translation_count} paragraphs ({dialogue_count} dialogue-led)",
             suggestion=suggestion,
         )
 
@@ -197,34 +225,34 @@ class ParagraphEvaluator(BaseEvaluator):
         self,
         source_count: int,
         translation_count: int,
+        dialogue_count: int = 0,
     ) -> float:
         """
-        Calculate a quality score based on paragraph count match.
+        Calculate a quality score based on paragraph count match (dialogue-aware).
 
-        Score is 1.0 if counts match exactly, decreasing as the
-        difference increases.
+        Score is 1.0 if the unexplained delta is zero, decreasing as the
+        unexplained difference increases.
 
         Args:
             source_count: Number of paragraphs in source
             translation_count: Number of paragraphs in translation
+            dialogue_count: Number of dialogue-led paragraphs in translation
 
         Returns:
             Score between 0.0 and 1.0
         """
-        if source_count == translation_count:
-            return 1.0
-
         # Avoid division by zero
         if source_count == 0:
             return 0.0 if translation_count > 0 else 1.0
 
-        # Calculate proportional difference
-        difference = abs(source_count - translation_count)
+        unexplained = max(
+            source_count - translation_count,
+            translation_count - source_count - dialogue_count,
+            0,
+        )
+
+        if unexplained == 0:
+            return 1.0
+
         max_count = max(source_count, translation_count)
-
-        # Score decreases linearly with difference
-        # difference of 1 in 10 paragraphs = 0.9 score
-        # difference of 5 in 10 paragraphs = 0.5 score
-        score = max(0.0, 1.0 - (difference / max_count))
-
-        return score
+        return max(0.0, 1.0 - (unexplained / max_count))

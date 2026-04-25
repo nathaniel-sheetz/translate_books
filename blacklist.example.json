@@ -1,0 +1,23 @@
+{
+  "entries": [
+    {
+      "term": "coger",
+      "variations": ["coger", "coge", "cojo", "coges", "cogió", "cogería", "cogían", "coja", "cojan", "cogiendo"],
+      "reason": "Offensive in Latin America - use 'tomar' or 'agarrar' instead",
+      "severity": "warning",
+      "case_sensitive": false,
+      "whole_word": true,
+      "alternatives": ["tomar", "agarrar"]
+    },
+    {
+      "term": "zumo",
+      "variations": ["zumo", "zumos"],
+      "reason": "Use 'jugo' instead for Latin American Spanish",
+      "severity": "error",
+      "case_sensitive": false,
+      "whole_word": true,
+      "alternatives": ["jugo", "jugos"]
+    }
+  ],
+  "version": "1.0"
+}

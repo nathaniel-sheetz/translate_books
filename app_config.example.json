@@ -1,0 +1,19 @@
+{
+  "enabled_evaluators": [
+    "length",
+    "paragraph",
+    "dictionary",
+    "glossary",
+    "completeness",
+    "blacklist",
+    "grammar"
+  ],
+  "blacklist_path": "blacklist.json",
+  "length_config": {
+    "expected_min": 0.95,
+    "expected_max": 1.3,
+    "min_ratio": 0.5,
+    "max_ratio": 2.0,
+    "count_by": "words"
+  }
+}

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.models import Chunk, Glossary, ProjectState, StyleGuide
+from src.models import Blacklist, Chunk, Glossary, ProjectState, StyleGuide
 
 
 def load_chunk(chunk_path: Path) -> Chunk:
@@ -162,6 +162,43 @@ def save_glossary(glossary: Glossary, output_path: Path) -> None:
         # Clean up temp file on error
         temp_path.unlink(missing_ok=True)
         raise
+
+
+def load_blacklist(blacklist_path: Path) -> Blacklist:
+    """
+    Load a Blacklist from JSON file.
+
+    Args:
+        blacklist_path: Path to the blacklist JSON file
+
+    Returns:
+        Loaded Blacklist object
+
+    Raises:
+        FileNotFoundError: If the blacklist file doesn't exist
+        json.JSONDecodeError: If the file contains invalid JSON
+        ValidationError: If the JSON doesn't match the Blacklist schema
+
+    Example:
+        >>> blacklist = load_blacklist(Path("blacklist.json"))
+    """
+    if not blacklist_path.exists():
+        raise FileNotFoundError(f"Blacklist file not found: {blacklist_path}")
+
+    try:
+        with blacklist_path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(
+            f"Invalid JSON in blacklist file {blacklist_path}: {e.msg}",
+            e.doc,
+            e.pos
+        )
+
+    try:
+        return Blacklist.model_validate(data)
+    except Exception as e:
+        raise ValueError(f"Invalid Blacklist data in {blacklist_path}: {e}")
 
 
 def load_prompt_template(template_path: Optional[Path] = None) -> str:

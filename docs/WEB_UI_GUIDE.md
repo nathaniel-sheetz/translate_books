@@ -217,6 +217,52 @@ The prompt includes: style guide, filtered glossary (only terms appearing in thi
 
 **Backend:** `translate_chunk_realtime()` and `estimate_cost()` from `src/api_translator.py`. Glossary filtering via `filter_glossary_for_chunk()` from `src/glossary_bootstrap.py`.
 
+### Evaluator Card
+
+Every chunk save (manual, auto-translate, or edits from the chunk editor) triggers the full evaluator suite as a post-save side effect. Results are persisted per chunk under `projects/<id>/evaluations/<chunk_id>.json` and rendered into the Translate panel as an **evaluator card** directly below the translation textarea.
+
+**Coded evaluators** (always run):
+
+| Evaluator | What it checks |
+|---|---|
+| `length` | Translation length falls within an acceptable ratio of the source |
+| `paragraph` | Paragraph count / break structure matches the source |
+| `dictionary` | Flags unknown or suspect Spanish words |
+| `glossary` | Enforces project glossary term choices in translated text |
+| `completeness` | Detects dropped source content |
+| `blacklist` | Surfaces forbidden words / phrases |
+| `grammar` | Basic Spanish grammar heuristics |
+
+**Card layout:**
+
+- **Summary row** — severity chips (`✗ errors`, `⚠ warnings`, `ℹ info`), an `average_score` chip, a **Rerun evaluators** button, and a **Run LLM judge** button.
+- **Grouped issue list** — one collapsible section per evaluator. Each issue row shows:
+  - Severity icon + evaluator tag + `issue.message`
+  - Context line with the offending span highlighted via `<mark>` (`…{snippet_before}<mark>{match}</mark>{snippet_after}…`). Falls back to the containing paragraph when the evaluator didn't report a precise location, or `(no location — evaluator gap)` when neither is available.
+  - Suggestion (muted text, when the evaluator provides one)
+  - Three feedback buttons — **false positive**, **bad message**, **gap** — that append to `projects/<id>/evaluations/_feedback.jsonl`
+  - **raw** disclosure → reveals the original `Issue.location` string and a collapsed `<pre>` of the issue's metadata, useful for iterating on the evaluators themselves.
+- **Empty state** — "All evaluators passed."
+
+**LLM judge (opt-in):** Click **Run LLM judge** to call a configured LLM with the source text, translation, style guide, and the coded-evaluator results. The judge returns a normalized score (1–5 internal, surfaced as 0.0–1.0) plus optional issues and notes. The result merges into the existing evaluation file under a separate `llm_judge` section and appears below the coded evaluators. Requires an `llm_config.json` at the project root — the button returns `409` if no LLM is configured.
+
+**Chapter-table badges:** Aggregated error/warning counts for each chapter are rendered as small badges next to the chapter name (e.g. `✗ 3` / `⚠ 7`). The rollup reads the persisted evaluation files and refreshes on stage load and after every evaluation run.
+
+**APIs:**
+- `GET  /api/project/<id>/evaluations/<chunk_id>` — load the most recent persisted evaluation for a chunk
+- `POST /api/project/<id>/evaluations/<chunk_id>/rerun` — re-run all coded evaluators against the current translation (preserves any existing `llm_judge` result by default)
+- `POST /api/project/<id>/evaluations/<chunk_id>/llm_judge` — run the LLM judge and merge the result into the stored evaluation; `409` if unconfigured, `500` on LLM error
+- `POST /api/project/<id>/evaluations/<chunk_id>/feedback` — append a feedback entry; body `{ "type": "false_positive" | "bad_message" | "missing_context_gap", "eval_name": "...", "issue_index": N, ... }`
+- `GET  /api/project/<id>/evaluations/summary` — returns `{ summary: {chunk_id: {errors, warnings, info}}, by_chapter: {chapter_id: {errors, warnings, info}} }` for badge rendering
+
+**Backend:**
+- `src/evaluators/` — the seven coded evaluators, the registry, and `aggregate_results()`
+- `src/evaluators/location_normalizer.py` — parses every `Issue.location` format into a `NormalizedLocation` and fans multi-location issues into per-location rows for rendering
+- `web_ui/evaluations.py` — orchestration and persistence (`run_coded_evaluators()`, `evaluate_and_persist_chunk()`, atomic JSON writes, LLM-judge merging, feedback append, per-project summary walk)
+- Hooked from `_replace_chunk_translation()` in `web_ui/app.py`, so every save path (manual, auto-translate, chunk editor) produces fresh results.
+
+The evaluator card lives only in the dashboard (`#chunk-detail-container` in `dashboard.html`). It is not rendered in the bilingual reader or the chunk editor.
+
 ---
 
 ## Stage 7: Review
@@ -365,6 +411,9 @@ projects/<id>/
 ├── corrections.jsonl       # Pending corrections (purged automatically when a chunk's translation is replaced)
 ├── corrections_applied.jsonl # Archive of applied corrections
 ├── .chunk_edits/           # Pre-edit chunk backups (last 10 per chunk, created by any translation save)
+├── evaluations/            # Per-chunk evaluator output
+│   ├── <chunk_id>.json     # Aggregated coded-evaluator + optional LLM-judge result
+│   └── _feedback.jsonl     # Append-only user feedback on individual issues
 ├── images/                 # Downloaded images (Gutenberg)
 └── <id>.epub               # Built EPUB (Stage 8 Export)
 ```
