@@ -445,6 +445,18 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <button type="button" class="btn-card" id="remove-cancel">{{ t.remove_cancel }}</button>
                 <button type="button" class="btn-card btn-setup" id="remove-confirm">{{ t.remove_confirm }}</button>
             </div>
+
+            <!-- Confirmation overlay (inside modal-box) -->
+            <div class="remove-confirm-overlay" id="remove-confirm-overlay" style="display:none">
+                <div class="remove-confirm-dialog">
+                    <h3 id="remove-confirm-title"></h3>
+                    <p id="remove-confirm-warning"></p>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-card" id="remove-confirm-no"></button>
+                        <button type="button" class="btn-card btn-danger" id="remove-confirm-yes"></button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>

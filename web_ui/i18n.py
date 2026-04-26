@@ -99,6 +99,10 @@ STRINGS = {
             "remove_done": "Removed.",
             "remove_orphans": "{n} annotations now orphaned.",
             "remove_image_record": "Image records can't be removed here \u2014 use the chunk editor.",
+            "remove_confirm_title": "Are you sure?",
+            "remove_confirm_warning": "This action cannot be undone. The selected text will be permanently removed.",
+            "remove_confirm_yes": "Yes, remove",
+            "remove_confirm_no": "Go back",
         },
     },
     "es": {
@@ -199,6 +203,10 @@ STRINGS = {
             "remove_done": "Eliminado.",
             "remove_orphans": "{n} anotaciones hu\u00e9rfanas tras eliminar.",
             "remove_image_record": "Las im\u00e1genes no se eliminan aqu\u00ed \u2014 use el editor de fragmentos.",
+            "remove_confirm_title": "\u00bfEst\u00e1 seguro?",
+            "remove_confirm_warning": "Esta acci\u00f3n no se puede deshacer. El texto seleccionado se eliminar\u00e1 permanentemente.",
+            "remove_confirm_yes": "S\u00ed, eliminar",
+            "remove_confirm_no": "Volver",
         },
     },
 }

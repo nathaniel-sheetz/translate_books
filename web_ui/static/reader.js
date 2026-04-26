@@ -587,6 +587,19 @@
     const removeHelpBtn = document.getElementById('remove-help-btn');
     const removeHelp = document.getElementById('remove-help');
     const REMOVE_BTN_LABEL = removeConfirm ? removeConfirm.textContent : 'Remove';
+    const removeConfirmOverlay = document.getElementById('remove-confirm-overlay');
+    const removeConfirmYes = document.getElementById('remove-confirm-yes');
+    const removeConfirmNo = document.getElementById('remove-confirm-no');
+
+    // Populate confirmation dialog text from i18n
+    if (removeConfirmOverlay) {
+        const cTitle = document.getElementById('remove-confirm-title');
+        const cWarn = document.getElementById('remove-confirm-warning');
+        if (cTitle) cTitle.textContent = i.remove_confirm_title || 'Are you sure?';
+        if (cWarn) cWarn.textContent = i.remove_confirm_warning || 'This action cannot be undone.';
+        if (removeConfirmYes) removeConfirmYes.textContent = i.remove_confirm_yes || 'Yes, remove';
+        if (removeConfirmNo) removeConfirmNo.textContent = i.remove_confirm_no || 'Go back';
+    }
 
     if (removeHelpBtn && removeHelp) {
         removeHelpBtn.addEventListener('click', () => {
@@ -726,6 +739,7 @@
 
     function closeRemoveModal() {
         removeModal.style.display = 'none';
+        if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
         removalCtx = null;
         esSel = enSel = esSugg = enSugg = null;
         showRemoveError('');
@@ -857,8 +871,28 @@
         }
     });
 
+    // Show confirmation overlay when user clicks "Remove"
     removeConfirm.addEventListener('click', () => {
         if (!removalCtx) return;
+        const esCheck = esSel && esSel.end > esSel.start
+            ? removalCtx.es_full.slice(esSel.start, esSel.end) : '';
+        const enCheck = enSel && enSel.end > enSel.start
+            ? removalCtx.en_full.slice(enSel.start, enSel.end) : '';
+        if (!esCheck && !enCheck) return;
+        if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'flex';
+    });
+
+    if (removeConfirmNo) {
+        removeConfirmNo.addEventListener('click', () => {
+            if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
+        });
+    }
+
+    // Actually perform the removal only after explicit confirmation
+    (removeConfirmYes || removeConfirm).addEventListener('click', function onConfirmedRemove() {
+        if (!removeConfirmYes) return;  // guard: only runs on the yes btn
+        if (!removalCtx) return;
+        if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
         const esSubstr = esSel && esSel.end > esSel.start
             ? removalCtx.es_full.slice(esSel.start, esSel.end) : '';
         const enSubstr = enSel && enSel.end > enSel.start
