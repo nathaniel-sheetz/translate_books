@@ -1291,6 +1291,299 @@ def _get_project_status(project_id: str) -> dict:
     return status
 
 
+# ── Reader: remove-text flow ──────────────────────────────────────────────────
+
+
+def _find_substring_normalized(haystack: str, needle: str) -> Optional[tuple[int, int]]:
+    """Locate ``needle`` inside ``haystack`` ignoring whitespace differences.
+
+    Returns ``(start, end)`` in original ``haystack`` indices, or ``None``.
+    """
+    idx = haystack.find(needle)
+    if idx >= 0:
+        return idx, idx + len(needle)
+    norm_h, idx_map = _norm_whitespace_with_map(haystack)
+    norm_n_full, _ = _norm_whitespace_with_map(needle)
+    norm_n = norm_n_full.strip()
+    if not norm_n:
+        return None
+    n_idx = norm_h.find(norm_n)
+    if n_idx < 0:
+        return None
+    n_end = n_idx + len(norm_n)
+    if n_idx >= len(idx_map) or n_end - 1 >= len(idx_map):
+        return None
+    return idx_map[n_idx], idx_map[n_end - 1] + 1
+
+
+@app.route(
+    "/api/removal-context/<project_id>/<chapter_id>/<int:es_idx>",
+    methods=["GET"],
+)
+def removal_context(project_id, chapter_id, es_idx):
+    """Return the chunk text + suggested highlight ranges to seed the
+    reader's removal modal.
+    """
+    if not _safe_id(project_id) or not _safe_id(chapter_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    if not align_path.exists():
+        return jsonify({"error": "Alignment not found"}), 404
+
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            align_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return jsonify({"error": f"Failed to read alignment: {e}"}), 500
+
+    record = next(
+        (a for a in align_data.get("alignments", [])
+         if a.get("es_idx") == es_idx),
+        None,
+    )
+    if record is None:
+        return jsonify({"error": f"No alignment record for es_idx={es_idx}"}), 404
+
+    chunk_id = record.get("chunk_id")
+    if not chunk_id or not _safe_id(chunk_id):
+        return jsonify({"error": "Alignment record missing chunk_id"}), 500
+
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": f"Chunk not found: {chunk_id}"}), 404
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load chunk: {e}"}), 500
+
+    es_full = chunk.translated_text or ""
+    en_full = chunk.source_text or ""
+
+    es_match = _find_substring_normalized(es_full, record.get("es") or "")
+    en_match = _find_substring_normalized(en_full, record.get("en") or "")
+
+    try:
+        chunk_mtime = chunk_path.stat().st_mtime
+    except OSError:
+        chunk_mtime = 0.0
+    try:
+        align_mtime = align_path.stat().st_mtime
+    except OSError:
+        align_mtime = 0.0
+
+    return jsonify({
+        "chunk_id": chunk_id,
+        "chunk_mtime": chunk_mtime,
+        "alignment_mtime": align_mtime,
+        "es_full": es_full,
+        "en_full": en_full,
+        "es_suggested": (
+            {"start": es_match[0], "end": es_match[1]} if es_match else None
+        ),
+        "en_suggested": (
+            {"start": en_match[0], "end": en_match[1]} if en_match else None
+        ),
+        "image_token_ranges_es": _image_token_ranges(es_full),
+        "image_token_ranges_en": _image_token_ranges(en_full),
+    })
+
+
+@app.route("/api/remove-text", methods=["POST"])
+def remove_text():
+    """Remove a substring from both source_text and translated_text of a
+    chunk, then recombine + realign the chapter.
+    """
+    data = request.json or {}
+    project_id = (data.get("project_id") or "").strip()
+    chapter_id = (data.get("chapter_id") or "").strip()
+    chunk_id = (data.get("chunk_id") or "").strip()
+    es_remove = data.get("es_remove") or ""
+    en_remove = data.get("en_remove") or ""
+    es_remove_start = data.get("es_remove_start")
+    en_remove_start = data.get("en_remove_start")
+    expected_chunk_mtime = data.get("expected_chunk_mtime")
+
+    def _coerce_hint(v):
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    es_hint = _coerce_hint(es_remove_start)
+    en_hint = _coerce_hint(en_remove_start)
+
+    if not (
+        _safe_id(project_id) and _safe_id(chapter_id) and _safe_id(chunk_id)
+    ):
+        return jsonify({"error": "Bad request"}), 400
+    if not es_remove and not en_remove:
+        return jsonify({"error": "No text provided to remove"}), 400
+
+    if _chapter_id_from_chunk_id(chunk_id) != chapter_id:
+        return jsonify({"error": "chunk_id does not belong to chapter_id"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+
+    # Concurrency check
+    try:
+        current_mtime = chunk_path.stat().st_mtime
+    except OSError as e:
+        return jsonify({"error": f"Cannot stat chunk file: {e}"}), 500
+    if expected_chunk_mtime is not None:
+        try:
+            if abs(float(expected_chunk_mtime) - current_mtime) > 1e-6:
+                return jsonify({
+                    "error": (
+                        "Chunk was modified by another process. "
+                        "Reload and try again."
+                    ),
+                }), 409
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid expected_chunk_mtime"}), 400
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load chunk: {e}"}), 500
+
+    old_es = chunk.translated_text or ""
+    old_en = chunk.source_text or ""
+
+    # Apply ES removal
+    new_es = old_es
+    es_bounds: Optional[tuple[int, int]] = None
+    if es_remove:
+        new_es, es_bounds, err = _remove_substring(old_es, es_remove, es_hint)
+        if err:
+            return jsonify({"error": f"Spanish: {err}"}), 400
+        guard = _check_no_image_token_overlap(old_es, *es_bounds)
+        if guard:
+            return jsonify({"error": f"Spanish: {guard}"}), 400
+        if not (new_es or "").strip():
+            return jsonify({
+                "error": "Removing this would empty the chunk's translation.",
+            }), 400
+
+    # Apply EN removal
+    new_en = old_en
+    en_bounds: Optional[tuple[int, int]] = None
+    if en_remove:
+        new_en, en_bounds, err = _remove_substring(old_en, en_remove, en_hint)
+        if err:
+            return jsonify({"error": f"English: {err}"}), 400
+        guard = _check_no_image_token_overlap(old_en, *en_bounds)
+        if guard:
+            return jsonify({"error": f"English: {guard}"}), 400
+        if not (new_en or "").strip():
+            return jsonify({
+                "error": "Removing this would empty the chunk's source.",
+            }), 400
+
+    # Build the edits list. Start with the seed chunk.
+    edits: list[dict] = [{
+        "chunk_id": chunk_id,
+        "chunk_path": chunk_path,
+        "chunk": chunk,
+        "new_translated_text": new_es if es_remove else None,
+        "new_source_text": new_en if en_remove else None,
+    }]
+
+    # Overlap-region duplication: if the removed text sits inside this
+    # chunk's overlap region, the same string lives in the adjacent
+    # chunk's overlap on the other side. Apply a first-occurrence
+    # replace there so the pair stays coherent for re-translation.
+    chunks_dir = project_dir / "chunks"
+    sibling_paths = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+    sibling_ids = [p.stem for p in sibling_paths]
+    try:
+        my_idx = sibling_ids.index(chunk_id)
+    except ValueError:
+        my_idx = -1
+
+    def _maybe_propagate(neighbor_idx: int) -> Optional[dict]:
+        if not (0 <= neighbor_idx < len(sibling_paths)):
+            return None
+        n_path = sibling_paths[neighbor_idx]
+        n_chunk = load_chunk(n_path)
+        n_es = n_chunk.translated_text or ""
+        n_en = n_chunk.source_text or ""
+        new_n_es: Optional[str] = None
+        new_n_en: Optional[str] = None
+        if es_remove and es_remove in n_es:
+            new_n_es = n_es.replace(es_remove, "", 1)
+        if en_remove and en_remove in n_en:
+            new_n_en = n_en.replace(en_remove, "", 1)
+        if new_n_es is None and new_n_en is None:
+            return None
+        return {
+            "chunk_id": n_chunk.id,
+            "chunk_path": n_path,
+            "chunk": n_chunk,
+            "new_translated_text": new_n_es,
+            "new_source_text": new_n_en,
+        }
+
+    if my_idx >= 0:
+        # Look at both neighbors; the propagation only fires when an
+        # exact-match copy of the removed string is present.
+        for neighbor in (my_idx - 1, my_idx + 1):
+            extra = _maybe_propagate(neighbor)
+            if extra is not None:
+                edits.append(extra)
+
+    try:
+        result = _apply_chunk_edits(
+            project_dir, project_id, chapter_id, edits,
+        )
+    except Exception as e:
+        app.logger.exception("remove-text pipeline failed")
+        return jsonify({"error": str(e)}), 500
+
+    # Audit log
+    try:
+        removals_path = project_dir / "removals.jsonl"
+        with open(removals_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "project_id": project_id,
+                "chapter_id": chapter_id,
+                "chunk_id": chunk_id,
+                "es_remove": es_remove,
+                "en_remove": en_remove,
+                "propagated_chunks": [
+                    e["chunk_id"] for e in edits if e["chunk_id"] != chunk_id
+                ],
+                "timestamp": datetime.now().isoformat(),
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    try:
+        new_align_mtime = align_path.stat().st_mtime
+    except OSError:
+        new_align_mtime = 0.0
+
+    return jsonify({
+        "ok": True,
+        "chunk_mtime": result["mtimes"].get(chunk_id, 0.0),
+        "alignment_mtime": new_align_mtime,
+        "orphaned_annotations": result["orphaned_annotations"],
+        "corrections_purged": result["corrections_purged"],
+        "edited_chunks": [e["chunk_id"] for e in edits],
+    })
+
+
 @app.route("/project/<project_id>")
 def dashboard_page(project_id):
     """Render the unified project dashboard."""
@@ -2428,6 +2721,118 @@ def _chapter_id_from_chunk_id(chunk_id: str) -> Optional[str]:
 _IMAGE_TOKEN_RE = re.compile(r"\[IMAGE:[^\]]+\]")
 
 
+def _image_token_ranges(text: str) -> list[tuple[int, int]]:
+    """Return [(start, end), ...] character ranges of [IMAGE:...] tokens."""
+    return [(m.start(), m.end()) for m in _IMAGE_TOKEN_RE.finditer(text)]
+
+
+def _spans_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return a_start < b_end and b_start < a_end
+
+
+def _check_no_image_token_overlap(
+    text: str, start: int, end: int,
+) -> Optional[str]:
+    """Return an error message if [start:end] overlaps any [IMAGE:...]
+    token in ``text``; ``None`` if the range is clear.
+    """
+    for tok_start, tok_end in _image_token_ranges(text):
+        if _spans_overlap(start, end, tok_start, tok_end):
+            return (
+                f"Selection overlaps an [IMAGE:...] token at characters "
+                f"{tok_start}-{tok_end}. Adjust the highlight."
+            )
+    return None
+
+
+def _norm_whitespace_with_map(s: str) -> tuple[str, list[int]]:
+    """Collapse runs of whitespace to single spaces and return both the
+    normalized string and a per-output-character mapping back to the
+    original index in ``s``.
+    """
+    out_chars: list[str] = []
+    out_map: list[int] = []
+    prev_ws = False
+    for i, ch in enumerate(s):
+        if ch.isspace():
+            if not prev_ws:
+                out_chars.append(" ")
+                out_map.append(i)
+            prev_ws = True
+        else:
+            out_chars.append(ch)
+            out_map.append(i)
+            prev_ws = False
+    return "".join(out_chars), out_map
+
+
+def _remove_substring(
+    text: str, substring: str, hint_start: Optional[int] = None,
+) -> tuple[Optional[str], Optional[tuple[int, int]], Optional[str]]:
+    """Remove the first occurrence of ``substring`` from ``text``.
+
+    If ``hint_start`` is provided and ``text[hint_start:]`` begins with
+    ``substring``, that occurrence is used directly. Otherwise tries an
+    exact match first; on miss, tries a whitespace-normalized match and
+    remaps the bounds back to the original string.
+
+    Returns ``(new_text, (orig_start, orig_end), error)``. On success the
+    error is ``None``; on failure ``new_text`` and the bounds are ``None``.
+    Tidies a single adjoining ASCII space to avoid double-spaces, but
+    preserves paragraph breaks (``\\n\\n``).
+    """
+    if not substring:
+        return None, None, "Empty selection."
+
+    # 0. Hint match — client knows the exact offset of the user's
+    # selection; prefer it over a substring search to avoid false-first
+    # matches when the same string also appears (e.g.) inside an
+    # [IMAGE:...] caption earlier in the chunk.
+    if hint_start is not None and 0 <= hint_start <= len(text):
+        end = hint_start + len(substring)
+        if end <= len(text) and text[hint_start:end] == substring:
+            new_text = _tidy_after_removal(text, hint_start, end)
+            return new_text, (hint_start, end), None
+
+    # 1. Exact match (fast path)
+    idx = text.find(substring)
+    if idx >= 0:
+        end = idx + len(substring)
+        new_text = _tidy_after_removal(text, idx, end)
+        return new_text, (idx, end), None
+
+    # 2. Whitespace-normalized match
+    norm_text, idx_map = _norm_whitespace_with_map(text)
+    norm_sub_full, _ = _norm_whitespace_with_map(substring)
+    norm_sub = norm_sub_full.strip()
+    if not norm_sub:
+        return None, None, "Selection is whitespace only."
+    n_idx = norm_text.find(norm_sub)
+    if n_idx < 0:
+        return (
+            None, None,
+            "Could not locate the selected text in the chunk.",
+        )
+    n_end = n_idx + len(norm_sub)
+    if n_end - 1 >= len(idx_map) or n_idx >= len(idx_map):
+        return None, None, "Internal error remapping selection bounds."
+    orig_start = idx_map[n_idx]
+    orig_end = idx_map[n_end - 1] + 1
+    new_text = _tidy_after_removal(text, orig_start, orig_end)
+    return new_text, (orig_start, orig_end), None
+
+
+def _tidy_after_removal(text: str, start: int, end: int) -> str:
+    """Remove ``text[start:end]`` and collapse a single adjoining ASCII
+    space, while preserving newline-based paragraph boundaries.
+    """
+    before = text[:start]
+    after = text[end:]
+    if before.endswith(" ") and after.startswith(" "):
+        after = after[1:]
+    return before + after
+
+
 def _chapter_has_pending_corrections(project_dir: Path, chapter_id: str) -> bool:
     """True if corrections.jsonl has any unapplied row for this chapter."""
     corrections_path = project_dir / "corrections.jsonl"
@@ -2580,60 +2985,72 @@ def _purge_chunk_corrections(project_dir: Path, chunk_id: str) -> int:
     return removed
 
 
-def _replace_chunk_translation(
+def _apply_chunk_edits(
     project_dir: Path,
     project_id: str,
-    chunk_id: str,
-    chunk_path: Path,
-    chunk: "Chunk",
-    new_text: str,
+    chapter_id: str,
+    edits: list[dict],
 ) -> dict:
-    """Shared pipeline for replacing a chunk's translation.
+    """Apply a batch of chunk edits in one chapter and rerun the post-edit
+    pipeline once.
 
-    Performs: backup → save → purge corrections → recombine → realign →
-    re-anchor annotations.
+    Each ``edit`` is a dict with keys: ``chunk_id``, ``chunk_path``,
+    ``chunk``, and optionally ``new_source_text`` and/or
+    ``new_translated_text``. Fields not provided are left as-is.
 
-    Returns a result dict with keys: ok, mtime, orphaned_annotations,
-    corrections_purged.  On failure raises an exception.
+    Performs (in order): backup → save chunks → purge corrections →
+    recombine chapter → realign chapter → re-anchor annotations →
+    evaluate edited chunks. Recombine/realign run once for the chapter,
+    not per chunk.
     """
     from src.combiner import combine_chunks
     from src.sentence_aligner import align_chapter_chunks
 
-    chapter_id = _chapter_id_from_chunk_id(chunk_id)
-
     # 1. Capture old alignment for annotation re-anchoring
     old_es_map = _load_alignment_es_map(project_dir, chapter_id)
 
-    # 2. Backup the pre-edit chunk JSON
-    backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
-    backup_root.mkdir(parents=True, exist_ok=True)
+    corrections_purged_total = 0
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
-    backup_path = backup_root / f"{ts}.json"
-    backup_path.write_text(
-        chunk_path.read_text(encoding="utf-8"), encoding="utf-8",
-    )
-    backups = sorted(backup_root.glob("*.json"))
-    for stale in backups[:-10]:
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+    for edit in edits:
+        chunk_id = edit["chunk_id"]
+        chunk_path: Path = edit["chunk_path"]
+        chunk: "Chunk" = edit["chunk"]
 
-    # 3. Update the chunk and persist
-    chunk.translated_text = new_text
-    save_chunk(chunk, chunk_path)
+        # 2. Backup the pre-edit chunk JSON (last 10)
+        backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_root / f"{ts}.json"
+        backup_path.write_text(
+            chunk_path.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+        for stale in sorted(backup_root.glob("*.json"))[:-10]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
-    # 4. Purge stale corrections for this chunk
-    corrections_purged = _purge_chunk_corrections(project_dir, chunk_id)
+        # 3. Apply the edit and persist
+        if edit.get("new_source_text") is not None:
+            chunk.source_text = edit["new_source_text"]
+        if edit.get("new_translated_text") is not None:
+            chunk.translated_text = edit["new_translated_text"]
+        save_chunk(chunk, chunk_path)
 
-    # 5. Recombine + realign the chapter
+        # 4. Purge stale corrections for this chunk
+        corrections_purged_total += _purge_chunk_corrections(
+            project_dir, chunk_id,
+        )
+
+    # 5. Recombine + realign the chapter (once)
     chunks_dir = project_dir / "chunks"
     chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
     chunks = [load_chunk(cf) for cf in chunk_files]
     combined_text = combine_chunks(chunks)
     chapters_dir = project_dir / "chapters"
     chapters_dir.mkdir(exist_ok=True)
-    (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+    (chapters_dir / f"{chapter_id}.txt").write_text(
+        combined_text, encoding="utf-8",
+    )
 
     align_dir = project_dir / "alignments"
     align_dir.mkdir(exist_ok=True)
@@ -2655,26 +3072,66 @@ def _replace_chunk_translation(
     except Exception:
         orphaned = []
 
-    try:
-        new_mtime = chunk_path.stat().st_mtime
-    except OSError:
-        new_mtime = 0.0
-
-    evaluation: Optional[dict] = None
-    try:
-        evaluation = evaluate_and_persist_chunk(project_dir, chunk)
-    except Exception as e:
-        app.logger.warning(
-            "Evaluator pipeline failed for chunk %s: %s", chunk_id, e,
-        )
-        evaluation = {"error": str(e)}
+    # 7. Re-evaluate each edited chunk; reload from disk so the evaluator
+    # sees the saved bytes rather than the in-memory object.
+    evaluations: dict[str, Optional[dict]] = {}
+    mtimes: dict[str, float] = {}
+    for edit in edits:
+        chunk_id = edit["chunk_id"]
+        chunk_path = edit["chunk_path"]
+        try:
+            edited_chunk = load_chunk(chunk_path)
+            evaluations[chunk_id] = evaluate_and_persist_chunk(
+                project_dir, edited_chunk,
+            )
+        except Exception as e:
+            app.logger.warning(
+                "Evaluator pipeline failed for chunk %s: %s", chunk_id, e,
+            )
+            evaluations[chunk_id] = {"error": str(e)}
+        try:
+            mtimes[chunk_id] = chunk_path.stat().st_mtime
+        except OSError:
+            mtimes[chunk_id] = 0.0
 
     return {
         "ok": True,
-        "mtime": new_mtime,
+        "mtimes": mtimes,
         "orphaned_annotations": len(orphaned),
-        "corrections_purged": corrections_purged,
-        "evaluation": evaluation,
+        "corrections_purged": corrections_purged_total,
+        "evaluations": evaluations,
+    }
+
+
+def _replace_chunk_translation(
+    project_dir: Path,
+    project_id: str,
+    chunk_id: str,
+    chunk_path: Path,
+    chunk: "Chunk",
+    new_text: str,
+) -> dict:
+    """Translation-only single-chunk edit — wraps :func:`_apply_chunk_edits`
+    and reshapes the result to the legacy chunk-editor response.
+    """
+    chapter_id = _chapter_id_from_chunk_id(chunk_id)
+    result = _apply_chunk_edits(
+        project_dir,
+        project_id,
+        chapter_id,
+        [{
+            "chunk_id": chunk_id,
+            "chunk_path": chunk_path,
+            "chunk": chunk,
+            "new_translated_text": new_text,
+        }],
+    )
+    return {
+        "ok": True,
+        "mtime": result["mtimes"].get(chunk_id, 0.0),
+        "orphaned_annotations": result["orphaned_annotations"],
+        "corrections_purged": result["corrections_purged"],
+        "evaluation": result["evaluations"].get(chunk_id),
     }
 
 

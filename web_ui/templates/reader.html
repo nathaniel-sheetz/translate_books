@@ -351,6 +351,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         <div class="sheet-header">
             <span class="sheet-label">{{ t.sheet_label }}</span>
             <button class="sheet-edit-chunk" id="sheet-edit-chunk" title="{{ t.edit_chunk }}">{{ t.edit_chunk }}</button>
+            <button class="sheet-edit-chunk" id="sheet-remove-text" title="{{ t.remove_text_btn }}">{{ t.remove_text_btn }}</button>
             <button class="sheet-close" id="sheet-close">&times;</button>
         </div>
         <div class="sheet-en" id="sheet-en"></div>
@@ -403,9 +404,64 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
 
     <!-- Overlay for dismissing bottom sheet -->
     <div class="sheet-overlay" id="sheet-overlay"></div>
+
+    <!-- Remove-text modal -->
+    <div id="remove-modal" class="modal-overlay" style="display:none">
+        <div class="modal-box remove-modal-box">
+            <div class="remove-modal-header">
+                <h2>{{ t.remove_modal_title }}</h2>
+                <button type="button" class="remove-help-btn" id="remove-help-btn" aria-label="Help" aria-expanded="false" title="{{ t.remove_modal_help }}">?</button>
+            </div>
+            <p class="remove-help" id="remove-help" style="display:none">{{ t.remove_modal_help }}</p>
+
+            <div class="remove-pane-wrap">
+                <div class="remove-pane-label">{{ t.remove_es_label }}<span class="remove-status" id="remove-es-status"></span></div>
+                <div class="remove-pane" id="remove-es" data-lang="es"></div>
+                <div class="remove-pane-meta">
+                    <span class="remove-pane-actions" data-lang="es">
+                        <button type="button" class="btn-card remove-apply-btn" id="remove-es-apply" hidden>{{ t.remove_apply }}</button>
+                        <button type="button" class="btn-card remove-unhighlight-btn" id="remove-es-unhighlight" hidden>{{ t.remove_unhighlight }}</button>
+                        <button type="button" class="btn-card remove-reset-btn" id="remove-es-clear">{{ t.remove_clear }}</button>
+                        <button type="button" class="btn-card remove-reset-btn" id="remove-es-reset">{{ t.remove_reset }}</button>
+                    </span>
+                </div>
+            </div>
+
+            <div class="remove-pane-wrap">
+                <div class="remove-pane-label">{{ t.remove_en_label }}<span class="remove-status" id="remove-en-status"></span></div>
+                <div class="remove-pane" id="remove-en" data-lang="en"></div>
+                <div class="remove-pane-meta">
+                    <span class="remove-pane-actions" data-lang="en">
+                        <button type="button" class="btn-card remove-apply-btn" id="remove-en-apply" hidden>{{ t.remove_apply }}</button>
+                        <button type="button" class="btn-card remove-unhighlight-btn" id="remove-en-unhighlight" hidden>{{ t.remove_unhighlight }}</button>
+                        <button type="button" class="btn-card remove-reset-btn" id="remove-en-clear">{{ t.remove_clear }}</button>
+                        <button type="button" class="btn-card remove-reset-btn" id="remove-en-reset">{{ t.remove_reset }}</button>
+                    </span>
+                </div>
+            </div>
+
+            <p id="remove-error" class="remove-error" style="display:none"></p>
+            <div class="modal-actions">
+                <button type="button" class="btn-card" id="remove-cancel">{{ t.remove_cancel }}</button>
+                <button type="button" class="btn-card btn-setup" id="remove-confirm">{{ t.remove_confirm }}</button>
+            </div>
+
+            <!-- Confirmation overlay (inside modal-box) -->
+            <div class="remove-confirm-overlay" id="remove-confirm-overlay" style="display:none">
+                <div class="remove-confirm-dialog">
+                    <h3 id="remove-confirm-title"></h3>
+                    <p id="remove-confirm-warning"></p>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-card" id="remove-confirm-no"></button>
+                        <button type="button" class="btn-card btn-danger" id="remove-confirm-yes"></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=9"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=16"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

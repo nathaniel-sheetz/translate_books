@@ -79,31 +79,58 @@
     let activeIdx = null;
     let selectedAnnType = null;
 
-    // Load alignment data and annotations in parallel
-    Promise.all([
-        fetch(`/api/alignment/${projectId}/${chapter}`).then(r => {
-            if (!r.ok) throw new Error(i.error_alignment || 'Alignment not found');
-            return r.json();
-        }),
-        fetch(`/api/annotations/${projectId}/${chapter}`).then(r => r.json()),
-    ])
-        .then(([data, annData]) => {
-            alignmentData = data;
+    // Load alignment data and annotations in parallel.
+    // Exposed as a function so the removal flow can re-bootstrap after a
+    // synchronous recombine + realign on the server.
+    function loadAndRender(scrollPrefix) {
+        return Promise.all([
+            fetch(`/api/alignment/${projectId}/${chapter}`).then(r => {
+                if (!r.ok) throw new Error(i.error_alignment || 'Alignment not found');
+                return r.json();
+            }),
+            fetch(`/api/annotations/${projectId}/${chapter}`).then(r => r.json()),
+        ])
+            .then(([data, annData]) => {
+                alignmentData = data;
 
-            // Build annotations map
-            annotationsMap = {};
-            for (const ann of (annData.annotations || [])) {
-                annotationsMap[ann.es_idx] = ann;
+                // Build annotations map
+                annotationsMap = {};
+                for (const ann of (annData.annotations || [])) {
+                    annotationsMap[ann.es_idx] = ann;
+                }
+
+                renderSentences(data.alignments);
+                addReviewButton();
+                updateStats();
+                if (scrollPrefix) {
+                    scrollToPrefix(scrollPrefix);
+                } else {
+                    scrollToAnchorParam();
+                }
+            })
+            .catch(err => {
+                content.innerHTML = `<p class="empty-state">${i.error_prefix || 'Error: '}${err.message}</p>`;
+            });
+    }
+
+    function scrollToPrefix(prefix) {
+        if (!prefix || !alignmentData) return;
+        const trimmed = prefix.trim().slice(0, 30);
+        if (!trimmed) return;
+        for (const a of alignmentData.alignments) {
+            if (a && typeof a.es === 'string' && a.es.startsWith(trimmed)) {
+                const el = content.querySelector(`[data-es-idx="${a.es_idx}"]`);
+                if (!el) return;
+                setTimeout(() => {
+                    const top = el.getBoundingClientRect().top + window.scrollY - 60;
+                    window.scrollTo({ top, behavior: 'instant' });
+                }, 0);
+                return;
             }
+        }
+    }
 
-            renderSentences(data.alignments);
-            addReviewButton();
-            updateStats();
-            scrollToAnchorParam();
-        })
-        .catch(err => {
-            content.innerHTML = `<p class="empty-state">${i.error_prefix || 'Error: '}${err.message}</p>`;
-        });
+    loadAndRender();
 
     function renderSentences(alignments) {
         content.innerHTML = '';
@@ -536,6 +563,397 @@
     // Keyboard shortcut: Escape to close sheet
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape') closeSheet();
+    });
+
+    // --- Remove-text modal ---
+
+    const removeModal = document.getElementById('remove-modal');
+    const removeBtn = document.getElementById('sheet-remove-text');
+    const removeEsPane = document.getElementById('remove-es');
+    const removeEnPane = document.getElementById('remove-en');
+    const removeEsStatus = document.getElementById('remove-es-status');
+    const removeEnStatus = document.getElementById('remove-en-status');
+    const removeEsReset = document.getElementById('remove-es-reset');
+    const removeEnReset = document.getElementById('remove-en-reset');
+    const removeEsClear = document.getElementById('remove-es-clear');
+    const removeEnClear = document.getElementById('remove-en-clear');
+    const removeEsApply = document.getElementById('remove-es-apply');
+    const removeEnApply = document.getElementById('remove-en-apply');
+    const removeEsUnhi = document.getElementById('remove-es-unhighlight');
+    const removeEnUnhi = document.getElementById('remove-en-unhighlight');
+    const removeError = document.getElementById('remove-error');
+    const removeConfirm = document.getElementById('remove-confirm');
+    const removeCancel = document.getElementById('remove-cancel');
+    const removeHelpBtn = document.getElementById('remove-help-btn');
+    const removeHelp = document.getElementById('remove-help');
+    const REMOVE_BTN_LABEL = removeConfirm ? removeConfirm.textContent : 'Remove';
+    const removeConfirmOverlay = document.getElementById('remove-confirm-overlay');
+    const removeConfirmYes = document.getElementById('remove-confirm-yes');
+    const removeConfirmNo = document.getElementById('remove-confirm-no');
+
+    // Populate confirmation dialog text from i18n
+    if (removeConfirmOverlay) {
+        const cTitle = document.getElementById('remove-confirm-title');
+        const cWarn = document.getElementById('remove-confirm-warning');
+        if (cTitle) cTitle.textContent = i.remove_confirm_title || 'Are you sure?';
+        if (cWarn) cWarn.textContent = i.remove_confirm_warning || 'This action cannot be undone.';
+        if (removeConfirmYes) removeConfirmYes.textContent = i.remove_confirm_yes || 'Yes, remove';
+        if (removeConfirmNo) removeConfirmNo.textContent = i.remove_confirm_no || 'Go back';
+    }
+
+    if (removeHelpBtn && removeHelp) {
+        removeHelpBtn.addEventListener('click', () => {
+            const open = removeHelp.style.display !== 'none';
+            removeHelp.style.display = open ? 'none' : '';
+            removeHelpBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+        });
+    }
+
+    let removalCtx = null;
+    let esSel = null;
+    let enSel = null;
+    let esSugg = null;
+    let enSugg = null;
+
+    function escapeHtml(s) {
+        return (s || '').replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
+    }
+
+    function rangesIntersect(aStart, aEnd, ranges) {
+        for (const r of ranges) {
+            const bStart = r[0], bEnd = r[1];
+            if (aStart < bEnd && bStart < aEnd) return [bStart, bEnd];
+        }
+        return null;
+    }
+
+    function renderPane(paneEl, fullText, sel) {
+        if (!sel || sel.start >= sel.end) {
+            paneEl.innerHTML = escapeHtml(fullText);
+            return;
+        }
+        const start = Math.max(0, Math.min(sel.start, fullText.length));
+        const end = Math.max(start, Math.min(sel.end, fullText.length));
+        paneEl.innerHTML =
+            escapeHtml(fullText.slice(0, start)) +
+            '<span class="hi">' + escapeHtml(fullText.slice(start, end)) + '</span>' +
+            escapeHtml(fullText.slice(end));
+    }
+
+    function scrollHighlightIntoView(paneEl) {
+        const hi = paneEl.querySelector('.hi');
+        if (!hi) return;
+        const paneRect = paneEl.getBoundingClientRect();
+        const hiRect = hi.getBoundingClientRect();
+        const offsetWithinPane = hiRect.top - paneRect.top + paneEl.scrollTop;
+        paneEl.scrollTop = Math.max(0, offsetWithinPane - 30);
+    }
+
+    function statusForSel(sel) {
+        if (!sel || sel.start >= sel.end) return '';
+        const n = sel.end - sel.start;
+        return (i.remove_chars || '{n} char selected').replace('{n}', n);
+    }
+
+    function updateRemoveButtons() {
+        removeEsStatus.textContent = statusForSel(esSel);
+        removeEnStatus.textContent = statusForSel(enSel);
+        const valid = !!removalCtx && (
+            (esSel && esSel.end > esSel.start) ||
+            (enSel && enSel.end > enSel.start)
+        );
+        removeConfirm.disabled = !valid;
+    }
+
+    function showRemoveError(msg) {
+        if (!msg) {
+            removeError.textContent = '';
+            removeError.style.display = 'none';
+        } else {
+            removeError.textContent = msg;
+            removeError.style.display = '';
+        }
+    }
+
+    function paneCharOffset(paneEl, node, offset) {
+        let total = 0;
+        const walker = document.createTreeWalker(paneEl, NodeFilter.SHOW_TEXT);
+        let n;
+        while ((n = walker.nextNode())) {
+            if (n === node) return total + offset;
+            total += n.nodeValue.length;
+        }
+        return total;
+    }
+
+
+    function openRemoveModal() {
+        if (activeIdx === null || !alignmentData) return;
+        const a = alignmentData.alignments.find(x => x.es_idx === activeIdx);
+        if (!a) return;
+        if (a.type === 'image') {
+            alert(i.remove_image_record || "Image records can't be removed here.");
+            return;
+        }
+
+        showRemoveError('');
+        removalCtx = null;
+        esSel = enSel = esSugg = enSugg = null;
+        removeEsPane.textContent = i.remove_loading || 'Loading…';
+        removeEnPane.textContent = '';
+        removeEsStatus.textContent = '';
+        removeEnStatus.textContent = '';
+        removeConfirm.disabled = true;
+        removeConfirm.textContent = REMOVE_BTN_LABEL;
+        removeModal.style.display = 'flex';
+        updateActionButtons();
+
+        fetch(`/api/removal-context/${projectId}/${chapter}/${activeIdx}`)
+            .then(r => r.json().then(d => ({ status: r.status, body: d })))
+            .then(({ status, body }) => {
+                if (status !== 200 || body.error) {
+                    showRemoveError(body.error || `HTTP ${status}`);
+                    removeEsPane.textContent = '';
+                    return;
+                }
+                removalCtx = body;
+                esSugg = body.es_suggested ? { ...body.es_suggested } : null;
+                enSugg = body.en_suggested ? { ...body.en_suggested } : null;
+                esSel = esSugg ? { ...esSugg } : null;
+                enSel = enSugg ? { ...enSugg } : null;
+                renderPane(removeEsPane, body.es_full, esSel);
+                renderPane(removeEnPane, body.en_full, enSel);
+                if (!esSugg && !enSugg) {
+                    showRemoveError(i.remove_no_match || "Couldn't seed the highlight — paint your selection.");
+                }
+                scrollHighlightIntoView(removeEsPane);
+                scrollHighlightIntoView(removeEnPane);
+                updateRemoveButtons();
+            })
+            .catch(err => {
+                showRemoveError((i.error_prefix || 'Error: ') + err.message);
+            });
+    }
+
+    function closeRemoveModal() {
+        removeModal.style.display = 'none';
+        if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
+        removalCtx = null;
+        esSel = enSel = esSugg = enSugg = null;
+        showRemoveError('');
+    }
+
+    if (removeBtn) removeBtn.addEventListener('click', openRemoveModal);
+
+    function paneHasSelection(paneEl) {
+        const browserSel = window.getSelection();
+        if (!browserSel || browserSel.isCollapsed) return false;
+        return paneEl.contains(browserSel.anchorNode) && paneEl.contains(browserSel.focusNode);
+    }
+
+    function updateActionButtons() {
+        const esSelected = paneHasSelection(removeEsPane);
+        const enSelected = paneHasSelection(removeEnPane);
+        if (removeEsApply) removeEsApply.hidden = !esSelected;
+        if (removeEsUnhi) removeEsUnhi.hidden = !esSelected;
+        if (removeEsReset) removeEsReset.hidden = esSelected;
+        if (removeEsClear) removeEsClear.hidden = esSelected;
+        if (removeEnApply) removeEnApply.hidden = !enSelected;
+        if (removeEnUnhi) removeEnUnhi.hidden = !enSelected;
+        if (removeEnReset) removeEnReset.hidden = enSelected;
+        if (removeEnClear) removeEnClear.hidden = enSelected;
+    }
+
+    document.addEventListener('selectionchange', () => {
+        if (removeModal.style.display !== 'flex') return;
+        updateActionButtons();
+    });
+
+    function applySelectionAsHighlight(paneEl, lang) {
+        if (!removalCtx) return;
+        const browserSel = window.getSelection();
+        if (!browserSel || browserSel.isCollapsed) return;
+        if (!paneEl.contains(browserSel.anchorNode) || !paneEl.contains(browserSel.focusNode)) return;
+
+        const aOffset = paneCharOffset(paneEl, browserSel.anchorNode, browserSel.anchorOffset);
+        const fOffset = paneCharOffset(paneEl, browserSel.focusNode, browserSel.focusOffset);
+        const start = Math.min(aOffset, fOffset);
+        const end = Math.max(aOffset, fOffset);
+        if (end <= start) return;
+
+        const fullText = lang === 'es' ? removalCtx.es_full : removalCtx.en_full;
+        const ranges = (lang === 'es'
+            ? removalCtx.image_token_ranges_es
+            : removalCtx.image_token_ranges_en) || [];
+        if (rangesIntersect(start, end, ranges)) {
+            showRemoveError(i.remove_image_overlap || 'Selection overlaps an image token.');
+            browserSel.removeAllRanges();
+            updateActionButtons();
+            return;
+        }
+        showRemoveError('');
+
+        if (lang === 'es') esSel = { start, end };
+        else enSel = { start, end };
+        renderPane(paneEl, fullText, lang === 'es' ? esSel : enSel);
+        browserSel.removeAllRanges();
+        updateActionButtons();
+        updateRemoveButtons();
+    }
+
+    if (removeEsApply) removeEsApply.addEventListener('mousedown', e => e.preventDefault());
+    if (removeEnApply) removeEnApply.addEventListener('mousedown', e => e.preventDefault());
+    if (removeEsUnhi) removeEsUnhi.addEventListener('mousedown', e => e.preventDefault());
+    if (removeEnUnhi) removeEnUnhi.addEventListener('mousedown', e => e.preventDefault());
+
+    if (removeEsApply) removeEsApply.addEventListener('click', () => applySelectionAsHighlight(removeEsPane, 'es'));
+    if (removeEnApply) removeEnApply.addEventListener('click', () => applySelectionAsHighlight(removeEnPane, 'en'));
+    if (removeEsUnhi) removeEsUnhi.addEventListener('click', () => {
+        if (!removalCtx) return;
+        esSel = null;
+        renderPane(removeEsPane, removalCtx.es_full, null);
+        const s = window.getSelection(); if (s) s.removeAllRanges();
+        updateActionButtons();
+        updateRemoveButtons();
+        showRemoveError('');
+    });
+    if (removeEnUnhi) removeEnUnhi.addEventListener('click', () => {
+        if (!removalCtx) return;
+        enSel = null;
+        renderPane(removeEnPane, removalCtx.en_full, null);
+        const s = window.getSelection(); if (s) s.removeAllRanges();
+        updateActionButtons();
+        updateRemoveButtons();
+        showRemoveError('');
+    });
+
+    removeEsReset.addEventListener('click', () => {
+        if (!removalCtx) return;
+        esSel = esSugg ? { ...esSugg } : null;
+        renderPane(removeEsPane, removalCtx.es_full, esSel);
+        scrollHighlightIntoView(removeEsPane);
+        updateRemoveButtons();
+        showRemoveError('');
+    });
+    removeEnReset.addEventListener('click', () => {
+        if (!removalCtx) return;
+        enSel = enSugg ? { ...enSugg } : null;
+        renderPane(removeEnPane, removalCtx.en_full, enSel);
+        scrollHighlightIntoView(removeEnPane);
+        updateRemoveButtons();
+        showRemoveError('');
+    });
+    if (removeEsClear) removeEsClear.addEventListener('click', () => {
+        if (!removalCtx) return;
+        esSel = null;
+        renderPane(removeEsPane, removalCtx.es_full, null);
+        updateRemoveButtons();
+        showRemoveError('');
+    });
+    if (removeEnClear) removeEnClear.addEventListener('click', () => {
+        if (!removalCtx) return;
+        enSel = null;
+        renderPane(removeEnPane, removalCtx.en_full, null);
+        updateRemoveButtons();
+        showRemoveError('');
+    });
+
+    removeCancel.addEventListener('click', closeRemoveModal);
+    removeModal.addEventListener('click', e => {
+        if (e.target === removeModal) closeRemoveModal();
+    });
+
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && removeModal.style.display === 'flex') {
+            closeRemoveModal();
+        }
+    });
+
+    // Show confirmation overlay when user clicks "Remove"
+    removeConfirm.addEventListener('click', () => {
+        if (!removalCtx) return;
+        const esCheck = esSel && esSel.end > esSel.start
+            ? removalCtx.es_full.slice(esSel.start, esSel.end) : '';
+        const enCheck = enSel && enSel.end > enSel.start
+            ? removalCtx.en_full.slice(enSel.start, enSel.end) : '';
+        if (!esCheck && !enCheck) return;
+        if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'flex';
+    });
+
+    if (removeConfirmNo) {
+        removeConfirmNo.addEventListener('click', () => {
+            if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
+        });
+    }
+
+    // Actually perform the removal only after explicit confirmation
+    (removeConfirmYes || removeConfirm).addEventListener('click', function onConfirmedRemove() {
+        if (!removeConfirmYes) return;  // guard: only runs on the yes btn
+        if (!removalCtx) return;
+        if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
+        const esSubstr = esSel && esSel.end > esSel.start
+            ? removalCtx.es_full.slice(esSel.start, esSel.end) : '';
+        const enSubstr = enSel && enSel.end > enSel.start
+            ? removalCtx.en_full.slice(enSel.start, enSel.end) : '';
+        if (!esSubstr && !enSubstr) return;
+
+        // Capture a prefix of the previous Spanish sentence so we can
+        // scroll back to where the eye was after re-render.
+        let scrollAnchor = null;
+        if (alignmentData) {
+            const prev = alignmentData.alignments
+                .filter(a => a.type !== 'image' && typeof a.es_idx === 'number' && a.es_idx < activeIdx)
+                .pop();
+            if (prev && typeof prev.es === 'string') {
+                scrollAnchor = prev.es.slice(0, 30);
+            }
+        }
+
+        showRemoveError('');
+        removeConfirm.disabled = true;
+        removeConfirm.textContent = i.remove_working || 'Removing…';
+
+        fetch('/api/remove-text', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: projectId,
+                chapter_id: chapter,
+                chunk_id: removalCtx.chunk_id,
+                es_remove: esSubstr,
+                en_remove: enSubstr,
+                es_remove_start: esSubstr ? esSel.start : null,
+                en_remove_start: enSubstr ? enSel.start : null,
+                expected_chunk_mtime: removalCtx.chunk_mtime,
+            }),
+        })
+            .then(r => r.json().then(d => ({ status: r.status, body: d })))
+            .then(({ status, body }) => {
+                if (status !== 200 || !body.ok) {
+                    showRemoveError(body.error || `HTTP ${status}`);
+                    removeConfirm.disabled = false;
+                    removeConfirm.textContent = REMOVE_BTN_LABEL;
+                    return;
+                }
+                const orphans = body.orphaned_annotations || 0;
+                closeRemoveModal();
+                closeSheet();
+                loadAndRender(scrollAnchor).then(() => {
+                    if (orphans > 0 && i.remove_orphans) {
+                        // Lightweight surfacing — alert is acceptable here
+                        // because orphaned annotations are rare and worth
+                        // explicit attention.
+                        alert(i.remove_orphans.replace('{n}', orphans));
+                    }
+                });
+            })
+            .catch(err => {
+                showRemoveError((i.network_error || 'Network error: ') + err.message);
+                removeConfirm.disabled = false;
+                removeConfirm.textContent = REMOVE_BTN_LABEL;
+            });
     });
 
     // --- Mark as reviewed button ---
