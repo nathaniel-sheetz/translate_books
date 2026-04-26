@@ -220,8 +220,8 @@ class GrammarEvaluator(BaseEvaluator):
 
         # Build location
         location = f"char {match.offset}"
-        if match.errorLength:
-            location += f"-{match.offset + match.errorLength}"
+        if match.error_length:
+            location += f"-{match.offset + match.error_length}"
 
         return self.create_issue(
             severity=severity,
@@ -272,7 +272,7 @@ class GrammarEvaluator(BaseEvaluator):
 
         # Check ignore_rules
         ignore_rules = context.get('ignore_rules', [])
-        rule_id = getattr(match, 'ruleId', None)
+        rule_id = getattr(match, 'rule_id', None)
         if rule_id in ignore_rules:
             return True
 
@@ -299,8 +299,8 @@ class GrammarEvaluator(BaseEvaluator):
         """
         try:
             # The matched text is in the context or can be extracted
-            if hasattr(match, 'matchedText') and match.matchedText:
-                return match.matchedText.strip()
+            if hasattr(match, 'matched_text') and match.matched_text:
+                return match.matched_text.strip()
 
             # Try to extract from context
             if hasattr(match, 'context') and match.context:
