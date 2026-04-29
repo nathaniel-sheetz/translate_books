@@ -33,16 +33,16 @@ def make_metadata():
 
 # Helper to create a mock LanguageTool Match object
 def make_mock_match(message, category, rule_id, offset=0, length=5, replacements=None, context=""):
-    """Create a mock LanguageTool Match object."""
+    """Create a mock LanguageTool Match object (3.x snake_case API)."""
     match = Mock()
     match.message = message
     match.category = category
-    match.ruleId = rule_id
+    match.rule_id = rule_id
     match.offset = offset
-    match.errorLength = length
+    match.error_length = length
     match.replacements = replacements or []
     match.context = context
-    match.matchedText = context
+    match.matched_text = context
     return match
 
 
@@ -199,7 +199,7 @@ class TestGlossaryIntegration:
             rule_id="MORFOLOGIK_RULE_ES",
             context="Darcy"
         )
-        mock_match.matchedText = "Darcy"
+        mock_match.matched_text = "Darcy"
         mock_tool.check.return_value = [mock_match]
         mock_lt_class.return_value = mock_tool
 
@@ -237,7 +237,7 @@ class TestGlossaryIntegration:
             rule_id="MORFOLOGIK_RULE_ES",
             context="magia"
         )
-        mock_match.matchedText = "magia"
+        mock_match.matched_text = "magia"
         mock_tool.check.return_value = [mock_match]
         mock_lt_class.return_value = mock_tool
 
