@@ -429,6 +429,10 @@ class StyleGuide(BaseModel):
         )
     """
     content: str = Field(description="The style guide text")
+    light_content: Optional[str] = Field(
+        default=None,
+        description="Optional shorter style guide used for single-sentence retranslation. Falls back to content when empty.",
+    )
     version: str = Field(default="1.0", description="Version (manually maintained by user)")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
@@ -619,6 +623,17 @@ class PairwiseVerdict(BaseModel):
     overall_winner: Literal['A', 'B', 'tie']
     rationale: str
     raw_response: str
+
+
+class RetranslationResult(BaseModel):
+    """Result of a single-sentence retranslation from the reader UI."""
+    new_translation: str = Field(description="Cleaned LLM output ready to insert")
+    model: str = Field(description="Model id used for the call")
+    provider: str = Field(description="Provider id used for the call")
+    prompt_tokens: int = Field(ge=0, description="Estimated input tokens")
+    completion_tokens: int = Field(ge=0, description="Estimated output tokens")
+    cost_usd: float = Field(ge=0.0, description="Estimated cost in USD")
+    raw_response: str = Field(description="Unprocessed LLM response for replay/debugging")
 
 
 class PipelineStage(str, Enum):

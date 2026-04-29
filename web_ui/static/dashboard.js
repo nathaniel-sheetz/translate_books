@@ -740,6 +740,7 @@
             document.getElementById('style-guide-existing').style.display = '';
             document.getElementById('style-guide-wizard').style.display = 'none';
             document.getElementById('style-guide-preview').textContent = status.style_guide_content;
+            document.getElementById('light-style-guide-input').value = status.light_style_guide_content || '';
         } else {
             document.getElementById('style-guide-existing').style.display = 'none';
             document.getElementById('style-guide-wizard').style.display = '';
@@ -749,6 +750,24 @@
     document.getElementById('btn-edit-style').addEventListener('click', function() {
         document.getElementById('style-guide-existing').style.display = 'none';
         document.getElementById('style-guide-wizard').style.display = '';
+    });
+
+    document.getElementById('btn-save-light-style').addEventListener('click', function() {
+        var value = document.getElementById('light-style-guide-input').value;
+        var statusEl = document.getElementById('light-style-save-status');
+        statusEl.textContent = 'Saving...';
+        apiPost('/api/setup/' + PROJECT + '/style-guide/light', { light_content: value })
+        .then(function(data) {
+            if (data && data.ok) {
+                statusEl.textContent = 'Saved!';
+            } else {
+                statusEl.textContent = 'Error: ' + ((data && data.error) || 'unknown');
+            }
+            setTimeout(function() { statusEl.textContent = ''; }, 3000);
+        })
+        .catch(function(e) {
+            statusEl.textContent = 'Error: ' + (e && e.message ? e.message : e);
+        });
     });
 
     // Collect answers from fixed + extra questions

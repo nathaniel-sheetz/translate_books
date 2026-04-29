@@ -1001,4 +1001,458 @@
         marker.appendChild(btn);
         content.appendChild(marker);
     }
+
+    // ========================================================================
+    // Retranslate flow (Phase 2)
+    // ========================================================================
+
+    const retransBtn = document.getElementById('sheet-retranslate');
+    const retransModal = document.getElementById('retranslate-modal');
+    const retransAlign = document.getElementById('retranslate-alignment');
+    const retransSource = document.getElementById('retranslate-source');
+    const retransCurrent = document.getElementById('retranslate-current');
+    const retransModelSel = document.getElementById('retranslate-model');
+    const retransRun = document.getElementById('retranslate-run');
+    const retransStatus = document.getElementById('retranslate-status');
+    const retransNewRow = document.getElementById('retranslate-new-row');
+    const retransNew = document.getElementById('retranslate-new');
+    const retransCost = document.getElementById('retranslate-cost');
+    const retransReset = document.getElementById('retranslate-reset');
+    const retransError = document.getElementById('retranslate-error');
+    const retransDiscard = document.getElementById('retranslate-discard');
+    const retransReplace = document.getElementById('retranslate-replace');
+    const retransConfirmOverlay = document.getElementById('retranslate-confirm-overlay');
+    const retransConfirmTitle = document.getElementById('retranslate-confirm-title');
+    const retransConfirmWarn = document.getElementById('retranslate-confirm-warning');
+    const retransConfirmYes = document.getElementById('retranslate-confirm-yes');
+    const retransConfirmNo = document.getElementById('retranslate-confirm-no');
+    const retransExpandPanel = document.getElementById('retranslate-expand-panel');
+    const retransExpandBeforeRow = document.getElementById('retranslate-expand-before-row');
+    const retransExpandAfterRow = document.getElementById('retranslate-expand-after-row');
+    const retransExpandBefore = document.getElementById('retranslate-expand-before');
+    const retransExpandAfter = document.getElementById('retranslate-expand-after');
+    const retransExpandBeforePreview = document.getElementById('retranslate-expand-before-preview');
+    const retransExpandAfterPreview = document.getElementById('retranslate-expand-after-preview');
+    const retransContextCount = document.getElementById('retranslate-context-count');
+
+    let retransCtx = null;     // {row, llmOutput, originalCurrent, originalSource,
+                               //  beforeRow, afterRow, beforeIncluded, afterIncluded,
+                               //  panelOpen, userEditedSource}
+    let modelsLoaded = false;
+
+    function loadModelsOnce() {
+        if (modelsLoaded || !retransModelSel) return Promise.resolve();
+        return fetch('/api/llm/models')
+            .then(r => r.json())
+            .then(data => {
+                retransModelSel.innerHTML = '';
+                const stored = (window.localStorage && localStorage.getItem('retranslate.preferred_model')) || '';
+                const seenStored = (data.models || []).some(m => m.id === stored);
+                (data.models || []).forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    opt.textContent = m.name + (m.is_default ? ' (default)' : '');
+                    retransModelSel.appendChild(opt);
+                });
+                if (stored && seenStored) {
+                    retransModelSel.value = stored;
+                } else if (data.default_model) {
+                    retransModelSel.value = data.default_model;
+                }
+                modelsLoaded = true;
+            })
+            .catch(() => { /* leave empty; user will see no options */ });
+    }
+
+    function findRowByEsIdx(idx) {
+        if (!alignmentData) return null;
+        return (alignmentData.alignments || []).find(a =>
+            a.type !== 'image' && typeof a.es_idx === 'number' && a.es_idx === idx
+        );
+    }
+
+    // Walk the alignment array by position (skipping image rows) to find the
+    // nearest non-empty English-bearing neighbors. Required because intermediate
+    // es_idx values inside an N:1 group are not exposed as separate rows.
+    function findArrayNeighbors(targetRow) {
+        const arr = (alignmentData && alignmentData.alignments) || [];
+        const i = arr.indexOf(targetRow);
+        if (i < 0) return { before: null, after: null };
+        const walk = (start, step) => {
+            for (let j = start; j >= 0 && j < arr.length; j += step) {
+                const r = arr[j];
+                if (r && r.type !== 'image' && r.en) return r;
+            }
+            return null;
+        };
+        return { before: walk(i - 1, -1), after: walk(i + 1, +1) };
+    }
+
+    function rebuildSourceFromExpansion() {
+        if (!retransCtx) return;
+        const parts = [];
+        if (retransCtx.beforeIncluded && retransCtx.beforeRow && retransCtx.beforeRow.en) {
+            parts.push(retransCtx.beforeRow.en);
+        }
+        parts.push(retransCtx.originalSource);
+        if (retransCtx.afterIncluded && retransCtx.afterRow && retransCtx.afterRow.en) {
+            parts.push(retransCtx.afterRow.en);
+        }
+        retransSource.value = parts.join(' ');
+        retransCtx.userEditedSource = false;
+    }
+
+    function buildContextText() {
+        if (!retransContextCount || !retransCtx || !retransCtx.row) return '';
+        const raw = parseInt(retransContextCount.value, 10);
+        const n = Math.max(0, Math.min(5, isNaN(raw) ? 0 : raw));
+        if (!n) return '';
+        const arr = (alignmentData && alignmentData.alignments) || [];
+
+        const sourceRows = new Set([retransCtx.row]);
+        if (retransCtx.beforeIncluded && retransCtx.beforeRow) sourceRows.add(retransCtx.beforeRow);
+        if (retransCtx.afterIncluded && retransCtx.afterRow) sourceRows.add(retransCtx.afterRow);
+
+        const positions = [];
+        sourceRows.forEach(r => {
+            const p = arr.indexOf(r);
+            if (p >= 0) positions.push(p);
+        });
+        if (!positions.length) return '';
+        const minPos = Math.min.apply(null, positions);
+        const maxPos = Math.max.apply(null, positions);
+
+        const collect = (start, step, count) => {
+            const out = [];
+            let pos = start;
+            while (out.length < count && pos >= 0 && pos < arr.length) {
+                const r = arr[pos];
+                if (r && r.type !== 'image' && r.en) out.push(r.en);
+                pos += step;
+            }
+            return out;
+        };
+        const before = collect(minPos - 1, -1, n).reverse();
+        const after = collect(maxPos + 1, +1, n);
+
+        const sections = [];
+        if (before.length) sections.push('Before:\n' + before.join(' '));
+        if (after.length) sections.push('After:\n' + after.join(' '));
+        return sections.join('\n\n');
+    }
+
+    function previewSnippet(text) {
+        const s = (text || '').trim().replace(/\s+/g, ' ');
+        return s.length > 80 ? s.slice(0, 80) + '…' : s;
+    }
+
+    function showRetransError(msg) {
+        if (!retransError) return;
+        if (msg) {
+            retransError.textContent = msg;
+            retransError.style.display = 'block';
+        } else {
+            retransError.textContent = '';
+            retransError.style.display = 'none';
+        }
+    }
+
+    function setRetransStatus(msg) {
+        if (retransStatus) retransStatus.textContent = msg || '';
+    }
+
+    function openRetransModal() {
+        if (activeIdx === null || activeIdx === undefined) return;
+        const row = findRowByEsIdx(activeIdx);
+        if (!row || !row.chunk_id) return;
+
+        const { before, after } = findArrayNeighbors(row);
+
+        retransCtx = {
+            row,
+            llmOutput: null,
+            originalCurrent: row.text_in_chunk || row.es || '',
+            originalSource: row.en || '',
+            beforeRow: before,
+            afterRow: after,
+            beforeIncluded: false,
+            afterIncluded: false,
+            panelOpen: false,
+            userEditedSource: false,
+        };
+
+        retransSource.value = retransCtx.originalSource;
+        retransCurrent.value = retransCtx.originalCurrent;
+        retransNew.value = '';
+        retransNewRow.style.display = 'none';
+        retransCost.textContent = '';
+        retransReplace.disabled = true;
+        showRetransError('');
+        setRetransStatus('');
+
+        // Expansion panel — show one or both neighbor rows when available
+        if (retransExpandPanel) retransExpandPanel.style.display = 'none';
+        if (retransExpandBefore) retransExpandBefore.checked = false;
+        if (retransExpandAfter) retransExpandAfter.checked = false;
+        if (retransExpandBeforeRow) {
+            if (before && before.en) {
+                retransExpandBeforeRow.style.display = 'flex';
+                if (retransExpandBeforePreview) retransExpandBeforePreview.textContent = previewSnippet(before.en);
+            } else {
+                retransExpandBeforeRow.style.display = 'none';
+            }
+        }
+        if (retransExpandAfterRow) {
+            if (after && after.en) {
+                retransExpandAfterRow.style.display = 'flex';
+                if (retransExpandAfterPreview) retransExpandAfterPreview.textContent = previewSnippet(after.en);
+            } else {
+                retransExpandAfterRow.style.display = 'none';
+            }
+        }
+
+        // Restore context count from localStorage (clamped to [0, 5])
+        if (retransContextCount) {
+            let stored = 1;
+            try {
+                const v = window.localStorage && localStorage.getItem('retranslate.context_count');
+                if (v !== null && v !== undefined) {
+                    const n = parseInt(v, 10);
+                    if (!isNaN(n)) stored = Math.max(0, Math.min(5, n));
+                }
+            } catch (e) { /* ignore */ }
+            retransContextCount.value = String(stored);
+        }
+
+        // Alignment badge — always interactive (clickable button) so user can
+        // expand source on either high- or low-confidence rows.
+        const sim = (typeof row.similarity === 'number') ? row.similarity.toFixed(2) : '—';
+        const conf = row.confidence || 'high';
+        const tmpl = (conf === 'low')
+            ? (i.retranslate_alignment_low || 'alignment: {sim} low')
+            : (i.retranslate_alignment_high || 'alignment: {sim} high');
+        if (retransAlign) {
+            retransAlign.textContent = (tmpl || '').replace('{sim}', sim);
+            retransAlign.className = 'retranslate-alignment-badge ' + (conf === 'low' ? 'is-low' : 'is-high');
+            retransAlign.setAttribute('role', 'button');
+            retransAlign.setAttribute('tabindex', '0');
+            retransAlign.setAttribute('aria-expanded', 'false');
+        }
+
+        retransModal.style.display = 'flex';
+        loadModelsOnce();
+    }
+
+    function closeRetransModal() {
+        retransModal.style.display = 'none';
+        if (retransConfirmOverlay) retransConfirmOverlay.style.display = 'none';
+        if (retransExpandPanel) retransExpandPanel.style.display = 'none';
+        if (retransExpandBefore) retransExpandBefore.checked = false;
+        if (retransExpandAfter) retransExpandAfter.checked = false;
+        if (retransAlign) retransAlign.setAttribute('aria-expanded', 'false');
+        retransCtx = null;
+        showRetransError('');
+        setRetransStatus('');
+    }
+
+    function toggleExpandPanel() {
+        if (!retransExpandPanel || !retransCtx) return;
+        const opening = retransExpandPanel.style.display === 'none';
+        retransExpandPanel.style.display = opening ? 'flex' : 'none';
+        retransCtx.panelOpen = opening;
+        if (retransAlign) retransAlign.setAttribute('aria-expanded', opening ? 'true' : 'false');
+    }
+
+    if (retransBtn) retransBtn.addEventListener('click', openRetransModal);
+    if (retransDiscard) retransDiscard.addEventListener('click', closeRetransModal);
+    if (retransModal) retransModal.addEventListener('click', e => {
+        if (e.target === retransModal) closeRetransModal();
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && retransModal && retransModal.style.display === 'flex') {
+            closeRetransModal();
+        }
+    });
+
+    if (retransAlign) {
+        retransAlign.addEventListener('click', toggleExpandPanel);
+        retransAlign.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleExpandPanel();
+            }
+        });
+    }
+    if (retransExpandBefore) retransExpandBefore.addEventListener('change', () => {
+        if (!retransCtx) return;
+        retransCtx.beforeIncluded = !!retransExpandBefore.checked;
+        rebuildSourceFromExpansion();
+    });
+    if (retransExpandAfter) retransExpandAfter.addEventListener('change', () => {
+        if (!retransCtx) return;
+        retransCtx.afterIncluded = !!retransExpandAfter.checked;
+        rebuildSourceFromExpansion();
+    });
+    if (retransSource) retransSource.addEventListener('input', () => {
+        if (retransCtx) retransCtx.userEditedSource = true;
+    });
+    if (retransContextCount) {
+        const normalizeContextCount = () => {
+            const raw = parseInt(retransContextCount.value, 10);
+            const n = Math.max(0, Math.min(5, isNaN(raw) ? 1 : raw));
+            if (String(n) !== retransContextCount.value) retransContextCount.value = String(n);
+            try {
+                if (window.localStorage) localStorage.setItem('retranslate.context_count', String(n));
+            } catch (e) { /* ignore */ }
+        };
+        const persistContextCount = () => {
+            const raw = parseInt(retransContextCount.value, 10);
+            if (isNaN(raw)) return;
+            if (raw < 0 || raw > 5) return;
+            try {
+                if (window.localStorage) localStorage.setItem('retranslate.context_count', String(raw));
+            } catch (e) { /* ignore */ }
+        };
+        retransContextCount.addEventListener('change', normalizeContextCount);
+        retransContextCount.addEventListener('blur', normalizeContextCount);
+        retransContextCount.addEventListener('input', persistContextCount);
+    }
+
+    if (retransRun) retransRun.addEventListener('click', () => {
+        if (!retransCtx || !retransCtx.row) return;
+        const source = (retransSource.value || '').trim();
+        if (!source) {
+            showRetransError(i.retranslate_empty_source || 'Source text cannot be empty.');
+            return;
+        }
+        const model = retransModelSel.value || null;
+        showRetransError('');
+        setRetransStatus(i.retranslate_working || 'Calling LLM…');
+        retransRun.disabled = true;
+
+        if (model && window.localStorage) {
+            try { localStorage.setItem('retranslate.preferred_model', model); } catch (e) { /* ignore */ }
+        }
+
+        fetch('/api/sentence/retranslate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: projectId,
+                chapter_id: chapter,
+                chunk_id: retransCtx.row.chunk_id,
+                es_idx: retransCtx.row.es_idx,
+                source_text: source,
+                model: model,
+                context_text: buildContextText(),
+                expected_chunk_mtime: retransCtx.row.chunk_mtime,
+            }),
+        })
+            .then(r => r.json().then(d => ({ status: r.status, body: d })))
+            .then(({ status, body }) => {
+                retransRun.disabled = false;
+                setRetransStatus('');
+                if (status !== 200 || !body.ok) {
+                    showRetransError(body.error || `HTTP ${status}`);
+                    return;
+                }
+                retransCtx.llmOutput = body.new_translation;
+                retransNew.value = body.new_translation;
+                retransNewRow.style.display = 'block';
+                const tmpl = i.retranslate_cost || '{model} · {pin}→{pout} tokens · ${cost}';
+                retransCost.textContent = tmpl
+                    .replace('{model}', body.model)
+                    .replace('{pin}', body.prompt_tokens)
+                    .replace('{pout}', body.completion_tokens)
+                    .replace('{cost}', body.cost_usd.toFixed(4));
+                retransReplace.disabled = false;
+            })
+            .catch(err => {
+                retransRun.disabled = false;
+                setRetransStatus('');
+                showRetransError((i.network_error || 'Network error: ') + err.message);
+            });
+    });
+
+    if (retransReset) retransReset.addEventListener('click', () => {
+        if (retransCtx && retransCtx.llmOutput !== null) {
+            retransNew.value = retransCtx.llmOutput;
+            showRetransError('');
+        }
+    });
+
+    function showRetransConfirm() {
+        if (!retransCtx || !retransCtx.row) return;
+        const newText = (retransNew.value || '').trim();
+        if (!newText) {
+            showRetransError(i.retranslate_empty_new || 'New translation cannot be empty.');
+            return;
+        }
+        if (retransConfirmTitle) retransConfirmTitle.textContent = i.retranslate_confirm_title || 'Replace this translation?';
+        if (retransConfirmWarn) retransConfirmWarn.textContent = i.retranslate_confirm_warning || '';
+        if (retransConfirmYes) retransConfirmYes.textContent = i.retranslate_confirm_yes || 'Yes, replace';
+        if (retransConfirmNo) retransConfirmNo.textContent = i.retranslate_confirm_no || 'Cancel';
+        if (retransConfirmOverlay) retransConfirmOverlay.style.display = 'flex';
+    }
+
+    if (retransReplace) retransReplace.addEventListener('click', showRetransConfirm);
+    if (retransConfirmNo) retransConfirmNo.addEventListener('click', () => {
+        if (retransConfirmOverlay) retransConfirmOverlay.style.display = 'none';
+    });
+
+    if (retransConfirmYes) retransConfirmYes.addEventListener('click', () => {
+        if (!retransCtx || !retransCtx.row) return;
+        const currentText = retransCurrent.value || '';
+        const newText = (retransNew.value || '').trim();
+        if (!currentText || !newText) return;
+        if (retransConfirmOverlay) retransConfirmOverlay.style.display = 'none';
+
+        // Capture scroll anchor (mirrors remove-text)
+        let scrollAnchor = null;
+        if (alignmentData) {
+            const prev = (alignmentData.alignments || [])
+                .filter(a => a.type !== 'image' && typeof a.es_idx === 'number' && a.es_idx < activeIdx)
+                .pop();
+            if (prev && typeof prev.es === 'string') {
+                scrollAnchor = prev.es.slice(0, 30);
+            }
+        }
+
+        retransReplace.disabled = true;
+        setRetransStatus(i.retranslate_replacing || 'Replacing and re-aligning…');
+        showRetransError('');
+
+        fetch('/api/sentence/replace', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: projectId,
+                chapter_id: chapter,
+                chunk_id: retransCtx.row.chunk_id,
+                es_idx: retransCtx.row.es_idx,
+                current_translation: currentText,
+                new_translation: newText,
+                expected_chunk_mtime: retransCtx.row.chunk_mtime,
+            }),
+        })
+            .then(r => r.json().then(d => ({ status: r.status, body: d })))
+            .then(({ status, body }) => {
+                if (status !== 200 || !body.ok) {
+                    let msg = body.error || `HTTP ${status}`;
+                    if (status === 422 && i.retranslate_no_match) msg = i.retranslate_no_match;
+                    showRetransError(msg);
+                    setRetransStatus('');
+                    retransReplace.disabled = false;
+                    return;
+                }
+                closeRetransModal();
+                closeSheet();
+                loadAndRender(scrollAnchor);
+            })
+            .catch(err => {
+                showRetransError((i.network_error || 'Network error: ') + err.message);
+                setRetransStatus('');
+                retransReplace.disabled = false;
+            });
+    });
 })();

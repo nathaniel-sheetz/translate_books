@@ -240,6 +240,16 @@
                     <button class="btn-secondary" id="btn-edit-style" style="margin-left:8px; padding:4px 10px; font-size:12px;">Edit</button>
                 </div>
                 <div class="preview-box" id="style-guide-preview"></div>
+
+                <div class="light-style-guide-section" style="margin-top:16px;">
+                    <h3 style="margin:0 0 4px 0; font-size:14px;">Light Style Guide <span style="font-weight:normal; color:#888; font-size:12px;">(optional, used for sentence retranslation)</span></h3>
+                    <p class="section-hint" style="margin:0 0 8px 0;">If set, this shorter guide replaces the full style guide in the reader's retranslate prompt. Leave empty to use the full guide.</p>
+                    <textarea id="light-style-guide-input" rows="6" style="width:100%;" placeholder="Paste a condensed style guide here (a few key voice/dialect rules)..."></textarea>
+                    <div class="btn-row" style="margin-top:8px;">
+                        <button class="btn-save" id="btn-save-light-style">Save Light Style Guide</button>
+                        <span class="status-msg" id="light-style-save-status"></span>
+                    </div>
+                </div>
             </div>
 
             <div id="style-guide-wizard">

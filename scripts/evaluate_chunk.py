@@ -56,7 +56,7 @@ from src.models import Chunk, Glossary
 
 
 # Known evaluator names (from evaluator registry)
-KNOWN_EVALUATORS = ["length", "paragraph", "dictionary", "glossary"]
+KNOWN_EVALUATORS = ["length", "paragraph", "dictionary", "glossary", "completeness", "blacklist", "grammar"]
 
 
 def parse_arguments():

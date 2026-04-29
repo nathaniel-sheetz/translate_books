@@ -352,6 +352,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
             <span class="sheet-label">{{ t.sheet_label }}</span>
             <button class="sheet-edit-chunk" id="sheet-edit-chunk" title="{{ t.edit_chunk }}">{{ t.edit_chunk }}</button>
             <button class="sheet-edit-chunk" id="sheet-remove-text" title="{{ t.remove_text_btn }}">{{ t.remove_text_btn }}</button>
+            <button class="sheet-edit-chunk" id="sheet-retranslate" title="{{ t.retranslate_btn }}">{{ t.retranslate_btn }}</button>
             <button class="sheet-close" id="sheet-close">&times;</button>
         </div>
         <div class="sheet-en" id="sheet-en"></div>
@@ -459,9 +460,80 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
             </div>
         </div>
     </div>
+
+    <!-- Retranslate modal -->
+    <div id="retranslate-modal" class="modal-overlay" style="display:none">
+        <div class="modal-box retranslate-modal-box">
+            <div class="remove-modal-header">
+                <h2>{{ t.retranslate_modal_title }}</h2>
+                <span class="retranslate-alignment-badge" id="retranslate-alignment"></span>
+            </div>
+
+            <div class="retranslate-row">
+                <label for="retranslate-source">{{ t.retranslate_source_label }}</label>
+                <textarea id="retranslate-source" rows="3"></textarea>
+                <div class="retranslate-expand-panel" id="retranslate-expand-panel" style="display:none">
+                    <label class="retranslate-expand-row" id="retranslate-expand-before-row" style="display:none">
+                        <input type="checkbox" id="retranslate-expand-before">
+                        <span class="retranslate-expand-label">{{ t.retranslate_expand_before }}</span>
+                        <span class="retranslate-expand-preview" id="retranslate-expand-before-preview"></span>
+                    </label>
+                    <label class="retranslate-expand-row" id="retranslate-expand-after-row" style="display:none">
+                        <input type="checkbox" id="retranslate-expand-after">
+                        <span class="retranslate-expand-label">{{ t.retranslate_expand_after }}</span>
+                        <span class="retranslate-expand-preview" id="retranslate-expand-after-preview"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="retranslate-row">
+                <label for="retranslate-current">{{ t.retranslate_current_label }}</label>
+                <textarea id="retranslate-current" rows="3"></textarea>
+            </div>
+
+            <div class="retranslate-row retranslate-context-row">
+                <label for="retranslate-context-count">{{ t.retranslate_context_label }}:</label>
+                <input type="number" id="retranslate-context-count" min="0" max="5" step="1" value="1" class="retranslate-context-input">
+            </div>
+
+            <div class="retranslate-controls">
+                <label for="retranslate-model">{{ t.retranslate_model_label }}:</label>
+                <select id="retranslate-model"></select>
+                <button type="button" class="btn-card btn-setup" id="retranslate-run">{{ t.retranslate_run }}</button>
+                <span class="retranslate-status" id="retranslate-status"></span>
+            </div>
+
+            <div class="retranslate-row" id="retranslate-new-row" style="display:none">
+                <label for="retranslate-new">{{ t.retranslate_new_label }} <span class="retranslate-cost" id="retranslate-cost"></span></label>
+                <textarea id="retranslate-new" rows="3"></textarea>
+                <div class="retranslate-new-actions">
+                    <button type="button" class="btn-card" id="retranslate-reset">{{ t.retranslate_reset }}</button>
+                </div>
+            </div>
+
+            <p id="retranslate-error" class="remove-error" style="display:none"></p>
+
+            <div class="modal-actions">
+                <button type="button" class="btn-card" id="retranslate-discard">{{ t.retranslate_discard }}</button>
+                <button type="button" class="btn-card btn-setup" id="retranslate-replace" disabled>{{ t.retranslate_replace }}</button>
+            </div>
+
+            <!-- Confirmation overlay -->
+            <div class="remove-confirm-overlay" id="retranslate-confirm-overlay" style="display:none">
+                <div class="remove-confirm-dialog">
+                    <h3 id="retranslate-confirm-title"></h3>
+                    <p id="retranslate-confirm-warning"></p>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-card" id="retranslate-confirm-no"></button>
+                        <button type="button" class="btn-card btn-danger" id="retranslate-confirm-yes"></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=16"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=18"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">
