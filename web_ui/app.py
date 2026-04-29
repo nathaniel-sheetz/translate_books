@@ -2154,13 +2154,15 @@ def project_chunk_all(project_id):
         from src.utils.file_io import save_chunk
 
         data = request.json or {}
-        config = ChunkingConfig(
-            target_size=data.get("target_size", 2000),
-            min_chunk_size=data.get("min_chunk_size", 500),
-            max_chunk_size=data.get("max_chunk_size", 3000),
-            overlap_paragraphs=data.get("overlap_paragraphs", 2),
-            min_overlap_words=data.get("min_overlap_words", 100),
-        )
+        config = ChunkingConfig(**{
+            k: v for k, v in {
+                "target_size": data.get("target_size"),
+                "min_chunk_size": data.get("min_chunk_size"),
+                "max_chunk_size": data.get("max_chunk_size"),
+                "overlap_paragraphs": data.get("overlap_paragraphs"),
+                "min_overlap_words": data.get("min_overlap_words"),
+            }.items() if v is not None
+        })
 
         chunks_dir = project_dir / "chunks"
         chunks_dir.mkdir(exist_ok=True)
@@ -2201,13 +2203,15 @@ def project_chapter_rechunk(project_id, chapter_id):
         from src.utils.file_io import save_chunk
 
         data = request.json or {}
-        config = ChunkingConfig(
-            target_size=data.get("target_size", 2000),
-            min_chunk_size=data.get("min_chunk_size", 500),
-            max_chunk_size=data.get("max_chunk_size", 3000),
-            overlap_paragraphs=data.get("overlap_paragraphs", 2),
-            min_overlap_words=data.get("min_overlap_words", 100),
-        )
+        config = ChunkingConfig(**{
+            k: v for k, v in {
+                "target_size": data.get("target_size"),
+                "min_chunk_size": data.get("min_chunk_size"),
+                "max_chunk_size": data.get("max_chunk_size"),
+                "overlap_paragraphs": data.get("overlap_paragraphs"),
+                "min_overlap_words": data.get("min_overlap_words"),
+            }.items() if v is not None
+        })
 
         chunks_dir = project_dir / "chunks"
         chunks_dir.mkdir(exist_ok=True)
