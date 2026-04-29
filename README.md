@@ -65,6 +65,8 @@ After translation and alignment, read chapters at `/read/<project_id>/<chapter>`
 - Side-by-side English/Spanish sentences
 - Tap any sentence to see the source and edit the translation
 - **Edit chunk** button in the bottom sheet opens a full-textarea editor for the surrounding chunk — use it to fix stray whitespace, wrong paragraph breaks, or other edits that don't fit one sentence at a time. Saves recombine and realign the chapter automatically and keep a backup under `.chunk_edits/`.
+- **Remove text…** button prunes a stray sentence (caption, OCR artifact) from both the source and translation, propagating overlap regions and re-aligning the chapter. See [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md).
+- **Retranslate…** button gets a fresh LLM translation of the tapped sentence with a per-call model picker, lets you confirm the source span (alignment isn't always perfect), and replaces the existing translation with one confirm. See [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md).
 - Annotation system (word choice, inconsistency, footnote, flag)
 - Mark chapters as reviewed
 - Correction workflow for batch fixes
@@ -184,6 +186,9 @@ pytest --cov=src tests/            # With coverage
 |---|---|
 | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Dashboard walkthrough tutorial |
 | [`docs/WEB_UI_GUIDE.md`](docs/WEB_UI_GUIDE.md) | Full dashboard + reader reference |
+| [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md) | Reader remove-text gesture |
+| [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md) | Reader sentence retranslate flow |
+| [`docs/LLM_JUDGE_EVALUATOR.md`](docs/LLM_JUDGE_EVALUATOR.md) | LLM-judge evaluator + model comparison harness |
 | [`docs/BATCH_PIPELINE.md`](docs/BATCH_PIPELINE.md) | CLI batch evaluate + combine |
 | [`docs/INGEST_GUTENBERG.md`](docs/INGEST_GUTENBERG.md) | Gutenberg HTML → source.txt |
 | [`docs/PROMPT_GUIDE.md`](docs/PROMPT_GUIDE.md) | Prompt template customization |
