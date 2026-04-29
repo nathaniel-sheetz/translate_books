@@ -8,6 +8,7 @@ Provides the pipeline dashboard and bilingual reader:
 """
 
 import json
+import math
 import re
 import secrets
 from datetime import datetime
@@ -1751,6 +1752,14 @@ def _validate_chunk_request(project_id: str, chapter_id: str, chunk_id: str):
     return project_dir, chunk_path
 
 
+# Size caps for retranslate text inputs (defensive against accidental megabyte
+# pastes; the LLM's own token limit is the implicit upper bound, but rejecting
+# early avoids wasted API calls and oversized chunk JSONs).
+_RETRANSLATE_SOURCE_MAX = 8 * 1024
+_RETRANSLATE_CONTEXT_MAX = 16 * 1024
+_REPLACE_TRANSLATION_MAX = 32 * 1024
+
+
 def _check_chunk_mtime(chunk_path: Path, expected_mtime) -> Optional[tuple]:
     """Return a (response, status) tuple if the mtime mismatches, else None."""
     if expected_mtime is None:
@@ -1760,12 +1769,15 @@ def _check_chunk_mtime(chunk_path: Path, expected_mtime) -> Optional[tuple]:
     except OSError as e:
         return jsonify({"error": f"Cannot stat chunk file: {e}"}), 500
     try:
-        if abs(float(expected_mtime) - current) > 1e-6:
-            return jsonify({
-                "error": "Chunk was modified by another process. Reload and try again.",
-            }), 409
+        expected_float = float(expected_mtime)
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid expected_chunk_mtime"}), 400
+    if not math.isfinite(expected_float):
+        return jsonify({"error": "Invalid expected_chunk_mtime"}), 400
+    if abs(expected_float - current) > 1e-6:
+        return jsonify({
+            "error": "Chunk was modified by another process. Reload and try again.",
+        }), 409
     return None
 
 
@@ -1786,6 +1798,14 @@ def sentence_retranslate():
 
     if not source_text:
         return jsonify({"error": "source_text is required"}), 400
+    if len(source_text) > _RETRANSLATE_SOURCE_MAX:
+        return jsonify({
+            "error": f"source_text exceeds {_RETRANSLATE_SOURCE_MAX} chars",
+        }), 413
+    if context_text is not None and len(context_text) > _RETRANSLATE_CONTEXT_MAX:
+        return jsonify({
+            "error": f"context_text exceeds {_RETRANSLATE_CONTEXT_MAX} chars",
+        }), 413
 
     validation = _validate_chunk_request(project_id, chapter_id, chunk_id)
     if isinstance(validation, tuple) and len(validation) == 2 and not isinstance(validation[0], Path):
@@ -1850,6 +1870,14 @@ def sentence_replace():
         return jsonify({"error": "current_translation is required"}), 400
     if not new_translation.strip():
         return jsonify({"error": "new_translation must be non-empty"}), 400
+    if len(current_translation) > _REPLACE_TRANSLATION_MAX:
+        return jsonify({
+            "error": f"current_translation exceeds {_REPLACE_TRANSLATION_MAX} chars",
+        }), 413
+    if len(new_translation) > _REPLACE_TRANSLATION_MAX:
+        return jsonify({
+            "error": f"new_translation exceeds {_REPLACE_TRANSLATION_MAX} chars",
+        }), 413
 
     validation = _validate_chunk_request(project_id, chapter_id, chunk_id)
     if isinstance(validation, tuple) and len(validation) == 2 and not isinstance(validation[0], Path):
