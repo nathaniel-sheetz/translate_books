@@ -31,6 +31,7 @@ from src.utils.file_io import (
     load_style_guide,
     render_prompt,
     save_chunk,
+    save_style_guide,
 )
 from web_ui.evaluations import (
     append_feedback,
@@ -222,20 +223,68 @@ def setup_style_guide_prompt(project_id):
 
 @app.route("/api/setup/<project_id>/style-guide", methods=["POST"])
 def setup_save_style_guide(project_id):
-    """Save style guide content to style.json."""
+    """Save style guide content to style.json. Preserves light_content if set."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.style_guide_wizard import save_style_guide_json
     data = request.get_json()
     content = data.get("content", "")
     if not content.strip():
         return jsonify({"error": "Empty style guide"}), 400
 
     output_path = project_dir / "style.json"
-    save_style_guide_json(content, output_path)
+
+    existing_light = None
+    created_at = None
+    if output_path.exists():
+        try:
+            existing = load_style_guide(output_path)
+            existing_light = existing.light_content
+            created_at = existing.created_at
+        except Exception as exc:
+            app.logger.warning("Could not read existing style.json at %s: %s", output_path, exc)
+
+    now = datetime.now()
+    guide = StyleGuide(
+        content=content,
+        light_content=existing_light,
+        version="1.0",
+        created_at=created_at or now,
+        updated_at=now,
+    )
+    save_style_guide(guide, output_path)
     return jsonify({"ok": True, "path": str(output_path)})
+
+
+@app.route("/api/setup/<project_id>/style-guide/light", methods=["POST"])
+def setup_save_light_style_guide(project_id):
+    """Save the optional light style guide used for sentence retranslation.
+
+    Empty body clears it (falls back to the full guide at retranslate time).
+    Requires the main style guide to already exist.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    style_path = project_dir / "style.json"
+    if not style_path.exists():
+        return jsonify({"error": "Save the main style guide first."}), 404
+
+    data = request.get_json() or {}
+    light_raw = (data.get("light_content") or "").strip()
+    new_light = light_raw if light_raw else None
+
+    try:
+        guide = load_style_guide(style_path)
+    except Exception as exc:
+        app.logger.exception("Could not load style.json at %s", style_path)
+        return jsonify({"error": f"Could not read style.json: {exc}"}), 500
+
+    guide.light_content = new_light
+    guide.updated_at = datetime.now()
+    save_style_guide(guide, style_path)
+    return jsonify({"ok": True, "light_content": new_light or ""})
 
 
 @app.route("/api/setup/<project_id>/style-guide/fallback", methods=["POST"])
@@ -665,6 +714,14 @@ def get_alignment(project_id, chapter):
         with open(align_path, encoding="utf-8") as f:
             data = json.load(f)
 
+        # Attach per-row `text_in_chunk` so the reader's retranslate panel can
+        # populate the "current translation" textarea with the literal chunk
+        # substring (the aligner's `es` field is normalized and not byte-identical
+        # to chunk.translated_text).
+        chunks_dir = projects_dir / project_id / "chunks"
+        if chunks_dir.exists():
+            _attach_text_in_chunk(data, chunks_dir)
+
         # Enrich with paragraph break info from the combined chapter text.
         # chapters/<chapter>.txt is the canonical output of Combine (see
         # project_combine / project_align); align refreshes it before writing
@@ -676,6 +733,76 @@ def get_alignment(project_id, chapter):
         return jsonify(data)
     except (json.JSONDecodeError, OSError) as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _attach_text_in_chunk(alignment_data: dict, chunks_dir: Path, target_lang: str = "es") -> None:
+    """Mutate alignment rows to include `text_in_chunk` (and chunk char offsets).
+
+    The aligner emits `es` text via pysbd.split + .strip() + " ".join() for N:1
+    groups, which is NOT byte-identical to chunk.translated_text. The reader's
+    retranslate flow needs the literal chunk substring so /api/sentence/replace
+    can find it without fuzzy matching. We re-split each chunk's translated_text
+    with the same splitter the aligner uses and walk char positions.
+    """
+    from collections import defaultdict
+    from src.sentence_aligner import _split_sentences_with_para_indices
+
+    rows_by_chunk: dict[str, list[dict]] = defaultdict(list)
+    for row in alignment_data.get("alignments", []):
+        cid = row.get("chunk_id")
+        if cid and "es_idx" in row:
+            rows_by_chunk[cid].append(row)
+
+    for chunk_id, rows in rows_by_chunk.items():
+        chunk_path = chunks_dir / f"{chunk_id}.json"
+        if not chunk_path.exists():
+            continue
+        try:
+            chunk_data = json.loads(chunk_path.read_text(encoding="utf-8"))
+            chunk_mtime = chunk_path.stat().st_mtime
+        except (json.JSONDecodeError, OSError):
+            continue
+        chunk_text = chunk_data.get("translated_text") or ""
+        if not chunk_text:
+            continue
+
+        try:
+            sentences, _ = _split_sentences_with_para_indices(chunk_text, target_lang)
+        except Exception:
+            continue
+
+        ranges: list[Optional[tuple[int, int]]] = []
+        cursor = 0
+        for sent in sentences:
+            idx = chunk_text.find(sent, cursor)
+            if idx == -1:
+                stripped = sent.strip()
+                idx = chunk_text.find(stripped, cursor) if stripped else -1
+                if idx == -1:
+                    ranges.append(None)
+                    continue
+                ranges.append((idx, idx + len(stripped)))
+                cursor = idx + len(stripped)
+            else:
+                ranges.append((idx, idx + len(sent)))
+                cursor = idx + len(sent)
+
+        # The aligner offsets es_idx by cumulative chunk counts. The minimum
+        # es_idx in this chunk's rows is the chunk-local offset.
+        es_offset = min(r["es_idx"] for r in rows)
+
+        for row in rows:
+            indices = row.get("es_indices") or [row["es_idx"]]
+            local = [i - es_offset for i in indices]
+            valid = [li for li in local if 0 <= li < len(ranges) and ranges[li] is not None]
+            if not valid:
+                continue
+            start = ranges[valid[0]][0]
+            end = ranges[valid[-1]][1]
+            row["text_in_chunk"] = chunk_text[start:end]
+            row["chunk_offset_start"] = start
+            row["chunk_offset_end"] = end
+            row["chunk_mtime"] = chunk_mtime
 
 
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]")
@@ -1170,6 +1297,7 @@ def _get_project_status(project_id: str) -> dict:
         "translated_chunks": 0,
         "has_style_guide": False,
         "style_guide_content": None,
+        "light_style_guide_content": None,
         "glossary_count": 0,
         "alignment_count": 0,
     }
@@ -1195,6 +1323,7 @@ def _get_project_status(project_id: str) -> dict:
         try:
             sg = load_style_guide(style_path)
             status["style_guide_content"] = sg.content
+            status["light_style_guide_content"] = sg.light_content
         except Exception:
             pass
 
@@ -1581,6 +1710,218 @@ def remove_text():
         "orphaned_annotations": result["orphaned_annotations"],
         "corrections_purged": result["corrections_purged"],
         "edited_chunks": [e["chunk_id"] for e in edits],
+    })
+
+
+# ============================================================================
+# Reader sentence retranslate (Phase 2)
+# ============================================================================
+
+@app.route("/api/llm/models")
+def llm_models():
+    """Return the model picker payload for the reader's retranslate UI."""
+    from src.api_translator import load_llm_config
+    config = load_llm_config()
+    default_model = config.get("default_model")
+    models: list[dict] = []
+    for provider in config.get("providers", []):
+        for m in provider.get("models", []):
+            models.append({
+                "id": m["id"],
+                "name": m.get("name", m["id"]),
+                "provider": provider["id"],
+                "pricing": m.get("pricing", {}),
+                "is_default": m["id"] == default_model,
+            })
+    return jsonify({"models": models, "default_model": default_model})
+
+
+def _validate_chunk_request(project_id: str, chapter_id: str, chunk_id: str):
+    """Shared validation for sentence endpoints. Returns (project_dir, chunk_path) or (response, status)."""
+    if not (_safe_id(project_id) and _safe_id(chapter_id) and _safe_id(chunk_id)):
+        return jsonify({"error": "Bad request"}), 400
+    if _chapter_id_from_chunk_id(chunk_id) != chapter_id:
+        return jsonify({"error": "chunk_id does not belong to chapter_id"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+    if not chunk_path.exists():
+        return jsonify({"error": "Chunk not found"}), 404
+    return project_dir, chunk_path
+
+
+def _check_chunk_mtime(chunk_path: Path, expected_mtime) -> Optional[tuple]:
+    """Return a (response, status) tuple if the mtime mismatches, else None."""
+    if expected_mtime is None:
+        return None
+    try:
+        current = chunk_path.stat().st_mtime
+    except OSError as e:
+        return jsonify({"error": f"Cannot stat chunk file: {e}"}), 500
+    try:
+        if abs(float(expected_mtime) - current) > 1e-6:
+            return jsonify({
+                "error": "Chunk was modified by another process. Reload and try again.",
+            }), 409
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid expected_chunk_mtime"}), 400
+    return None
+
+
+@app.route("/api/sentence/retranslate", methods=["POST"])
+def sentence_retranslate():
+    """Generate a fresh translation for a user-confirmed source span."""
+    from src.retranslator import retranslate_sentence, RetranslationError
+
+    data = request.json or {}
+    project_id = (data.get("project_id") or "").strip()
+    chapter_id = (data.get("chapter_id") or "").strip()
+    chunk_id = (data.get("chunk_id") or "").strip()
+    source_text = (data.get("source_text") or "").strip()
+    model = (data.get("model") or "").strip() or None
+    provider = (data.get("provider") or "").strip() or None
+    context_text = (data.get("context_text") or "").strip() or None
+    expected_chunk_mtime = data.get("expected_chunk_mtime")
+
+    if not source_text:
+        return jsonify({"error": "source_text is required"}), 400
+
+    validation = _validate_chunk_request(project_id, chapter_id, chunk_id)
+    if isinstance(validation, tuple) and len(validation) == 2 and not isinstance(validation[0], Path):
+        return validation
+    project_dir, chunk_path = validation
+
+    mtime_err = _check_chunk_mtime(chunk_path, expected_chunk_mtime)
+    if mtime_err is not None:
+        return mtime_err
+
+    glossary = None
+    glossary_path = project_dir / "glossary.json"
+    if glossary_path.exists():
+        try:
+            glossary = load_glossary(glossary_path)
+        except Exception as e:
+            app.logger.warning("Could not load glossary at %s: %s", glossary_path, e)
+
+    style_path = project_dir / "style.json"
+    style_arg = style_path if style_path.exists() else None
+
+    try:
+        result = retranslate_sentence(
+            source_text,
+            style_json_path=style_arg,
+            glossary=glossary,
+            model=model,
+            provider=provider,
+            context_text=context_text,
+        )
+    except RetranslationError as e:
+        return jsonify({"error": f"Retranslation failed: {e}"}), 502
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("retranslate failed")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "ok": True,
+        "new_translation": result.new_translation,
+        "model": result.model,
+        "provider": result.provider,
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "cost_usd": result.cost_usd,
+    })
+
+
+@app.route("/api/sentence/replace", methods=["POST"])
+def sentence_replace():
+    """Replace a sentence (or N:1 span) in a chunk and re-align the chapter."""
+    data = request.json or {}
+    project_id = (data.get("project_id") or "").strip()
+    chapter_id = (data.get("chapter_id") or "").strip()
+    chunk_id = (data.get("chunk_id") or "").strip()
+    current_translation = data.get("current_translation") or ""
+    new_translation = data.get("new_translation") or ""
+    expected_chunk_mtime = data.get("expected_chunk_mtime")
+
+    if not current_translation:
+        return jsonify({"error": "current_translation is required"}), 400
+    if not new_translation.strip():
+        return jsonify({"error": "new_translation must be non-empty"}), 400
+
+    validation = _validate_chunk_request(project_id, chapter_id, chunk_id)
+    if isinstance(validation, tuple) and len(validation) == 2 and not isinstance(validation[0], Path):
+        return validation
+    project_dir, chunk_path = validation
+
+    mtime_err = _check_chunk_mtime(chunk_path, expected_chunk_mtime)
+    if mtime_err is not None:
+        return mtime_err
+
+    try:
+        chunk = load_chunk(chunk_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load chunk: {e}"}), 500
+
+    old_es = chunk.translated_text or ""
+    start = old_es.find(current_translation)
+    if start == -1:
+        return jsonify({
+            "error": (
+                "Cannot locate the original sentence in the chunk. "
+                "Reload the reader and try again."
+            ),
+        }), 422
+    end = start + len(current_translation)
+    new_es = old_es[:start] + new_translation + old_es[end:]
+
+    if not new_es.strip():
+        return jsonify({"error": "Replacement would empty the chunk's translation."}), 400
+
+    edits = [{
+        "chunk_id": chunk_id,
+        "chunk_path": chunk_path,
+        "chunk": chunk,
+        "new_translated_text": new_es,
+        "new_source_text": None,
+    }]
+
+    try:
+        result = _apply_chunk_edits(project_dir, project_id, chapter_id, edits)
+    except Exception as e:
+        app.logger.exception("sentence replace pipeline failed")
+        return jsonify({"error": str(e)}), 500
+
+    # Audit log
+    try:
+        log_path = project_dir / "retranslations.jsonl"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "project_id": project_id,
+                "chapter_id": chapter_id,
+                "chunk_id": chunk_id,
+                "es_idx": data.get("es_idx"),
+                "current_translation": current_translation,
+                "new_translation": new_translation,
+                "timestamp": datetime.now().isoformat(),
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    try:
+        new_align_mtime = align_path.stat().st_mtime
+    except OSError:
+        new_align_mtime = 0.0
+
+    return jsonify({
+        "ok": True,
+        "chunk_mtime": result["mtimes"].get(chunk_id, 0.0),
+        "alignment_mtime": new_align_mtime,
+        "orphaned_annotations": result["orphaned_annotations"],
+        "corrections_purged": result["corrections_purged"],
     })
 
 
@@ -2573,6 +2914,30 @@ def batch_api_retrieve_job(project_id, job_id):
                 if chapter_id:
                     affected_chapters.add(chapter_id)
 
+        # Run coded evaluators on every translated chunk
+        glossary = None
+        blacklist = None
+        glossary_path = project_dir / "glossary.json"
+        if glossary_path.exists():
+            try:
+                glossary = load_glossary(glossary_path)
+            except Exception:
+                pass
+        from web_ui.evaluations import _load_project_blacklist
+        blacklist = _load_project_blacklist(project_dir)
+
+        evaluated_count = 0
+        for chunk in translated:
+            if (chunk.translated_text or "").strip():
+                try:
+                    evaluate_and_persist_chunk(
+                        project_dir, chunk,
+                        glossary=glossary, blacklist=blacklist,
+                    )
+                    evaluated_count += 1
+                except Exception:
+                    pass  # Non-fatal: evals can be re-run from Review stage
+
         # Recombine + realign affected chapters
         for chapter_id in affected_chapters:
             try:
@@ -2612,6 +2977,7 @@ def batch_api_retrieve_job(project_id, job_id):
         return jsonify({
             "ok": True,
             "translated_count": len(translated),
+            "evaluated_count": evaluated_count,
             "total_count": len(original_chunks),
             "chapters_affected": list(affected_chapters),
         })
