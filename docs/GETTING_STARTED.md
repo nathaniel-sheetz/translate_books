@@ -137,8 +137,9 @@ Build a downloadable EPUB from your translated chapters.
 
 1. The stage shows how many chapters will be included (only fully-translated chapters are packaged)
 2. Title and author are pre-filled from your project config — edit if needed
-3. Click **Build EPUB** — the system auto-combines chunks and builds the EPUB with embedded images
-4. Click **Download** to save the file, or find it at `projects/my-book/my-book.epub`
+3. Optionally edit the **Translator note heading** and **Note from the translator** fields (auto-saved on blur). Leave the body blank to skip — KDP-friendly end matter that becomes the last chapter when filled in. The body pre-fills from `prompts/translator_note_default.txt` (per-user; falls back to `translator_note_default.example.txt` if you haven't created it yet). Create or edit the per-user file to change what new books pre-fill with.
+4. Click **Build EPUB** — the system auto-combines chunks and builds the EPUB with embedded images
+5. Click **Download** to save the file, or find it at `projects/my-book/my-book.epub`
 
 ## What's Next
 

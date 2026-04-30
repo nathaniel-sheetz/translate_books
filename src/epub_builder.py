@@ -35,6 +35,8 @@ _DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
     "numeral_style": "arabic",  # "arabic" or "roman"
 }
 
+_DEFAULT_TRANSLATOR_HEADING = "Note from the Translator"
+
 
 def _int_to_roman(n: int) -> str:
     """Convert a positive integer to its Roman numeral representation."""
@@ -171,6 +173,48 @@ def detect_chapter_heading(
     return (heading, subtitle, body)
 
 
+def _render_body_blocks(body: str) -> List[str]:
+    """
+    Render a plain-text body into a list of XHTML block strings.
+
+    Handles:
+        - Paragraphs (blank-line separated) -> <p>
+        - [IMAGE:...] placeholders (sole-block) -> <img> inside <div class="image">
+        - --- lines -> <hr />
+    """
+    out: List[str] = []
+    blocks = re.split(r'\n{2,}', body)
+
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        # Check if entire block is an image placeholder
+        img_match = _IMAGE_RE.fullmatch(block)
+        if img_match:
+            rel_path = img_match.group(1)
+            alt_text = img_match.group(2) or ''
+            # Use just the filename for the src (images are stored flat in EPUB)
+            filename = Path(rel_path).name
+            out.append(
+                f'<div class="image">'
+                f'<img src="images/{escape(filename)}" alt="{escape(alt_text)}"/>'
+                f'</div>'
+            )
+            continue
+
+        # Check for horizontal rule
+        if _HR_RE.match(block):
+            out.append('<hr/>')
+            continue
+
+        # Regular paragraph -- escape HTML entities
+        out.append(f'<p>{escape(block)}</p>')
+
+    return out
+
+
 def chapter_text_to_xhtml(
     text: str,
     chapter_number: int,
@@ -206,36 +250,58 @@ def chapter_text_to_xhtml(
     if subtitle:
         parts.append(f'<h2>{escape(subtitle)}</h2>')
 
-    # Split body into blocks separated by blank lines
-    blocks = re.split(r'\n{2,}', body)
+    parts.extend(_render_body_blocks(body))
 
-    for block in blocks:
-        block = block.strip()
-        if not block:
-            continue
+    parts.append('</body>')
+    parts.append('</html>')
+    return '\n'.join(parts)
 
-        # Check if entire block is an image placeholder
-        img_match = _IMAGE_RE.fullmatch(block)
-        if img_match:
-            rel_path = img_match.group(1)
-            alt_text = img_match.group(2) or ''
-            # Use just the filename for the src (images are stored flat in EPUB)
-            filename = Path(rel_path).name
-            parts.append(
-                f'<div class="image">'
-                f'<img src="images/{escape(filename)}" alt="{escape(alt_text)}"/>'
-                f'</div>'
-            )
-            continue
 
-        # Check for horizontal rule
-        if _HR_RE.match(block):
-            parts.append('<hr/>')
-            continue
+def _strip_image_blocks(body: str) -> Tuple[str, int]:
+    """
+    Strip ALL [IMAGE:...] substrings from body (per ENG REVIEW decision 2A).
 
-        # Regular paragraph -- escape HTML entities
-        parts.append(f'<p>{escape(block)}</p>')
+    Translator notes are short prose; image references would not be embedded
+    (collect_referenced_images only scans chapters_dir), producing a broken
+    EPUB. We strip them entirely, including inline occurrences.
 
+    Returns:
+        (stripped_body, n_stripped) — n_stripped is the number of image
+        placeholders removed.
+    """
+    matches = _IMAGE_RE.findall(body)
+    n_stripped = len(matches)
+    if n_stripped == 0:
+        return body, 0
+    return _IMAGE_RE.sub('', body), n_stripped
+
+
+def note_text_to_xhtml(heading: str, body: str) -> str:
+    """
+    Convert a translator note to XHTML. Same scaffolding as
+    chapter_text_to_xhtml but takes an explicit heading (no regex
+    detection, no subtitle) and strips [IMAGE:...] placeholders from body.
+    """
+    eff_heading = heading.strip() or _DEFAULT_TRANSLATOR_HEADING
+    stripped_body, n_stripped = _strip_image_blocks(body)
+    if n_stripped > 0:
+        logger.warning(
+            "Stripped %d image placeholder(s) from translator note",
+            n_stripped,
+        )
+
+    parts = []
+    parts.append('<?xml version="1.0" encoding="utf-8"?>')
+    parts.append('<!DOCTYPE html>')
+    parts.append('<html xmlns="http://www.w3.org/1999/xhtml">')
+    parts.append(
+        '<head><title>{}</title>'
+        '<link rel="stylesheet" type="text/css" href="style.css"/>'
+        '</head>'.format(escape(eff_heading))
+    )
+    parts.append('<body>')
+    parts.append(f'<h1>{escape(eff_heading)}</h1>')
+    parts.extend(_render_body_blocks(stripped_body))
     parts.append('</body>')
     parts.append('</html>')
     return '\n'.join(parts)
@@ -299,6 +365,8 @@ def build_epub(
     output_path: Optional[Path] = None,
     chapters_dir: Optional[Path] = None,
     chapter_heading_config: Optional[Dict[str, Any]] = None,
+    translator_note_heading: Optional[str] = None,
+    translator_note_body: Optional[str] = None,
 ) -> Path:
     """
     Build an EPUB from translated chapter files and project images.
@@ -318,6 +386,12 @@ def build_epub(
                       numeral line). Shape: {"label": str, "numeral_style":
                       "arabic"|"roman"}. If omitted, falls back to
                       project.json's "chapter_heading" key, then defaults.
+        translator_note_heading: Heading for the optional "Note from the
+                     Translator" final chapter. Falls back to a default constant
+                     if blank/whitespace.
+        translator_note_body: Body text for the translator note. If empty (or
+                     becomes empty after stripping [IMAGE:...] placeholders),
+                     no extra chapter is appended.
 
     Returns:
         Path to the written EPUB file.
@@ -422,6 +496,29 @@ def build_epub(
 
         spine.append(chapter_item)
         toc.append(chapter_item)
+
+    # Append optional "Note from the Translator" as the final chapter.
+    if translator_note_body is not None:
+        body_text = str(translator_note_body)
+        stripped_body, _ = _strip_image_blocks(body_text)
+        if stripped_body.strip():
+            heading_text = (translator_note_heading or "").strip() \
+                or _DEFAULT_TRANSLATOR_HEADING
+            note_xhtml = note_text_to_xhtml(heading_text, body_text)
+            note_item = epub.EpubHtml(
+                uid='translator_note',
+                title=heading_text,
+                file_name='translator_note.xhtml',
+                lang=language,
+            )
+            note_item.set_content(note_xhtml.encode('utf-8'))
+            note_item.add_item(css_item)
+            book.add_item(note_item)
+            spine.append(note_item)
+            toc.append(note_item)
+            logger.info("Translator note appended")
+        else:
+            logger.info("Translator note skipped (empty body)")
 
     book.toc = toc
     book.spine = spine

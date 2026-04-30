@@ -528,6 +528,20 @@
                 <input type="text" id="epub-author" placeholder="Author name">
             </div>
 
+            <!-- Cross-reference: placeholder mirrors src.epub_builder._DEFAULT_TRANSLATOR_HEADING -->
+            <div class="dash-field" style="max-width:400px; margin-bottom:8px;">
+                <label>Translator note heading</label>
+                <input type="text" id="epub-translator-heading"
+                       placeholder="Note from the Translator">
+                <span class="status-msg" id="epub-translator-heading-status" style="margin-left:8px;"></span>
+            </div>
+            <div class="dash-field" style="margin-bottom:16px;">
+                <label>Note from the translator</label>
+                <textarea id="epub-translator-note" rows="10" style="width:100%;"
+                          placeholder="Optional. Leave blank to omit this chapter."></textarea>
+                <span class="status-msg" id="epub-translator-note-status"></span>
+            </div>
+
             <div class="btn-row">
                 <button class="btn-primary" id="btn-build-epub">Build EPUB</button>
                 <a class="btn-secondary" id="btn-download-epub" style="display:none; text-decoration:none;" download>Download EPUB</a>

@@ -2367,13 +2367,91 @@
                 dlBtn.style.display = '';
             }
         });
+
+        loadTranslatorNote();
     }
+
+    // -- Translator note: load + blur autosave with sequence-token guard --
+    function loadTranslatorNote() {
+        apiGet('/api/project/' + PROJECT + '/translator-note').then(function(data) {
+            if (!data) return;
+            var hEl = document.getElementById('epub-translator-heading');
+            var bEl = document.getElementById('epub-translator-note');
+            if (hEl && typeof data.heading === 'string') hEl.value = data.heading;
+            if (bEl && typeof data.body === 'string') bEl.value = data.body;
+        });
+    }
+
+    var _translatorNoteSeq = 0;
+    var _translatorNoteLastApplied = 0;
+
+    function setNoteStatus(text, color, onClick) {
+        // Update both indicators in lockstep so users see status near both fields.
+        var ids = ['epub-translator-heading-status', 'epub-translator-note-status'];
+        ids.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = text;
+            el.style.color = color || '';
+            el.style.cursor = onClick ? 'pointer' : '';
+            el.onclick = onClick || null;
+        });
+    }
+
+    function fadeNoteStatus(delayMs) {
+        setTimeout(function() {
+            var ids = ['epub-translator-heading-status', 'epub-translator-note-status'];
+            ids.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el && el.textContent === 'Saved') {
+                    el.textContent = '';
+                }
+            });
+        }, delayMs);
+    }
+
+    function saveTranslatorNote() {
+        var hEl = document.getElementById('epub-translator-heading');
+        var bEl = document.getElementById('epub-translator-note');
+        var heading = hEl ? hEl.value : '';
+        var body = bEl ? bEl.value : '';
+        var seq = ++_translatorNoteSeq;
+        setNoteStatus('Saving…', '#888', null);
+        return fetch('/api/project/' + PROJECT + '/translator-note', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ heading: heading, body: body }),
+        }).then(function(r) {
+            // Sequence-token guard: only the latest POST may update the indicator.
+            if (seq < _translatorNoteLastApplied) return;
+            _translatorNoteLastApplied = seq;
+            if (r.ok) {
+                setNoteStatus('Saved', '#080', null);
+                fadeNoteStatus(2000);
+            } else {
+                setNoteStatus('Save failed — click to retry', '#c00', saveTranslatorNote);
+            }
+        }).catch(function() {
+            if (seq < _translatorNoteLastApplied) return;
+            _translatorNoteLastApplied = seq;
+            setNoteStatus('Save failed — click to retry', '#c00', saveTranslatorNote);
+        });
+    }
+
+    ['epub-translator-heading', 'epub-translator-note'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('blur', saveTranslatorNote);
+    });
 
     document.getElementById('btn-build-epub').addEventListener('click', function() {
         var btn = this;
         var statusEl = document.getElementById('epub-status');
         var title = document.getElementById('epub-title').value.trim();
         var author = document.getElementById('epub-author').value.trim();
+        var hEl = document.getElementById('epub-translator-heading');
+        var bEl = document.getElementById('epub-translator-note');
+        var translatorHeading = hEl ? hEl.value : '';
+        var translatorNote = bEl ? bEl.value : '';
 
         btn.disabled = true;
         btn.textContent = 'Building...';
@@ -2383,6 +2461,8 @@
         apiPost('/api/project/' + PROJECT + '/build-epub', {
             title: title || undefined,
             author: author || undefined,
+            translator_heading: translatorHeading,
+            translator_note: translatorNote,
         }).then(function(data) {
             btn.disabled = false;
             btn.textContent = 'Build EPUB';

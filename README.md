@@ -46,7 +46,7 @@ The dashboard at `/project/<id>` walks you through 8 stages. All stages are alwa
 | 5 | **Glossary** | Build consistent term glossary (LLM-assisted) |
 | 6 | **Translate** | Translate chunks via API or manual copy/paste |
 | 7 | **Review** | Align sentences, read bilingually, annotate |
-| 8 | **Export** | Build and download EPUB with images |
+| 8 | **Export** | Build and download EPUB with images, plus an optional editable "Note from the Translator" appended as the last chapter |
 
 The style guide and glossary stages use a **copy/paste LLM pattern**: the dashboard generates a prompt, you copy it into any LLM (Claude, ChatGPT, etc.), paste the response back, and the dashboard parses it.
 

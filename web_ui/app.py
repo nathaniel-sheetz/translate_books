@@ -100,6 +100,87 @@ def _save_project_config(project_id: str, config: dict) -> None:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
+# Cross-reference: HTML placeholder text (web_ui/templates/dashboard.html) is
+# hardcoded to "Note from the Translator" — keep in sync with the backend
+# constant src.epub_builder._DEFAULT_TRANSLATOR_HEADING.
+#
+# Per-user template lives at prompts/translator_note_default.txt (gitignored).
+# A repo-tracked example ships at prompts/translator_note_default.example.txt;
+# if the per-user file is missing the example is used as a fallback.
+_TRANSLATOR_NOTE_TEMPLATE_PATH = _PROJECT_ROOT / "prompts" / "translator_note_default.txt"
+_TRANSLATOR_NOTE_TEMPLATE_EXAMPLE_PATH = _PROJECT_ROOT / "prompts" / "translator_note_default.example.txt"
+_TRANSLATOR_NOTE_BODY_MAX_BYTES = 100_000
+
+
+def _read_translator_note_template() -> str:
+    """Return the default note body, preferring the per-user file."""
+    for path in (_TRANSLATOR_NOTE_TEMPLATE_PATH, _TRANSLATOR_NOTE_TEMPLATE_EXAMPLE_PATH):
+        try:
+            return path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            continue
+    return ""
+
+
+def _load_translator_note(project_id: str) -> dict:
+    """
+    Load the per-book translator note.
+
+    Returns dict with keys 'heading' and 'body'. Falls back to the
+    repo-tracked default template body (and empty heading so the UI
+    placeholder shows the default constant) when no per-book file exists.
+    On corrupt JSON, the bad file is moved aside as ``.bak.<unix-ts>`` and
+    defaults are returned (ENG REVIEW decision 1B).
+    """
+    import logging
+    import time
+
+    log = logging.getLogger(__name__)
+    note_path = _get_projects_dir() / project_id / "translator_note.json"
+
+    def _defaults() -> dict:
+        return {"heading": "", "body": _read_translator_note_template()}
+
+    if not note_path.exists():
+        return _defaults()
+
+    try:
+        with open(note_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        try:
+            backup = note_path.with_suffix(f".json.bak.{int(time.time())}")
+            note_path.rename(backup)
+            log.warning(
+                "Corrupt translator_note.json renamed to %s; returning defaults",
+                backup.name,
+            )
+        except OSError as exc:
+            log.warning("Failed to rename corrupt translator_note.json: %s", exc)
+        return _defaults()
+    except OSError as exc:
+        log.warning("Could not read translator_note.json: %s", exc)
+        return _defaults()
+
+    return {
+        "heading": str(data.get("heading", "")),
+        "body": str(data.get("body", "")),
+    }
+
+
+def _save_translator_note(project_id: str, heading: str, body: str) -> None:
+    """Persist the translator note to projects/<id>/translator_note.json."""
+    note_path = _get_projects_dir() / project_id / "translator_note.json"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(note_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"heading": heading, "body": body},
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+
 def _project_title(project_id: str) -> str:
     """Return the display title for a project, falling back to the folder name."""
     return _load_project_config(project_id).get("title") or project_id
@@ -3943,9 +4024,49 @@ def epub_status(project_id):
     })
 
 
+@app.route("/api/project/<project_id>/translator-note", methods=["GET"])
+def get_translator_note(project_id):
+    """Return the per-book translator note (heading + body)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify(_load_translator_note(project_id))
+
+
+@app.route("/api/project/<project_id>/translator-note", methods=["POST"])
+def save_translator_note(project_id):
+    """Persist the per-book translator note (heading + body)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    heading_raw = data.get("heading", "")
+    body_raw = data.get("body", "")
+    heading = "" if heading_raw is None else str(heading_raw)
+    body = "" if body_raw is None else str(body_raw)
+
+    if len(body.encode("utf-8")) > _TRANSLATOR_NOTE_BODY_MAX_BYTES:
+        return jsonify({"error": "Body exceeds 100KB limit"}), 400
+
+    _save_translator_note(project_id, heading, body)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/project/<project_id>/build-epub", methods=["POST"])
 def build_epub_route(project_id):
-    """Build EPUB from translated chapters."""
+    """Build EPUB from translated chapters.
+
+    Translator-note data flow (per ENG REVIEW decision 1C):
+        request.body.{translator_heading, translator_note}
+            -> _save_translator_note(...)            # disk = source of truth
+            -> _load_translator_note(...)            # round-trip back
+            -> build_epub(..., translator_note_*)    # appended as final chapter
+    """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
@@ -3962,6 +4083,19 @@ def build_epub_route(project_id):
     chapter_heading_config = data.get("chapter_heading")
     if not isinstance(chapter_heading_config, dict):
         chapter_heading_config = None
+
+    # Persist any translator-note edits sent with this build request so disk
+    # is always the source of truth (ENG REVIEW decision 1A).
+    if "translator_heading" in data or "translator_note" in data:
+        h_raw = data.get("translator_heading", "")
+        b_raw = data.get("translator_note", "")
+        h = "" if h_raw is None else str(h_raw)
+        b = "" if b_raw is None else str(b_raw)
+        if len(b.encode("utf-8")) > _TRANSLATOR_NOTE_BODY_MAX_BYTES:
+            return jsonify({"error": "Translator note body exceeds 100KB limit"}), 400
+        _save_translator_note(project_id, h, b)
+
+    note = _load_translator_note(project_id)
 
     chunks_dir = project_dir / "chunks"
 
@@ -4014,6 +4148,8 @@ def build_epub_route(project_id):
             chapters_dir=temp_dir,
             output_path=epub_output,
             chapter_heading_config=chapter_heading_config,
+            translator_note_heading=note.get("heading", ""),
+            translator_note_body=note.get("body", ""),
         )
 
         size_bytes = epub_path.stat().st_size

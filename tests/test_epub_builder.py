@@ -1,5 +1,6 @@
 """Tests for the EPUB builder module."""
 
+import logging
 import tempfile
 import zipfile
 from pathlib import Path
@@ -7,11 +8,14 @@ from pathlib import Path
 import pytest
 
 from src.epub_builder import (
+    _DEFAULT_TRANSLATOR_HEADING,
     _int_to_roman,
+    _strip_image_blocks,
     build_epub,
     chapter_text_to_xhtml,
     collect_referenced_images,
     detect_chapter_heading,
+    note_text_to_xhtml,
     parse_image_placeholders,
     synthesize_chapter_heading,
 )
@@ -342,3 +346,168 @@ class TestBuildEpub:
             )
             # 3 chapters: chapter_01, chapter_02, chapter_10 (in numeric order)
             assert len(xhtml_files) == 3
+
+
+# --- _strip_image_blocks ---
+
+class TestStripImageBlocks:
+    def test_no_images(self):
+        body = "Just prose.\n\nMore prose."
+        out, n = _strip_image_blocks(body)
+        assert out == body
+        assert n == 0
+
+    def test_strips_sole_block(self):
+        body = "Para1.\n\n[IMAGE:images/x.jpg]\n\nPara2."
+        out, n = _strip_image_blocks(body)
+        assert "[IMAGE:" not in out
+        assert n == 1
+
+    def test_strips_inline_substring(self):
+        # Decision 2A: ALL [IMAGE:...] substrings stripped, surrounding prose preserved.
+        body = "Hello [IMAGE:images/x.jpg] world."
+        out, n = _strip_image_blocks(body)
+        assert "[IMAGE:" not in out
+        assert "Hello" in out and "world." in out
+        assert n == 1
+
+
+# --- note_text_to_xhtml ---
+
+class TestNoteTextToXhtml:
+    def test_basic(self):
+        xhtml = note_text_to_xhtml("Note from the Translator", "Hello.")
+        assert "<h1>Note from the Translator</h1>" in xhtml
+        assert "<p>Hello.</p>" in xhtml
+
+    def test_default_heading_when_blank(self):
+        xhtml = note_text_to_xhtml("", "Body.")
+        assert f"<h1>{_DEFAULT_TRANSLATOR_HEADING}</h1>" in xhtml
+
+    def test_default_heading_when_whitespace(self):
+        xhtml = note_text_to_xhtml("   \n\t  ", "Body.")
+        assert f"<h1>{_DEFAULT_TRANSLATOR_HEADING}</h1>" in xhtml
+
+    def test_xss_heading_escaped(self):
+        xhtml = note_text_to_xhtml("<script>alert(1)</script>", "Body.")
+        assert "<script>alert(1)</script>" not in xhtml
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in xhtml
+
+    def test_inline_image_stripped(self, caplog):
+        caplog.set_level(logging.WARNING, logger="src.epub_builder")
+        xhtml = note_text_to_xhtml(
+            "H", "Para1.\n\n[IMAGE:images/x.jpg]\n\nPara2."
+        )
+        assert "<img" not in xhtml
+        assert "<p>Para1.</p>" in xhtml
+        assert "<p>Para2.</p>" in xhtml
+        assert any("Stripped" in rec.message for rec in caplog.records)
+
+    def test_links_stylesheet(self):
+        xhtml = note_text_to_xhtml("H", "Body.")
+        assert '<link rel="stylesheet" type="text/css" href="style.css"/>' in xhtml
+
+
+# --- build_epub: translator note integration ---
+
+class TestBuildEpubTranslatorNote(TestBuildEpub):
+    def test_appends_note_as_last_chapter(self, tmp_path):
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="T",
+            author="A",
+            translator_note_heading="Note from the Translator",
+            translator_note_body="Hello.",
+        )
+        with zipfile.ZipFile(output) as zf:
+            names = zf.namelist()
+            assert any("translator_note.xhtml" in n for n in names)
+            note_xhtml = next(
+                zf.read(n).decode("utf-8")
+                for n in names
+                if n.endswith("translator_note.xhtml")
+            )
+            assert "<h1>Note from the Translator</h1>" in note_xhtml
+            assert "<p>Hello.</p>" in note_xhtml
+            # Confirm note is referenced last in the spine via the OPF.
+            opf = next(
+                zf.read(n).decode("utf-8")
+                for n in names
+                if n.endswith(".opf")
+            )
+            # itemref id pattern in ebooklib is the file's id; assert its
+            # ordering by file-name presence in spine section.
+            spine_section = opf.split("<spine")[1].split("</spine>")[0]
+            assert "translator_note" in spine_section
+            # No chapter follows the note in the spine.
+            tail = spine_section.split("translator_note")[-1]
+            assert "chapter_" not in tail
+
+    def test_empty_body_no_extra_chapter(self, tmp_path):
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="T",
+            author="A",
+            translator_note_heading="X",
+            translator_note_body="",
+        )
+        with zipfile.ZipFile(output) as zf:
+            assert not any(
+                "translator_note.xhtml" in n for n in zf.namelist()
+            )
+
+    def test_body_only_image_no_extra_chapter(self, tmp_path):
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="T",
+            author="A",
+            translator_note_heading="X",
+            translator_note_body="[IMAGE:images/x.jpg]",
+        )
+        with zipfile.ZipFile(output) as zf:
+            assert not any(
+                "translator_note.xhtml" in n for n in zf.namelist()
+            )
+
+    def test_blank_heading_uses_default_constant(self, tmp_path):
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="T",
+            author="A",
+            translator_note_heading="",
+            translator_note_body="Hello.",
+        )
+        with zipfile.ZipFile(output) as zf:
+            content = next(
+                zf.read(n).decode("utf-8")
+                for n in zf.namelist()
+                if n.endswith("translator_note.xhtml")
+            )
+            assert f"<h1>{_DEFAULT_TRANSLATOR_HEADING}</h1>" in content
+
+    def test_no_note_kwargs_unchanged(self, tmp_path):
+        """Regression: building without note kwargs produces no extra files."""
+        project = self._make_project(tmp_path)
+        out_base = build_epub(
+            project_path=project,
+            title="T",
+            author="A",
+            output_path=tmp_path / "base.epub",
+        )
+        out_explicit_none = build_epub(
+            project_path=project,
+            title="T",
+            author="A",
+            translator_note_heading=None,
+            translator_note_body=None,
+            output_path=tmp_path / "explicit.epub",
+        )
+        with zipfile.ZipFile(out_base) as a, zipfile.ZipFile(out_explicit_none) as b:
+            base_xhtml = sorted(n for n in a.namelist() if n.endswith(".xhtml"))
+            other_xhtml = sorted(n for n in b.namelist() if n.endswith(".xhtml"))
+            assert base_xhtml == other_xhtml
+            assert not any("translator_note" in n for n in base_xhtml)
