@@ -290,17 +290,31 @@ Build a downloadable EPUB from all fully-translated chapters. The stage shows ho
 **Workflow:**
 1. Title and author fields are pre-populated from `project.json`
 2. The coverage line shows "X of Y chapters will be included"
-3. Click **Build EPUB** — the backend auto-combines translated chunks and calls the epub builder
-4. On success, a **Download** link appears and the file is saved to the project folder
+3. Optionally edit the **Translator note heading** and **Note from the translator** fields (auto-saved on blur). Leave the body blank to omit the chapter entirely.
+4. Click **Build EPUB** — the backend auto-combines translated chunks and calls the epub builder
+5. On success, a **Download** link appears and the file is saved to the project folder
 
 Images referenced via `[IMAGE:...]` placeholders in translated text are embedded in the EPUB. A cover image is auto-detected from `images/cover.jpg` (or `.png`) if present.
 
+### Translator note (optional final chapter)
+
+The Export panel ships with a "Note from the Translator" — Amazon KDP-ready end matter that's appended as the last spine/TOC entry.
+
+- **Heading:** plain text, defaults to `Note from the Translator` if left blank.
+- **Body:** plain text. Blank-line-separated paragraphs become `<p>`s; `---` lines become `<hr/>`. `[IMAGE:...]` placeholders are stripped (translator notes don't carry their own images).
+- **Empty body → no chapter is appended**, so the EPUB is byte-identical to the legacy build path when the field is left blank.
+- **Per-book storage:** `projects/<id>/translator_note.json` (`{heading, body}`). Auto-saved on blur and again when Build EPUB runs (POST body wins → disk → loader → `build_epub`).
+- **Default body source:** `prompts/translator_note_default.txt` (per-user, gitignored). Falls back to `prompts/translator_note_default.example.txt` (repo-tracked) on a fresh checkout. Edit either file to change what new books pre-fill.
+- **Limits & safety:** body capped at 100 KB (HTTP 400 above that); heading uncapped but HTML-escaped (XSS-safe). Corrupt `translator_note.json` is renamed to `.bak.<unix-ts>` and defaults are returned silently.
+
 **APIs:**
 - `GET /api/project/<id>/epub-status` — chapter coverage, existing epub info, title/author from config
-- `POST /api/project/<id>/build-epub` — `{ "title": "...", "author": "..." }` → `{ "ok": true, "filename": "...", "size_bytes": N, "chapters_included": N }`
+- `POST /api/project/<id>/build-epub` — `{ "title": "...", "author": "...", "translator_heading": "...", "translator_note": "..." }` → `{ "ok": true, "filename": "...", "size_bytes": N, "chapters_included": N }`. The two `translator_*` fields, when present, are persisted to `translator_note.json` before the build runs (disk = source of truth).
+- `GET /api/project/<id>/translator-note` → `{ "heading": "...", "body": "..." }`
+- `POST /api/project/<id>/translator-note` — `{ "heading": "...", "body": "..." }` → `{ "ok": true }`. Body > 100 KB → `400`.
 - `GET /api/project/<id>/download-epub` — serves the EPUB file as a download
 
-**Backend:** `build_epub()` from `src/epub_builder.py`, `combine_chunks()` from `src/combiner.py`.
+**Backend:** `build_epub()`, `note_text_to_xhtml()`, `_DEFAULT_TRANSLATOR_HEADING` from `src/epub_builder.py`; `_load_translator_note` / `_save_translator_note` / `_read_translator_note_template` from `web_ui/app.py`; `combine_chunks()` from `src/combiner.py`.
 
 ---
 
@@ -415,5 +429,6 @@ projects/<id>/
 │   ├── <chunk_id>.json     # Aggregated coded-evaluator + optional LLM-judge result
 │   └── _feedback.jsonl     # Append-only user feedback on individual issues
 ├── images/                 # Downloaded images (Gutenberg)
+├── translator_note.json    # Optional "Note from the Translator" (heading + body, Stage 8)
 └── <id>.epub               # Built EPUB (Stage 8 Export)
 ```
