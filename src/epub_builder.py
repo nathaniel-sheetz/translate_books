@@ -6,12 +6,13 @@ resolves images from the project images/ directory, and produces
 a valid EPUB 3 file.
 """
 
+import json
 import logging
 import mimetypes
 import re
 from html import escape
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ebooklib import epub
 
@@ -23,6 +24,67 @@ _HEADING_RE = re.compile(
     r'^(?:CHAPTER\s+)?([IVXLCDM\d]+)\s*$', re.IGNORECASE
 )
 _HR_RE = re.compile(r'^-{3,}$')
+
+# Default configuration for synthesizing a chapter heading when the chapter
+# text does not begin with a recognizable numeral line. Override per project
+# via the "chapter_heading" key in project.json, e.g.:
+#   "chapter_heading": {"label": "Capítulo", "numeral_style": "arabic"}
+# Set "label" to "" (empty string) to emit just the numeral with no word.
+_DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
+    "label": "Chapter",
+    "numeral_style": "arabic",  # "arabic" or "roman"
+}
+
+
+def _int_to_roman(n: int) -> str:
+    """Convert a positive integer to its Roman numeral representation."""
+    if n <= 0:
+        return str(n)
+    pairs = [
+        (1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),
+        (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),
+        (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I'),
+    ]
+    out = []
+    for value, sym in pairs:
+        while n >= value:
+            out.append(sym)
+            n -= value
+    return ''.join(out)
+
+
+def _resolve_heading_config(
+    config: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge a user-supplied heading config with defaults."""
+    merged = dict(_DEFAULT_HEADING_CONFIG)
+    if config:
+        if 'label' in config and config['label'] is not None:
+            merged['label'] = str(config['label'])
+        if config.get('numeral_style') in ('arabic', 'roman'):
+            merged['numeral_style'] = config['numeral_style']
+    return merged
+
+
+def synthesize_chapter_heading(
+    chapter_number: int,
+    config: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build a chapter heading string like 'Capítulo 1' or 'III'.
+
+    Args:
+        chapter_number: 1-based chapter index.
+        config: Optional override of {"label": str, "numeral_style": str}.
+    """
+    cfg = _resolve_heading_config(config)
+    label = cfg['label'].strip()
+    if cfg['numeral_style'] == 'roman':
+        numeral = _int_to_roman(chapter_number)
+    else:
+        numeral = str(chapter_number)
+    if label:
+        return f'{label} {numeral}'
+    return numeral
 
 _DEFAULT_CSS = """\
 img { max-width: 100%; height: auto; }
@@ -50,7 +112,12 @@ def parse_image_placeholders(text: str) -> List[Tuple[str, str, str]]:
     return results
 
 
-def detect_chapter_heading(text: str) -> Tuple[str, str, str]:
+def detect_chapter_heading(
+    text: str,
+    *,
+    chapter_number: Optional[int] = None,
+    heading_config: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str, str]:
     """
     Parse chapter heading and subtitle from text.
 
@@ -58,9 +125,13 @@ def detect_chapter_heading(text: str) -> Tuple[str, str, str]:
         CHAPTER I\\n\\nThe Title\\n\\nbody...
         I\\n\\nUNA AND THE LION\\n\\nbody...
 
+    When the first line is not a recognizable numeral and ``chapter_number``
+    is provided, a heading is synthesized from ``heading_config`` (e.g.
+    "Capítulo 1") and the existing first non-blank line becomes the subtitle.
+
     Returns:
         (heading, subtitle, body) where heading/subtitle may be ''
-        if the pattern is not detected.
+        if no heading was detected and synthesis was not requested.
     """
     lines = text.split('\n')
     if not lines:
@@ -69,13 +140,18 @@ def detect_chapter_heading(text: str) -> Tuple[str, str, str]:
     first_line = lines[0].strip()
     heading_match = _HEADING_RE.match(first_line)
 
-    if not heading_match:
+    if heading_match:
+        heading = first_line
+        idx = 1
+    elif chapter_number is not None:
+        # Synthesize a heading from the chapter number; the original first
+        # non-blank line will be promoted to the subtitle below.
+        heading = synthesize_chapter_heading(chapter_number, heading_config)
+        idx = 0
+    else:
         return ('', '', text)
 
-    heading = first_line
-
-    # Look for subtitle: skip blank lines after heading, take next non-blank line
-    idx = 1
+    # Look for subtitle: skip blank lines, take next non-blank line.
     while idx < len(lines) and not lines[idx].strip():
         idx += 1
 
@@ -95,7 +171,12 @@ def detect_chapter_heading(text: str) -> Tuple[str, str, str]:
     return (heading, subtitle, body)
 
 
-def chapter_text_to_xhtml(text: str, chapter_number: int) -> str:
+def chapter_text_to_xhtml(
+    text: str,
+    chapter_number: int,
+    *,
+    heading_config: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Convert a plain-text chapter to XHTML suitable for EPUB embedding.
 
@@ -105,7 +186,11 @@ def chapter_text_to_xhtml(text: str, chapter_number: int) -> str:
         - [IMAGE:...] placeholders -> <img> inside <div class="image">
         - --- lines -> <hr />
     """
-    heading, subtitle, body = detect_chapter_heading(text)
+    heading, subtitle, body = detect_chapter_heading(
+        text,
+        chapter_number=chapter_number,
+        heading_config=heading_config,
+    )
 
     parts = []
     parts.append('<?xml version="1.0" encoding="utf-8"?>')
@@ -192,6 +277,19 @@ def _sort_chapter_files(files: List[Path]) -> List[Path]:
     return sorted(files, key=sort_key)
 
 
+def _load_chapter_heading_config(project_path: Path) -> Optional[Dict[str, Any]]:
+    """Read the optional 'chapter_heading' block from project.json."""
+    project_json = project_path / 'project.json'
+    if not project_json.exists():
+        return None
+    try:
+        data = json.loads(project_json.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return None
+    cfg = data.get('chapter_heading')
+    return cfg if isinstance(cfg, dict) else None
+
+
 def build_epub(
     project_path: Path,
     title: str,
@@ -200,6 +298,7 @@ def build_epub(
     cover_image: Optional[Path] = None,
     output_path: Optional[Path] = None,
     chapters_dir: Optional[Path] = None,
+    chapter_heading_config: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Build an EPUB from translated chapter files and project images.
@@ -214,6 +313,11 @@ def build_epub(
         output_path: Where to write the EPUB. Defaults to project_path/{name}.epub.
         chapters_dir: Directory containing chapter_*.txt files.
                       Defaults to project_path/chapters/.
+        chapter_heading_config: Optional override for synthesized chapter
+                      headings (used when a chapter does not begin with a
+                      numeral line). Shape: {"label": str, "numeral_style":
+                      "arabic"|"roman"}. If omitted, falls back to
+                      project.json's "chapter_heading" key, then defaults.
 
     Returns:
         Path to the written EPUB file.
@@ -221,6 +325,9 @@ def build_epub(
     project_path = Path(project_path)
     chapters_dir = Path(chapters_dir) if chapters_dir else project_path / 'chapters'
     images_dir = project_path / 'images'
+
+    if chapter_heading_config is None:
+        chapter_heading_config = _load_chapter_heading_config(project_path)
 
     # Discover chapter files
     chapter_files = list(chapters_dir.glob('chapter_*.txt'))
@@ -293,9 +400,13 @@ def build_epub(
 
     for i, chapter_file in enumerate(chapter_files, 1):
         text = chapter_file.read_text(encoding='utf-8')
-        xhtml_content = chapter_text_to_xhtml(text, i)
+        xhtml_content = chapter_text_to_xhtml(
+            text, i, heading_config=chapter_heading_config,
+        )
 
-        heading, subtitle, _ = detect_chapter_heading(text)
+        heading, subtitle, _ = detect_chapter_heading(
+            text, chapter_number=i, heading_config=chapter_heading_config,
+        )
         toc_label = heading or f'Chapter {i}'
         if subtitle:
             toc_label = f'{toc_label}: {subtitle}'

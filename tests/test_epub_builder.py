@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from src.epub_builder import (
+    _int_to_roman,
     build_epub,
     chapter_text_to_xhtml,
     collect_referenced_images,
     detect_chapter_heading,
     parse_image_placeholders,
+    synthesize_chapter_heading,
 )
 
 
@@ -121,12 +123,84 @@ class TestChapterTextToXhtml:
         assert '&lt;hello&gt;' in xhtml
         assert '&amp;' in xhtml
 
-    def test_no_heading(self):
+    def test_no_heading_synthesizes_default(self):
+        # When the chapter text doesn't begin with a numeral, the builder
+        # synthesizes a heading from the chapter number using defaults
+        # (label="Chapter", numeral_style="arabic"). The original first
+        # line is promoted to the <h2> subtitle.
         text = "Just some text without a chapter heading."
         xhtml = chapter_text_to_xhtml(text, 5)
-        assert '<title>Chapter 5</title>' in xhtml
-        # No h1 since no heading detected
-        assert '<h1>' not in xhtml
+        assert '<h1>Chapter 5</h1>' in xhtml
+        assert '<h2>Just some text without a chapter heading.</h2>' in xhtml
+
+    def test_synthesis_with_custom_label(self):
+        text = "EL REY ALFREDO Y LOS PASTELES.\n\nMuchos años atrás..."
+        xhtml = chapter_text_to_xhtml(
+            text, 1,
+            heading_config={"label": "Capítulo", "numeral_style": "arabic"},
+        )
+        assert '<h1>Capítulo 1</h1>' in xhtml
+        assert '<h2>EL REY ALFREDO Y LOS PASTELES.</h2>' in xhtml
+        assert '<p>Muchos años atrás...</p>' in xhtml
+
+    def test_synthesis_with_roman(self):
+        text = "Title line.\n\nBody."
+        xhtml = chapter_text_to_xhtml(
+            text, 4,
+            heading_config={"label": "Chapter", "numeral_style": "roman"},
+        )
+        assert '<h1>Chapter IV</h1>' in xhtml
+
+    def test_synthesis_no_label(self):
+        text = "Title line.\n\nBody."
+        xhtml = chapter_text_to_xhtml(
+            text, 7,
+            heading_config={"label": "", "numeral_style": "arabic"},
+        )
+        assert '<h1>7</h1>' in xhtml
+
+    def test_existing_numeral_heading_not_overridden(self):
+        # If the chapter already begins with a numeral, synthesis must not
+        # fire — preserves behavior for projects like lang-faerie.
+        text = "I\n\nUNA Y EL LEÓN\n\nBody."
+        xhtml = chapter_text_to_xhtml(
+            text, 1,
+            heading_config={"label": "Capítulo", "numeral_style": "arabic"},
+        )
+        assert '<h1>I</h1>' in xhtml
+        assert '<h2>UNA Y EL LEÓN</h2>' in xhtml
+        assert 'Capítulo' not in xhtml
+
+
+# --- synthesize_chapter_heading & _int_to_roman ---
+
+class TestSynthesizeChapterHeading:
+    def test_int_to_roman_basics(self):
+        assert _int_to_roman(1) == 'I'
+        assert _int_to_roman(4) == 'IV'
+        assert _int_to_roman(9) == 'IX'
+        assert _int_to_roman(50) == 'L'
+        assert _int_to_roman(1994) == 'MCMXCIV'
+
+    def test_default_config(self):
+        assert synthesize_chapter_heading(1) == 'Chapter 1'
+        assert synthesize_chapter_heading(50) == 'Chapter 50'
+
+    def test_custom_label_arabic(self):
+        cfg = {"label": "Capítulo", "numeral_style": "arabic"}
+        assert synthesize_chapter_heading(3, cfg) == 'Capítulo 3'
+
+    def test_roman_style(self):
+        cfg = {"label": "Chapter", "numeral_style": "roman"}
+        assert synthesize_chapter_heading(4, cfg) == 'Chapter IV'
+
+    def test_empty_label_emits_just_numeral(self):
+        cfg = {"label": "", "numeral_style": "arabic"}
+        assert synthesize_chapter_heading(12, cfg) == '12'
+
+    def test_unknown_numeral_style_falls_back_to_arabic(self):
+        cfg = {"label": "Ch", "numeral_style": "klingon"}
+        assert synthesize_chapter_heading(2, cfg) == 'Ch 2'
 
 
 # --- collect_referenced_images ---
