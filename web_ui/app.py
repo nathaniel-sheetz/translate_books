@@ -3957,6 +3957,11 @@ def build_epub_route(project_id):
     title = data.get("title") or config.get("spanish_title") or config.get("title") or project_id
     author = data.get("author") or config.get("author", "")
     language = data.get("language") or config.get("target_lang_code", "es")
+    # Optional chapter heading synthesis config; request body wins, otherwise
+    # build_epub will read it from project.json.
+    chapter_heading_config = data.get("chapter_heading")
+    if not isinstance(chapter_heading_config, dict):
+        chapter_heading_config = None
 
     chunks_dir = project_dir / "chunks"
 
@@ -4008,6 +4013,7 @@ def build_epub_route(project_id):
             language=language,
             chapters_dir=temp_dir,
             output_path=epub_output,
+            chapter_heading_config=chapter_heading_config,
         )
 
         size_bytes = epub_path.stat().st_size
