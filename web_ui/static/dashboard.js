@@ -2274,7 +2274,10 @@
                 '<td>' + (annotations > 0 ? annotations + ' notes' : '&mdash;') + '</td>' +
                 '<td>' + (reviewed ? '&#10003;' : '&mdash;') + '</td>' +
                 '<td>' +
-                    (!hasAlignment ? '<button class="btn-primary ch-align" data-chapter="' + ch.id + '" style="padding:3px 10px;font-size:12px">Align</button> ' : '') +
+                    (!hasAlignment
+                        ? '<button class="btn-primary ch-align" data-chapter="' + ch.id + '" style="padding:3px 10px;font-size:12px">Align</button> '
+                        : '<button class="btn-secondary ch-realign" data-chapter="' + ch.id + '" data-annotations="' + annotations + '" style="padding:3px 10px;font-size:12px">Realign</button> '
+                    ) +
                     '<a href="/read/' + PROJECT + '/' + ch.id + '" target="_blank" class="btn-secondary" style="padding:3px 10px;font-size:12px;text-decoration:none">Read</a>' +
                 '</td>';
             tbody.appendChild(tr);
@@ -2331,6 +2334,38 @@
                         btn.textContent = 'Done';
                         loadStatus();
                     }
+                });
+            });
+        });
+
+        // Realign button handlers
+        tbody.querySelectorAll('.ch-realign').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var chId = btn.dataset.chapter;
+                var noteCount = parseInt(btn.dataset.annotations || '0', 10);
+                if (noteCount > 0) {
+                    var msg = 'Realign ' + chId + '? ' + noteCount +
+                        ' annotation(s) on this chapter will be re-anchored by ' +
+                        'matching sentence text. Annotations on sentences whose ' +
+                        'text changed may become orphaned.';
+                    if (!window.confirm(msg)) return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Realigning...';
+                apiPost('/api/project/' + PROJECT + '/align/' + chId, {}).then(function(data) {
+                    if (data.error) {
+                        btn.textContent = 'Error';
+                        btn.disabled = false;
+                        alert(data.error);
+                        return;
+                    }
+                    var orphans = data.orphaned_annotations || 0;
+                    if (orphans > 0) {
+                        alert('Realigned ' + chId + '. ' + orphans +
+                            ' annotation(s) could not be re-anchored and are now orphaned.');
+                    }
+                    btn.textContent = 'Done';
+                    loadStatus();
                 });
             });
         });

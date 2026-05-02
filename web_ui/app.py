@@ -3156,6 +3156,10 @@ def project_align(project_id, chapter_id):
         if not chunk_files:
             return jsonify({"error": "No chunks found"}), 404
 
+        # Capture the prior alignment (if any) so we can re-anchor any
+        # annotations whose es_idx may shift after a fresh align run.
+        old_es_map = _load_alignment_es_map(project_dir, chapter_id)
+
         # Refresh the combined chapter text before aligning so chapters/ is
         # always in sync with the translated chunks. get_alignment reads this
         # file to enrich alignment data with paragraph breaks.
@@ -3178,7 +3182,24 @@ def project_align(project_id, chapter_id):
             output_path=str(output_path),
         )
 
-        return jsonify({"ok": True, "pairs": len(result.get("pairs", []))})
+        orphaned: list = []
+        if old_es_map:
+            try:
+                orphaned = _reanchor_annotations_after_realign(
+                    project_dir, chapter_id, old_es_map,
+                )
+            except Exception as e:
+                app.logger.warning(
+                    "Annotation re-anchor failed for %s/%s: %s",
+                    project_id, chapter_id, e,
+                )
+                orphaned = []
+
+        return jsonify({
+            "ok": True,
+            "pairs": len(result.get("pairs", [])),
+            "orphaned_annotations": len(orphaned),
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
