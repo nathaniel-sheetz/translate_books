@@ -2290,6 +2290,33 @@ def project_chunk_all(project_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _reconstruct_chapter_source_from_chunks(chunks) -> str:
+    """Reconstruct original chapter source text from existing chunks.
+
+    Each chunk's `source_text` preserves the original (untranslated) chapter
+    content for that span, including a leading overlap with the previous
+    chunk. Strip that overlap and rejoin so we recover the original chapter
+    source even when chapters/{id}.txt has been overwritten by Combine with
+    the translated text.
+    """
+    if not chunks:
+        return ""
+    sorted_chunks = sorted(chunks, key=lambda c: c.position)
+    parts = []
+    for i, c in enumerate(sorted_chunks):
+        text = c.source_text or ""
+        if i == 0:
+            parts.append(text)
+            continue
+        ov = (c.metadata.overlap_start if c.metadata else 0) or 0
+        # chunk_text = overlap_text + "\n\n" + body_text, so body starts at ov+2
+        if ov > 0 and len(text) > ov + 2 and text[ov:ov + 2] == "\n\n":
+            parts.append(text[ov + 2:])
+        else:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
 @app.route("/api/project/<project_id>/chapters/<chapter_id>/rechunk", methods=["POST"])
 def project_chapter_rechunk(project_id, chapter_id):
     """Rechunk a single chapter, replacing its existing chunks.
@@ -2297,14 +2324,18 @@ def project_chapter_rechunk(project_id, chapter_id):
     Destructive: deletes all existing chunk files for this chapter before
     writing new ones. The client is responsible for warning the user when
     the chapter has translated chunks that would be lost.
+
+    Source-of-truth note: chapters/{id}.txt is overwritten by Combine with the
+    translated text, so we cannot rely on it as the source for re-chunking.
+    Instead we reconstruct the original source from the existing chunks'
+    `source_text` fields (which always hold the original-language text), and
+    only fall back to chapters/{id}.txt when no chunks exist yet.
     """
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _get_projects_dir() / project_id
     chapter_path = project_dir / "chapters" / f"{chapter_id}.txt"
-    if not chapter_path.exists():
-        return jsonify({"error": "Chapter not found"}), 404
 
     try:
         from src.chunker import chunk_chapter
@@ -2325,16 +2356,36 @@ def project_chapter_rechunk(project_id, chapter_id):
         chunks_dir = project_dir / "chunks"
         chunks_dir.mkdir(exist_ok=True)
 
+        # Reconstruct source from existing chunks BEFORE deleting them, so we
+        # don't accidentally rechunk from chapters/{id}.txt (which Combine has
+        # overwritten with translated text).
+        existing_chunk_paths = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        existing_chunks = []
+        for cf in existing_chunk_paths:
+            try:
+                existing_chunks.append(load_chunk(cf))
+            except Exception:
+                pass
+
+        if existing_chunks:
+            text = _reconstruct_chapter_source_from_chunks(existing_chunks)
+        else:
+            if not chapter_path.exists():
+                return jsonify({"error": "Chapter not found"}), 404
+            text = chapter_path.read_text(encoding="utf-8")
+
+        if not text or not text.strip():
+            return jsonify({"error": "Chapter source text is empty"}), 400
+
         # Delete existing chunk files for this chapter so we don't leave
         # stale higher-numbered chunks behind if the new chunking produces
         # fewer chunks than before.
-        for old in chunks_dir.glob(f"{chapter_id}_chunk_*.json"):
+        for old in existing_chunk_paths:
             try:
                 old.unlink()
             except OSError:
                 pass
 
-        text = chapter_path.read_text(encoding="utf-8")
         chunks = chunk_chapter(text, config, chapter_id)
         for chunk in chunks:
             save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
