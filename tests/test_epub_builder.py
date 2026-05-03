@@ -10,11 +10,13 @@ import pytest
 from src.epub_builder import (
     _DEFAULT_TRANSLATOR_HEADING,
     _int_to_roman,
+    _load_chapter_manifest,
     _strip_image_blocks,
     build_epub,
     chapter_text_to_xhtml,
     collect_referenced_images,
     detect_chapter_heading,
+    matter_text_to_xhtml,
     note_text_to_xhtml,
     parse_image_placeholders,
     synthesize_chapter_heading,
@@ -511,3 +513,103 @@ class TestBuildEpubTranslatorNote(TestBuildEpub):
             other_xhtml = sorted(n for n in b.namelist() if n.endswith(".xhtml"))
             assert base_xhtml == other_xhtml
             assert not any("translator_note" in n for n in base_xhtml)
+
+
+# --- chapter_manifest support ---
+
+class TestChapterManifest:
+    def _make_project_with_preface(self, tmp_path):
+        """Project with preface as chapter_01 and two real chapters."""
+        import json as _json
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+
+        (chapters_dir / "chapter_01.txt").write_text(
+            "Preface\n\nThis is the preface body, before any numbered chapter starts.",
+            encoding="utf-8",
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "CHAPTER I\n\nThe Beginning\n\nFirst real chapter content.",
+            encoding="utf-8",
+        )
+        (chapters_dir / "chapter_03.txt").write_text(
+            "CHAPTER II\n\nThe Middle\n\nSecond real chapter content.",
+            encoding="utf-8",
+        )
+
+        manifest = [
+            {"id": "chapter_01", "kind": "front_matter", "label": "Preface"},
+            {"id": "chapter_02", "kind": "chapter", "number": 1},
+            {"id": "chapter_03", "kind": "chapter", "number": 2},
+        ]
+        (tmp_path / "project.json").write_text(
+            _json.dumps({"chapter_manifest": manifest}), encoding="utf-8"
+        )
+        return tmp_path
+
+    def test_load_chapter_manifest(self, tmp_path):
+        proj = self._make_project_with_preface(tmp_path)
+        m = _load_chapter_manifest(proj)
+        assert set(m.keys()) == {"chapter_01", "chapter_02", "chapter_03"}
+        assert m["chapter_01"]["kind"] == "front_matter"
+        assert m["chapter_02"]["number"] == 1
+
+    def test_toc_uses_manifest_labels(self, tmp_path):
+        """TOC should label preface 'Preface' and chapters Chapter 1, Chapter 2."""
+        proj = self._make_project_with_preface(tmp_path)
+        output = build_epub(
+            project_path=proj,
+            title="Test",
+            author="A",
+            language="en",
+        )
+        assert output.exists()
+        with zipfile.ZipFile(output) as zf:
+            # Read the NCX (table of contents) and check labels
+            ncx_name = next((n for n in zf.namelist() if n.endswith(".ncx")), None)
+            assert ncx_name is not None
+            ncx = zf.read(ncx_name).decode("utf-8")
+            assert "Preface" in ncx
+            # The two chapters should be 1 and 2 — NOT 2 and 3
+            assert "Chapter 1" in ncx or "CHAPTER I" in ncx
+            assert "Chapter 2" in ncx or "CHAPTER II" in ncx
+            # Should NOT contain the off-by-one synthesized label
+            assert "Chapter 3" not in ncx
+
+    def test_no_manifest_keeps_existing_behavior(self, tmp_path):
+        """Without a manifest, build_epub falls back to today's enumeration."""
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+        (chapters_dir / "chapter_01.txt").write_text(
+            "CHAPTER I\n\nFirst\n\nBody.", encoding="utf-8"
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "CHAPTER II\n\nSecond\n\nBody.", encoding="utf-8"
+        )
+        # No project.json on purpose.
+        output = build_epub(project_path=tmp_path, title="T", author="A")
+        with zipfile.ZipFile(output) as zf:
+            xhtml_files = sorted(
+                n for n in zf.namelist()
+                if "chapter_" in n and n.endswith(".xhtml")
+            )
+            assert len(xhtml_files) == 2
+
+
+class TestMatterTextToXhtml:
+    def test_consumes_matching_heading_line(self):
+        text = "Preface\n\nFirst paragraph of the preface."
+        out = matter_text_to_xhtml(text, "Preface")
+        assert "<h1>Preface</h1>" in out
+        # The duplicated "Preface" header should not appear as a paragraph.
+        assert "<p>Preface</p>" not in out
+        assert "First paragraph of the preface." in out
+
+    def test_keeps_body_when_first_line_does_not_match(self):
+        text = "Some opening line.\n\nMore text."
+        out = matter_text_to_xhtml(text, "Foreword")
+        assert "<h1>Foreword</h1>" in out
+        assert "Some opening line." in out
+
