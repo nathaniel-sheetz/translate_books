@@ -645,12 +645,19 @@
     // ========================================================================
 
     function getChunkConfig() {
+        // Use Number.isFinite to preserve explicit 0 values (|| would treat
+        // 0 as falsy and substitute the default, silently overriding the
+        // user's choice for overlap_paragraphs / min_overlap_words).
+        function intOrDefault(id, def) {
+            var n = parseInt(document.getElementById(id).value, 10);
+            return Number.isFinite(n) ? n : def;
+        }
         return {
-            target_size: parseInt(document.getElementById('chunk-target-size').value, 10) || 2000,
-            min_chunk_size: parseInt(document.getElementById('chunk-min-size').value, 10) || 500,
-            max_chunk_size: parseInt(document.getElementById('chunk-max-size').value, 10) || 3000,
-            overlap_paragraphs: parseInt(document.getElementById('chunk-overlap-para').value, 10) || 2,
-            min_overlap_words: parseInt(document.getElementById('chunk-overlap-words').value, 10) || 100,
+            target_size: intOrDefault('chunk-target-size', 2000),
+            min_chunk_size: intOrDefault('chunk-min-size', 500),
+            max_chunk_size: intOrDefault('chunk-max-size', 3000),
+            overlap_paragraphs: intOrDefault('chunk-overlap-para', 2),
+            min_overlap_words: intOrDefault('chunk-overlap-words', 100),
         };
     }
 
