@@ -169,6 +169,19 @@
                 <input type="text" id="split-custom-regex" placeholder="e.g. ^CHAPTER\s+\d+">
             </div>
 
+            <div class="dash-field-row">
+                <div class="dash-field">
+                    <label>Front matter titles (one per line)</label>
+                    <textarea id="split-front-matter" rows="3"
+                        placeholder="Preface&#10;To the Teacher"></textarea>
+                </div>
+                <div class="dash-field">
+                    <label>Back matter titles (one per line)</label>
+                    <textarea id="split-back-matter" rows="3"
+                        placeholder="Epilogue"></textarea>
+                </div>
+            </div>
+
             <div class="btn-row">
                 <button class="btn-secondary" id="btn-split-preview">Preview Split</button>
                 <button class="btn-primary" id="btn-split-confirm" style="display:none">Confirm &amp; Split</button>

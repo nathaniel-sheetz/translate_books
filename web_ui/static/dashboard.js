@@ -614,10 +614,17 @@
     });
 
     function getSplitConfig() {
+        function parseLines(elId) {
+            var raw = (document.getElementById(elId) || {}).value || '';
+            return raw.split('\n').map(function(s) { return s.trim(); })
+                .filter(function(s) { return s.length > 0; });
+        }
         return {
             pattern_type: document.getElementById('split-pattern').value,
             custom_regex: document.getElementById('split-custom-regex').value,
             min_chapter_size: parseInt(document.getElementById('split-min-size').value, 10) || 500,
+            front_matter_titles: parseLines('split-front-matter'),
+            back_matter_titles: parseLines('split-back-matter'),
         };
     }
 
@@ -625,14 +632,22 @@
         var area = document.getElementById('split-preview-area');
         area.style.display = '';
         document.getElementById('split-preview-count').textContent =
-            chapters.length + ' chapters detected';
+            chapters.length + ' sections detected';
         var cards = document.getElementById('split-preview-cards');
         cards.innerHTML = '';
         chapters.forEach(function(ch) {
             var card = document.createElement('div');
             card.className = 'chapter-card';
+            var kind = ch.kind || 'chapter';
+            var badge = '';
+            if (kind === 'front_matter') {
+                badge = '<span class="ch-badge ch-badge-front">front matter</span>';
+            } else if (kind === 'back_matter') {
+                badge = '<span class="ch-badge ch-badge-back">back matter</span>';
+            }
             card.innerHTML =
                 '<span class="ch-name">' + escapeHtml(ch.name || ch.title || 'Chapter') + '</span>' +
+                badge +
                 '<span class="ch-words">' + (ch.words || ch.word_count || 0) + ' words</span>' +
                 '<span class="ch-preview">' + escapeHtml(truncate(ch.preview || ch.first_line || '', 80)) + '</span>';
             cards.appendChild(card);

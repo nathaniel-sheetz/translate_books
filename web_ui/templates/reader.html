@@ -275,7 +275,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         {% for ch in chapters %}
         <li>
             <a href="/read/{{ project_id }}/{{ ch.id }}">
-                <span class="nav-title">{{ ch.id | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+                <span class="nav-title{% if ch.kind and ch.kind != 'chapter' %} nav-title-matter{% endif %}">{{ ch.display_label or (ch.id | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix)) }}</span>
                 <span class="nav-meta">
                     {%- if ch.review_count > 0 -%}
                         <span class="badge badge-review">{{ ch.review_count }} {{ t.badge_review }}</span>
@@ -330,7 +330,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
             {% else %}
             <span class="nav-chevron disabled">&lsaquo;</span>
             {% endif %}
-            <span class="reader-title">{{ chapter | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix) }}</span>
+            <span class="reader-title">{{ display_label or (chapter | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix)) }}</span>
             {% if next_chapter %}
             <a href="/read/{{ project_id }}/{{ next_chapter }}" class="nav-chevron">&rsaquo;</a>
             {% else %}
