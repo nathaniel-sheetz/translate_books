@@ -592,6 +592,10 @@
     const removeConfirmNo = document.getElementById('remove-confirm-no');
 
     // Populate confirmation dialog text from i18n
+    const removeConfirmEsLabel = document.getElementById('remove-confirm-preview-es-label');
+    const removeConfirmEnLabel = document.getElementById('remove-confirm-preview-en-label');
+    const removeConfirmEsText = document.getElementById('remove-confirm-preview-es');
+    const removeConfirmEnText = document.getElementById('remove-confirm-preview-en');
     if (removeConfirmOverlay) {
         const cTitle = document.getElementById('remove-confirm-title');
         const cWarn = document.getElementById('remove-confirm-warning');
@@ -599,6 +603,30 @@
         if (cWarn) cWarn.textContent = i.remove_confirm_warning || 'This action cannot be undone.';
         if (removeConfirmYes) removeConfirmYes.textContent = i.remove_confirm_yes || 'Yes, remove';
         if (removeConfirmNo) removeConfirmNo.textContent = i.remove_confirm_no || 'Go back';
+        if (removeConfirmEsLabel) removeConfirmEsLabel.textContent = i.remove_confirm_preview_es_label || 'Spanish:';
+        if (removeConfirmEnLabel) removeConfirmEnLabel.textContent = i.remove_confirm_preview_en_label || 'English:';
+    }
+
+    function fillConfirmPreview(esText, enText) {
+        const noneLabel = i.remove_confirm_preview_none || '(nothing selected)';
+        if (removeConfirmEsText) {
+            if (esText) {
+                removeConfirmEsText.textContent = esText;
+                removeConfirmEsText.classList.remove('is-empty');
+            } else {
+                removeConfirmEsText.textContent = noneLabel;
+                removeConfirmEsText.classList.add('is-empty');
+            }
+        }
+        if (removeConfirmEnText) {
+            if (enText) {
+                removeConfirmEnText.textContent = enText;
+                removeConfirmEnText.classList.remove('is-empty');
+            } else {
+                removeConfirmEnText.textContent = noneLabel;
+                removeConfirmEnText.classList.add('is-empty');
+            }
+        }
     }
 
     if (removeHelpBtn && removeHelp) {
@@ -614,6 +642,29 @@
     let enSel = null;
     let esSugg = null;
     let enSugg = null;
+    // Tracks whether each pane's current selection is the still-untouched
+    // default suggestion. When the user diverges in one pane, an unmodified
+    // default in the other pane is cleared so it can't be silently deleted.
+    let esIsDefault = false;
+    let enIsDefault = false;
+
+    function divergeFromDefault(lang) {
+        if (lang === 'es') {
+            esIsDefault = false;
+            if (enIsDefault) {
+                enSel = null;
+                enIsDefault = false;
+                if (removalCtx) renderPane(removeEnPane, removalCtx.en_full, null);
+            }
+        } else {
+            enIsDefault = false;
+            if (esIsDefault) {
+                esSel = null;
+                esIsDefault = false;
+                if (removalCtx) renderPane(removeEsPane, removalCtx.es_full, null);
+            }
+        }
+    }
 
     function escapeHtml(s) {
         return (s || '').replace(/[&<>"']/g, c => ({
@@ -701,6 +752,7 @@
         showRemoveError('');
         removalCtx = null;
         esSel = enSel = esSugg = enSugg = null;
+        esIsDefault = enIsDefault = false;
         removeEsPane.textContent = i.remove_loading || 'Loading…';
         removeEnPane.textContent = '';
         removeEsStatus.textContent = '';
@@ -723,6 +775,8 @@
                 enSugg = body.en_suggested ? { ...body.en_suggested } : null;
                 esSel = esSugg ? { ...esSugg } : null;
                 enSel = enSugg ? { ...enSugg } : null;
+                esIsDefault = !!esSugg;
+                enIsDefault = !!enSugg;
                 renderPane(removeEsPane, body.es_full, esSel);
                 renderPane(removeEnPane, body.en_full, enSel);
                 if (!esSugg && !enSugg) {
@@ -742,6 +796,7 @@
         if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'none';
         removalCtx = null;
         esSel = enSel = esSugg = enSugg = null;
+        esIsDefault = enIsDefault = false;
         showRemoveError('');
     }
 
@@ -797,6 +852,7 @@
 
         if (lang === 'es') esSel = { start, end };
         else enSel = { start, end };
+        divergeFromDefault(lang);
         renderPane(paneEl, fullText, lang === 'es' ? esSel : enSel);
         browserSel.removeAllRanges();
         updateActionButtons();
@@ -813,6 +869,7 @@
     if (removeEsUnhi) removeEsUnhi.addEventListener('click', () => {
         if (!removalCtx) return;
         esSel = null;
+        divergeFromDefault('es');
         renderPane(removeEsPane, removalCtx.es_full, null);
         const s = window.getSelection(); if (s) s.removeAllRanges();
         updateActionButtons();
@@ -822,6 +879,7 @@
     if (removeEnUnhi) removeEnUnhi.addEventListener('click', () => {
         if (!removalCtx) return;
         enSel = null;
+        divergeFromDefault('en');
         renderPane(removeEnPane, removalCtx.en_full, null);
         const s = window.getSelection(); if (s) s.removeAllRanges();
         updateActionButtons();
@@ -832,6 +890,7 @@
     removeEsReset.addEventListener('click', () => {
         if (!removalCtx) return;
         esSel = esSugg ? { ...esSugg } : null;
+        esIsDefault = !!esSugg;
         renderPane(removeEsPane, removalCtx.es_full, esSel);
         scrollHighlightIntoView(removeEsPane);
         updateRemoveButtons();
@@ -840,6 +899,7 @@
     removeEnReset.addEventListener('click', () => {
         if (!removalCtx) return;
         enSel = enSugg ? { ...enSugg } : null;
+        enIsDefault = !!enSugg;
         renderPane(removeEnPane, removalCtx.en_full, enSel);
         scrollHighlightIntoView(removeEnPane);
         updateRemoveButtons();
@@ -848,6 +908,7 @@
     if (removeEsClear) removeEsClear.addEventListener('click', () => {
         if (!removalCtx) return;
         esSel = null;
+        divergeFromDefault('es');
         renderPane(removeEsPane, removalCtx.es_full, null);
         updateRemoveButtons();
         showRemoveError('');
@@ -855,6 +916,7 @@
     if (removeEnClear) removeEnClear.addEventListener('click', () => {
         if (!removalCtx) return;
         enSel = null;
+        divergeFromDefault('en');
         renderPane(removeEnPane, removalCtx.en_full, null);
         updateRemoveButtons();
         showRemoveError('');
@@ -879,6 +941,7 @@
         const enCheck = enSel && enSel.end > enSel.start
             ? removalCtx.en_full.slice(enSel.start, enSel.end) : '';
         if (!esCheck && !enCheck) return;
+        fillConfirmPreview(esCheck, enCheck);
         if (removeConfirmOverlay) removeConfirmOverlay.style.display = 'flex';
     });
 
