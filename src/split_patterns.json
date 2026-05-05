@@ -47,5 +47,22 @@
     "numeric",
     "bare_roman",
     "allcaps_heading"
+  ],
+  "front_matter_patterns": [
+    "^\\s*preface\\s*$",
+    "^\\s*foreword\\s*$",
+    "^\\s*prologue\\s*$",
+    "^\\s*introduction\\s*$",
+    "^\\s*note\\s+to\\s+(the\\s+)?reader\\s*$",
+    "^\\s*dedication\\s*$",
+    "^\\s*acknowledge?ments\\s*$",
+    "^\\s*author'?s\\s+note\\s*$"
+  ],
+  "back_matter_patterns": [
+    "^\\s*epilogue\\s*$",
+    "^\\s*afterword\\s*$",
+    "^\\s*appendix(\\s+[A-Z0-9]+)?\\s*$",
+    "^\\s*colophon\\s*$",
+    "^\\s*bibliography\\s*$"
   ]
 }

@@ -307,6 +307,46 @@ def note_text_to_xhtml(heading: str, body: str) -> str:
     return '\n'.join(parts)
 
 
+def matter_text_to_xhtml(text: str, label: str) -> str:
+    """
+    Convert front- or back-matter text to XHTML.
+
+    Like ``chapter_text_to_xhtml`` but uses the supplied ``label`` as the
+    <h1> (no "Chapter N" synthesis) and preserves [IMAGE:...] placeholders.
+    If the first line of ``text`` matches the label (case-insensitive,
+    ignoring punctuation), it is consumed as the heading; otherwise the
+    label is added on top and the original text becomes the body.
+    """
+    lines = text.split('\n')
+    body_start = 0
+    if lines:
+        first = lines[0].strip().strip(".:!?,;").strip().casefold()
+        norm_label = label.strip().strip(".:!?,;").strip().casefold()
+        if first and norm_label and first == norm_label:
+            body_start = 1
+            # also skip following blank lines
+            while body_start < len(lines) and not lines[body_start].strip():
+                body_start += 1
+    body = '\n'.join(lines[body_start:])
+
+    parts = []
+    parts.append('<?xml version="1.0" encoding="utf-8"?>')
+    parts.append('<!DOCTYPE html>')
+    parts.append('<html xmlns="http://www.w3.org/1999/xhtml">')
+    parts.append(
+        '<head><title>{}</title>'
+        '<link rel="stylesheet" type="text/css" href="style.css"/>'
+        '</head>'.format(escape(label))
+    )
+    parts.append('<body>')
+    if label:
+        parts.append(f'<h1>{escape(label)}</h1>')
+    parts.extend(_render_body_blocks(body))
+    parts.append('</body>')
+    parts.append('</html>')
+    return '\n'.join(parts)
+
+
 def collect_referenced_images(chapters_dir: Path) -> set:
     """Scan all chapter .txt files for [IMAGE:...] placeholders.
 
@@ -356,6 +396,29 @@ def _load_chapter_heading_config(project_path: Path) -> Optional[Dict[str, Any]]
     return cfg if isinstance(cfg, dict) else None
 
 
+def _load_chapter_manifest(project_path: Path) -> Dict[str, Dict[str, Any]]:
+    """Read the optional 'chapter_manifest' from project.json.
+
+    Returns a dict keyed by chapter id (filename stem) -> entry dict, or
+    an empty dict when no manifest is present.
+    """
+    project_json = project_path / 'project.json'
+    if not project_json.exists():
+        return {}
+    try:
+        data = json.loads(project_json.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    raw = data.get('chapter_manifest')
+    if not isinstance(raw, list):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for entry in raw:
+        if isinstance(entry, dict) and isinstance(entry.get('id'), str):
+            out[entry['id']] = entry
+    return out
+
+
 def build_epub(
     project_path: Path,
     title: str,
@@ -402,6 +465,8 @@ def build_epub(
 
     if chapter_heading_config is None:
         chapter_heading_config = _load_chapter_heading_config(project_path)
+
+    chapter_manifest = _load_chapter_manifest(project_path)
 
     # Discover chapter files
     chapter_files = list(chapters_dir.glob('chapter_*.txt'))
@@ -474,16 +539,35 @@ def build_epub(
 
     for i, chapter_file in enumerate(chapter_files, 1):
         text = chapter_file.read_text(encoding='utf-8')
-        xhtml_content = chapter_text_to_xhtml(
-            text, i, heading_config=chapter_heading_config,
-        )
+        chapter_id = chapter_file.stem  # e.g. "chapter_03"
+        manifest_entry = chapter_manifest.get(chapter_id) or {}
+        kind = manifest_entry.get('kind', 'chapter')
 
-        heading, subtitle, _ = detect_chapter_heading(
-            text, chapter_number=i, heading_config=chapter_heading_config,
-        )
-        toc_label = heading or f'Chapter {i}'
-        if subtitle:
-            toc_label = f'{toc_label}: {subtitle}'
+        if kind == 'chapter':
+            display_number = manifest_entry.get('number', i) if manifest_entry \
+                else i
+            xhtml_content = chapter_text_to_xhtml(
+                text, display_number, heading_config=chapter_heading_config,
+            )
+            heading, subtitle, _ = detect_chapter_heading(
+                text,
+                chapter_number=display_number,
+                heading_config=chapter_heading_config,
+            )
+            toc_label = heading or f'Chapter {display_number}'
+            if subtitle:
+                toc_label = f'{toc_label}: {subtitle}'
+        else:
+            # Front- or back-matter section: never synthesize "Chapter N".
+            label = (manifest_entry.get('label') or '').strip()
+            heading, subtitle, _ = detect_chapter_heading(
+                text, chapter_number=None, heading_config=chapter_heading_config,
+            )
+            display_label = heading or label or chapter_id.replace('_', ' ').title()
+            xhtml_content = matter_text_to_xhtml(text, display_label)
+            toc_label = display_label
+            if subtitle and subtitle != display_label:
+                toc_label = f'{display_label}: {subtitle}'
 
         chapter_item = epub.EpubHtml(
             title=toc_label,

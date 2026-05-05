@@ -186,6 +186,36 @@ def _project_title(project_id: str) -> str:
     return _load_project_config(project_id).get("title") or project_id
 
 
+def _load_chapter_manifest_for_project(project_id: str) -> dict:
+    """Return {chapter_id: entry} from project.json's chapter_manifest, or {}."""
+    cfg = _load_project_config(project_id)
+    raw = cfg.get("chapter_manifest")
+    if not isinstance(raw, list):
+        return {}
+    out = {}
+    for entry in raw:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            out[entry["id"]] = entry
+    return out
+
+
+def _chapter_display_label(chapter_id: str, manifest: dict, chapter_prefix: str) -> str:
+    """Compute the display label for a chapter ID using a manifest."""
+    entry = manifest.get(chapter_id)
+    if entry:
+        kind = entry.get("kind", "chapter")
+        if kind == "chapter":
+            num = entry.get("number")
+            if num is not None:
+                return f"{chapter_prefix} {num}"
+        else:
+            label = entry.get("label")
+            if label:
+                return label
+    # Fallback to today's behavior: title-case the filename stem
+    return chapter_id.replace("_", " ").title().replace("Chapter", chapter_prefix)
+
+
 def _safe_id(value: str) -> bool:
     """Return False if ID contains path traversal characters."""
     return bool(value) and ".." not in value and "/" not in value and "\\" not in value
@@ -720,6 +750,10 @@ def reader_chapters(project_id):
     # Load reviewed status
     reviewed = _load_reviewed(project_dir)
 
+    # Load chapter manifest for display labels
+    manifest = _load_chapter_manifest_for_project(project_id)
+    chapter_prefix = t.get("chapter_prefix", "Chapter")
+
     chapters = []
     for f in sorted(align_dir.glob("*.json")):
         try:
@@ -733,8 +767,11 @@ def reader_chapters(project_id):
             flag_count = ann.get("flag", 0)
             total_ann = sum(ann.values())
 
+            entry = manifest.get(ch_id) or {}
             chapters.append({
                 "id": ch_id,
+                "display_label": _chapter_display_label(ch_id, manifest, chapter_prefix),
+                "kind": entry.get("kind", "chapter"),
                 "confidence": confidence,
                 "low_confidence": confidence < 90,
                 "review_count": review_count,
@@ -774,11 +811,17 @@ def reader_view(project_id, chapter):
     prev_chapter = all_chapters[idx - 1] if idx > 0 else None
     next_chapter = all_chapters[idx + 1] if idx < len(all_chapters) - 1 else None
 
+    # Resolve display label using the chapter manifest (if any).
+    manifest = _load_chapter_manifest_for_project(project_id)
+    chapter_prefix = t.get("chapter_prefix", "Chapter")
+    display_label = _chapter_display_label(chapter, manifest, chapter_prefix)
+
     return render_template(
         "reader.html", mode="read",
         project_id=project_id, project_title=_project_title(project_id),
         chapter=chapter, t=t, lang=_get_ui_lang(),
         prev_chapter=prev_chapter, next_chapter=next_chapter,
+        display_label=display_label,
     )
 
 
@@ -2207,13 +2250,24 @@ def project_split_preview(project_id):
             pattern_type=data.get("pattern_type", "roman"),
             custom_regex=data.get("custom_regex"),
             min_chapter_size=data.get("min_chapter_size", 500),
+            front_matter_titles=data.get("front_matter_titles") or [],
+            back_matter_titles=data.get("back_matter_titles") or [],
+            auto_detect_front_matter=data.get("auto_detect_front_matter", True),
+            auto_detect_back_matter=data.get("auto_detect_back_matter", True),
         )
         result = []
         for ch in chapters:
+            if ch.kind == "chapter":
+                display_name = ch.chapter_title or f"Chapter {ch.number or ch.position_index}"
+            else:
+                display_name = ch.label or ch.chapter_title or ch.kind
             result.append({
-                "name": ch.chapter_title or f"Chapter {ch.chapter_number}",
+                "name": display_name,
                 "words": len(ch.content.split()),
                 "preview": ch.content[:200],
+                "kind": ch.kind,
+                "label": ch.label,
+                "number": ch.number,
             })
         return jsonify({"chapters": result})
     except Exception as e:
@@ -2239,6 +2293,10 @@ def project_split(project_id):
             pattern_type=data.get("pattern_type", "roman"),
             custom_regex=data.get("custom_regex"),
             min_chapter_size=data.get("min_chapter_size", 500),
+            front_matter_titles=data.get("front_matter_titles") or [],
+            back_matter_titles=data.get("back_matter_titles") or [],
+            auto_detect_front_matter=data.get("auto_detect_front_matter", True),
+            auto_detect_back_matter=data.get("auto_detect_back_matter", True),
         )
         chapters_dir = project_dir / "chapters"
         save_chapters_to_files(chapters, chapters_dir)
@@ -2290,6 +2348,33 @@ def project_chunk_all(project_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _reconstruct_chapter_source_from_chunks(chunks) -> str:
+    """Reconstruct original chapter source text from existing chunks.
+
+    Each chunk's `source_text` preserves the original (untranslated) chapter
+    content for that span, including a leading overlap with the previous
+    chunk. Strip that overlap and rejoin so we recover the original chapter
+    source even when chapters/{id}.txt has been overwritten by Combine with
+    the translated text.
+    """
+    if not chunks:
+        return ""
+    sorted_chunks = sorted(chunks, key=lambda c: c.position)
+    parts = []
+    for i, c in enumerate(sorted_chunks):
+        text = c.source_text or ""
+        if i == 0:
+            parts.append(text)
+            continue
+        ov = (c.metadata.overlap_start if c.metadata else 0) or 0
+        # chunk_text = overlap_text + "\n\n" + body_text, so body starts at ov+2
+        if ov > 0 and len(text) > ov + 2 and text[ov:ov + 2] == "\n\n":
+            parts.append(text[ov + 2:])
+        else:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
 @app.route("/api/project/<project_id>/chapters/<chapter_id>/rechunk", methods=["POST"])
 def project_chapter_rechunk(project_id, chapter_id):
     """Rechunk a single chapter, replacing its existing chunks.
@@ -2297,14 +2382,18 @@ def project_chapter_rechunk(project_id, chapter_id):
     Destructive: deletes all existing chunk files for this chapter before
     writing new ones. The client is responsible for warning the user when
     the chapter has translated chunks that would be lost.
+
+    Source-of-truth note: chapters/{id}.txt is overwritten by Combine with the
+    translated text, so we cannot rely on it as the source for re-chunking.
+    Instead we reconstruct the original source from the existing chunks'
+    `source_text` fields (which always hold the original-language text), and
+    only fall back to chapters/{id}.txt when no chunks exist yet.
     """
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _get_projects_dir() / project_id
     chapter_path = project_dir / "chapters" / f"{chapter_id}.txt"
-    if not chapter_path.exists():
-        return jsonify({"error": "Chapter not found"}), 404
 
     try:
         from src.chunker import chunk_chapter
@@ -2325,16 +2414,36 @@ def project_chapter_rechunk(project_id, chapter_id):
         chunks_dir = project_dir / "chunks"
         chunks_dir.mkdir(exist_ok=True)
 
+        # Reconstruct source from existing chunks BEFORE deleting them, so we
+        # don't accidentally rechunk from chapters/{id}.txt (which Combine has
+        # overwritten with translated text).
+        existing_chunk_paths = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        existing_chunks = []
+        for cf in existing_chunk_paths:
+            try:
+                existing_chunks.append(load_chunk(cf))
+            except Exception:
+                pass
+
+        if existing_chunks:
+            text = _reconstruct_chapter_source_from_chunks(existing_chunks)
+        else:
+            if not chapter_path.exists():
+                return jsonify({"error": "Chapter not found"}), 404
+            text = chapter_path.read_text(encoding="utf-8")
+
+        if not text or not text.strip():
+            return jsonify({"error": "Chapter source text is empty"}), 400
+
         # Delete existing chunk files for this chapter so we don't leave
         # stale higher-numbered chunks behind if the new chunking produces
         # fewer chunks than before.
-        for old in chunks_dir.glob(f"{chapter_id}_chunk_*.json"):
+        for old in existing_chunk_paths:
             try:
                 old.unlink()
             except OSError:
                 pass
 
-        text = chapter_path.read_text(encoding="utf-8")
         chunks = chunk_chapter(text, config, chapter_id)
         for chunk in chunks:
             save_chunk(chunk, chunks_dir / f"{chunk.id}.json")

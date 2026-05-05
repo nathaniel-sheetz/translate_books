@@ -102,6 +102,36 @@ The script will:
     )
 
     parser.add_argument(
+        '--front-matter',
+        action='append',
+        default=[],
+        help='Front-matter heading(s) for this book. Repeat or comma-separate '
+             '(e.g. --front-matter "To the Teacher,To the Reader"). '
+             'These ALWAYS match regardless of the built-in keyword list.',
+    )
+
+    parser.add_argument(
+        '--back-matter',
+        action='append',
+        default=[],
+        help='Back-matter heading(s) for this book. Repeat or comma-separate.',
+    )
+
+    parser.add_argument(
+        '--no-auto-front-matter',
+        action='store_true',
+        help='Disable the built-in front-matter keyword list '
+             '(preface, foreword, prologue, ...).',
+    )
+
+    parser.add_argument(
+        '--no-auto-back-matter',
+        action='store_true',
+        help='Disable the built-in back-matter keyword list '
+             '(epilogue, afterword, appendix, ...).',
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Show detailed progress and chapter information',
@@ -166,12 +196,29 @@ def main():
         if args.custom_regex:
             print(f"Custom regex: {args.custom_regex}")
 
+    # Parse comma-separated front/back matter titles into a flat list
+    def _flatten_titles(values):
+        out = []
+        for v in values or []:
+            for piece in str(v).split(','):
+                p = piece.strip()
+                if p:
+                    out.append(p)
+        return out
+
+    front_titles = _flatten_titles(args.front_matter)
+    back_titles = _flatten_titles(args.back_matter)
+
     try:
         chapters = split_book_into_chapters(
             book_text=book_text,
             pattern_type=args.pattern,
             custom_regex=args.custom_regex,
-            min_chapter_size=args.min_size
+            min_chapter_size=args.min_size,
+            front_matter_titles=front_titles,
+            back_matter_titles=back_titles,
+            auto_detect_front_matter=not args.no_auto_front_matter,
+            auto_detect_back_matter=not args.no_auto_back_matter,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -203,7 +250,8 @@ def main():
         print("-" * 80)
         for chapter in chapters:
             word_count = len(chapter.content.split())
-            print(f"  {chapter.chapter_title:20} | {word_count:6,} words | Lines {chapter.start_line:4}-{chapter.end_line:4}")
+            kind_tag = f"[{chapter.kind}]"
+            print(f"  {chapter.chapter_title:20} {kind_tag:16} | {word_count:6,} words | Lines {chapter.start_line:4}-{chapter.end_line:4}")
         print("-" * 80)
         print()
 
@@ -214,7 +262,7 @@ def main():
 
         # Show what would be created
         for chapter in chapters:
-            filename = f"{args.prefix}_{chapter.chapter_number:02d}.txt"
+            filename = f"{args.prefix}_{chapter.position_index:02d}.txt"
             filepath = args.output / filename
             print(f"  {filepath}")
 

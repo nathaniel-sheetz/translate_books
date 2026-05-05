@@ -4,33 +4,74 @@ Book splitting functionality for automatic chapter detection.
 This module provides utilities to detect chapter boundaries in full book files
 and split them into individual chapter files. Patterns are defined in
 split_patterns.json and can be extended without code changes.
+
+Front matter (preface, foreword, etc.) and back matter (epilogue, appendix,
+etc.) are first-class non-numbered sections. Detected sections are recorded
+in a "chapter_manifest" written to project.json so the reader and EPUB
+builder can render them with proper labels.
 """
 
 import json
 import re
 from pathlib import Path
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+SectionKind = Literal["front_matter", "chapter", "back_matter"]
 
 
 class DetectedChapter(BaseModel):
     """
-    Represents a detected chapter with its content and metadata.
+    Represents a detected chapter or front/back matter section.
 
     Example:
         DetectedChapter(
-            chapter_number=1,
+            position_index=1,
+            kind="chapter",
+            number=1,
             chapter_title="Chapter I",
             content="It was the best of times...",
             start_line=1,
-            end_line=145
+            end_line=145,
         )
     """
-    chapter_number: int = Field(ge=1, description="Sequential chapter number (1, 2, 3...)")
-    chapter_title: str = Field(description="Chapter title as it appears in text (e.g., 'Chapter I')")
-    content: str = Field(min_length=1, description="Chapter text content")
+    model_config = ConfigDict(populate_by_name=True)
+
+    position_index: int = Field(
+        ge=1, description="Sequential position in reading order (1-based)"
+    )
+    chapter_title: str = Field(description="Heading text as it appears in the book")
+    content: str = Field(min_length=1, description="Section text content")
     start_line: int = Field(ge=0, description="Starting line number in source file")
     end_line: int = Field(ge=0, description="Ending line number in source file")
+    kind: SectionKind = Field(
+        default="chapter",
+        description="Kind of section: front_matter, chapter, or back_matter",
+    )
+    label: str = Field(
+        default="",
+        description="Display label for non-chapter sections (e.g. 'Preface').",
+    )
+    number: Optional[int] = Field(
+        default=None,
+        description="Display chapter number (only set when kind='chapter').",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_chapter_number(cls, data):
+        """Accept legacy 'chapter_number' kwarg as 'position_index'."""
+        if isinstance(data, dict) and "chapter_number" in data and "position_index" not in data:
+            data = dict(data)
+            data["position_index"] = data.pop("chapter_number")
+        return data
+
+    @property
+    def chapter_number(self) -> int:
+        """Backward-compatible alias for position_index."""
+        return self.position_index
 
 
 # Roman numeral conversion tables
@@ -221,41 +262,157 @@ def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str]
         raise ValueError(f"Invalid regex in pattern '{pattern_type}': {e}")
 
 
+# ---------------------------------------------------------------------------
+# Front / back matter detection
+# ---------------------------------------------------------------------------
+
+_TITLE_PUNCT = ".:!?,;\u2014-"
+
+
+def _normalize_title(line: str) -> str:
+    """Lowercase a heading line, strip whitespace and trailing punctuation."""
+    s = line.strip()
+    s = s.strip(_TITLE_PUNCT).strip()
+    return s.casefold()
+
+
+def _matches_user_title(line: str, titles: List[str]) -> Optional[str]:
+    """Return the original (user-supplied) title if the line matches one."""
+    if not titles:
+        return None
+    norm_line = _normalize_title(line)
+    for t in titles:
+        if not t or not t.strip():
+            continue
+        if _normalize_title(t) == norm_line:
+            return t.strip()
+    return None
+
+
+def _matches_builtin_pattern(line: str, compiled_patterns: List[re.Pattern]) -> Optional[str]:
+    """Return the matched heading (canonical title-cased) if any built-in pattern matches."""
+    s = line.strip().strip(_TITLE_PUNCT).strip()
+    if not s:
+        return None
+    for pat in compiled_patterns:
+        if pat.match(s):
+            # Title-case for display purposes (Preface, Foreword, etc.)
+            return s.title()
+    return None
+
+
+def _compile_matter_patterns(key: str) -> List[re.Pattern]:
+    """Compile front_matter_patterns or back_matter_patterns from JSON."""
+    data = load_split_patterns()
+    raw = data.get(key, []) or []
+    out = []
+    for r in raw:
+        try:
+            out.append(re.compile(r, re.IGNORECASE))
+        except re.error:
+            continue
+    return out
+
+
+def _find_matter_sections(
+    text: str,
+    *,
+    region_start: int,
+    region_end: int,
+    user_titles: List[str],
+    builtin_patterns: List[re.Pattern],
+    kind: SectionKind,
+) -> List[dict]:
+    """
+    Scan a substring of `text` (region_start..region_end) for front- or
+    back-matter headings. Returns ordered sections within that region.
+    Each entry: {"start_pos", "end_pos", "label", "heading_line", "kind"}
+    """
+    if region_start >= region_end:
+        return []
+
+    matches = []  # list of (line_start_pos, heading_end_pos, label, raw_heading)
+
+    pos = region_start
+    while pos < region_end:
+        line_end = text.find("\n", pos, region_end)
+        if line_end == -1:
+            line_end = region_end
+        line = text[pos:line_end]
+
+        label = _matches_user_title(line, user_titles)
+        if label is None:
+            label = _matches_builtin_pattern(line, builtin_patterns)
+
+        if label is not None:
+            matches.append((pos, line_end, label, line.strip()))
+
+        pos = line_end + 1
+
+    if not matches:
+        return []
+
+    sections = []
+    for i, (start, heading_end, label, raw_heading) in enumerate(matches):
+        if i + 1 < len(matches):
+            section_end = matches[i + 1][0]
+        else:
+            section_end = region_end
+        sections.append({
+            "start_pos": start,
+            "end_pos": section_end,
+            "heading_end": heading_end,
+            "label": label,
+            "heading_line": raw_heading,
+            "kind": kind,
+        })
+    return sections
+
+
 def split_book_into_chapters(
     book_text: str,
     pattern_type: str = "roman",
     custom_regex: Optional[str] = None,
     min_chapter_size: int = 100,
+    front_matter_titles: Optional[List[str]] = None,
+    back_matter_titles: Optional[List[str]] = None,
+    auto_detect_front_matter: bool = True,
+    auto_detect_back_matter: bool = True,
 ) -> List[DetectedChapter]:
     """
-    Split a full book text into individual chapters.
+    Split a full book text into individual chapters and front/back matter.
 
-    Detects chapter boundaries using the specified pattern and extracts
-    chapter content. Handles edge cases like prefaces, epilogues, and
-    varying whitespace.
+    Detects chapter boundaries using the specified pattern. Additionally
+    scans for front matter (preface, foreword, etc.) before the first
+    chapter and back matter (epilogue, appendix, etc.) after the last.
 
     Args:
         book_text: Full text of the book to split
         pattern_type: Type of chapter pattern - "roman", "numeric", or "custom"
         custom_regex: Custom regex pattern (required if pattern_type is "custom")
         min_chapter_size: Minimum characters for valid chapter (filters false matches)
+        front_matter_titles: Literal heading strings the user has declared as
+            front matter for this book (e.g. ["To the Teacher"]). Always
+            match, regardless of the built-in keyword list.
+        back_matter_titles: Literal heading strings declared as back matter.
+        auto_detect_front_matter: If True (default), also match the built-in
+            keyword list (preface, foreword, prologue, ...).
+        auto_detect_back_matter: If True (default), also match the built-in
+            back-matter keyword list (epilogue, afterword, appendix, ...).
 
     Returns:
-        List of DetectedChapter objects in sequential order
+        List of DetectedChapter objects in reading order. position_index is
+        1..N, kind is one of front_matter / chapter / back_matter, and
+        ``number`` is set sequentially (starting at 1) only for chapters.
 
     Raises:
-        ValueError: If no chapters detected or invalid parameters
-
-    Example:
-        >>> book = "Chapter I\\n\\nIt was...\\n\\nChapter II\\n\\nIt was still..."
-        >>> chapters = split_book_into_chapters(book, pattern_type="roman")
-        >>> len(chapters)
-        2
-        >>> chapters[0].chapter_title
-        'Chapter I'
+        ValueError: If no sections detected at all.
     """
     if not book_text or not book_text.strip():
         raise ValueError("Book text cannot be empty")
+
+    front_matter_titles = list(front_matter_titles or [])
+    back_matter_titles = list(back_matter_titles or [])
 
     # Get chapter detection pattern
     pattern = get_chapter_pattern(pattern_type, custom_regex)
@@ -263,11 +420,9 @@ def split_book_into_chapters(
     # Find all chapter headers
     matches = list(pattern.finditer(book_text))
 
-    if not matches:
-        raise ValueError(
-            f"No chapters detected with pattern type '{pattern_type}'. "
-            f"Check that your book uses the expected chapter format."
-        )
+    # Compile matter patterns
+    front_patterns = _compile_matter_patterns("front_matter_patterns") if auto_detect_front_matter else []
+    back_patterns = _compile_matter_patterns("back_matter_patterns") if auto_detect_back_matter else []
 
     # Determine numbering strategy from pattern definition
     if pattern_type == "custom":
@@ -277,96 +432,203 @@ def split_book_into_chapters(
         defn = data["patterns"].get(pattern_type, {})
         numbering = defn.get("numbering", "sequential")
 
-    detected_chapters = []
+    # ------------------------------------------------------------------
+    # Build the list of sections (front matter + chapters + back matter)
+    # ------------------------------------------------------------------
 
-    for i, match in enumerate(matches):
-        # Extract chapter number/title from match
-        chapter_identifier = match.group(1)  # The captured group
+    if matches:
+        first_chapter_start = matches[0].start()
+        last_chapter_end = len(book_text)  # back matter is anything after last chapter heading
+    else:
+        first_chapter_start = len(book_text)
+        last_chapter_end = len(book_text)
 
-        # Determine chapter number based on numbering strategy
-        if numbering == "roman":
-            chapter_num = roman_to_int(chapter_identifier)
-            if chapter_num is None:
-                continue
-            chapter_title = f"Chapter {chapter_identifier.upper()}"
-        elif numbering == "numeric":
-            try:
-                chapter_num = int(chapter_identifier)
-                chapter_title = f"Chapter {chapter_num}"
-            except ValueError:
-                continue
-        else:  # sequential
-            chapter_num = len(detected_chapters) + 1
-            chapter_title = match.group(0).strip()
+    front_sections = _find_matter_sections(
+        book_text,
+        region_start=0,
+        region_end=first_chapter_start,
+        user_titles=front_matter_titles,
+        builtin_patterns=front_patterns,
+        kind="front_matter",
+    )
 
-        # Find start and end positions
-        start_pos = match.end()  # Start after the chapter header
-
-        # End position is start of next chapter, or end of book
+    # Build raw chapter sections (start, end, identifier, raw_heading)
+    chapter_sections = []
+    for i, m in enumerate(matches):
+        chapter_identifier = m.group(1) if m.lastindex else m.group(0)
+        start_pos = m.end()
         if i + 1 < len(matches):
             end_pos = matches[i + 1].start()
         else:
             end_pos = len(book_text)
+        chapter_sections.append({
+            "match_start": m.start(),
+            "start_pos": start_pos,
+            "end_pos": end_pos,
+            "identifier": chapter_identifier,
+            "raw_heading": m.group(0).strip(),
+        })
 
-        # Extract chapter content
-        content = book_text[start_pos:end_pos].strip()
+    # Identify back matter inside the LAST chapter's body. Back matter is the
+    # first matter heading found after the last chapter heading.
+    back_sections: List[dict] = []
+    if chapter_sections:
+        last = chapter_sections[-1]
+        candidate_back = _find_matter_sections(
+            book_text,
+            region_start=last["start_pos"],
+            region_end=len(book_text),
+            user_titles=back_matter_titles,
+            builtin_patterns=back_patterns,
+            kind="back_matter",
+        )
+        if candidate_back:
+            # Trim the last chapter to end where back matter begins.
+            last["end_pos"] = candidate_back[0]["start_pos"]
+            back_sections = candidate_back
+    else:
+        # No chapters detected: scan the entire text for back matter too.
+        back_sections = _find_matter_sections(
+            book_text,
+            region_start=0,
+            region_end=len(book_text),
+            user_titles=back_matter_titles,
+            builtin_patterns=back_patterns,
+            kind="back_matter",
+        )
 
-        # Skip if content is too short (likely false positive)
-        if len(content) < min_chapter_size:
-            continue
+    if not matches and not front_sections and not back_sections:
+        raise ValueError(
+            f"No chapters detected with pattern type '{pattern_type}'. "
+            f"Check that your book uses the expected chapter format."
+        )
 
-        # Calculate line numbers
-        start_line = book_text[:match.start()].count('\n')
-        end_line = book_text[:end_pos].count('\n')
+    # ------------------------------------------------------------------
+    # Materialize DetectedChapter list in reading order.
+    # ------------------------------------------------------------------
 
-        detected_chapters.append(DetectedChapter(
-            chapter_number=chapter_num,
-            chapter_title=chapter_title,
+    detected: List[DetectedChapter] = []
+    chapter_seq = 0  # display number for kind=="chapter"
+
+    def _add_section(*, section_start: int, content_start: int, content_end: int,
+                     kind: SectionKind, raw_heading: str, label: str,
+                     number: Optional[int]) -> None:
+        nonlocal detected
+        content = book_text[content_start:content_end].strip()
+        if len(content) < min_chapter_size and kind == "chapter":
+            return  # filter false-positive chapters by size
+        if not content:
+            return
+        start_line = book_text[:section_start].count("\n")
+        end_line = book_text[:content_end].count("\n")
+        position = len(detected) + 1
+
+        if kind == "chapter":
+            title = raw_heading or (f"Chapter {number}" if number else "")
+        else:
+            title = raw_heading or label
+
+        detected.append(DetectedChapter(
+            position_index=position,
+            chapter_title=title,
             content=content,
             start_line=start_line,
-            end_line=end_line
+            end_line=end_line,
+            kind=kind,
+            label=label,
+            number=number,
         ))
 
-    if not detected_chapters:
+    # Front matter
+    for fs in front_sections:
+        _add_section(
+            section_start=fs["start_pos"],
+            content_start=fs["heading_end"] + 1,
+            content_end=fs["end_pos"],
+            kind="front_matter",
+            raw_heading=fs["heading_line"],
+            label=fs["label"],
+            number=None,
+        )
+
+    # Chapters
+    for cs in chapter_sections:
+        ident = cs["identifier"]
+        if numbering == "roman":
+            num = roman_to_int(ident)
+            if num is None:
+                continue
+            heading = f"Chapter {ident.upper()}"
+        elif numbering == "numeric":
+            try:
+                num = int(ident)
+            except (TypeError, ValueError):
+                continue
+            heading = f"Chapter {num}"
+        else:  # sequential
+            num = chapter_seq + 1
+            heading = cs["raw_heading"]
+
+        # Try to add; only bump display sequence if the section was actually added
+        before = len(detected)
+        chapter_seq += 1
+        _add_section(
+            section_start=cs["match_start"],
+            content_start=cs["start_pos"],
+            content_end=cs["end_pos"],
+            kind="chapter",
+            raw_heading=heading,
+            label="",
+            number=chapter_seq,
+        )
+        if len(detected) == before:
+            # Section was filtered (too short); roll back the display counter.
+            chapter_seq -= 1
+
+    # Back matter
+    for bs in back_sections:
+        _add_section(
+            section_start=bs["start_pos"],
+            content_start=bs["heading_end"] + 1,
+            content_end=bs["end_pos"],
+            kind="back_matter",
+            raw_heading=bs["heading_line"],
+            label=bs["label"],
+            number=None,
+        )
+
+    if not detected:
         raise ValueError(
             "No valid chapters found. Chapters may be too short or pattern may not match."
         )
 
-    # Sort by chapter number to ensure sequential order
-    detected_chapters.sort(key=lambda c: c.chapter_number)
-
-    return detected_chapters
+    return detected
 
 
 def validate_chapter_sequence(chapters: List[DetectedChapter]) -> tuple[bool, List[str]]:
     """
     Validate that detected chapters form a proper sequence.
 
-    Checks for gaps in chapter numbering, duplicates, and other issues
-    that might indicate detection problems.
-
-    Args:
-        chapters: List of detected chapters
+    Checks numbering of kind=='chapter' entries; front/back matter are
+    informational and do not affect validation.
 
     Returns:
         Tuple of (is_valid, list_of_warnings)
-
-    Example:
-        >>> chapters = [chapter1, chapter2, chapter4]  # Missing chapter 3
-        >>> is_valid, warnings = validate_chapter_sequence(chapters)
-        >>> print(warnings[0])
-        'Gap in sequence: Missing chapter 3'
     """
     if not chapters:
         return (False, ["No chapters provided"])
 
     warnings = []
 
-    # Sort by chapter number
-    sorted_chapters = sorted(chapters, key=lambda c: c.chapter_number)
+    chapter_only = [c for c in chapters if c.kind == "chapter"]
+    if not chapter_only:
+        return (False, ["No numbered chapters detected (only front/back matter)"])
+
+    # Sort by display number
+    sorted_chapters = sorted(chapter_only, key=lambda c: c.number or 0)
 
     # Check for duplicates
-    chapter_nums = [c.chapter_number for c in sorted_chapters]
+    chapter_nums = [c.number for c in sorted_chapters]
     duplicates = [num for num in set(chapter_nums) if chapter_nums.count(num) > 1]
 
     if duplicates:
@@ -376,17 +638,17 @@ def validate_chapter_sequence(chapters: List[DetectedChapter]) -> tuple[bool, Li
     # Check for gaps in sequence
     expected_next = 1
     for chapter in sorted_chapters:
-        if chapter.chapter_number > expected_next:
-            # Found a gap
-            missing = list(range(expected_next, chapter.chapter_number))
+        if chapter.number is None:
+            continue
+        if chapter.number > expected_next:
+            missing = list(range(expected_next, chapter.number))
             warnings.append(f"Gap in sequence: Missing chapter(s) {missing}")
-
-        expected_next = chapter.chapter_number + 1
+        expected_next = chapter.number + 1
 
     # Check if first chapter is 1
-    if sorted_chapters[0].chapter_number != 1:
+    if sorted_chapters[0].number != 1:
         warnings.append(
-            f"First chapter is {sorted_chapters[0].chapter_number}, not 1. "
+            f"First chapter is {sorted_chapters[0].number}, not 1. "
             f"Book may have prologue or preface."
         )
 
@@ -394,7 +656,7 @@ def validate_chapter_sequence(chapters: List[DetectedChapter]) -> tuple[bool, Li
     for chapter in sorted_chapters:
         if len(chapter.content) < 500:
             warnings.append(
-                f"Chapter {chapter.chapter_number} is very short ({len(chapter.content)} chars). "
+                f"Chapter {chapter.number} is very short ({len(chapter.content)} chars). "
                 f"May be a false positive."
             )
 
@@ -402,45 +664,94 @@ def validate_chapter_sequence(chapters: List[DetectedChapter]) -> tuple[bool, Li
     return (is_valid, warnings)
 
 
+def build_chapter_manifest(
+    chapters: List[DetectedChapter],
+    *,
+    filename_prefix: str = "chapter",
+) -> List[dict]:
+    """
+    Build a serializable chapter_manifest from a list of detected sections.
+
+    Each entry has the shape:
+        {"id": "chapter_03", "kind": "chapter", "number": 1}
+        {"id": "chapter_01", "kind": "front_matter", "label": "Preface"}
+    """
+    out = []
+    for ch in chapters:
+        chapter_id = f"{filename_prefix}_{ch.position_index:02d}"
+        entry = {"id": chapter_id, "kind": ch.kind}
+        if ch.kind == "chapter":
+            if ch.number is not None:
+                entry["number"] = ch.number
+        else:
+            if ch.label:
+                entry["label"] = ch.label
+        out.append(entry)
+    return out
+
+
+def _write_chapter_manifest(project_dir: Path, manifest: List[dict]) -> None:
+    """Merge a chapter_manifest into project.json without clobbering other keys."""
+    project_json = project_dir / "project.json"
+    data: dict = {}
+    if project_json.exists():
+        try:
+            data = json.loads(project_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data["chapter_manifest"] = manifest
+    project_json.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def save_chapters_to_files(
     chapters: List[DetectedChapter],
     output_dir: str,
     filename_prefix: str = "chapter",
-    filename_suffix: str = ".txt"
+    filename_suffix: str = ".txt",
+    *,
+    write_manifest: bool = True,
 ) -> List[str]:
     """
-    Save detected chapters to individual text files.
+    Save detected chapters/sections to individual text files.
 
-    Args:
-        chapters: List of detected chapters
-        output_dir: Directory to save chapter files
-        filename_prefix: Prefix for chapter filenames (default: "chapter")
-        filename_suffix: File extension (default: ".txt")
-
-    Returns:
-        List of created file paths
-
-    Example:
-        >>> chapters = split_book_into_chapters(book_text)
-        >>> files = save_chapters_to_files(chapters, "chapters/")
-        >>> print(files[0])
-        'chapters/chapter_01.txt'
+    Files are written in reading order using ``position_index`` regardless
+    of section kind (front matter, chapter, back matter). When
+    ``write_manifest`` is True (default), a ``chapter_manifest`` is also
+    merged into the parent project's ``project.json`` so downstream tools
+    can render proper labels.
     """
-    from pathlib import Path
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     created_files = []
 
     for chapter in chapters:
-        # Generate filename with zero-padded chapter number
-        filename = f"{filename_prefix}_{chapter.chapter_number:02d}{filename_suffix}"
+        # Filename uses position_index so files are always in reading order.
+        filename = f"{filename_prefix}_{chapter.position_index:02d}{filename_suffix}"
         filepath = output_path / filename
 
-        # Write chapter content
-        filepath.write_text(f"{chapter.chapter_title}\n\n{chapter.content}", encoding='utf-8')
+        # Write chapter content with the original heading text on top.
+        heading = chapter.chapter_title or chapter.label or ""
+        if heading:
+            filepath.write_text(f"{heading}\n\n{chapter.content}", encoding="utf-8")
+        else:
+            filepath.write_text(chapter.content, encoding="utf-8")
 
         created_files.append(str(filepath))
+
+    if write_manifest:
+        manifest = build_chapter_manifest(chapters, filename_prefix=filename_prefix)
+        # Project root is the parent of the chapters/ directory.
+        project_dir = output_path.parent
+        try:
+            _write_chapter_manifest(project_dir, manifest)
+        except OSError:
+            # Don't fail the write if manifest persistence fails.
+            pass
 
     return created_files
