@@ -54,23 +54,47 @@ def _normalize_for_embedding(text: str) -> str:
     return text
 
 
+# Two fixed-width lookbehind branches so we can split on either
+# `.!?` directly before whitespace OR `.!?` followed by a closing
+# quote/bracket before whitespace, WITHOUT consuming the closing
+# quote/bracket. (Python `re` lookbehind requires fixed width per
+# alternative.)
+_SPLIT_LONG_RE = re.compile(
+    r"(?:(?<=[.!?])|(?<=[.!?][\"'\u201D\u2019\u00BB\)\]]))"
+    r"\s+(?=[A-Z\u00BF\u00A1'\"\u201C\u2018\u00AB\(\[])"
+)
+
+# A "run-on" pattern: sentence-ender, optional closing quote/bracket,
+# whitespace, then an OPENING quote or parenthesis. This is the
+# signature of strung-together quotations or quote+(reference)+quote
+# runs that pysbd commonly fails to split. Unlike the broader
+# _SPLIT_LONG_RE (which also accepts a capital letter after the space),
+# this is restrictive enough to be safe to trigger on short sentences
+# without false-positives on abbreviations like "Dr. Smith".
+_RUN_ON_RE = re.compile(
+    r"[.!?][\"'\u201D\u2019\u00BB\)\]]?\s+[\"\u201C\u2018\u00AB\(\[]"
+)
+
+
 def _split_long_sentence(text: str) -> list[str]:
     """
-    Split a long sentence on sentence-ending punctuation followed by
-    space + uppercase or quote character. Fixes pysbd's tendency to
-    treat entire quoted dialogue passages as single sentences.
+    Split a long sentence on sentence-ending punctuation (optionally
+    followed by a closing quote/bracket) and whitespace, before an
+    uppercase letter or opening quote/bracket. Fixes pysbd's tendency
+    to treat entire quoted dialogue passages as single sentences,
+    including the common case `."  "Next…` where the closing quote
+    sits between the period and the whitespace.
     """
-    parts = re.split(
-        r"(?<=[.!?])\s+(?=[A-Z\u00BF\u00A1'\"\u201C\u2018\(\[])",
-        text,
-    )
+    parts = _SPLIT_LONG_RE.split(text)
     return [p.strip() for p in parts if p.strip()]
 
 
 def split_sentences(text: str, language: str) -> list[str]:
     """
-    Split text into sentences using pysbd, then post-split any
-    sentences longer than MAX_SENTENCE_WORDS.
+    Split text into sentences using pysbd, then post-split any sentence
+    that is either longer than MAX_SENTENCE_WORDS or contains a run-on
+    quotation pattern (period+optional-close+space+opening-quote/paren),
+    which pysbd routinely fails to break apart.
     """
     segmenter = pysbd.Segmenter(language=language, clean=False)
     raw_sentences = segmenter.segment(text)
@@ -80,7 +104,11 @@ def split_sentences(text: str, language: str) -> list[str]:
         sent = sent.strip()
         if not sent:
             continue
-        if len(sent.split()) > MAX_SENTENCE_WORDS:
+        needs_split = (
+            len(sent.split()) > MAX_SENTENCE_WORDS
+            or _RUN_ON_RE.search(sent) is not None
+        )
+        if needs_split:
             sub_sents = _split_long_sentence(sent)
             if len(sub_sents) > 1:
                 result.extend(sub_sents)

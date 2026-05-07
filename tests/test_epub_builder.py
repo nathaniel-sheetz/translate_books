@@ -11,6 +11,8 @@ from src.epub_builder import (
     _DEFAULT_TRANSLATOR_HEADING,
     _int_to_roman,
     _load_chapter_manifest,
+    _load_toc_format,
+    _normalize_heading,
     _strip_image_blocks,
     build_epub,
     chapter_text_to_xhtml,
@@ -94,6 +96,20 @@ class TestDetectChapterHeading:
         # The long line is treated as subtitle since it's < 200 chars
         assert subtitle == "The body starts right away with a long paragraph."
 
+    def test_detects_sermon_heading(self):
+        text = "SERMÓN I.\n\nHay un Dios.\n\nBody text here."
+        heading, subtitle, body = detect_chapter_heading(text)
+        assert heading == "SERMÓN I."
+        assert subtitle == "Hay un Dios."
+        assert body == "Body text here."
+
+    def test_detects_english_sermon_heading(self):
+        text = "SERMON III.\n\nThe Good Shepherd\n\nBody."
+        heading, subtitle, body = detect_chapter_heading(text)
+        assert heading == "SERMON III."
+        assert subtitle == "The Good Shepherd"
+        assert body == "Body."
+
 
 # --- chapter_text_to_xhtml ---
 
@@ -101,7 +117,7 @@ class TestChapterTextToXhtml:
     def test_basic_paragraphs(self):
         text = "CHAPTER I\n\nTitle\n\nFirst paragraph.\n\nSecond paragraph."
         xhtml = chapter_text_to_xhtml(text, 1)
-        assert '<h1>CHAPTER I</h1>' in xhtml
+        assert '<h1>Chapter I</h1>' in xhtml
         assert '<h2>Title</h2>' in xhtml
         assert '<p>First paragraph.</p>' in xhtml
         assert '<p>Second paragraph.</p>' in xhtml
@@ -177,6 +193,16 @@ class TestChapterTextToXhtml:
         assert '<h2>UNA Y EL LEÓN</h2>' in xhtml
         assert 'Capítulo' not in xhtml
 
+    def test_chapter_xhtml_renders_normalized_heading(self):
+        # Sermon-style: all-caps label with trailing period gets canonicalized.
+        text = "SERMÓN I.\n\nHay un Dios.\n\nPorque es necesario..."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<h1>Sermón I</h1>' in xhtml
+        assert '<h2>Hay un Dios.</h2>' in xhtml
+        assert '<p>Porque es necesario...</p>' in xhtml
+        # The raw all-caps form should not appear as the h1.
+        assert '<h1>SERMÓN I.</h1>' not in xhtml
+
 
 # --- synthesize_chapter_heading & _int_to_roman ---
 
@@ -207,6 +233,28 @@ class TestSynthesizeChapterHeading:
     def test_unknown_numeral_style_falls_back_to_arabic(self):
         cfg = {"label": "Ch", "numeral_style": "klingon"}
         assert synthesize_chapter_heading(2, cfg) == 'Ch 2'
+
+
+# --- _normalize_heading ---
+
+class TestNormalizeHeading:
+    @pytest.mark.parametrize("raw,expected", [
+        ("SERMÓN I.", "Sermón I"),
+        ("CHAPTER XVII", "Chapter XVII"),
+        ("I", "I"),
+        ("SERMON III.", "Sermon III"),
+        ("Capítulo 1", "Capítulo 1"),
+        ("CHAPTER 12", "Chapter 12"),
+        ("12", "12"),
+        ("LECCIÓN 0.", "Lección 0"),
+    ])
+    def test_normalize_variants(self, raw, expected):
+        assert _normalize_heading(raw) == expected
+
+    def test_non_matching_input_strips_trailing_period(self):
+        # Defensive fallback: raw line that didn't match the regex still
+        # gets a period stripped so callers can rely on idempotent output.
+        assert _normalize_heading("Some Title.") == "Some Title"
 
 
 # --- collect_referenced_images ---
@@ -572,8 +620,8 @@ class TestChapterManifest:
             ncx = zf.read(ncx_name).decode("utf-8")
             assert "Preface" in ncx
             # The two chapters should be 1 and 2 — NOT 2 and 3
-            assert "Chapter 1" in ncx or "CHAPTER I" in ncx
-            assert "Chapter 2" in ncx or "CHAPTER II" in ncx
+            assert "Chapter I: The Beginning" in ncx
+            assert "Chapter II: The Middle" in ncx
             # Should NOT contain the off-by-one synthesized label
             assert "Chapter 3" not in ncx
 
@@ -612,4 +660,62 @@ class TestMatterTextToXhtml:
         out = matter_text_to_xhtml(text, "Foreword")
         assert "<h1>Foreword</h1>" in out
         assert "Some opening line." in out
+
+
+class TestTocFormat:
+    def _make_sermon_project(self, tmp_path, *, toc_format=None):
+        import json as _json
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+        (chapters_dir / "chapter_01.txt").write_text(
+            "SERMÓN I.\n\nHay un Dios.\n\nBody one.", encoding="utf-8",
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "SERMON III.\n\nThe Good Shepherd\n\nBody two.", encoding="utf-8",
+        )
+        config = {}
+        if toc_format is not None:
+            config["toc_format"] = toc_format
+        if config:
+            (tmp_path / "project.json").write_text(
+                _json.dumps(config), encoding="utf-8"
+            )
+        return tmp_path
+
+    def test_load_toc_format_present(self, tmp_path):
+        proj = self._make_sermon_project(tmp_path, toc_format="heading_only")
+        assert _load_toc_format(proj) == "heading_only"
+
+    def test_load_toc_format_absent(self, tmp_path):
+        proj = self._make_sermon_project(tmp_path)
+        assert _load_toc_format(proj) is None
+
+    def test_toc_format_heading_only(self, tmp_path):
+        proj = self._make_sermon_project(tmp_path, toc_format="heading_only")
+        output = build_epub(
+            project_path=proj, title="T", author="A", language="es",
+        )
+        with zipfile.ZipFile(output) as zf:
+            ncx_name = next((n for n in zf.namelist() if n.endswith(".ncx")), None)
+            assert ncx_name is not None
+            ncx = zf.read(ncx_name).decode("utf-8")
+            assert "Sermón I" in ncx
+            assert "Sermon III" in ncx
+            # Subtitle suffix must be absent under heading_only.
+            assert "Hay un Dios" not in ncx
+            assert "The Good Shepherd" not in ncx
+
+    def test_toc_format_default_preserves_subtitle(self, tmp_path):
+        proj = self._make_sermon_project(tmp_path)
+        output = build_epub(
+            project_path=proj, title="T", author="A", language="es",
+        )
+        with zipfile.ZipFile(output) as zf:
+            ncx_name = next((n for n in zf.namelist() if n.endswith(".ncx")), None)
+            assert ncx_name is not None
+            ncx = zf.read(ncx_name).decode("utf-8")
+            # Default branch keeps the "Heading: Subtitle" format.
+            assert "Sermón I: Hay un Dios." in ncx
+            assert "Sermon III: The Good Shepherd" in ncx
 

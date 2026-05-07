@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _IMAGE_RE = re.compile(r'\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]')
 _CHAPTER_NUM_RE = re.compile(r'chapter_(\d+)\.txt$', re.IGNORECASE)
 _HEADING_RE = re.compile(
-    r'^(?:CHAPTER\s+)?([IVXLCDM\d]+)\s*$', re.IGNORECASE
+    r'^(?:(\w+)\s+)?([IVXLCDM\d]+)\.?\s*$', re.IGNORECASE
 )
 _HR_RE = re.compile(r'^-{3,}$')
 
@@ -88,12 +88,31 @@ def synthesize_chapter_heading(
         return f'{label} {numeral}'
     return numeral
 
+
+def _normalize_heading(matched_line: str) -> str:
+    """Render a detected heading in canonical form.
+
+    'SERMÓN I.' -> 'Sermón I'
+    'CHAPTER XVII' -> 'Chapter XVII'
+    'I' -> 'I'
+    """
+    m = _HEADING_RE.match(matched_line.strip())
+    if not m:
+        return matched_line.strip().rstrip('.')
+    label, numeral = m.group(1), m.group(2)
+    if label:
+        return f'{label.capitalize()} {numeral.upper()}'
+    return numeral.upper()
+
+
 _DEFAULT_CSS = """\
 img { max-width: 100%; height: auto; }
 div.image { text-align: center; margin: 1em 0; }
 h1, h2 { text-align: center; }
 p { text-indent: 1.5em; margin-top: 0.25em; margin-bottom: 0.25em; }
 hr { margin: 1.5em auto; width: 40%; }
+nav ol { list-style: none; padding-left: 0; }
+nav ol ol { padding-left: 1.5em; }
 """
 
 
@@ -246,7 +265,7 @@ def chapter_text_to_xhtml(
     parts.append('<body>')
 
     if heading:
-        parts.append(f'<h1>{escape(heading)}</h1>')
+        parts.append(f'<h1>{escape(_normalize_heading(heading))}</h1>')
     if subtitle:
         parts.append(f'<h2>{escape(subtitle)}</h2>')
 
@@ -396,6 +415,19 @@ def _load_chapter_heading_config(project_path: Path) -> Optional[Dict[str, Any]]
     return cfg if isinstance(cfg, dict) else None
 
 
+def _load_toc_format(project_path: Path) -> Optional[str]:
+    """Read the optional 'toc_format' string from project.json."""
+    project_json = project_path / 'project.json'
+    if not project_json.exists():
+        return None
+    try:
+        data = json.loads(project_json.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return None
+    val = data.get('toc_format')
+    return val if isinstance(val, str) else None
+
+
 def _load_chapter_manifest(project_path: Path) -> Dict[str, Dict[str, Any]]:
     """Read the optional 'chapter_manifest' from project.json.
 
@@ -467,6 +499,7 @@ def build_epub(
         chapter_heading_config = _load_chapter_heading_config(project_path)
 
     chapter_manifest = _load_chapter_manifest(project_path)
+    toc_format = _load_toc_format(project_path)
 
     # Discover chapter files
     chapter_files = list(chapters_dir.glob('chapter_*.txt'))
@@ -554,8 +587,9 @@ def build_epub(
                 chapter_number=display_number,
                 heading_config=chapter_heading_config,
             )
-            toc_label = heading or f'Chapter {display_number}'
-            if subtitle:
+            norm_heading = _normalize_heading(heading) if heading else ''
+            toc_label = norm_heading or f'Chapter {display_number}'
+            if subtitle and toc_format != 'heading_only':
                 toc_label = f'{toc_label}: {subtitle}'
         else:
             # Front- or back-matter section: never synthesize "Chapter N".
@@ -609,7 +643,9 @@ def build_epub(
 
     # Add navigation files
     book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
+    nav_item = epub.EpubNav()
+    nav_item.add_link(href='style.css', rel='stylesheet', type='text/css')
+    book.add_item(nav_item)
 
     # Write EPUB
     if output_path is None:
