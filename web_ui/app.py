@@ -743,9 +743,22 @@ def reader_chapters(project_id):
             ann_counts[ch][r.get("type", "flag")] += 1
         all_annotations = dict(ann_counts)
 
-    # Check for pending corrections (file must exist AND have content)
+    # Check for pending corrections (file must exist AND contain at least one
+    # non-blank line — a stale file with only whitespace shouldn't trigger the banner).
     _corr_path = project_dir / "corrections.jsonl"
-    has_corrections = _corr_path.exists() and _corr_path.stat().st_size > 1
+    has_corrections = False
+    if _corr_path.exists() and _corr_path.stat().st_size > 1:
+        try:
+            with open(_corr_path, encoding="utf-8") as _cf:
+                has_corrections = any(line.strip() for line in _cf)
+        except OSError:
+            has_corrections = False
+        # Auto-clean stale empty/whitespace-only file so it doesn't keep nagging.
+        if not has_corrections:
+            try:
+                _corr_path.unlink()
+            except OSError:
+                pass
 
     # Load reviewed status
     reviewed = _load_reviewed(project_dir)

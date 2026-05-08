@@ -91,6 +91,39 @@ _RE_FLAGS = {
     "DOTALL": re.DOTALL,
 }
 
+# A line that contains nothing but a single [IMAGE:images/...] placeholder.
+# Used to detect chapter-header decoration images that sit immediately
+# above an all-caps chapter heading and would otherwise be glued to the
+# end of the previous section by the splitter.
+_HEADER_IMAGE_LINE_RE = re.compile(r'\[IMAGE:images/[^\]]+\]')
+
+
+def _find_preceding_header_image(text: str, pos: int) -> Optional[tuple[int, str]]:
+    """
+    If a single ``[IMAGE:images/...]`` line lies immediately before ``pos``
+    (separated from it only by blank lines), return ``(line_start, image_text)``.
+
+    ``line_start`` is the offset of the first character of the image line —
+    suitable for use as the new section boundary so the previous section's
+    ``end_pos`` can be shrunk to it. The image is *not* required to be
+    preceded by anything in particular (start-of-file is fine), but the
+    image line must be the only content on its line.
+
+    Returns ``None`` if no such image exists, so callers can use the
+    plain heading position unchanged.
+    """
+    # Walk back over the blank gap between `pos` and whatever precedes it.
+    i = pos
+    while i > 0 and text[i - 1] in ' \t\r\n':
+        i -= 1
+    if i == pos or i == 0 or text[i - 1] != ']':
+        return None
+    line_start = text.rfind('\n', 0, i) + 1  # 0 if no preceding newline
+    candidate = text[line_start:i]
+    if not _HEADER_IMAGE_LINE_RE.fullmatch(candidate):
+        return None
+    return (line_start, candidate)
+
 
 def load_split_patterns() -> dict:
     """Load split patterns from split_patterns.json. Caches after first load."""
@@ -437,7 +470,11 @@ def split_book_into_chapters(
     # ------------------------------------------------------------------
 
     if matches:
-        first_chapter_start = matches[0].start()
+        # If the first chapter heading has a preceding [IMAGE:...] line,
+        # the front-matter region must end at the image (not the heading)
+        # so the image isn't claimed by the last front-matter section.
+        first_header_image = _find_preceding_header_image(book_text, matches[0].start())
+        first_chapter_start = first_header_image[0] if first_header_image else matches[0].start()
         last_chapter_end = len(book_text)  # back matter is anything after last chapter heading
     else:
         first_chapter_start = len(book_text)
@@ -461,13 +498,28 @@ def split_book_into_chapters(
             end_pos = matches[i + 1].start()
         else:
             end_pos = len(book_text)
+
+        # If a single [IMAGE:images/...] line sits immediately before this
+        # heading, treat it as a chapter-header decoration and pull the
+        # section boundary back so the image belongs to *this* chapter
+        # instead of the preceding one.
+        header_image = _find_preceding_header_image(book_text, m.start())
+        section_start = header_image[0] if header_image else m.start()
+
         chapter_sections.append({
-            "match_start": m.start(),
+            "match_start": section_start,
             "start_pos": start_pos,
             "end_pos": end_pos,
             "identifier": chapter_identifier,
             "raw_heading": m.group(0).strip(),
+            "header_image": header_image[1] if header_image else None,
         })
+
+    # Sections may now overlap with their predecessor (we pulled match_start
+    # back). Shrink each section's end_pos to its successor's match_start so
+    # the chapter-header image isn't double-counted.
+    for i in range(len(chapter_sections) - 1):
+        chapter_sections[i]["end_pos"] = chapter_sections[i + 1]["match_start"]
 
     # Identify back matter inside the LAST chapter's body. Back matter is the
     # first matter heading found after the last chapter heading.
@@ -512,9 +564,16 @@ def split_book_into_chapters(
 
     def _add_section(*, section_start: int, content_start: int, content_end: int,
                      kind: SectionKind, raw_heading: str, label: str,
-                     number: Optional[int]) -> None:
+                     number: Optional[int],
+                     header_image: Optional[str] = None) -> None:
         nonlocal detected
         content = book_text[content_start:content_end].strip()
+        # Prepend the chapter-header image (if any) so it appears at the
+        # start of the chapter body in the saved file, where every
+        # downstream consumer (chunker, translator, EPUB builder) already
+        # knows how to handle [IMAGE:...] placeholders.
+        if header_image:
+            content = f"{header_image}\n\n{content}" if content else header_image
         if len(content) < min_chapter_size and kind == "chapter":
             return  # filter false-positive chapters by size
         if not content:
@@ -580,6 +639,7 @@ def split_book_into_chapters(
             raw_heading=heading,
             label="",
             number=chapter_seq,
+            header_image=cs.get("header_image"),
         )
         if len(detected) == before:
             # Section was filtered (too short); roll back the display counter.
