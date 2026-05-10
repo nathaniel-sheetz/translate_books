@@ -963,18 +963,38 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
     # Build ordered list of paragraph events: either a text paragraph
     # (with its first-2-words key) or an image placeholder.
     # Skip the first paragraph since it never gets a para_start marker.
+    #
+    # A single paragraph may contain text AND one or more [IMAGE:...]
+    # placeholders glued together by single newlines (e.g. when chunk
+    # boundaries clobber the surrounding blank line, or when an LLM
+    # retranslate drops one). We split each paragraph on the placeholder
+    # regex so the images aren't silently dropped: any leading text
+    # contributes a "para" event (matching the aligner's view that this is
+    # one paragraph with a single para_start), then each image contributes
+    # an "image" event. Trailing text after an in-paragraph image is not
+    # emitted as a "para" event because the aligner only flags the
+    # paragraph's first sentence as para_start.
     events = []  # list of ("para", first_2_words) or ("image", src, alt)
     for i in range(1, len(paragraphs)):
         para = paragraphs[i]
-        img_match = _IMAGE_PLACEHOLDER_RE.fullmatch(para)
-        if img_match:
-            src = img_match.group(1)  # e.g. "images/i010.jpg"
-            alt = img_match.group(2) or ""
-            events.append(("image", src, alt))
-        else:
+        matches = list(_IMAGE_PLACEHOLDER_RE.finditer(para))
+
+        if not matches:
             words = para.split()[:2]
             if words:
                 events.append(("para", " ".join(words)))
+            continue
+
+        leading = para[: matches[0].start()].strip()
+        if leading:
+            words = leading.split()[:2]
+            if words:
+                events.append(("para", " ".join(words)))
+
+        for m in matches:
+            src = m.group(1)  # e.g. "images/i010.jpg"
+            alt = m.group(2) or ""
+            events.append(("image", src, alt))
 
     # Filter out [IMAGE:...] placeholder sentences from alignment records.
     # The aligner treats them as sentences but they're not readable text.
