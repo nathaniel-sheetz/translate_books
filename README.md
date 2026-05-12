@@ -140,6 +140,7 @@ book_translation/
 │   ├── api_translator.py       # LLM API translation (Anthropic/OpenAI)
 │   ├── sentence_aligner.py     # Bilingual sentence alignment
 │   ├── style_guide_wizard.py   # Style guide generation
+│   ├── text_feature_detector.py # Heuristic feature scan → conditional questions
 │   ├── glossary_bootstrap.py   # Glossary candidate extraction
 │   ├── translator.py           # Prompt rendering + workbook generation
 │   ├── epub_builder.py         # EPUB export
@@ -156,6 +157,7 @@ book_translation/
 │       ├── chapters/           # Split chapter files
 │       ├── chunks/             # Chunk JSON files
 │       ├── style.json          # Style guide
+│       ├── text_features.json  # Cached heuristic feature manifest (style wizard)
 │       ├── glossary.json       # Glossary
 │       ├── translated/         # Combined translated chapters
 │       ├── alignments/         # Sentence alignment JSON

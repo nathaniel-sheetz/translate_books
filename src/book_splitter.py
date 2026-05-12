@@ -453,6 +453,21 @@ def split_book_into_chapters(
     # Find all chapter headers
     matches = list(pattern.finditer(book_text))
 
+    # User-supplied front/back-matter titles take precedence over the chapter
+    # regex. Without this, a generic pattern like "allcaps_heading" would
+    # claim a heading such as "TO THE CHILDREN" as the first chapter and the
+    # downstream front-matter scan (which only looks BEFORE the first chapter)
+    # would never see the user's declared title. Drop any chapter match whose
+    # heading line normalizes to a user-declared front- or back-matter title;
+    # _find_matter_sections will then re-tag those lines with the correct
+    # kind on its second pass.
+    user_matter_titles = [*front_matter_titles, *back_matter_titles]
+    if user_matter_titles and matches:
+        matches = [
+            m for m in matches
+            if _matches_user_title(m.group(0), user_matter_titles) is None
+        ]
+
     # Compile matter patterns
     front_patterns = _compile_matter_patterns("front_matter_patterns") if auto_detect_front_matter else []
     back_patterns = _compile_matter_patterns("back_matter_patterns") if auto_detect_back_matter else []

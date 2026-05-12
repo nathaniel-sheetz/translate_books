@@ -92,6 +92,13 @@
                 <div class="source-stats" id="source-stats"></div>
                 <div class="source-origin" id="source-origin" style="display:none"></div>
                 <div class="source-preview" id="source-preview"></div>
+                <div class="image-status-banner" id="image-status-banner" style="display:none">
+                    <div class="image-status-msg" id="image-status-msg"></div>
+                    <div class="btn-row">
+                        <button class="btn-secondary" id="btn-retry-images">Retry image download</button>
+                        <span class="status-msg" id="retry-images-status"></span>
+                    </div>
+                </div>
                 <div class="btn-row">
                     <button class="btn-secondary" id="btn-replace-source">Replace Source</button>
                 </div>
@@ -276,10 +283,19 @@
                 <!-- Step 1: Fixed Questions -->
                 <div class="setup-section">
                     <h2>1. Answer Style Questions</h2>
+                    <div class="action-row" style="margin:6px 0 10px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                        <button class="btn-secondary" id="btn-style-rescan">Rescan full text for conditional questions</button>
+                        <span class="status-msg" id="style-rescan-status"></span>
+                    </div>
                     <div id="fixed-questions">
                         {% for q in fixed_questions %}
                         <div class="question-block" data-qid="{{ q.id }}">
                             <label class="question-label">{{ q.question }}</label>
+                            {% if q.get('_is_conditional') and q.get('_detected_hint') %}
+                            <div class="section-hint" style="margin:4px 0 8px 0;">
+                                Detected: {{ q.get('_detected_hint') }}
+                            </div>
+                            {% endif %}
                             {% for opt in q.options %}
                             <label class="option-label">
                                 <input type="radio" name="q_{{ q.id }}" value="{{ loop.index0 }}"

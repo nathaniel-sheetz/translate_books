@@ -83,10 +83,30 @@ Click **Chunk All** to break every chapter into translation-sized JSON chunks.
 
 The style guide tells the LLM how to translate — formality, tone, regional variant, etc.
 
-1. Answer the fixed questions (radio buttons for register, dialect, era, etc.)
-2. Optionally generate additional questions: click **Generate via API** (uses the selected LLM provider/model) or use the copy/paste workflow
+Before any questions are presented, the wizard runs a **heuristic full-text scan** of the source (not just the LLM sample) and writes a feature manifest to `projects/my-book/text_features.json`. The manifest controls which questions you see:
+
+- **Fixed questions** (always asked): dialect, forms of address, personal-name handling, place-name handling.
+- **Conditional questions** (asked only if the matching feature is detected): dialogue formatting, verse handling, footnote handling, epigraphs, letters, scripture references, archaic register, foreign passages, lists, block quotes, dramatic format, imperial measurements, period currency, translator notes.
+
+Each conditional question shows a one-line `Detected: …` evidence excerpt so you know why it is being asked. The manifest is cached and reused on subsequent runs; pass `--force-rescan` (CLI) to re-scan after editing the source.
+
+1. Answer the fixed questions, then any conditional questions that surfaced for your text
+2. Optionally generate additional questions: click **Generate via API** (uses the selected LLM provider/model) or use the copy/paste workflow — the LLM is told which features the manifest already covers so it does not duplicate them
 3. Generate the style guide: click **Generate via API**, use the **Generate from Answers (no LLM)** fallback, or copy/paste through an external LLM
 4. The style guide is saved to `projects/my-book/style.json`
+
+CLI usage:
+
+```bash
+python scripts/generate_style_guide.py --project-dir projects/my-book \
+    --target-lang Spanish --locale mx --fixed-only
+
+# Force re-scan after editing source
+python scripts/generate_style_guide.py --project-dir projects/my-book \
+    --target-lang Spanish --locale mx --force-rescan
+```
+
+See [Style Guide Feature Detection](PROMPT_GUIDE.md#style-guide-feature-detection) for the full list of detectors, predicate syntax, and how to add a new conditional question.
 
 ## Step 6: Glossary
 

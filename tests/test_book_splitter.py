@@ -123,6 +123,52 @@ class TestFrontBackMatterDetection:
         # Preface keyword ignored — only the chapter is detected
         assert all(s.kind == "chapter" for s in sections)
 
+    def test_user_front_matter_overrides_allcaps_chapter_match(self):
+        """Regression: with the all-caps pattern, a heading like
+        'TO THE CHILDREN' is itself matched by the chapter regex. The user
+        declaring it as front matter must take precedence so it isn't
+        emitted as chapter 1."""
+        text = (
+            "TO THE CHILDREN\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "THE STORY THAT THE SWALLOW DIDN'T TELL\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "THE LAMB WITH THE LONGEST TAIL\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="allcaps_heading",
+            front_matter_titles=["TO THE CHILDREN"],
+        )
+        assert [s.kind for s in sections] == ["front_matter", "chapter", "chapter"]
+        assert sections[0].label == "TO THE CHILDREN"
+        # Real chapters renumber starting from 1
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
+
+    def test_user_back_matter_overrides_allcaps_chapter_match(self):
+        """Same regression for back matter: a user-declared back-matter
+        title that the all-caps pattern would otherwise grab as a chapter
+        must be demoted to back_matter."""
+        # Leading "\n\n" so the all-caps lookbehind matches the very first
+        # heading (real books always have something before chapter 1).
+        text = (
+            "\n\nTHE FIRST STORY\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "THE SECOND STORY\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "ABOUT THE AUTHOR\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="allcaps_heading",
+            back_matter_titles=["ABOUT THE AUTHOR"],
+        )
+        assert [s.kind for s in sections] == ["chapter", "chapter", "back_matter"]
+        assert sections[-1].label == "ABOUT THE AUTHOR"
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
+
 
 # ---------------------------------------------------------------------------
 # save_chapters_to_files writes manifest

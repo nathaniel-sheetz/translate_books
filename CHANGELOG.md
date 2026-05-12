@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0.0] - 2026-05-07
+
+### Added
+- **Heuristic full-text feature detection drives conditional style-guide questions**: a new `src/text_feature_detector.py` module scans the entire source text (not just the 15 K-character LLM sample) and emits a `FeatureManifest` with one entry per feature (`present`, `count`, `confidence`, `evidence`).
+  - 14 detectors: `dialogue`, `verse`, `footnotes`, `epigraphs`, `letters`, `scripture_references`, `archaic_language`, `foreign_passages`, `lists`, `block_quotes`, `dramatic_format`, `measurements_imperial`, `currency_period`, `translator_notes`. The dialogue detector reuses `src/chunker.py` `_is_dialogue()` / `ATTRIBUTION_RE`; the verse detector uses `_is_scene_break()` for stanza delimiters.
+  - Manifest cached at `projects/<id>/text_features.json`; re-runs only when the source mtime is newer than the cache or `--force-rescan` is passed. Each entry stores 1–3 short evidence excerpts so detection is auditable.
+- **Conditional style-guide question library**: `prompts/style_guide_questions.json` is now a dict with two arrays:
+  - `fixed`: 4 always-asked questions (`dialect`, `forms_of_address`, `person_name_handling`, `place_name_handling`).
+  - `conditional`: 14 questions, each carrying a `requires` predicate (`{"feature": <name>, "min_count": N, "min_confidence": x}`) evaluated against the manifest. Only matching questions are surfaced.
+  - `dialogue_formatting` moved out of the fixed set and re-introduced as a conditional question gated on `dialogue.min_count = 5` — it now fires only when dialogue is actually present.
+  - Legacy flat-list configs are still accepted (treated as all-fixed, no conditional).
+- **CLI hint** in `scripts/generate_style_guide.py`: prints the list of detected features, where the manifest cache lives, and a one-line "Detected: …" excerpt above each conditional question so the user understands why it is being asked. New `--force-rescan` flag.
+- **Manifest-aware LLM prompt**: `prompts/style_guide_questions.txt` now embeds a compact `{{ feature_manifest_summary }}` block instructing the LLM that features marked ✓ already have dedicated questions and not to duplicate them, and to use the manifest as ground-truth evidence about content beyond the 15 K-character sample.
+- New tests: `tests/test_text_feature_detector.py` (per-detector tests + manifest caching), `tests/test_style_guide_wizard.py` (config loading, conditional filtering, manifest summary in prompt). New fixtures: `tests/fixtures/verse_sample.txt`, `footnote_sample.txt`, `epistolary_sample.txt`.
+
+### Changed
+- `src/style_guide_wizard.py`: new public helpers `load_question_config`, `load_conditional_questions`, `get_active_questions`. `build_question_prompt` now takes an optional `manifest` and renders a summary block. `load_fixed_questions` is preserved as a back-compat shim.
+
 ## [0.5.1.0] - 2026-05-07
 
 ### Added

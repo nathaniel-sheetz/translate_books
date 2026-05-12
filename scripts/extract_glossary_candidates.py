@@ -782,6 +782,29 @@ def save_report(report: CandidateReport, output_path: Path) -> None:
         raise
 
 
+def _read_source_text(source_file: Path, verbose: bool = False) -> str:
+    """Read source text from a file or auto-promote to a project's chapters/.
+
+    If ``source_file`` lives in a directory that also contains a
+    ``chapters/`` subdirectory with ``chapter_*.txt`` files, prefer those
+    clean per-chapter files so we don't feed TOC, copyright, publisher info,
+    and other front matter into glossary extraction. Otherwise read the file
+    as-is.
+    """
+    project_dir = source_file.parent
+    chapters_dir = project_dir / "chapters"
+    if chapters_dir.is_dir():
+        chapter_files = sorted(chapters_dir.glob("chapter_*.txt"))
+        if chapter_files:
+            if verbose:
+                print(
+                    f"Using {len(chapter_files)} clean chapter files from "
+                    f"{chapters_dir} (skipping front matter in {source_file.name})"
+                )
+            return "\n\n".join(cf.read_text(encoding="utf-8") for cf in chapter_files)
+    return source_file.read_text(encoding="utf-8")
+
+
 def main():
     args = parse_arguments()
 
@@ -802,8 +825,10 @@ def main():
         if args.verbose:
             print(f"Loaded glossary with {len(glossary.terms)} terms")
 
-    # Read source text
-    text = args.source_file.read_text(encoding='utf-8')
+    # Read source text. If the user pointed at a project's source.txt and a
+    # sibling chapters/ directory exists, prefer those clean per-chapter files
+    # so we don't feed TOC, copyright, and other front matter into extraction.
+    text = _read_source_text(args.source_file, verbose=args.verbose)
     if not text.strip():
         print("Error: Source file is empty", file=sys.stderr)
         sys.exit(1)

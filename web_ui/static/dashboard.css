@@ -379,6 +379,33 @@
     margin-right: 16px;
 }
 
+.image-status-banner {
+    border: 1px solid #e0dcd7;
+    border-radius: 4px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    background: #faf8f5;
+}
+
+.image-status-banner.warn {
+    background: #fff8e1;
+    border-color: #f0c36d;
+    color: #6a4a00;
+}
+
+.image-status-msg {
+    font-size: 13px;
+    margin-bottom: 8px;
+    line-height: 1.4;
+}
+
+.image-status-msg code {
+    background: rgba(0, 0, 0, 0.06);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
 .upload-zone {
     border: 2px dashed #ccc;
     border-radius: 8px;

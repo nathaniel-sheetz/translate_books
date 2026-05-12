@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.style_guide_wizard import (
-    load_fixed_questions,
+    get_active_questions,
     build_question_prompt,
     parse_llm_questions,
     build_style_guide_prompt,
@@ -37,6 +37,7 @@ from src.style_guide_wizard import (
     load_source_sample,
     save_style_guide_json,
 )
+from src.text_feature_detector import manifest_path
 
 
 def ask_question_interactive(question: dict) -> int | str:
@@ -44,6 +45,8 @@ def ask_question_interactive(question: dict) -> int | str:
     print(f"\n  {question['question']}")
     if question.get("context"):
         print(f"  ({question['context']})")
+    if question.get("_detected_hint"):
+        print(f"  Detected: {question['_detected_hint']}")
     for i, opt in enumerate(question["options"]):
         default_marker = " (default)" if i == question.get("default", -1) else ""
         print(f"    {i + 1}) {opt['label']}{default_marker}")
@@ -83,6 +86,11 @@ def main():
     parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
     parser.add_argument("--model", default="claude-sonnet-4-20250514")
     parser.add_argument("--questions-config", help="Path to custom questions JSON")
+    parser.add_argument(
+        "--force-rescan",
+        action="store_true",
+        help="Re-run feature detection even if a cached manifest exists",
+    )
 
     args = parser.parse_args()
     project_dir = Path(args.project_dir)
@@ -97,14 +105,30 @@ def main():
     word_count = len(source_text.split())
     print(f"  Loaded {word_count:,} words")
 
-    # Load and ask fixed questions
+    # Load fixed + active conditional questions (manifest-driven).
     questions_path = Path(args.questions_config) if args.questions_config else None
-    fixed_questions = load_fixed_questions(questions_path)
-    all_questions = list(fixed_questions)
+    print("Scanning text for features (heuristic detection)...")
+    fixed_questions, conditional_questions, manifest = get_active_questions(
+        project_dir, config_path=questions_path, force=args.force_rescan
+    )
+    if manifest.features:
+        present = [n for n, r in manifest.features.items() if r.present]
+        print(f"  Detected features: {', '.join(present) if present else '(none)'}")
+        print(f"  Manifest cached at: {manifest_path(project_dir)}")
+
+    # Inject one-line "detected" hints onto each conditional question.
+    for q in conditional_questions:
+        feat_name = q.get("requires", {}).get("feature")
+        if feat_name and feat_name in manifest.features:
+            ev = manifest.features[feat_name].evidence
+            if ev:
+                q["_detected_hint"] = ev[0]
+
+    all_questions: list[dict] = list(fixed_questions) + list(conditional_questions)
     answers: dict[str, int | str] = {}
 
     print("\n--- Style Guide Questionnaire ---")
-    for q in fixed_questions:
+    for q in all_questions:
         if args.non_interactive:
             answers[q["id"]] = q.get("default", 0)
             opt = q["options"][answers[q["id"]]]
@@ -117,7 +141,14 @@ def main():
         print("\nGenerating additional questions from text analysis...")
         try:
             from src.api_translator import call_llm
-            prompt = build_question_prompt(source_text, args.target_lang, args.locale, fixed_questions, answers)
+            prompt = build_question_prompt(
+                source_text,
+                args.target_lang,
+                args.locale,
+                fixed_questions,
+                answers,
+                manifest=manifest,
+            )
             response = call_llm(prompt, provider=args.provider, model=args.model, call_type="style_questions")
             llm_questions = parse_llm_questions(response)
             all_questions.extend(llm_questions)

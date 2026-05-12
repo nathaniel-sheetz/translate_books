@@ -357,11 +357,58 @@
             } else {
                 originEl.style.display = 'none';
             }
+            // Image-fetch status banner: warn if any [IMAGE:...] placeholder
+            // doesn't have a matching file on disk.
+            updateImageStatusBanner(status);
         } else {
             document.getElementById('source-loaded').style.display = 'none';
             document.getElementById('source-upload').style.display = '';
         }
     }
+
+    function updateImageStatusBanner(status) {
+        var banner = document.getElementById('image-status-banner');
+        var msg = document.getElementById('image-status-msg');
+        var btn = document.getElementById('btn-retry-images');
+        var expected = status.images_expected || 0;
+        var missing = (status.images_missing || []).length;
+        if (expected > 0 && missing > 0) {
+            banner.style.display = '';
+            banner.classList.add('warn');
+            var preview = (status.images_missing || []).slice(0, 5).join(', ');
+            if (missing > 5) preview += ', \u2026';
+            msg.innerHTML = '\u26A0 ' + missing + ' of ' + expected +
+                ' image' + (expected === 1 ? '' : 's') +
+                ' failed to download during ingest. Missing: <code>' +
+                escapeHtml(preview) + '</code>';
+            btn.disabled = !status.gutenberg_url;
+            btn.title = status.gutenberg_url ? '' : 'No gutenberg_url in project.json \u2014 cannot retry';
+        } else {
+            banner.style.display = 'none';
+            banner.classList.remove('warn');
+        }
+    }
+
+    document.getElementById('btn-retry-images').addEventListener('click', function() {
+        var btn = this;
+        btn.disabled = true;
+        setStatus('retry-images-status', 'Downloading\u2026', '');
+        apiPost('/api/project/' + PROJECT + '/fetch-missing-images', {}).then(function(data) {
+            btn.disabled = false;
+            if (data.error) {
+                setStatus('retry-images-status', data.error, 'error');
+                return;
+            }
+            var failed = (data.failed || []).length;
+            var summary = data.downloaded + ' downloaded';
+            if (failed) summary += ', ' + failed + ' still failing';
+            setStatus('retry-images-status', summary, failed ? 'error' : 'success');
+            loadStatus();
+        }).catch(function() {
+            btn.disabled = false;
+            setStatus('retry-images-status', 'Network error', 'error');
+        });
+    });
 
     function formatBytes(bytes) {
         if (bytes < 1024) return bytes + ' B';
@@ -756,6 +803,31 @@
     // ========================================================================
 
     var pendingStyleContent = null;
+
+    // Force-rescan full text features (controls conditional questions).
+    var rescanBtn = document.getElementById('btn-style-rescan');
+    if (rescanBtn) {
+        rescanBtn.addEventListener('click', function() {
+            rescanBtn.disabled = true;
+            setStatus('style-rescan-status', 'Rescanning full text...', 'info');
+            apiPost('/api/setup/' + PROJECT + '/text-features/rescan', {}).then(function(data) {
+                if (data && data.ok) {
+                    setStatus(
+                        'style-rescan-status',
+                        'Rescan complete (' + (data.conditional_count || 0) + ' conditional questions). Reloading...',
+                        'success'
+                    );
+                    setTimeout(function() { window.location.reload(); }, 400);
+                } else {
+                    rescanBtn.disabled = false;
+                    setStatus('style-rescan-status', (data && data.error) ? data.error : 'Rescan failed', 'error');
+                }
+            }).catch(function(e) {
+                rescanBtn.disabled = false;
+                setStatus('style-rescan-status', 'Rescan failed: ' + (e && e.message ? e.message : e), 'error');
+            });
+        });
+    }
 
     function populateStyleGuideStage(status) {
         if (status.has_style_guide && status.style_guide_content) {

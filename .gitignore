@@ -69,6 +69,7 @@ prompts/style_guide_generate.txt
 prompts/glossary_bootstrap.txt
 prompts/translation.txt
 prompts/translator_note_default.txt
+prompts/previous/
 
 # Prompt history logs (can be large)
 prompts/history/

@@ -293,18 +293,30 @@ def setup_questions_prompt(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.style_guide_wizard import load_fixed_questions, build_question_prompt, load_source_sample
+    from src.style_guide_wizard import (
+        build_question_prompt,
+        get_active_questions,
+        load_source_sample,
+    )
     data = request.get_json()
     answers = data.get("answers", {})
     # Convert string indices back to int
     answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
 
-    fixed_questions = load_fixed_questions()
+    fixed_questions, conditional_questions, manifest = get_active_questions(project_dir)
     source_text = load_source_sample(project_dir)
     target_lang = data.get("target_lang", "Spanish")
     locale = data.get("locale", "mx")
 
-    prompt = build_question_prompt(source_text, target_lang, locale, fixed_questions, answers)
+    all_questions = list(fixed_questions) + list(conditional_questions)
+    prompt = build_question_prompt(
+        source_text,
+        target_lang,
+        locale,
+        all_questions,
+        answers,
+        manifest=manifest,
+    )
     return jsonify({"prompt": prompt})
 
 
@@ -316,15 +328,17 @@ def setup_style_guide_prompt(project_id):
     project_dir = _get_projects_dir() / project_id
 
     from src.style_guide_wizard import (
-        load_fixed_questions, build_style_guide_prompt, load_source_sample,
+        build_style_guide_prompt,
+        get_active_questions,
+        load_source_sample,
     )
     data = request.get_json()
     answers = data.get("answers", {})
     answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
     extra_questions = data.get("extra_questions", [])
 
-    fixed_questions = load_fixed_questions()
-    all_questions = fixed_questions + extra_questions
+    fixed_questions, conditional_questions, _manifest = get_active_questions(project_dir)
+    all_questions = list(fixed_questions) + list(conditional_questions) + list(extra_questions)
     source_text = load_source_sample(project_dir)
     target_lang = data.get("target_lang", "Spanish")
     locale = data.get("locale", "mx")
@@ -405,16 +419,45 @@ def setup_style_guide_fallback(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    from src.style_guide_wizard import load_fixed_questions, answers_to_style_guide_fallback
+    from src.style_guide_wizard import get_active_questions, answers_to_style_guide_fallback
     data = request.get_json()
     answers = data.get("answers", {})
     answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
     extra_questions = data.get("extra_questions", [])
 
-    fixed_questions = load_fixed_questions()
-    all_questions = fixed_questions + extra_questions
+    project_dir = _get_projects_dir() / project_id
+    fixed_questions, conditional_questions, _manifest = get_active_questions(project_dir)
+    all_questions = list(fixed_questions) + list(conditional_questions) + list(extra_questions)
     content = answers_to_style_guide_fallback(all_questions, answers)
     return jsonify({"content": content})
+
+
+@app.route("/api/setup/<project_id>/text-features/rescan", methods=["POST"])
+def setup_text_features_rescan(project_id):
+    """Force a full-text feature rescan for conditional style-guide questions.
+
+    This regenerates (and overwrites) ``text_features.json`` for the project.
+    The frontend can call this and then reload to re-render conditional questions.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    from src.style_guide_wizard import get_active_questions
+
+    try:
+        fixed, conditional, manifest = get_active_questions(project_dir, force=True)
+        return jsonify(
+            {
+                "ok": True,
+                "fixed_count": len(fixed),
+                "conditional_count": len(conditional),
+                "manifest_path": str(project_dir / "text_features.json"),
+            }
+        )
+    except Exception as exc:
+        app.logger.exception("Text feature rescan failed for %s", project_id)
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/setup/<project_id>/extract-candidates", methods=["POST"])
@@ -516,7 +559,7 @@ def setup_questions_generate(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.style_guide_wizard import load_fixed_questions, build_question_prompt, load_source_sample
+    from src.style_guide_wizard import build_question_prompt, get_active_questions, load_source_sample
     from src.api_translator import call_llm
 
     data = request.get_json()
@@ -525,12 +568,20 @@ def setup_questions_generate(project_id):
     provider = data.get("provider", "anthropic")
     model = data.get("model")
 
-    fixed_questions = load_fixed_questions()
+    fixed_questions, conditional_questions, manifest = get_active_questions(project_dir)
     source_text = load_source_sample(project_dir)
     target_lang = data.get("target_lang", "Spanish")
     locale = data.get("locale", "mx")
 
-    prompt = build_question_prompt(source_text, target_lang, locale, fixed_questions, answers)
+    all_questions = list(fixed_questions) + list(conditional_questions)
+    prompt = build_question_prompt(
+        source_text,
+        target_lang,
+        locale,
+        all_questions,
+        answers,
+        manifest=manifest,
+    )
 
     try:
         result = call_llm(prompt, provider=provider, model=model, call_type="style_questions")
@@ -550,7 +601,7 @@ def setup_style_guide_generate(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.style_guide_wizard import load_fixed_questions, build_style_guide_prompt, load_source_sample
+    from src.style_guide_wizard import get_active_questions, build_style_guide_prompt, load_source_sample
     from src.api_translator import call_llm
 
     data = request.get_json()
@@ -560,8 +611,8 @@ def setup_style_guide_generate(project_id):
     provider = data.get("provider", "anthropic")
     model = data.get("model")
 
-    fixed_questions = load_fixed_questions()
-    all_questions = fixed_questions + extra_questions
+    fixed_questions, conditional_questions, _manifest = get_active_questions(project_dir)
+    all_questions = list(fixed_questions) + list(conditional_questions) + list(extra_questions)
     source_text = load_source_sample(project_dir)
     target_lang = data.get("target_lang", "Spanish")
     locale = data.get("locale", "mx")
@@ -963,18 +1014,38 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
     # Build ordered list of paragraph events: either a text paragraph
     # (with its first-2-words key) or an image placeholder.
     # Skip the first paragraph since it never gets a para_start marker.
+    #
+    # A single paragraph may contain text AND one or more [IMAGE:...]
+    # placeholders glued together by single newlines (e.g. when chunk
+    # boundaries clobber the surrounding blank line, or when an LLM
+    # retranslate drops one). We split each paragraph on the placeholder
+    # regex so the images aren't silently dropped: any leading text
+    # contributes a "para" event (matching the aligner's view that this is
+    # one paragraph with a single para_start), then each image contributes
+    # an "image" event. Trailing text after an in-paragraph image is not
+    # emitted as a "para" event because the aligner only flags the
+    # paragraph's first sentence as para_start.
     events = []  # list of ("para", first_2_words) or ("image", src, alt)
     for i in range(1, len(paragraphs)):
         para = paragraphs[i]
-        img_match = _IMAGE_PLACEHOLDER_RE.fullmatch(para)
-        if img_match:
-            src = img_match.group(1)  # e.g. "images/i010.jpg"
-            alt = img_match.group(2) or ""
-            events.append(("image", src, alt))
-        else:
+        matches = list(_IMAGE_PLACEHOLDER_RE.finditer(para))
+
+        if not matches:
             words = para.split()[:2]
             if words:
                 events.append(("para", " ".join(words)))
+            continue
+
+        leading = para[: matches[0].start()].strip()
+        if leading:
+            words = leading.split()[:2]
+            if words:
+                events.append(("para", " ".join(words)))
+
+        for m in matches:
+            src = m.group(1)  # e.g. "images/i010.jpg"
+            alt = m.group(2) or ""
+            events.append(("image", src, alt))
 
     # Filter out [IMAGE:...] placeholder sentences from alignment records.
     # The aligner treats them as sentences but they're not readable text.
@@ -1453,6 +1524,28 @@ def _get_project_status(project_id: str) -> dict:
     config = _load_project_config(project_id)
     status["gutenberg_url"] = config.get("gutenberg_url")
     status["suggested_split_pattern"] = config.get("suggested_split_pattern")
+
+    # Image status: count placeholders in source.txt vs files on disk so the
+    # dashboard can warn when the Gutenberg ingester failed to fetch some images.
+    status["images_expected"] = 0
+    status["images_present"] = 0
+    status["images_missing"] = []
+    if status["has_source"]:
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location(
+                "fetch_missing_images",
+                Path(__file__).parent.parent / "scripts" / "fetch_missing_images.py",
+            )
+            _fmi = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_fmi)
+            placeholders = _fmi.extract_placeholders(source_path)
+            missing = _fmi.list_missing_images(project_dir)
+            status["images_expected"] = len(placeholders)
+            status["images_present"] = len(placeholders) - len(missing)
+            status["images_missing"] = missing
+        except Exception:
+            pass
 
     # Style guide
     style_path = project_dir / "style.json"
@@ -2099,8 +2192,24 @@ def dashboard_page(project_id):
     if not project_dir.exists():
         return "Project not found", 404
 
-    from src.style_guide_wizard import load_fixed_questions
-    fixed_questions = load_fixed_questions()
+    from src.style_guide_wizard import get_active_questions
+    fixed_questions, conditional_questions, manifest = get_active_questions(project_dir)
+
+    # Inject conditional question evidence into the UI so users can see why a
+    # question is being asked.
+    hydrated_conditional = []
+    for q in conditional_questions:
+        q2 = dict(q)
+        q2["_is_conditional"] = True
+        requires = q2.get("requires") or {}
+        feat = requires.get("feature")
+        if feat:
+            r = manifest.get(feat)
+            if r.evidence:
+                q2["_detected_hint"] = r.evidence[0]
+        hydrated_conditional.append(q2)
+
+    all_questions = list(fixed_questions) + hydrated_conditional
     t = _reader_strings()
 
     return render_template(
@@ -2108,7 +2217,7 @@ def dashboard_page(project_id):
         project_id=project_id,
         project_title=_project_title(project_id),
         project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
-        fixed_questions=fixed_questions,
+        fixed_questions=all_questions,
         t=t,
         lang=_get_ui_lang(),
     )
@@ -2230,6 +2339,45 @@ def project_ingest_gutenberg(project_id):
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/fetch-missing-images", methods=["POST"])
+def project_fetch_missing_images(project_id):
+    """Re-download any images missing from a Gutenberg-ingested project."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not (project_dir / "source.txt").exists():
+        return jsonify({"error": "Project has no source.txt"}), 400
+
+    data = request.json or {}
+    base_url_override = (data.get("base_url") or "").strip() or None
+    force = bool(data.get("force", False))
+
+    try:
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "fetch_missing_images",
+            Path(__file__).parent.parent / "scripts" / "fetch_missing_images.py",
+        )
+        _fmi = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_fmi)
+
+        result = _fmi.fetch_missing_images(
+            project_dir, base_url=base_url_override, force=force
+        )
+        return jsonify({
+            "ok": True,
+            "downloaded": result["downloaded"],
+            "skipped_existing": result["skipped_existing"],
+            "failed": [{"url": u, "error": e} for (u, e) in result["failed"]],
+            "placeholders": result["placeholders"],
+        })
+    except (FileNotFoundError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/split-patterns", methods=["GET"])
