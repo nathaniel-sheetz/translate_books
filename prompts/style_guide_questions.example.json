@@ -1,98 +1,467 @@
-[
-  {
-    "id": "dialect",
-    "glossary_relevant": false,
-    "question": "What dialect and region should the translation target?",
-    "options": [
-      {
-        "label": "Mexican Spanish",
-        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into standard, educated Mexican Spanish. Use tú or Usted forms (not vos or vosotros). Avoid Iberian-specific vocabulary and expressions, prefer MX-standard lexical choices throughout."
-      },
-      {
-        "label": "Castilian Spanish",
-        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into standard Castilian Spanish. Use tú/vosotros forms as appropriate. Prefer Iberian vocabulary and idiomatic expressions."
-      },
-      {
-        "label": "Rioplatense Spanish",
-        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into Rioplatense Spanish. Use vos/ustedes forms. Prefer Argentine/Uruguayan vocabulary and expressions."
-      },
-      {
-        "label": "Colombian Spanish",
-        "style_guide_effect": "DIALECT AND REGISTER\nTranslate into standard Colombian Spanish. Use usted and tú forms as appropriate regionally. Prefer Colombian vocabulary."
-      }
-    ],
-    "allow_custom": true,
-    "custom_prompt": "Describe the dialect and region:",
-    "default": 0
-  },
-  {
-    "id": "forms_of_address",
-    "glossary_relevant": false,
-    "question": "How should forms of address (you/your) be handled?",
-    "options": [
-      {
-        "label": "Tú throughout (informal)",
-        "style_guide_effect": "FORMS OF ADDRESS\nUse tú forms for all second-person address. This creates an informal, intimate tone throughout."
-      },
-      {
-        "label": "Usted throughout (formal)",
-        "style_guide_effect": "FORMS OF ADDRESS\nUse usted forms for all second-person address. This maintains formal, respectful distance throughout."
-      },
-      {
-        "label": "Mixed: tú for family/friends, usted for strangers",
-        "style_guide_effect": "FORMS OF ADDRESS\nUse tú for characters in close relationships (family, friends, children) and usted for strangers, authority figures, and formal contexts. This reflects natural social register switching."
-      },
-      {
-        "label": "Vos (regional informal)",
-        "style_guide_effect": "FORMS OF ADDRESS\nUse vos forms for informal second-person address, matching regional usage. Use usted for formal contexts."
-      }
-    ],
-    "allow_custom": true,
-    "custom_prompt": "Describe the forms of address rules:",
-    "default": 2
-  },
-  {
-    "id": "dialogue_formatting",
-    "glossary_relevant": false,
-    "question": "How should dialogue be formatted?",
-    "options": [
-      {
-        "label": "Raya (—) — standard Spanish convention",
-        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using standard Spanish raya conventions (—). Break character speech into a new paragraph when it follows narrative. Use guillemets (« ») for nested speech (dialogue within dialogue)."
-      },
-      {
-        "label": "Quotation marks (\"...\")",
-        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using quotation marks (\"...\"). Use single quotes ('...') for nested speech."
-      },
-      {
-        "label": "Guillemets («...»)",
-        "style_guide_effect": "DIALOGUE FORMATTING\nMark dialogue using guillemets («...»). Use quotation marks for nested speech within guillemets."
-      }
-    ],
-    "allow_custom": true,
-    "custom_prompt": "Describe the dialogue formatting rules:",
-    "default": 0
-  },
-  {
-    "id": "name_handling",
-    "glossary_relevant": true,
-    "question": "How should personal and place names be handled?",
-    "options": [
-      {
-        "label": "Keep original names unchanged",
-        "style_guide_effect": "NAME HANDLING\nKeep all personal names and place names in their original form. Do not translate or adapt names."
-      },
-      {
-        "label": "Translate names when a standard equivalent exists",
-        "style_guide_effect": "NAME HANDLING\nTranslate names when a widely recognized equivalent exists in the target language (e.g., Peter → Pedro, London → Londres). Keep names without standard equivalents in their original form."
-      },
-      {
-        "label": "Translate all names",
-        "style_guide_effect": "NAME HANDLING\nTranslate or adapt all personal and place names to the target language. Create natural-sounding equivalents where standard translations don't exist."
-      }
-    ],
-    "allow_custom": true,
-    "custom_prompt": "Describe the name handling rules:",
-    "default": 0
-  }
-]
+{
+  "fixed": [
+    {
+      "id": "dialect",
+      "glossary_relevant": false,
+      "question": "What dialect and region should the translation target?",
+      "options": [
+        {
+          "label": "Mexican Spanish",
+          "style_guide_effect": "Translate into standard, educated Mexican Spanish. Use t\u00fa or Usted forms (not vos or vosotros). Avoid Iberian-specific vocabulary and expressions, prefer MX-standard lexical choices throughout."
+        },
+        {
+          "label": "Castilian Spanish",
+          "style_guide_effect": "Translate into standard Castilian Spanish. Use t\u00fa/vosotros forms as appropriate. Prefer Iberian vocabulary and expressions."
+        },
+        {
+          "label": "Rioplatense Spanish",
+          "style_guide_effect": "Translate into Rioplatense Spanish. Use vos/ustedes forms. Prefer Argentine/Uruguayan vocabulary and expressions."
+        },
+        {
+          "label": "Colombian Spanish",
+          "style_guide_effect": "Translate into standard Colombian Spanish. Use usted and t\u00fa forms as appropriate regionally. Prefer Colombian vocabulary and expressions."
+        },
+        {
+          "label": "Generic Latin America",
+          "style_guide_effect": "Translate into generic Latin American Spanish. Use usted and t\u00fa forms, not vos or vosotros. Prefer vocabulary and expressions that are commonly understood in Latin America over region-specific words."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the dialect and region:",
+      "default": 0
+    },
+    {
+      "id": "forms_of_address",
+      "glossary_relevant": false,
+      "question": "How should forms of address (you/your) be handled?",
+      "options": [
+        {
+          "label": "T\u00fa dominates (informal)",
+          "style_guide_effect": "Use t\u00fa forms for at least most second-person address, including family, friends, and professional contexts. Reserve Usted forms for clear authority-level discrepancies with low relational closeness, such as a child speaking to an adult acquaintance or an employee speaking to a CEO."
+        },
+        {
+          "label": "Usted dominates (formal)",
+          "style_guide_effect": "Use usted forms for at least most second-person address, including professional relationships and children addressing adults (including parents). Reserve t\u00fa forms for close, peer-level relationships or when a clear superior speaks to a clear inferior (such as an adult addressing a child)."
+        },
+        {
+          "label": "Standard: t\u00fa for family/friends, usted for strangers/non-family authorities",
+          "style_guide_effect": "Use t\u00fa for characters in close relationships (family, friends, children) and usted for strangers, authority figures, and formal contexts."
+        },
+        {
+          "label": "Vos (regional informal)",
+          "style_guide_effect": "Use vos forms for informal second-person address, matching regional usage. Use usted for formal contexts."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the forms of address rules:",
+      "default": 2
+    },
+    {
+      "id": "person_name_handling",
+      "glossary_relevant": true,
+      "question": "How should personal names be handled?",
+      "options": [
+        {
+          "label": "Keep original personal names unchanged",
+          "style_guide_effect": "Keep all personal names in their original form. Do not translate or adapt personal names, even when common equivalents exist."
+        },
+        {
+          "label": "Translate personal names when a standard equivalent exists",
+          "style_guide_effect": "Translate personal names when a widely recognized equivalent exists in the target language (e.g., Peter \u2192 Pedro). Keep names without standard equivalents in their original form."
+        },
+        {
+          "label": "Translate all personal names",
+          "style_guide_effect": "Translate or adapt all personal names to the target language. Create natural-sounding equivalents where standard translations don't exist."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the personal name handling rules",
+      "default": 0
+    },
+    {
+      "id": "place_name_handling",
+      "glossary_relevant": true,
+      "question": "How should place names be handled?",
+      "options": [
+        {
+          "label": "Keep original place names unchanged",
+          "style_guide_effect": "Keep all place names in their original form. Do not translate or adapt place names, even when common equivalents exist."
+        },
+        {
+          "label": "Translate place names when a standard equivalent exists",
+          "style_guide_effect": "Translate place names when a widely recognized equivalent exists in the target language (e.g., London \u2192 Londr\u00e9s). Keep place names without standard equivalents in their original form."
+        },
+        {
+          "label": "Translate all place names",
+          "style_guide_effect": "Translate or adapt all place names to the target language. Create natural-sounding equivalents where standard translations don't exist."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the place name handling rules",
+      "default": 0
+    }
+  ],
+  "conditional": [
+    {
+      "id": "dialogue_formatting",
+      "glossary_relevant": false,
+      "requires": {"feature": "dialogue", "min_count": 5},
+      "question": "How should dialogue be formatted?",
+      "options": [
+        {
+          "label": "Standard: raya (\u2014) marks speaker changes",
+          "style_guide_effect": "Mark dialogue using standard Spanish raya conventions (\u2014). Break character speech into a new paragraph when it follows narrative. Use guillemets (\u00ab \u00bb) for nested speech (dialogue within dialogue) and internal thoughts."
+        },
+        {
+          "label": "Quotation marks (\u201c...\u201d)",
+          "style_guide_effect": "Mark dialogue using quotation marks (\u201c...\u201d). Use single quotes (\u2018...\u2019) for nested speech."
+        },
+        {
+          "label": "Guillemets (\u00ab...\u00bb)",
+          "style_guide_effect": "Mark dialogue using guillemets (\u00ab...\u00bb). Use quotation marks for nested speech within guillemets."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the dialogue formatting rules",
+      "default": 0
+    },
+    {
+      "id": "verse_handling",
+      "glossary_relevant": false,
+      "requires": {"feature": "verse"},
+      "question": "How should verse / poetry passages be handled?",
+      "options": [
+        {
+          "label": "Preserve meter and rhyme",
+          "style_guide_effect": "VERSE\nWhen translating verse passages, preserve both the original meter and rhyme scheme. Adapt vocabulary as needed to maintain prosody."
+        },
+        {
+          "label": "Preserve meter only",
+          "style_guide_effect": "VERSE\nWhen translating verse passages, preserve the original meter and line lengths. Do not force rhymes that do not occur naturally in the target language."
+        },
+        {
+          "label": "Preserve rhyme only",
+          "style_guide_effect": "VERSE\nWhen translating verse passages, preserve the original rhyme scheme but allow meter to flex as needed for natural target-language phrasing."
+        },
+        {
+          "label": "Prose translation",
+          "style_guide_effect": "VERSE\nTranslate verse passages as prose, preserving meaning and imagery rather than form. Set the prose rendering as a block quote in the target text."
+        },
+        {
+          "label": "Side-by-side bilingual",
+          "style_guide_effect": "VERSE\nKeep the original verse alongside a target-language translation, side-by-side or stanza-by-stanza."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the verse handling rules",
+      "default": 1
+    },
+    {
+      "id": "footnote_handling",
+      "glossary_relevant": false,
+      "requires": {"feature": "footnotes"},
+      "question": "How should footnotes / endnotes be handled?",
+      "options": [
+        {
+          "label": "Translate inline as footnotes in the same position",
+          "style_guide_effect": "FOOTNOTES\nTranslate the original notes and keep them as footnotes in the same position as in the source text."
+        },
+        {
+          "label": "Move all notes to numbered endnotes",
+          "style_guide_effect": "FOOTNOTES\nMove all notes (foot or end) to numbered endnotes at the back of each chapter or volume."
+        },
+        {
+          "label": "Preserve original numbering and placement",
+          "style_guide_effect": "FOOTNOTES\nPreserve the original numbering and placement (foot vs end) of the source notes in the translation."
+        },
+        {
+          "label": "Merge with translator notes",
+          "style_guide_effect": "FOOTNOTES\nMerge the original notes with any translator notes into a single annotated apparatus, marking translator additions clearly."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the footnote handling rules",
+      "default": 0
+    },
+    {
+      "id": "epigraph_handling",
+      "glossary_relevant": false,
+      "requires": {"feature": "epigraphs"},
+      "question": "How should chapter epigraphs be handled?",
+      "options": [
+        {
+          "label": "Translate the epigraph",
+          "style_guide_effect": "EPIGRAPHS\nTranslate chapter epigraphs into the target language. Preserve attribution exactly."
+        },
+        {
+          "label": "Keep original + footnote translation",
+          "style_guide_effect": "EPIGRAPHS\nKeep epigraphs in the original language and provide a target-language translation in a footnote."
+        },
+        {
+          "label": "Parallel original and translation",
+          "style_guide_effect": "EPIGRAPHS\nPresent the epigraph with the original on one line and the translation on the next, separated by a thin rule."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the epigraph handling rules",
+      "default": 0
+    },
+    {
+      "id": "letter_formatting",
+      "glossary_relevant": false,
+      "requires": {"feature": "letters"},
+      "question": "How should letters / epistolary passages be formatted?",
+      "options": [
+        {
+          "label": "Preserve original conventions (salutation, valediction)",
+          "style_guide_effect": "LETTERS\nPreserve the original salutation and valediction conventions of the source text inside letters, even when they differ from target-language norms."
+        },
+        {
+          "label": "Localize to target conventions",
+          "style_guide_effect": "LETTERS\nReplace salutations and valedictions in letters with idiomatic target-language equivalents."
+        },
+        {
+          "label": "Hybrid: preserve register but localize formulae",
+          "style_guide_effect": "LETTERS\nKeep the formality and register of the original, but adapt fixed formulae (Dear/Sincerely) to natural target-language expressions of equivalent register."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the letter formatting rules",
+      "default": 2
+    },
+    {
+      "id": "scripture_translation",
+      "glossary_relevant": false,
+      "requires": {"feature": "scripture_references"},
+      "question": "Which target-language Bible should be used for scripture, and how should book-chapter-verse abbreviations be rendered?",
+      "options": [
+        {
+          "label": "Reina-Valera 1960 (RVR1960)",
+          "style_guide_effect": "SCRIPTURE\nUse the Reina-Valera 1960 (RVR1960) translation when quoting scripture. Render references using RVR conventions (e.g., Mt 5:3, Sal 23:1)."
+        },
+        {
+          "label": "Nueva Versi\u00f3n Internacional (NVI)",
+          "style_guide_effect": "SCRIPTURE\nUse the Nueva Versi\u00f3n Internacional (NVI) translation when quoting scripture. Render references using NVI conventions."
+        },
+        {
+          "label": "Biblia La Palabra (BLP)",
+          "style_guide_effect": "SCRIPTURE\nUse the Biblia La Palabra (BLP) translation when quoting scripture."
+        },
+        {
+          "label": "Translate fresh from the source quotation",
+          "style_guide_effect": "SCRIPTURE\nTranslate scripture quotations directly from the source text rather than substituting a published translation; cite the reference in target-language abbreviation style."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the scripture translation policy",
+      "default": 0
+    },
+    {
+      "id": "archaic_register",
+      "glossary_relevant": false,
+      "requires": {"feature": "archaic_language"},
+      "question": "How should archaic language in the source be rendered?",
+      "options": [
+        {
+          "label": "Modernize fully",
+          "style_guide_effect": "ARCHAIC LANGUAGE\nRender archaic forms in contemporary target-language register; do not preserve archaisms."
+        },
+        {
+          "label": "Preserve archaic register (vos / vuestra merced / archaisms)",
+          "style_guide_effect": "ARCHAIC LANGUAGE\nPreserve an archaic register in the target text using period-appropriate forms (e.g., vos / vuestra merced / vosotros) where appropriate."
+        },
+        {
+          "label": "Partial: preserve flavor, use sparingly",
+          "style_guide_effect": "ARCHAIC LANGUAGE\nUse archaic target-language vocabulary sparingly to evoke period flavor without obscuring meaning."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the archaic register rules",
+      "default": 2
+    },
+    {
+      "id": "foreign_passages",
+      "glossary_relevant": false,
+      "requires": {"feature": "foreign_passages"},
+      "question": "How should foreign-language passages (italicized or quoted in another language) be handled?",
+      "options": [
+        {
+          "label": "Leave in original language",
+          "style_guide_effect": "FOREIGN PASSAGES\nLeave passages in the original foreign language unchanged."
+        },
+        {
+          "label": "Translate inline",
+          "style_guide_effect": "FOREIGN PASSAGES\nTranslate foreign passages inline into the target language; do not mark them as foreign."
+        },
+        {
+          "label": "Translate in a footnote",
+          "style_guide_effect": "FOREIGN PASSAGES\nKeep the foreign passage in the original language and provide a translation in a footnote."
+        },
+        {
+          "label": "Italicize and translate inline",
+          "style_guide_effect": "FOREIGN PASSAGES\nItalicize foreign passages and translate them inline in parentheses immediately after."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the foreign passage handling rules",
+      "default": 0
+    },
+    {
+      "id": "list_formatting",
+      "glossary_relevant": false,
+      "requires": {"feature": "lists"},
+      "question": "How should bulleted / numbered lists be formatted?",
+      "options": [
+        {
+          "label": "Preserve original markers",
+          "style_guide_effect": "LISTS\nPreserve the original list markers (bullets, numbers, letters) and indentation in the translation."
+        },
+        {
+          "label": "Normalize to target convention",
+          "style_guide_effect": "LISTS\nNormalize list markers to standard target-language conventions, regardless of the original markers."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the list formatting rules",
+      "default": 0
+    },
+    {
+      "id": "block_quote_handling",
+      "glossary_relevant": false,
+      "requires": {"feature": "block_quotes"},
+      "question": "How should block quotes be handled?",
+      "options": [
+        {
+          "label": "Translate fresh",
+          "style_guide_effect": "BLOCK QUOTES\nTranslate block quotes directly from the source rather than substituting a canonical translation."
+        },
+        {
+          "label": "Use canonical existing translation when available",
+          "style_guide_effect": "BLOCK QUOTES\nWhen a canonical published translation of a quoted work exists in the target language, substitute it; cite source."
+        },
+        {
+          "label": "Italicize block",
+          "style_guide_effect": "BLOCK QUOTES\nItalicize block quotes in the translation regardless of source formatting, to distinguish them from surrounding prose."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the block quote handling rules",
+      "default": 0
+    },
+    {
+      "id": "dramatic_format",
+      "glossary_relevant": false,
+      "requires": {"feature": "dramatic_format"},
+      "question": "How should dramatic / play-script passages be formatted?",
+      "options": [
+        {
+          "label": "Italics for stage directions, brackets retained",
+          "style_guide_effect": "DRAMATIC FORMAT\nFormat speaker names as ALL CAPS followed by a colon. Italicize stage directions and keep them in brackets."
+        },
+        {
+          "label": "Plain formatting (no italics, no brackets)",
+          "style_guide_effect": "DRAMATIC FORMAT\nFormat speaker names as ALL CAPS followed by a colon. Render stage directions in plain text without italics or brackets."
+        },
+        {
+          "label": "Omit stage directions",
+          "style_guide_effect": "DRAMATIC FORMAT\nOmit stage directions entirely; preserve only speaker names and spoken text."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the dramatic format rules",
+      "default": 0
+    },
+    {
+      "id": "measurement_handling",
+      "glossary_relevant": false,
+      "requires": {"feature": "measurements_imperial"},
+      "question": "How should imperial measurements (miles, feet, °F, etc.) be handled?",
+      "options": [
+        {
+          "label": "Keep imperial",
+          "style_guide_effect": "MEASUREMENTS\nKeep imperial measurements unchanged in the translation."
+        },
+        {
+          "label": "Convert to metric",
+          "style_guide_effect": "MEASUREMENTS\nConvert imperial measurements to metric equivalents in the translation."
+        },
+        {
+          "label": "Convert with footnote",
+          "style_guide_effect": "MEASUREMENTS\nKeep imperial measurements in the main text and provide metric equivalents in a footnote."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the measurement handling rules",
+      "default": 1
+    },
+    {
+      "id": "currency_handling",
+      "glossary_relevant": false,
+      "requires": {"feature": "currency_period"},
+      "question": "How should period currency (shillings, pesos, maravedíes, etc.) be handled?",
+      "options": [
+        {
+          "label": "Keep period currency",
+          "style_guide_effect": "CURRENCY\nKeep period currency names unchanged in the translation."
+        },
+        {
+          "label": "Modernize",
+          "style_guide_effect": "CURRENCY\nReplace period currency with the modern equivalent in the source country."
+        },
+        {
+          "label": "Convert with footnote",
+          "style_guide_effect": "CURRENCY\nKeep period currency in the main text and explain its rough modern value in a footnote on first use."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the currency handling rules",
+      "default": 0
+    },
+    {
+      "id": "translator_notes_policy",
+      "glossary_relevant": false,
+      "requires": {"feature": "translator_notes"},
+      "question": "How should existing translator notes (N. del T.) in the source be handled?",
+      "options": [
+        {
+          "label": "Preserve original translator notes",
+          "style_guide_effect": "TRANSLATOR NOTES\nPreserve existing translator notes from the source text verbatim, marked as 'N. del T. (original)'."
+        },
+        {
+          "label": "Strip them",
+          "style_guide_effect": "TRANSLATOR NOTES\nStrip existing translator notes from the source; do not carry them into the target text."
+        },
+        {
+          "label": "Merge with new notes",
+          "style_guide_effect": "TRANSLATOR NOTES\nMerge existing translator notes with any new ones added during this translation, distinguishing them with a date or initial tag."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe the translator notes policy",
+      "default": 0
+    },
+    {
+      "id": "epicene_animal_speakers",
+      "glossary_relevant": true,
+      "requires": {"feature": "epicene_animal_speakers", "min_confidence": 0.4},
+      "question": "Some animal characters in this book have a sex established in English (via pronouns like 'he/she', kinship terms like 'mother spider', or honorifics like 'Mr. Swallow'), but their Spanish equivalents are epicene nouns with one fixed grammatical gender (la golondrina, el tibur\u00f3n, la jirafa, el mosquito, la hormiga). How should the translation preserve each character's sex?",
+      "options": [
+        {
+          "label": "Prefer macho/hembra modifiers",
+          "style_guide_effect": "EPICENE ANIMALS\nWhen an English animal noun maps to a Spanish epicene noun (la golondrina, el tibur\u00f3n, la jirafa, el mosquito, la hormiga, la ara\u00f1a, la rana, el rat\u00f3n, etc.) and the source establishes a sex via pronouns, kinship terms, or honorifics, append 'macho' or 'hembra' on first introduction and whenever the sex would otherwise be ambiguous (e.g., 'la golondrina macho vol\u00f3 a casa', 'el tibur\u00f3n hembra'). Subsequent references may drop the modifier once the sex is established. Pronouns and adjective agreement still follow the noun's grammatical gender."
+        },
+        {
+          "label": "Prefer honorifics, kinship, and proper-name forms",
+          "style_guide_effect": "EPICENE ANIMALS\nWhen an English animal noun maps to a Spanish epicene noun (la golondrina, el tibur\u00f3n, la jirafa, el mosquito, la hormiga, la ara\u00f1a, la rana, el rat\u00f3n, etc.) and the source establishes a sex, carry that sex through Spanish honorifics, kinship roles, or capitalized proper names rather than macho/hembra. Examples: 'Mr. Swallow' \u2192 'el se\u00f1or Golondrina', 'mother spider' \u2192 'mam\u00e1 Ara\u00f1a', 'Father Frog' \u2192 'pap\u00e1 Rana', 'the male giraffe' \u2192 'don Jirafa' or a named character. The grammatical gender of the underlying noun (la golondrina, la ara\u00f1a) does not change; the honorific or kinship word carries the sex."
+        },
+        {
+          "label": "Accept grammatical gender; rely on context",
+          "style_guide_effect": "EPICENE ANIMALS\nTranslate animal nouns with their natural Spanish grammatical gender and let pronouns and adjectives agree with that gender, even when the English source establishes a different sex. Do not add macho/hembra or honorifics solely to preserve sex. Trust narrative context (kinship roles already in the surrounding prose, named characters, plot cues) to convey the character's sex to the reader."
+        }
+      ],
+      "allow_custom": true,
+      "custom_prompt": "Describe how epicene animal sex should be handled, including any per-character overrides:",
+      "default": 1
+    }
+  ]
+}

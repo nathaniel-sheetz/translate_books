@@ -12,6 +12,7 @@
 8. [Best Practices](#best-practices)
 9. [Examples](#examples)
 10. [Troubleshooting](#troubleshooting)
+11. [Style Guide Feature Detection](#style-guide-feature-detection)
 
 ---
 
@@ -630,6 +631,144 @@ book-translate test-prompt my_template.txt.jinja \
   --show-variables \
   --debug
 ```
+
+---
+
+## Style Guide Feature Detection
+
+The style-guide wizard does not just ask a fixed list of questions. Before any
+prompt is shown, `src/text_feature_detector.py` performs a deterministic
+heuristic scan over the **entire** project source (loaded from `chunks/` if
+present, otherwise from `source.txt`) and writes a **feature manifest** to
+`projects/<id>/text_features.json`. The manifest gates which conditional
+questions are surfaced to the user and is also embedded as a compact summary
+in the LLM-generated-questions prompt so the LLM does not duplicate questions
+the wizard already covers.
+
+### Manifest shape
+
+```json
+{
+  "generated_at": "2026-05-07T...",
+  "source_mtime": 1746619200.0,
+  "total_paragraphs": 251,
+  "total_words": 18626,
+  "features": {
+    "dialogue":             { "name": "dialogue",             "present": true,  "count": 58, "confidence": 0.50, "evidence": ["..."] },
+    "verse":                { "name": "verse",                "present": true,  "count": 6,  "confidence": 0.33, "evidence": ["..."] },
+    "scripture_references": { "name": "scripture_references", "present": true,  "count": 45, "confidence": 1.00, "evidence": ["John 3:16 ..."] },
+    "archaic_language":     { "name": "archaic_language",     "present": true,  "count": 210,"confidence": 1.00, "evidence": ["..."] },
+    "footnotes":            { "name": "footnotes",            "present": false, "count": 0,  "confidence": 0.0,  "evidence": [] }
+  }
+}
+```
+
+The cache is invalidated automatically when the source mtime is newer than
+`source_mtime`. Pass `--force-rescan` to `scripts/generate_style_guide.py` to
+re-run unconditionally.
+
+### Detector library
+
+| Feature | What it looks for |
+|---|---|
+| `dialogue` | Reuses `src/chunker.py` `_is_dialogue()` + paragraphs starting with raya (`—`). Present if `count >= 5` and ratio > 1% of paragraphs. |
+| `verse` | Runs of ≥4 consecutive short (<60-char), non-terminal lines, separated by blank lines / scene breaks. |
+| `footnotes` | `[N]` brackets, `^N. ` runs in the back third of the text, repeated `*` markers. |
+| `epigraphs` | Short (<300-char) paragraph immediately after a chapter heading containing an em-dash attribution. |
+| `letters` | Salutation (`Dear`, `Mi querido`, `Estimado`) + valediction (`Sincerely`, `Atentamente`) within 60 paragraphs. |
+| `scripture_references` | `Book chapter:verse` against a Bible-book wordlist (English + Spanish, including 1/2/3 prefixes). |
+| `archaic_language` | Frequency of `thou/thee/thy/hast/...` (English) or `vos/vuestra merced/heos/...` (Spanish) above 5 per 10K words. |
+| `foreign_passages` | ≥3 distinct `_italic_` / `*italic*` runs of ≥2 words. |
+| `lists` | ≥1 run of ≥3 consecutive lines starting with `-`, `*`, `•`, `1.`, `a)`, etc. |
+| `block_quotes` | Indented (≥4 spaces) long lines or `…:` followed by a long quoted paragraph. |
+| `dramatic_format` | ALL-CAPS speaker names + `:` and/or `[Enter ...]` style stage directions. |
+| `measurements_imperial` | Regex for `\d+ (miles\|feet\|inches\|lbs\|°F\|...)`. |
+| `currency_period` | `$`, `£`, `shilling`, `peso`, `real`, `maravedí`, etc. |
+| `translator_notes` | `[N. del T.`, `[Translator's note`, `[Nota del traductor`. |
+
+### Conditional questions
+
+`prompts/style_guide_questions.json` is now a dict with two arrays:
+
+```json
+{
+  "fixed":       [ /* dialect, forms_of_address, person_name_handling, place_name_handling */ ],
+  "conditional": [ /* dialogue_formatting, verse_handling, footnote_handling, ... */ ]
+}
+```
+
+Each conditional question carries a `requires` predicate evaluated against the
+manifest:
+
+```json
+{
+  "id": "dialogue_formatting",
+  "requires": { "feature": "dialogue", "min_count": 5 },
+  "question": "How should dialogue be formatted?",
+  "options": [ ... ]
+}
+```
+
+Predicate keys:
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `feature`        | string | required  | Manifest key to look up. |
+| `present`        | bool   | `true`    | Require the feature's `present` flag. |
+| `min_count`      | int    | none      | Minimum `count` value. |
+| `min_confidence` | float  | none      | Minimum `confidence` (0.0–1.0). |
+
+A legacy flat-list config (the pre-v0.6 format) is still accepted and treated
+as `{"fixed": [...], "conditional": []}`.
+
+### Adding a new conditional question
+
+1. Add a detector in `src/text_feature_detector.py` (a function returning
+   `FeatureResult(name, present, count, confidence, evidence)`) and register
+   it in `DETECTORS`.
+2. Add a unit test in `tests/test_text_feature_detector.py` covering both a
+   positive fixture and a negative case.
+3. Append a question to the `conditional` array in
+   `prompts/style_guide_questions.json` (and the tracked
+   `prompts/style_guide_questions.example.json`) with a `requires` predicate
+   pointing at your new feature key.
+4. The wizard surfaces it automatically — no code change in
+   `scripts/generate_style_guide.py` or `src/style_guide_wizard.py` is
+   required.
+
+### LLM-prompt manifest summary
+
+`prompts/style_guide_questions.txt` exposes a `{{ feature_manifest_summary }}`
+slot. `build_question_prompt(..., manifest=...)` renders a one-line-per-feature
+summary into it; the prompt instructs the LLM that features marked `✓` already
+have dedicated wizard questions and not to duplicate them, and to lean on the
+manifest as ground-truth evidence about content beyond the 15 K-character
+sample.
+
+If `manifest=None` is passed (e.g., for tests or external callers), the slot
+renders `(no manifest available)` so prompt rendering never errors out.
+
+### Public API in `src/style_guide_wizard.py`
+
+| Function | Purpose |
+|---|---|
+| `load_question_config(path=None)` | Returns `{"fixed": [...], "conditional": [...]}`. Accepts the legacy flat-list format too. |
+| `load_fixed_questions(path=None)` | Back-compat shim — returns only `fixed`. |
+| `load_conditional_questions(path=None)` | Returns only `conditional`. |
+| `get_active_questions(project_dir, *, config_path=None, manifest=None, force=False)` | Convenience: loads the config, runs / loads the manifest, filters conditionals; returns `(fixed, active_conditional, manifest)`. |
+| `build_question_prompt(... manifest=None)` | Renders the LLM prompt with the manifest summary block. |
+
+### Public API in `src/text_feature_detector.py`
+
+| Function / Class | Purpose |
+|---|---|
+| `detect_all_features(project_dir, *, force=False, text=None)` | Run all detectors with on-disk caching; pass `text=` to bypass file loading (for tests). |
+| `build_manifest(full_text)` | Run all detectors against an in-memory string. |
+| `manifest_path(project_dir)` | Return the cache path (`{project_dir}/text_features.json`). |
+| `matches_requires(requires, manifest)` | Evaluate a `requires` predicate against a manifest. |
+| `filter_conditional_questions(conditional, manifest)` | Filter a list of question dicts against a manifest. |
+| `manifest_summary(manifest)` | Compact one-line-per-feature summary for embedding in prompts. |
+| `FeatureManifest`, `FeatureResult` | Dataclasses with `to_dict()` / `from_dict()` for JSON round-trips. |
 
 ---
 

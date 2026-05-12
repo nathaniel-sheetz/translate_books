@@ -65,9 +65,9 @@ TRANSLATION INSTRUCTIONS
 ================================================================================
 
 1. STRUCTURE PRESERVATION:
-   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (refer to style guide for details)
-   - If the source contains image placeholders in the format [IMAGE:filename], copy
-     them into the translation exactly as-is at the same position in the text
+   - Preserve all paragraph breaks that appear in the source.  Do not merge or split paragraphs due to length.
+   - If the source contains image placeholders in the format [IMAGE:filename.ext:image description], copy
+     them into the translation exactly as-is at the same position in the text, translating only the image description.
 
 2. GLOSSARY COMPLIANCE:
    - Use the exact translations provided in the glossary for all specified terms
@@ -82,7 +82,6 @@ TRANSLATION INSTRUCTIONS
    - Translate for meaning, not word-for-word
    - Ensure natural-sounding {{target_language}}
    - Preserve literary devices (metaphors, allusions, wordplay when possible)
-   - Maintain cultural context while making it accessible to target audience
    - Ensure grammatical correctness in {{target_language}}
 
 5. PUNCTUATION AND FORMATTING:

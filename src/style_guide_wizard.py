@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Optional
 
 from src.models import StyleGuide
+from src.text_feature_detector import (
+    FeatureManifest,
+    detect_all_features,
+    filter_conditional_questions,
+    manifest_summary,
+)
 from src.utils.file_io import save_style_guide, render_prompt, load_prompt_template
+from src.utils.source_text import load_clean_source_text
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -30,11 +37,35 @@ def _resolve_prompt_path(name: str) -> Path:
     raise FileNotFoundError(f"Neither {user_path} nor {example_path} found")
 
 
-def load_fixed_questions(path: Optional[Path] = None) -> list[dict]:
-    """Load fixed questions from config JSON."""
+def load_question_config(path: Optional[Path] = None) -> dict[str, list[dict]]:
+    """Load question config as ``{"fixed": [...], "conditional": [...]}``.
+
+    Accepts both the new dict-shaped config (``{"fixed": [...], "conditional": [...]}``)
+    and the legacy flat-list format (treated as all-fixed, no conditional).
+    """
     config_path = path or _resolve_prompt_path("style_guide_questions.json")
     with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return {"fixed": data, "conditional": []}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Question config at {config_path} must be a list or dict, got {type(data).__name__}"
+        )
+    return {
+        "fixed": list(data.get("fixed", [])),
+        "conditional": list(data.get("conditional", [])),
+    }
+
+
+def load_fixed_questions(path: Optional[Path] = None) -> list[dict]:
+    """Load only the fixed questions (back-compat shim)."""
+    return load_question_config(path)["fixed"]
+
+
+def load_conditional_questions(path: Optional[Path] = None) -> list[dict]:
+    """Load only the conditional questions."""
+    return load_question_config(path)["conditional"]
 
 
 def format_answered_questions(
@@ -74,8 +105,14 @@ def build_question_prompt(
     locale: str,
     fixed_questions: list[dict],
     fixed_answers: dict[str, int | str],
+    manifest: Optional[FeatureManifest] = None,
 ) -> str:
-    """Build the prompt for LLM to generate additional questions."""
+    """Build the prompt for LLM to generate additional questions.
+
+    Note: we intentionally do NOT include the heuristic feature manifest in
+    this prompt. The LLM should base additional question suggestions on the
+    user-answered questions plus the source text sample.
+    """
     template = _resolve_prompt_path("style_guide_questions.txt").read_text(encoding="utf-8")
     answered = format_answered_questions(fixed_questions, fixed_answers)
     variables = {
@@ -85,6 +122,28 @@ def build_question_prompt(
         "source_text": source_text[:15000],  # Cap at ~15K chars
     }
     return render_prompt(template, variables)
+
+
+def get_active_questions(
+    project_dir: Optional[Path],
+    *,
+    config_path: Optional[Path] = None,
+    manifest: Optional[FeatureManifest] = None,
+    force: bool = False,
+) -> tuple[list[dict], list[dict], FeatureManifest]:
+    """Return (fixed_questions, active_conditional_questions, manifest).
+
+    Loads the question config, runs / loads the feature manifest, then filters
+    the conditional questions against it.
+    """
+    config = load_question_config(config_path)
+    if manifest is None:
+        if project_dir is None:
+            manifest = FeatureManifest(features={}, generated_at="")
+        else:
+            manifest = detect_all_features(Path(project_dir), force=force)
+    active_conditional = filter_conditional_questions(config["conditional"], manifest)
+    return config["fixed"], active_conditional, manifest
 
 
 def parse_llm_questions(response: str) -> list[dict]:
@@ -167,37 +226,15 @@ def answers_to_style_guide_fallback(
 def load_source_sample(project_dir: Path, max_words: int = 10000) -> str:
     """Load a source text sample from a project directory.
 
-    Prefers processed chapter data (chunks) over raw source.txt, since chunks
-    contain clean chapter text without TOC, publisher info, etc.
-
-    Priority: chunk source_text → source.txt fallback.
-    Returns first ~max_words words.
+    Returns the first ``max_words`` words of the cleanest available source
+    text. See ``src.utils.source_text.load_clean_source_text`` for the
+    priority order (chapters → chunks → source.txt).
     """
-    # Prefer chunks — these are post-chapter-splitting, clean source text
-    chunks_dir = project_dir / "chunks"
-    if chunks_dir.exists():
-        chunk_files = sorted(chunks_dir.glob("*_chunk_*.json"))
-        if chunk_files:
-            texts = []
-            word_count = 0
-            for chunk_file in chunk_files:
-                with open(chunk_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                src = data.get("source_text", "")
-                texts.append(src)
-                word_count += len(src.split())
-                if word_count >= max_words:
-                    break
-            return "\n\n".join(texts)
-
-    # Fallback: raw source.txt (pre-splitting, may include TOC/front matter)
-    source_path = project_dir / "source.txt"
-    if source_path.exists():
-        text = source_path.read_text(encoding="utf-8")
-        words = text.split()
-        return " ".join(words[:max_words])
-
-    return ""
+    text, _, _ = load_clean_source_text(project_dir)
+    if not text:
+        return ""
+    words = text.split()
+    return " ".join(words[:max_words])
 
 
 def save_style_guide_json(content: str, output_path: Path) -> None:

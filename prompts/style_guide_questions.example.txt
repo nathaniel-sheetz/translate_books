@@ -4,7 +4,7 @@ You have been given the opening chapters of a book to analyze for translation. T
 
 {{answered_questions}}
 
-Your job: identify 4-8 ADDITIONAL stylistic decisions specific to THIS text that the translator should make before beginning. Focus on decisions where the answer is NOT obvious from the text alone — where cultural knowledge, audience awareness, or translator preference determines the right choice.
+Your job: identify 3-6 ADDITIONAL stylistic decisions specific to THIS text that the translator should make before beginning. Focus on decisions where the answer is NOT obvious from the text alone — where cultural knowledge, audience awareness, or translator preference determines the right choice.
 
 Analyze the text for:
 - Author voice and rhetorical style (does the author use specific devices that need adaptation?)
@@ -17,7 +17,7 @@ Analyze the text for:
 SOURCE TEXT SAMPLE:
 {{source_text}}
 
-Return a JSON array of questions. Each question must have:
+Return a JSON array of questions, in English. Each question must have:
 - "id": short snake_case identifier
 - "question": the question text
 - "context": brief explanation of what's at stake for this specific text (1-2 sentences)
