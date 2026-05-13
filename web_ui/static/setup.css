@@ -85,6 +85,37 @@
 
 .question-block {
     margin-bottom: 18px;
+    position: relative;
+    padding-right: 60px;
+}
+
+.skip-toggle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    font-size: 12px;
+    color: #888;
+    user-select: none;
+    cursor: pointer;
+}
+
+.skip-toggle input {
+    margin-right: 4px;
+    vertical-align: middle;
+}
+
+.question-block.question-skipped {
+    opacity: 0.45;
+    background: #fafafa;
+}
+
+.question-block.question-skipped .question-label {
+    text-decoration: line-through;
+}
+
+.question-block.question-skipped .skip-toggle {
+    opacity: 1;
+    color: #555;
 }
 
 .question-label {
@@ -321,6 +352,15 @@
     color: #888;
     font-size: 13px;
     margin-left: 4px;
+}
+
+.glossary-qa-item-skipped {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.glossary-qa-item-skipped .glossary-qa-question {
+    text-decoration: line-through;
 }
 
 /* Status messages */

@@ -290,6 +290,10 @@
                     <div id="fixed-questions">
                         {% for q in fixed_questions %}
                         <div class="question-block" data-qid="{{ q.id }}">
+                            <label class="skip-toggle" title="Skip this question and exclude it from the style guide prompt">
+                                <input type="checkbox" class="skip-checkbox" data-qid="{{ q.id }}">
+                                Skip
+                            </label>
                             <label class="question-label">{{ q.question }}</label>
                             {% if q.get('_is_conditional') and q.get('_detected_hint') %}
                             <div class="section-hint" style="margin:4px 0 8px 0;">
