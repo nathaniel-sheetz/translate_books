@@ -133,6 +133,8 @@ A shared **LLM provider/model selector** appears at the top of the style guide w
 3. Generate style guide: click **Generate via API**, use **Generate from Answers (no LLM)** fallback, or copy/paste
 4. Save to `style.json`
 
+**Skipping a question.** Every question (fixed, feature-detected/conditional, or LLM-generated) has a small **Skip** checkbox in the top-right of its block. Ticking it dims the question, disables the radios, and clears any selected answer. Skipped questions are excluded from the style-guide prompt, the no-LLM fallback, the prompt-copy preview, and the Glossary stage's "choose relevant questions" list (the matching row is greyed out and its checkbox disabled). Use this when a question is irrelevant to your book or when an LLM-generated question is off-base. Skip state is session-only — reloading the dashboard clears it.
+
 **APIs:**
 - `POST /api/setup/<id>/prompts/questions` — generate additional questions prompt (for copy/paste)
 - `POST /api/setup/<id>/questions/generate` — generate questions via direct LLM call; `{ "answers": {...}, "provider": "...", "model": "..." }`
