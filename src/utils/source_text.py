@@ -1,20 +1,25 @@
 """
 Source text loader for project-aware tools.
 
-Style-guide and glossary generation need to feed an LLM with sample source
-text. The raw ``source.txt`` typically contains TOC, copyright, publisher
-info, and other front matter that is irrelevant (and noisy) to the LLM.
+Style-guide, glossary, and feature-detection paths all need to feed an LLM
+(or a heuristic detector) with sample source-language text. The raw
+``source.txt`` typically contains TOC, copyright, publisher info, and other
+front matter that is irrelevant (and noisy).
 
 The chapter-splitting step already strips most of that and writes clean
-per-chapter files to ``chapters/`` (and later ``chunks/``). This helper
-centralises the "find the cleanest source text available" logic so style-
-guide, glossary, and feature-detection paths all behave the same way and
-benefit from any future splitter improvements automatically.
+per-chapter files to ``chapters/``. The chunking step then re-writes the
+same content into ``chunks/*.json`` with both a ``source_text`` field
+(immutable, source-language) and a ``translated_text`` field (filled in
+later by the translator).
 
 Priority order:
-    1. ``chapters/chapter_*.txt``  — post-splitting, available earliest, plain text
-    2. ``chunks/*_chunk_*.json``   — post-chunking, equivalent content (JSON)
-    3. ``source.txt``              — raw, may include TOC / publisher / copyright
+    1. ``chunks/*_chunk_*.json`` ``source_text``  — guaranteed source-language,
+       front matter already excluded, immutable even after translation. Used
+       first because ``chapters/`` may be overwritten with translated text
+       on partially-translated projects.
+    2. ``chapters/chapter_*.txt``  — clean plain text right after splitting,
+       but a downstream workflow can replace these with translations.
+    3. ``source.txt``              — raw, may include TOC / publisher / copyright.
 
 Returns the source kind so callers can warn when they fall back to raw
 ``source.txt``.
@@ -46,27 +51,15 @@ def load_clean_source_text(
     """
     project_dir = Path(project_dir)
 
-    # 1. Prefer chapters/ — clean, plain text, available right after splitting.
-    chapters_dir = project_dir / "chapters"
-    if chapters_dir.exists():
-        chapter_files = sorted(chapters_dir.glob("chapter_*.txt"))
-        if chapter_files:
-            mtime = max(f.stat().st_mtime for f in chapter_files)
-            texts: list[str] = []
-            for cf in chapter_files:
-                try:
-                    texts.append(cf.read_text(encoding="utf-8"))
-                except OSError as exc:
-                    logger.warning("Failed to read chapter %s: %s", cf, exc)
-            return "\n\n".join(texts), mtime, "chapters"
-
-    # 2. Fall back to chunks/ — same content as chapters but JSON-wrapped.
+    # 1. Prefer chunks/ — the ``source_text`` field is guaranteed to be the
+    #    original source language, even on projects whose ``chapters/``
+    #    files have been replaced with translated text.
     chunks_dir = project_dir / "chunks"
     if chunks_dir.exists():
         chunk_files = sorted(chunks_dir.glob("*_chunk_*.json"))
         if chunk_files:
             mtime = max(f.stat().st_mtime for f in chunk_files)
-            texts = []
+            texts: list[str] = []
             for cf in chunk_files:
                 try:
                     with open(cf, "r", encoding="utf-8") as fh:
@@ -75,6 +68,21 @@ def load_clean_source_text(
                 except (json.JSONDecodeError, OSError) as exc:
                     logger.warning("Failed to read chunk %s: %s", cf, exc)
             return "\n\n".join(texts), mtime, "chunks"
+
+    # 2. Fall back to chapters/ — clean plain text right after splitting,
+    #    but may have been overwritten with translated text downstream.
+    chapters_dir = project_dir / "chapters"
+    if chapters_dir.exists():
+        chapter_files = sorted(chapters_dir.glob("chapter_*.txt"))
+        if chapter_files:
+            mtime = max(f.stat().st_mtime for f in chapter_files)
+            texts = []
+            for cf in chapter_files:
+                try:
+                    texts.append(cf.read_text(encoding="utf-8"))
+                except OSError as exc:
+                    logger.warning("Failed to read chapter %s: %s", cf, exc)
+            return "\n\n".join(texts), mtime, "chapters"
 
     # 3. Last resort: raw source.txt — likely contains front matter.
     source_path = project_dir / "source.txt"

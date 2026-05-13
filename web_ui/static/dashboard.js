@@ -867,9 +867,46 @@
     // Collect answers from fixed + extra questions
     var extraQuestions = [];
 
+    function isBlockSkipped(block) {
+        var skip = block && block.querySelector('.skip-checkbox');
+        return !!(skip && skip.checked);
+    }
+
+    function applySkipState(block, skipped) {
+        block.classList.toggle('question-skipped', skipped);
+        block.querySelectorAll('input[type="radio"], .custom-input').forEach(function(el) {
+            el.disabled = skipped;
+            if (skipped && el.type === 'radio') el.checked = false;
+        });
+        var preview = block.querySelector('.effect-preview');
+        if (preview && skipped) preview.textContent = '';
+        var qid = block.dataset.qid;
+        if (qid) syncGlossaryQASkip(qid, skipped);
+    }
+
+    function syncGlossaryQASkip(qid, skipped) {
+        var item = document.querySelector('.glossary-qa-item[data-qid="' + qid + '"]');
+        if (!item) return;
+        item.classList.toggle('glossary-qa-item-skipped', skipped);
+        var cb = item.querySelector('input[type="checkbox"]');
+        if (cb) {
+            cb.disabled = skipped;
+            if (skipped) cb.checked = false;
+        }
+    }
+
+    function wireSkipCheckbox(block) {
+        var skip = block.querySelector('.skip-checkbox');
+        if (!skip) return;
+        skip.addEventListener('change', function() {
+            applySkipState(block, skip.checked);
+        });
+    }
+
     function collectAnswers() {
         var answers = {};
         document.querySelectorAll('.question-block').forEach(function(block) {
+            if (isBlockSkipped(block)) return;
             var qid = block.dataset.qid;
             var checked = block.querySelector('input[name="q_' + qid + '"]:checked');
             if (!checked) return;
@@ -881,6 +918,8 @@
             }
         });
         extraQuestions.forEach(function(q) {
+            var block = document.querySelector('.question-block[data-qid="' + q.id + '"]');
+            if (block && isBlockSkipped(block)) return;
             var checked = document.querySelector('input[name="q_' + q.id + '"]:checked');
             if (checked) {
                 answers[q.id] = parseInt(checked.value, 10);
@@ -889,8 +928,9 @@
         return answers;
     }
 
-    // Custom input toggle
+    // Custom input toggle + skip wiring
     document.querySelectorAll('.question-block').forEach(function(block) {
+        wireSkipCheckbox(block);
         block.querySelectorAll('input[type="radio"]').forEach(function(radio) {
             radio.addEventListener('change', function() {
                 var customInput = block.querySelector('.custom-input');
@@ -986,7 +1026,9 @@
             var block = document.createElement('div');
             block.className = 'question-block';
             block.dataset.qid = q.id;
-            var html = '<label class="question-label">' + escapeHtml(q.question) + '</label>';
+            var html = '<label class="skip-toggle" title="Skip this question and exclude it from the style guide prompt">' +
+                '<input type="checkbox" class="skip-checkbox" data-qid="' + q.id + '"> Skip</label>';
+            html += '<label class="question-label">' + escapeHtml(q.question) + '</label>';
             (q.options || []).forEach(function(opt, i) {
                 var label = typeof opt === 'string' ? opt : opt.label;
                 html += '<label class="option-label">' +
@@ -996,6 +1038,8 @@
             });
             html += '<div class="effect-preview" data-qid="' + q.id + '"></div>';
             block.innerHTML = html;
+
+            wireSkipCheckbox(block);
 
             // Wire change handlers for effect preview
             block.querySelectorAll('input[type="radio"]').forEach(function(radio) {
@@ -1115,20 +1159,23 @@
         var qaDiv = document.getElementById('glossary-qa-selection');
         if (!qaDiv) return;
         qaDiv.innerHTML = '';
-        FIXED_QUESTIONS.forEach(function(q) {
-            var defaultChecked = q.glossary_relevant === true;
+        function appendQAItem(q, defaultChecked) {
+            var block = document.querySelector('.question-block[data-qid="' + q.id + '"]');
+            var skipped = block ? isBlockSkipped(block) : false;
             var item = document.createElement('label');
-            item.className = 'glossary-qa-item';
-            item.innerHTML = '<input type="checkbox"' + (defaultChecked ? ' checked' : '') + ' value="' + q.id + '"> ' +
+            item.className = 'glossary-qa-item' + (skipped ? ' glossary-qa-item-skipped' : '');
+            item.dataset.qid = q.id;
+            var checkedAttr = (defaultChecked && !skipped) ? ' checked' : '';
+            var disabledAttr = skipped ? ' disabled' : '';
+            item.innerHTML = '<input type="checkbox"' + checkedAttr + disabledAttr + ' value="' + q.id + '"> ' +
                 '<span class="glossary-qa-question">' + escapeHtml(q.question) + '</span>';
             qaDiv.appendChild(item);
+        }
+        FIXED_QUESTIONS.forEach(function(q) {
+            appendQAItem(q, q.glossary_relevant === true);
         });
         extraQuestions.forEach(function(q) {
-            var item = document.createElement('label');
-            item.className = 'glossary-qa-item';
-            item.innerHTML = '<input type="checkbox" value="' + q.id + '"> ' +
-                '<span class="glossary-qa-question">' + escapeHtml(q.question) + '</span>';
-            qaDiv.appendChild(item);
+            appendQAItem(q, false);
         });
     }
 

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1.0] - 2026-05-13
+
+### Added
+- **Per-question Skip flag in the style-guide wizard**: every fixed, conditional, and LLM-generated question now has a "Skip" checkbox in the top-right of its block. Toggling Skip dims the block in place, disables the radios, and clears any selected answer. Skipped questions are excluded from `collectAnswers()`, so they drop out of the style-guide LLM prompt, the no-LLM fallback, the prompt-copy preview, and the glossary guidance derivation. The Glossary stage's "choose relevant questions" list also greys out (with a line-through and disabled checkbox) any row whose source question is skipped, so unanswered questions can't sneak into the glossary prompt either. State is session-only — a reload resets it.
+
+### Fixed
+- **Feature detector reads source-language text only**: `load_clean_source_text` now prefers `chunks/*_chunk_*.json` (which carries an immutable `source_text` field) over `chapters/<id>.txt`. Previously, on a partially-translated project, the detector was scanning translated chapter files and matching Spanish words (`lanzamiento de pesos`, `trabajo duro`) as English period-currency tokens. Priority order is now `chunks/` → `chapters/` → `source.txt`. The style-guide wizard's source sample uses the same loader and inherits the fix.
+- **`currency_period` detector**: the bare word `crown` was matching `victor's crown`, `crown of gold`, `crown the summit`. The detector now counts `crown` only when at least one strong currency token (`shilling`, `pence`, `peso`, `real`, `maravedí`, etc.) also appears, and bumps the `present` threshold from `count >= 2` to `count >= 3`.
+- **`epicene_animal_speakers` detector**: incidental mentions of `spider`, `eagle`, `mouse`, `crow` inside scenes full of human dialogue were tripping the speech-verb-proximity gate. The detector now drops `has_speech` / `has_dialogue` from the trigger gate, requires either a non-pronoun prefix (`Mr.`, `Father`, `old`, …) or proper-noun-style capitalization on the animal mention, and requires `mismatch_pairs >= 1` for `present` (so a single consistent `mother + jirafa` no longer fires).
+
 ## [0.6.0.0] - 2026-05-07
 
 ### Added

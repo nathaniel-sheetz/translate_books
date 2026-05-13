@@ -229,6 +229,35 @@ class TestCurrencyDetector:
         result = detect_currency_period(_paragraphs(text), text)
         assert result.present
 
+    def test_crown_alone_does_not_trigger(self):
+        # "Crown" has many non-currency meanings (victor's crown, crown of
+        # gold, "crown the summit"). Without any strong currency token,
+        # crown mentions must NOT trigger the period-currency question.
+        text = (
+            "At the Olympian games he won the victor's crown. He wore a "
+            "crown of gold on his head. The ruins of the temple still "
+            "crown the summit of the Acropolis."
+        )
+        result = detect_currency_period(_paragraphs(text), text)
+        assert not result.present
+
+    def test_crown_counts_when_paired_with_strong_currency(self):
+        # When at least one strong currency token is present, "crown" is
+        # likely the British coin and should count toward the threshold.
+        text = (
+            "He paid two shillings for ale and three crowns for the horse. "
+            "A pence was left over, and another crown for the stable boy."
+        )
+        result = detect_currency_period(_paragraphs(text), text)
+        assert result.present
+
+    def test_below_count_threshold_does_not_trigger(self):
+        # A single shilling mention is not enough — threshold requires
+        # count >= 3 strong+crown tokens.
+        text = "He paid one shilling for the loaf and went on his way."
+        result = detect_currency_period(_paragraphs(text), text)
+        assert not result.present
+
 
 class TestEpiceneAnimalSpeakersDetector:
     def test_male_swallow_female_grammatical_gender_mismatch(self):
@@ -259,9 +288,10 @@ class TestEpiceneAnimalSpeakersDetector:
             'she said.\n\nShe watched the moon rise above the savanna.'
         )
         result = detect_epicene_animal_speakers(_paragraphs(text), text)
-        # Mother + jirafa (F) is consistent — present, but lower confidence
-        # since there is no cross-gender hazard.
-        assert result.present
+        # Mother + jirafa (F) is consistent — no cross-gender hazard, so
+        # the detector intentionally does NOT fire. The wizard question
+        # only matters when sex would otherwise flip in translation.
+        assert not result.present
 
     def test_father_spider_named_character(self):
         text = (
@@ -292,6 +322,25 @@ class TestEpiceneAnimalSpeakersDetector:
 
     def test_no_animals_at_all(self):
         text = "She walked across the room and turned on the light. " * 20
+        result = detect_epicene_animal_speakers(_paragraphs(text), text)
+        assert not result.present
+
+    def test_incidental_animal_near_dialogue_does_not_fire(self):
+        # Regression: a Greek-mythology / horse book that mentions common
+        # animals (spider, eagle, mouse, crow, etc.) inside scenes full of
+        # human dialogue used to trigger this question via bare speech-verb
+        # proximity. With the tightened gate, these incidental mentions
+        # must NOT fire because they have no anthropomorphism cue (no
+        # honorific, no kinship prefix, no proper-name capitalization).
+        text = (
+            '"He soared higher than any eagle had ever attained," said '
+            'Helios.\n\n'
+            'Old Atlantes, like a spider in his den, sat in his high '
+            'towers and kept watch.\n\n'
+            '"It is eight hundred miles as the crow flies," he said.\n\n'
+            '"As it often happens to mice and men, so it happened to '
+            'the wizard," she replied.'
+        )
         result = detect_epicene_animal_speakers(_paragraphs(text), text)
         assert not result.present
 

@@ -638,9 +638,13 @@ book-translate test-prompt my_template.txt.jinja \
 
 The style-guide wizard does not just ask a fixed list of questions. Before any
 prompt is shown, `src/text_feature_detector.py` performs a deterministic
-heuristic scan over the **entire** project source (loaded from `chunks/` if
-present, otherwise from `source.txt`) and writes a **feature manifest** to
-`projects/<id>/text_features.json`. The manifest gates which conditional
+heuristic scan over the **entire** project source and writes a **feature
+manifest** to `projects/<id>/text_features.json`. The source text is resolved
+by `src/utils/source_text.load_clean_source_text` in this priority order:
+`chunks/*_chunk_*.json` (the `source_text` field — immutable, source-language)
+→ `chapters/<id>.txt` → `source.txt`. Chunks come first so the scan stays in
+the source language even after `chapters/` has been overwritten with
+translated content. The manifest gates which conditional
 questions are surfaced to the user and is also embedded as a compact summary
 in the LLM-generated-questions prompt so the LLM does not duplicate questions
 the wizard already covers.

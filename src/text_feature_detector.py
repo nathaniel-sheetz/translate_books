@@ -459,24 +459,36 @@ def detect_measurements_imperial(paragraphs: list[str], full_text: str) -> Featu
     )
 
 
+# Strong currency tokens: unambiguous period-currency words that count on their
+# own. "Crown" is intentionally excluded here because it has many non-currency
+# meanings in English (the victor's crown, a crown of gold, "crown the summit",
+# Crown of Castile, etc.). Crown is handled separately below — it only counts
+# when at least one strong currency token also appears in the text.
 _CURRENCY_RE = re.compile(
     r"(\$\d|\£\d|\bshillings?\b|\bpence\b|\bpesos?\b|\breales?\b|"
     # Guard against false positives like "guinea pig(s)" / "guinea hen(s)"
     # (animals, not currency).
-    r"\bmaravedíes?\b|\bduros?\b|\bdoubloons?\b|\bcrowns?\b|\bguineas?\b(?!\s+(?:pigs?|hens?|fowls?|cocks?)\b))",
+    r"\bmaravedíes?\b|\bduros?\b|\bdoubloons?\b|\bguineas?\b(?!\s+(?:pigs?|hens?|fowls?|cocks?)\b))",
     re.IGNORECASE,
 )
+
+_CROWN_RE = re.compile(r"\bcrowns?\b", re.IGNORECASE)
 
 
 def detect_currency_period(paragraphs: list[str], full_text: str) -> FeatureResult:
     evidence: list[str] = []
-    matches = list(_CURRENCY_RE.finditer(full_text))
+    strong_matches = list(_CURRENCY_RE.finditer(full_text))
+    # Crown only counts as currency when paired with a strong token elsewhere
+    # in the text — otherwise "victor's crown" / "crown of gold" / "crown the
+    # summit" would falsely trigger period-currency on books with none.
+    crown_matches = list(_CROWN_RE.finditer(full_text)) if strong_matches else []
+    matches = sorted(strong_matches + crown_matches, key=lambda m: m.start())
     count = len(matches)
     for m in matches[:MAX_EVIDENCE_PER_FEATURE]:
         start = max(0, m.start() - 30)
         end = min(len(full_text), m.end() + 30)
         _add_evidence(evidence, full_text[start:end])
-    present = count >= 2
+    present = count >= 3
     confidence = min(1.0, count / 6) if present else 0.0
     return FeatureResult(
         "currency_period", present, count, confidence, evidence
@@ -702,19 +714,10 @@ def detect_epicene_animal_speakers(
         _, gender = _EPICENE_ANIMALS[animal]
         prefix = (m.group("prefix") or "").strip()
 
-        # Speech / dialogue context within ±200 chars
+        # Evidence window (±200 chars) — also reused below as the snippet
+        # bounds when an animal+sex-cue pair is recorded.
         ws = max(0, m.start() - _EPICENE_SPEECH_WIN)
         we = min(n, m.end() + _EPICENE_SPEECH_WIN)
-        speech_window = full_text[ws:we]
-
-        has_speech = bool(_SPEECH_RE.search(speech_window))
-        has_dialogue = (
-            '"' in speech_window
-            or "\u201c" in speech_window
-            or "\u201d" in speech_window
-            or "—" in speech_window
-            or "«" in speech_window
-        )
 
         # Animal capitalized mid-sentence -> proper-name signal
         raw = m.group("animal")
@@ -732,7 +735,13 @@ def detect_epicene_animal_speakers(
             "my", "your", "his", "her", "their", "our", "its",
         }
 
-        if not (has_speech or has_dialogue or is_proper or prefix_anthropomorphic):
+        # Tightened: bare dialogue / speech-verb proximity is too noisy on
+        # books that simply mention common animals near unrelated dialogue
+        # (e.g., a Greek-mythology book that mentions "spider", "eagle",
+        # "mouse" inside scenes full of human dialogue). Require a stronger
+        # anthropomorphism signal — either a non-pronoun prefix
+        # (Mr./Father/old/...) or a proper-noun-style capitalization.
+        if not (is_proper or prefix_anthropomorphic):
             continue
 
         speaking_animals.add(animal)
@@ -773,7 +782,11 @@ def detect_epicene_animal_speakers(
         + 0.40 * min(len(mismatch_pairs), 3)
     )
     confidence = min(1.0, base)
-    present = count >= 1 and len(speaking_animals) >= 1
+    # Only fire when there's an actual cross-gender hazard. Consistent
+    # cases (mother + jirafa, father + sapo) translate naturally and don't
+    # need the wizard question — they were just adding noise on books that
+    # mention common animals incidentally.
+    present = len(mismatch_pairs) >= 1
 
     return FeatureResult(
         "epicene_animal_speakers", present, count, confidence, evidence
