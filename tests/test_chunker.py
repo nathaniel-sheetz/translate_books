@@ -14,6 +14,8 @@ from src.chunker import (
     _score_split_points,
     _is_dialogue,
     _is_scene_break,
+    _is_subchapter_heading,
+    _find_heading_anchors,
 )
 from src.models import ChunkingConfig, ChunkingMethod, ChunkMetadata, ChunkStatus
 
@@ -618,3 +620,297 @@ class TestEdgeCases:
         chunks = chunk_chapter(text, config, "chapter_01")
         assert len(chunks) > 0
         assert chunks[0].metadata.paragraph_count == 3
+
+
+# --- Subchapter heading detection ---
+
+class TestIsSubchapterHeading:
+    """Tests for _is_subchapter_heading: patterns A (roman), B (arabic), C (bare all-caps)."""
+
+    # Pattern A: Roman numeral prefix
+    def test_roman_numeral_heading(self):
+        assert _is_subchapter_heading("I. THE WIZARD OF THE PYRENEES")
+        assert _is_subchapter_heading("IV. THE FLIGHT TO THE MOON")
+        assert _is_subchapter_heading("VII. THE PARDON")
+
+    # Pattern B: Arabic numeral prefix
+    def test_arabic_numeral_heading(self):
+        assert _is_subchapter_heading("1. THE BEGINNING")
+        assert _is_subchapter_heading("12. THE LAST STAND")
+
+    # Pattern C: Bare all-caps title
+    def test_bare_all_caps_heading(self):
+        assert _is_subchapter_heading("THE GREAT WOODEN HORSE")
+        assert _is_subchapter_heading("FIRST HEAT—THE WEDDING PRESENTS")
+        assert _is_subchapter_heading("GRIFFEN THE HIGH FLYER")
+        assert _is_subchapter_heading("SWIFT AND OLD-GOLD")
+
+    # Negatives
+    def test_regular_prose_not_heading(self):
+        prose = (
+            "OLD Atlantes, the wizard of the Pyrenees, had built a tower for his "
+            "laboratory on the topmost peak of a gray mountain."
+        )
+        assert not _is_subchapter_heading(prose)
+
+    def test_dialogue_not_heading(self):
+        assert not _is_subchapter_heading('"WHAT?" he cried.')
+        assert not _is_subchapter_heading('"HELLO THERE"')
+        assert not _is_subchapter_heading('“WHO GOES THERE”')
+
+    def test_mixed_case_chapter_marker_not_heading(self):
+        assert not _is_subchapter_heading("Chapter VI")
+        assert not _is_subchapter_heading("Chapter XVII")
+
+    def test_emphatic_exclamation_not_heading(self):
+        # Trailing sentence-end punctuation disqualifies
+        assert not _is_subchapter_heading("STOP HIM!")
+        assert not _is_subchapter_heading("WHO GOES THERE?")
+        assert not _is_subchapter_heading("THE END.")
+
+    def test_scene_break_not_heading(self):
+        assert not _is_subchapter_heading("***")
+        assert not _is_subchapter_heading("* * *")
+        assert not _is_subchapter_heading("---")
+
+    def test_too_short_not_heading(self):
+        # Single word, or fewer than 4 alphabetic chars
+        assert not _is_subchapter_heading("END")
+        assert not _is_subchapter_heading("A B")  # only 2 letters total
+
+    def test_too_long_not_heading(self):
+        # 11+ words rules out pattern C even if all caps
+        too_long = " ".join(["WORD"] * 11)
+        assert not _is_subchapter_heading(too_long)
+
+    def test_empty_not_heading(self):
+        assert not _is_subchapter_heading("")
+        assert not _is_subchapter_heading("   ")
+
+
+class TestFindHeadingAnchors:
+    """Tests for _find_heading_anchors."""
+
+    def test_no_headings_no_anchors(self):
+        paragraphs = [" ".join(["word"] * 200) for _ in range(10)]
+        para_words = [200] * 10
+        config = ChunkingConfig(min_chunk_size=500, max_chunk_size=3000)
+        anchors = _find_heading_anchors(paragraphs, para_words, config)
+        assert anchors == []
+
+    def test_simple_three_section_anchors(self):
+        # Three sections of 600 words each, separated by Roman headings.
+        paragraphs = []
+        para_words = []
+        for section_idx in range(3):
+            paragraphs.append(f"{['I', 'II', 'III'][section_idx]}. SECTION TITLE")
+            para_words.append(3)
+            for _ in range(3):
+                paragraphs.append(" ".join(["word"] * 200))
+                para_words.append(200)
+        config = ChunkingConfig(min_chunk_size=500, max_chunk_size=3000)
+        anchors = _find_heading_anchors(paragraphs, para_words, config)
+        # Skip first heading (at index 0, h >= 1 required) -> anchors are
+        # at the next two heading paragraphs: indices 4 and 8.
+        assert anchors == [4, 8]
+
+    def test_chapter_title_at_index_1_skipped(self):
+        # Mimic a real chapter file: "Chapter VI" at 0, "GRIFFEN THE HIGH FLYER"
+        # at 1 (bare all-caps -> matches pattern C), then real content.
+        paragraphs = [
+            "Chapter VI",
+            "GRIFFEN THE HIGH FLYER",
+            "I. THE WIZARD",
+        ] + [" ".join(["word"] * 200) for _ in range(3)] + [
+            "II. THE CASTLE",
+        ] + [" ".join(["word"] * 200) for _ in range(3)]
+        para_words = [count_words(p) for p in paragraphs]
+        config = ChunkingConfig(min_chunk_size=500, max_chunk_size=3000)
+        anchors = _find_heading_anchors(paragraphs, para_words, config)
+        # Index 1 (chapter title) excluded because only 2 words precede it
+        # (the "Chapter VI" paragraph) - below min_chunk_size.
+        # Index 2 also excluded for the same reason (title + "Chapter VI" still
+        # has only ~5 words before).
+        # Index 6 ("II. THE CASTLE") accepted.
+        assert 1 not in anchors
+        assert 2 not in anchors
+        assert 6 in anchors
+
+    def test_too_small_section_skipped(self):
+        # Heading 1 at index 1 with only 100 words after start -> skip.
+        # Heading 2 at index 5 with sufficient words on both sides -> keep.
+        paragraphs = [
+            " ".join(["word"] * 100),  # 100 words
+            "I. FIRST",
+            " ".join(["word"] * 600),
+            " ".join(["word"] * 600),
+            " ".join(["word"] * 600),
+            "II. SECOND",
+            " ".join(["word"] * 600),
+            " ".join(["word"] * 600),
+        ]
+        para_words = [count_words(p) for p in paragraphs]
+        config = ChunkingConfig(min_chunk_size=500, max_chunk_size=3000)
+        anchors = _find_heading_anchors(paragraphs, para_words, config)
+        # I. FIRST at index 1: only 100 words before -> reject.
+        # II. SECOND at index 5: 100 + 2 (heading) + 1800 = ample before
+        #   and 1200 after -> accept.
+        assert 1 not in anchors
+        assert 5 in anchors
+
+
+def count_words(text):
+    """Local helper to match production word counting."""
+    from src.utils.text_utils import count_words as _count
+    return _count(text)
+
+
+class TestSubchapterAwareChunking:
+    """Integration tests: chunk_chapter honors subchapter headings."""
+
+    def test_splits_on_roman_numeral_headings(self):
+        # Build a chapter with three subchapters each ~700 words.
+        parts = []
+        for roman, title in [("I", "FIRST"), ("II", "SECOND"), ("III", "THIRD")]:
+            parts.append(f"{roman}. {title}")
+            for _ in range(7):
+                parts.append(" ".join(["word"] * 100))
+        text = "\n\n".join(parts)
+        config = ChunkingConfig(
+            target_size=700,
+            min_chunk_size=500,
+            max_chunk_size=1500,
+            overlap_paragraphs=0,
+            min_overlap_words=0,
+        )
+        chunks = chunk_chapter(text, config, "chapter_test")
+        # Expect 3 chunks, each starting with a Roman heading.
+        assert len(chunks) == 3
+        for chunk in chunks:
+            first_para = chunk.source_text.split("\n\n")[0]
+            assert _is_subchapter_heading(first_para), (
+                f"Chunk does not start on a heading: {first_para!r}"
+            )
+
+    def test_splits_on_bare_all_caps_headings(self):
+        # FIRST HEAT-style bare-all-caps titles.
+        parts = []
+        for title in [
+            "FIRST HEAT—THE WEDDING PRESENTS",
+            "SECOND HEAT—BEFORE TROY",
+            "THIRD HEAT—THE KING'S MESSENGERS",
+        ]:
+            parts.append(title)
+            for _ in range(7):
+                parts.append(" ".join(["word"] * 100))
+        text = "\n\n".join(parts)
+        config = ChunkingConfig(
+            target_size=700,
+            min_chunk_size=500,
+            max_chunk_size=1500,
+            overlap_paragraphs=0,
+            min_overlap_words=0,
+        )
+        chunks = chunk_chapter(text, config, "chapter_test")
+        assert len(chunks) == 3
+        for chunk in chunks:
+            first_para = chunk.source_text.split("\n\n")[0]
+            assert _is_subchapter_heading(first_para)
+
+    def test_oversized_subchapter_subdivided(self):
+        # Section II is huge (3500 words, exceeds max=2000). DP should
+        # honor the forced anchors AND subdivide section II.
+        parts = []
+        # Section I: ~700 words
+        parts.append("I. SHORT FIRST")
+        for _ in range(7):
+            parts.append(" ".join(["word"] * 100))
+        # Section II: ~3500 words (oversized)
+        parts.append("II. BIG SECOND")
+        for _ in range(35):
+            parts.append(" ".join(["word"] * 100))
+        # Section III: ~700 words
+        parts.append("III. SHORT THIRD")
+        for _ in range(7):
+            parts.append(" ".join(["word"] * 100))
+        text = "\n\n".join(parts)
+        config = ChunkingConfig(
+            target_size=1500,
+            min_chunk_size=500,
+            max_chunk_size=2000,
+            overlap_paragraphs=0,
+            min_overlap_words=0,
+        )
+        chunks = chunk_chapter(text, config, "chapter_test")
+        # 2 anchors -> at least 3 chunks. Section II oversized -> at least 4.
+        assert len(chunks) >= 4
+        # Every anchor must begin a chunk: chunks starting with the two later
+        # headings must exist.
+        starting_paras = [c.source_text.split("\n\n")[0] for c in chunks]
+        assert any(p.startswith("I. ") for p in starting_paras)
+        assert any(p.startswith("II. ") for p in starting_paras)
+        assert any(p.startswith("III. ") for p in starting_paras)
+
+    def test_adjacent_headings_with_tiny_middle_skipped(self):
+        # Two headings sandwich a tiny 50-word middle section. The middle
+        # heading should be rejected by the feasibility filter, and the
+        # resulting chunks should satisfy min/max.
+        parts = ["I. FIRST"]
+        parts += [" ".join(["word"] * 100) for _ in range(7)]  # 700 words
+        parts.append("II. TINY MIDDLE")
+        parts += [" ".join(["word"] * 50)]  # 50 words - too small
+        parts.append("III. THIRD")
+        parts += [" ".join(["word"] * 100) for _ in range(7)]  # 700 words
+        text = "\n\n".join(parts)
+        config = ChunkingConfig(
+            target_size=700,
+            min_chunk_size=500,
+            max_chunk_size=1500,
+            overlap_paragraphs=0,
+            min_overlap_words=0,
+        )
+        chunks = chunk_chapter(text, config, "chapter_test")
+        # Middle anchor would create a 50-word chunk -> rejected.
+        # Resulting chunks should be reasonable in size.
+        for chunk in chunks:
+            assert chunk.metadata.word_count <= config.max_chunk_size
+
+
+class TestRealWonderBookChapters:
+    """Integration: chapters 7, 14, 16, 17 of wonder-book-of-horses should
+    produce chunks that begin on subchapter headings."""
+
+    @pytest.fixture(params=[7, 14, 16, 17])
+    def chapter_text(self, request):
+        path = (
+            Path(__file__).parent.parent
+            / "projects" / "wonder-book-of-horses" / "chapters"
+            / f"chapter_{request.param:02d}.txt"
+        )
+        if not path.exists():
+            pytest.skip(f"{path.name} not present")
+        return request.param, path.read_text(encoding="utf-8")
+
+    def test_every_chunk_starts_on_heading_or_first_para(self, chapter_text):
+        chap_num, text = chapter_text
+        config = ChunkingConfig(
+            target_size=2000,
+            min_chunk_size=500,
+            max_chunk_size=3000,
+            overlap_paragraphs=0,
+            min_overlap_words=0,
+        )
+        chunks = chunk_chapter(text, config, f"chapter_{chap_num:02d}")
+        assert len(chunks) >= 2, (
+            f"Chapter {chap_num} should produce multiple chunks for this test "
+            f"to be meaningful"
+        )
+        for idx, chunk in enumerate(chunks):
+            first_para = chunk.source_text.split("\n\n")[0]
+            if idx == 0:
+                # First chunk begins with the chapter title block
+                continue
+            assert _is_subchapter_heading(first_para), (
+                f"Chapter {chap_num} chunk {idx} does not start on a heading: "
+                f"{first_para!r}"
+            )

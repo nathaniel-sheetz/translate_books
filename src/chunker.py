@@ -7,6 +7,7 @@ Uses a three-phase approach:
 3. Optimize: find split points that balance even sizing with good boundaries
 """
 
+import bisect
 import logging
 import math
 import re
@@ -50,6 +51,17 @@ ATTRIBUTION_RE = re.compile(
 )
 
 SCENE_BREAK_RE = re.compile(r'^[\s*\-_]{1,}$')
+
+# --- Subchapter heading patterns ---
+
+# Pattern A: Roman numeral prefix, e.g. "I. THE WIZARD OF THE PYRENEES"
+ROMAN_HEADING_RE = re.compile(r"^[IVXLCDM]+\.\s+[A-Z][A-Z0-9 .,;:'\-—–&]*$")
+
+# Pattern B: Arabic numeral prefix, e.g. "1. SOME TITLE"
+ARABIC_HEADING_RE = re.compile(r"^\d+\.\s+[A-Z][A-Z0-9 .,;:'\-—–&]*$")
+
+# Pattern C (bare all-caps) is implemented in code, not a single regex.
+SENTENCE_END_CHARS = {'.', '?', '!'}
 
 
 def _generate_chunk_id(chapter_id: str, position: int) -> str:
@@ -166,6 +178,80 @@ def _is_scene_break(para: str) -> bool:
     return bool(re.match(r'^[\s*\-_]+$', stripped)) and len(stripped.replace(' ', '')) >= 3
 
 
+def _is_subchapter_heading(para: str) -> bool:
+    """
+    Detect whether a paragraph is a subchapter heading.
+
+    Matches one of three patterns:
+      A. Roman numeral prefix, e.g. "I. THE WIZARD OF THE PYRENEES"
+      B. Arabic numeral prefix, e.g. "1. SOME TITLE"
+      C. Bare all-caps title (strict): 2-10 words, all letters uppercase,
+         not ending in . ? !, not opening with a dialogue quote, not a scene break.
+    """
+    stripped = para.strip()
+    if not stripped:
+        return False
+
+    if ROMAN_HEADING_RE.match(stripped) or ARABIC_HEADING_RE.match(stripped):
+        return True
+
+    if _is_scene_break(stripped):
+        return False
+    if stripped[0] in DIALOGUE_STARTERS:
+        return False
+    if stripped[-1] in SENTENCE_END_CHARS:
+        return False
+
+    words = stripped.split()
+    if not (2 <= len(words) <= 10):
+        return False
+
+    letters = [c for c in stripped if c.isalpha()]
+    if len(letters) < 4:
+        return False
+    if any(c.islower() for c in letters):
+        return False
+
+    return True
+
+
+def _find_heading_anchors(
+    paragraphs: List[str],
+    para_words: List[int],
+    config: ChunkingConfig
+) -> List[int]:
+    """
+    Identify subchapter heading paragraphs that can serve as forced split points.
+
+    A heading at index h is accepted as an anchor only when both the section
+    that would end at h and the section that would start at h contain at least
+    config.min_chunk_size words. Walks headings in order, greedily accepting
+    feasible ones. Naturally excludes the chapter title at index 1 (only the
+    "Chapter N" paragraph precedes it) and any heading too close to the end.
+    """
+    if len(paragraphs) < 2:
+        return []
+
+    n = len(paragraphs)
+    prefix = [0] * (n + 1)
+    for i, w in enumerate(para_words):
+        prefix[i + 1] = prefix[i] + w
+
+    anchors: List[int] = []
+    last_anchor = 0
+
+    for h in range(1, n):
+        if not _is_subchapter_heading(paragraphs[h]):
+            continue
+        before = prefix[h] - prefix[last_anchor]
+        after = prefix[n] - prefix[h]
+        if before >= config.min_chunk_size and after >= config.min_chunk_size:
+            anchors.append(h)
+            last_anchor = h
+
+    return anchors
+
+
 def _score_split_points(paragraphs: List[str]) -> List[float]:
     """
     Score each paragraph boundary from 0.0 (bad split) to 1.0 (good split).
@@ -211,6 +297,12 @@ def _score_split_points(paragraphs: List[str]) -> List[float]:
         if _is_scene_break(curr_para):
             score += 0.4
 
+        # --- Subchapter heading boundary ---
+        # Helps DP prefer heading boundaries when subdividing oversized sections
+        # (forced anchors are honored regardless via _find_optimal_splits).
+        if _is_subchapter_heading(next_para):
+            score += 0.4
+
         # --- Long paragraph bonus ---
         if count_words(curr_para) > 150:
             score += 0.1
@@ -237,18 +329,26 @@ def _find_optimal_splits(
     scores: List[float],
     n_chunks: int,
     ideal_size: float,
-    config: ChunkingConfig
+    config: ChunkingConfig,
+    forced_splits: Set[int] = None,
 ) -> List[int]:
     """
     Find optimal paragraph indices where new chunks start.
 
     Returns a list of start indices, e.g. [0, 12, 25] for 3 chunks.
     Uses dynamic programming to balance even sizing with split quality.
+
+    If forced_splits is provided, any chunk straddling a forced split index
+    is assigned infinite cost, forcing the DP to honor those boundaries.
     """
     n_paras = len(para_words)
 
     if n_chunks == 1:
         return [0]
+
+    forced = forced_splits or set()
+    # Sorted list of forced indices for fast straddle checks via bisect.
+    forced_sorted = sorted(forced)
 
     # Precompute prefix sums for fast range word counts
     prefix = [0] * (n_paras + 1)
@@ -261,8 +361,18 @@ def _find_optimal_splits(
 
     weight = config.split_quality_weight
 
+    def straddles_forced(a: int, b: int) -> bool:
+        """True if any f in forced satisfies a < f < b."""
+        if not forced_sorted:
+            return False
+        i = bisect.bisect_right(forced_sorted, a)
+        return i < len(forced_sorted) and forced_sorted[i] < b
+
     def chunk_cost(a: int, b: int) -> float:
         """Cost of a chunk spanning paragraphs [a, b)."""
+        if straddles_forced(a, b):
+            return float('inf')
+
         words = range_words(a, b)
         size_cost = ((words - ideal_size) / ideal_size) ** 2
 
@@ -421,6 +531,21 @@ def chunk_chapter(
 
     # Phase 1: Determine chunk count
     n_chunks = _optimal_chunk_count(total_words, config)
+
+    # Phase 1b: Detect subchapter heading anchors and adjust chunk count to
+    # honor them. Anchors are feasible heading boundaries (sections on either
+    # side meet min_chunk_size).
+    anchors = _find_heading_anchors(all_paragraphs, para_words, config)
+    if anchors:
+        # Each section between consecutive anchors (and the head/tail sections)
+        # may need multiple chunks if it exceeds max_chunk_size.
+        section_starts = [0] + anchors + [len(all_paragraphs)]
+        n_for_max = 0
+        for a, b in zip(section_starts, section_starts[1:]):
+            section_words = sum(para_words[a:b])
+            n_for_max += max(1, math.ceil(section_words / config.max_chunk_size))
+        n_chunks = max(n_chunks, len(anchors) + 1, n_for_max)
+
     # Can't split into more chunks than paragraphs
     n_chunks = min(n_chunks, len(all_paragraphs))
 
@@ -451,7 +576,8 @@ def chunk_chapter(
     # Phase 3: Find optimal splits
     ideal_size = total_words / n_chunks
     split_indices = _find_optimal_splits(
-        para_words, scores, n_chunks, ideal_size, config
+        para_words, scores, n_chunks, ideal_size, config,
+        forced_splits=set(anchors) if anchors else None,
     )
 
     logger.debug(
