@@ -1359,6 +1359,7 @@
                 var msg = glossaryEditMode
                     ? 'Saved ' + terms.length + ' terms (replaced)'
                     : 'Saved ' + terms.length + ' terms';
+                glossaryEditMode = false;
                 setStatus('glossary-save-status', msg, 'success');
                 loadStatus();
             }
@@ -1386,6 +1387,7 @@
         if (rows.length) {
             glossaryProposals = [];
             rows.forEach(function(tr) {
+                if (tr.classList.contains('rejected')) return;
                 glossaryProposals.push({
                     english: tr.querySelector('.gl-english').value,
                     spanish: tr.querySelector('.gl-spanish').value,

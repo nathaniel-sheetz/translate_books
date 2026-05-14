@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
+from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
     format_glossary_for_prompt,
     load_chunk,
@@ -32,6 +33,7 @@ from src.utils.file_io import (
     load_style_guide,
     render_prompt,
     save_chunk,
+    save_glossary,
     save_style_guide,
 )
 from web_ui.evaluations import (
@@ -538,7 +540,7 @@ def setup_load_glossary(project_id):
 
 
 @app.route("/api/setup/<project_id>/glossary", methods=["POST"])
-def setup_save_glossary(project_id):
+def setupsave_glossary(project_id):
     """Save glossary terms to glossary.json.
 
     Modes:
@@ -549,8 +551,6 @@ def setup_save_glossary(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
-    from src.utils.file_io import save_glossary as _save_glossary
     data = request.get_json()
     terms_data = data.get("terms", [])
     mode = data.get("mode", "merge")
@@ -565,7 +565,7 @@ def setup_save_glossary(project_id):
 
     if mode == "replace":
         glossary = proposals_to_glossary(terms)
-        _save_glossary(glossary, glossary_path)
+        save_glossary(glossary, glossary_path)
         return jsonify({"ok": True, "total": len(terms), "mode": "replace"})
 
     # Merge with existing if present
@@ -574,11 +574,11 @@ def setup_save_glossary(project_id):
         existing_set = {t.english.lower() for t in existing.terms}
         new_terms = [t for t in terms if t.english.lower() not in existing_set]
         existing.terms.extend(new_terms)
-        _save_glossary(existing, glossary_path)
+        save_glossary(existing, glossary_path)
         return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
     else:
         glossary = proposals_to_glossary(terms)
-        _save_glossary(glossary, glossary_path)
+        save_glossary(glossary, glossary_path)
         return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
 
 
