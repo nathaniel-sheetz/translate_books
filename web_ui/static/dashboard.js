@@ -1154,6 +1154,8 @@
 
     var glossaryCandidates = [];
     var glossaryProposals = [];
+    var glossaryEditMode = false;
+    var GLOSSARY_TYPES = ['character', 'place', 'concept', 'technical', 'other'];
 
     function buildGlossaryQASelection() {
         var qaDiv = document.getElementById('glossary-qa-selection');
@@ -1211,6 +1213,7 @@
     }
 
     document.getElementById('btn-add-more-terms').addEventListener('click', function() {
+        glossaryEditMode = false;
         document.getElementById('glossary-existing').style.display = 'none';
     });
 
@@ -1267,6 +1270,7 @@
             }
             if (data.terms) {
                 glossaryProposals = data.terms;
+                glossaryEditMode = false;
                 renderGlossaryProposals(glossaryProposals);
                 setStatus('glossary-api-status', data.terms.length + ' terms generated', 'success');
             } else if (data.raw_text) {
@@ -1287,6 +1291,7 @@
             if (match) text = match[1].trim();
             glossaryProposals = JSON.parse(text);
             if (!Array.isArray(glossaryProposals)) throw new Error('Expected JSON array');
+            glossaryEditMode = false;
             renderGlossaryProposals(glossaryProposals);
         } catch (e) {
             alert('Failed to parse glossary: ' + e.message);
@@ -1301,11 +1306,18 @@
         proposals.forEach(function(p, i) {
             var tr = document.createElement('tr');
             tr.dataset.index = i;
+            var currentType = (p.type || 'other').toLowerCase();
+            if (GLOSSARY_TYPES.indexOf(currentType) === -1) currentType = 'other';
+            var typeOptions = GLOSSARY_TYPES.map(function(t) {
+                var sel = (t === currentType) ? ' selected' : '';
+                return '<option value="' + t + '"' + sel + '>' + t + '</option>';
+            }).join('');
+            tr.dataset.alternatives = JSON.stringify(p.alternatives || []);
             tr.innerHTML =
                 '<td><input type="text" value="' + escapeHtml(p.english || '') + '" class="gl-english"></td>' +
                 '<td><input type="text" value="' + escapeHtml(p.spanish || '') + '" class="gl-spanish"></td>' +
-                '<td>' + escapeHtml(p.type || 'other') + '</td>' +
-                '<td>' + escapeHtml(truncate(p.context || '', 40)) + '</td>' +
+                '<td><select class="gl-type">' + typeOptions + '</select></td>' +
+                '<td><input type="text" value="' + escapeHtml(p.context || '') + '" class="gl-context"></td>' +
                 '<td class="term-actions">' +
                     '<button class="accepted gl-accept">Keep</button> ' +
                     '<button class="gl-reject">Drop</button>' +
@@ -1328,21 +1340,63 @@
         var terms = [];
         document.querySelectorAll('#glossary-proposals-table tbody tr').forEach(function(tr) {
             if (tr.classList.contains('rejected')) return;
+            var eng = tr.querySelector('.gl-english').value.trim();
+            var spa = tr.querySelector('.gl-spanish').value.trim();
+            if (!eng || !spa) return;  // skip blank rows
             terms.push({
-                english: tr.querySelector('.gl-english').value,
-                spanish: tr.querySelector('.gl-spanish').value,
-                type: tr.cells[2].textContent,
-                context: tr.cells[3].textContent,
+                english: eng,
+                spanish: spa,
+                type: tr.querySelector('.gl-type').value,
+                context: tr.querySelector('.gl-context').value,
+                alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
             });
         });
-        apiPost('/api/setup/' + PROJECT + '/glossary', { terms: terms }).then(function(data) {
+        var payload = { terms: terms, mode: glossaryEditMode ? 'replace' : 'merge' };
+        apiPost('/api/setup/' + PROJECT + '/glossary', payload).then(function(data) {
             if (data.error) {
                 setStatus('glossary-save-status', data.error, 'error');
             } else {
-                setStatus('glossary-save-status', 'Saved ' + terms.length + ' terms', 'success');
+                var msg = glossaryEditMode
+                    ? 'Saved ' + terms.length + ' terms (replaced)'
+                    : 'Saved ' + terms.length + ' terms';
+                setStatus('glossary-save-status', msg, 'success');
                 loadStatus();
             }
         });
+    });
+
+    // Edit existing glossary
+    document.getElementById('btn-edit-glossary').addEventListener('click', function() {
+        apiGet('/api/setup/' + PROJECT + '/glossary').then(function(data) {
+            if (data.error) {
+                alert('Failed to load glossary: ' + data.error);
+                return;
+            }
+            glossaryProposals = data.terms || [];
+            glossaryEditMode = true;
+            renderGlossaryProposals(glossaryProposals);
+            document.getElementById('glossary-existing').style.display = 'none';
+        });
+    });
+
+    // Add a blank row to the glossary table
+    document.getElementById('btn-add-glossary-row').addEventListener('click', function() {
+        // Capture current edits before re-rendering so they aren't lost.
+        var rows = document.querySelectorAll('#glossary-proposals-table tbody tr');
+        if (rows.length) {
+            glossaryProposals = [];
+            rows.forEach(function(tr) {
+                glossaryProposals.push({
+                    english: tr.querySelector('.gl-english').value,
+                    spanish: tr.querySelector('.gl-spanish').value,
+                    type: tr.querySelector('.gl-type').value,
+                    context: tr.querySelector('.gl-context').value,
+                    alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
+                });
+            });
+        }
+        glossaryProposals.push({english:'', spanish:'', type:'other', context:'', alternatives:[]});
+        renderGlossaryProposals(glossaryProposals);
     });
 
     // ========================================================================

@@ -155,14 +155,17 @@ A **LLM provider/model selector** appears in Step 3 ("Bootstrap Translations via
 1. Select which style guide Q&A pairs to use as context
 2. Click **Extract Candidates** — scans source text for proper nouns and terms
 3. Click **Generate via API** to translate candidates using the selected LLM, or use the copy/paste workflow
-4. Review proposals table — accept/reject each term
+4. Review proposals table — accept/reject each term, edit `english` / `spanish` / `type` / `context` inline
 5. Save glossary
+
+**Edit existing glossary:** Once a glossary is saved, the "Existing glossary loaded (N terms)" banner shows an **Edit** button. Clicking it loads the saved `glossary.json` into the same proposals table. **Drop** a row to remove that term on save; **+ Add row** to insert a new entry; edit any cell inline. Save uses replace semantics — the table contents become the authoritative glossary, so dropped rows are deleted from `glossary.json`. The `alternatives` field on each term is preserved transparently (not shown in the UI). Translation prompts re-read `glossary.json` on each chunk, so changes take effect on the next translate or retranslate.
 
 **APIs:**
 - `POST /api/setup/<id>/extract-candidates` — extract candidate terms
 - `POST /api/setup/<id>/prompts/glossary` — generate glossary prompt (for copy/paste)
 - `POST /api/setup/<id>/glossary/generate` — generate glossary via direct LLM call; `{ "candidates": [...], "provider": "...", "model": "..." }`
-- `POST /api/setup/<id>/glossary` — save glossary JSON
+- `GET /api/setup/<id>/glossary` — return current glossary as `{ "terms": [{english, spanish, type, context, alternatives}, ...] }` for the edit table
+- `POST /api/setup/<id>/glossary` — save glossary JSON; accepts optional `mode: "merge" | "replace"` (default `merge`). `replace` overwrites the entire glossary; `merge` only appends terms whose `english` is not already present.
 
 **Backend:** `extract_glossary_candidates()` from `src/glossary_bootstrap.py`.
 
