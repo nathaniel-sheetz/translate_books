@@ -551,7 +551,7 @@ def setupsave_glossary(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    data = request.get_json()
+    data = request.get_json() or {}
     terms_data = data.get("terms", [])
     mode = data.get("mode", "merge")
 
@@ -559,6 +559,8 @@ def setupsave_glossary(project_id):
         return jsonify({"error": "Invalid mode"}), 400
     if mode == "merge" and not terms_data:
         return jsonify({"error": "No terms provided"}), 400
+    if mode == "replace" and not terms_data:
+        return jsonify({"error": "Refusing to replace glossary with empty list"}), 400
 
     terms = glossary_terms_from_proposals(terms_data)
     glossary_path = project_dir / "glossary.json"
