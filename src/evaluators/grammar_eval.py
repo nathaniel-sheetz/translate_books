@@ -26,6 +26,7 @@ except ImportError:
     LANGUAGETOOL_AVAILABLE = False
 
 from ..models import Chunk, EvalResult, Issue, IssueLevel, Glossary
+from ..utils.text_utils import image_placeholder_ranges, strip_image_placeholders
 from .base import BaseEvaluator
 
 
@@ -135,11 +136,22 @@ class GrammarEvaluator(BaseEvaluator):
             self.tool = language_tool_python.LanguageTool(dialect)
             self.dialect = dialect
 
+        # Strip [IMAGE:...] placeholders so tokens like "IMAGE", "jpg", and
+        # filename fragments don't get flagged as spelling/grammar issues.
+        # Equal-length whitespace keeps match.offset aligned to the original text.
+        placeholder_ranges = image_placeholder_ranges(chunk.translated_text)
+        text_to_check = strip_image_placeholders(chunk.translated_text)
+
         # Run LanguageTool check
-        matches = self._check_grammar(chunk.translated_text)
+        matches = self._check_grammar(text_to_check)
 
         # Process matches
         for match in matches:
+            # Skip matches whose offset falls inside a replaced placeholder
+            # (the whitespace run we substituted triggers a spurious spaces warning)
+            if any(start <= match.offset < end for start, end in placeholder_ranges):
+                continue
+
             # Check if this match should be ignored
             if self._should_ignore_match(match, context):
                 continue
