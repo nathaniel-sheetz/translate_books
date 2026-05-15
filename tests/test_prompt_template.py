@@ -365,3 +365,70 @@ class TestPromptWorkflow:
 
         assert "Test Book" in result
         assert "Test content" in result
+
+
+# =============================================================================
+# IMAGE PLACEHOLDER INSTRUCTION VARIABLE
+# =============================================================================
+
+class TestLiveTranslationTemplate:
+    """The live prompts/translation.txt must expose the new dynamic variable."""
+
+    @pytest.fixture
+    def live_template(self):
+        path = Path(__file__).parent.parent / "prompts" / "translation.txt"
+        if not path.exists():
+            pytest.skip("prompts/translation.txt not present in this checkout")
+        return path.read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def example_template(self):
+        return (Path(__file__).parent.parent / "prompts" / "translation.example.txt").read_text(encoding="utf-8")
+
+    def test_live_template_uses_image_placeholder_variable(self, live_template):
+        assert "{{image_placeholder_instructions}}" in live_template
+        # The hardcoded line is gone.
+        assert "If the source contains image placeholders in the format [IMAGE:filename.ext:image description]" not in live_template
+
+    def test_example_template_uses_image_placeholder_variable(self, example_template):
+        assert "{{image_placeholder_instructions}}" in example_template
+
+    def test_live_template_renders_with_empty_instruction(self, live_template):
+        """Rendering with image_placeholder_instructions='' must succeed (no orphan KeyError)."""
+        variables = {
+            "book_title": "Test",
+            "source_language": "English",
+            "target_language": "Spanish",
+            "source_text": "Hello world.",
+            "glossary": "(none)",
+            "style_guide": "(none)",
+            "context": "",
+            "chapter_info": "",
+            "previous_chapter_context": "",
+            "image_placeholder_instructions": "",
+        }
+        result = render_prompt(live_template, variables)
+        # No unreplaced variables left.
+        assert "{{" not in result
+
+    def test_live_template_renders_with_filename_only_instruction(self, live_template):
+        from src.utils.text_utils import image_placeholder_instruction
+
+        src = "Para one.\n\n[IMAGE:images/i01.jpg]\n\nPara two."
+        bullet = image_placeholder_instruction(src)
+        variables = {
+            "book_title": "Test",
+            "source_language": "English",
+            "target_language": "Spanish",
+            "source_text": src,
+            "glossary": "(none)",
+            "style_guide": "(none)",
+            "context": "",
+            "chapter_info": "",
+            "previous_chapter_context": "",
+            "image_placeholder_instructions": bullet,
+        }
+        result = render_prompt(live_template, variables)
+        # Bullet appears in the rendered prompt; "translating only" wording does NOT.
+        assert "[IMAGE:filename.ext]" in result
+        assert "translating only" not in result

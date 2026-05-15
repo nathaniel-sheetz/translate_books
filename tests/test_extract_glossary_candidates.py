@@ -452,3 +452,30 @@ class TestGetContextSentence:
         result = get_context_sentence("Uncle Paul", [long])
         assert len(result) < len(long)
         assert "Uncle Paul" in result
+
+
+class TestImagePlaceholdersExcluded:
+    """[IMAGE:...] tokens must not surface as candidate glossary terms."""
+
+    def test_image_tokens_not_in_candidates(self):
+        text = (
+            "Uncle Paul went to the garden. Uncle Paul saw a flower. "
+            "Uncle Paul came back. Uncle Paul looked happy.\n\n"
+            "[IMAGE:images/c01.jpg]\n\n"
+            "[IMAGE:images/c02.jpg:a winter caption scene]\n\n"
+            "Uncle Paul left."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=100)
+        surface_terms = {c.term for c in report.candidates}
+        terms_lower = {t.lower() for t in surface_terms}
+
+        # Filename / placeholder fragments must NOT appear as candidates.
+        for fragment in ("IMAGE", "image", "jpg", "c01", "c02", "images"):
+            assert fragment.lower() not in terms_lower, (
+                f"Unexpected placeholder fragment '{fragment}' in candidates: {surface_terms}"
+            )
+        # Description tokens must NOT appear either.
+        for word in ("winter", "caption", "scene"):
+            assert word.lower() not in terms_lower, (
+                f"Unexpected description word '{word}' in candidates: {surface_terms}"
+            )
