@@ -923,6 +923,38 @@ Examples:
         "--model", default="claude-sonnet-4-20250514",
         help="Model for bootstrap (default: claude-sonnet-4-20250514)"
     )
+    parser.add_argument(
+        "--max-literary-zipf-capitalized", type=float, default=4.0,
+        help="Max literary Zipf for always-capitalized words to be flagged "
+             "(default: 4.0; higher = more permissive)"
+    )
+    parser.add_argument(
+        "--max-literary-zipf-mixed", type=float, default=3.0,
+        help="Max literary Zipf for mixed-case dictionary words to be flagged "
+             "(default: 3.0)"
+    )
+    parser.add_argument(
+        "--bootstrap-context-mode", choices=["full-text", "word"], default="full-text",
+        help="Bootstrap prompt shape: 'full-text' (default, today's behavior — "
+             "flat candidate list + first 10 KB of book) or 'word' (candidates "
+             "ordered by first appearance, each followed by per-term word-window "
+             "fragments, no bulk source-text dump)"
+    )
+    parser.add_argument(
+        "--bootstrap-fragments-per-term", type=int, default=2,
+        help="Word-mode only: number of in-text fragments to attach to each "
+             "candidate (default: 2)"
+    )
+    parser.add_argument(
+        "--bootstrap-words-before", type=int, default=10,
+        help="Word-mode only: word tokens to include before each match "
+             "(default: 10)"
+    )
+    parser.add_argument(
+        "--bootstrap-words-after", type=int, default=6,
+        help="Word-mode only: word tokens to include after each match "
+             "(default: 6)"
+    )
     return parser.parse_args()
 
 
@@ -973,25 +1005,26 @@ def save_report(report: CandidateReport, output_path: Path) -> None:
 
 
 def _read_source_text(source_file: Path, verbose: bool = False) -> str:
-    """Read source text from a file or auto-promote to a project's chapters/.
+    """Read source text from a file or auto-promote to a project's chunks/chapters.
 
-    If ``source_file`` lives in a directory that also contains a
-    ``chapters/`` subdirectory with ``chapter_*.txt`` files, prefer those
-    clean per-chapter files so we don't feed TOC, copyright, publisher info,
-    and other front matter into glossary extraction. Otherwise read the file
-    as-is.
+    When ``source_file`` lives in a project directory, delegate to
+    ``load_clean_source_text`` so we prefer ``chunks/*_chunk_*.json``
+    ``source_text`` (immutable source-language, survives the combine stage
+    overwriting ``chapters/``) over ``chapters/chapter_*.txt`` (clean but
+    may be translated text on Stage-6'd projects). Falls back to reading
+    ``source_file`` as-is for standalone files outside a project dir.
     """
+    from src.utils.source_text import load_clean_source_text
+
     project_dir = source_file.parent
-    chapters_dir = project_dir / "chapters"
-    if chapters_dir.is_dir():
-        chapter_files = sorted(chapters_dir.glob("chapter_*.txt"))
-        if chapter_files:
-            if verbose:
-                print(
-                    f"Using {len(chapter_files)} clean chapter files from "
-                    f"{chapters_dir} (skipping front matter in {source_file.name})"
-                )
-            return "\n\n".join(cf.read_text(encoding="utf-8") for cf in chapter_files)
+    text, _mtime, source_kind = load_clean_source_text(project_dir)
+    if source_kind in ("chunks", "chapters"):
+        if verbose:
+            print(
+                f"Using {source_kind}/ from {project_dir} "
+                f"(skipping front matter in {source_file.name})"
+            )
+        return text
     return source_file.read_text(encoding="utf-8")
 
 
@@ -1030,6 +1063,8 @@ def main():
         min_frequency=args.min_frequency,
         max_candidates=args.max_candidates,
         verbose=args.verbose,
+        max_zipf_capitalized=args.max_literary_zipf_capitalized,
+        max_zipf_mixed=args.max_literary_zipf_mixed,
     )
     report.source_file = str(args.source_file)
 
@@ -1062,13 +1097,55 @@ def main():
             for c in report.candidates
         ]
 
-        # Truncate source text for context
-        source_sample = text[:10000]
+        context_mode = args.bootstrap_context_mode
+        book_title = ""
+        context_unit_label = ""
+        source_sample = ""
+
+        if context_mode == "word":
+            from src.utils.glossary_context import find_first_word_contexts
+
+            chapter_texts = [("source", text)]
+            no_match = 0
+            for cand in candidates:
+                pos, ctx = find_first_word_contexts(
+                    cand["term"], chapter_texts,
+                    max_contexts=args.bootstrap_fragments_per_term,
+                    words_before=args.bootstrap_words_before,
+                    words_after=args.bootstrap_words_after,
+                )
+                cand["first_position"] = pos
+                cand["contexts"] = ctx
+                if not ctx:
+                    no_match += 1
+
+            candidates.sort(
+                key=lambda c: c["first_position"] if c["first_position"] is not None
+                              else (10**9, 10**9)
+            )
+
+            book_title = args.source_file.parent.name or args.source_file.stem
+            context_unit_label = (
+                f"fragments (~{args.bootstrap_words_before} words before / "
+                f"{args.bootstrap_words_after} words after)"
+            )
+            print(
+                f"  word-mode: {args.bootstrap_fragments_per_term} fragment(s) "
+                f"per term; {no_match} candidate(s) had no in-text match"
+            )
+        else:
+            # Truncate source text for context (full-text mode, today's behavior)
+            source_sample = text[:10000]
 
         print("\nBootstrapping glossary translations via LLM...")
         try:
             from src.api_translator import call_llm
-            prompt = build_glossary_prompt(candidates, source_sample, style_content, "Spanish")
+            prompt = build_glossary_prompt(
+                candidates, source_sample, style_content, "Spanish",
+                context_mode=context_mode,
+                book_title=book_title,
+                context_unit_label=context_unit_label,
+            )
             response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=4096, call_type="glossary")
             proposals = parse_glossary_response(response)
             terms = glossary_terms_from_proposals(proposals)
