@@ -11,11 +11,15 @@ Usage:
     python extract_glossary_candidates.py source.txt -o candidates.json
     python extract_glossary_candidates.py source.txt -o candidates.json -g glossary.json
     python extract_glossary_candidates.py source.txt -o candidates.json --min-frequency 3
+
+First-run setup for rare-literary detection:
+    python -c "import nltk; nltk.download('brown'); nltk.download('gutenberg')"
 """
 
 import argparse
 import json
 import math
+import pickle
 import re
 import sys
 import tempfile
@@ -38,6 +42,22 @@ try:
 except ImportError:
     enchant = None
     ENCHANT_AVAILABLE = False
+
+try:
+    from nltk.corpus import brown, gutenberg
+    from nltk import FreqDist
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
+
+try:
+    from wordfreq import zipf_frequency as _wf_zipf
+    WORDFREQ_AVAILABLE = True
+except ImportError:
+    WORDFREQ_AVAILABLE = False
+
+CACHE_VERSION = 1
+CACHE_PATH = Path.home() / ".cache" / "translate_books" / "literary_freqdist.pkl"
 
 # Tokenization pattern matching dictionary_eval.py
 TOKEN_PATTERN = re.compile(r"[\w'áéíóúüñÁÉÍÓÚÜÑ]+")
@@ -90,7 +110,8 @@ SEQUENCE_BREAKERS = {
     "to", "in", "on", "at", "by", "from", "with", "of", "up", "out",
 }
 
-# Dialogue attribution verbs that create false positive n-grams
+# Dialogue attribution verbs (and other common adjacent words) that create
+# false positive n-grams like "said Smith" or "while Smith".
 DIALOGUE_VERBS = {
     "said", "asked", "replied", "answered", "cried", "exclaimed",
     "whispered", "shouted", "murmured", "continued", "added",
@@ -99,6 +120,19 @@ DIALOGUE_VERBS = {
     "interposed", "returned", "put", "took", "went", "began",
     "resumed", "protested", "objected", "insisted", "concluded",
     "queried", "ventured", "pursued", "urged", "asserted", "affirmed",
+    "either", "whole", "case", "return", "leave", "while",
+}
+
+# Words that should never appear as glossary candidates (single-word or as
+# any token in a multi-word n-gram). Days of the week and months of the year
+# are universally known and don't need glossary entries.
+BLOCKED_WORDS = {
+    # Days of the week
+    "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday",
+    # Months of the year
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
 }
 
 
@@ -202,6 +236,59 @@ class DictionaryChecker:
             return False
 
 
+class FrequencyChecker:
+    """Literary-English frequency baseline (Brown fiction + Gutenberg),
+    with wordfreq fallback for words the corpus doesn't cover.
+
+    Higher Zipf = more common word. Range roughly 1.0 (very rare) to 7.0
+    (the/and). Used to surface dictionary words that are rare in literary
+    English (archaic, domain-specific, or character names that happen to
+    collide with real words).
+    """
+
+    def __init__(self):
+        self._fd = None
+        self._total = 0
+        self.available = NLTK_AVAILABLE or WORDFREQ_AVAILABLE
+        if NLTK_AVAILABLE:
+            try:
+                self._fd, self._total = self._load_or_build()
+            except LookupError:
+                # Brown/Gutenberg not downloaded — fall back to wordfreq
+                self._fd = None
+                self._total = 0
+
+    def _load_or_build(self):
+        if CACHE_PATH.exists():
+            try:
+                blob = pickle.loads(CACHE_PATH.read_bytes())
+                if blob.get("version") == CACHE_VERSION:
+                    return blob["fd"], blob["total"]
+            except Exception:
+                pass  # fall through to rebuild
+        words = (list(brown.words(categories=["fiction", "mystery",
+                                              "romance", "humor"]))
+                 + list(gutenberg.words()))
+        fd = FreqDist(w.lower() for w in words if w.isalpha())
+        total = sum(fd.values())
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_bytes(pickle.dumps(
+            {"version": CACHE_VERSION, "fd": fd, "total": total}))
+        return fd, total
+
+    def literary_zipf(self, word: str) -> float:
+        """Return literary-English Zipf. Higher = more common.
+        Range roughly 1.0 (very rare) to 7.0 (the/and)."""
+        w = word.lower()
+        if self._fd is not None:
+            count = self._fd[w]
+            if count >= 3:
+                return math.log10((count / self._total) * 1e9)
+        if WORDFREQ_AVAILABLE:
+            return _wf_zipf(w, "en")
+        return 2.0  # last-resort: assume rare
+
+
 # ---------------------------------------------------------------------------
 # Extractors
 # ---------------------------------------------------------------------------
@@ -234,14 +321,17 @@ def extract_proper_nouns(
                 continue
 
             # Check for capitalized word NOT at sentence start
-            if i > 0 and token[0].isupper() and token.lower() not in SEQUENCE_BREAKERS:
+            if (i > 0 and token[0].isupper()
+                    and token.lower() not in SEQUENCE_BREAKERS
+                    and token.lower() not in BLOCKED_WORDS):
                 # Try to build a multi-word sequence
                 sequence = [token]
                 j = i + 1
                 while (j < len(tokens)
                        and tokens[j][0].isupper()
                        and not is_special_case(tokens[j])
-                       and tokens[j].lower() not in SEQUENCE_BREAKERS):
+                       and tokens[j].lower() not in SEQUENCE_BREAKERS
+                       and tokens[j].lower() not in BLOCKED_WORDS):
                     sequence.append(tokens[j])
                     j += 1
 
@@ -350,6 +440,8 @@ def extract_uncommon_words(
         lower = token.lower()
         if lower in STOPWORDS:
             continue
+        if lower in BLOCKED_WORDS:
+            continue
         word_counts[lower] += 1
         if lower not in first_form:
             first_form[lower] = token
@@ -406,6 +498,9 @@ def extract_frequent_ngrams(
                 # Skip dialogue attributions ("said Jules", "asked Emile")
                 if any(w in DIALOGUE_VERBS for w in gram_lowers):
                     continue
+                # Skip any n-gram containing a blocked word (days/months)
+                if any(w in BLOCKED_WORDS for w in gram_lowers):
+                    continue
                 # Skip n-grams that start or end with a conjunction/stopword
                 if gram_lowers[0] in STOPWORDS or gram_lowers[-1] in STOPWORDS:
                     continue
@@ -448,10 +543,15 @@ def extract_frequent_ngrams(
 def extract_repeated_capitalized(
     text: str,
     dict_checker: DictionaryChecker,
+    freq_checker: "FrequencyChecker",
     already_found: set[str],
     min_frequency: int,
+    max_zipf_capitalized: float = 4.0,
 ) -> dict[str, GlossaryCandidate]:
-    """Safety net: find words that are always capitalized and not in dictionary."""
+    """Safety net: find words that are always capitalized and either not in
+    the English dictionary, or rare in literary English (catches names like
+    'Merlin' / 'Mammon' that collide with real but uncommon words).
+    """
     cap_counts: Counter = Counter()
     lower_counts: Counter = Counter()
     first_form: dict[str, str] = {}
@@ -461,6 +561,8 @@ def extract_repeated_capitalized(
             continue
         lower = token.lower()
         if lower in STOPWORDS:
+            continue
+        if lower in BLOCKED_WORDS:
             continue
         if token[0].isupper():
             cap_counts[lower] += 1
@@ -480,19 +582,80 @@ def extract_repeated_capitalized(
         # Must always be capitalized (never appears lowercase)
         if lower_counts.get(word_lower, 0) > 0:
             continue
-        # Must not be a common English word
-        if dict_checker.is_english_word(word_lower):
-            continue
         if len(word_lower) <= 1:
             continue
+
+        in_dict = dict_checker.is_english_word(word_lower)
+        if in_dict:
+            # Word is in the dictionary — admit only if rare in literary English.
+            if not freq_checker.available:
+                continue
+            if freq_checker.literary_zipf(word_lower) >= max_zipf_capitalized:
+                continue
+            reasons = ["always_capitalized", "rare_in_literary_english"]
+        else:
+            reasons = ["always_capitalized", "not_in_dictionary"]
 
         candidates[word_lower] = GlossaryCandidate(
             term=first_form.get(word_lower, word_lower),
             type_guess=GlossaryTermType.OTHER,
             frequency=cap_count,
-            detection_reasons=["always_capitalized", "not_in_dictionary"],
+            detection_reasons=reasons,
         )
 
+    return candidates
+
+
+def extract_rare_literary_words(
+    text: str,
+    dict_checker: DictionaryChecker,
+    freq_checker: "FrequencyChecker",
+    already_found: set[str],
+    min_frequency: int,
+    max_zipf_mixed: float = 3.0,
+) -> dict[str, GlossaryCandidate]:
+    """Find dictionary words that are rare in literary English and recur in
+    the project text. Catches archaic / domain-specific terms like 'palmer',
+    'gaoler', 'halyard', 'carpel'.
+    """
+    if not freq_checker.available:
+        return {}
+
+    word_counts: Counter = Counter()
+    first_form: dict[str, str] = {}
+    for token in tokenize(text):
+        if is_special_case(token):
+            continue
+        lower = token.lower()
+        if lower in STOPWORDS:
+            continue
+        if lower in BLOCKED_WORDS:
+            continue
+        if len(lower) <= 2:
+            continue
+        word_counts[lower] += 1
+        if lower not in first_form:
+            first_form[lower] = token
+        elif first_form[lower].isupper() and not token.isupper():
+            first_form[lower] = token
+
+    candidates = {}
+    for word_lower, count in word_counts.items():
+        if count < min_frequency:
+            continue
+        if word_lower in already_found:
+            continue
+        # Must be in the dictionary (otherwise extract_uncommon_words got it)
+        if not dict_checker.is_english_word(word_lower):
+            continue
+        if freq_checker.literary_zipf(word_lower) >= max_zipf_mixed:
+            continue
+        candidates[word_lower] = GlossaryCandidate(
+            term=first_form[word_lower],
+            type_guess=GlossaryTermType.TECHNICAL,
+            frequency=count,
+            detection_reasons=["rare_in_literary_english"],
+        )
     return candidates
 
 
@@ -571,9 +734,11 @@ def score_and_rank(
         not_in_dict = 1.0 if not dict_checker.is_english_word(key) else 0.0
         is_multi = 1.0 if " " in key else 0.0
         norm_reasons = min(len(c.detection_reasons) / 3.0, 1.0)
+        rare_bonus = 1.0 if "rare_in_literary_english" in c.detection_reasons else 0.0
 
         c.score = round(
-            0.4 * norm_freq + 0.3 * not_in_dict + 0.2 * is_multi + 0.1 * norm_reasons,
+            0.35 * norm_freq + 0.25 * not_in_dict + 0.20 * is_multi
+            + 0.10 * norm_reasons + 0.10 * rare_bonus,
             4,
         )
 
@@ -599,6 +764,9 @@ def extract_candidates(
     min_frequency: int = 2,
     max_candidates: int = 500,
     verbose: bool = False,
+    freq_checker: Optional["FrequencyChecker"] = None,
+    max_zipf_capitalized: float = 4.0,
+    max_zipf_mixed: float = 3.0,
 ) -> CandidateReport:
     """Run the full extraction pipeline on source text."""
     text = normalize_newlines(text)
@@ -614,6 +782,12 @@ def extract_candidates(
     if not dict_checker.available and verbose:
         print("Warning: PyEnchant not available. Dictionary-based extraction disabled.",
               file=sys.stderr)
+
+    if freq_checker is None:
+        freq_checker = FrequencyChecker()
+    if not freq_checker.available and verbose:
+        print("Warning: NLTK and wordfreq unavailable. "
+              "Skipping rare-literary extraction.", file=sys.stderr)
 
     if verbose:
         print(f"Analyzing {total_words:,} words ({unique_words:,} unique)...")
@@ -640,12 +814,24 @@ def extract_candidates(
 
     # 4. Repeated capitalized (safety net)
     already = set(proper_nouns.keys()) | set(uncommon.keys()) | set(ngrams.keys())
-    repeated_cap = extract_repeated_capitalized(text, dict_checker, already, min_frequency)
+    repeated_cap = extract_repeated_capitalized(
+        text, dict_checker, freq_checker, already, min_frequency,
+        max_zipf_capitalized,
+    )
     if verbose:
         print(f"  Repeated capitalized candidates: {len(repeated_cap)}")
 
+    # 5. Rare literary words (dictionary words rare in literary English)
+    rare_literary = extract_rare_literary_words(
+        text, dict_checker, freq_checker,
+        already | set(repeated_cap.keys()),
+        min_frequency, max_zipf_mixed,
+    )
+    if verbose:
+        print(f"  Rare literary word candidates: {len(rare_literary)}")
+
     # Merge
-    merged = merge_candidates(proper_nouns, uncommon, ngrams, repeated_cap)
+    merged = merge_candidates(proper_nouns, uncommon, ngrams, repeated_cap, rare_literary)
     if verbose:
         print(f"  Merged total: {len(merged)}")
 

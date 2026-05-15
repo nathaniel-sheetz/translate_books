@@ -14,10 +14,12 @@ from scripts.extract_glossary_candidates import (
     is_special_case,
     get_context_sentence,
     DictionaryChecker,
+    FrequencyChecker,
     extract_proper_nouns,
     extract_uncommon_words,
     extract_frequent_ngrams,
     extract_repeated_capitalized,
+    extract_rare_literary_words,
     merge_candidates,
     exclude_glossary_terms,
     score_and_rank,
@@ -25,6 +27,9 @@ from scripts.extract_glossary_candidates import (
     GlossaryCandidate,
     CandidateReport,
     save_report,
+    _read_source_text,
+    NLTK_AVAILABLE,
+    WORDFREQ_AVAILABLE,
 )
 from src.models import Glossary, GlossaryTerm, GlossaryTermType
 
@@ -52,6 +57,21 @@ def mock_dict_checker():
         "steam", "engine", "blue", "bird", "rock", "water",
     }
     checker.is_english_word = lambda w: w.lower() in common_words
+    return checker
+
+
+@pytest.fixture
+def mock_freq_checker():
+    """Frequency checker with hand-curated literary Zipf scores."""
+    checker = MagicMock(spec=FrequencyChecker)
+    checker.available = True
+    zipf_table = {
+        "merlin": 3.0, "mammon": 3.0, "palmer": 3.5, "gaoler": 2.5,
+        "armour": 3.5, "halyard": 2.0, "binnacle": 1.5, "carpel": 2.0,
+        "dragon": 5.0, "witch": 4.7, "sword": 5.0, "house": 6.0,
+        "emile": 3.0, "jules": 3.0, "paul": 5.5,
+    }
+    checker.literary_zipf = lambda w: zipf_table.get(w.lower(), 3.0)
     return checker
 
 
@@ -271,21 +291,166 @@ class TestExtractFrequentNgrams:
 
 class TestExtractRepeatedCapitalized:
 
-    def test_finds_always_capitalized(self, mock_dict_checker):
+    def test_finds_always_capitalized(self, mock_dict_checker, mock_freq_checker):
         text = "Emile was there. Emile came back. Emile smiled."
-        result = extract_repeated_capitalized(text, mock_dict_checker, set(), 2)
+        result = extract_repeated_capitalized(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
         assert "emile" in result
 
-    def test_excludes_sometimes_lowercase(self, mock_dict_checker):
+    def test_excludes_sometimes_lowercase(self, mock_dict_checker, mock_freq_checker):
         text = "The garden was nice. They went to the garden."
-        result = extract_repeated_capitalized(text, mock_dict_checker, set(), 1)
+        result = extract_repeated_capitalized(
+            text, mock_dict_checker, mock_freq_checker, set(), 1
+        )
         # "garden" appears lowercase, should not be flagged
         assert "garden" not in result
 
-    def test_excludes_already_found(self, mock_dict_checker):
+    def test_excludes_already_found(self, mock_dict_checker, mock_freq_checker):
         text = "Emile was there. Emile came back."
-        result = extract_repeated_capitalized(text, mock_dict_checker, {"emile"}, 2)
+        result = extract_repeated_capitalized(
+            text, mock_dict_checker, mock_freq_checker, {"emile"}, 2
+        )
         assert "emile" not in result
+
+    def test_dictionary_word_with_low_zipf_admitted(
+        self, mock_dict_checker, mock_freq_checker
+    ):
+        """Merlin is in the dictionary (a bird) but rare in literature, so
+        the always-capitalized form should now surface."""
+        # Add 'merlin' as an English word so the dict check passes.
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {
+            "merlin", "the", "a", "was", "there", "and",
+        }
+        text = "Merlin watched the sky. Merlin turned away. Merlin was silent."
+        result = extract_repeated_capitalized(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "merlin" in result
+        reasons = result["merlin"].detection_reasons
+        assert "always_capitalized" in reasons
+        assert "rare_in_literary_english" in reasons
+
+    def test_dictionary_word_with_high_zipf_rejected(
+        self, mock_dict_checker, mock_freq_checker
+    ):
+        """House is a common English word, even when always capitalized
+        (e.g. personification), it should NOT be flagged."""
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {
+            "house", "the", "a", "was", "stood", "still",
+        }
+        text = "House stood still. House was silent. House waited."
+        result = extract_repeated_capitalized(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "house" not in result
+
+    def test_non_dictionary_word_keeps_old_path(
+        self, mock_dict_checker, mock_freq_checker
+    ):
+        """Non-dictionary always-capitalized word still gets the
+        not_in_dictionary reason (legacy path)."""
+        mock_dict_checker.is_english_word = lambda w: False
+        text = "Zorblax appeared. Zorblax spoke. Zorblax vanished."
+        result = extract_repeated_capitalized(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "zorblax" in result
+        assert "not_in_dictionary" in result["zorblax"].detection_reasons
+
+
+class TestExtractRareLiteraryWords:
+
+    def test_archaic_dictionary_word_flagged(self, mock_dict_checker, mock_freq_checker):
+        """A dictionary word that's genuinely rare in literature (gaoler, Zipf 2.5)
+        and recurs above min_frequency should be flagged."""
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {
+            "gaoler", "the", "a", "was", "and", "with", "his",
+        }
+        text = "The gaoler watched. The gaoler turned. The gaoler locked."
+        result = extract_rare_literary_words(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "gaoler" in result
+        assert result["gaoler"].detection_reasons == ["rare_in_literary_english"]
+
+    def test_below_min_frequency_excluded(self, mock_dict_checker, mock_freq_checker):
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {"palmer", "the"}
+        text = "The palmer walked alone."
+        result = extract_rare_literary_words(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "palmer" not in result
+
+    def test_common_literary_word_excluded(self, mock_dict_checker, mock_freq_checker):
+        """dragon and sword have high literary Zipf and should NOT be flagged."""
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {
+            "dragon", "sword", "the", "a", "and",
+        }
+        text = "The dragon roared. The sword gleamed. The dragon flew. The sword struck."
+        result = extract_rare_literary_words(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "dragon" not in result
+        assert "sword" not in result
+
+    def test_non_dictionary_word_excluded(self, mock_dict_checker, mock_freq_checker):
+        """Words not in the dictionary belong to extract_uncommon_words,
+        not this extractor."""
+        mock_dict_checker.is_english_word = lambda w: False
+        text = "The zorblax watched. The zorblax fled."
+        result = extract_rare_literary_words(
+            text, mock_dict_checker, mock_freq_checker, set(), 2
+        )
+        assert "zorblax" not in result
+
+    def test_already_found_excluded(self, mock_dict_checker, mock_freq_checker):
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {"palmer", "the"}
+        text = "The palmer walked. The palmer rested."
+        result = extract_rare_literary_words(
+            text, mock_dict_checker, mock_freq_checker, {"palmer"}, 2
+        )
+        assert "palmer" not in result
+
+    def test_threshold_override_tightens(self, mock_dict_checker, mock_freq_checker):
+        """Lowering max_zipf_mixed below palmer's 3.5 should drop palmer."""
+        mock_dict_checker.is_english_word = lambda w: w.lower() in {
+            "palmer", "halyard", "the", "and",
+        }
+        text = (
+            "The palmer walked. The palmer rested. "
+            "The halyard snapped. The halyard frayed."
+        )
+        # max_zipf_mixed=3.0: palmer (3.5) drops, halyard (2.0) stays
+        result = extract_rare_literary_words(
+            text, mock_dict_checker, mock_freq_checker, set(), 2,
+            max_zipf_mixed=3.0,
+        )
+        assert "palmer" not in result
+        assert "halyard" in result
+
+    def test_unavailable_freq_checker_returns_empty(self, mock_dict_checker):
+        unavailable = MagicMock(spec=FrequencyChecker)
+        unavailable.available = False
+        result = extract_rare_literary_words(
+            "anything goes here.", mock_dict_checker, unavailable, set(), 1
+        )
+        assert result == {}
+
+
+@pytest.mark.skipif(
+    not (NLTK_AVAILABLE and WORDFREQ_AVAILABLE),
+    reason="NLTK or wordfreq not installed",
+)
+class TestFrequencyChecker:
+
+    def test_common_words_score_higher_than_rare(self):
+        """Smoke check: 'the' must have a much higher Zipf than 'merlin'."""
+        checker = FrequencyChecker()
+        if not checker.available:
+            pytest.skip("FrequencyChecker not available at runtime")
+        assert checker.literary_zipf("the") > checker.literary_zipf("merlin")
+        assert checker.literary_zipf("the") > 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +570,27 @@ class TestExtractCandidates:
         text = "Hello world. Goodbye world."
         report = extract_candidates(text, min_frequency=10)
         assert len(report.candidates) == 0
+
+    def test_rare_literary_integration(self, mock_freq_checker):
+        """End-to-end: archaic dictionary words surface, common literary words don't."""
+        text = (
+            "The gaoler unlocked the door. The gaoler watched the prisoner. "
+            "The gaoler turned away. Merlin watched from afar. "
+            "Merlin nodded once. Merlin turned away. "
+            "The dragon roared. The dragon flew over. The dragon vanished. "
+            "The sword gleamed. The sword struck true. The sword shattered."
+        )
+        report = extract_candidates(
+            text, min_frequency=2, max_candidates=100,
+            freq_checker=mock_freq_checker,
+        )
+        terms_lower = {c.term.lower() for c in report.candidates}
+        # Rare archaic / collision-name words should appear
+        assert "gaoler" in terms_lower
+        assert "merlin" in terms_lower
+        # Common literary words should NOT appear
+        assert "dragon" not in terms_lower
+        assert "sword" not in terms_lower
 
 
 # ---------------------------------------------------------------------------
