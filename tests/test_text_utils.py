@@ -9,7 +9,10 @@ from src.utils.text_utils import (
     count_words,
     extract_paragraphs,
     count_paragraphs,
-    detect_paragraph_boundaries
+    detect_paragraph_boundaries,
+    strip_image_placeholders,
+    image_placeholder_ranges,
+    image_placeholder_instruction,
 )
 
 
@@ -292,3 +295,134 @@ class TestEdgeCases:
 
         boundaries = detect_paragraph_boundaries(text)
         assert len(boundaries) == 100
+
+
+class TestStripImagePlaceholders:
+    """Tests for strip_image_placeholders function."""
+
+    def test_no_placeholders(self):
+        text = "Just regular prose with no images."
+        assert strip_image_placeholders(text) == text
+
+    def test_filename_only(self):
+        text = "before [IMAGE:images/i01.jpg] after"
+        result = strip_image_placeholders(text)
+        # Same total length, placeholder replaced with spaces
+        assert len(result) == len(text)
+        assert "[IMAGE:" not in result
+        assert "images/i01.jpg" not in result
+        assert result.startswith("before ")
+        assert result.endswith(" after")
+
+    def test_with_description(self):
+        text = "before [IMAGE:images/i01.jpg:a child smiles] after"
+        result = strip_image_placeholders(text)
+        assert len(result) == len(text)
+        assert "[IMAGE:" not in result
+        assert "child" not in result
+        assert "smiles" not in result
+
+    def test_offset_preserved(self):
+        """Character offsets after the placeholder must line up with the original."""
+        text = "X [IMAGE:images/i01.jpg] Y"
+        result = strip_image_placeholders(text)
+        # The 'Y' should sit at exactly the same index it did in the source.
+        assert text.index("Y") == result.index("Y")
+
+    def test_multiple_placeholders(self):
+        text = "a [IMAGE:images/a.jpg] b [IMAGE:images/b.jpg:caption] c"
+        result = strip_image_placeholders(text)
+        assert "IMAGE" not in result
+        assert "jpg" not in result
+        assert "caption" not in result
+        # Non-placeholder content survives.
+        assert "a " in result and " b " in result and " c" in result
+
+    def test_empty_string(self):
+        assert strip_image_placeholders("") == ""
+
+    def test_none_passthrough(self):
+        assert strip_image_placeholders(None) is None
+
+
+class TestImagePlaceholderRanges:
+    """Tests for image_placeholder_ranges function."""
+
+    def test_no_placeholders(self):
+        assert image_placeholder_ranges("no images here") == []
+
+    def test_empty_string(self):
+        assert image_placeholder_ranges("") == []
+
+    def test_filename_only(self):
+        text = "a [IMAGE:images/i01.jpg] b"
+        ranges = image_placeholder_ranges(text)
+        assert ranges == [(2, 24)]
+
+    def test_with_description(self):
+        text = "a [IMAGE:images/i01.jpg:caption] b"
+        ranges = image_placeholder_ranges(text)
+        assert len(ranges) == 1
+        start, end = ranges[0]
+        assert text[start:end] == "[IMAGE:images/i01.jpg:caption]"
+
+    def test_multiple_placeholders(self):
+        text = "a [IMAGE:a.jpg] b [IMAGE:b.jpg:cap] c"
+        ranges = image_placeholder_ranges(text)
+        assert len(ranges) == 2
+        assert text[ranges[0][0]:ranges[0][1]] == "[IMAGE:a.jpg]"
+        assert text[ranges[1][0]:ranges[1][1]] == "[IMAGE:b.jpg:cap]"
+
+    def test_ranges_cover_replacement_whitespace(self):
+        """Offsets inside the replaced region must be caught by range check."""
+        text = "x [IMAGE:images/img009.jpg:Page header] y"
+        ranges = image_placeholder_ranges(text)
+        assert len(ranges) == 1
+        start, end = ranges[0]
+        # Any offset inside the replaced span should be in range
+        for offset in range(start, end):
+            assert any(s <= offset < e for s, e in ranges)
+
+
+class TestImagePlaceholderInstruction:
+    """Tests for image_placeholder_instruction function."""
+
+    def test_no_placeholders_returns_empty(self):
+        assert image_placeholder_instruction("Plain prose.") == ""
+
+    def test_empty_string(self):
+        assert image_placeholder_instruction("") == ""
+
+    def test_filename_only(self):
+        bullet = image_placeholder_instruction(
+            "Para one.\n\n[IMAGE:images/i01.jpg]\n\nPara two."
+        )
+        assert bullet != ""
+        assert bullet.startswith("   - ")
+        assert "[IMAGE:filename.ext]" in bullet
+        # Must NOT use the description-aware wording when there are no descriptions.
+        assert "image description" not in bullet
+        assert "translating only" not in bullet
+
+    def test_with_description(self):
+        bullet = image_placeholder_instruction(
+            "Para.\n\n[IMAGE:images/i01.jpg:a winter scene]\n\nMore."
+        )
+        assert bullet != ""
+        assert bullet.startswith("   - ")
+        assert "[IMAGE:filename.ext:image description]" in bullet
+        assert "translating only the image description" in bullet
+
+    def test_mixed_resolves_to_with_description(self):
+        """Mixed-format chunks should get the with-description (superset) wording."""
+        bullet = image_placeholder_instruction(
+            "[IMAGE:images/a.jpg]\n\n[IMAGE:images/b.jpg:caption]"
+        )
+        assert "image description" in bullet
+        assert "translating only" in bullet
+
+    def test_empty_description_treated_as_filename_only(self):
+        """[IMAGE:foo.jpg:] (empty description) should not trigger the description wording."""
+        bullet = image_placeholder_instruction("[IMAGE:images/a.jpg:]")
+        assert bullet != ""
+        assert "translating only" not in bullet

@@ -36,6 +36,7 @@ from src.utils.file_io import (
     save_glossary,
     save_style_guide,
 )
+from src.utils.text_utils import image_placeholder_instruction
 from web_ui.evaluations import (
     append_feedback,
     evaluate_and_persist_chunk,
@@ -2789,6 +2790,7 @@ def project_chunk_prompt(project_id, chunk_id):
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": prev_context,
+            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         }
 
         rendered = render_prompt(template, variables)

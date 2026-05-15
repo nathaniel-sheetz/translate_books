@@ -18,6 +18,7 @@ from src.utils.file_io import (
     format_glossary_for_prompt,
     save_chunk,
 )
+from src.utils.text_utils import image_placeholder_instruction
 
 
 def _extract_tail_paragraphs(
@@ -388,7 +389,8 @@ def _generate_chunk_section(
         "style_guide": style_guide.content if style_guide else "No style guide provided.",
         "context": book_context if book_context else "",
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position} of {total_chunks}",
-        "previous_chapter_context": previous_chapter_context
+        "previous_chapter_context": previous_chapter_context,
+        "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
     }
 
     # Render the complete prompt

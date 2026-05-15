@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from src.models import Glossary, GlossaryTermType
 from src.utils.file_io import load_glossary
-from src.utils.text_utils import count_words, normalize_newlines
+from src.utils.text_utils import count_words, normalize_newlines, strip_image_placeholders
 
 try:
     import enchant
@@ -602,6 +602,10 @@ def extract_candidates(
 ) -> CandidateReport:
     """Run the full extraction pipeline on source text."""
     text = normalize_newlines(text)
+    # Strip [IMAGE:...] placeholders so "IMAGE", "jpg", and filename fragments
+    # aren't surfaced as candidate glossary terms. Equal-length whitespace
+    # keeps word/sentence boundaries (and total_words count) sensible.
+    text = strip_image_placeholders(text)
     sentences = split_into_sentences(text)
     total_words = count_words(text)
     unique_words = len(set(t.lower() for t in tokenize(text)))

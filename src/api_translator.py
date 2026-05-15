@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
 from src.utils.prompt_logger import log_prompt
+from src.utils.text_utils import image_placeholder_instruction
 
 # Load environment variables from .env file
 load_dotenv()
@@ -222,6 +223,7 @@ def estimate_cost(
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": "",
+            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         }
 
         # Render prompt
@@ -471,6 +473,7 @@ def translate_chunk_realtime(
         "context": "",
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": previous_chapter_context,
+        "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
     }
 
     prompt = render_prompt(template, variables)
@@ -588,6 +591,7 @@ def _submit_anthropic_batch(
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": context_map.get(chunk.id, ""),
+            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         }
 
         prompt = render_prompt(template, variables)
@@ -695,6 +699,7 @@ def _submit_openai_batch(
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": context_map.get(chunk.id, ""),
+            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         }
 
         prompt = render_prompt(template, variables)
