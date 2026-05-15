@@ -5,6 +5,7 @@ This module provides utilities for processing chapter text, including:
 - Normalizing newlines across different platforms
 - Detecting and extracting paragraphs
 - Counting words and paragraphs consistently with evaluators
+- Detecting and stripping [IMAGE:...] placeholders embedded by source ingestion
 
 All functions handle edge cases like empty text, single paragraphs,
 and mixed newline conventions.
@@ -12,6 +13,12 @@ and mixed newline conventions.
 
 import re
 from typing import List
+
+
+# Matches [IMAGE:filename.ext] or [IMAGE:filename.ext:description].
+# Group 1 = filename (everything up to the first ':' or ']').
+# Group 2 = description (everything after the second ':'), or None if absent.
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\[IMAGE:([^:\]]+)(?::([^\]]*))?\]")
 
 
 def normalize_newlines(text: str) -> str:
@@ -170,3 +177,97 @@ def detect_paragraph_boundaries(text: str) -> List[int]:
             boundaries.append(start_pos)
 
     return boundaries
+
+
+def image_placeholder_ranges(text: str) -> list[tuple[int, int]]:
+    """
+    Return the (start, end) character ranges of all [IMAGE:...] placeholders.
+
+    Useful for filtering out tool matches that land inside a replaced
+    placeholder region (e.g. LanguageTool whitespace warnings).
+
+    Args:
+        text: Text potentially containing image placeholders.
+
+    Returns:
+        List of (start, end) tuples (end is exclusive, matching slice semantics).
+    """
+    if not text:
+        return []
+    return [(m.start(), m.end()) for m in _IMAGE_PLACEHOLDER_RE.finditer(text)]
+
+
+def strip_image_placeholders(text: str) -> str:
+    """
+    Replace [IMAGE:...] tokens with equal-length whitespace.
+
+    Character offsets are preserved so downstream tools (LanguageTool,
+    word tokenizers) that report positions stay accurate against the
+    original text.
+
+    Both supported placeholder formats are handled:
+    - ``[IMAGE:filename.ext]``
+    - ``[IMAGE:filename.ext:description]``
+
+    Args:
+        text: Text potentially containing image placeholders.
+
+    Returns:
+        Text with each placeholder replaced by a run of spaces of the same length.
+
+    Example:
+        >>> strip_image_placeholders("a [IMAGE:images/i01.jpg] b")
+        'a                        b'
+    """
+    if not text:
+        return text
+    return _IMAGE_PLACEHOLDER_RE.sub(lambda m: " " * len(m.group()), text)
+
+
+def image_placeholder_instruction(source_text: str) -> str:
+    """
+    Build the translation-prompt sub-bullet describing how to handle image placeholders.
+
+    Inspects ``source_text`` and returns one of:
+
+    - ``""`` — the source contains no ``[IMAGE:...]`` placeholders.
+    - filename-only bullet — every placeholder is of the form
+      ``[IMAGE:filename.ext]``.
+    - with-description bullet — at least one placeholder includes a description
+      (``[IMAGE:filename.ext:description]``). Mixed-format chunks also resolve
+      here because the with-description wording is a safe superset.
+
+    Returned bullets include leading ``   - `` so they slot directly into the
+    STRUCTURE PRESERVATION section of the translation prompt.
+
+    Args:
+        source_text: The chunk's source text.
+
+    Returns:
+        A bullet line (no trailing newline) or an empty string.
+    """
+    if not source_text:
+        return ""
+
+    matches = list(_IMAGE_PLACEHOLDER_RE.finditer(source_text))
+    if not matches:
+        return ""
+
+    any_with_description = any(
+        m.group(2) is not None and m.group(2).strip() != "" for m in matches
+    )
+
+    if any_with_description:
+        return (
+            "   - If the source contains image placeholders in the format "
+            "[IMAGE:filename.ext:image description], copy\n"
+            "     them into the translation exactly as-is at the same position "
+            "in the text, translating only the image description."
+        )
+
+    return (
+        "   - If the source contains image placeholders in the format "
+        "[IMAGE:filename.ext], copy\n"
+        "     them into the translation exactly as-is at the same position "
+        "in the text."
+    )
