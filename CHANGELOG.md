@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0.0] - 2026-05-14
+
+### Added
+- **In-UI glossary editing (Stage 5)**: the "Existing glossary loaded (N terms)" banner now has an **Edit** button that loads `glossary.json` into the same proposals table used for LLM bootstrap. Each row's `english`, `spanish`, `type`, and `context` fields are editable inline; the `type` column is now a `<select>` over the five `GlossaryTermType` values. A **+ Add row** button appends a blank row that's saved alongside the rest. The existing **Drop** toggle doubles as delete-on-save: dropped rows are excluded from the submitted list. Save in edit mode uses replace semantics; the table contents become the authoritative glossary. Future translation prompts re-read `glossary.json` per chunk, so changes apply on the next translate or retranslate without any cache flush. The `alternatives` list on each term is round-tripped through a `data-alternatives` attribute and preserved on save even though the UI doesn't display it.
+
+### Changed
+- `POST /api/setup/<id>/glossary` now accepts an optional `mode` field: `"merge"` (default, prior behavior — only new terms are appended) or `"replace"` (the submitted list becomes the entire glossary). The LLM-proposals save flow continues to send `merge`, so existing behavior is unchanged.
+- New `GET /api/setup/<id>/glossary` endpoint returns the current glossary in proposal-row shape (`english`, `spanish`, `type`, `context`, `alternatives`) for the edit table.
+
+### Fixed
+- **XSS in glossary edit table**: `escapeHtml` used a DOM text-node trick that escaped `<`, `>`, `&` but not `"`. Terms injected into `value="..."` HTML attributes could break out of the attribute and execute event handlers. Fixed by additionally replacing `"` with `&quot;`.
+- **glossaryEditMode not reset after save**: after a successful replace-mode save, the edit flag stayed `true`, causing any subsequent add-row or LLM-generate save to also use replace semantics.
+- **Rejected rows resurrected by "+ Add row"**: clicking "+ Add row" re-rendered the table from a DOM snapshot that included rejected rows, silently un-dropping them before save.
+- **POST /api/setup/<id>/glossary** now returns 400 (instead of 500) on a missing or non-JSON body.
+- **replace mode with empty terms list** is now explicitly rejected with 400 rather than silently overwriting `glossary.json` with an empty array.
+
 ## [0.6.1.0] - 2026-05-13
 
 ### Added

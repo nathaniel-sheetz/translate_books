@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
+from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
     format_glossary_for_prompt,
     load_chunk,
@@ -32,6 +33,7 @@ from src.utils.file_io import (
     load_style_guide,
     render_prompt,
     save_chunk,
+    save_glossary,
     save_style_guide,
 )
 from web_ui.evaluations import (
@@ -516,22 +518,57 @@ def setup_glossary_prompt(project_id):
     return jsonify({"prompt": prompt})
 
 
+@app.route("/api/setup/<project_id>/glossary", methods=["GET"])
+def setup_load_glossary(project_id):
+    """Return existing glossary terms in proposal-shaped rows for the edit table."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    glossary_path = _get_projects_dir() / project_id / "glossary.json"
+    if not glossary_path.exists():
+        return jsonify({"terms": []})
+    g = load_glossary(glossary_path)
+    return jsonify({"terms": [
+        {
+            "english": t.english,
+            "spanish": t.spanish,
+            "type": t.type.value if hasattr(t.type, "value") else t.type,
+            "context": t.context or "",
+            "alternatives": t.alternatives or [],
+        }
+        for t in g.terms
+    ]})
+
+
 @app.route("/api/setup/<project_id>/glossary", methods=["POST"])
-def setup_save_glossary(project_id):
-    """Save glossary terms to glossary.json."""
+def setupsave_glossary(project_id):
+    """Save glossary terms to glossary.json.
+
+    Modes:
+    - "merge" (default): only new terms (by english.lower()) are appended to existing file.
+    - "replace": submitted list is treated as the authoritative full glossary.
+    """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
-    from src.utils.file_io import save_glossary as _save_glossary
-    data = request.get_json()
+    data = request.get_json() or {}
     terms_data = data.get("terms", [])
-    if not terms_data:
+    mode = data.get("mode", "merge")
+
+    if mode not in ("merge", "replace"):
+        return jsonify({"error": "Invalid mode"}), 400
+    if mode == "merge" and not terms_data:
         return jsonify({"error": "No terms provided"}), 400
+    if mode == "replace" and not terms_data:
+        return jsonify({"error": "Refusing to replace glossary with empty list"}), 400
 
     terms = glossary_terms_from_proposals(terms_data)
     glossary_path = project_dir / "glossary.json"
+
+    if mode == "replace":
+        glossary = proposals_to_glossary(terms)
+        save_glossary(glossary, glossary_path)
+        return jsonify({"ok": True, "total": len(terms), "mode": "replace"})
 
     # Merge with existing if present
     if glossary_path.exists():
@@ -539,11 +576,11 @@ def setup_save_glossary(project_id):
         existing_set = {t.english.lower() for t in existing.terms}
         new_terms = [t for t in terms if t.english.lower() not in existing_set]
         existing.terms.extend(new_terms)
-        _save_glossary(existing, glossary_path)
+        save_glossary(existing, glossary_path)
         return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
     else:
         glossary = proposals_to_glossary(terms)
-        _save_glossary(glossary, glossary_path)
+        save_glossary(glossary, glossary_path)
         return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
 
 
