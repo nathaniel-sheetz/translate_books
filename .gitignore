@@ -83,6 +83,7 @@ test.txt
 workbook.md
 clean_*.py
 scripts/run_eval_test.py
+scripts/experiments/
 
 # Comparison run outputs
 comparisons/

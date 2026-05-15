@@ -36,6 +36,7 @@ from src.utils.file_io import (
     save_glossary,
     save_style_guide,
 )
+from src.utils.source_text import load_chapter_source_text
 from src.utils.text_utils import image_placeholder_instruction
 from web_ui.evaluations import (
     append_feedback,
@@ -1655,7 +1656,12 @@ def _get_project_status(project_id: str) -> dict:
     if chapters_dir.exists():
         for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
             ch_id = ch_file.stem
-            text = ch_file.read_text(encoding="utf-8")
+            # Prefer chunks/ source_text so post-Stage-6 projects report
+            # English word counts and previews instead of the translated
+            # text that combine wrote back over chapters/.
+            text, _mtime, _source_kind = load_chapter_source_text(project_dir, ch_id)
+            if not text:
+                text = ch_file.read_text(encoding="utf-8")
             words = len(text.split())
             chunk_info = chunk_index.get(ch_id, {"total": 0, "translated": 0})
 
@@ -2536,7 +2542,12 @@ def project_chunk_all(project_id):
         total_chunks = 0
         for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
             chapter_id = ch_file.stem
-            text = ch_file.read_text(encoding="utf-8")
+            # Prefer chunks/ source_text so a re-chunk on a Stage-6'd project
+            # preserves English in the new chunks instead of writing the
+            # translated text from chapters/ back into chunk.source_text.
+            text, _mtime, _kind = load_chapter_source_text(project_dir, chapter_id)
+            if not text:
+                text = ch_file.read_text(encoding="utf-8")
             chunks = chunk_chapter(text, config, chapter_id)
             for chunk in chunks:
                 save_chunk(chunk, chunks_dir / f"{chunk.id}.json")

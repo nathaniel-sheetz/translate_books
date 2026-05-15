@@ -96,3 +96,52 @@ def load_clean_source_text(
         return source_path.read_text(encoding="utf-8"), source_path.stat().st_mtime, "source"
 
     return "", None, ""
+
+
+def load_chapter_source_text(
+    project_dir: Path, chapter_id: str
+) -> tuple[str, Optional[float], SourceKind]:
+    """Load one chapter's source-language text with the same precedence.
+
+    Priority:
+        1. ``chunks/{chapter_id}_chunk_*.json`` ``source_text`` — guaranteed
+           source-language even after the combine stage overwrites
+           ``chapters/`` with translated text.
+        2. ``chapters/{chapter_id}.txt`` — clean per-chapter text from the
+           split stage, but may have been replaced with translated text.
+
+    No ``source.txt`` fallback — that's the whole-book file and doesn't map
+    cleanly to a single chapter. Returns ``("", None, "")`` if neither
+    location has content for ``chapter_id``.
+    """
+    project_dir = Path(project_dir)
+
+    chunks_dir = project_dir / "chunks"
+    if chunks_dir.exists():
+        chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        if chunk_files:
+            mtime = max(f.stat().st_mtime for f in chunk_files)
+            texts: list[str] = []
+            for cf in chunk_files:
+                try:
+                    with open(cf, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                    texts.append(data.get("source_text", ""))
+                except (json.JSONDecodeError, OSError) as exc:
+                    logger.warning("Failed to read chunk %s: %s", cf, exc)
+            joined = "\n\n".join(t for t in texts if t)
+            if joined:
+                return joined, mtime, "chunks"
+
+    chapter_path = project_dir / "chapters" / f"{chapter_id}.txt"
+    if chapter_path.exists():
+        try:
+            return (
+                chapter_path.read_text(encoding="utf-8"),
+                chapter_path.stat().st_mtime,
+                "chapters",
+            )
+        except OSError as exc:
+            logger.warning("Failed to read chapter %s: %s", chapter_path, exc)
+
+    return "", None, ""

@@ -97,6 +97,7 @@ from src.utils.file_io import (
     load_style_guide,
     render_prompt,
 )
+from src.utils.source_text import load_chapter_source_text
 from src.utils.text_utils import image_placeholder_instruction
 
 logger = logging.getLogger(__name__)
@@ -482,11 +483,22 @@ def run_comparison(args: argparse.Namespace) -> None:
     )
     chunks: list[Chunk] = []
     for sp in source_paths:
-        chapter_text = sp.read_text(encoding="utf-8")
         ch_id = sp.stem
+        source_kind = "raw"
+        chapter_text = ""
+        # When sp points into a project's chapters/ dir, prefer chunks/
+        # source_text so we don't pick up translations that the combine stage
+        # may have written back over the English chapter file.
+        if sp.parent.name == "chapters":
+            chapter_text, _mtime, source_kind = load_chapter_source_text(
+                sp.parent.parent, ch_id
+            )
+        if not chapter_text:
+            chapter_text = sp.read_text(encoding="utf-8")
+            source_kind = "raw"
         ch_chunks = chunk_chapter(chapter_text, config, chapter_id=ch_id)
         chunks.extend(ch_chunks)
-        print(f"Source: {sp} -> {len(ch_chunks)} chunks (chapter_id={ch_id})")
+        print(f"Source: {sp} [{source_kind}] -> {len(ch_chunks)} chunks (chapter_id={ch_id})")
     print(
         f"Total: {len(chunks)} chunks across {len(source_paths)} source(s) "
         f"(target_size={config.target_size}w, overlap_paragraphs="
