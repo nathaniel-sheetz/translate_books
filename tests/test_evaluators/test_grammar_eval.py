@@ -674,3 +674,103 @@ class TestSuggestions:
         assert len(result.issues) == 1
         assert result.issues[0].suggestion is not None
         assert "corrección" in result.issues[0].suggestion
+
+
+@skip_if_no_lt
+class TestImagePlaceholderFiltering:
+    """Tests for [IMAGE:...] placeholder filtering in grammar evaluation."""
+
+    @patch('language_tool_python.LanguageTool')
+    def test_match_inside_placeholder_range_is_skipped(self, mock_lt_class):
+        """A LanguageTool match whose offset falls inside a replaced placeholder is suppressed."""
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        # "IMAGE" sits at offset 2 inside "[IMAGE:images/i01.jpg]"
+        # The placeholder starts at index 2 in "a [IMAGE:images/i01.jpg] b".
+        text = "a [IMAGE:images/i01.jpg] b"
+        placeholder_start = text.index("[IMAGE:")  # == 2
+        # Simulate a LanguageTool match that starts inside the placeholder
+        match_inside = make_mock_match(
+            message="Unknown word: IMAGE",
+            category="TYPOS",
+            rule_id="MORFOLOGIK_RULE_ES",
+            offset=placeholder_start + 1,  # well inside [IMAGE:...]
+        )
+        mock_tool.check.return_value = [match_inside]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="a [IMAGE:images/i01.jpg] b",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {})
+
+        # Match was inside the placeholder region — must be suppressed
+        assert len(result.issues) == 0
+        assert result.passed
+
+    @patch('language_tool_python.LanguageTool')
+    def test_match_outside_placeholder_range_is_kept(self, mock_lt_class):
+        """A match whose offset falls outside any placeholder region is reported normally."""
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        text = "a [IMAGE:images/i01.jpg] fueron"
+        # "fueron" starts at index 25 (after the placeholder ends at 24)
+        match_outside = make_mock_match(
+            message="Subject-verb agreement error",
+            category="GRAMMAR",
+            rule_id="AGREEMENT_ERROR",
+            offset=text.index("fueron"),
+        )
+        mock_tool.check.return_value = [match_outside]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {})
+
+        # Match is outside the placeholder — must NOT be suppressed
+        assert len(result.issues) == 1
+        assert result.issues[0].severity == IssueLevel.ERROR
+
+    @patch('language_tool_python.LanguageTool')
+    def test_text_without_placeholders_unchanged(self, mock_lt_class):
+        """When translated_text has no placeholders, behaviour is identical to before."""
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        match = make_mock_match("Grammar error", "GRAMMAR", "RULE_X", offset=0)
+        mock_tool.check.return_value = [match]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text="El niño fueron al parque.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {})
+
+        # No placeholders, so no suppression — error is reported as normal
+        assert len(result.issues) == 1
+        assert result.issues[0].severity == IssueLevel.ERROR

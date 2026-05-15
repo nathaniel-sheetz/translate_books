@@ -432,3 +432,26 @@ class TestLiveTranslationTemplate:
         # Bullet appears in the rendered prompt; "translating only" wording does NOT.
         assert "[IMAGE:filename.ext]" in result
         assert "translating only" not in result
+
+    def test_live_template_renders_with_description_instruction(self, live_template):
+        from src.utils.text_utils import image_placeholder_instruction
+
+        src = "Para one.\n\n[IMAGE:images/i01.jpg:a winter scene]\n\nPara two."
+        bullet = image_placeholder_instruction(src)
+        variables = {
+            "book_title": "Test",
+            "source_language": "English",
+            "target_language": "Spanish",
+            "source_text": src,
+            "glossary": "(none)",
+            "style_guide": "(none)",
+            "context": "",
+            "chapter_info": "",
+            "previous_chapter_context": "",
+            "image_placeholder_instructions": bullet,
+        }
+        result = render_prompt(live_template, variables)
+        # With-description wording must appear; filename-only wording must NOT.
+        assert "[IMAGE:filename.ext:image description]" in result
+        assert "translating only the image description" in result
+        assert "{{" not in result

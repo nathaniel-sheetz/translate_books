@@ -378,3 +378,34 @@ def test_lowercase_proper_nouns_warning(evaluator, base_chunk):
 
     # "inglaterra" (lowercase) is not in dictionary, should be flagged
     assert result.metadata["unknown_words"] >= 1
+
+
+def test_image_placeholder_tokens_not_flagged(evaluator, base_chunk):
+    """[IMAGE:...] placeholder tokens must not be reported as English or unknown words."""
+    base_chunk.translated_text = (
+        "El niño sonrió. [IMAGE:images/c01.jpg] Luego salió."
+    )
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    # Placeholder fragments must NOT appear in issues
+    flagged_words = {issue.message for issue in result.issues}
+    for fragment in ("IMAGE", "jpg", "c01", "images"):
+        assert not any(fragment.lower() in msg.lower() for msg in flagged_words), (
+            f"Placeholder fragment '{fragment}' was flagged: {flagged_words}"
+        )
+
+
+def test_image_placeholder_with_description_not_flagged(evaluator, base_chunk):
+    """[IMAGE:filename:description] placeholder including a description must be fully stripped."""
+    base_chunk.translated_text = (
+        "Primera línea. [IMAGE:images/c02.jpg:a winter scene] Segunda línea."
+    )
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    flagged_words = {issue.message for issue in result.issues}
+    for fragment in ("IMAGE", "jpg", "c02", "winter", "scene"):
+        assert not any(fragment.lower() in msg.lower() for msg in flagged_words), (
+            f"Placeholder/description fragment '{fragment}' was flagged: {flagged_words}"
+        )
