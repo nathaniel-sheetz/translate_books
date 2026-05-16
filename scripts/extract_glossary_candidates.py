@@ -59,8 +59,48 @@ except ImportError:
 CACHE_VERSION = 1
 CACHE_PATH = Path.home() / ".cache" / "translate_books" / "literary_freqdist.pkl"
 
-# Tokenization pattern matching dictionary_eval.py
-TOKEN_PATTERN = re.compile(r"[\w'áéíóúüñÁÉÍÓÚÜÑ]+")
+# Apostrophe variants (straight, curly right, modifier letter) used in
+# possessive/contraction stripping. Tokenization includes all three so
+# `doesn’t` stays a single token even before normalization.
+_APOSTROPHES = "'’ʼ"
+_POSSESSIVE_RE = re.compile(rf"[{_APOSTROPHES}]s$|[{_APOSTROPHES}]$",
+                            re.IGNORECASE)
+
+# Tokenization pattern matching dictionary_eval.py, plus curly/modifier
+# apostrophes so contractions don't get split when text wasn't normalized.
+TOKEN_PATTERN = re.compile(r"[\w'’ʼáéíóúüñÁÉÍÓÚÜÑ]+")
+
+# Map curly/modifier apostrophes to straight so dictionary lookups
+# (`enchant.Dict("en_US").check("doesn't")`) succeed.
+_APOSTROPHE_NORMALIZE = str.maketrans({"’": "'", "ʼ": "'"})
+
+
+def _strip_possessive(token: str) -> str:
+    """Drop trailing possessive markers — `Nelson's`, `Hood's`, `parents'`.
+
+    Curly and straight apostrophes are both handled. Returns the token
+    unchanged when it doesn't end in a possessive form.
+    """
+    if not token:
+        return token
+    return _POSSESSIVE_RE.sub("", token)
+
+
+def _restore_title_periods(tokens: list[str]) -> str:
+    """Join tokens with spaces, appending '.' to title abbreviations.
+
+    English convention writes `Mr.`, `Mrs.`, `Dr.`, `St.`, `Capt.` with a
+    trailing period; the tokenizer strips it. This restores the period in
+    multi-word surface forms so `Mrs. Ford` / `Lord St. Vincent` display
+    correctly. References ``_ABBREV_NO_SPLIT`` (defined later in module).
+    """
+    parts = []
+    for t in tokens:
+        if t.lower() in _ABBREV_NO_SPLIT:
+            parts.append(t + ".")
+        else:
+            parts.append(t)
+    return " ".join(parts)
 
 # Title words that indicate a character name follows
 TITLE_WORDS = {
@@ -123,6 +163,41 @@ DIALOGUE_VERBS = {
     "either", "whole", "case", "return", "leave", "while",
 }
 
+# Finite/auxiliary verbs and other clausal cues that signal a sentence
+# fragment rather than a stable named entity. Used to reject n-grams like
+# "Britain was now", "Paul was reading", "Jacques made", "lived in England".
+FINITE_VERBS = {
+    "was", "is", "are", "were", "be", "been", "am",
+    "had", "has", "have",
+    "made", "lived", "named", "knows", "knew", "read",
+    "gave", "got", "met", "saw", "seemed", "became",
+    "took", "went", "came", "ran", "ran", "did",
+}
+
+# Leading prepositions and adverbs that often start a phrase fragment.
+LEADING_PREPOSITIONS = {
+    "off", "on", "at", "by", "from", "into", "over",
+    "with", "against", "back", "up", "down", "through",
+    "across", "around", "under", "between",
+}
+
+# Quote-attribution verbs and similar tokens that signal narration glue
+# rather than a glossary phrase.
+QUOTE_ATTRIBUTION = {
+    "quote", "wrote", "writes", "writing", "says", "say", "said",
+}
+
+# Nationality / national-origin words. These act as adjectives in phrases
+# like "British ships" / "Spanish navy" and on their own are not glossary
+# entries — translators handle them via standard equivalents.
+DEMONYMS = {
+    "british", "spanish", "french", "frenchman", "frenchmen",
+    "spaniard", "spaniards", "danes", "dane", "portuguese",
+    "russian", "italian", "american", "englishman", "englishmen",
+    "dutch", "austrian", "austrians", "prussian", "prussians",
+    "indian", "indians",
+}
+
 # Words that should never appear as glossary candidates (single-word or as
 # any token in a multi-word n-gram). Days of the week and months of the year
 # are universally known and don't need glossary entries.
@@ -164,15 +239,51 @@ class CandidateReport(BaseModel):
 # Text helpers
 # ---------------------------------------------------------------------------
 
+# Title-style abbreviations whose terminating "." should NOT end a sentence
+# (e.g. "Lord St. Vincent", "Mr. Smith", "Capt. Hardy").
+_ABBREV_NO_SPLIT = {
+    "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "rev",
+    "hon", "capt", "col", "gen", "lt", "sgt", "maj",
+}
+
+_TRAILING_TOKEN_RE = re.compile(r"([A-Za-z]+)\.['\"]?\s*$")
+
+
+def _ends_with_abbreviation(fragment: str) -> bool:
+    """True when ``fragment`` ends with a known title abbreviation + period."""
+    m = _TRAILING_TOKEN_RE.search(fragment)
+    if not m:
+        return False
+    return m.group(1).lower() in _ABBREV_NO_SPLIT
+
+
+def _rejoin_abbreviation_splits(parts: list[str]) -> list[str]:
+    """Re-join fragments where the splitter broke on an abbreviation period.
+
+    e.g. ['afterwards Lord St.', 'Vincent took command'] -> single sentence.
+    """
+    if not parts:
+        return parts
+    result = [parts[0]]
+    for nxt in parts[1:]:
+        if _ends_with_abbreviation(result[-1]):
+            result[-1] = result[-1].rstrip() + " " + nxt.lstrip()
+        else:
+            result.append(nxt)
+    return result
+
+
 def split_into_sentences(text: str) -> list[str]:
     """Split text into sentences, handling common abbreviations."""
     # Split on sentence-ending punctuation followed by whitespace and uppercase
     # This avoids splitting on "Mr. Smith" or "U.S.A."
     parts = re.split(r'(?<=[.!?])\s+(?=[A-Z"\'])', text)
+    parts = _rejoin_abbreviation_splits(parts)
     # Also split on newlines that start new sentences
     sentences = []
     for part in parts:
         sub = re.split(r'\n+(?=[A-Z"\'])', part)
+        sub = _rejoin_abbreviation_splits(sub)
         sentences.extend(sub)
     return [s.strip() for s in sentences if s.strip()]
 
@@ -180,6 +291,29 @@ def split_into_sentences(text: str) -> list[str]:
 def tokenize(text: str) -> list[str]:
     """Extract word tokens from text."""
     return TOKEN_PATTERN.findall(text)
+
+
+def tokenize_with_spans(text: str) -> list[tuple[str, int, int]]:
+    """Same as tokenize, but each entry includes (token, start, end) offsets.
+
+    Lets callers see what punctuation lives between adjacent tokens — needed
+    to stop name-sequence building at commas/quotes in `Emile, Jules` or
+    `said Jules. "Even`.
+    """
+    return [(m.group(), m.start(), m.end()) for m in TOKEN_PATTERN.finditer(text)]
+
+
+# Characters that signal a sequence boundary between two adjacent capitalized
+# tokens. Comma/semicolon/colon mark a list (`Emile, Jules, Claire`) and
+# straight/curly double quotes mark a dialogue boundary the sentence splitter
+# may have missed (`said Jules. "Even ...`). Periods are excluded so
+# abbreviations like `Mr. Smith` / `Lord St. Vincent` still build a sequence.
+_SEQ_BREAK_CHARS = frozenset(',;:"“”')
+
+
+def _has_hard_break(text: str, start: int, end: int) -> bool:
+    """True when the slice `text[start:end]` contains a sequence-breaking char."""
+    return any(c in _SEQ_BREAK_CHARS for c in text[start:end])
 
 
 def is_special_case(word: str) -> bool:
@@ -211,29 +345,41 @@ def get_context_sentence(term: str, sentences: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 class DictionaryChecker:
-    """Wraps PyEnchant for English dictionary lookups."""
+    """Wraps PyEnchant for English dictionary lookups.
+
+    Tries en_US first, then en_GB so British spellings (`honour`, `learnt`,
+    `centre`, `colours`) aren't flagged as out-of-dictionary.
+    """
 
     def __init__(self):
+        self.english_dict = None
+        self.gb_dict = None
         if not ENCHANT_AVAILABLE:
-            self.english_dict = None
             return
         try:
             self.english_dict = enchant.Dict("en_US")
         except Exception:
             self.english_dict = None
+        try:
+            self.gb_dict = enchant.Dict("en_GB")
+        except Exception:
+            self.gb_dict = None
 
     @property
     def available(self) -> bool:
-        return self.english_dict is not None
+        return self.english_dict is not None or self.gb_dict is not None
 
     def is_english_word(self, word: str) -> bool:
-        """Check if word is in the English dictionary."""
-        if not self.english_dict:
-            return False
-        try:
-            return self.english_dict.check(word) or self.english_dict.check(word.lower())
-        except Exception:
-            return False
+        """Check if word is in either the US or UK English dictionary."""
+        for d in (self.english_dict, self.gb_dict):
+            if d is None:
+                continue
+            try:
+                if d.check(word) or d.check(word.lower()):
+                    return True
+            except Exception:
+                continue
+        return False
 
 
 class FrequencyChecker:
@@ -307,9 +453,10 @@ def extract_proper_nouns(
     type_guesses: dict[str, GlossaryTermType] = {}
 
     for sent in sentences:
-        tokens = tokenize(sent)
-        if not tokens:
+        spans = tokenize_with_spans(sent)
+        if not spans:
             continue
+        tokens = [t for t, _, _ in spans]
 
         i = 0
         while i < len(tokens):
@@ -320,24 +467,30 @@ def extract_proper_nouns(
                 i += 1
                 continue
 
-            # Check for capitalized word NOT at sentence start
-            if (i > 0 and token[0].isupper()
+            # Capitalized at any position. At sentence start (i==0) we still
+            # want to capture multi-word sequences like "Lord St. Vincent
+            # issued orders" — the single-word case at i==0 is filtered below
+            # since "The"/"He"/etc. start most sentences.
+            if (token[0].isupper()
                     and token.lower() not in SEQUENCE_BREAKERS
                     and token.lower() not in BLOCKED_WORDS):
-                # Try to build a multi-word sequence
+                # Try to build a multi-word sequence. Stop on commas/quotes
+                # between tokens so `Emile, Jules` and `said Jules. "Even`
+                # don't build false multi-word names.
                 sequence = [token]
                 j = i + 1
                 while (j < len(tokens)
                        and tokens[j][0].isupper()
                        and not is_special_case(tokens[j])
                        and tokens[j].lower() not in SEQUENCE_BREAKERS
-                       and tokens[j].lower() not in BLOCKED_WORDS):
+                       and tokens[j].lower() not in BLOCKED_WORDS
+                       and not _has_hard_break(sent, spans[j - 1][2], spans[j][1])):
                     sequence.append(tokens[j])
                     j += 1
 
                 # Record multi-word sequences (2+ words)
                 if len(sequence) >= 2:
-                    term = " ".join(sequence)
+                    term = _restore_title_periods(sequence)
                     term_lower = term.lower()
                     capitalized_occurrences[term_lower] += 1
                     total_occurrences[term_lower] += 1
@@ -373,8 +526,18 @@ def extract_proper_nouns(
                     i = j
                     continue
 
-                # Single capitalized word at non-start position
+                # Single capitalized word. Mid-sentence: record as candidate
+                # (but drop bare title abbreviations Mr/Mrs/Dr/Capt/...).
+                # Sentence-start single capitalized: just track totals so the
+                # >80% capitalized-ratio filter stays accurate.
                 t_lower = token.lower()
+                if i == 0:
+                    total_occurrences[t_lower] += 1
+                    i += 1
+                    continue
+                if t_lower in _ABBREV_NO_SPLIT:
+                    i += 1
+                    continue
                 capitalized_occurrences[t_lower] += 1
                 total_occurrences[t_lower] += 1
                 if t_lower not in first_forms:
@@ -385,7 +548,7 @@ def extract_proper_nouns(
                 type_guesses.setdefault(t_lower, GlossaryTermType.OTHER)
 
             else:
-                # Not capitalized or at sentence start — track total for ratio
+                # Not capitalized — track total for ratio
                 t_lower = token.lower()
                 total_occurrences[t_lower] += 1
 
@@ -402,6 +565,11 @@ def extract_proper_nouns(
             continue
         # Skip if it's a common English word (unless multi-word)
         if " " not in term_lower and dict_checker.is_english_word(term_lower):
+            continue
+        # Skip bare title abbreviations: they're tracked above as part of
+        # multi-word sequences ("Mrs. Ford") but should never surface as a
+        # standalone glossary candidate.
+        if " " not in term_lower and term_lower in _ABBREV_NO_SPLIT:
             continue
 
         surface = first_forms.get(term_lower, term_lower)
@@ -426,9 +594,16 @@ def extract_uncommon_words(
     proper_noun_keys: set[str],
     min_frequency: int,
     sentences: list[str],
+    freq_checker: Optional["FrequencyChecker"] = None,
+    max_zipf_mixed: float = 3.0,
 ) -> dict[str, GlossaryCandidate]:
-    """Extract words not found in the English dictionary."""
-    if not dict_checker.available:
+    """Extract words not found in the English dictionary.
+
+    When neither dictionary is available, fall back to a literary-Zipf
+    threshold so common British-spelling words (`honour`, `centre`) still
+    get filtered by frequency.
+    """
+    if not dict_checker.available and (freq_checker is None or not freq_checker.available):
         return {}
 
     word_counts: Counter = Counter()
@@ -454,8 +629,14 @@ def extract_uncommon_words(
             continue
         if word_lower in proper_noun_keys:
             continue
-        if dict_checker.is_english_word(word_lower):
-            continue
+        if dict_checker.available:
+            if dict_checker.is_english_word(word_lower):
+                continue
+        elif freq_checker is not None and freq_checker.available:
+            # No dict to consult — gate on literary frequency so common
+            # British spellings like `honour` get filtered.
+            if freq_checker.literary_zipf(word_lower) >= max_zipf_mixed:
+                continue
         if len(word_lower) <= 2:
             continue
 
@@ -481,13 +662,21 @@ def extract_frequent_ngrams(
     first_form: dict[str, str] = {}
 
     for sent in sentences:
-        tokens = tokenize(sent)
+        spans = tokenize_with_spans(sent)
+        tokens = [t for t, _, _ in spans]
         lowers = [t.lower() for t in tokens]
 
         for n in (2, 3):
             for i in range(len(tokens) - n + 1):
                 gram_lowers = lowers[i:i + n]
                 gram_tokens = tokens[i:i + n]
+                gram_spans = spans[i:i + n]
+
+                # Skip n-grams that span a comma/quote boundary
+                # (`Emile, Jules` / `said Jules. "Even`).
+                if any(_has_hard_break(sent, gram_spans[k - 1][2], gram_spans[k][1])
+                       for k in range(1, n)):
+                    continue
 
                 # At least one non-stopword
                 if all(w in STOPWORDS for w in gram_lowers):
@@ -504,14 +693,38 @@ def extract_frequent_ngrams(
                 # Skip n-grams that start or end with a conjunction/stopword
                 if gram_lowers[0] in STOPWORDS or gram_lowers[-1] in STOPWORDS:
                     continue
+                # Skip sentence fragments: any finite/auxiliary verb token
+                # ("was", "is", "made", "lived", ...) signals a clause
+                # rather than a stable phrase.
+                if any(w in FINITE_VERBS for w in gram_lowers):
+                    continue
+                # Skip when the n-gram leads with a preposition/adverb
+                # (STOPWORDS doesn't cover all of these).
+                if gram_lowers[0] in LEADING_PREPOSITIONS:
+                    continue
+                # Skip narrative fragments that lead with a lowercase title
+                # word ("his uncle, Captain Maurice"): the leading token is
+                # a possessive/familial reference, not a title prefix here.
+                if (gram_tokens[0][:1].islower()
+                        and gram_lowers[0] in TITLE_WORDS):
+                    continue
+                # Skip quote-attribution glue ("quote Southey", "wrote Smith").
+                if any(w in QUOTE_ATTRIBUTION for w in gram_lowers):
+                    continue
 
-                key = " ".join(gram_lowers)
+                surface = _restore_title_periods(gram_tokens)
+                key = surface.lower()
                 ngram_counts[key] += 1
-                surface = " ".join(gram_tokens)
                 if key not in first_form:
                     first_form[key] = surface
                 elif first_form[key].isupper() and not surface.isupper():
                     first_form[key] = surface
+
+    # Single-word proper-noun keys (character names already captured on
+    # their own). Used to drop n-grams whose only "not in dict" tokens are
+    # known character names + ordinary English content like
+    # "Jules looks", "Uncle Paul let", "Claire When", "Emile Jules".
+    single_proper_keys = {k for k in proper_noun_keys if " " not in k}
 
     candidates = {}
     for ngram_lower, count in ngram_counts.items():
@@ -528,6 +741,15 @@ def extract_frequent_ngrams(
         if dict_checker.available:
             all_in_dict = all(dict_checker.is_english_word(w) for w in words)
             if all_in_dict:
+                continue
+            # Drop n-grams that are a known character name (or two of them)
+            # plus ordinary English content. Multi-word stable names are
+            # captured by extract_proper_nouns and filtered above. Strip
+            # possessives first so "Emile's comment" matches as well.
+            words_bare = [_strip_possessive(w) for w in words]
+            non_proper = [w for w in words_bare if w not in single_proper_keys]
+            if (any(w in single_proper_keys for w in words_bare)
+                    and all(dict_checker.is_english_word(w) for w in non_proper)):
                 continue
 
         candidates[ngram_lower] = GlossaryCandidate(
@@ -583,6 +805,10 @@ def extract_repeated_capitalized(
         if lower_counts.get(word_lower, 0) > 0:
             continue
         if len(word_lower) <= 1:
+            continue
+        # Bare title abbreviations (Mr/Mrs/Dr/Capt/...) are not glossary
+        # candidates on their own.
+        if word_lower in _ABBREV_NO_SPLIT:
             continue
 
         in_dict = dict_checker.is_english_word(word_lower)
@@ -697,6 +923,143 @@ def merge_candidates(
     return merged
 
 
+def filter_demonyms(
+    merged: dict[str, GlossaryCandidate],
+) -> dict[str, GlossaryCandidate]:
+    """Drop nationality words and demonym-led adjectival phrases.
+
+    Rules:
+      a. Single-word demonym ("British", "Spaniards", "Frenchmen") → drop.
+      b. Demonym-led phrase where every other token is lowercase in the
+         surface form ("British ships", "Spanish navy") → drop.
+
+    A demonym-led phrase with at least one capitalized non-demonym token
+    survives ("British Empire", "Spanish Inquisition").
+    """
+    result: dict[str, GlossaryCandidate] = {}
+    for key, cand in merged.items():
+        tokens_key = key.split()
+        if not tokens_key:
+            result[key] = cand
+            continue
+
+        # Rule (a): single-word demonym.
+        if len(tokens_key) == 1 and tokens_key[0] in DEMONYMS:
+            continue
+
+        # Rule (b): demonym-led phrase, everything-else lowercase.
+        if len(tokens_key) >= 2 and tokens_key[0] in DEMONYMS:
+            surface_tokens = cand.term.split()
+            tail_all_lower = all(
+                t == t.lower() for t in surface_tokens[1:]
+            )
+            if tail_all_lower:
+                continue
+
+        result[key] = cand
+    return result
+
+
+def _strip_possessive_phrase(s: str) -> str:
+    """Strip possessive marker from the last token of a phrase."""
+    parts = s.split()
+    if not parts:
+        return s
+    parts[-1] = _strip_possessive(parts[-1])
+    return " ".join(parts)
+
+
+def prune_contained_terms(
+    merged: dict[str, GlossaryCandidate],
+    text: str,
+    min_frequency: int = 2,
+) -> dict[str, GlossaryCandidate]:
+    """Drop candidates whose occurrences are entirely contained inside a
+    longer candidate.
+
+    Enumerates every candidate match position in the source text, resolves
+    overlaps with leftmost-longest greedy matching, and drops candidates
+    whose standalone (non-shadowed) hits fall below ``min_frequency``.
+
+    Python's regex alternation is leftmost-FIRST, so a single union regex
+    can't pick the longest among overlapping alternatives that start at
+    different positions (e.g. ``uncle Captain Maurice`` would shadow
+    ``Captain Maurice Suckling``). We sidestep this by collecting all
+    matches and resolving overlaps ourselves.
+    """
+    if not merged:
+        return merged
+
+    from src.utils.glossary_context import _normalize_quotes, _term_pattern
+
+    normalized = _normalize_quotes(text)
+
+    all_matches: list[tuple[int, int, str]] = []  # (start, end, key)
+    for key, cand in merged.items():
+        if not cand.term.strip():
+            continue
+        try:
+            pattern = _term_pattern(cand.term)
+        except re.error:
+            continue
+        for m in pattern.finditer(normalized):
+            all_matches.append((m.start(), m.end(), key))
+
+    # Leftmost-longest: sort by start asc, then by length desc.
+    all_matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+
+    standalone_hits: Counter = Counter()
+    claimed_to = 0
+    for start, end, key in all_matches:
+        if start >= claimed_to:
+            standalone_hits[key] += 1
+            claimed_to = end
+
+    pruned: dict[str, GlossaryCandidate] = {}
+    for key, cand in merged.items():
+        if standalone_hits.get(key, 0) >= min_frequency:
+            pruned[key] = cand
+    return pruned
+
+
+def collapse_possessive_keys(
+    merged: dict[str, GlossaryCandidate],
+) -> dict[str, GlossaryCandidate]:
+    """Collapse possessive variants into their bare form.
+
+    `Nelson's` + `Nelson` → `Nelson` with summed frequencies. The non-
+    possessive surface form is preferred for display, reasons are unioned,
+    and the higher-priority type wins.
+    """
+    result: dict[str, GlossaryCandidate] = {}
+    # Process bare keys first so the bare surface form claims the slot.
+    ordered = sorted(
+        merged.items(),
+        key=lambda kv: 1 if _strip_possessive_phrase(kv[0]) != kv[0] else 0,
+    )
+    for key, cand in ordered:
+        bare_key = _strip_possessive_phrase(key)
+        bare_surface = _strip_possessive_phrase(cand.term)
+        if bare_key in result:
+            existing = result[bare_key]
+            existing.frequency += cand.frequency
+            for reason in cand.detection_reasons:
+                if reason not in existing.detection_reasons:
+                    existing.detection_reasons.append(reason)
+            if TYPE_PRIORITY.get(cand.type_guess, 0) > TYPE_PRIORITY.get(existing.type_guess, 0):
+                existing.type_guess = cand.type_guess
+            # Prefer the non-possessive surface if the existing slot still
+            # carries a possessive form (can happen if no bare-key candidate
+            # was emitted by any extractor).
+            if existing.term != _strip_possessive_phrase(existing.term):
+                existing.term = bare_surface
+        else:
+            new_cand = cand.model_copy()
+            new_cand.term = bare_surface
+            result[bare_key] = new_cand
+    return result
+
+
 def exclude_glossary_terms(
     candidates: dict[str, GlossaryCandidate],
     glossary: Glossary,
@@ -774,6 +1137,9 @@ def extract_candidates(
     # aren't surfaced as candidate glossary terms. Equal-length whitespace
     # keeps word/sentence boundaries (and total_words count) sensible.
     text = strip_image_placeholders(text)
+    # Normalize curly/modifier apostrophes to straight so contractions like
+    # `doesn’t` tokenize as one word and dict checks succeed.
+    text = text.translate(_APOSTROPHE_NORMALIZE)
     sentences = split_into_sentences(text)
     total_words = count_words(text)
     unique_words = len(set(t.lower() for t in tokenize(text)))
@@ -800,7 +1166,8 @@ def extract_candidates(
 
     # 2. Uncommon words
     uncommon = extract_uncommon_words(
-        text, dict_checker, set(proper_nouns.keys()), min_frequency, sentences
+        text, dict_checker, set(proper_nouns.keys()), min_frequency, sentences,
+        freq_checker=freq_checker, max_zipf_mixed=max_zipf_mixed,
     )
     if verbose:
         print(f"  Uncommon word candidates: {len(uncommon)}")
@@ -834,6 +1201,21 @@ def extract_candidates(
     merged = merge_candidates(proper_nouns, uncommon, ngrams, repeated_cap, rare_literary)
     if verbose:
         print(f"  Merged total: {len(merged)}")
+
+    # Collapse possessive variants (Nelson's → Nelson, Hood's → Hood)
+    merged = collapse_possessive_keys(merged)
+    if verbose:
+        print(f"  After possessive collapse: {len(merged)}")
+
+    # Drop candidates whose every occurrence is inside a longer candidate.
+    merged = prune_contained_terms(merged, text, min_frequency=min_frequency)
+    if verbose:
+        print(f"  After contained-term pruning: {len(merged)}")
+
+    # Drop nationality words and demonym-led adjectival phrases.
+    merged = filter_demonyms(merged)
+    if verbose:
+        print(f"  After demonym filtering: {len(merged)}")
 
     # Glossary exclusion
     excluded = 0
@@ -910,6 +1292,12 @@ Examples:
     parser.add_argument(
         "--bootstrap-output", type=Path, default=None,
         help="Output path for bootstrapped glossary.json (default: same dir as -o)"
+    )
+    parser.add_argument(
+        "--prompt-out", type=Path, default=None,
+        help="Build the bootstrap prompt and write it to this file, then exit "
+             "without calling the LLM. Works with or without --bootstrap; "
+             "honors --bootstrap-context-mode and related word-mode flags."
     )
     parser.add_argument(
         "--style-guide", type=Path, default=None,
@@ -1074,8 +1462,9 @@ def main():
     if not args.dry_run:
         save_report(report, args.output)
 
-    # Bootstrap: send candidates to LLM for translation proposals
-    if args.bootstrap and report.candidates:
+    # Bootstrap: send candidates to LLM for translation proposals,
+    # or just dump the prompt to disk when --prompt-out is set.
+    if (args.bootstrap or args.prompt_out) and report.candidates:
         from src.glossary_bootstrap import (
             build_glossary_prompt,
             parse_glossary_response,
@@ -1137,15 +1526,24 @@ def main():
             # Truncate source text for context (full-text mode, today's behavior)
             source_sample = text[:10000]
 
+        prompt = build_glossary_prompt(
+            candidates, source_sample, style_content, "Spanish",
+            context_mode=context_mode,
+            book_title=book_title,
+            context_unit_label=context_unit_label,
+        )
+
+        if args.prompt_out:
+            args.prompt_out.parent.mkdir(parents=True, exist_ok=True)
+            args.prompt_out.write_text(prompt, encoding="utf-8")
+            print(f"\nWrote bootstrap prompt ({len(prompt):,} chars, "
+                  f"{len(candidates)} candidates) to {args.prompt_out}")
+            if not args.bootstrap:
+                return
+
         print("\nBootstrapping glossary translations via LLM...")
         try:
             from src.api_translator import call_llm
-            prompt = build_glossary_prompt(
-                candidates, source_sample, style_content, "Spanish",
-                context_mode=context_mode,
-                book_title=book_title,
-                context_unit_label=context_unit_label,
-            )
             response = call_llm(prompt, provider=args.provider, model=args.model, max_tokens=4096, call_type="glossary")
             proposals = parse_glossary_response(response)
             terms = glossary_terms_from_proposals(proposals)

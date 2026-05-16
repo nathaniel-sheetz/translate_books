@@ -28,6 +28,11 @@ from scripts.extract_glossary_candidates import (
     CandidateReport,
     save_report,
     _read_source_text,
+    _strip_possessive,
+    _restore_title_periods,
+    collapse_possessive_keys,
+    prune_contained_terms,
+    filter_demonyms,
     NLTK_AVAILABLE,
     WORDFREQ_AVAILABLE,
 )
@@ -115,11 +120,34 @@ class TestSplitIntoSentences:
         assert len(sentences) == 3
 
     def test_preserves_mr_abbreviation(self):
-        # "Mr." followed by uppercase should still split, but we at least get
-        # the sentence with "Mr. Smith" in it
+        # "Mr." followed by uppercase should NOT split into a new sentence.
         sentences = split_into_sentences("He met Mr. Smith at the park.")
-        # May split on "Mr." — that's acceptable; the key is we don't crash
-        assert any("Smith" in s for s in sentences)
+        assert len(sentences) == 1
+        assert "Mr. Smith" in sentences[0]
+
+    def test_keeps_lord_st_vincent_together(self):
+        text = "afterwards Lord St. Vincent took command of the fleet."
+        sentences = split_into_sentences(text)
+        assert len(sentences) == 1
+        assert "Lord St. Vincent" in sentences[0]
+
+    def test_keeps_mrs_dr_capt_together(self):
+        text = (
+            "She greeted Mrs. Nisbet warmly. "
+            "Then Dr. Martin spoke. "
+            "Capt. Hardy returned."
+        )
+        sentences = split_into_sentences(text)
+        # Three sentences total — abbreviations don't split anything mid-sentence.
+        assert len(sentences) == 3
+        assert "Mrs. Nisbet" in sentences[0]
+        assert "Dr. Martin" in sentences[1]
+        assert "Capt. Hardy" in sentences[2]
+
+    def test_real_sentence_terminator_still_splits(self):
+        text = "He left. Then she arrived."
+        sentences = split_into_sentences(text)
+        assert len(sentences) == 2
 
     def test_newline_splitting(self):
         sentences = split_into_sentences("First sentence.\nSecond sentence.")
@@ -913,3 +941,493 @@ class TestBootstrapWordModeCLIIntegration:
         assert "Anchor" in prompt
         assert "Banner" in prompt
         assert "SOURCE TEXT SAMPLE" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Possessive normalization
+# ---------------------------------------------------------------------------
+
+class TestStripPossessive:
+
+    def test_straight_apostrophe_s(self):
+        assert _strip_possessive("Nelson's") == "Nelson"
+
+    def test_curly_apostrophe_s(self):
+        assert _strip_possessive("Nelson’s") == "Nelson"
+
+    def test_trailing_s_apostrophe(self):
+        # Plural possessive: parents' -> parents
+        assert _strip_possessive("parents'") == "parents"
+
+    def test_no_change_for_plain_word(self):
+        assert _strip_possessive("Nelson") == "Nelson"
+        assert _strip_possessive("ships") == "ships"
+
+    def test_empty_input(self):
+        assert _strip_possessive("") == ""
+
+
+class TestCollapsePossessiveKeys:
+
+    def test_collapses_possessive_into_bare(self):
+        merged = {
+            "nelson": GlossaryCandidate(
+                term="Nelson", type_guess=GlossaryTermType.CHARACTER,
+                frequency=216, detection_reasons=["capitalized_mid_sentence"],
+            ),
+            "nelson's": GlossaryCandidate(
+                term="Nelson's", type_guess=GlossaryTermType.OTHER,
+                frequency=36, detection_reasons=["capitalized_mid_sentence"],
+            ),
+        }
+        result = collapse_possessive_keys(merged)
+        assert "nelson" in result
+        assert "nelson's" not in result
+        assert result["nelson"].frequency == 216 + 36
+        # Surface stays bare.
+        assert result["nelson"].term == "Nelson"
+        # Higher-priority CHARACTER survives.
+        assert result["nelson"].type_guess == GlossaryTermType.CHARACTER
+
+    def test_possessive_only_keeps_bare_form(self):
+        # Only `Hood's` was emitted — collapse should still surface it as `Hood`.
+        merged = {
+            "hood's": GlossaryCandidate(
+                term="Hood's", type_guess=GlossaryTermType.OTHER, frequency=3,
+            ),
+        }
+        result = collapse_possessive_keys(merged)
+        assert "hood" in result
+        assert result["hood"].term == "Hood"
+
+    def test_collapses_multi_word_possessive(self):
+        # "Lord Hood's" should collapse into "Lord Hood"
+        merged = {
+            "lord hood": GlossaryCandidate(
+                term="Lord Hood", type_guess=GlossaryTermType.CHARACTER, frequency=4,
+            ),
+            "lord hood's": GlossaryCandidate(
+                term="Lord Hood's", type_guess=GlossaryTermType.CHARACTER, frequency=3,
+            ),
+        }
+        result = collapse_possessive_keys(merged)
+        assert "lord hood" in result
+        assert "lord hood's" not in result
+        assert result["lord hood"].frequency == 7
+        assert result["lord hood"].term == "Lord Hood"
+
+
+# ---------------------------------------------------------------------------
+# Contained-term pruning
+# ---------------------------------------------------------------------------
+
+class TestPruneContainedTerms:
+
+    def test_drops_components_of_longer_phrase(self):
+        text = (
+            "His father was a country clergyman who lived at Burnham Thorpe "
+            "in the county of Norfolk. They moved to Burnham Thorpe again."
+        )
+        merged = {
+            "burnham thorpe": GlossaryCandidate(
+                term="Burnham Thorpe", type_guess=GlossaryTermType.PLACE, frequency=2,
+            ),
+            "burnham": GlossaryCandidate(
+                term="Burnham", type_guess=GlossaryTermType.OTHER, frequency=2,
+            ),
+            "thorpe": GlossaryCandidate(
+                term="Thorpe", type_guess=GlossaryTermType.OTHER, frequency=2,
+            ),
+        }
+        result = prune_contained_terms(merged, text, min_frequency=2)
+        assert "burnham thorpe" in result
+        assert "burnham" not in result
+        assert "thorpe" not in result
+
+    def test_keeps_term_with_standalone_occurrences(self):
+        text = (
+            "London Bridge stood firm. London is a great city. "
+            "Across London Bridge they marched. Then back to London."
+        )
+        merged = {
+            "london bridge": GlossaryCandidate(
+                term="London Bridge", type_guess=GlossaryTermType.PLACE, frequency=2,
+            ),
+            "london": GlossaryCandidate(
+                term="London", type_guess=GlossaryTermType.PLACE, frequency=4,
+            ),
+        }
+        result = prune_contained_terms(merged, text, min_frequency=2)
+        assert "london bridge" in result
+        assert "london" in result  # has 2 standalone occurrences
+
+    def test_drops_multi_word_subphrase(self):
+        # "Captain Maurice" only appears inside "Captain Maurice Suckling".
+        text = (
+            "His uncle, Captain Maurice Suckling, took command. "
+            "Years later, Captain Maurice Suckling distinguished himself."
+        )
+        merged = {
+            "captain maurice suckling": GlossaryCandidate(
+                term="Captain Maurice Suckling",
+                type_guess=GlossaryTermType.CHARACTER, frequency=2,
+            ),
+            "captain maurice": GlossaryCandidate(
+                term="Captain Maurice",
+                type_guess=GlossaryTermType.CHARACTER, frequency=2,
+            ),
+            "maurice suckling": GlossaryCandidate(
+                term="Maurice Suckling",
+                type_guess=GlossaryTermType.CHARACTER, frequency=2,
+            ),
+        }
+        result = prune_contained_terms(merged, text, min_frequency=2)
+        assert "captain maurice suckling" in result
+        assert "captain maurice" not in result
+        assert "maurice suckling" not in result
+
+    def test_empty_input(self):
+        assert prune_contained_terms({}, "any text", min_frequency=2) == {}
+
+
+# ---------------------------------------------------------------------------
+# N-gram tightening (finite verbs, leading prepositions, quote attribution)
+# ---------------------------------------------------------------------------
+
+class TestExtractFrequentNgramsTightened:
+
+    def _checker(self, vocab):
+        checker = MagicMock(spec=DictionaryChecker)
+        checker.available = True
+        checker.is_english_word = lambda w: w.lower() in vocab
+        return checker
+
+    def test_rejects_finite_verb_ngrams(self):
+        text = (
+            "Britain was now at war. Britain was now in trouble. "
+            "Britain was now exhausted."
+        )
+        ck = self._checker({"now", "at", "in", "war", "trouble", "exhausted"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        assert "britain was now" not in result
+
+    def test_rejects_lived_named_made(self):
+        text = (
+            "Paul lived in England. Paul lived in England again. "
+            "He named William as heir. He named William as heir again. "
+            "Jacques made the boat. Jacques made the boat once more."
+        )
+        ck = self._checker({"in", "as", "the", "boat", "heir", "once", "more", "again"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        assert "lived in england" not in result
+        assert "named william" not in result
+        assert "jacques made" not in result
+
+    def test_rejects_leading_preposition(self):
+        text = "off Cadiz the fleet waited. off Cadiz they returned."
+        ck = self._checker({"the", "fleet", "waited", "they", "returned"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        assert "off cadiz" not in result
+
+    def test_rejects_quote_attribution(self):
+        text = "quote Southey aptly. quote Southey at length."
+        ck = self._checker({"aptly", "at", "length"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        assert "quote southey" not in result
+
+    def test_paul_was_reading_dropped(self):
+        text = "Paul was reading aloud. Paul was reading slowly."
+        ck = self._checker({"aloud", "slowly"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        assert "paul was reading" not in result
+
+    def test_rejects_known_name_plus_dictionary_word(self):
+        # `Jules looks` / `Claire when` / `Uncle Paul let` / `Emile Jules` —
+        # all sentence-fragment narrations where the character is captured
+        # separately. proper_noun_keys carries the single-word name keys.
+        text = (
+            "Jules looks around. Jules looks again. "
+            "Claire when she arrived. Claire when she left. "
+            "Uncle Paul let him go. Uncle Paul let her go. "
+            "Emile Jules and the others. Emile Jules also helped."
+        )
+        ck = self._checker({
+            "around", "again", "she", "arrived", "left", "him", "go",
+            "her", "and", "the", "others", "also", "helped", "when", "let",
+            "looks", "uncle",
+        })
+        sentences = split_into_sentences(text)
+        proper_keys = {"jules", "paul", "emile", "claire", "uncle paul"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "jules looks" not in result
+        assert "claire when" not in result
+        assert "uncle paul let" not in result
+        assert "emile jules" not in result
+
+    def test_rejects_emile_possessive_plus_word(self):
+        text = "Emile's comment was sharp. Emile's comment was funny."
+        ck = self._checker({"was", "sharp", "funny", "comment"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"emile"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "emile's comment" not in result
+        assert "emile comment" not in result
+
+    def test_skips_ngram_across_comma(self):
+        text = (
+            "There are three: Emile, Jules, and Claire. "
+            "Then again Emile, Jules came together."
+        )
+        ck = self._checker({"there", "are", "three", "and", "came", "together",
+                            "again", "then"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        # The comma between Emile and Jules should suppress the bigram.
+        assert "emile jules" not in result
+
+    def test_skips_ngram_across_quote(self):
+        text = (
+            "“There are ant-hills,” observed Jules. “Even in the garden.” "
+            "“Yes!” said Jules. “Even more so today.”"
+        )
+        ck = self._checker({"are", "in", "the", "garden", "more", "so",
+                            "today", "yes", "said", "observed", "even",
+                            "ant", "hills", "there"})
+        sentences = split_into_sentences(text)
+        result = extract_frequent_ngrams(sentences, ck, set(), 2)
+        # Period + quotes between Jules and Even should suppress the bigram.
+        assert "jules even" not in result
+
+
+class TestProperNounSequenceBreaks:
+
+    def test_comma_breaks_sequence(self):
+        # `Emile, Jules, and Claire` should NOT yield `Emile Jules` as a
+        # multi-word proper noun — the comma marks a list, not a name.
+        text = (
+            "He said: There are three: Emile, Jules, and Claire. "
+            "Again the three: Emile, Jules, and Claire helped."
+        )
+        sentences = split_into_sentences(text)
+        checker = MagicMock(spec=DictionaryChecker)
+        checker.available = True
+        checker.is_english_word = lambda w: w.lower() in {
+            "he", "said", "there", "are", "three", "and", "the", "again",
+            "helped",
+        }
+        result = extract_proper_nouns(sentences, checker, min_frequency=2)
+        # `emile jules` should not be a multi-word key — only the singletons.
+        assert "emile jules" not in result
+        # The individual names should still survive on their own.
+        # (They're recorded as part of the now-shorter sequences and
+        # also appear independently across the two repetitions.)
+        assert any(k.startswith("emile") for k in result)
+
+    def test_quote_breaks_sequence(self):
+        # `said Jules. "Even ...` should not glue `Jules Even` into a name.
+        text = (
+            'observed Jules. "Even in the garden are ants," he said. '
+            'replied Jules. "Even more so today," she answered.'
+        )
+        sentences = split_into_sentences(text)
+        checker = MagicMock(spec=DictionaryChecker)
+        checker.available = True
+        checker.is_english_word = lambda w: w.lower() in {
+            "in", "the", "garden", "are", "ants", "he", "said", "more",
+            "so", "today", "she", "answered", "even", "observed", "replied",
+        }
+        result = extract_proper_nouns(sentences, checker, min_frequency=2)
+        assert "jules even" not in result
+
+
+# ---------------------------------------------------------------------------
+# Demonym filtering
+# ---------------------------------------------------------------------------
+
+class TestFilterDemonyms:
+
+    def _make(self, term, freq=5, type_guess=GlossaryTermType.OTHER):
+        return GlossaryCandidate(term=term, type_guess=type_guess, frequency=freq)
+
+    def test_drops_single_word_demonym(self):
+        merged = {
+            "british": self._make("British"),
+            "spaniards": self._make("Spaniards"),
+            "frenchmen": self._make("Frenchmen"),
+            "englishman": self._make("Englishman"),
+            "danes": self._make("Danes"),
+            "nelson": self._make("Nelson"),
+        }
+        result = filter_demonyms(merged)
+        assert "british" not in result
+        assert "spaniards" not in result
+        assert "frenchmen" not in result
+        assert "englishman" not in result
+        assert "danes" not in result
+        # Non-demonym proper noun preserved
+        assert "nelson" in result
+
+    def test_drops_demonym_led_lowercase_phrase(self):
+        merged = {
+            "british ships": self._make("British ships"),
+            "spanish navy": self._make("Spanish navy"),
+            "british fleet": self._make("British fleet"),
+            "spanish admiral": self._make("Spanish admiral"),
+        }
+        result = filter_demonyms(merged)
+        assert "british ships" not in result
+        assert "spanish navy" not in result
+        assert "british fleet" not in result
+        assert "spanish admiral" not in result
+
+    def test_keeps_demonym_phrase_with_capitalized_tail(self):
+        merged = {
+            "british empire": self._make("British Empire"),
+            "spanish inquisition": self._make("Spanish Inquisition"),
+            "french revolution": self._make("French Revolution"),
+        }
+        result = filter_demonyms(merged)
+        assert "british empire" in result
+        assert "spanish inquisition" in result
+        assert "french revolution" in result
+
+    def test_non_demonym_phrases_preserved(self):
+        merged = {
+            "royal navy": self._make("Royal Navy"),
+            "lord hood": self._make("Lord Hood"),
+        }
+        result = filter_demonyms(merged)
+        assert "royal navy" in result
+        assert "lord hood" in result
+
+
+# ---------------------------------------------------------------------------
+# Integration: combined Tier 1+2+3 noise reduction on a Nelson-style snippet
+# ---------------------------------------------------------------------------
+
+class TestExtractCandidatesNoiseReduction:
+
+    def test_nelson_style_noise_reduced(self):
+        text = (
+            "Horatio Nelson was born in 1758. His father lived at Burnham Thorpe "
+            "in the county of Norfolk. Nelson grew up at Burnham Thorpe. "
+            "Nelson's letters survive. Nelson signalled the fleet. "
+            "Years later, Lord St. Vincent took command. Lord St. Vincent issued orders. "
+            "British ships sailed for Cadiz. British ships waited off Cadiz. "
+            "British ships returned. The Spaniards retreated. The Spaniards fled. "
+            "The Spaniards regrouped."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms_lower = {c.term.lower() for c in report.candidates}
+
+        # Possessive collapse: `Nelson's` should not appear as its own term.
+        assert "nelson's" not in terms_lower
+        # Component pruning: `Burnham`/`Thorpe` only ever inside `Burnham Thorpe`.
+        assert "burnham" not in terms_lower
+        assert "thorpe" not in terms_lower
+        # Sentence splitter fix: `Lord St. Vincent` survives intact.
+        assert any("lord st" in t for t in terms_lower)
+        # Demonym suppression: single-word and adjectival phrases gone.
+        assert "british" not in terms_lower
+        assert "spaniards" not in terms_lower
+        assert "british ships" not in terms_lower
+
+        # Real proper nouns survive.
+        assert any("burnham thorpe" in t for t in terms_lower)
+
+
+# ---------------------------------------------------------------------------
+# British-spelling fallback in DictionaryChecker
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not __import__("scripts.extract_glossary_candidates", fromlist=["ENCHANT_AVAILABLE"]).ENCHANT_AVAILABLE,
+    reason="PyEnchant not installed",
+)
+class TestDictionaryCheckerGBFallback:
+
+    def test_british_spellings_recognised(self):
+        checker = DictionaryChecker()
+        if not checker.available:
+            pytest.skip("Neither en_US nor en_GB dictionary available")
+        # If en_GB was loaded, common British spellings should now resolve.
+        if checker.gb_dict is None:
+            pytest.skip("en_GB dictionary unavailable")
+        for word in ("honour", "centre", "colours", "harbour", "defence"):
+            assert checker.is_english_word(word), f"expected {word!r} to be in dict"
+
+
+class TestRestoreTitlePeriods:
+
+    def test_appends_period_to_known_titles(self):
+        assert _restore_title_periods(["Mrs", "Ford"]) == "Mrs. Ford"
+        assert _restore_title_periods(["Lord", "St", "Vincent"]) == "Lord St. Vincent"
+        assert _restore_title_periods(["Capt", "Hardy"]) == "Capt. Hardy"
+
+    def test_leaves_non_titles_alone(self):
+        assert _restore_title_periods(["Burnham", "Thorpe"]) == "Burnham Thorpe"
+
+    def test_case_insensitive(self):
+        assert _restore_title_periods(["mr", "smith"]) == "mr. smith"
+
+
+class TestCurlyApostropheHandling:
+
+    def test_contractions_stay_one_token(self):
+        # Curly apostrophe must not split `doesn’t` into `doesn` + `t`.
+        tokens = tokenize("It doesn’t work and it isn’t broken either.")
+        assert "doesn’t" in tokens or "doesn't" in tokens
+        assert "doesn" not in tokens
+        assert "isn" not in tokens
+
+    def test_extract_candidates_normalizes_curly_quotes(self):
+        # extract_candidates should normalize curly apostrophes so contraction
+        # halves like `doesn` / `isn` / `wouldn` never become candidates.
+        text = (
+            "It doesn’t work, she says. "
+            "It doesn’t matter much. "
+            "It doesn’t fit anywhere. "
+            "He wouldn’t answer. He wouldn’t go. He wouldn’t agree. "
+            "I think it isn’t worth it. I told you it isn’t over yet."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms = {c.term.lower() for c in report.candidates}
+        for noise in ("doesn", "isn", "wouldn", "hadn", "haven"):
+            assert noise not in terms, (
+                f"{noise!r} should not appear after curly-apostrophe normalization"
+            )
+
+
+class TestTitlePeriodsInCandidates:
+
+    def test_proper_noun_keeps_mrs_period(self):
+        # Repeat enough so it survives min_frequency=2 and the dictionary check.
+        text = (
+            "She greeted Mrs. Ford warmly. "
+            "Then Mrs. Ford spoke about the engine. "
+            "The next day Mrs. Ford returned with the keys."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms = {c.term for c in report.candidates}
+        assert "Mrs. Ford" in terms
+        assert "Mrs Ford" not in terms
+
+    def test_bare_title_abbreviation_dropped(self):
+        # Even when `Mr` appears repeatedly mid-sentence without a following
+        # capitalized name, it should not become a glossary candidate.
+        text = (
+            "the room and ask Mr Wilson directly. "
+            "Then please tell Mr Wilson again. "
+            "And remind Mr Wilson tomorrow."
+        )
+        # Force `Mr` to appear standalone too:
+        text += " Yes Mr is what they called him. No Mr is mentioned again. So Mr."
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms = {c.term.lower() for c in report.candidates}
+        assert "mr" not in terms
+        assert "mrs" not in terms
