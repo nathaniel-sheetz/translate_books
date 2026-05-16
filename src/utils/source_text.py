@@ -60,11 +60,18 @@ def load_clean_source_text(
         if chunk_files:
             mtime = max(f.stat().st_mtime for f in chunk_files)
             texts: list[str] = []
-            for cf in chunk_files:
+            for i, cf in enumerate(chunk_files):
                 try:
                     with open(cf, "r", encoding="utf-8") as fh:
                         data = json.load(fh)
-                    texts.append(data.get("source_text", ""))
+                    text = data.get("source_text", "")
+                    # Strip leading overlap from the previous chunk (first chunk
+                    # has no overlap_start, or it is 0).
+                    if i > 0:
+                        overlap = data.get("metadata", {}).get("overlap_start", 0)
+                        if overlap > 0:
+                            text = text[overlap:]
+                    texts.append(text)
                 except (json.JSONDecodeError, OSError) as exc:
                     logger.warning("Failed to read chunk %s: %s", cf, exc)
             return "\n\n".join(texts), mtime, "chunks"
@@ -122,11 +129,16 @@ def load_chapter_source_text(
         if chunk_files:
             mtime = max(f.stat().st_mtime for f in chunk_files)
             texts: list[str] = []
-            for cf in chunk_files:
+            for i, cf in enumerate(chunk_files):
                 try:
                     with open(cf, "r", encoding="utf-8") as fh:
                         data = json.load(fh)
-                    texts.append(data.get("source_text", ""))
+                    text = data.get("source_text", "")
+                    if i > 0:
+                        overlap = data.get("metadata", {}).get("overlap_start", 0)
+                        if overlap > 0:
+                            text = text[overlap:]
+                    texts.append(text)
                 except (json.JSONDecodeError, OSError) as exc:
                     logger.warning("Failed to read chunk %s: %s", cf, exc)
             joined = "\n\n".join(t for t in texts if t)

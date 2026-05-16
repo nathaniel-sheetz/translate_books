@@ -395,7 +395,6 @@ class FrequencyChecker:
     def __init__(self):
         self._fd = None
         self._total = 0
-        self.available = NLTK_AVAILABLE or WORDFREQ_AVAILABLE
         if NLTK_AVAILABLE:
             try:
                 self._fd, self._total = self._load_or_build()
@@ -403,6 +402,9 @@ class FrequencyChecker:
                 # Brown/Gutenberg not downloaded — fall back to wordfreq
                 self._fd = None
                 self._total = 0
+        # available only if we have a real backend; the 2.0 sentinel path in
+        # literary_zipf is not a useful frequency baseline.
+        self.available = self._fd is not None or WORDFREQ_AVAILABLE
 
     def _load_or_build(self):
         if CACHE_PATH.exists():
@@ -417,9 +419,12 @@ class FrequencyChecker:
                  + list(gutenberg.words()))
         fd = FreqDist(w.lower() for w in words if w.isalpha())
         total = sum(fd.values())
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_bytes(pickle.dumps(
-            {"version": CACHE_VERSION, "fd": fd, "total": total}))
+        try:
+            CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CACHE_PATH.write_bytes(pickle.dumps(
+                {"version": CACHE_VERSION, "fd": fd, "total": total}))
+        except OSError as exc:
+            logger.warning("Could not cache literary frequency data: %s", exc)
         return fd, total
 
     def literary_zipf(self, word: str) -> float:
