@@ -126,7 +126,7 @@ def glossary_terms_from_proposals(proposals: list[dict]) -> list[GlossaryTerm]:
             term_type = "OTHER"
         terms.append(GlossaryTerm(
             english=p["english"],
-            spanish=p["spanish"],
+            spanish=p.get("translation") or p.get("spanish", ""),
             type=term_type.lower(),
             context=p.get("context", ""),
             alternatives=p.get("alternatives", []),

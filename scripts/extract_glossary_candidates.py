@@ -171,7 +171,7 @@ FINITE_VERBS = {
     "had", "has", "have",
     "made", "lived", "named", "knows", "knew", "read",
     "gave", "got", "met", "saw", "seemed", "became",
-    "took", "went", "came", "ran", "ran", "did",
+    "took", "went", "came", "ran", "did",
 }
 
 # Leading prepositions and adverbs that often start a phrase fragment.

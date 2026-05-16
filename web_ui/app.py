@@ -515,7 +515,7 @@ def _build_glossary_prompt_for_request(project_id, project_dir, data):
     from src.glossary_bootstrap import build_glossary_prompt
     from src.style_guide_wizard import load_source_sample
 
-    candidates = list(data.get("candidates", []))
+    candidates = list(data.get("candidates", []))[:1000]
     target_lang = data.get("target_lang", "Spanish")
     glossary_guidance = data.get("glossary_guidance", "")
     context_mode = data.get("context_mode", "full-text")
@@ -536,7 +536,7 @@ def _build_glossary_prompt_for_request(project_id, project_dir, data):
     context_unit_label = ""
 
     if context_mode == "word":
-        from src.utils.glossary_context import find_first_word_contexts
+        from src.utils.glossary_context import find_first_word_contexts, precompute_chapter_tokens
         from src.utils.source_text import load_clean_source_text
 
         words_before = 10
@@ -545,6 +545,7 @@ def _build_glossary_prompt_for_request(project_id, project_dir, data):
 
         full_text, _, _ = load_clean_source_text(project_dir)
         chapter_texts = [("source", full_text or "")]
+        precomputed = precompute_chapter_tokens(chapter_texts)
         for cand in candidates:
             term = cand.get("term") or cand.get("english") or ""
             pos, ctx = find_first_word_contexts(
@@ -552,6 +553,7 @@ def _build_glossary_prompt_for_request(project_id, project_dir, data):
                 max_contexts=fragments_per_term,
                 words_before=words_before,
                 words_after=words_after,
+                _precomputed=precomputed,
             )
             cand["first_position"] = pos
             cand["contexts"] = ctx

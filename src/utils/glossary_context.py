@@ -75,6 +75,7 @@ def find_first_word_contexts(
     max_contexts: int = 2,
     words_before: int = 10,
     words_after: int = 6,
+    _precomputed: "list[tuple[str, list[tuple[int,int]]]] | None" = None,
 ) -> tuple[Optional[tuple[int, int]], list[tuple[str, str]]]:
     """Find up to ``max_contexts`` word-window fragments across chapters.
 
@@ -82,6 +83,11 @@ def find_first_word_contexts(
     ``words_before`` word-tokens before the match and ``words_after`` after,
     using the original surrounding characters so punctuation/spacing is
     preserved.
+
+    ``_precomputed``: optional list of ``(normalized_text, token_spans)`` per
+    chapter, produced by :func:`precompute_chapter_tokens`.  Pass this when
+    calling for many terms against the same chapters to avoid re-tokenizing on
+    each call.
 
     Returns:
       (first_position, contexts)
@@ -94,11 +100,14 @@ def find_first_word_contexts(
     first_position: Optional[tuple[int, int]] = None
 
     for ch_idx, (label, text) in enumerate(chapter_texts):
-        normalized = _normalize_quotes(text)
-        # Pre-compute word-token spans so we can count "N words" away from a
-        # match position quickly.
-        token_spans = [m.span() for m in _TOKEN_RE.finditer(normalized)
-                       if m.group().isalnum() or any(c.isalpha() for c in m.group())]
+        if _precomputed is not None:
+            normalized, token_spans = _precomputed[ch_idx]
+        else:
+            normalized = _normalize_quotes(text)
+            # Pre-compute word-token spans so we can count "N words" away from a
+            # match position quickly.
+            token_spans = [m.span() for m in _TOKEN_RE.finditer(normalized)
+                           if m.group().isalnum() or any(c.isalpha() for c in m.group())]
 
         for m in pattern.finditer(normalized):
             if first_position is None:
@@ -148,3 +157,20 @@ def find_first_word_contexts(
             if len(contexts) >= max_contexts:
                 return first_position, contexts
     return first_position, contexts
+
+
+def precompute_chapter_tokens(
+    chapter_texts: list[tuple[str, str]],
+) -> "list[tuple[str, list[tuple[int, int]]]]":
+    """Pre-compute normalized text and word-token spans for each chapter.
+
+    Pass the result as ``_precomputed`` to :func:`find_first_word_contexts`
+    when looping over many terms against the same chapters.
+    """
+    result = []
+    for _label, text in chapter_texts:
+        normalized = _normalize_quotes(text)
+        token_spans = [m.span() for m in _TOKEN_RE.finditer(normalized)
+                       if m.group().isalnum() or any(c.isalpha() for c in m.group())]
+        result.append((normalized, token_spans))
+    return result
