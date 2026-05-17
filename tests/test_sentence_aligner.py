@@ -5,6 +5,7 @@ from src.sentence_aligner import (
     split_sentences,
     _split_long_sentence,
     _normalize_for_embedding,
+    _split_sentences_with_para_indices,
 )
 
 
@@ -114,6 +115,41 @@ class TestSplitSentences:
         text = "Some text. [IMAGE:images/foo.jpg] More text."
         result = split_sentences(text, "en")
         assert any("[IMAGE:" in s for s in result)
+
+
+class TestSplitSentencesWithParaIndices:
+    def test_prose_paragraph_uses_pysbd(self):
+        text = "Hello world. How are you?"
+        sentences, indices = _split_sentences_with_para_indices(text, "en")
+        assert sentences == ["Hello world.", "How are you?"]
+        assert indices == [0, 0]
+
+    def test_verse_paragraph_splits_on_newlines(self):
+        stanza = (
+            "Drops of rain and bits of sunshine\n"
+            "Falling here and gleaming there,\n"
+            "Tiny blades of grass appearing.\n"
+            "Tell of springtime bright and fair."
+        )
+        sentences, indices = _split_sentences_with_para_indices(stanza, "en")
+        assert len(sentences) == 4
+        assert "Drops of rain and bits of sunshine" in sentences
+        assert "Falling here and gleaming there," in sentences
+        assert all(idx == 0 for idx in indices)
+
+    def test_verse_empty_lines_stripped(self):
+        stanza = "Line one\n\nLine two\n\nLine three"
+        sentences, indices = _split_sentences_with_para_indices(stanza, "en")
+        # Each non-empty line becomes a sentence; blank lines between them skipped.
+        # Note: double \n splits into 3 paras; only the inner ones with no \n are prose.
+        # Actual: pysbd handles each sub-paragraph. Just verify no empty strings.
+        assert all(s.strip() for s in sentences)
+
+    def test_prose_then_verse_paragraph_indices(self):
+        text = "Prose paragraph.\n\nDrops of rain and bits of sunshine\nFalling here."
+        sentences, indices = _split_sentences_with_para_indices(text, "en")
+        assert indices[0] == 0
+        assert indices[-1] == 1
 
 
 class TestAlignSentences:
