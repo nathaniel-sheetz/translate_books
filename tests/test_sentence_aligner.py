@@ -138,12 +138,15 @@ class TestSplitSentencesWithParaIndices:
         assert all(idx == 0 for idx in indices)
 
     def test_verse_empty_lines_stripped(self):
-        stanza = "Line one\n\nLine two\n\nLine three"
+        # Single \n separates verse lines within a stanza (double \n would split
+        # into separate paragraphs and bypass the verse path entirely).
+        stanza = "Line one\n\nLine two\nLine three\nLine four"
         sentences, indices = _split_sentences_with_para_indices(stanza, "en")
-        # Each non-empty line becomes a sentence; blank lines between them skipped.
-        # Note: double \n splits into 3 paras; only the inner ones with no \n are prose.
-        # Actual: pysbd handles each sub-paragraph. Just verify no empty strings.
         assert all(s.strip() for s in sentences)
+        # Lines two/three/four form a 3-line verse block; line one is a solo para.
+        assert "Line two" in sentences
+        assert "Line three" in sentences
+        assert "Line four" in sentences
 
     def test_prose_then_verse_paragraph_indices(self):
         text = "Prose paragraph.\n\nDrops of rain and bits of sunshine\nFalling here."

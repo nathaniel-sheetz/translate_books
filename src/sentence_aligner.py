@@ -146,9 +146,11 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
                 line = line.strip()
                 if not line:
                     continue
-                line_sents = split_sentences(line, language)
-                sentences.extend(line_sents)
-                para_indices.extend([para_idx] * len(line_sents))
+                # Use the verse line as-is — pysbd on a single line could split
+                # "He sang. Softly." into two records, breaking the
+                # 1-record-per-line invariant that downstream alignment depends on.
+                sentences.append(line)
+                para_indices.append(para_idx)
         else:
             para_sents = split_sentences(para, language)
             sentences.extend(para_sents)

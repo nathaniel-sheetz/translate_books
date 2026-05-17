@@ -238,7 +238,7 @@ def _render_body_blocks(body: str) -> List[str]:
             continue
 
         # Verse / stanza block -- preserve every line break as a <p class="verse-line">
-        if '\n' in block and is_verse_block(block):
+        if is_verse_block(block):
             verse_lines = [
                 f'  <p class="verse-line">{escape(line.strip())}</p>'
                 for line in block.split('\n')
