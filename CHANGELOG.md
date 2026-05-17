@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0.0] - 2026-05-16
+
+### Added
+- **Literary-frequency baseline for glossary extraction**: `FrequencyChecker` builds a Zipf-score corpus from NLTK Brown fiction + Gutenberg on first run (cached to `~/.cache/translate_books/literary_freqdist.pkl`) with `wordfreq` as fallback. Gives the extractor a literary-English frequency reference so common English words aren't surfaced as candidates.
+- **Rare literary word extractor**: new `extract_rare_literary_words()` pulls out dictionary words whose literary Zipf score falls below a configurable threshold — archaic, domain-specific, or stylistically distinctive vocabulary the translator needs to handle consistently.
+- **Span-based tokenization with abbreviation-aware sentence splitting**: `tokenize_with_spans()` returns `(text, start, end)` triples; sentence boundaries now survive `Mr.`, `Lord St. Vincent`, and similar abbreviations via `_ends_with_abbreviation()` / `_rejoin_abbreviation_splits()`.
+- **Noise filters and post-merge passes**: `prune_contained_terms()` drops candidates whose every occurrence sits inside a longer candidate (leftmost-longest overlap resolution); `collapse_possessive_keys()` merges `Nelson's` → `Nelson` summing frequencies; `filter_demonyms()` removes nationality words and demonym-led phrases.
+- **Word-mode bootstrap prompt**: `build_glossary_prompt()` now supports `context_mode="word"`. In word mode, each candidate is annotated with 1–2 short in-text word-window fragments (via `find_first_word_contexts()`) and candidates are sorted by first appearance, giving the LLM richer context without a bulk source dump.
+- **`src/utils/glossary_context.py`**: shared helpers `find_first_contexts()`, `find_first_word_contexts()`, and `precompute_chapter_tokens()` for locating term occurrences across chapter texts with efficient pre-computed tokenization.
+- **`src/utils/source_text.py`**: `load_clean_source_text()` and `load_chapter_source_text()` — project-aware source loaders that prefer `chunks/` (guaranteed source-language even after Stage-6 combine overwrites `chapters/`) with overlap stripping, falling back to `chapters/` then raw `source.txt`.
+- **Zipf sensitivity slider and word-mode select in the web UI**: `/api/setup/<id>/extract-candidates` now accepts `zipf_offset` (±1.0) to shift both Zipf thresholds simultaneously; `/api/setup/<id>/prompts/glossary` accepts `context_mode` (`"full-text"` or `"word"`).
+- **`prompts/glossary_bootstrap_word.example.txt`**: example template for the word-mode bootstrap prompt.
+
+### Changed
+- Glossary bootstrap prompt key for the LLM's translated output changed from `"spanish"` to `"translation"` (language-agnostic); parser falls back to `"spanish"` for backward compatibility with existing LLM responses.
+- `FrequencyChecker.available` now reflects an actually-loaded backend (NLTK corpus or `wordfreq`) rather than mere importability; the 2.0 sentinel path is not treated as a real frequency source.
+- Word-mode context generation pre-computes normalized text and token spans once per request instead of once per candidate.
+- Candidates list in word-mode glossary prompt endpoint capped at 1000 items.
+- Source text loaded from `chunks/` now strips leading overlap characters from non-first chunks, preventing duplicate passages from inflating extraction frequencies.
+- Literary frequency cache write failures are non-fatal (logged as warning, extraction continues in-memory).
+
+### Fixed
+- `_read_source_text()` now prefers `chunks/source_text` over `chapters/` to survive Stage-6 translate which overwrites chapter files.
+
 ## [0.7.0.0] - 2026-05-14
 
 ### Added

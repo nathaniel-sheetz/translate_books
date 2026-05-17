@@ -1217,10 +1217,23 @@
         document.getElementById('glossary-existing').style.display = 'none';
     });
 
+    // Zipf sensitivity slider readout (defaults mirror extract_glossary_candidates.py)
+    var zipfSlider = document.getElementById('extract-zipf-slider');
+    var zipfReadout = document.getElementById('extract-zipf-readout');
+    function updateZipfReadout() {
+        var offset = parseFloat(zipfSlider.value) || 0;
+        var mixed = (3.0 + offset).toFixed(2);
+        var cap = (4.0 + offset).toFixed(2);
+        zipfReadout.textContent = mixed + ' / ' + cap;
+    }
+    zipfSlider.addEventListener('input', updateZipfReadout);
+    updateZipfReadout();
+
     // Extract candidates
     document.getElementById('btn-extract-candidates').addEventListener('click', function() {
         setStatus('extract-status', 'Extracting...', '');
-        apiPost('/api/setup/' + PROJECT + '/extract-candidates', {}).then(function(data) {
+        var offset = parseFloat(zipfSlider.value) || 0;
+        apiPost('/api/setup/' + PROJECT + '/extract-candidates', { zipf_offset: offset }).then(function(data) {
             if (data.error) {
                 setStatus('extract-status', data.error, 'error');
                 return;
@@ -1233,20 +1246,38 @@
         });
     });
 
+    function getGlossaryContextMode() {
+        var sel = document.getElementById('glossary-context-mode');
+        return (sel && sel.value) || 'full-text';
+    }
+
     // Show glossary prompt
     document.getElementById('btn-show-glossary-prompt').addEventListener('click', function() {
+        var btn = this;
         var area = document.getElementById('glossary-prompt-area');
-        if (area.style.display === 'none') {
-            apiPost('/api/setup/' + PROJECT + '/prompts/glossary', {
-                candidates: glossaryCandidates,
-                glossary_guidance: collectGlossaryGuidance(),
-            }).then(function(data) {
-                document.getElementById('glossary-prompt-text').value = data.prompt || data.error || '';
-                area.style.display = '';
-            });
-        } else {
+        if (area.style.display !== 'none') {
             area.style.display = 'none';
+            return;
         }
+        var mode = getGlossaryContextMode();
+        var label = mode === 'word'
+            ? 'Building word-mode prompt (scanning book for first appearances)...'
+            : 'Building prompt...';
+        btn.disabled = true;
+        setStatus('glossary-prompt-status', label, 'info');
+        apiPost('/api/setup/' + PROJECT + '/prompts/glossary', {
+            candidates: glossaryCandidates,
+            glossary_guidance: collectGlossaryGuidance(),
+            context_mode: mode,
+        }).then(function(data) {
+            btn.disabled = false;
+            document.getElementById('glossary-prompt-text').value = data.prompt || data.error || '';
+            area.style.display = '';
+            setStatus('glossary-prompt-status', '', '');
+        }).catch(function(e) {
+            btn.disabled = false;
+            setStatus('glossary-prompt-status', 'Failed: ' + (e && e.message ? e.message : 'request error'), 'error');
+        });
     });
 
     // Generate glossary via API
@@ -1262,6 +1293,7 @@
             glossary_guidance: collectGlossaryGuidance(),
             provider: provider,
             model: model,
+            context_mode: getGlossaryContextMode(),
         }).then(function(data) {
             btn.disabled = false;
             if (data.error && !data.terms && !data.raw_text) {

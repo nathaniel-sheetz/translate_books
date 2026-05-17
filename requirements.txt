@@ -10,6 +10,10 @@ pytest-cov>=4.0.0
 pyenchant>=3.2.0
 language-tool-python>=2.7.0  # Grammar checking with LanguageTool
 
+# Glossary candidate extraction (literary frequency baseline)
+nltk>=3.8             # Brown + Gutenberg corpora for literary Zipf
+wordfreq>=3.0.0       # Fallback general-English frequency
+
 # Terminal formatting (for evaluation reports)
 rich>=13.0.0
 

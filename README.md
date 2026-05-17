@@ -145,7 +145,7 @@ book_translation/
 │   ├── translator.py           # Prompt rendering + workbook generation
 │   ├── epub_builder.py         # EPUB export
 │   ├── evaluators/             # Pluggable quality evaluators
-│   └── utils/                  # File I/O, text utilities
+│   └── utils/                  # File I/O, text utilities, source loaders, glossary context helpers
 │
 ├── scripts/                    # CLI entry points
 ├── prompts/                    # LLM prompt templates (Jinja2)
@@ -196,6 +196,7 @@ pytest --cov=src tests/            # With coverage
 | [`docs/PROMPT_GUIDE.md`](docs/PROMPT_GUIDE.md) | Prompt template customization |
 | [`docs/CHAPTER_DETECTION_GUIDE.md`](docs/CHAPTER_DETECTION_GUIDE.md) | Chapter splitting patterns |
 | [`docs/DICTIONARY_SETUP.md`](docs/DICTIONARY_SETUP.md) | Dictionary evaluator setup |
+| [`docs/GLOSSARY_CANDIDATES.md`](docs/GLOSSARY_CANDIDATES.md) | Glossary candidate extraction pipeline reference |
 
 ---
 

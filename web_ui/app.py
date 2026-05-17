@@ -36,6 +36,7 @@ from src.utils.file_io import (
     save_glossary,
     save_style_guide,
 )
+from src.utils.source_text import load_chapter_source_text
 from src.utils.text_utils import image_placeholder_instruction
 from web_ui.evaluations import (
     append_feedback,
@@ -470,6 +471,13 @@ def setup_extract_candidates(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
+    payload = request.get_json(silent=True) or {}
+    try:
+        zipf_offset = float(payload.get("zipf_offset", 0.0))
+    except (TypeError, ValueError):
+        zipf_offset = 0.0
+    zipf_offset = max(-1.0, min(1.0, zipf_offset))
+
     from scripts.extract_glossary_candidates import extract_candidates
     from src.style_guide_wizard import load_source_sample
     text = load_source_sample(project_dir, max_words=200000)  # High cap — use all available chunks
@@ -481,7 +489,13 @@ def setup_extract_candidates(project_id):
     if glossary_path.exists():
         glossary = load_glossary(glossary_path)
 
-    report = extract_candidates(text, glossary=glossary)
+    # Defaults (4.0 / 3.0) mirror extract_candidates() signature; update both spots if changed.
+    report = extract_candidates(
+        text,
+        glossary=glossary,
+        max_zipf_capitalized=4.0 + zipf_offset,
+        max_zipf_mixed=3.0 + zipf_offset,
+    )
     candidates = [
         {"term": c.term, "type_guess": c.type_guess.value, "frequency": c.frequency,
          "context_sentence": c.context_sentence}
@@ -490,21 +504,24 @@ def setup_extract_candidates(project_id):
     return jsonify({"candidates": candidates, "total": len(candidates)})
 
 
-@app.route("/api/setup/<project_id>/prompts/glossary", methods=["POST"])
-def setup_glossary_prompt(project_id):
-    """Return the full prompt for glossary bootstrap (for copy/paste)."""
-    if not _safe_id(project_id):
-        return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+def _build_glossary_prompt_for_request(project_id, project_dir, data):
+    """Shared helper: assemble args for ``build_glossary_prompt`` from request payload.
 
+    Honors ``context_mode`` ("full-text" | "word"). In word mode, enriches each
+    candidate with first-appearance contexts and sorts by first appearance, so
+    the prompt mirrors what ``scripts/extract_glossary_candidates.py`` produces
+    when run with ``--bootstrap-context-mode word`` at default settings.
+    """
     from src.glossary_bootstrap import build_glossary_prompt
     from src.style_guide_wizard import load_source_sample
-    data = request.get_json()
-    candidates = data.get("candidates", [])
+
+    candidates = list(data.get("candidates", []))[:1000]
     target_lang = data.get("target_lang", "Spanish")
     glossary_guidance = data.get("glossary_guidance", "")
+    context_mode = data.get("context_mode", "full-text")
+    if context_mode not in ("full-text", "word"):
+        context_mode = "full-text"
 
-    # Load style guide if exists
     style_content = ""
     style_path = project_dir / "style.json"
     if style_path.exists():
@@ -514,8 +531,60 @@ def setup_glossary_prompt(project_id):
         except Exception:
             pass
 
-    source_text = load_source_sample(project_dir)
-    prompt = build_glossary_prompt(candidates, source_text, style_content, target_lang, glossary_guidance)
+    source_sample = ""
+    book_title = ""
+    context_unit_label = ""
+
+    if context_mode == "word":
+        from src.utils.glossary_context import find_first_word_contexts, precompute_chapter_tokens
+        from src.utils.source_text import load_clean_source_text
+
+        words_before = 10
+        words_after = 6
+        fragments_per_term = 2
+
+        full_text, _, _ = load_clean_source_text(project_dir)
+        chapter_texts = [("source", full_text or "")]
+        precomputed = precompute_chapter_tokens(chapter_texts)
+        for cand in candidates:
+            term = cand.get("term") or cand.get("english") or ""
+            pos, ctx = find_first_word_contexts(
+                term, chapter_texts,
+                max_contexts=fragments_per_term,
+                words_before=words_before,
+                words_after=words_after,
+                _precomputed=precomputed,
+            )
+            cand["first_position"] = pos
+            cand["contexts"] = ctx
+        candidates.sort(
+            key=lambda c: c.get("first_position") if c.get("first_position") is not None
+                          else (10**9, 10**9)
+        )
+        book_title = _project_title(project_id)
+        context_unit_label = (
+            f"fragments (~{words_before} words before / {words_after} words after)"
+        )
+    else:
+        source_sample = load_source_sample(project_dir)
+
+    return build_glossary_prompt(
+        candidates, source_sample, style_content, target_lang, glossary_guidance,
+        context_mode=context_mode,
+        book_title=book_title,
+        context_unit_label=context_unit_label,
+    )
+
+
+@app.route("/api/setup/<project_id>/prompts/glossary", methods=["POST"])
+def setup_glossary_prompt(project_id):
+    """Return the full prompt for glossary bootstrap (for copy/paste)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+
+    data = request.get_json() or {}
+    prompt = _build_glossary_prompt_for_request(project_id, project_dir, data)
     return jsonify({"prompt": prompt})
 
 
@@ -671,29 +740,13 @@ def setup_glossary_generate(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _get_projects_dir() / project_id
 
-    from src.glossary_bootstrap import build_glossary_prompt
-    from src.style_guide_wizard import load_source_sample
     from src.api_translator import call_llm
 
-    data = request.get_json()
-    candidates = data.get("candidates", [])
-    target_lang = data.get("target_lang", "Spanish")
-    glossary_guidance = data.get("glossary_guidance", "")
+    data = request.get_json() or {}
     provider = data.get("provider", "anthropic")
     model = data.get("model")
 
-    # Load style guide if exists
-    style_content = ""
-    style_path = project_dir / "style.json"
-    if style_path.exists():
-        try:
-            sg = load_style_guide(style_path)
-            style_content = sg.content
-        except Exception:
-            pass
-
-    source_text = load_source_sample(project_dir)
-    prompt = build_glossary_prompt(candidates, source_text, style_content, target_lang, glossary_guidance)
+    prompt = _build_glossary_prompt_for_request(project_id, project_dir, data)
 
     try:
         result = call_llm(prompt, provider=provider, model=model, max_tokens=8192, call_type="glossary")
@@ -1655,7 +1708,12 @@ def _get_project_status(project_id: str) -> dict:
     if chapters_dir.exists():
         for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
             ch_id = ch_file.stem
-            text = ch_file.read_text(encoding="utf-8")
+            # Prefer chunks/ source_text so post-Stage-6 projects report
+            # English word counts and previews instead of the translated
+            # text that combine wrote back over chapters/.
+            text, _mtime, _source_kind = load_chapter_source_text(project_dir, ch_id)
+            if not text:
+                text = ch_file.read_text(encoding="utf-8")
             words = len(text.split())
             chunk_info = chunk_index.get(ch_id, {"total": 0, "translated": 0})
 
@@ -2536,7 +2594,12 @@ def project_chunk_all(project_id):
         total_chunks = 0
         for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
             chapter_id = ch_file.stem
-            text = ch_file.read_text(encoding="utf-8")
+            # Prefer chunks/ source_text so a re-chunk on a Stage-6'd project
+            # preserves English in the new chunks instead of writing the
+            # translated text from chapters/ back into chunk.source_text.
+            text, _mtime, _kind = load_chapter_source_text(project_dir, chapter_id)
+            if not text:
+                text = ch_file.read_text(encoding="utf-8")
             chunks = chunk_chapter(text, config, chapter_id)
             for chunk in chunks:
                 save_chunk(chunk, chunks_dir / f"{chunk.id}.json")

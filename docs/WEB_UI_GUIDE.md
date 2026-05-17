@@ -161,13 +161,13 @@ A **LLM provider/model selector** appears in Step 3 ("Bootstrap Translations via
 **Edit existing glossary:** Once a glossary is saved, the "Existing glossary loaded (N terms)" banner shows an **Edit** button. Clicking it loads the saved `glossary.json` into the same proposals table. **Drop** a row to remove that term on save; **+ Add row** to insert a new entry; edit any cell inline. Save uses replace semantics — the table contents become the authoritative glossary, so dropped rows are deleted from `glossary.json`. The `alternatives` field on each term is preserved transparently (not shown in the UI). Translation prompts re-read `glossary.json` on each chunk, so changes take effect on the next translate or retranslate.
 
 **APIs:**
-- `POST /api/setup/<id>/extract-candidates` — extract candidate terms
-- `POST /api/setup/<id>/prompts/glossary` — generate glossary prompt (for copy/paste)
+- `POST /api/setup/<id>/extract-candidates` — extract candidate terms; accepts optional `zipf_offset` (float, ±1.0) to shift both Zipf rarity thresholds simultaneously — positive values surface rarer words, negative values are more permissive
+- `POST /api/setup/<id>/prompts/glossary` — generate glossary prompt (for copy/paste); accepts optional `context_mode` (`"full-text"` or `"word"`) — word mode annotates each candidate with 1–2 short in-text fragments instead of a full source dump
 - `POST /api/setup/<id>/glossary/generate` — generate glossary via direct LLM call; `{ "candidates": [...], "provider": "...", "model": "..." }`
 - `GET /api/setup/<id>/glossary` — return current glossary as `{ "terms": [{english, spanish, type, context, alternatives}, ...] }` for the edit table
 - `POST /api/setup/<id>/glossary` — save glossary JSON; accepts optional `mode: "merge" | "replace"` (default `merge`). `replace` overwrites the entire glossary; `merge` only appends terms whose `english` is not already present.
 
-**Backend:** `extract_glossary_candidates()` from `src/glossary_bootstrap.py`.
+**Backend:** `extract_glossary_candidates()` from `src/glossary_bootstrap.py`; `build_glossary_prompt()` from `src/glossary_bootstrap.py`; context helpers from `src/utils/glossary_context.py`; source loaders from `src/utils/source_text.py`. See [`docs/GLOSSARY_CANDIDATES.md`](GLOSSARY_CANDIDATES.md) for the full extraction pipeline reference.
 
 ---
 

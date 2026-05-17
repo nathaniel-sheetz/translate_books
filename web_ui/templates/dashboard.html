@@ -407,6 +407,11 @@
 
                     <div class="btn-row">
                         <button class="btn-primary" id="btn-extract-candidates">Extract Candidates</button>
+                        <label for="extract-zipf-slider" class="zipf-slider-label">Sensitivity:</label>
+                        <input type="range" id="extract-zipf-slider"
+                               min="-1" max="1" step="0.25" value="0"
+                               title="Adjusts both zipf thresholds together. Higher = more lenient (more candidates).">
+                        <span id="extract-zipf-readout" class="zipf-slider-readout">3.00 / 4.00</span>
                         <span class="status-msg" id="extract-status"></span>
                     </div>
                     <div id="candidates-count" style="display:none"></div>
@@ -435,7 +440,15 @@
                     </div>
 
                     <div class="prompt-block">
+                        <div class="prompt-mode-row" style="margin-bottom:6px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                            <label for="glossary-context-mode" style="font-weight:600; font-size:13px;">Context mode:</label>
+                            <select id="glossary-context-mode" style="padding:4px 8px;">
+                                <option value="full-text">full-text (10 KB book sample appended)</option>
+                                <option value="word">word (per-term fragments, sorted by first appearance)</option>
+                            </select>
+                        </div>
                         <button class="btn-secondary" id="btn-show-glossary-prompt">Show Prompt to Copy</button>
+                        <span class="status-msg" id="glossary-prompt-status"></span>
                         <div class="prompt-area" id="glossary-prompt-area" style="display:none">
                             <textarea readonly id="glossary-prompt-text" rows="10"></textarea>
                             <button class="btn-copy" data-target="glossary-prompt-text">Copy</button>

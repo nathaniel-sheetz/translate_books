@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.utils.source_text import load_clean_source_text
+from src.utils.source_text import load_chapter_source_text, load_clean_source_text
 
 
 def _write_chapter(project_dir: Path, name: str, text: str) -> None:
@@ -65,6 +65,47 @@ class TestPriority:
 
     def test_empty_project_returns_empty(self, tmp_path: Path):
         text, mtime, kind = load_clean_source_text(tmp_path)
+        assert text == ""
+        assert mtime is None
+        assert kind == ""
+
+
+class TestLoadChapterSourceText:
+    def test_chunks_preferred_over_chapters(self, tmp_path: Path):
+        _write_chunk(tmp_path, "chapter_01_chunk_000.json", "ENGLISH PART ONE")
+        _write_chunk(tmp_path, "chapter_01_chunk_001.json", "ENGLISH PART TWO")
+        _write_chapter(tmp_path, "chapter_01.txt", "TRADUCCIÓN ESPAÑOLA")
+
+        text, _, kind = load_chapter_source_text(tmp_path, "chapter_01")
+        assert kind == "chunks"
+        assert "ENGLISH PART ONE" in text
+        assert "ENGLISH PART TWO" in text
+        assert "TRADUCCIÓN" not in text
+
+    def test_only_requested_chapter_id_is_returned(self, tmp_path: Path):
+        _write_chunk(tmp_path, "chapter_01_chunk_000.json", "chapter one")
+        _write_chunk(tmp_path, "chapter_02_chunk_000.json", "chapter two")
+        text, _, kind = load_chapter_source_text(tmp_path, "chapter_02")
+        assert kind == "chunks"
+        assert text == "chapter two"
+
+    def test_chapters_used_when_no_chunks(self, tmp_path: Path):
+        _write_chapter(tmp_path, "chapter_01.txt", "Plain chapter text.")
+        text, _, kind = load_chapter_source_text(tmp_path, "chapter_01")
+        assert kind == "chapters"
+        assert text == "Plain chapter text."
+
+    def test_chunks_with_empty_source_text_falls_through(self, tmp_path: Path):
+        # A chunk with empty source_text shouldn't shadow a real chapter file.
+        _write_chunk(tmp_path, "chapter_01_chunk_000.json", "")
+        _write_chapter(tmp_path, "chapter_01.txt", "Real chapter content.")
+        text, _, kind = load_chapter_source_text(tmp_path, "chapter_01")
+        assert kind == "chapters"
+        assert text == "Real chapter content."
+
+    def test_missing_chapter_returns_empty(self, tmp_path: Path):
+        _write_chapter(tmp_path, "chapter_01.txt", "exists")
+        text, mtime, kind = load_chapter_source_text(tmp_path, "chapter_99")
         assert text == ""
         assert mtime is None
         assert kind == ""
