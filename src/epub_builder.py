@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ebooklib import epub
 
+from src.utils.verse import is_verse_block
+
 logger = logging.getLogger(__name__)
 
 _IMAGE_RE = re.compile(r'\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]')
@@ -111,6 +113,13 @@ div.image { text-align: center; margin: 1em 0; }
 h1, h2 { text-align: center; }
 p { text-indent: 1.5em; margin-top: 0.25em; margin-bottom: 0.25em; }
 hr { margin: 1.5em auto; width: 40%; }
+div.verse { margin: 1em 1.5em; }
+div.verse p.verse-line {
+    text-indent: -2em;
+    padding-left: 2em;
+    margin: 0;
+    line-height: 1.35;
+}
 nav ol { list-style: none; padding-left: 0; }
 nav ol ol { padding-left: 1.5em; }
 """
@@ -202,7 +211,7 @@ def _render_body_blocks(body: str) -> List[str]:
         - --- lines -> <hr />
     """
     out: List[str] = []
-    blocks = re.split(r'\n{2,}', body)
+    blocks = re.split(r'\n\s*\n', body)
 
     for block in blocks:
         block = block.strip()
@@ -226,6 +235,20 @@ def _render_body_blocks(body: str) -> List[str]:
         # Check for horizontal rule
         if _HR_RE.match(block):
             out.append('<hr/>')
+            continue
+
+        # Verse / stanza block -- preserve every line break as a <p class="verse-line">
+        # Skip the verse path if any line is an image placeholder (so the image
+        # is not swallowed by the verse branch and rendered as escaped text).
+        if is_verse_block(block) and not any(
+            _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
+        ):
+            verse_lines = [
+                f'  <p class="verse-line">{escape(line.strip())}</p>'
+                for line in block.split('\n')
+                if line.strip()
+            ]
+            out.append('<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>')
             continue
 
         # Regular paragraph -- escape HTML entities

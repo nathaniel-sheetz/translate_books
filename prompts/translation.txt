@@ -69,6 +69,7 @@ TRANSLATION INSTRUCTIONS
 
 1. STRUCTURE PRESERVATION:
    - Preserve all paragraph breaks that appear in the source.  Do not merge or split paragraphs due to length.
+   - When the source contains verse or poetry (short lines separated by single newlines within a stanza), preserve every line break exactly.  Each verse line in the source must correspond to one verse line in the translation, with the same single-newline structure.  Stanza breaks (blank lines between groups of verse lines) must also be preserved.
 {{image_placeholder_instructions}}
 
 2. GLOSSARY COMPLIANCE:

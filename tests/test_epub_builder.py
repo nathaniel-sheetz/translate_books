@@ -203,6 +203,33 @@ class TestChapterTextToXhtml:
         # The raw all-caps form should not appear as the h1.
         assert '<h1>SERMÓN I.</h1>' not in xhtml
 
+    def test_verse_block_renders_div_verse(self):
+        stanza = (
+            "Drops of rain and bits of sunshine\n"
+            "Falling here and gleaming there,\n"
+            "Tiny blades of grass appearing.\n"
+            "Tell of springtime bright and fair."
+        )
+        text = f"CHAPTER I\n\nSpring Song\n\n{stanza}\n\nNormal prose paragraph."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<div class="verse">' in xhtml
+        assert '<p class="verse-line">Drops of rain and bits of sunshine</p>' in xhtml
+        assert '<p class="verse-line">Falling here and gleaming there,</p>' in xhtml
+        assert '<p class="verse-line">Tell of springtime bright and fair.</p>' in xhtml
+        assert '<p>Normal prose paragraph.</p>' in xhtml
+
+    def test_prose_block_with_newlines_does_not_render_as_verse(self):
+        # Long lines should not trigger the verse path even if they contain \n.
+        long_para = (
+            "This is a very long prose paragraph that happens to contain a newline "
+            "character, but because the lines are long it should not be mistaken for "
+            "verse by the is_verse_block heuristic.\n"
+            "This second line is also very long and should remain in a regular <p> tag."
+        )
+        text = f"CHAPTER I\n\nTitle\n\n{long_para}"
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<div class="verse">' not in xhtml
+
 
 # --- synthesize_chapter_heading & _int_to_roman ---
 

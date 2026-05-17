@@ -154,6 +154,10 @@
                 const br = document.createElement('span');
                 br.className = 'para-break';
                 content.appendChild(br);
+            } else if (a.verse_line_break) {
+                const br = document.createElement('span');
+                br.className = 'verse-break';
+                content.appendChild(br);
             }
 
             const span = document.createElement('span');

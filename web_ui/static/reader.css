@@ -1165,6 +1165,14 @@ body {
     height: 1.2em;
 }
 
+/* Verse line breaks within a stanza -- forces a wrap without a full
+   blank-line gap (which is what .para-break does between stanzas). */
+
+.verse-break {
+    display: block;
+    height: 0;
+}
+
 /* Bottom sheet */
 
 .sheet-overlay {
