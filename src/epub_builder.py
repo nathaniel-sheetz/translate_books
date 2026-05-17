@@ -211,7 +211,7 @@ def _render_body_blocks(body: str) -> List[str]:
         - --- lines -> <hr />
     """
     out: List[str] = []
-    blocks = re.split(r'\n{2,}', body)
+    blocks = re.split(r'\n\s*\n', body)
 
     for block in blocks:
         block = block.strip()
@@ -238,7 +238,11 @@ def _render_body_blocks(body: str) -> List[str]:
             continue
 
         # Verse / stanza block -- preserve every line break as a <p class="verse-line">
-        if is_verse_block(block):
+        # Skip the verse path if any line is an image placeholder (so the image
+        # is not swallowed by the verse branch and rendered as escaped text).
+        if is_verse_block(block) and not any(
+            _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
+        ):
             verse_lines = [
                 f'  <p class="verse-line">{escape(line.strip())}</p>'
                 for line in block.split('\n')
