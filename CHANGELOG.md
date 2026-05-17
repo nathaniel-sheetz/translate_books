@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1.0] - 2026-05-17
+
+### Added
+- **Italic preservation end-to-end**: `<i>` and `<em>` tags in the source HTML are now carried through the full pipeline and rendered as `<em>` in the final EPUB.
+  - **Ingest** (`scripts/ingest_gutenberg.py`): `<i>` and `<em>` elements are converted to `_word_` underscore markers during HTML-to-text conversion. Adjacent italic tags and `<br>`-separated italic content are handled correctly.
+  - **Translation prompt** (`prompts/translation.txt`): the LLM is instructed to preserve underscore markers in the translation, wrapping the translated word(s) in the same `_..._` syntax.
+  - **EPUB builder** (`src/epub_builder.py`): underscore markers are promoted to `<em>` in paragraphs, verse lines, and chapter subtitles. Snake_case and URL-style underscores are guarded against via word-boundary lookarounds.
+- **Inline chapter subtitles**: the book splitter now extracts subtitles that appear on the same line as the chapter number (e.g. `CHAPTER I EARLY BOYHOOD`). The subtitle is attached to the chapter heading so it appears as a sub-heading in the translated output.
+
 ## [0.9.0.0] - 2026-05-17
 
 ### Added
