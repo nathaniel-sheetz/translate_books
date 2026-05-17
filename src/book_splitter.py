@@ -508,13 +508,6 @@ def split_book_into_chapters(
     chapter_sections = []
     for i, m in enumerate(matches):
         chapter_identifier = m.group(1) if m.lastindex else m.group(0)
-        # Optional second capture group holds an inline subtitle (e.g.
-        # "CHAPTER I EARLY BOYHOOD" -> subtitle = "EARLY BOYHOOD").
-        chapter_subtitle: Optional[str] = None
-        if m.lastindex and m.lastindex >= 2:
-            sub = m.group(2)
-            if sub:
-                chapter_subtitle = sub.strip() or None
         start_pos = m.end()
         if i + 1 < len(matches):
             end_pos = matches[i + 1].start()
@@ -533,7 +526,6 @@ def split_book_into_chapters(
             "start_pos": start_pos,
             "end_pos": end_pos,
             "identifier": chapter_identifier,
-            "subtitle": chapter_subtitle,
             "raw_heading": m.group(0).strip(),
             "header_image": header_image[1] if header_image else None,
         })
@@ -636,22 +628,17 @@ def split_book_into_chapters(
     # Chapters
     for cs in chapter_sections:
         ident = cs["identifier"]
-        subtitle = cs.get("subtitle")
         if numbering == "roman":
             num = roman_to_int(ident)
             if num is None:
                 continue
             heading = f"Chapter {ident.upper()}"
-            if subtitle:
-                heading = f"{heading}\n{subtitle}"
         elif numbering == "numeric":
             try:
                 num = int(ident)
             except (TypeError, ValueError):
                 continue
             heading = f"Chapter {num}"
-            if subtitle:
-                heading = f"{heading}\n{subtitle}"
         else:  # sequential
             num = chapter_seq + 1
             heading = cs["raw_heading"]
