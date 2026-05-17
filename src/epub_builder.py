@@ -26,6 +26,7 @@ _HEADING_RE = re.compile(
     r'^(?:(\w+)\s+)?([IVXLCDM\d]+)\.?\s*$', re.IGNORECASE
 )
 _HR_RE = re.compile(r'^-{3,}$')
+_EM_RE = re.compile(r'(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])')
 
 # Default configuration for synthesizing a chapter heading when the chapter
 # text does not begin with a recognizable numeral line. Override per project
@@ -244,15 +245,20 @@ def _render_body_blocks(body: str) -> List[str]:
             _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
         ):
             verse_lines = [
-                f'  <p class="verse-line">{escape(line.strip())}</p>'
+                f'  <p class="verse-line">{_EM_RE.sub(r"<em>\\1</em>", escape(line.strip()))}</p>'
                 for line in block.split('\n')
                 if line.strip()
             ]
             out.append('<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>')
             continue
 
-        # Regular paragraph -- escape HTML entities
-        out.append(f'<p>{escape(block)}</p>')
+        # Regular paragraph -- escape HTML entities, then promote
+        # underscore-wrapped runs (the italic marker emitted by the ingest
+        # pipeline) to <em>. Order matters: escape() leaves underscores
+        # untouched, so substituting after it is safe.
+        escaped = escape(block)
+        with_em = _EM_RE.sub(r'<em>\1</em>', escaped)
+        out.append(f'<p>{with_em}</p>')
 
     return out
 
@@ -290,7 +296,7 @@ def chapter_text_to_xhtml(
     if heading:
         parts.append(f'<h1>{escape(_normalize_heading(heading))}</h1>')
     if subtitle:
-        parts.append(f'<h2>{escape(subtitle)}</h2>')
+        parts.append(f'<h2>{_EM_RE.sub(r"<em>\\1</em>", escape(subtitle))}</h2>')
 
     parts.extend(_render_body_blocks(body))
 
