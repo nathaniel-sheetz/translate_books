@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0.0] - 2026-05-17
+
+### Added
+- **Verse/poetry line-break preservation end-to-end**: the pipeline now detects stanza blocks and preserves every verse line through translation, alignment, EPUB rendering, and the web reader.
+  - `src/utils/verse.py`: new `is_verse_block(block)` heuristic — a block with ≥2 non-empty lines, average line length ≤65 chars, and at least one line of 2–12 words is treated as verse.
+  - **EPUB builder**: verse blocks render as `<div class="verse"><p class="verse-line">…</p></div>` with a hanging-indent style (`text-indent: -2em; padding-left: 2em`). Image placeholders embedded within a verse-shaped block are handled correctly (not rendered as literal text).
+  - **Sentence aligner**: `_split_sentences_with_para_indices` now splits verse paragraphs on `\n` before pysbd, producing one sentence record per verse line. Verse lines are not passed through pysbd to preserve the 1-record-per-line invariant. `align_chunk` uses this path for both source and target.
+  - **Web reader**: `_enrich_alignment` tags alignment records with `verse_line_break=True` for non-first lines of each stanza; `reader.js` renders `<span class="verse-break">` (zero-height block) to produce a visible line break within a stanza without a full paragraph gap.
+  - **Translation prompt** (`prompts/translation.txt`, `prompts/translation.example.txt`): added explicit verse line-break preservation instruction under STRUCTURE PRESERVATION.
+
+### Fixed
+- EPUB paragraph splitting now uses `\n\s*\n` (matching the reader's regex) instead of `\n{2,}`, so a stanza separator with a stray trailing space is not silently merged with the next stanza.
+
 ## [0.8.0.0] - 2026-05-16
 
 ### Added
