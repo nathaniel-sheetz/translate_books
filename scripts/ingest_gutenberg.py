@@ -44,6 +44,7 @@ WORDS_PER_CHUNK = 2000
 BLOCK_TAGS = {"p", "div", "blockquote", "li", "td", "th", "dd", "dt"}
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 SKIP_TAGS = {"script", "style", "head", "nav", "aside", "footer", "header"}
+ITALIC_TAGS = {"i", "em"}
 
 # CSS classes whose elements should be silently dropped
 SKIP_CLASSES = {"pagenum", "page-number", "pageno", "toc", "footnote", "endnote"}
@@ -186,6 +187,13 @@ class Converter:
             s = str(node)
             stripped = s.strip()
             if not stripped:
+                # Whitespace-only text node: emit a single separating space
+                # so adjacent emitting siblings (e.g. two <i> tags) don't
+                # collide into "_a__b_".
+                if s and self.parts:
+                    prev = self.parts[-1]
+                    if prev and not prev[-1].isspace():
+                        self.parts.append(" ")
                 return
             # Collapse internal whitespace to single spaces
             normalized = re.sub(r"\s+", " ", stripped)
@@ -245,6 +253,27 @@ class Converter:
             for child in node.children:
                 self._walk(child)
             self.parts.append("\n\n")
+            return
+
+        if tag in ITALIC_TAGS:
+            # Render inner content into a temporary buffer, then wrap the
+            # joined text with underscore markers so downstream stages
+            # (chunker, LLM, EPUB builder) can carry italics through.
+            saved = self.parts
+            self.parts = []
+            for child in node.children:
+                self._walk(child)
+            # Collapse any newlines from <br> inside the italic span so the
+            # EM_RE in epub_builder (which rejects [^_\n]) can match correctly.
+            inner = re.sub(r"\s+", " ", "".join(self.parts)).strip()
+            self.parts = saved
+            if inner:
+                # Ensure the italic marker is not immediately preceded by an
+                # alphanumeric char or a closing `_`, both of which would fool
+                # the lookbehind in EM_RE into refusing the match.
+                if self.parts and self.parts[-1] and not self.parts[-1][-1].isspace():
+                    self.parts.append(" ")
+                self.parts.append(f"_{inner}_")
             return
 
         # Inline tags and anything else — just recurse
