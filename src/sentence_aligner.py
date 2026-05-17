@@ -18,6 +18,8 @@ from typing import Optional
 import numpy as np
 import pysbd
 
+from src.utils.verse import is_verse_block
+
 # Lazy-loaded to avoid slow import when not needed
 _model = None
 
@@ -125,6 +127,13 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
     Split multi-paragraph text into sentences, tracking which paragraph
     each sentence came from.
 
+    Verse paragraphs (per is_verse_block) are split on '\\n' BEFORE
+    pysbd so each verse line becomes its own sentence record. Without
+    this, pysbd's terminal-punctuation heuristic produces inconsistent
+    line-level granularity for poetry (a line ending in ',' is joined
+    with the next; a line ending in '.' is split) which makes
+    downstream verse-line preservation in the reader unreliable.
+
     Returns (sentences, para_indices) where para_indices[i] is the
     zero-based paragraph number for sentence i.
     """
@@ -132,9 +141,18 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
     sentences: list[str] = []
     para_indices: list[int] = []
     for para_idx, para in enumerate(paragraphs):
-        para_sents = split_sentences(para, language)
-        sentences.extend(para_sents)
-        para_indices.extend([para_idx] * len(para_sents))
+        if is_verse_block(para):
+            for line in para.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                line_sents = split_sentences(line, language)
+                sentences.extend(line_sents)
+                para_indices.extend([para_idx] * len(line_sents))
+        else:
+            para_sents = split_sentences(para, language)
+            sentences.extend(para_sents)
+            para_indices.extend([para_idx] * len(para_sents))
     return sentences, para_indices
 
 
@@ -404,7 +422,7 @@ def align_chunk(
     if not source_text or not translated_text:
         raise ValueError(f"Missing source or translated text in {chunk_path}")
 
-    en_sentences = split_sentences(source_text, source_lang)
+    en_sentences, _ = _split_sentences_with_para_indices(source_text, source_lang)
     es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
 
     if model is None:

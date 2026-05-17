@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ebooklib import epub
 
+from src.utils.verse import is_verse_block
+
 logger = logging.getLogger(__name__)
 
 _IMAGE_RE = re.compile(r'\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]')
@@ -111,6 +113,13 @@ div.image { text-align: center; margin: 1em 0; }
 h1, h2 { text-align: center; }
 p { text-indent: 1.5em; margin-top: 0.25em; margin-bottom: 0.25em; }
 hr { margin: 1.5em auto; width: 40%; }
+div.verse { margin: 1em 1.5em; }
+div.verse p.verse-line {
+    text-indent: -2em;
+    padding-left: 2em;
+    margin: 0;
+    line-height: 1.35;
+}
 nav ol { list-style: none; padding-left: 0; }
 nav ol ol { padding-left: 1.5em; }
 """
@@ -226,6 +235,16 @@ def _render_body_blocks(body: str) -> List[str]:
         # Check for horizontal rule
         if _HR_RE.match(block):
             out.append('<hr/>')
+            continue
+
+        # Verse / stanza block -- preserve every line break as a <p class="verse-line">
+        if '\n' in block and is_verse_block(block):
+            verse_lines = [
+                f'  <p class="verse-line">{escape(line.strip())}</p>'
+                for line in block.split('\n')
+                if line.strip()
+            ]
+            out.append('<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>')
             continue
 
         # Regular paragraph -- escape HTML entities

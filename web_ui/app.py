@@ -38,6 +38,7 @@ from src.utils.file_io import (
 )
 from src.utils.source_text import load_chapter_source_text
 from src.utils.text_utils import image_placeholder_instruction
+from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
     append_feedback,
     evaluate_and_persist_chunk,
@@ -1237,6 +1238,49 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
                     "alt": alt,
                 }))
             event_idx += 1
+
+    # Mark verse line breaks: for each verse-block paragraph in the source,
+    # lines after the first correspond to mid-stanza line breaks. The first
+    # line of each stanza is already flagged via para_start above; we tag
+    # subsequent verse lines so the reader can render a visible break.
+    verse_line_keys: list[str] = []
+    for para in paragraphs:
+        if not is_verse_block(para):
+            continue
+        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
+        for ln in lines[1:]:
+            words = ln.split()[:2]
+            if words:
+                verse_line_keys.append(" ".join(words))
+
+    if verse_line_keys:
+        key_idx = 0
+        for ai, a in enumerate(alignments):
+            if key_idx >= len(verse_line_keys):
+                break
+            if a.get("para_start"):
+                continue
+            es_text = a.get("es", "").strip()
+            if not es_text:
+                continue
+            es_words = " ".join(es_text.split()[:2])
+            target = verse_line_keys[key_idx]
+            matched = False
+            if es_words == target:
+                matched = True
+            elif len(target.split()) >= 2:
+                target_first = target.split()[0]
+                es_first = es_text.split()[0]
+                if target_first and es_first == target_first:
+                    has_exact_later = any(
+                        " ".join(alignments[j].get("es", "").split()[:2]) == target
+                        for j in range(ai + 1, len(alignments))
+                    )
+                    if not has_exact_later:
+                        matched = True
+            if matched:
+                a["verse_line_break"] = True
+                key_idx += 1
 
     # Insert image records (reverse order to preserve indices)
     for insert_idx, img_record in reversed(insert_queue):
