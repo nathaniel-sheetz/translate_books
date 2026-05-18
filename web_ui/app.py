@@ -106,7 +106,7 @@ def _save_project_config(project_id: str, config: dict) -> None:
 
 
 # Cross-reference: HTML placeholder text (web_ui/templates/dashboard.html) is
-# hardcoded to "Note from the Translator" — keep in sync with the backend
+# hardcoded to "Nota del traductor" — keep in sync with the backend
 # constant src.epub_builder._DEFAULT_TRANSLATOR_HEADING.
 #
 # Per-user template lives at prompts/translator_note_default.txt (gitignored).

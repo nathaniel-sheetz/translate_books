@@ -459,6 +459,59 @@ class TestBuildEpub:
         assert output == custom_output
         assert output.exists()
 
+    def test_dublin_core_metadata(self, tmp_path):
+        """Optional translator/description/rights/source_title/publisher metadata
+        is written to the OPF and blank fields are omitted."""
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="Test Book",
+            author="Original Author",
+            language="es",
+            translator="The Translator",
+            description="A short synopsis.",
+            rights="Translation © 2026 …",
+            source_title="The Original Title",
+            publisher="My Imprint",
+        )
+
+        # Read the OPF file (the EPUB package document) and verify each field.
+        with zipfile.ZipFile(output) as zf:
+            opf_name = next(n for n in zf.namelist() if n.endswith('.opf'))
+            opf = zf.read(opf_name).decode('utf-8')
+
+        assert '<dc:creator' in opf and 'Original Author' in opf
+        # Translator is a contributor with role=trl, NOT a second creator.
+        assert '<dc:contributor' in opf and 'The Translator' in opf
+        assert opf.count('<dc:creator') == 1
+        assert 'property="role"' in opf and '>trl<' in opf
+        assert '<dc:description' in opf and 'A short synopsis.' in opf
+        assert '<dc:rights' in opf and 'Translation' in opf
+        assert '<dc:source' in opf and 'The Original Title' in opf
+        assert '<dc:publisher' in opf and 'My Imprint' in opf
+
+    def test_blank_optional_metadata_is_omitted(self, tmp_path):
+        """Blank/whitespace metadata must not emit empty <dc:*/> elements."""
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="Test Book",
+            author="Author",
+            translator="   ",
+            description="",
+            rights=None,
+            source_title="",
+            publisher="",
+        )
+        with zipfile.ZipFile(output) as zf:
+            opf_name = next(n for n in zf.namelist() if n.endswith('.opf'))
+            opf = zf.read(opf_name).decode('utf-8')
+        assert '<dc:contributor' not in opf
+        assert '<dc:description' not in opf
+        assert '<dc:rights' not in opf
+        assert '<dc:source' not in opf
+        assert '<dc:publisher' not in opf
+
     def test_chapter_ordering(self, tmp_path):
         """Chapters should be ordered numerically, not lexicographically."""
         project = self._make_project(tmp_path)
