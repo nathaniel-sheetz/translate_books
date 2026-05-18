@@ -866,7 +866,69 @@
         }
     }
 
+    // Edit = inline-edit the existing style guide text. Rebuild = wipe and
+    // re-run the Q&A → LLM-generate wizard. These used to be the same button.
+    function setStyleEditMode(editing) {
+        var preview = document.getElementById('style-guide-preview');
+        var editor = document.getElementById('style-guide-editor');
+        var actions = document.getElementById('style-guide-edit-actions');
+        var editBtn = document.getElementById('btn-edit-style');
+        var rebuildBtn = document.getElementById('btn-rebuild-style');
+        if (editing) {
+            editor.value = preview.textContent || '';
+            preview.style.display = 'none';
+            editor.style.display = '';
+            actions.style.display = '';
+            if (editBtn) editBtn.disabled = true;
+            if (rebuildBtn) rebuildBtn.disabled = true;
+        } else {
+            editor.style.display = 'none';
+            actions.style.display = 'none';
+            preview.style.display = '';
+            if (editBtn) editBtn.disabled = false;
+            if (rebuildBtn) rebuildBtn.disabled = false;
+            setStatus('style-edit-status', '', '');
+        }
+    }
+
     document.getElementById('btn-edit-style').addEventListener('click', function() {
+        setStyleEditMode(true);
+    });
+
+    document.getElementById('btn-cancel-style-edit').addEventListener('click', function() {
+        setStyleEditMode(false);
+    });
+
+    document.getElementById('btn-save-style-edit').addEventListener('click', function() {
+        var editor = document.getElementById('style-guide-editor');
+        var newContent = editor.value || '';
+        if (!newContent.trim()) {
+            setStatus('style-edit-status', 'Style guide cannot be empty.', 'error');
+            return;
+        }
+        setStatus('style-edit-status', 'Saving...', '');
+        apiPost('/api/setup/' + PROJECT + '/style-guide', { content: newContent })
+        .then(function(data) {
+            if (data && data.ok) {
+                document.getElementById('style-guide-preview').textContent = newContent;
+                setStyleEditMode(false);
+                setStatus('style-edit-status', 'Saved!', 'success');
+                setTimeout(function() { setStatus('style-edit-status', '', ''); }, 2000);
+                loadStatus();
+            } else {
+                setStatus('style-edit-status', 'Error: ' + ((data && data.error) || 'unknown'), 'error');
+            }
+        })
+        .catch(function(e) {
+            setStatus('style-edit-status', 'Error: ' + (e && e.message ? e.message : e), 'error');
+        });
+    });
+
+    document.getElementById('btn-rebuild-style').addEventListener('click', function() {
+        if (!confirm('Rebuild the style guide from scratch?\n\nThis hides the current guide and reopens the Q&A wizard. Your existing style.json stays on disk until you regenerate.')) {
+            return;
+        }
+        setStyleEditMode(false);
         document.getElementById('style-guide-existing').style.display = 'none';
         document.getElementById('style-guide-wizard').style.display = '';
     });

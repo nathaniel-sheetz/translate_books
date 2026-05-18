@@ -1710,19 +1710,11 @@ def _get_project_status(project_id: str) -> dict:
     chunks_dir = project_dir / "chunks"
     align_dir = project_dir / "alignments"
 
-    # Load annotations for review info
-    annotations_by_chapter = {}
-    ann_path = project_dir / "annotations.jsonl"
-    if ann_path.exists():
-        try:
-            with open(ann_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    ann = json.loads(line)
-                    ch = ann.get("chapter_id", "")
-                    if ch:
-                        annotations_by_chapter[ch] = annotations_by_chapter.get(ch, 0) + 1
-        except Exception:
-            pass
+    # Load annotations for review info. Use the same dedup/tombstone logic
+    # the reader uses (`_load_annotations`) so the Review tab counts match
+    # what `/read/<project_id>` shows — i.e. only active annotations, no
+    # superseded edits and no `removed: True` records.
+    annotations_by_chapter: dict[str, int] = {}
 
     # Reviewed chapters
     reviewed_chapters = set()
@@ -1777,6 +1769,13 @@ def _get_project_status(project_id: str) -> dict:
                 except Exception:
                     pass
 
+            # Active annotation count (matches the reader's chapter list).
+            try:
+                active_count = len(_load_annotations(project_dir, ch_id))
+            except Exception:
+                active_count = 0
+            annotations_by_chapter[ch_id] = active_count
+
             status["chapters"].append({
                 "id": ch_id,
                 "name": ch_id.replace("_", " ").title(),
@@ -1786,7 +1785,7 @@ def _get_project_status(project_id: str) -> dict:
                 "translated_count": chunk_info["translated"],
                 "has_alignment": has_alignment,
                 "alignment_confidence": alignment_confidence,
-                "annotation_count": annotations_by_chapter.get(ch_id, 0),
+                "annotation_count": active_count,
                 "reviewed": ch_id in reviewed_chapters,
             })
 

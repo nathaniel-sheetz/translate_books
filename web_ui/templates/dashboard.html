@@ -262,9 +262,16 @@
             <div id="style-guide-existing" style="display:none">
                 <div class="existing-banner">
                     Existing style guide loaded.
-                    <button class="btn-secondary" id="btn-edit-style" style="margin-left:8px; padding:4px 10px; font-size:12px;">Edit</button>
+                    <button class="btn-secondary" id="btn-edit-style" style="margin-left:8px; padding:4px 10px; font-size:12px;" title="Edit the current style guide text in place.">Edit</button>
+                    <button class="btn-secondary" id="btn-rebuild-style" style="margin-left:4px; padding:4px 10px; font-size:12px;" title="Discard the current guide and walk through the Q&amp;A wizard again to regenerate it.">Rebuild</button>
                 </div>
                 <div class="preview-box" id="style-guide-preview"></div>
+                <textarea id="style-guide-editor" class="preview-box" style="display:none; width:100%; min-height:240px; box-sizing:border-box; font-family:inherit; background:#fff;"></textarea>
+                <div class="btn-row" id="style-guide-edit-actions" style="display:none; margin-top:8px;">
+                    <button class="btn-save" id="btn-save-style-edit">Save</button>
+                    <button class="btn-secondary" id="btn-cancel-style-edit">Cancel</button>
+                    <span class="status-msg" id="style-edit-status"></span>
+                </div>
 
                 <div class="light-style-guide-section" style="margin-top:16px;">
                     <h3 style="margin:0 0 4px 0; font-size:14px;">Light Style Guide <span style="font-weight:normal; color:#888; font-size:12px;">(optional, used for sentence retranslation)</span></h3>
@@ -412,13 +419,14 @@
 
                     <div class="btn-row">
                         <button class="btn-primary" id="btn-extract-candidates">Extract Candidates</button>
-                        <label for="extract-zipf-slider" class="zipf-slider-label">Sensitivity:</label>
+                        <label for="extract-zipf-slider" class="zipf-slider-label">Rare-word sensitivity:</label>
                         <input type="range" id="extract-zipf-slider"
                                min="-1" max="1" step="0.25" value="0"
-                               title="Adjusts both zipf thresholds together. Higher = more lenient (more candidates).">
+                               title="Adjusts how rare a word must be to become a glossary candidate. Higher = include more common words.">
                         <span id="extract-zipf-readout" class="zipf-slider-readout">3.00 / 4.00</span>
                         <span class="status-msg" id="extract-status"></span>
                     </div>
+                    <p class="section-hint" style="margin:4px 0 0 0;">Only affects which words are <em>detected</em> as candidates during this scan. Existing glossary entries are not changed.</p>
                     <div id="candidates-count" style="display:none"></div>
                 </div>
 
