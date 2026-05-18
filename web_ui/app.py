@@ -3143,6 +3143,7 @@ def project_translate_batch(project_id):
 
     def run_batch():
         from src.api_translator import translate_chunk_realtime
+        affected_chapters: set[str] = set()
         for cp in chunk_paths:
             try:
                 chunk = load_chunk(cp)
@@ -3164,6 +3165,7 @@ def project_translate_batch(project_id):
                     previous_chapter_context=prev_context,
                 )
                 save_chunk(translated, cp)
+                affected_chapters.add(chunk.chapter_id)
                 job_queue.put(json.dumps({
                     "event": "chunk_done",
                     "chunk_id": chunk.id,
@@ -3175,6 +3177,40 @@ def project_translate_batch(project_id):
                     "chunk_id": chunk.id if chunk else "",
                     "error": str(e),
                 }))
+
+        # Recombine + realign each affected chapter so the Review tab is
+        # immediately usable without a manual "Align" click. Mirrors the
+        # post-batch behavior of the async Batch API endpoint above.
+        for chapter_id in affected_chapters:
+            try:
+                from src.combiner import combine_chunks
+                from src.sentence_aligner import align_chapter_chunks
+
+                chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+                ch_chunks = [load_chunk(cf) for cf in chunk_files]
+                combined_text = combine_chunks(ch_chunks)
+                chapters_dir = project_dir / "chapters"
+                chapters_dir.mkdir(exist_ok=True)
+                (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+
+                align_dir = project_dir / "alignments"
+                align_dir.mkdir(exist_ok=True)
+                align_chapter_chunks(
+                    chunk_paths=[str(cf) for cf in chunk_files],
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    source_lang="en",
+                    target_lang="es",
+                    output_path=str(align_dir / f"{chapter_id}.json"),
+                )
+                job_queue.put(json.dumps({
+                    "event": "chapter_aligned",
+                    "chapter_id": chapter_id,
+                }))
+            except Exception:
+                # Non-fatal: alignment can be re-run from the Review stage.
+                pass
+
         job_queue.put(json.dumps({"event": "batch_complete"}))
 
     t = threading.Thread(target=run_batch, daemon=True)
