@@ -1659,6 +1659,9 @@ def _get_project_status(project_id: str) -> dict:
     config = _load_project_config(project_id)
     status["gutenberg_url"] = config.get("gutenberg_url")
     status["suggested_split_pattern"] = config.get("suggested_split_pattern")
+    # Persisted chunking parameters (Stage 3 form remembers what the user
+    # last successfully chunked with). May be absent for new projects.
+    status["chunking_config"] = config.get("chunking_config") or None
 
     # Image status: count placeholders in source.txt vs files on disk so the
     # dashboard can warn when the Gutenberg ingester failed to fetch some images.
@@ -2606,6 +2609,26 @@ def project_split(project_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _persist_chunking_config(project_id: str, config) -> None:
+    """Save the chunking parameters used in a successful chunk run to
+    projects/<id>/project.json so the Stage 3 form pre-fills with the
+    user's last choices on subsequent visits."""
+    try:
+        proj_cfg = _load_project_config(project_id)
+        proj_cfg["chunking_config"] = {
+            "target_size": config.target_size,
+            "min_chunk_size": config.min_chunk_size,
+            "max_chunk_size": config.max_chunk_size,
+            "overlap_paragraphs": config.overlap_paragraphs,
+            "min_overlap_words": config.min_overlap_words,
+        }
+        _save_project_config(project_id, proj_cfg)
+    except Exception:
+        # Persistence is best-effort; never fail a chunk run because we
+        # couldn't update project.json.
+        pass
+
+
 @app.route("/api/project/<project_id>/chunk-all", methods=["POST"])
 def project_chunk_all(project_id):
     """Chunk all (or selected) chapters."""
@@ -2649,6 +2672,7 @@ def project_chunk_all(project_id):
                 save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
                 total_chunks += 1
 
+        _persist_chunking_config(project_id, config)
         return jsonify({"ok": True, "total_chunks": total_chunks})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2754,6 +2778,7 @@ def project_chapter_rechunk(project_id, chapter_id):
         for chunk in chunks:
             save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
 
+        _persist_chunking_config(project_id, config)
         return jsonify({"ok": True, "chunk_count": len(chunks)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

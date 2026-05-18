@@ -215,8 +215,16 @@
         <!-- STAGE 3: CHUNK -->
         <!-- ============================================================ -->
         <div class="stage-panel" id="stage-chunk">
-            <h2>Chunk Chapters</h2>
-            <p class="stage-subtitle">Divide chapters into translation-sized chunks with overlap.</p>
+            <div class="stage-panel-header" style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+                <div>
+                    <h2 style="margin:0">Chunk Chapters</h2>
+                    <p class="stage-subtitle" style="margin:4px 0 0 0">Divide chapters into translation-sized chunks with overlap.</p>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                    <span class="status-msg" id="chunk-status"></span>
+                    <button class="btn-primary" id="btn-chunk-all">Chunk All</button>
+                </div>
+            </div>
 
             <div class="dash-field-row">
                 <div class="dash-field">
@@ -242,11 +250,6 @@
             </div>
 
             <div id="chunk-chapter-list"></div>
-
-            <div class="btn-row">
-                <button class="btn-primary" id="btn-chunk-all">Chunk All</button>
-                <span class="status-msg" id="chunk-status"></span>
-            </div>
         </div>
 
         <!-- ============================================================ -->

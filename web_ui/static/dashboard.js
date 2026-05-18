@@ -731,6 +731,24 @@
     }
 
     function populateChunkStage(status) {
+        // Pre-fill chunk parameter inputs from the project's persisted
+        // chunking_config (saved on the last successful chunk run). Fall
+        // back to the HTML-default system values when nothing is saved.
+        var cc = status.chunking_config;
+        if (cc) {
+            var fields = [
+                ['chunk-target-size', cc.target_size],
+                ['chunk-min-size', cc.min_chunk_size],
+                ['chunk-max-size', cc.max_chunk_size],
+                ['chunk-overlap-para', cc.overlap_paragraphs],
+                ['chunk-overlap-words', cc.min_overlap_words],
+            ];
+            fields.forEach(function(pair) {
+                var el = document.getElementById(pair[0]);
+                if (el && Number.isFinite(pair[1])) el.value = pair[1];
+            });
+        }
+
         var list = document.getElementById('chunk-chapter-list');
         list.innerHTML = '';
 
