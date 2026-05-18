@@ -650,8 +650,6 @@ def split_book_into_chapters(
             except (TypeError, ValueError):
                 continue
             heading = f"Chapter {num}"
-            if subtitle:
-                heading = f"{heading}\n{subtitle}"
         else:  # sequential
             num = chapter_seq + 1
             heading = cs["raw_heading"]
