@@ -91,7 +91,7 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 **Workflow:**
 1. Click **Preview** to dry-run detection — shows cards with chapter title, word count, and first 200 characters
 2. Click **Confirm & Split** to write files
-3. If already split: shows existing chapters with a "Re-split" option (warns about overwrite)
+3. If already split: shows existing chapters with an inline note explaining that confirming a new split will overwrite the saved files and any per-chapter source edits. A confirmation dialog is shown before overwriting.
 
 **APIs:**
 - `POST /api/project/<id>/split/preview` — `{ "pattern_type": "roman" }` → list of detected chapters
