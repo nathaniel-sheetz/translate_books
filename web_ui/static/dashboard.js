@@ -2702,6 +2702,36 @@
             if (!titleInput.value && (data.spanish_title || data.title)) titleInput.value = data.spanish_title || data.title;
             if (!authorInput.value && data.author) authorInput.value = data.author;
 
+            // Pre-populate optional Dublin Core metadata fields from project.json.
+            // Only fill when the field is empty so unsaved user edits aren't clobbered.
+            var metaFields = [
+                ['epub-translator', 'translator'],
+                ['epub-source-title', 'source_title'],
+                ['epub-publisher', 'publisher'],
+                ['epub-description', 'description'],
+                ['epub-rights', 'rights'],
+            ];
+            metaFields.forEach(function(pair) {
+                var el = document.getElementById(pair[0]);
+                if (el && !el.value && data[pair[1]]) el.value = data[pair[1]];
+            });
+
+            // Cover image preview — mirrors what _resolve_cover() picks at build time.
+            var coverThumb = document.getElementById('epub-cover-thumb');
+            var coverEmpty = document.getElementById('epub-cover-empty');
+            if (coverThumb && coverEmpty) {
+                if (data.cover_filename) {
+                    var bust = data.cover_mtime ? ('?t=' + data.cover_mtime) : '';
+                    coverThumb.src = '/projects/' + PROJECT + '/images/' + data.cover_filename + bust;
+                    coverThumb.style.display = '';
+                    coverEmpty.style.display = 'none';
+                } else {
+                    coverThumb.removeAttribute('src');
+                    coverThumb.style.display = 'none';
+                    coverEmpty.style.display = '';
+                }
+            }
+
             // Update badge
             var badge = document.getElementById('badge-export');
             if (data.epub_exists) {
@@ -2804,6 +2834,18 @@
         var translatorHeading = hEl ? hEl.value : '';
         var translatorNote = bEl ? bEl.value : '';
 
+        // Read optional DC metadata. We always include these keys in the POST
+        // body (even when blank) so users can clear a previously-saved value.
+        function readMeta(id) {
+            var el = document.getElementById(id);
+            return el ? el.value.trim() : '';
+        }
+        var translator = readMeta('epub-translator');
+        var sourceTitle = readMeta('epub-source-title');
+        var publisher = readMeta('epub-publisher');
+        var description = readMeta('epub-description');
+        var rights = readMeta('epub-rights');
+
         btn.disabled = true;
         btn.textContent = 'Building...';
         statusEl.textContent = '';
@@ -2812,6 +2854,11 @@
         apiPost('/api/project/' + PROJECT + '/build-epub', {
             title: title || undefined,
             author: author || undefined,
+            translator: translator,
+            source_title: sourceTitle,
+            publisher: publisher,
+            description: description,
+            rights: rights,
             translator_heading: translatorHeading,
             translator_note: translatorNote,
         }).then(function(data) {

@@ -4473,6 +4473,23 @@ def epub_status(project_id):
     epub_files = list(project_dir.glob("*.epub"))
     epub_file = max(epub_files, key=lambda p: p.stat().st_mtime) if epub_files else None
 
+    # Surface the cover image that ``src.epub_builder._resolve_cover`` will
+    # auto-pick at build time, so the Export tab can render a thumbnail
+    # preview. Mirrors the precedence used in epub_builder.
+    images_dir = project_dir / "images"
+    cover_filename = None
+    cover_mtime = None
+    if images_dir.exists():
+        for name in ("cover.jpg", "cover.jpeg", "cover.png"):
+            candidate = images_dir / name
+            if candidate.exists():
+                cover_filename = name
+                try:
+                    cover_mtime = int(candidate.stat().st_mtime)
+                except OSError:
+                    cover_mtime = None
+                break
+
     return jsonify({
         "total_chapters": len(chapters),
         "translated_chapters": translated_count,
@@ -4482,6 +4499,13 @@ def epub_status(project_id):
         "title": config.get("title", ""),
         "spanish_title": config.get("spanish_title", ""),
         "author": config.get("author", ""),
+        "translator": config.get("translator", ""),
+        "description": config.get("description", ""),
+        "rights": config.get("rights", ""),
+        "source_title": config.get("source_title", ""),
+        "publisher": config.get("publisher", ""),
+        "cover_filename": cover_filename,
+        "cover_mtime": cover_mtime,
     })
 
 
@@ -4539,6 +4563,29 @@ def build_epub_route(project_id):
     title = data.get("title") or config.get("spanish_title") or config.get("title") or project_id
     author = data.get("author") or config.get("author", "")
     language = data.get("language") or config.get("target_lang_code", "es")
+
+    # Optional Dublin Core metadata: request body wins, otherwise fall back to
+    # project.json. Persist whatever the form submitted so re-exports keep the
+    # same metadata without retyping (mirrors the translator-note pattern).
+    metadata_keys = ("translator", "description", "rights", "source_title", "publisher")
+    metadata: dict[str, str] = {}
+    config_dirty = False
+    for key in metadata_keys:
+        if key in data:
+            val = "" if data.get(key) is None else str(data.get(key)).strip()
+            if config.get(key, "") != val:
+                config[key] = val
+                config_dirty = True
+            metadata[key] = val
+        else:
+            metadata[key] = str(config.get(key, "") or "").strip()
+    # Also persist author/title when supplied so the form is the source of truth.
+    for key, val in (("author", author), ("title", data.get("title") or "")):
+        if val and config.get(key, "") != val:
+            config[key] = val
+            config_dirty = True
+    if config_dirty:
+        _save_project_config(project_id, config)
     # Optional chapter heading synthesis config; request body wins, otherwise
     # build_epub will read it from project.json.
     chapter_heading_config = data.get("chapter_heading")
@@ -4611,6 +4658,11 @@ def build_epub_route(project_id):
             chapter_heading_config=chapter_heading_config,
             translator_note_heading=note.get("heading", ""),
             translator_note_body=note.get("body", ""),
+            translator=metadata["translator"] or None,
+            description=metadata["description"] or None,
+            rights=metadata["rights"] or None,
+            source_title=metadata["source_title"] or None,
+            publisher=metadata["publisher"] or None,
         )
 
         size_bytes = epub_path.stat().st_size

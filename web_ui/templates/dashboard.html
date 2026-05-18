@@ -584,16 +584,56 @@
                 <label>Title</label>
                 <input type="text" id="epub-title" placeholder="Book title">
             </div>
-            <div class="dash-field" style="max-width:400px; margin-bottom:16px;">
+
+            <div class="dash-field" id="epub-cover-row" style="max-width:400px; margin-bottom:12px;">
+                <label>Cover image</label>
+                <img id="epub-cover-thumb" alt="Cover preview"
+                     style="display:none; max-width:160px; max-height:220px; border:1px solid #ccc; border-radius:4px;">
+                <p id="epub-cover-empty" class="section-hint" style="margin:0; color:#888;">
+                    No cover image found. Drop one into the project's
+                    <code>images/</code> directory as <code>cover.jpg</code>,
+                    <code>cover.jpeg</code>, or <code>cover.png</code>.
+                </p>
+            </div>
+
+            <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
                 <label>Author</label>
-                <input type="text" id="epub-author" placeholder="Author name">
+                <input type="text" id="epub-author" placeholder="Original author">
+            </div>
+
+            <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
+                <label>Translator</label>
+                <input type="text" id="epub-translator" placeholder="Translator name (optional)">
+            </div>
+
+            <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
+                <label>Original title</label>
+                <input type="text" id="epub-source-title"
+                       placeholder="Source-language title (optional)">
+            </div>
+
+            <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
+                <label>Publisher</label>
+                <input type="text" id="epub-publisher" placeholder="Publisher / imprint (optional)">
+            </div>
+
+            <div class="dash-field" style="max-width:600px; margin-bottom:12px;">
+                <label>Description</label>
+                <textarea id="epub-description" rows="3" style="width:100%;"
+                          placeholder="Synopsis shown in most readers (optional)"></textarea>
+            </div>
+
+            <div class="dash-field" style="max-width:600px; margin-bottom:16px;">
+                <label>Rights</label>
+                <input type="text" id="epub-rights"
+                       placeholder="e.g. Translation © 2026 …; original in the public domain">
             </div>
 
             <!-- Cross-reference: placeholder mirrors src.epub_builder._DEFAULT_TRANSLATOR_HEADING -->
             <div class="dash-field" style="max-width:400px; margin-bottom:8px;">
                 <label>Translator note heading</label>
                 <input type="text" id="epub-translator-heading"
-                       placeholder="Note from the Translator">
+                       placeholder="Nota del traductor">
                 <span class="status-msg" id="epub-translator-heading-status" style="margin-left:8px;"></span>
             </div>
             <div class="dash-field" style="margin-bottom:16px;">
