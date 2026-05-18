@@ -110,6 +110,10 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 - Overlap paragraphs (default: 0)
 - Minimum overlap words (default: 0)
 
+The form pre-fills with the parameters from the last successful chunk run. These are stored in `project.json` under `chunking_config` and restored automatically on dashboard load, so you don't have to re-enter them if you rechunk later.
+
+The **Chunk All** button is in the panel header alongside the status indicator.
+
 **Workflow:**
 1. Configure chunking parameters
 2. Click **Chunk All** to process every chapter
@@ -132,6 +136,10 @@ A shared **LLM provider/model selector** appears at the top of the style guide w
 2. Generate additional questions: click **Generate via API** to call the selected LLM directly, or use the copy/paste workflow (Show Prompt to Copy → paste response)
 3. Generate style guide: click **Generate via API**, use **Generate from Answers (no LLM)** fallback, or copy/paste
 4. Save to `style.json`
+
+**Editing an existing style guide.** Once a guide is saved, the banner shows two buttons:
+- **Edit** — opens an inline textarea with the current style guide text for direct edits. Save or Cancel with the buttons below.
+- **Rebuild** — discards the current guide and re-runs the full Q&A wizard to regenerate it from scratch.
 
 **Skipping a question.** Every question (fixed, feature-detected/conditional, or LLM-generated) has a small **Skip** checkbox in the top-right of its block. Ticking it dims the question, disables the radios, and clears any selected answer. Skipped questions are excluded from the style-guide prompt, the no-LLM fallback, the prompt-copy preview, and the Glossary stage's "choose relevant questions" list (the matching row is greyed out and its checkbox disabled). Use this when a question is irrelevant to your book or when an LLM-generated question is off-base. Skip state is session-only — reloading the dashboard clears it.
 
@@ -159,6 +167,8 @@ A **LLM provider/model selector** appears in Step 3 ("Bootstrap Translations via
 5. Save glossary
 
 **Edit existing glossary:** Once a glossary is saved, the "Existing glossary loaded (N terms)" banner shows an **Edit** button. Clicking it loads the saved `glossary.json` into the same proposals table. **Drop** a row to remove that term on save; **+ Add row** to insert a new entry; edit any cell inline. Save uses replace semantics — the table contents become the authoritative glossary, so dropped rows are deleted from `glossary.json`. The `alternatives` field on each term is preserved transparently (not shown in the UI). Translation prompts re-read `glossary.json` on each chunk, so changes take effect on the next translate or retranslate.
+
+The **Rare-word sensitivity** slider controls how rare a word must be to surface as a candidate. Higher values include more common words; lower values restrict to the rarest vocabulary. This only affects candidate detection during this scan — existing glossary entries are not changed.
 
 **APIs:**
 - `POST /api/setup/<id>/extract-candidates` — extract candidate terms; accepts optional `zipf_offset` (float, ±1.0) to shift both Zipf rarity thresholds simultaneously — positive values surface rarer words, negative values are more permissive
@@ -212,11 +222,13 @@ The prompt includes: style guide, filtered glossary (only terms appearing in thi
 5. Click **Start** — launches background translation thread
 6. Real-time progress via Server-Sent Events (SSE)
 
+After all chunks finish translating, the dashboard automatically combines each affected chapter and writes its alignment file. The Review tab is ready to read without a manual "Combine + Align" click. A `chapter_aligned` SSE event is emitted for each chapter as it completes alignment.
+
 **APIs:**
 - `GET /api/llm-config` — returns available providers/models with availability flags
 - `POST /api/project/<id>/translate/cost-estimate` — `{ "chapters": [...], "provider": "anthropic", "model": "..." }` -> `{ "cost_usd": 0.12, "input_tokens": 5000, "chunk_count": 8 }`
 - `POST /api/project/<id>/translate/batch` — `{ "chapters": [...], "provider": "...", "model": "..." }` -> `{ "job_id": "abc123" }`
-- `GET /api/project/<id>/translate/sse?job_id=abc123` — SSE stream with events: `chunk_started`, `chunk_done`, `chunk_error`, `batch_complete`
+- `GET /api/project/<id>/translate/sse?job_id=abc123` — SSE stream with events: `chunk_started`, `chunk_done`, `chunk_error`, `chapter_aligned`, `batch_complete`
 
 **Available models** are configured in `llm_config.json`. By default: Anthropic (Claude Sonnet 4, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku), OpenAI (GPT-4o, GPT-4o Mini), and DeepInfra (Llama 3.3 70B). Any OpenAI-compatible provider can be added.
 
@@ -293,19 +305,34 @@ Table of translated chapters with columns: chapter, alignment status, annotation
 Build a downloadable EPUB from all fully-translated chapters. The stage shows how many chapters (out of the total) will be included — only chapters where every chunk has been translated are packaged.
 
 **Workflow:**
-1. Title and author fields are pre-populated from `project.json`
+1. Title, author, and Dublin Core metadata fields are pre-populated from `project.json`
 2. The coverage line shows "X of Y chapters will be included"
-3. Optionally edit the **Translator note heading** and **Note from the translator** fields (auto-saved on blur). Leave the body blank to omit the chapter entirely.
-4. Click **Build EPUB** — the backend auto-combines translated chunks and calls the epub builder
-5. On success, a **Download** link appears and the file is saved to the project folder
+3. Optionally fill in the **Translator**, **Original title**, **Publisher**, **Description**, and **Rights** fields — these write Dublin Core metadata into the EPUB's OPF file
+4. Optionally edit the **Translator note heading** and **Note from the translator** fields (auto-saved on blur). Leave the body blank to omit the chapter entirely.
+5. Click **Build EPUB** — the backend auto-combines translated chunks and calls the epub builder
+6. On success, a **Download** link appears and the file is saved to the project folder
 
-Images referenced via `[IMAGE:...]` placeholders in translated text are embedded in the EPUB. A cover image is auto-detected from `images/cover.jpg` (or `.png`) if present.
+**Cover image preview.** If `images/cover.jpg`, `images/cover.jpeg`, or `images/cover.png` exists in the project, a thumbnail is shown in the Export panel so you can confirm the correct image is present before building. The same image is auto-embedded as the EPUB cover.
+
+Images referenced via `[IMAGE:...]` placeholders in translated text are embedded in the EPUB.
+
+### Dublin Core metadata fields
+
+| Field | project.json key | EPUB OPF element |
+|---|---|---|
+| Translator | `translator` | `dc:contributor` (MARC relator `trl`) |
+| Original title | `source_title` | `dc:source` |
+| Publisher | `publisher` | `dc:publisher` |
+| Description | `description` | `dc:description` |
+| Rights | `rights` | `dc:rights` |
+
+All fields are optional. Values are saved to `project.json` by the `POST /api/project/<id>/config` endpoint when Build EPUB is clicked, and read back by `build_epub()` at build time.
 
 ### Translator note (optional final chapter)
 
 The Export panel ships with a "Note from the Translator" — Amazon KDP-ready end matter that's appended as the last spine/TOC entry.
 
-- **Heading:** plain text, defaults to `Note from the Translator` if left blank.
+- **Heading:** plain text, defaults to `Nota del traductor` if left blank.
 - **Body:** plain text. Blank-line-separated paragraphs become `<p>`s; `---` lines become `<hr/>`. `[IMAGE:...]` placeholders are stripped (translator notes don't carry their own images).
 - **Empty body → no chapter is appended**, so the EPUB is byte-identical to the legacy build path when the field is left blank.
 - **Per-book storage:** `projects/<id>/translator_note.json` (`{heading, body}`). Auto-saved on blur and again when Build EPUB runs (POST body wins → disk → loader → `build_epub`).
@@ -414,7 +441,7 @@ All state is derived from the filesystem — no database.
 
 ```
 projects/<id>/
-├── project.json            # Project config (title, spanish_title, gutenberg_url, suggested_split_pattern)
+├── project.json            # Project config (title, spanish_title, gutenberg_url, suggested_split_pattern, chunking_config, translator, source_title, publisher, description, rights)
 ├── source.txt              # Raw source text
 ├── chapters/               # Chapter .txt files (combined translated output)
 │   ├── chapter_01.txt
