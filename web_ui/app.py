@@ -3125,6 +3125,9 @@ def project_translate_batch(project_id):
     provider = data.get("provider", "anthropic")
     model = data.get("model", None)
 
+    if not all(_safe_id(ch_id) for ch_id in chapter_ids):
+        return jsonify({"error": "Invalid chapter ID"}), 400
+
     include_translated = data.get("include_translated", False)
 
     # Collect chunks to translate
@@ -4700,7 +4703,7 @@ def build_epub_route(project_id):
             (temp_dir / f"{ch_id}.txt").write_text(combined_text, encoding="utf-8")
 
         from src.epub_builder import build_epub
-        epub_filename = title + ".epub"
+        epub_filename = Path(title).name + ".epub"
         epub_output = project_dir / epub_filename
         epub_path = build_epub(
             project_path=project_dir,

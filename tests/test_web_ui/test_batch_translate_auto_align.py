@@ -253,3 +253,40 @@ class TestBatchTranslateAutoAlign:
         job = app_module._batch_jobs.get(job_id)
         assert job is not None
         assert not job["thread"].is_alive()
+
+    def test_chapter_aligned_event_enqueued_for_sse(self, client, project):
+        """After a successful batch a ``chapter_aligned`` event must be put on
+        the job queue so the SSE stream delivers it to the dashboard."""
+
+        def fake_translate(chunk, **kwargs):
+            return chunk.model_copy(
+                update={"translated_text": "Texto.", "status": ChunkStatus.TRANSLATED}
+            )
+
+        def fake_align(**kwargs):
+            out = kwargs.get("output_path")
+            if out:
+                import json as _json
+                Path(out).parent.mkdir(parents=True, exist_ok=True)
+                Path(out).write_text(_json.dumps({"sentences": []}), encoding="utf-8")
+
+        with patch("src.api_translator.translate_chunk_realtime", side_effect=fake_translate), \
+             patch("src.sentence_aligner.align_chapter_chunks", side_effect=fake_align):
+            job_id = self._start_batch(client, "proj1", ["chapter_001"])
+            self._wait_for_job(client, "proj1", job_id)
+
+        import web_ui.app as app_module
+        job = app_module._batch_jobs.get(job_id)
+        assert job is not None
+
+        # Drain the queue and collect all enqueued events.
+        queued: list[dict] = []
+        while not job["queue"].empty():
+            queued.append(json.loads(job["queue"].get_nowait()))
+
+        event_types = [e.get("event") for e in queued]
+        assert "chapter_aligned" in event_types, (
+            f"Expected 'chapter_aligned' event in job queue; got: {event_types}"
+        )
+        aligned = [e for e in queued if e.get("event") == "chapter_aligned"]
+        assert aligned[0].get("chapter_id") == "chapter_001"
