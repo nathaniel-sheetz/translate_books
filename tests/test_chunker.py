@@ -268,6 +268,13 @@ class TestIsSceneBreak:
         assert not _is_scene_break("A normal paragraph.")
         assert not _is_scene_break("")
 
+    def test_italic_only_paragraph_not_scene_break(self):
+        # The scene-break detector matches paragraphs made entirely of
+        # *, -, _, and whitespace. A standalone italicized word like
+        # "_Victory_" contains letters and must not be misclassified.
+        assert not _is_scene_break("_Victory_")
+        assert not _is_scene_break("_HMS Victory_")
+
 
 class TestChunkChapter:
     """Tests for main chunk_chapter function."""

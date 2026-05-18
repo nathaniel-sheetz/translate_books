@@ -218,6 +218,63 @@ class TestChapterTextToXhtml:
         assert '<p class="verse-line">Tell of springtime bright and fair.</p>' in xhtml
         assert '<p>Normal prose paragraph.</p>' in xhtml
 
+    def test_underscore_italic_renders_em(self):
+        text = "CHAPTER I\n\nTitle\n\nHe was _absolutely_ furious."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<p>He was <em>absolutely</em> furious.</p>" in xhtml
+
+    def test_multiple_italics_in_one_paragraph(self):
+        text = (
+            "CHAPTER I\n\nTitle\n\n"
+            "The _Victory_ met the _Redoutable_."
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>Victory</em>" in xhtml
+        assert "<em>Redoutable</em>" in xhtml
+
+    def test_snake_case_underscores_not_italicized(self):
+        text = "CHAPTER I\n\nTitle\n\nUse snake_case for variables."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>" not in xhtml
+        assert "snake_case" in xhtml
+
+    def test_unpaired_underscore_does_not_emit_em(self):
+        text = "CHAPTER I\n\nTitle\n\nA stray _ underscore here."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>" not in xhtml
+        assert "_" in xhtml
+
+    def test_italic_at_paragraph_start(self):
+        text = "CHAPTER I\n\nTitle\n\n_Victory_ sailed at dawn."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<p><em>Victory</em> sailed at dawn.</p>" in xhtml
+
+    def test_italic_at_paragraph_end(self):
+        text = "CHAPTER I\n\nTitle\n\nHe boarded the _Victory_"
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "He boarded the <em>Victory</em></p>" in xhtml
+
+    def test_italic_preserves_html_entities(self):
+        # The italic content contains characters that escape() rewrites
+        # (& -> &amp;). EM_RE runs after escape, so the entity must end up
+        # inside the <em> tag rather than break the match.
+        text = "CHAPTER I\n\nTitle\n\nShares of _AT&T_ rose."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>AT&amp;T</em>" in xhtml
+
+    def test_multi_word_italic_phrase(self):
+        text = "CHAPTER I\n\nTitle\n\nRead _Don Quixote, Part I_ first."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>Don Quixote, Part I</em>" in xhtml
+
+    def test_underscore_in_url_like_string_not_italicized(self):
+        # bar_baz_qux has alphanumerics on both sides of each underscore,
+        # so the lookarounds must reject it.
+        text = "CHAPTER I\n\nTitle\n\nSee foo/bar_baz_qux for details."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>" not in xhtml
+        assert "bar_baz_qux" in xhtml
+
     def test_prose_block_with_newlines_does_not_render_as_verse(self):
         # Long lines should not trigger the verse path even if they contain \n.
         long_para = (
