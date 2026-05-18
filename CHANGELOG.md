@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2.0] - 2026-05-17
+
+### Added
+- **Chapter subtitle extraction**: the `chapter_roman_titled` split pattern now captures inline subtitles from roman-numeral headings (e.g. `CHAPTER I EARLY BOYHOOD`). The subtitle is stored separately and written as a second line in the chapter heading, flowing into `<h2>` in the exported EPUB.
+- **Broader all-caps heading detection**: `allcaps_heading` character class now allows `.` and `&`, enabling headings like `ST. LOUIS` and `PEACE & WAR` that were previously missed.
+
+### Fixed
+- **EPUB italic rendering in verse lines and subtitles**: `_EM_RE.sub()` calls used a double-escaped backreference (`r"<em>\\1</em>"` → literal `\1`). Fixed to `r"<em>\1</em>"` so underscore-marked italics are correctly promoted to `<em>` in verse and subtitle blocks.
+
+### Changed
+- **Resplit confirmation dialog**: the UI now checks whether a saved split exists before prompting. If one does, the dialog warns that chapter files and any per-chapter source edits will be replaced.
+
 ## [0.9.1.0] - 2026-05-17
 
 ### Added
