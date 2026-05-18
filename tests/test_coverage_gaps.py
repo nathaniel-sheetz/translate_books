@@ -436,6 +436,18 @@ class TestLoadChapterSourceTextCorruptChunk:
         assert kind == "chapters"
         assert text == "Chapter fallback."
 
+    def test_all_chunks_corrupt_and_no_chapter_returns_empty(self, tmp_path: Path):
+        """All chunks corrupt + no chapter file → silent empty return ("", None, "")."""
+        chunks = tmp_path / "chunks"
+        chunks.mkdir()
+        (chunks / "chapter_01_chunk_000.json").write_text("not valid json", encoding="utf-8")
+        (chunks / "chapter_01_chunk_001.json").write_text("also bad json{{", encoding="utf-8")
+        # No chapters/ directory at all.
+        text, mtime, kind = load_chapter_source_text(tmp_path, "chapter_01")
+        assert text == ""
+        assert mtime is None
+        assert kind == ""
+
     def test_no_chunks_dir_uses_chapters(self, tmp_path: Path):
         chapters = tmp_path / "chapters"
         chapters.mkdir()
@@ -733,3 +745,185 @@ class TestFindFirstContextsMaxContexts:
         pos, ctx = find_first_contexts("Nelson", chapters, max_contexts=1)
         assert len(ctx) == 1
         assert ctx[0][1] == "Nelson here."
+
+
+# ===========================================================================
+# Branch-specific gap tests: feat/chapter-subtitle-extraction
+# ===========================================================================
+
+from src.book_splitter import split_book_into_chapters  # noqa: E402
+from src.epub_builder import chapter_text_to_xhtml  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# book_splitter: chapter_roman_titled pattern captures group-2 subtitle
+# ---------------------------------------------------------------------------
+
+_BODY = "lorem ipsum dolor sit amet " * 30  # ~900-word body
+
+
+class TestChapterRomanTitledSubtitle:
+    """Inline subtitles extracted via the chapter_roman_titled pattern."""
+
+    def test_inline_subtitle_appears_in_chapter_title(self):
+        text = (
+            "Chapter I Early Boyhood\n\n" + _BODY + "\n\n"
+            "Chapter II The School Years\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="chapter_roman_titled")
+        titles = [s.chapter_title for s in sections if s.kind == "chapter"]
+        assert any("Early Boyhood" in t for t in titles), titles
+        assert any("School Years" in t for t in titles), titles
+
+    def test_inline_subtitle_with_dash_separator(self):
+        text = (
+            "Chapter I - Early Boyhood\n\n" + _BODY + "\n\n"
+            "Chapter II - The School Years\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="chapter_roman_titled")
+        ch1 = next(s for s in sections if s.kind == "chapter")
+        assert "Early Boyhood" in ch1.chapter_title
+
+    def test_inline_subtitle_with_colon_separator(self):
+        text = (
+            "Chapter I: The Beginning\n\n" + _BODY + "\n\n"
+            "Chapter II: The Middle\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="chapter_roman_titled")
+        ch1 = next(s for s in sections if s.kind == "chapter")
+        assert "Beginning" in ch1.chapter_title
+
+    def test_chapters_numbered_correctly_with_inline_subtitles(self):
+        text = (
+            "Chapter I Alpha Title\n\n" + _BODY + "\n\n"
+            "Chapter II Beta Title\n\n" + _BODY + "\n\n"
+            "Chapter III Gamma Title\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="chapter_roman_titled")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert [c.number for c in chapters] == [1, 2, 3]
+
+    def test_front_matter_still_detected_with_roman_titled_pattern(self):
+        text = (
+            "Preface\n\n" + _BODY + "\n\n"
+            "Chapter I The Early Days\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="chapter_roman_titled")
+        kinds = [s.kind for s in sections]
+        assert "front_matter" in kinds
+
+
+# ---------------------------------------------------------------------------
+# book_splitter: numeric pattern — no group-2 subtitle (regression guard)
+# ---------------------------------------------------------------------------
+
+class TestNumericChapterNoSpuriousSubtitle:
+    def test_numeric_chapters_still_numbered_correctly(self):
+        text = (
+            "Chapter 1\n\n" + _BODY + "\n\n"
+            "Chapter 2\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="numeric")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert [c.number for c in chapters] == [1, 2]
+
+    def test_numeric_chapter_title_has_no_spurious_newline(self):
+        """When there is no subtitle, the heading must not end in \\n."""
+        text = "Chapter 1\n\n" + _BODY
+        sections = split_book_into_chapters(text, pattern_type="numeric")
+        ch = sections[0]
+        assert "\n" not in ch.chapter_title
+
+
+# ---------------------------------------------------------------------------
+# allcaps_heading: widened character class now includes '.' and '&'
+# ---------------------------------------------------------------------------
+
+class TestAllcapsHeadingWidePattern:
+    def test_heading_with_period_detected(self):
+        text = (
+            "\n\nST. LOUIS\n\n" + _BODY + "\n\n"
+            "NEW YORK\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="allcaps_heading")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert len(chapters) == 2
+
+    def test_heading_with_ampersand_detected(self):
+        text = (
+            "\n\nPEACE & WAR\n\n" + _BODY + "\n\n"
+            "THE AFTERMATH\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="allcaps_heading")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert len(chapters) == 2
+
+    def test_heading_with_period_and_ampersand_together(self):
+        text = (
+            "\n\nR.E.M. & FRIENDS\n\n" + _BODY + "\n\n"
+            "THE TOUR\n\n" + _BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="allcaps_heading")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert len(chapters) == 2
+
+
+# ---------------------------------------------------------------------------
+# epub_builder: _EM_RE applied inside verse lines
+# ---------------------------------------------------------------------------
+
+class TestItalicInVerseLines:
+    def test_italic_in_single_verse_line(self):
+        verse = (
+            "Sail on, _Victory_!\n"
+            "Sail into the night."
+        )
+        text = f"CHAPTER I\n\nTitle\n\n{verse}"
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<div class="verse">' in xhtml
+        assert "<em>Victory</em>" in xhtml
+
+    def test_non_italic_verse_line_unaffected(self):
+        verse = "Plain verse line.\nAnother plain line."
+        text = f"CHAPTER I\n\nTitle\n\n{verse}"
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>" not in xhtml
+
+    def test_multiple_italics_across_verse_lines(self):
+        verse = (
+            "The _Red_ rose blooms.\n"
+            "The _Blue_ bird sings."
+        )
+        text = f"CHAPTER I\n\nTitle\n\n{verse}"
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>Red</em>" in xhtml
+        assert "<em>Blue</em>" in xhtml
+
+    def test_italic_html_entities_inside_verse(self):
+        """escape() runs before _EM_RE; entity chars inside italic must remain
+        inside the <em> tag even in verse lines."""
+        verse = (
+            "Buy _AT&T_ shares.\n"
+            "The market rose."
+        )
+        text = f"CHAPTER I\n\nTitle\n\n{verse}"
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<em>AT&amp;T</em>" in xhtml
+
+
+# ---------------------------------------------------------------------------
+# epub_builder: _EM_RE applied in <h2> subtitle
+# ---------------------------------------------------------------------------
+
+class TestItalicInSubtitleH2:
+    def test_italic_subtitle_renders_em_in_h2(self):
+        """A subtitle containing _word_ must produce <em> inside <h2>."""
+        text = "CHAPTER I\n\n_The Beginning_\n\nBody text here."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<h2>" in xhtml
+        assert "<em>The Beginning</em>" in xhtml
+
+    def test_plain_subtitle_no_spurious_em_in_h2(self):
+        text = "CHAPTER I\n\nThe Beginning\n\nBody text here."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<h2>The Beginning</h2>" in xhtml
+        assert "<em>" not in xhtml
