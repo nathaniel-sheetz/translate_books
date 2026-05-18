@@ -572,7 +572,7 @@ def build_epub(
         )
         book.add_metadata(
             None, 'meta', t,
-            {'refines': '#translator', 'property': 'file-as', 'scheme': 'marc:relators'},
+            {'refines': '#translator', 'property': 'file-as'},
         )
     if description and description.strip():
         book.add_metadata('DC', 'description', description.strip())

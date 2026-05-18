@@ -1391,6 +1391,31 @@ def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, dict]:
     return by_idx
 
 
+def _load_annotation_counts(project_dir: Path) -> dict[str, int]:
+    """Return active annotation count per chapter_id in a single file read."""
+    annotations_path = project_dir / "annotations.jsonl"
+    if not annotations_path.exists():
+        return {}
+
+    by_chapter: dict[str, dict[int, dict]] = {}
+    for line in annotations_path.read_text(encoding="utf-8").strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ch = record.get("chapter_id", "")
+        if not ch:
+            continue
+        ch_map = by_chapter.setdefault(ch, {})
+        if record.get("removed"):
+            ch_map.pop(record.get("es_idx"), None)
+        else:
+            ch_map[record["es_idx"]] = record
+    return {ch: len(m) for ch, m in by_chapter.items()}
+
+
 @app.route("/api/annotations/<project_id>/<chapter>")
 def get_annotations(project_id, chapter):
     """Return annotations for a chapter."""
@@ -1710,11 +1735,9 @@ def _get_project_status(project_id: str) -> dict:
     chunks_dir = project_dir / "chunks"
     align_dir = project_dir / "alignments"
 
-    # Load annotations for review info. Use the same dedup/tombstone logic
-    # the reader uses (`_load_annotations`) so the Review tab counts match
-    # what `/read/<project_id>` shows — i.e. only active annotations, no
-    # superseded edits and no `removed: True` records.
-    annotations_by_chapter: dict[str, int] = {}
+    # Load active annotation counts in one pass. Uses the same dedup/tombstone
+    # logic as _load_annotations so Review tab counts match the reader.
+    annotation_counts = _load_annotation_counts(project_dir)
 
     # Reviewed chapters
     reviewed_chapters = set()
@@ -1769,12 +1792,7 @@ def _get_project_status(project_id: str) -> dict:
                 except Exception:
                     pass
 
-            # Active annotation count (matches the reader's chapter list).
-            try:
-                active_count = len(_load_annotations(project_dir, ch_id))
-            except Exception:
-                active_count = 0
-            annotations_by_chapter[ch_id] = active_count
+            active_count = annotation_counts.get(ch_id, 0)
 
             status["chapters"].append({
                 "id": ch_id,
