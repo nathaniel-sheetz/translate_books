@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0.0] - 2026-05-18
+
+### Added
+- **Dublin Core EPUB metadata**: Export tab now has fields for Translator, Original Title, Publisher, Description, and Rights. Values are saved to `project.json` and written into the EPUB's OPF as `dc:contributor` (with MARC relator role `trl`), `dc:source`, `dc:publisher`, `dc:description`, and `dc:rights`.
+- **Cover image thumbnail**: Export tab shows a live preview of the cover art from `images/cover.jpg/.jpeg/.png`, matching the image that `build_epub` auto-picks at build time.
+- **Auto-align after realtime batch translation**: translating chunks now automatically combines each affected chapter and writes its alignment file. The Review tab is ready without a manual "Align" click; a `chapter_aligned` SSE event signals the dashboard.
+- **Chunking config persistence**: the Stage 3 form pre-fills with the parameters from the last successful chunk run, stored in `project.json` under `chunking_config`.
+- **Style guide inline edit**: the Style tab now has separate Edit and Rebuild buttons. Edit opens an inline textarea for direct text changes; Rebuild re-runs the Q&A wizard.
+- **Glossary rare-word sensitivity label**: slider renamed to "Rare-word sensitivity:" with a clarified tooltip and a hint paragraph explaining that the slider affects candidate detection only, not existing entries.
+
+### Fixed
+- **Dashboard annotation counts**: the Review tab now uses the same dedup and tombstone logic as the reader, so superseded edits and removed annotations are not double-counted.
+- **N+1 annotation file reads**: `_get_project_status` previously read `annotations.jsonl` once per chapter; replaced with a single-pass bulk read.
+- **EPUB `file-as` meta element**: removed spurious `scheme="marc:relators"` attribute from the translator's `file-as` metadata element (the `role` element uses the scheme; `file-as` does not).
+- **Chunk All button placement**: moved to the top-right of the Chunk panel header alongside the status indicator.
+
 ## [0.9.2.0] - 2026-05-17
 
 ### Added

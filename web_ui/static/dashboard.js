@@ -731,6 +731,24 @@
     }
 
     function populateChunkStage(status) {
+        // Pre-fill chunk parameter inputs from the project's persisted
+        // chunking_config (saved on the last successful chunk run). Fall
+        // back to the HTML-default system values when nothing is saved.
+        var cc = status.chunking_config;
+        if (cc) {
+            var fields = [
+                ['chunk-target-size', cc.target_size],
+                ['chunk-min-size', cc.min_chunk_size],
+                ['chunk-max-size', cc.max_chunk_size],
+                ['chunk-overlap-para', cc.overlap_paragraphs],
+                ['chunk-overlap-words', cc.min_overlap_words],
+            ];
+            fields.forEach(function(pair) {
+                var el = document.getElementById(pair[0]);
+                if (el && Number.isFinite(pair[1])) el.value = pair[1];
+            });
+        }
+
         var list = document.getElementById('chunk-chapter-list');
         list.innerHTML = '';
 
@@ -848,7 +866,69 @@
         }
     }
 
+    // Edit = inline-edit the existing style guide text. Rebuild = wipe and
+    // re-run the Q&A → LLM-generate wizard. These used to be the same button.
+    function setStyleEditMode(editing) {
+        var preview = document.getElementById('style-guide-preview');
+        var editor = document.getElementById('style-guide-editor');
+        var actions = document.getElementById('style-guide-edit-actions');
+        var editBtn = document.getElementById('btn-edit-style');
+        var rebuildBtn = document.getElementById('btn-rebuild-style');
+        if (editing) {
+            editor.value = preview.textContent || '';
+            preview.style.display = 'none';
+            editor.style.display = '';
+            actions.style.display = '';
+            if (editBtn) editBtn.disabled = true;
+            if (rebuildBtn) rebuildBtn.disabled = true;
+        } else {
+            editor.style.display = 'none';
+            actions.style.display = 'none';
+            preview.style.display = '';
+            if (editBtn) editBtn.disabled = false;
+            if (rebuildBtn) rebuildBtn.disabled = false;
+            setStatus('style-edit-status', '', '');
+        }
+    }
+
     document.getElementById('btn-edit-style').addEventListener('click', function() {
+        setStyleEditMode(true);
+    });
+
+    document.getElementById('btn-cancel-style-edit').addEventListener('click', function() {
+        setStyleEditMode(false);
+    });
+
+    document.getElementById('btn-save-style-edit').addEventListener('click', function() {
+        var editor = document.getElementById('style-guide-editor');
+        var newContent = editor.value || '';
+        if (!newContent.trim()) {
+            setStatus('style-edit-status', 'Style guide cannot be empty.', 'error');
+            return;
+        }
+        setStatus('style-edit-status', 'Saving...', '');
+        apiPost('/api/setup/' + PROJECT + '/style-guide', { content: newContent })
+        .then(function(data) {
+            if (data && data.ok) {
+                document.getElementById('style-guide-preview').textContent = newContent;
+                setStyleEditMode(false);
+                setStatus('style-edit-status', 'Saved!', 'success');
+                setTimeout(function() { setStatus('style-edit-status', '', ''); }, 2000);
+                loadStatus();
+            } else {
+                setStatus('style-edit-status', 'Error: ' + ((data && data.error) || 'unknown'), 'error');
+            }
+        })
+        .catch(function(e) {
+            setStatus('style-edit-status', 'Error: ' + (e && e.message ? e.message : e), 'error');
+        });
+    });
+
+    document.getElementById('btn-rebuild-style').addEventListener('click', function() {
+        if (!confirm('Rebuild the style guide from scratch?\n\nThis hides the current guide and reopens the Q&A wizard. Your existing style.json stays on disk until you regenerate.')) {
+            return;
+        }
+        setStyleEditMode(false);
         document.getElementById('style-guide-existing').style.display = 'none';
         document.getElementById('style-guide-wizard').style.display = '';
     });
@@ -2622,6 +2702,36 @@
             if (!titleInput.value && (data.spanish_title || data.title)) titleInput.value = data.spanish_title || data.title;
             if (!authorInput.value && data.author) authorInput.value = data.author;
 
+            // Pre-populate optional Dublin Core metadata fields from project.json.
+            // Only fill when the field is empty so unsaved user edits aren't clobbered.
+            var metaFields = [
+                ['epub-translator', 'translator'],
+                ['epub-source-title', 'source_title'],
+                ['epub-publisher', 'publisher'],
+                ['epub-description', 'description'],
+                ['epub-rights', 'rights'],
+            ];
+            metaFields.forEach(function(pair) {
+                var el = document.getElementById(pair[0]);
+                if (el && !el.value && data[pair[1]]) el.value = data[pair[1]];
+            });
+
+            // Cover image preview — mirrors what _resolve_cover() picks at build time.
+            var coverThumb = document.getElementById('epub-cover-thumb');
+            var coverEmpty = document.getElementById('epub-cover-empty');
+            if (coverThumb && coverEmpty) {
+                if (data.cover_filename) {
+                    var bust = data.cover_mtime ? ('?t=' + data.cover_mtime) : '';
+                    coverThumb.src = '/projects/' + PROJECT + '/images/' + data.cover_filename + bust;
+                    coverThumb.style.display = '';
+                    coverEmpty.style.display = 'none';
+                } else {
+                    coverThumb.removeAttribute('src');
+                    coverThumb.style.display = 'none';
+                    coverEmpty.style.display = '';
+                }
+            }
+
             // Update badge
             var badge = document.getElementById('badge-export');
             if (data.epub_exists) {
@@ -2724,6 +2834,18 @@
         var translatorHeading = hEl ? hEl.value : '';
         var translatorNote = bEl ? bEl.value : '';
 
+        // Read optional DC metadata. We always include these keys in the POST
+        // body (even when blank) so users can clear a previously-saved value.
+        function readMeta(id) {
+            var el = document.getElementById(id);
+            return el ? el.value.trim() : '';
+        }
+        var translator = readMeta('epub-translator');
+        var sourceTitle = readMeta('epub-source-title');
+        var publisher = readMeta('epub-publisher');
+        var description = readMeta('epub-description');
+        var rights = readMeta('epub-rights');
+
         btn.disabled = true;
         btn.textContent = 'Building...';
         statusEl.textContent = '';
@@ -2732,6 +2854,11 @@
         apiPost('/api/project/' + PROJECT + '/build-epub', {
             title: title || undefined,
             author: author || undefined,
+            translator: translator,
+            source_title: sourceTitle,
+            publisher: publisher,
+            description: description,
+            rights: rights,
             translator_heading: translatorHeading,
             translator_note: translatorNote,
         }).then(function(data) {

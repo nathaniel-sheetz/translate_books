@@ -38,7 +38,7 @@ _DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
     "numeral_style": "arabic",  # "arabic" or "roman"
 }
 
-_DEFAULT_TRANSLATOR_HEADING = "Note from the Translator"
+_DEFAULT_TRANSLATOR_HEADING = "Nota del traductor"
 
 
 def _int_to_roman(n: int) -> str:
@@ -491,6 +491,11 @@ def build_epub(
     chapter_heading_config: Optional[Dict[str, Any]] = None,
     translator_note_heading: Optional[str] = None,
     translator_note_body: Optional[str] = None,
+    translator: Optional[str] = None,
+    description: Optional[str] = None,
+    rights: Optional[str] = None,
+    source_title: Optional[str] = None,
+    publisher: Optional[str] = None,
 ) -> Path:
     """
     Build an EPUB from translated chapter files and project images.
@@ -498,8 +503,8 @@ def build_epub(
     Args:
         project_path: Root project directory (contains images/).
         title: Book title for EPUB metadata.
-        author: Author name for EPUB metadata.
-        language: EPUB language code.
+        author: Author name for EPUB metadata (dc:creator).
+        language: EPUB language code (dc:language, the target language).
         cover_image: Path to cover image (absolute or relative to project_path).
                      Auto-detects images/cover.jpg or .png if not provided.
         output_path: Where to write the EPUB. Defaults to project_path/{name}.epub.
@@ -516,6 +521,12 @@ def build_epub(
         translator_note_body: Body text for the translator note. If empty (or
                      becomes empty after stripping [IMAGE:...] placeholders),
                      no extra chapter is appended.
+        translator: Translator name. Emitted as a dc:contributor with
+                     opf:role="trl". Blank/whitespace is treated as omitted.
+        description: Book synopsis (dc:description). Shown in most readers.
+        rights: Copyright / license line (dc:rights).
+        source_title: Original-language title of the work (dc:source).
+        publisher: Publisher name / imprint (dc:publisher).
 
     Returns:
         Path to the written EPUB file.
@@ -545,6 +556,32 @@ def build_epub(
     book.set_title(title)
     book.set_language(language)
     book.add_author(author)
+
+    # Optional Dublin Core metadata. All fields are skipped when blank so we
+    # never emit empty <dc:*/> elements to the OPF.
+    if translator and translator.strip():
+        # Emit translator as dc:contributor (not dc:creator) so readers don't
+        # show them as a co-author. "trl" is the MARC relator code for
+        # "translator" and is the convention used by Calibre, Apple Books,
+        # and Kobo.
+        t = translator.strip()
+        book.add_metadata('DC', 'contributor', t, {'id': 'translator'})
+        book.add_metadata(
+            None, 'meta', 'trl',
+            {'refines': '#translator', 'property': 'role', 'scheme': 'marc:relators'},
+        )
+        book.add_metadata(
+            None, 'meta', t,
+            {'refines': '#translator', 'property': 'file-as'},
+        )
+    if description and description.strip():
+        book.add_metadata('DC', 'description', description.strip())
+    if rights and rights.strip():
+        book.add_metadata('DC', 'rights', rights.strip())
+    if source_title and source_title.strip():
+        book.add_metadata('DC', 'source', source_title.strip())
+    if publisher and publisher.strip():
+        book.add_metadata('DC', 'publisher', publisher.strip())
 
     # Add CSS
     css_item = epub.EpubItem(

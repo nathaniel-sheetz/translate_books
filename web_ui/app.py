@@ -106,7 +106,7 @@ def _save_project_config(project_id: str, config: dict) -> None:
 
 
 # Cross-reference: HTML placeholder text (web_ui/templates/dashboard.html) is
-# hardcoded to "Note from the Translator" — keep in sync with the backend
+# hardcoded to "Nota del traductor" — keep in sync with the backend
 # constant src.epub_builder._DEFAULT_TRANSLATOR_HEADING.
 #
 # Per-user template lives at prompts/translator_note_default.txt (gitignored).
@@ -1391,6 +1391,31 @@ def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, dict]:
     return by_idx
 
 
+def _load_annotation_counts(project_dir: Path) -> dict[str, int]:
+    """Return active annotation count per chapter_id in a single file read."""
+    annotations_path = project_dir / "annotations.jsonl"
+    if not annotations_path.exists():
+        return {}
+
+    by_chapter: dict[str, dict[int, dict]] = {}
+    for line in annotations_path.read_text(encoding="utf-8").strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ch = record.get("chapter_id", "")
+        if not ch:
+            continue
+        ch_map = by_chapter.setdefault(ch, {})
+        if record.get("removed"):
+            ch_map.pop(record.get("es_idx"), None)
+        else:
+            ch_map[record["es_idx"]] = record
+    return {ch: len(m) for ch, m in by_chapter.items()}
+
+
 @app.route("/api/annotations/<project_id>/<chapter>")
 def get_annotations(project_id, chapter):
     """Return annotations for a chapter."""
@@ -1659,6 +1684,9 @@ def _get_project_status(project_id: str) -> dict:
     config = _load_project_config(project_id)
     status["gutenberg_url"] = config.get("gutenberg_url")
     status["suggested_split_pattern"] = config.get("suggested_split_pattern")
+    # Persisted chunking parameters (Stage 3 form remembers what the user
+    # last successfully chunked with). May be absent for new projects.
+    status["chunking_config"] = config.get("chunking_config") or None
 
     # Image status: count placeholders in source.txt vs files on disk so the
     # dashboard can warn when the Gutenberg ingester failed to fetch some images.
@@ -1707,19 +1735,9 @@ def _get_project_status(project_id: str) -> dict:
     chunks_dir = project_dir / "chunks"
     align_dir = project_dir / "alignments"
 
-    # Load annotations for review info
-    annotations_by_chapter = {}
-    ann_path = project_dir / "annotations.jsonl"
-    if ann_path.exists():
-        try:
-            with open(ann_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    ann = json.loads(line)
-                    ch = ann.get("chapter_id", "")
-                    if ch:
-                        annotations_by_chapter[ch] = annotations_by_chapter.get(ch, 0) + 1
-        except Exception:
-            pass
+    # Load active annotation counts in one pass. Uses the same dedup/tombstone
+    # logic as _load_annotations so Review tab counts match the reader.
+    annotation_counts = _load_annotation_counts(project_dir)
 
     # Reviewed chapters
     reviewed_chapters = set()
@@ -1774,6 +1792,8 @@ def _get_project_status(project_id: str) -> dict:
                 except Exception:
                     pass
 
+            active_count = annotation_counts.get(ch_id, 0)
+
             status["chapters"].append({
                 "id": ch_id,
                 "name": ch_id.replace("_", " ").title(),
@@ -1783,7 +1803,7 @@ def _get_project_status(project_id: str) -> dict:
                 "translated_count": chunk_info["translated"],
                 "has_alignment": has_alignment,
                 "alignment_confidence": alignment_confidence,
-                "annotation_count": annotations_by_chapter.get(ch_id, 0),
+                "annotation_count": active_count,
                 "reviewed": ch_id in reviewed_chapters,
             })
 
@@ -2606,6 +2626,26 @@ def project_split(project_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _persist_chunking_config(project_id: str, config) -> None:
+    """Save the chunking parameters used in a successful chunk run to
+    projects/<id>/project.json so the Stage 3 form pre-fills with the
+    user's last choices on subsequent visits."""
+    try:
+        proj_cfg = _load_project_config(project_id)
+        proj_cfg["chunking_config"] = {
+            "target_size": config.target_size,
+            "min_chunk_size": config.min_chunk_size,
+            "max_chunk_size": config.max_chunk_size,
+            "overlap_paragraphs": config.overlap_paragraphs,
+            "min_overlap_words": config.min_overlap_words,
+        }
+        _save_project_config(project_id, proj_cfg)
+    except Exception:
+        # Persistence is best-effort; never fail a chunk run because we
+        # couldn't update project.json.
+        pass
+
+
 @app.route("/api/project/<project_id>/chunk-all", methods=["POST"])
 def project_chunk_all(project_id):
     """Chunk all (or selected) chapters."""
@@ -2649,6 +2689,7 @@ def project_chunk_all(project_id):
                 save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
                 total_chunks += 1
 
+        _persist_chunking_config(project_id, config)
         return jsonify({"ok": True, "total_chunks": total_chunks})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2754,6 +2795,7 @@ def project_chapter_rechunk(project_id, chapter_id):
         for chunk in chunks:
             save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
 
+        _persist_chunking_config(project_id, config)
         return jsonify({"ok": True, "chunk_count": len(chunks)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3083,6 +3125,9 @@ def project_translate_batch(project_id):
     provider = data.get("provider", "anthropic")
     model = data.get("model", None)
 
+    if not all(_safe_id(ch_id) for ch_id in chapter_ids):
+        return jsonify({"error": "Invalid chapter ID"}), 400
+
     include_translated = data.get("include_translated", False)
 
     # Collect chunks to translate
@@ -3119,6 +3164,7 @@ def project_translate_batch(project_id):
 
     def run_batch():
         from src.api_translator import translate_chunk_realtime
+        affected_chapters: set[str] = set()
         for cp in chunk_paths:
             try:
                 chunk = load_chunk(cp)
@@ -3140,6 +3186,7 @@ def project_translate_batch(project_id):
                     previous_chapter_context=prev_context,
                 )
                 save_chunk(translated, cp)
+                affected_chapters.add(chunk.chapter_id)
                 job_queue.put(json.dumps({
                     "event": "chunk_done",
                     "chunk_id": chunk.id,
@@ -3151,6 +3198,40 @@ def project_translate_batch(project_id):
                     "chunk_id": chunk.id if chunk else "",
                     "error": str(e),
                 }))
+
+        # Recombine + realign each affected chapter so the Review tab is
+        # immediately usable without a manual "Align" click. Mirrors the
+        # post-batch behavior of the async Batch API endpoint above.
+        for chapter_id in affected_chapters:
+            try:
+                from src.combiner import combine_chunks
+                from src.sentence_aligner import align_chapter_chunks
+
+                chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+                ch_chunks = [load_chunk(cf) for cf in chunk_files]
+                combined_text = combine_chunks(ch_chunks)
+                chapters_dir = project_dir / "chapters"
+                chapters_dir.mkdir(exist_ok=True)
+                (chapters_dir / f"{chapter_id}.txt").write_text(combined_text, encoding="utf-8")
+
+                align_dir = project_dir / "alignments"
+                align_dir.mkdir(exist_ok=True)
+                align_chapter_chunks(
+                    chunk_paths=[str(cf) for cf in chunk_files],
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    source_lang="en",
+                    target_lang="es",
+                    output_path=str(align_dir / f"{chapter_id}.json"),
+                )
+                job_queue.put(json.dumps({
+                    "event": "chapter_aligned",
+                    "chapter_id": chapter_id,
+                }))
+            except Exception:
+                # Non-fatal: alignment can be re-run from the Review stage.
+                pass
+
         job_queue.put(json.dumps({"event": "batch_complete"}))
 
     t = threading.Thread(target=run_batch, daemon=True)
@@ -4449,6 +4530,23 @@ def epub_status(project_id):
     epub_files = list(project_dir.glob("*.epub"))
     epub_file = max(epub_files, key=lambda p: p.stat().st_mtime) if epub_files else None
 
+    # Surface the cover image that ``src.epub_builder._resolve_cover`` will
+    # auto-pick at build time, so the Export tab can render a thumbnail
+    # preview. Mirrors the precedence used in epub_builder.
+    images_dir = project_dir / "images"
+    cover_filename = None
+    cover_mtime = None
+    if images_dir.exists():
+        for name in ("cover.jpg", "cover.jpeg", "cover.png"):
+            candidate = images_dir / name
+            if candidate.exists():
+                cover_filename = name
+                try:
+                    cover_mtime = int(candidate.stat().st_mtime)
+                except OSError:
+                    cover_mtime = None
+                break
+
     return jsonify({
         "total_chapters": len(chapters),
         "translated_chapters": translated_count,
@@ -4458,6 +4556,13 @@ def epub_status(project_id):
         "title": config.get("title", ""),
         "spanish_title": config.get("spanish_title", ""),
         "author": config.get("author", ""),
+        "translator": config.get("translator", ""),
+        "description": config.get("description", ""),
+        "rights": config.get("rights", ""),
+        "source_title": config.get("source_title", ""),
+        "publisher": config.get("publisher", ""),
+        "cover_filename": cover_filename,
+        "cover_mtime": cover_mtime,
     })
 
 
@@ -4515,6 +4620,29 @@ def build_epub_route(project_id):
     title = data.get("title") or config.get("spanish_title") or config.get("title") or project_id
     author = data.get("author") or config.get("author", "")
     language = data.get("language") or config.get("target_lang_code", "es")
+
+    # Optional Dublin Core metadata: request body wins, otherwise fall back to
+    # project.json. Persist whatever the form submitted so re-exports keep the
+    # same metadata without retyping (mirrors the translator-note pattern).
+    metadata_keys = ("translator", "description", "rights", "source_title", "publisher")
+    metadata: dict[str, str] = {}
+    config_dirty = False
+    for key in metadata_keys:
+        if key in data:
+            val = "" if data.get(key) is None else str(data.get(key)).strip()
+            if config.get(key, "") != val:
+                config[key] = val
+                config_dirty = True
+            metadata[key] = val
+        else:
+            metadata[key] = str(config.get(key, "") or "").strip()
+    # Also persist author/title when supplied so the form is the source of truth.
+    for key, val in (("author", author), ("title", data.get("title") or "")):
+        if val and config.get(key, "") != val:
+            config[key] = val
+            config_dirty = True
+    if config_dirty:
+        _save_project_config(project_id, config)
     # Optional chapter heading synthesis config; request body wins, otherwise
     # build_epub will read it from project.json.
     chapter_heading_config = data.get("chapter_heading")
@@ -4575,7 +4703,7 @@ def build_epub_route(project_id):
             (temp_dir / f"{ch_id}.txt").write_text(combined_text, encoding="utf-8")
 
         from src.epub_builder import build_epub
-        epub_filename = title + ".epub"
+        epub_filename = Path(title).name + ".epub"
         epub_output = project_dir / epub_filename
         epub_path = build_epub(
             project_path=project_dir,
@@ -4587,6 +4715,11 @@ def build_epub_route(project_id):
             chapter_heading_config=chapter_heading_config,
             translator_note_heading=note.get("heading", ""),
             translator_note_body=note.get("body", ""),
+            translator=metadata["translator"] or None,
+            description=metadata["description"] or None,
+            rights=metadata["rights"] or None,
+            source_title=metadata["source_title"] or None,
+            publisher=metadata["publisher"] or None,
         )
 
         size_bytes = epub_path.stat().st_size

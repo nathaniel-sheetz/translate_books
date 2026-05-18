@@ -6,5 +6,12 @@
     "target_language": "Spanish",
     "glossary_path": "projects/my-book/glossary.json",
     "style_guide_path": "projects/my-book/style.json",
-    "ui_language": "en"
+    "ui_language": "en",
+
+    "author": "Original Author Name",
+    "translator": "Translator Name",
+    "source_title": "Original-Language Title",
+    "publisher": "",
+    "description": "One-paragraph synopsis shown in most EPUB readers.",
+    "rights": "Translation © 2026 …; original work in the public domain."
 }
