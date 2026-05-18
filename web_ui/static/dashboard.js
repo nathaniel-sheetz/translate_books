@@ -604,7 +604,7 @@
         if (status.chapters && status.chapters.length > 0) {
             document.getElementById('split-existing').style.display = '';
             document.getElementById('split-existing-count').textContent =
-                status.chapters.length + ' chapters detected';
+                'Current saved split: ' + status.chapters.length + ' chapters';
             var cards = document.getElementById('split-existing-cards');
             cards.innerHTML = '';
             status.chapters.forEach(function(ch) {
@@ -640,6 +640,18 @@
     });
 
     document.getElementById('btn-split-confirm').addEventListener('click', function() {
+        var existingVisible =
+            document.getElementById('split-existing').style.display !== 'none';
+        if (existingVisible) {
+            var msg =
+                'This will OVERWRITE the currently saved split.\n\n' +
+                'All current chapter files will be replaced with the new split shown above. ' +
+                'Any per-chapter edits made to the source text will be lost.\n\n' +
+                'Continue?';
+            if (!confirm(msg)) {
+                return;
+            }
+        }
         var config = getSplitConfig();
         setStatus('split-status', 'Splitting...', '');
         apiPost('/api/project/' + PROJECT + '/split', config).then(function(data) {
@@ -649,15 +661,10 @@
                 setStatus('split-status', 'Split complete', 'success');
                 document.getElementById('split-preview-area').style.display = 'none';
                 document.getElementById('btn-split-confirm').style.display = 'none';
+                document.getElementById('split-existing').style.display = 'none';
                 loadStatus();
             }
         });
-    });
-
-    document.getElementById('btn-resplit').addEventListener('click', function() {
-        if (confirm('This will overwrite existing chapter files. Continue?')) {
-            document.getElementById('split-existing').style.display = 'none';
-        }
     });
 
     function getSplitConfig() {
@@ -679,7 +686,7 @@
         var area = document.getElementById('split-preview-area');
         area.style.display = '';
         document.getElementById('split-preview-count').textContent =
-            chapters.length + ' sections detected';
+            chapters.length + ' chapters detected';
         var cards = document.getElementById('split-preview-cards');
         cards.innerHTML = '';
         chapters.forEach(function(ch) {

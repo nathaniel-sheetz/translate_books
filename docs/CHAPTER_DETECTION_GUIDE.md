@@ -17,8 +17,10 @@ Instead of manually creating 100 separate chapter files, you can now:
 
 ### Supported Chapter Patterns
 
-- **Roman numerals**: Chapter I, Chapter II, Chapter III, ..., Chapter C
+- **Roman numerals with inline subtitle** (`chapter_roman_titled`): `CHAPTER I EARLY BOYHOOD`, `CHAPTER II THE JOURNEY` — the subtitle after the roman numeral is captured separately and written as a second line in the chapter heading (rendered as `<h2>` in the EPUB).
+- **Roman numerals** (`roman`): Chapter I, Chapter II, Chapter III, ..., Chapter C
 - **Numeric**: Chapter 1, Chapter 2, Chapter 3, etc.
+- **All-caps headings** (`allcaps_heading`): `ST. LOUIS`, `PEACE & WAR` — headings containing `.` and `&` are supported.
 - **Custom**: Define your own regex pattern
 
 ### Usage

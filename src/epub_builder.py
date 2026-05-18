@@ -245,7 +245,7 @@ def _render_body_blocks(body: str) -> List[str]:
             _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
         ):
             verse_lines = [
-                f'  <p class="verse-line">{_EM_RE.sub(r"<em>\\1</em>", escape(line.strip()))}</p>'
+                f'  <p class="verse-line">{_EM_RE.sub(r"<em>\1</em>", escape(line.strip()))}</p>'
                 for line in block.split('\n')
                 if line.strip()
             ]
@@ -296,7 +296,7 @@ def chapter_text_to_xhtml(
     if heading:
         parts.append(f'<h1>{escape(_normalize_heading(heading))}</h1>')
     if subtitle:
-        parts.append(f'<h2>{_EM_RE.sub(r"<em>\\1</em>", escape(subtitle))}</h2>')
+        parts.append(f'<h2>{_EM_RE.sub(r"<em>\1</em>", escape(subtitle))}</h2>')
 
     parts.extend(_render_body_blocks(body))
 
