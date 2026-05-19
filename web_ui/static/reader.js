@@ -1500,8 +1500,8 @@
                 current_translation: currentText,
                 new_translation: newText,
                 expected_chunk_mtime: retransCtx.row.chunk_mtime,
-                chunk_offset_start: retransCtx.row.chunk_offset_start,
-                chunk_offset_end: retransCtx.row.chunk_offset_end,
+                chunk_offset_start: currentText === retransCtx.originalCurrent ? retransCtx.row.chunk_offset_start : undefined,
+                chunk_offset_end: currentText === retransCtx.originalCurrent ? retransCtx.row.chunk_offset_end : undefined,
             }),
         })
             .then(r => r.json().then(d => ({ status: r.status, body: d })))
