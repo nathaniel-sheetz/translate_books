@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1.0] - 2026-05-19
+
+### Fixed
+- **Sentence replace uses chunk offsets to prevent silent corruption**: `/api/sentence/replace` now accepts `chunk_offset_start`/`chunk_offset_end` from the reader and uses them to locate the exact span to overwrite. When a sentence appears more than once in a chunk (e.g. body text that also appears verbatim inside an `[IMAGE:...]` caption), the previous `str.find()` always replaced the first occurrence, silently corrupting whichever copy came first. The fix uses a three-tier resolution: (1) if the supplied offsets slice back to `current_translation`, that exact span is replaced; (2) if the offsets are stale (user edited the field), an anchored `find()` searches forward from the hint; (3) old clients with no offsets fall back to the original `find()` from position 0. The audit log now records the resolved `chunk_offset_start`/`chunk_offset_end` for forensic debugging.
+
 ## [0.10.0.0] - 2026-05-18
 
 ### Added
