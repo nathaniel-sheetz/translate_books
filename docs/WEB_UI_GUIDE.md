@@ -406,7 +406,7 @@ After a successful save the reader reopens scrolled to the same sentence via a t
 
 ### Corrections
 
-When corrections are saved from the reader, a banner appears on the chapter list page with an **Apply Corrections** button that batch-applies all pending edits.
+When corrections are saved from the reader, a banner appears on the chapter list page with an **Apply Corrections** button that batch-applies all pending edits. The reader passes `chunk_offset_start`/`chunk_offset_end` with each correction so `apply_corrections.py` can locate the exact span to replace — even when the corrected sentence also appears in an `[IMAGE:...]` caption or elsewhere in the same chunk. Multiple corrections to the same chunk are applied in descending-offset order to keep earlier offsets valid as text shifts.
 
 ### Reader APIs
 
