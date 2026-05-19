@@ -522,6 +522,8 @@
             original_es: alignment.es,
             corrected_es: correctedEs,
             en_reference: alignment.en,
+            chunk_offset_start: alignment.chunk_offset_start,
+            chunk_offset_end: alignment.chunk_offset_end,
         };
 
         fetch('/api/correction', {

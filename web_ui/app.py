@@ -1334,6 +1334,25 @@ def save_correction():
             "timestamp": datetime.now().isoformat(),
         }
 
+        # Persist client-supplied chunk offsets so apply_to_chunk can target
+        # the exact span the user edited, even when original_es has a "twin"
+        # earlier in the chunk (e.g. a quoted version of the same line, or an
+        # [IMAGE:...] caption whose alt text matches the body sentence).
+        # Defensive: only persist if both are well-formed non-negative ints
+        # (bool is a subclass of int — exclude it explicitly).
+        chunk_offset_start = data.get("chunk_offset_start")
+        chunk_offset_end = data.get("chunk_offset_end")
+        if (
+            isinstance(chunk_offset_start, int)
+            and not isinstance(chunk_offset_start, bool)
+            and isinstance(chunk_offset_end, int)
+            and not isinstance(chunk_offset_end, bool)
+            and 0 <= chunk_offset_start < chunk_offset_end
+            and chunk_offset_end - chunk_offset_start == len(original_es)
+        ):
+            correction_record["chunk_offset_start"] = chunk_offset_start
+            correction_record["chunk_offset_end"] = chunk_offset_end
+
         # Read alignment to get chunk_id for this es_idx
         align_path = project_dir / "alignments" / f"{chapter_id}.json"
         chunk_id = None
