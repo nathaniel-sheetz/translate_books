@@ -1334,6 +1334,25 @@ def save_correction():
             "timestamp": datetime.now().isoformat(),
         }
 
+        # Persist client-supplied chunk offsets so apply_to_chunk can target
+        # the exact span the user edited, even when original_es has a "twin"
+        # earlier in the chunk (e.g. a quoted version of the same line, or an
+        # [IMAGE:...] caption whose alt text matches the body sentence).
+        # Defensive: only persist if both are well-formed non-negative ints
+        # (bool is a subclass of int — exclude it explicitly).
+        chunk_offset_start = data.get("chunk_offset_start")
+        chunk_offset_end = data.get("chunk_offset_end")
+        if (
+            isinstance(chunk_offset_start, int)
+            and not isinstance(chunk_offset_start, bool)
+            and isinstance(chunk_offset_end, int)
+            and not isinstance(chunk_offset_end, bool)
+            and 0 <= chunk_offset_start < chunk_offset_end
+            and chunk_offset_end - chunk_offset_start == len(original_es)
+        ):
+            correction_record["chunk_offset_start"] = chunk_offset_start
+            correction_record["chunk_offset_end"] = chunk_offset_end
+
         # Read alignment to get chunk_id for this es_idx
         align_path = project_dir / "alignments" / f"{chapter_id}.json"
         chunk_id = None
@@ -2284,15 +2303,55 @@ def sentence_replace():
         return jsonify({"error": f"Failed to load chunk: {e}"}), 500
 
     old_es = chunk.translated_text or ""
-    start = old_es.find(current_translation)
-    if start == -1:
-        return jsonify({
-            "error": (
-                "Cannot locate the original sentence in the chunk. "
-                "Reload the reader and try again."
-            ),
-        }), 422
-    end = start + len(current_translation)
+
+    # Resolve the span to replace. Three tiers, in order:
+    #   1. Client offsets that slice back to current_translation — exact span.
+    #      This is the always-correct branch when the client clicks an
+    #      alignment row without editing the "current" textbox.
+    #   2. Client offsets that don't slice cleanly (user edited current, or
+    #      offsets are stale) — anchored find() near the hint, then plain
+    #      find() if that misses.
+    #   3. No offsets at all (old clients) — legacy find() from 0.
+    # Tier 1 is the fix for silent corruption when current_translation
+    # appears more than once in the chunk (e.g. a body sentence whose text
+    # also lives inside an [IMAGE:...] caption).
+    chunk_offset_start = data.get("chunk_offset_start")
+    chunk_offset_end = data.get("chunk_offset_end")
+    has_offset_hint = (
+        isinstance(chunk_offset_start, int)
+        and not isinstance(chunk_offset_start, bool)
+        and 0 <= chunk_offset_start <= len(old_es)
+    )
+
+    start: Optional[int] = None
+    end: Optional[int] = None
+
+    if (
+        has_offset_hint
+        and isinstance(chunk_offset_end, int)
+        and not isinstance(chunk_offset_end, bool)
+        and chunk_offset_start < chunk_offset_end <= len(old_es)
+        and chunk_offset_end - chunk_offset_start == len(current_translation)
+        and old_es[chunk_offset_start:chunk_offset_end] == current_translation
+    ):
+        start, end = chunk_offset_start, chunk_offset_end
+
+    if start is None and has_offset_hint:
+        idx = old_es.find(current_translation, chunk_offset_start)
+        if idx != -1:
+            start, end = idx, idx + len(current_translation)
+
+    if start is None:
+        idx = old_es.find(current_translation)
+        if idx == -1:
+            return jsonify({
+                "error": (
+                    "Cannot locate the original sentence in the chunk. "
+                    "Reload the reader and try again."
+                ),
+            }), 422
+        start, end = idx, idx + len(current_translation)
+
     new_es = old_es[:start] + new_translation + old_es[end:]
 
     if not new_es.strip():
@@ -2321,6 +2380,8 @@ def sentence_replace():
                 "chapter_id": chapter_id,
                 "chunk_id": chunk_id,
                 "es_idx": data.get("es_idx"),
+                "chunk_offset_start": start,
+                "chunk_offset_end": end,
                 "current_translation": current_translation,
                 "new_translation": new_translation,
                 "timestamp": datetime.now().isoformat(),

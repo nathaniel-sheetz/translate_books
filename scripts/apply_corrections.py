@@ -50,24 +50,101 @@ def group_by_chunk(corrections: list[dict]) -> dict[str, list[dict]]:
     return dict(by_chunk)
 
 
+def _resolve_correction_span(
+    text: str, original: str, hint_start, hint_end,
+) -> tuple[int, int] | None:
+    """Resolve which span of ``text`` a correction targets.
+
+    Mirrors the three-tier logic in ``web_ui.app.sentence_replace``:
+
+      1. Hint slices exactly back to ``original`` — exact span. This is the
+         common path when the alignment row's ``chunk_offset_start`` /
+         ``chunk_offset_end`` were stamped on by ``_attach_text_in_chunk``
+         and the chunk hasn't been touched since.
+      2. Hint is present but doesn't slice cleanly (chunk was mutated after
+         the offset was stamped, or the user edited ``original_es`` before
+         submitting) — anchored ``find()`` from ``hint_start``.
+      3. No usable hint — plain ``find()`` from zero. May hit the wrong
+         duplicate when ``original`` has a "twin" earlier in the chunk;
+         this matches pre-offset-aware behavior for old queued corrections
+         that lack offsets.
+
+    Returns ``(start, end)`` or ``None`` if ``original`` is absent.
+    """
+    has_hint = (
+        isinstance(hint_start, int)
+        and not isinstance(hint_start, bool)
+        and 0 <= hint_start <= len(text)
+    )
+
+    if (
+        has_hint
+        and isinstance(hint_end, int)
+        and not isinstance(hint_end, bool)
+        and hint_start < hint_end <= len(text)
+        and hint_end - hint_start == len(original)
+        and text[hint_start:hint_end] == original
+    ):
+        return hint_start, hint_end
+
+    if has_hint:
+        idx = text.find(original, hint_start)
+        if idx != -1:
+            return idx, idx + len(original)
+
+    idx = text.find(original)
+    if idx == -1:
+        return None
+    return idx, idx + len(original)
+
+
 def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False) -> tuple[Chunk, int]:
-    """Apply corrections to a chunk's translated_text via string replacement.
+    """Apply corrections to a chunk's translated_text.
+
+    Each correction is resolved via :func:`_resolve_correction_span` so that
+    corrections with ``chunk_offset_start``/``chunk_offset_end`` hints land on
+    the exact span the user edited, not the first textual match. This fixes
+    the "twin earlier in body" bug: a body sentence whose text also appears
+    inside an ``[IMAGE:...]`` caption (or a quoted version a few sentences up)
+    would otherwise corrupt the twin when applied via naive ``str.replace``.
+
+    When a chunk has multiple corrections, offset-bearing ones are applied in
+    descending ``chunk_offset_start`` order so earlier corrections do not shift
+    later corrections' offsets out from under them. Legacy corrections without
+    offsets are applied last, in their original queue order.
 
     Returns the updated chunk and the number of corrections applied.
     """
     text = chunk.translated_text or ""
     applied = 0
 
-    for corr in corrections:
+    def _sort_key(indexed):
+        i, corr = indexed
+        start = corr.get("chunk_offset_start")
+        if isinstance(start, int) and not isinstance(start, bool) and start >= 0:
+            return (0, -start, i)
+        return (1, 0, i)
+
+    ordered = [c for _, c in sorted(enumerate(corrections), key=_sort_key)]
+
+    for corr in ordered:
         original = corr["original_es"]
         corrected = corr["corrected_es"]
 
-        if original in text:
-            text = text.replace(original, corrected, 1)
-            applied += 1
-        else:
+        span = _resolve_correction_span(
+            text,
+            original,
+            corr.get("chunk_offset_start"),
+            corr.get("chunk_offset_end"),
+        )
+        if span is None:
             print(f"    WARNING: Could not find original text in chunk {chunk.id}:")
             print(f"      Looking for: {original[:60]}...")
+            continue
+
+        start, end = span
+        text = text[:start] + corrected + text[end:]
+        applied += 1
 
     if not dry_run and applied > 0:
         chunk_data = chunk.model_dump()

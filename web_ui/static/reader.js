@@ -522,6 +522,8 @@
             original_es: alignment.es,
             corrected_es: correctedEs,
             en_reference: alignment.en,
+            chunk_offset_start: alignment.chunk_offset_start,
+            chunk_offset_end: alignment.chunk_offset_end,
         };
 
         fetch('/api/correction', {
@@ -1500,6 +1502,8 @@
                 current_translation: currentText,
                 new_translation: newText,
                 expected_chunk_mtime: retransCtx.row.chunk_mtime,
+                chunk_offset_start: currentText === retransCtx.originalCurrent ? retransCtx.row.chunk_offset_start : undefined,
+                chunk_offset_end: currentText === retransCtx.originalCurrent ? retransCtx.row.chunk_offset_end : undefined,
             }),
         })
             .then(r => r.json().then(d => ({ status: r.status, body: d })))
