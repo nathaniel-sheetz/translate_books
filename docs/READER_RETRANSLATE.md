@@ -237,7 +237,9 @@ Response on success:
   "es_idx": 7,
   "current_translation": "La torta se quemó.",
   "new_translation": "La torta se quemó y la campesina regañó al rey.",
-  "expected_chunk_mtime": 1730000000.123
+  "expected_chunk_mtime": 1730000000.123,
+  "chunk_offset_start": 412,
+  "chunk_offset_end": 430
 }
 ```
 
@@ -254,9 +256,21 @@ Response on success mirrors `/api/remove-text`:
 ```
 
 - `current_translation` is the **literal substring** to be replaced in
-  `chunk.translated_text`. The server uses `str.find()`; if not found,
-  returns `422` ("Cannot locate the original sentence in the chunk.
-  Reload and try again.").
+  `chunk.translated_text`. Span resolution is three-tier:
+  1. If `chunk_offset_start`/`chunk_offset_end` are present and
+     `chunk.translated_text[start:end] == current_translation`, that exact
+     span is replaced. This is the always-correct branch when the reader
+     submits an unedited alignment row, and it prevents silent corruption
+     when the same string appears more than once in the chunk (e.g. a body
+     sentence whose text also lives inside an `[IMAGE:...]` caption).
+  2. If offsets are present but don't slice cleanly (user edited the
+     "current" textbox, or the row is stale), the server falls back to
+     `chunk.translated_text.find(current_translation, chunk_offset_start)`
+     — anchored near the user's intended position.
+  3. If no offsets are sent (old clients), the server falls back to a plain
+     `find()` from position 0.
+- If the string isn't found anywhere, returns `422` ("Cannot locate the
+  original sentence in the chunk. Reload and try again.").
 - `expected_chunk_mtime` mismatch returns `409`.
 - Empty `new_translation` (after strip) returns `400`.
 - Replacement that would empty the chunk returns `400`.
@@ -318,13 +332,19 @@ Every successful replace appends a JSON line to
   "chapter_id": "chapter_01",
   "chunk_id": "chapter_01_chunk_002",
   "es_idx": 7,
+  "chunk_offset_start": 412,
+  "chunk_offset_end": 430,
   "current_translation": "...",
   "new_translation": "...",
   "timestamp": "2026-04-26T10:14:22.187"
 }
 ```
 
-Mirrors `removals.jsonl` and `corrections.jsonl` for auditability.
+`chunk_offset_start`/`chunk_offset_end` reflect the actual span the server
+overwrote (whether they came from the client or were resolved via the
+`find()` fallbacks), so a bad replacement can be diagnosed without
+reconstructing the chunk state. Mirrors `removals.jsonl` and
+`corrections.jsonl` for auditability.
 
 ## Edge Cases
 
