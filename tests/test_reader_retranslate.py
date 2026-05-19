@@ -511,10 +511,13 @@ class TestReplaceUsesChunkOffsets:
     def test_invalid_offsets_fall_through_cleanly(
         self, client, project_with_chunk, bad_offsets,
     ):
-        """Bad offsets must not raise — they should fall through to plain
-        find() (Tier 3). The existing fixture's chunk has only one match for
-        'El gato se sentó.', so the replacement still succeeds and points at
-        the unique occurrence.
+        """Bad offsets must not raise — they fall through to Tier 2 or Tier 3
+        without error. Cases where has_offset_hint is False (out-of-bounds,
+        negative, non-int, bool) go directly to Tier 3. The length-mismatch
+        case has a valid start so has_offset_hint=True and goes to Tier 2
+        (anchored find), then Tier 3 if that misses. Either way the fixture's
+        chunk has exactly one match for 'El gato se sentó.', so the
+        replacement succeeds regardless of which tier handles it.
         """
         payload = {
             "project_id": "test-project",
@@ -530,14 +533,14 @@ class TestReplaceUsesChunkOffsets:
         assert result.startswith("El felino se sentó.")
 
     def test_offset_mismatch_uses_anchored_find(self, client, project_with_duplicate_translation):
-        """Tier 2: user edited the 'current' textbox so offsets no longer
-        slice cleanly, but the edited string still appears at/after the
-        hint position. Anchored find() near the hint picks the right one.
+        """Tier 2: hint is off (straddles separator) so the Tier 1 slice
+        check fails, but anchored find() from hint_start recovers the correct
+        second occurrence.
         """
-        # User originally clicked the second "Está bien." but then edited the
-        # current textbox; we send offsets near the second occurrence with a
-        # current_translation whose length doesn't match. find(text, hint)
-        # should still locate "Está bien." at the second occurrence.
+        # The hint points one byte before the second "Está bien." — the slice
+        # [10:20] spans ". Está bie" which doesn't equal "Está bien.", so
+        # Tier 1 rejects it. Tier 2 runs find("Está bien.", 10) and lands at
+        # index 11 (the second occurrence).
         rv = client.post("/api/sentence/replace", json={
             "project_id": "test-project",
             "chapter_id": "chapter_01",
@@ -553,6 +556,40 @@ class TestReplaceUsesChunkOffsets:
         # Anchored find from hint_start=10 lands at index 11 (the second
         # occurrence). First "Está bien." preserved.
         assert _load_translated(project_with_duplicate_translation) == "Está bien. Vale."
+
+    def test_valid_offsets_string_not_found_returns_422(self, client, project_with_chunk):
+        """Tier 1 fails, Tier 2 anchored find misses, Tier 3 plain find misses
+        → 422. Offsets are well-formed ints but the target string is absent.
+        """
+        rv = client.post("/api/sentence/replace", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "current_translation": "Esta frase no existe.",
+            "new_translation": "Reemplazo.",
+            "chunk_offset_start": 0,
+            "chunk_offset_end": len("Esta frase no existe."),
+        })
+        assert rv.status_code == 422
+        assert "Cannot locate" in rv.get_json()["error"]
+
+    def test_tier3_audit_log_records_server_resolved_offsets(self, client, project_with_chunk):
+        """Tier 3 (no client offsets): audit log records the start/end the
+        server resolved via plain find(), not None.
+        """
+        rv = client.post("/api/sentence/replace", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "current_translation": "El gato se sentó.",
+            "new_translation": "El felino se sentó.",
+            "es_idx": 0,
+        })
+        assert rv.status_code == 200
+        log_path = project_with_chunk / "retranslations.jsonl"
+        record = json.loads(log_path.read_text(encoding="utf-8").strip().split("\n")[-1])
+        assert record["chunk_offset_start"] == 0
+        assert record["chunk_offset_end"] == len("El gato se sentó.")
 
     def test_no_offsets_legacy_behavior(self, client, project_with_chunk):
         """Tier 3: old clients that don't send offsets still work."""
