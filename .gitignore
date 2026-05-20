@@ -94,3 +94,4 @@ docs/design/
 # Claude Code project config
 CLAUDE.md
 .claude/
+.gstack/
