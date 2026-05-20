@@ -1,0 +1,13 @@
+{
+  "_comment": "Per-user forced glossary candidate terms. Copy this file to forced_glossary_terms.json (gitignored) and edit. Any term in the list that appears in a project's source text is force-injected into the glossary candidate report — useful for domain words LLMs translate inconsistently (e.g. 'stall' as establo vs casilla, 'gobbler' as pavo macho vs guajolote). Matching is case-insensitive, whole-word, with simple -s/-es plural matching for single-word entries. Multi-word phrases match exactly. Required: term. Optional: type_guess (CHARACTER|PLACE|TECHNICAL|CONCEPT|OTHER, default OTHER), detection_reasons (merged with 'forced_user_term').",
+  "terms": [
+    {
+      "term": "stall",
+      "type_guess": "TECHNICAL"
+    },
+    {
+      "term": "gobbler",
+      "type_guess": "OTHER"
+    }
+  ]
+}

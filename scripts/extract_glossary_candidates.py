@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pydantic import BaseModel, Field
 
+from src.app_config import load_forced_glossary_terms
 from src.models import Glossary, GlossaryTermType
 from src.utils.file_io import load_glossary
 from src.utils.text_utils import count_words, normalize_newlines, strip_image_placeholders
@@ -1123,6 +1124,78 @@ def score_and_rank(
 
 
 # ---------------------------------------------------------------------------
+# Forced glossary candidates (user-maintained always-surface list)
+# ---------------------------------------------------------------------------
+
+FORCED_TERM_REASON = "forced_user_term"
+
+
+def _forced_term_pattern(term: str) -> re.Pattern:
+    """Whole-word, case-insensitive regex for a forced term.
+
+    Single-word terms get optional ``-s`` / ``-es`` plural suffix so
+    `gobbler` matches `gobblers` and `stall` matches `stalls`. Multi-word
+    phrases match exactly with no inflection.
+    """
+    escaped = re.escape(term.strip())
+    if " " in term.strip():
+        return re.compile(rf"\b{escaped}\b", re.IGNORECASE)
+    return re.compile(rf"\b{escaped}(?:es|s)?\b", re.IGNORECASE)
+
+
+def build_forced_candidates(
+    text: str,
+    forced_entries: list[dict],
+) -> dict[str, GlossaryCandidate]:
+    """Build candidates for forced terms that actually occur in the source.
+
+    Returns a dict keyed by lowercased term, ready to be merged with the
+    main extraction pipeline. Terms with zero matches in ``text`` are
+    skipped — forced terms only surface when they're really in the book.
+    """
+    result: dict[str, GlossaryCandidate] = {}
+    for entry in forced_entries:
+        term = entry.get("term")
+        if not isinstance(term, str) or not term.strip():
+            continue
+        surface = term.strip()
+        key = surface.lower()
+        if key in result:
+            continue
+        try:
+            pattern = _forced_term_pattern(surface)
+        except re.error:
+            continue
+        matches = pattern.findall(text)
+        freq = len(matches)
+        if freq < 1:
+            continue
+
+        type_raw = entry.get("type_guess")
+        try:
+            type_guess = (
+                GlossaryTermType(type_raw.lower())
+                if isinstance(type_raw, str) and type_raw
+                else GlossaryTermType.OTHER
+            )
+        except ValueError:
+            type_guess = GlossaryTermType.OTHER
+
+        reasons_raw = entry.get("detection_reasons") or []
+        reasons = [r for r in reasons_raw if isinstance(r, str)]
+        if FORCED_TERM_REASON not in reasons:
+            reasons.append(FORCED_TERM_REASON)
+
+        result[key] = GlossaryCandidate(
+            term=surface,
+            type_guess=type_guess,
+            frequency=freq,
+            detection_reasons=reasons,
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -1221,6 +1294,16 @@ def extract_candidates(
     merged = filter_demonyms(merged)
     if verbose:
         print(f"  After demonym filtering: {len(merged)}")
+
+    # Inject forced user-defined terms (bypasses min-frequency, demonym, and
+    # contained-term filters; still subject to existing-glossary exclusion).
+    forced_entries = load_forced_glossary_terms()
+    if forced_entries:
+        forced = build_forced_candidates(text, forced_entries)
+        if forced:
+            merged = merge_candidates(merged, forced)
+            if verbose:
+                print(f"  After forced-term injection: {len(merged)}")
 
     # Glossary exclusion
     excluded = 0
