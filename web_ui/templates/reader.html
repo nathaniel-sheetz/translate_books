@@ -337,6 +337,20 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
             <span class="nav-chevron disabled">&rsaquo;</span>
             {% endif %}
         </div>
+        <button class="topbar-icon-btn" id="btn-align"
+                title="{{ t.realign_chapter }}"
+                aria-label="{{ t.realign_chapter }}"
+                {% if not has_pending_corrections %}hidden{% endif %}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+                <line x1="3" y1="6"  x2="14" y2="6"/>
+                <line x1="3" y1="12" x2="14" y2="12"/>
+                <line x1="3" y1="18" x2="14" y2="18"/>
+                <polyline points="18 9 21 12 18 15"/>
+                <line x1="21" y1="12" x2="14" y2="12"/>
+            </svg>
+        </button>
         <span class="reader-stats" id="reader-stats"></span>
     </div>
 
@@ -543,7 +557,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=18"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=20"></script>
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

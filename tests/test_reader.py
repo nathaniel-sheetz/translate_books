@@ -85,6 +85,66 @@ class TestReaderView:
         rv = client.get("/read/test-project/chapter_99")
         assert rv.status_code == 404
 
+    @staticmethod
+    def _btn_align_open_tag(html: str) -> str:
+        """Return just the opening <button ...> tag for #btn-align, no inner SVG."""
+        start = html.index('id="btn-align"')
+        tag_start = html.rfind("<button", 0, start)
+        tag_end = html.index(">", start)
+        return html[tag_start : tag_end + 1]
+
+    def test_realign_button_hidden_when_no_pending_corrections(
+        self, client, project_with_alignment,
+    ):
+        rv = client.get("/read/test-project/chapter_01")
+        assert rv.status_code == 200
+        # Button is in the DOM but the `hidden` attribute is present so the JS
+        # can reveal it after a save without re-rendering the template.
+        tag = self._btn_align_open_tag(rv.data.decode("utf-8"))
+        assert "hidden" in tag
+
+    def test_realign_button_visible_when_pending_corrections(
+        self, client, project_with_alignment,
+    ):
+        corr = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 0,
+            "original_es": "El gato.",
+            "corrected_es": "El gato pequeño.",
+            "en_reference": "The cat.",
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (project_with_alignment / "corrections.jsonl").write_text(
+            json.dumps(corr, ensure_ascii=False) + "\n", encoding="utf-8",
+        )
+        rv = client.get("/read/test-project/chapter_01")
+        assert rv.status_code == 200
+        tag = self._btn_align_open_tag(rv.data.decode("utf-8"))
+        assert "hidden" not in tag
+
+    def test_realign_button_hidden_when_corrections_target_other_chapter(
+        self, client, project_with_alignment,
+    ):
+        corr = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_99",
+            "chunk_id": "chapter_99_chunk_000",
+            "es_idx": 0,
+            "original_es": "x",
+            "corrected_es": "y",
+            "en_reference": "x",
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (project_with_alignment / "corrections.jsonl").write_text(
+            json.dumps(corr, ensure_ascii=False) + "\n", encoding="utf-8",
+        )
+        rv = client.get("/read/test-project/chapter_01")
+        assert rv.status_code == 200
+        tag = self._btn_align_open_tag(rv.data.decode("utf-8"))
+        assert "hidden" in tag
+
 
 class TestAlignmentAPI:
     def test_get_alignment(self, client, project_with_alignment):

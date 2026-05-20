@@ -458,6 +458,108 @@
         });
     }
 
+    // --- Toast (used by the realign flow; minimal, no deps) ---
+    let toastEl = null;
+    let toastTimer = null;
+    function showToast(msg) {
+        if (!toastEl) {
+            toastEl = document.createElement('div');
+            toastEl.className = 'reader-toast';
+            document.body.appendChild(toastEl);
+        }
+        toastEl.textContent = msg;
+        toastEl.classList.add('visible');
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toastEl.classList.remove('visible'), 2400);
+    }
+
+    // --- Realign current chapter from inside the reader ---
+    // Server endpoint recombines chunks, realigns, and re-anchors annotations.
+    // While in flight, lock the controls that race those writes
+    // (alignment JSON or chunk files). Reading and annotating stay live.
+    const btnAlign = document.getElementById('btn-align');
+    const btnAlignTitle = btnAlign ? (btnAlign.getAttribute('title') || 'Realign chapter') : '';
+    let aligning = false;
+
+    function lockChunkMutators(on) {
+        const ids = ['btn-save', 'sheet-remove-text',
+                     'sheet-retranslate', 'sheet-edit-chunk'];
+        for (const id of ids) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            el.disabled = on;
+            el.classList.toggle('disabled-during-align', on);
+            if (on) el.setAttribute('title', i.realign_locked || 'Disabled while realigning…');
+            else el.removeAttribute('title');
+        }
+    }
+
+    function showRealignButton() {
+        if (btnAlign) btnAlign.hidden = false;
+    }
+    function hideRealignButton() {
+        if (btnAlign) btnAlign.hidden = true;
+    }
+
+    // First sentence whose top edge is below the topbar — where the user is
+    // anchored at refresh time (not click time, so scrolling during the wait
+    // is honored).
+    function getTopVisibleSentencePrefix() {
+        const headerH = 56;
+        const spans = content.querySelectorAll('.sentence');
+        for (const s of spans) {
+            if (s.getBoundingClientRect().top >= headerH) {
+                return (s.textContent || '').trim().slice(0, 30);
+            }
+        }
+        return null;
+    }
+
+    if (btnAlign) {
+        btnAlign.addEventListener('click', () => {
+            if (aligning) return;
+            aligning = true;
+            btnAlign.classList.add('aligning');
+            btnAlign.disabled = true;
+            btnAlign.setAttribute('title', i.realign_working || 'Realigning…');
+            lockChunkMutators(true);
+
+            fetch(`/api/project/${projectId}/align/${chapter}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}',
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.error) {
+                    showToast((i.realign_failed || 'Realign failed: ') + data.error);
+                    return;
+                }
+                const prefix = getTopVisibleSentencePrefix();
+                return Promise.resolve(loadAndRender(prefix)).then(() => {
+                    hideRealignButton();
+                    const orphans = (data && data.orphaned_annotations) || 0;
+                    if (orphans > 0) {
+                        const tmpl = i.realign_orphans || 'Realigned. {n} annotation(s) orphaned.';
+                        showToast(tmpl.replace('{n}', String(orphans)));
+                    } else {
+                        showToast(i.realign_done || 'Chapter realigned.');
+                    }
+                });
+            })
+            .catch(err => {
+                showToast((i.realign_failed || 'Realign failed: ') + (err && err.message ? err.message : err));
+            })
+            .finally(() => {
+                aligning = false;
+                btnAlign.classList.remove('aligning');
+                btnAlign.disabled = false;
+                btnAlign.setAttribute('title', btnAlignTitle);
+                lockChunkMutators(false);
+            });
+        });
+    }
+
     // Tap overlay to close
     sheetOverlay.addEventListener('click', closeSheet);
     sheetClose.addEventListener('click', closeSheet);
@@ -543,6 +645,7 @@
                         el.classList.add('corrected');
                     }
 
+                    showRealignButton();
                     closeSheet();
                 } else {
                     alert((i.error_saving || 'Error saving: ') + (result.error || 'Unknown error'));
@@ -558,6 +661,7 @@
                     el.textContent = correctedEs + ' ';
                     el.classList.add('corrected');
                 }
+                showRealignButton();
                 closeSheet();
             })
             .finally(() => {
