@@ -476,13 +476,22 @@ def align_chapter_chunks(
     total_en = 0
     total_es = 0
 
-    for chunk_path in sorted(chunk_paths):
+    for chunk_idx, chunk_path in enumerate(sorted(chunk_paths)):
         result = align_chunk(
             chunk_path,
             source_lang=source_lang,
             target_lang=target_lang,
             model=model,
         )
+        # The chunker only splits on paragraph boundaries, so the first
+        # sentence of every chunk after the first is itself a paragraph
+        # start. align_chunk can't see chapter context — it only flags
+        # para_start when the sentence's previous sentence lives in a
+        # different paragraph within the same chunk — so we mark the
+        # cross-chunk boundary here.
+        if chunk_idx > 0 and result["alignments"]:
+            result["alignments"][0]["para_start"] = True
+
         # Offset indices by cumulative counts
         for a in result["alignments"]:
             a["es_idx"] += total_es

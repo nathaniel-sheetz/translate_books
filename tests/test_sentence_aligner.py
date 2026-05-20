@@ -260,3 +260,148 @@ class TestAlignSentences:
         assert normalized_sim > 0.6, (
             f"Normalized title sim should clear 0.6 threshold, got {normalized_sim:.3f}"
         )
+
+
+class TestAlignChapterChunks:
+    """Cross-chunk stitching behavior in ``align_chapter_chunks``."""
+
+    @pytest.fixture(scope="class")
+    def model(self):
+        try:
+            from sentence_transformers import SentenceTransformer
+            return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        except ImportError:
+            pytest.skip("sentence-transformers not installed")
+
+    def test_marks_first_sentence_of_non_first_chunk_as_para_start(
+        self, tmp_path, monkeypatch, model
+    ):
+        """Regression for the chapter_04 'Día tras día' boundary: the chunker
+        only splits on paragraph boundaries, so the first sentence of every
+        chunk after the first is itself a paragraph start. ``align_chunk``
+        cannot see chapter context (it only flags ``para_start`` for
+        same-chunk paragraph crossings), so ``align_chapter_chunks`` must
+        mark the cross-chunk boundary.
+        """
+        import json
+
+        from src import sentence_aligner
+        from src.sentence_aligner import align_chapter_chunks
+
+        # Reuse the loaded model rather than letting align_chunk re-download it.
+        monkeypatch.setattr(sentence_aligner, "_get_model", lambda: model)
+
+        chunk_0 = {
+            "id": "chapter_test_chunk_000",
+            "chapter_id": "chapter_test",
+            "position": 0,
+            "source_text": (
+                "The cat sat on the mat.\n\n"
+                "The dog watched from the doorway."
+            ),
+            "translated_text": (
+                "El gato se sentó en la alfombra.\n\n"
+                "El perro miraba desde la puerta."
+            ),
+        }
+        chunk_1 = {
+            "id": "chapter_test_chunk_001",
+            "chapter_id": "chapter_test",
+            "position": 1,
+            "source_text": (
+                "Day after day the seasons changed.\n\n"
+                "The garden bloomed."
+            ),
+            "translated_text": (
+                "Día tras día las estaciones cambiaban.\n\n"
+                "El jardín florecía."
+            ),
+        }
+
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        for chunk in (chunk_0, chunk_1):
+            (chunks_dir / f"{chunk['id']}.json").write_text(
+                json.dumps(chunk, ensure_ascii=False), encoding="utf-8"
+            )
+
+        chunk_paths = sorted(str(p) for p in chunks_dir.glob("*.json"))
+        result = align_chapter_chunks(
+            chunk_paths=chunk_paths,
+            project_id="test_project",
+            chapter_id="chapter_test",
+        )
+
+        alignments = result["alignments"]
+        assert alignments, "expected at least one alignment row"
+
+        # First sentence of chunk 0 must NOT be flagged — it's the start of
+        # the chapter, with no preceding paragraph.
+        c0 = [a for a in alignments if a["chunk_id"] == chunk_0["id"]]
+        assert c0, "No alignments found for chunk 0"
+        assert not c0[0].get("para_start"), "First sentence of chunk 0 should not be a para_start"
+
+        # First sentence of chunk 1 MUST be flagged.
+        c1 = [a for a in alignments if a["chunk_id"] == chunk_1["id"]]
+        assert c1, "No alignments found for chunk 1"
+        assert c1[0].get("para_start") is True, (
+            "First sentence of chunk 1 must be flagged as para_start "
+            "(chunks are always paragraph-aligned)"
+        )
+
+    def test_para_start_set_on_every_non_first_chunk(
+        self, tmp_path, monkeypatch, model
+    ):
+        """Every chunk after the first (not just chunk 1) must have its first
+        sentence flagged as para_start — regression guard for three-chunk chapters.
+        """
+        import json
+
+        from src import sentence_aligner
+        from src.sentence_aligner import align_chapter_chunks
+
+        monkeypatch.setattr(sentence_aligner, "_get_model", lambda: model)
+
+        def make_chunk(idx, src, tgt):
+            return {
+                "id": f"chapter_test_chunk_{idx:03d}",
+                "chapter_id": "chapter_test",
+                "position": idx,
+                "source_text": src,
+                "translated_text": tgt,
+            }
+
+        chunk_0 = make_chunk(0, "The cat sat.\n\nThe dog watched.", "El gato.\n\nEl perro.")
+        chunk_1 = make_chunk(1, "Day after day it rained.\n\nThe fields stayed wet.",
+                             "Día tras día llovió.\n\nLos campos seguían mojados.")
+        chunk_2 = make_chunk(2, "Spring finally arrived.\n\nFlowers bloomed.",
+                             "Por fin llegó la primavera.\n\nFloraron flores.")
+
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        for chunk in (chunk_0, chunk_1, chunk_2):
+            (chunks_dir / f"{chunk['id']}.json").write_text(
+                json.dumps(chunk, ensure_ascii=False), encoding="utf-8"
+            )
+
+        chunk_paths = sorted(str(p) for p in chunks_dir.glob("*.json"))
+        result = align_chapter_chunks(
+            chunk_paths=chunk_paths,
+            project_id="test_project",
+            chapter_id="chapter_test",
+        )
+
+        alignments = result["alignments"]
+        assert alignments, "expected alignments"
+
+        c0 = [a for a in alignments if a["chunk_id"] == chunk_0["id"]]
+        assert c0, "No alignments for chunk 0"
+        assert not c0[0].get("para_start"), "chunk 0 should not be para_start"
+
+        c1 = [a for a in alignments if a["chunk_id"] == chunk_1["id"]]
+        assert c1, "No alignments for chunk 1"
+        assert c1[0].get("para_start") is True, "chunk 1 first sentence must be para_start"
+
+        c2 = [a for a in alignments if a["chunk_id"] == chunk_2["id"]]
+        assert c2, "No alignments for chunk 2"
+        assert c2[0].get("para_start") is True, "chunk 2 first sentence must be para_start"
