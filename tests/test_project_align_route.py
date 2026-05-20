@@ -430,6 +430,178 @@ class TestRealignReanchor:
         assert rv.get_json()["orphaned_annotations"] == 0
 
 
+# ---------- pending corrections ----------
+
+
+class TestRealignAppliesPendingCorrections:
+    """Realign must apply queued bottom-sheet corrections to chunks first.
+
+    Bottom-sheet "Save" writes to corrections.jsonl and patches the
+    alignment in-place but does not touch chunks. If realign runs against
+    unpatched chunks, the regenerated alignment overwrites the user's
+    edit. Realign must apply pending corrections to the chunks first.
+    """
+
+    def test_pending_correction_applied_to_chunk_then_realigned(
+        self, client, project, monkeypatch,
+    ):
+        # Existing alignment (matches the unedited chunk).
+        _write_alignment(project / "alignments", "chapter_01", [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó.",
+             "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
+             "chunk_id": "chapter_01_chunk_000",
+             "chunk_offset_start": 0, "chunk_offset_end": 17},
+        ])
+        # Queue a correction (what bottom-sheet Save would write).
+        chunk_text = "El gato se sentó. El perro ladró. El pájaro voló."
+        original_es = "El gato se sentó."
+        corrected_es = "El gato se sentó tranquilo."
+        correction = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 0,
+            "original_es": original_es,
+            "corrected_es": corrected_es,
+            "en_reference": "The cat sat.",
+            "chunk_offset_start": 0,
+            "chunk_offset_end": len(original_es),
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (project / "corrections.jsonl").write_text(
+            json.dumps(correction, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        # Aligner echoes back whatever's in the chunk now; check it sees
+        # the corrected text.
+        captured: dict = {}
+
+        def fake_align(chunk_paths, project_id, chapter_id, source_lang,
+                       target_lang, output_path):
+            from src.utils.file_io import load_chunk as _lc
+            ch = _lc(Path(chunk_paths[0]))
+            captured["translated_text"] = ch.translated_text
+            payload = {
+                "chapter_id": chapter_id,
+                "project_id": project_id,
+                "en_count": 1,
+                "es_count": 1,
+                "high_confidence_pct": 100.0,
+                "avg_similarity": 0.95,
+                "alignments": [{"es_idx": 0, "en_idx": 0,
+                                "es": corrected_es,
+                                "en": "The cat sat.",
+                                "similarity": 0.95, "confidence": "high",
+                                "chunk_id": "chapter_01_chunk_000"}],
+            }
+            Path(output_path).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8",
+            )
+            return {"pairs": payload["alignments"]}
+
+        monkeypatch.setattr(sentence_aligner_module, "align_chapter_chunks", fake_align)
+
+        rv = client.post("/api/project/test-project/align/chapter_01")
+        assert rv.status_code == 200, rv.get_json()
+        data = rv.get_json()
+        assert data["corrections_applied"] == 1
+
+        # Chunk on disk now has the corrected text.
+        from src.utils.file_io import load_chunk
+        updated = load_chunk(project / "chunks" / "chapter_01_chunk_000.json")
+        assert corrected_es in updated.translated_text
+        assert original_es not in updated.translated_text
+        # Aligner observed the corrected text.
+        assert corrected_es in captured["translated_text"]
+        # corrections.jsonl is cleared; archive has the row with applied_at.
+        assert not (project / "corrections.jsonl").exists()
+        archive = project / "corrections_applied.jsonl"
+        assert archive.exists()
+        archived_rows = [
+            json.loads(line)
+            for line in archive.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(archived_rows) == 1
+        assert archived_rows[0]["corrected_es"] == corrected_es
+        assert "applied_at" in archived_rows[0]
+        # Untouched chunk text in other positions should be preserved.
+        assert "El perro ladró" in updated.translated_text
+        # Original chunk_text was not destroyed
+        assert chunk_text  # sanity reference
+
+    def test_other_chapter_corrections_preserved(
+        self, client, project, monkeypatch,
+    ):
+        """Corrections targeting other chapters must remain in
+        corrections.jsonl after a per-chapter realign."""
+        rows = [
+            {
+                "project_id": "test-project",
+                "chapter_id": "chapter_01",
+                "chunk_id": "chapter_01_chunk_000",
+                "es_idx": 0,
+                "original_es": "El gato se sentó.",
+                "corrected_es": "El gato se sentó tranquilo.",
+                "en_reference": "The cat sat.",
+                "chunk_offset_start": 0,
+                "chunk_offset_end": 17,
+                "timestamp": "2026-05-20T12:00:00",
+            },
+            {
+                "project_id": "test-project",
+                "chapter_id": "chapter_02",
+                "chunk_id": "chapter_02_chunk_000",
+                "es_idx": 0,
+                "original_es": "Otra frase.",
+                "corrected_es": "Otra frase mejor.",
+                "en_reference": "Another sentence.",
+                "timestamp": "2026-05-20T12:00:00",
+            },
+        ]
+        (project / "corrections.jsonl").write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+            encoding="utf-8",
+        )
+
+        _patch_aligner(monkeypatch, [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó tranquilo.",
+             "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
+             "chunk_id": "chapter_01_chunk_000"},
+        ])
+
+        rv = client.post("/api/project/test-project/align/chapter_01")
+        assert rv.status_code == 200
+        assert rv.get_json()["corrections_applied"] == 1
+
+        # chapter_02 row is still queued.
+        remaining = [
+            json.loads(line)
+            for line in (project / "corrections.jsonl")
+            .read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(remaining) == 1
+        assert remaining[0]["chapter_id"] == "chapter_02"
+
+    def test_no_pending_corrections_reports_zero(
+        self, client, project, monkeypatch,
+    ):
+        """No corrections.jsonl → corrections_applied is 0; no archive
+        file is created."""
+        _patch_aligner(monkeypatch, [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó.",
+             "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
+             "chunk_id": "chapter_01_chunk_000"},
+        ])
+
+        rv = client.post("/api/project/test-project/align/chapter_01")
+        assert rv.status_code == 200
+        assert rv.get_json()["corrections_applied"] == 0
+        assert not (project / "corrections_applied.jsonl").exists()
+
+
 # ---------- error path ----------
 
 
