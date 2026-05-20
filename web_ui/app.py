@@ -3811,7 +3811,7 @@ def _apply_pending_corrections_for_chapter(
     target_rows: list[dict] = []
     other_rows: list[dict] = []
     for record in rows:
-        if record.get("chapter_id") == chapter_id and record.get("chunk_id"):
+        if record.get("chapter_id") == chapter_id:
             target_rows.append(record)
         else:
             other_rows.append(record)
@@ -3840,7 +3840,13 @@ def _apply_pending_corrections_for_chapter(
                 chunk_id, e,
             )
             continue
-        updated_chunk, applied = apply_to_chunk(chunk, chunk_rows)
+        try:
+            updated_chunk, applied = apply_to_chunk(chunk, chunk_rows)
+        except Exception as e:
+            app.logger.warning(
+                "apply_to_chunk failed for chunk %s: %s", chunk_id, e,
+            )
+            continue
         if applied > 0:
             save_chunk(updated_chunk, chunk_path)
             applied_total += applied
