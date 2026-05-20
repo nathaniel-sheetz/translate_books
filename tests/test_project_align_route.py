@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import src.sentence_aligner as sentence_aligner_module
-from web_ui.app import app
+from web_ui.app import app, _apply_pending_corrections_for_chapter
 from src.models import Chunk, ChunkMetadata, ChunkStatus
 from src.utils.file_io import save_chunk
 
@@ -526,10 +526,9 @@ class TestRealignAppliesPendingCorrections:
         assert len(archived_rows) == 1
         assert archived_rows[0]["corrected_es"] == corrected_es
         assert "applied_at" in archived_rows[0]
+        assert archived_rows[0]["status"] == "applied"
         # Untouched chunk text in other positions should be preserved.
         assert "El perro ladró" in updated.translated_text
-        # Original chunk_text was not destroyed
-        assert chunk_text  # sanity reference
 
     def test_other_chapter_corrections_preserved(
         self, client, project, monkeypatch,
@@ -600,6 +599,142 @@ class TestRealignAppliesPendingCorrections:
         assert rv.status_code == 200
         assert rv.get_json()["corrections_applied"] == 0
         assert not (project / "corrections_applied.jsonl").exists()
+
+
+# ---------- pending corrections edge cases (direct function tests) ----------
+
+
+class TestApplyPendingCorrectionsEdgeCases:
+    """Edge-case paths in _apply_pending_corrections_for_chapter.
+
+    Tested via direct function calls so error paths don't collide with the
+    surrounding project_align route logic (e.g. load_chunk also used later
+    in the same route handler).
+    """
+
+    def _setup_project(self, tmp_path):
+        proj_dir = tmp_path / "projects" / "test-project"
+        chunks_dir = proj_dir / "chunks"
+        chunks_dir.mkdir(parents=True)
+        chunk = _make_chunk(
+            "chapter_01_chunk_000", "chapter_01",
+            "The cat sat.",
+            "El gato se sentó.",
+        )
+        save_chunk(chunk, chunks_dir / "chapter_01_chunk_000.json")
+        return proj_dir
+
+    def test_malformed_json_line_is_skipped(self, tmp_path):
+        """A corrupt line in corrections.jsonl is ignored; valid rows still apply."""
+        proj_dir = self._setup_project(tmp_path)
+        valid = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 0,
+            "original_es": "El gato se sentó.",
+            "corrected_es": "El gato tranquilo.",
+            "en_reference": "The cat sat.",
+            "chunk_offset_start": 0,
+            "chunk_offset_end": 17,
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            "NOT_VALID_JSON\n" + json.dumps(valid, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        result = _apply_pending_corrections_for_chapter(proj_dir, "chapter_01")
+        assert result == 1
+
+    def test_missing_chunk_file_skipped_gracefully(self, tmp_path):
+        """A correction targeting a non-existent chunk returns 0 without crashing."""
+        proj_dir = self._setup_project(tmp_path)
+        correction = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_999",  # does not exist
+            "es_idx": 0,
+            "original_es": "El gato se sentó.",
+            "corrected_es": "El gato.",
+            "en_reference": "The cat sat.",
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            json.dumps(correction, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        result = _apply_pending_corrections_for_chapter(proj_dir, "chapter_01")
+        assert result == 0
+        # Row is archived but marked skipped — not silently lost as "applied".
+        archived = [
+            json.loads(line)
+            for line in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        assert len(archived) == 1
+        assert archived[0]["status"] == "skipped"
+
+    def test_load_chunk_exception_is_handled(self, tmp_path, monkeypatch):
+        """An exception loading a chunk is swallowed; function still returns cleanly."""
+        proj_dir = self._setup_project(tmp_path)
+        correction = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 0,
+            "original_es": "El gato se sentó.",
+            "corrected_es": "El gato tranquilo.",
+            "en_reference": "The cat sat.",
+            "chunk_offset_start": 0,
+            "chunk_offset_end": 17,
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            json.dumps(correction, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        import web_ui.app as app_module
+        def _raise(path):
+            raise OSError("corrupt chunk file")
+        monkeypatch.setattr(app_module, "load_chunk", _raise)
+        result = _apply_pending_corrections_for_chapter(proj_dir, "chapter_01")
+        assert result == 0
+        archived = [
+            json.loads(line)
+            for line in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        assert len(archived) == 1
+        assert archived[0]["status"] == "skipped"
+
+    def test_stale_correction_no_match_returns_zero(self, tmp_path):
+        """A correction whose original_es no longer appears in chunk text returns 0."""
+        proj_dir = self._setup_project(tmp_path)
+        correction = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 0,
+            "original_es": "Este texto ya no existe en el fragmento.",
+            "corrected_es": "Texto corregido.",
+            "en_reference": "The cat sat.",
+            "chunk_offset_start": 0,
+            "chunk_offset_end": 40,
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            json.dumps(correction, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        result = _apply_pending_corrections_for_chapter(proj_dir, "chapter_01")
+        assert result == 0
+        archived = [
+            json.loads(line)
+            for line in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        assert len(archived) == 1
+        assert archived[0]["status"] == "skipped"
 
 
 # ---------- error path ----------

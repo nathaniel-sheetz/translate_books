@@ -964,7 +964,12 @@ body {
 
 .topbar-icon-btn:hover {
     color: var(--text-muted);
-    background: rgba(0, 0, 0, 0.04);
+    background: var(--hover-bg, rgba(0, 0, 0, 0.06));
+}
+
+.topbar-icon-btn:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: 2px;
 }
 
 .topbar-icon-btn:disabled {

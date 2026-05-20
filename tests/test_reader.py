@@ -145,6 +145,30 @@ class TestReaderView:
         tag = self._btn_align_open_tag(rv.data.decode("utf-8"))
         assert "hidden" in tag
 
+    def test_realign_button_visible_despite_malformed_json_line(
+        self, client, project_with_alignment,
+    ):
+        """A malformed line in corrections.jsonl is skipped; valid rows still
+        show the button."""
+        corr = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 0,
+            "original_es": "El gato.",
+            "corrected_es": "El gato pequeño.",
+            "en_reference": "The cat.",
+            "timestamp": "2026-05-20T12:00:00",
+        }
+        (project_with_alignment / "corrections.jsonl").write_text(
+            "NOT_JSON\n" + json.dumps(corr, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        rv = client.get("/read/test-project/chapter_01")
+        assert rv.status_code == 200
+        tag = self._btn_align_open_tag(rv.data.decode("utf-8"))
+        assert "hidden" not in tag
+
 
 class TestAlignmentAPI:
     def test_get_alignment(self, client, project_with_alignment):

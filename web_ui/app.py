@@ -3825,7 +3825,10 @@ def _apply_pending_corrections_for_chapter(
 
     chunks_dir = project_dir / "chunks"
     applied_total = 0
+    applied_chunk_ids: set[str] = set()
     for chunk_id, chunk_rows in by_chunk.items():
+        if not _safe_id(chunk_id):
+            continue
         chunk_path = chunks_dir / f"{chunk_id}.json"
         if not chunk_path.exists():
             continue
@@ -3841,6 +3844,7 @@ def _apply_pending_corrections_for_chapter(
         if applied > 0:
             save_chunk(updated_chunk, chunk_path)
             applied_total += applied
+            applied_chunk_ids.add(chunk_id)
 
     archive_path = project_dir / "corrections_applied.jsonl"
     applied_at = datetime.now().isoformat()
@@ -3848,6 +3852,9 @@ def _apply_pending_corrections_for_chapter(
         for record in target_rows:
             archived = dict(record)
             archived["applied_at"] = applied_at
+            archived["status"] = (
+                "applied" if record.get("chunk_id") in applied_chunk_ids else "skipped"
+            )
             f.write(json.dumps(archived, ensure_ascii=False) + "\n")
 
     if other_rows:
