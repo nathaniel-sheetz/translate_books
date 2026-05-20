@@ -67,6 +67,7 @@ After translation and alignment, read chapters at `/read/<project_id>/<chapter>`
 - **Edit chunk** button in the bottom sheet opens a full-textarea editor for the surrounding chunk — use it to fix stray whitespace, wrong paragraph breaks, or other edits that don't fit one sentence at a time. Saves recombine and realign the chapter automatically and keep a backup under `.chunk_edits/`.
 - **Remove text…** button prunes a stray sentence (caption, OCR artifact) from both the source and translation, propagating overlap regions and re-aligning the chapter. See [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md).
 - **Retranslate…** button gets a fresh LLM translation of the tapped sentence with a per-call model picker, lets you confirm the source span (alignment isn't always perfect), and replaces the existing translation with one confirm. See [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md).
+- **Realign chapter** button appears in the topbar whenever the current chapter has unsaved pending corrections. Clicking it applies the queued corrections to chunk files, then regenerates the sentence alignment in place. Applied corrections are archived to `corrections_applied.jsonl`; unresolvable rows are archived as `skipped`.
 - Annotation system (word choice, inconsistency, footnote, flag)
 - Mark chapters as reviewed
 - Correction workflow for batch fixes
