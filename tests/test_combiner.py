@@ -202,7 +202,9 @@ class TestCombineChunks:
         """Test combining 2 chunks with overlap."""
         # Chunk 1: "First chunk" + overlap "shared text"
         # Chunk 2: overlap "shared text" + "second chunk"
-        # Combined should be: "First chunk shared text second chunk"
+        # After overlap removal, non-overlap is " second chunk" (leading space
+        # is a toy-data artifact from word-level overlap, not paragraph text).
+        # combine_chunks inserts \n\n at every chunk boundary.
 
         chunks = [
             create_test_chunk(
@@ -221,8 +223,8 @@ class TestCombineChunks:
 
         result = combine_chunks(chunks)
 
-        # Should be: "First chunk shared text" + " second chunk"
-        assert result == "First chunk shared text second chunk"
+        # combine_chunks normalizes the chunk boundary to a paragraph break.
+        assert result == "First chunk shared text\n\n second chunk"
 
     def test_three_chunks_with_overlap(self):
         """Test combining 3 chunks with varying overlaps."""
@@ -249,8 +251,8 @@ class TestCombineChunks:
 
         result = combine_chunks(chunks)
 
-        # "Chunk one overlap" + " chunk two ending" + " chunk three"
-        assert result == "Chunk one overlap chunk two ending chunk three"
+        # combine_chunks normalizes each chunk boundary to a paragraph break.
+        assert result == "Chunk one overlap\n\n chunk two ending\n\n chunk three"
 
     def test_zero_overlap_combination(self):
         """Test combining chunks with no overlap."""
@@ -271,7 +273,9 @@ class TestCombineChunks:
 
         result = combine_chunks(chunks)
 
-        assert result == "First chunkSecond chunk"
+        # Chunk boundaries are always paragraph boundaries (the chunker
+        # only splits on \n\n), so combine_chunks inserts the separator.
+        assert result == "First chunk\n\nSecond chunk"
 
     def test_unsorted_chunks(self):
         """Test that function sorts chunks correctly."""
@@ -283,8 +287,9 @@ class TestCombineChunks:
 
         result = combine_chunks(chunks)
 
-        # Should combine in correct order: 0, 1, 2
-        assert result == "First chunk Second Third"
+        # Should combine in correct order: 0, 1, 2, with paragraph-break
+        # separators inserted between chunks.
+        assert result == "First chunk\n\n Second\n\n Third"
 
     def test_validation_failure_raises_error(self):
         """Test that validation errors raise ValueError."""
@@ -379,6 +384,141 @@ class TestIntegration:
         assert result.count("Párrafo 3") == 1
         assert result.count("Párrafo 4") == 1
 
+    def test_paragraph_break_preserved_at_zero_overlap_boundary(self):
+        """Two paragraph-aligned chunks with overlap_start=0 must remain
+        distinct paragraphs after combine_chunks (regression for the
+        ``among-the-farmyard-people/chapter_04`` 'Día tras día' boundary
+        where the inter-chunk \\n\\n was being silently dropped).
+        """
+        chunks = [
+            create_test_chunk(
+                0,
+                translated_text=(
+                    "Párrafo A.\n\n"
+                    "Párrafo B que es el último del primer trozo."
+                ),
+                overlap_start=0,
+                overlap_end=0,
+            ),
+            create_test_chunk(
+                1,
+                translated_text=(
+                    "Párrafo C que abre el segundo trozo.\n\n"
+                    "Párrafo D."
+                ),
+                overlap_start=0,
+                overlap_end=0,
+            ),
+        ]
+
+        result = combine_chunks(chunks)
+        paragraphs = result.split("\n\n")
+
+        assert paragraphs == [
+            "Párrafo A.",
+            "Párrafo B que es el último del primer trozo.",
+            "Párrafo C que abre el segundo trozo.",
+            "Párrafo D.",
+        ]
+
+    def test_paragraph_break_preserved_with_trailing_newline(self):
+        """A chunk whose translation ends with a stray trailing newline
+        (a common LLM artifact — chapter_04_chunk_000 ends with
+        ``"…impaciencia.\\n"``) must still produce a clean paragraph break
+        at the chunk boundary, not three newlines.
+        """
+        chunks = [
+            create_test_chunk(
+                0,
+                translated_text="Final del primer trozo.\n",
+                overlap_start=0,
+                overlap_end=0,
+            ),
+            create_test_chunk(
+                1,
+                translated_text="Inicio del segundo trozo.",
+                overlap_start=0,
+                overlap_end=0,
+            ),
+        ]
+
+        result = combine_chunks(chunks)
+
+        assert result == (
+            "Final del primer trozo.\n\nInicio del segundo trozo."
+        )
+
+    def test_paragraph_break_preserved_when_both_sides_dirty(self):
+        """A trailing \\n on chunk_0 AND a leading \\n on chunk_1's non-overlap
+        text must still produce exactly one \\n\\n paragraph break.
+        """
+        chunks = [
+            create_test_chunk(
+                0,
+                translated_text="Párrafo uno.\n",
+                overlap_start=0,
+                overlap_end=0,
+            ),
+            create_test_chunk(
+                1,
+                translated_text="\nPárrafo dos.",
+                overlap_start=0,
+                overlap_end=0,
+            ),
+        ]
+
+        result = combine_chunks(chunks)
+
+        assert result == "Párrafo uno.\n\nPárrafo dos."
+
+    def test_crlf_trailing_newline_normalized(self):
+        """A chunk ending with Windows-style \\r\\n must produce a clean
+        paragraph break, not a stray \\r before the blank line.
+        """
+        chunks = [
+            create_test_chunk(
+                0,
+                translated_text="Primer párrafo.\r\n",
+                overlap_start=0,
+                overlap_end=0,
+            ),
+            create_test_chunk(
+                1,
+                translated_text="Segundo párrafo.",
+                overlap_start=0,
+                overlap_end=0,
+            ),
+        ]
+
+        result = combine_chunks(chunks)
+
+        assert "\r" not in result
+        assert result == "Primer párrafo.\n\nSegundo párrafo."
+
+    def test_empty_non_overlap_does_not_append_separator(self):
+        """When overlap removal consumes the entire chunk text, no spurious
+        \\n\\n should be appended to chapter_text.
+        """
+        chunks = [
+            create_test_chunk(
+                0,
+                translated_text="Only chunk text.",
+                overlap_start=0,
+                overlap_end=16,  # entire text is 'overlap'
+            ),
+            create_test_chunk(
+                1,
+                translated_text="Only chunk text.",
+                overlap_start=16,  # overlap_start >= len(text) → empty non-overlap
+                overlap_end=0,
+            ),
+        ]
+
+        result = combine_chunks(chunks)
+
+        assert not result.endswith("\n\n"), "spurious \\n\\n appended after empty non-overlap"
+        assert result == "Only chunk text."
+
 
 class TestEdgeCases:
     """Additional edge case tests."""
@@ -391,7 +531,7 @@ class TestEdgeCases:
         ]
 
         result = combine_chunks(chunks)
-        assert result == "Firstx Second"
+        assert result == "Firstx\n\n Second"
         # "x" should appear only once
 
     def test_large_overlap(self):

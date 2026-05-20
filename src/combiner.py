@@ -258,9 +258,22 @@ def combine_chunks(chunks: List[Chunk]) -> str:
                 f"appending {len(non_overlap_text)} chars"
             )
 
-            # Add separator if needed (chunks should already have proper formatting)
-            # Just concatenate - chunks should maintain their internal structure
-            chapter_text += non_overlap_text
+            # Chunks are paragraph-aligned by construction (the chunker splits
+            # on \n\n and stores "\n\n".join(paragraphs) with no leading or
+            # trailing separator), so the boundary between two consecutive
+            # chunks is always a paragraph break in the source. Normalize it
+            # to exactly one blank line so the break survives reassembly
+            # regardless of overlap_start and regardless of any stray trailing
+            # newlines (or Windows-style \r\n) the translator may have emitted.
+            # Skip the separator entirely if overlap removal consumed the whole
+            # chunk (non_overlap_text is empty or whitespace-only).
+            non_overlap_stripped = non_overlap_text.lstrip("\r\n")
+            if non_overlap_stripped:
+                chapter_text = (
+                    chapter_text.rstrip("\r\n")
+                    + "\n\n"
+                    + non_overlap_stripped
+                )
 
     logger.info(
         f"Combination complete: {len(chapter_text)} characters total from "

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.2.0] - 2026-05-19
+
+### Fixed
+- **Paragraph break preserved at chunk boundaries**: when a chapter was split into multiple chunks on a paragraph boundary (the chunker's only split rule), the inter-chunk `\n\n` lived *between* the chunks and was never stored on either side. `combine_chunks()` then concatenated chunks with `chapter_text += non_overlap_text`, fusing chunk N's last paragraph with chunk N+1's first in the combined `chapters/<id>.txt`. The reader (which splits the file on `\n\s*\n` to derive paragraph events) and the EPUB renderer (same split) both emitted them as one paragraph. With the project default `overlap_paragraphs=0` this hit every multi-chunk chapter — e.g. `among-the-farmyard-people/chapter_04` joined "…impaciencia." to "Día tras día…". `combine_chunks` now normalizes each boundary to exactly one blank line using `rstrip("\r\n") + "\n\n" + lstrip("\r\n")`, and skips the separator entirely when overlap removal consumes the whole chunk (empty non-overlap). The companion fix in `align_chapter_chunks` flags the first alignment of every non-first chunk as `para_start` (per-chunk `align_chunk` only flags within-chunk paragraph crossings, so the cross-chunk boundary was never marked). Affected chapters need to be recombined and re-aligned.
+
 ## [0.10.1.0] - 2026-05-19
 
 ### Fixed
