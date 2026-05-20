@@ -292,7 +292,7 @@ Table of translated chapters with columns: chapter, alignment status, annotation
 
 **APIs:**
 - `POST /api/project/<id>/combine/<chapter>` — combine chunks → `chapters/<chapter>.txt`
-- `POST /api/project/<id>/align/<chapter>` — refreshes `chapters/<chapter>.txt` (re-combines chunks), then writes sentence alignment → `alignments/<chapter>.json`
+- `POST /api/project/<id>/align/<chapter>` — applies any pending corrections for the chapter to chunk files first, then refreshes `chapters/<chapter>.txt` (re-combines chunks) and writes sentence alignment → `alignments/<chapter>.json`. Response includes `corrections_applied: N` with the count of queued corrections that were patched into chunks before realigning.
 
 **Backend:** `combine_chunks()` from `src/combiner.py`, `align_chapter_chunks()` from `src/sentence_aligner.py`.
 
@@ -408,6 +408,8 @@ After a successful save the reader reopens scrolled to the same sentence via a t
 
 When corrections are saved from the reader, a banner appears on the chapter list page with an **Apply Corrections** button that batch-applies all pending edits. The reader passes `chunk_offset_start`/`chunk_offset_end` with each correction so `apply_corrections.py` can locate the exact span to replace — even when the corrected sentence also appears in an `[IMAGE:...]` caption or elsewhere in the same chunk. Multiple corrections to the same chunk are applied in descending-offset order to keep earlier offsets valid as text shifts.
 
+The reader also shows a **Realign** button (topbar icon, right of chapter navigation) whenever the current chapter has unsaved pending corrections. After saving a correction via the bottom sheet the button appears automatically. Clicking it applies all queued corrections to the underlying chunk files, then regenerates the sentence alignment for the chapter in place, preserving scroll position and showing a toast on completion. Applied correction records are archived to `corrections_applied.jsonl` with a `status` field (`applied` or `skipped`); rows that could not be matched (missing chunk file, stale source text, empty `chunk_id`, load error) are archived as `skipped` rather than silently dropped. Corrections targeting other chapters are left in `corrections.jsonl`.
+
 ### Reader APIs
 
 | Endpoint | Method | Purpose |
@@ -420,6 +422,7 @@ When corrections are saved from the reader, a banner appears on the chapter list
 | `/api/reviewed/<id>/<chapter>` | GET/POST/DELETE | Reviewed status |
 | `/api/apply-corrections/<id>` | POST | Batch apply corrections |
 | `/api/chunk/<id>/<chunk_id>/edit` | POST | Save a full-chunk text edit (recombines + realigns the chapter) |
+| `/api/project/<id>/align/<chapter>` | POST | Apply pending corrections to chunks, then recombine + realign (used by the reader Realign button) |
 
 ---
 

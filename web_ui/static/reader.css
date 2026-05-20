@@ -944,6 +944,78 @@ body {
     cursor: pointer;
 }
 
+.topbar-icon-btn {
+    background: transparent;
+    border: none;
+    padding: 4px 6px;
+    margin-left: 4px;
+    color: var(--text-muted2);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 4px;
+    line-height: 0;
+}
+
+/* `display: inline-flex` above otherwise wins over the UA `[hidden]` rule. */
+.topbar-icon-btn[hidden] {
+    display: none;
+}
+
+.topbar-icon-btn:hover {
+    color: var(--text-muted);
+    background: var(--hover-bg, rgba(0, 0, 0, 0.06));
+}
+
+.topbar-icon-btn:focus-visible {
+    outline: 2px solid var(--accent, #3b82f6);
+    outline-offset: 2px;
+}
+
+.topbar-icon-btn:disabled {
+    cursor: wait;
+}
+
+.topbar-icon-btn.aligning {
+    animation: align-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes align-pulse {
+    0%, 100% { opacity: 0.45; }
+    50%      { opacity: 1; }
+}
+
+.disabled-during-align {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+/* Ephemeral toast for non-blocking notifications (e.g. realign done). */
+.reader-toast {
+    position: fixed;
+    top: 60px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    background: var(--text, #222);
+    color: var(--bg, #fff);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 200;
+    max-width: 80vw;
+    text-align: center;
+}
+
+.reader-toast.visible {
+    opacity: 0.95;
+    transform: translateX(-50%) translateY(0);
+}
+
 /* Main reading content */
 
 .reader-content {

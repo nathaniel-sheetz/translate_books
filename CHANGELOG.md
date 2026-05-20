@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.3.0] - 2026-05-20
+
+### Added
+- **Realign button in reader**: the reader topbar now shows a realign icon button whenever the current chapter has unsaved pending corrections. After saving a correction via the bottom sheet the button appears automatically; clicking it triggers a full chapter realign in place, preserving scroll position and showing a toast on completion.
+
+### Fixed
+- **Pending corrections applied before realign**: running *Realign* from the reader now patches chunk files with any queued bottom-sheet corrections before regenerating the alignment. Previously, chunks held the original text, so realign would silently overwrite the user's edits with a freshly generated alignment. Applied corrections are moved to `corrections_applied.jsonl` with a `status` field (`applied` or `skipped`); rows that could not be applied (missing chunk, stale text, load error) are archived as `skipped` rather than silently stamped as applied. Rows targeting other chapters are preserved in the queue.
+- **Empty `chunk_id` corrections no longer re-queue forever**: a correction record with an empty `chunk_id` was previously routed back to `corrections.jsonl` on every realign, keeping the realign button visible indefinitely. Such rows are now archived as `skipped`.
+- **`apply_to_chunk` exceptions handled per-chunk**: a malformed correction record (e.g. missing `original_es` key) previously propagated an unhandled exception through the align route. The error is now caught and logged per-chunk so a single bad row does not abort the entire realign.
+
 ## [0.10.2.0] - 2026-05-19
 
 ### Fixed

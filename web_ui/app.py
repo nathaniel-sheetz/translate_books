@@ -972,12 +972,16 @@ def reader_view(project_id, chapter):
     chapter_prefix = t.get("chapter_prefix", "Chapter")
     display_label = _chapter_display_label(chapter, manifest, chapter_prefix)
 
+    project_dir = _get_projects_dir() / project_id
+    has_pending_corrections = _chapter_has_pending_corrections(project_dir, chapter)
+
     return render_template(
         "reader.html", mode="read",
         project_id=project_id, project_title=_project_title(project_id),
         chapter=chapter, t=t, lang=_get_ui_lang(),
         prev_chapter=prev_chapter, next_chapter=next_chapter,
         display_label=display_label,
+        has_pending_corrections=has_pending_corrections,
     )
 
 
@@ -3699,7 +3703,16 @@ def project_combine(project_id, chapter_id):
 
 @app.route("/api/project/<project_id>/align/<chapter_id>", methods=["POST"])
 def project_align(project_id, chapter_id):
-    """Combine chunks and run sentence alignment for a chapter."""
+    """Apply pending corrections for the chapter, then combine + realign.
+
+    Reader's bottom-sheet "Save" queues edits in ``corrections.jsonl`` and
+    patches ``alignments/{chapter_id}.json`` in-place, but does not touch
+    chunk files. If we realign without first applying those queued rows,
+    the chunks (still holding the original Spanish) would regenerate an
+    alignment that overwrites the user's edits. Apply per-chapter first
+    so realign is always idempotent with respect to the visible reader
+    state.
+    """
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
@@ -3717,6 +3730,10 @@ def project_align(project_id, chapter_id):
         # Capture the prior alignment (if any) so we can re-anchor any
         # annotations whose es_idx may shift after a fresh align run.
         old_es_map = _load_alignment_es_map(project_dir, chapter_id)
+
+        corrections_applied = _apply_pending_corrections_for_chapter(
+            project_dir, chapter_id,
+        )
 
         # Refresh the combined chapter text before aligning so chapters/ is
         # always in sync with the translated chunks. get_alignment reads this
@@ -3757,9 +3774,106 @@ def project_align(project_id, chapter_id):
             "ok": True,
             "pairs": len(result.get("pairs", [])),
             "orphaned_annotations": len(orphaned),
+            "corrections_applied": corrections_applied,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _apply_pending_corrections_for_chapter(
+    project_dir: Path, chapter_id: str,
+) -> int:
+    """Patch chunks with any queued corrections for this chapter and
+    archive the applied rows. Returns the number of corrections applied.
+
+    Corrections targeting other chapters are preserved in
+    ``corrections.jsonl``. Rows for this chapter that fail to resolve
+    against their chunk are dropped (matching the chunk-editor behavior
+    that purges stale corrections after a chunk text changes).
+    """
+    corrections_path = project_dir / "corrections.jsonl"
+    if not corrections_path.exists():
+        return 0
+
+    from collections import defaultdict
+    from scripts.apply_corrections import apply_to_chunk
+
+    rows: list[dict] = []
+    for line in corrections_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    target_rows: list[dict] = []
+    other_rows: list[dict] = []
+    for record in rows:
+        if record.get("chapter_id") == chapter_id:
+            target_rows.append(record)
+        else:
+            other_rows.append(record)
+
+    if not target_rows:
+        return 0
+
+    by_chunk: dict[str, list[dict]] = defaultdict(list)
+    for record in target_rows:
+        by_chunk[record["chunk_id"]].append(record)
+
+    chunks_dir = project_dir / "chunks"
+    applied_total = 0
+    applied_chunk_ids: set[str] = set()
+    for chunk_id, chunk_rows in by_chunk.items():
+        if not _safe_id(chunk_id):
+            continue
+        chunk_path = chunks_dir / f"{chunk_id}.json"
+        if not chunk_path.exists():
+            continue
+        try:
+            chunk = load_chunk(chunk_path)
+        except Exception as e:
+            app.logger.warning(
+                "Failed to load chunk %s while applying corrections: %s",
+                chunk_id, e,
+            )
+            continue
+        try:
+            updated_chunk, applied = apply_to_chunk(chunk, chunk_rows)
+        except Exception as e:
+            app.logger.warning(
+                "apply_to_chunk failed for chunk %s: %s", chunk_id, e,
+            )
+            continue
+        if applied > 0:
+            save_chunk(updated_chunk, chunk_path)
+            applied_total += applied
+            applied_chunk_ids.add(chunk_id)
+
+    archive_path = project_dir / "corrections_applied.jsonl"
+    applied_at = datetime.now().isoformat()
+    with open(archive_path, "a", encoding="utf-8") as f:
+        for record in target_rows:
+            archived = dict(record)
+            archived["applied_at"] = applied_at
+            archived["status"] = (
+                "applied" if record.get("chunk_id") in applied_chunk_ids else "skipped"
+            )
+            f.write(json.dumps(archived, ensure_ascii=False) + "\n")
+
+    if other_rows:
+        with open(corrections_path, "w", encoding="utf-8") as f:
+            for record in other_rows:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    else:
+        try:
+            corrections_path.unlink()
+        except OSError:
+            pass
+
+    return applied_total
 
 
 # ============================================================================
