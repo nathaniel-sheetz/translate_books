@@ -264,6 +264,53 @@ def update_project_status(project_id):
     return jsonify({"ok": True, "status": status})
 
 
+@app.route(
+    "/api/project/<project_id>/chapter-manifest/<chapter_id>",
+    methods=["PATCH"],
+)
+def update_chapter_manifest_label(project_id, chapter_id):
+    """Override the `label` for a front_matter/back_matter manifest entry.
+
+    Body: ``{"label": "<new label>"}``. Empty string clears the override
+    (falls back to existing label/heading behavior in EPUB and reader).
+    Numbered chapters (``kind == "chapter"``) are rejected with 400.
+    """
+    if not _safe_id(project_id) or not _safe_id(chapter_id):
+        return jsonify({"error": "Bad request"}), 400
+
+    data = request.get_json(silent=True) or {}
+    if "label" not in data:
+        return jsonify({"error": "Missing 'label' field"}), 400
+    label = str(data.get("label", "")).strip()
+
+    config = _load_project_config(project_id)
+    manifest = config.get("chapter_manifest")
+    if not isinstance(manifest, list):
+        return jsonify({"error": "No chapter_manifest for project"}), 404
+
+    entry = next(
+        (e for e in manifest
+         if isinstance(e, dict) and e.get("id") == chapter_id),
+        None,
+    )
+    if entry is None:
+        return jsonify({"error": f"No manifest entry for {chapter_id}"}), 404
+
+    kind = entry.get("kind", "chapter")
+    if kind == "chapter":
+        return jsonify({
+            "error": "Cannot edit label for numbered chapters",
+        }), 400
+
+    if label:
+        entry["label"] = label
+    else:
+        entry.pop("label", None)
+
+    _save_project_config(project_id, config)
+    return jsonify(entry)
+
+
 # ============================================================================
 # LLM config endpoint
 # ============================================================================
@@ -1790,6 +1837,8 @@ def _get_project_status(project_id: str) -> dict:
             except (json.JSONDecodeError, OSError):
                 pass
 
+    manifest_by_id = _load_chapter_manifest_for_project(project_id)
+
     if chapters_dir.exists():
         for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
             ch_id = ch_file.stem
@@ -1817,6 +1866,7 @@ def _get_project_status(project_id: str) -> dict:
 
             active_count = annotation_counts.get(ch_id, 0)
 
+            entry = manifest_by_id.get(ch_id) or {}
             status["chapters"].append({
                 "id": ch_id,
                 "name": ch_id.replace("_", " ").title(),
@@ -1828,6 +1878,8 @@ def _get_project_status(project_id: str) -> dict:
                 "alignment_confidence": alignment_confidence,
                 "annotation_count": active_count,
                 "reviewed": ch_id in reviewed_chapters,
+                "kind": entry.get("kind", "chapter"),
+                "label": entry.get("label"),
             })
 
     status["chapter_count"] = len(status["chapters"])
