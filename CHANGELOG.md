@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0.0] - 2026-05-21
+
+### Added
+- **Front/back matter label editor on dashboard** — front-matter and back-matter chapters now show a text input in the project split view so you can set the heading that appears in the reader and EPUB (e.g. "A los niños" instead of the raw filename). Empty or whitespace-only saves clear the override and fall back to the existing heading. Numbered chapters remain read-only.
+- **`PATCH /api/project/<id>/chapter-manifest/<chapter_id>`** — new endpoint persists a custom `label` for front/back matter manifest entries. Returns 400 if the target is a numbered chapter.
+- **`kind` and `label` fields in chapter status response** — `/api/project/<id>/status` now includes `kind` (`chapter`, `front_matter`, `back_matter`) and `label` (custom heading if set) for each chapter, enabling the dashboard to render front/back matter distinctly.
+
 ## [0.11.1.0] - 2026-05-21
 
 ### Fixed
