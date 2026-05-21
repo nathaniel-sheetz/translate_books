@@ -33,7 +33,14 @@ def _term_pattern(term: str) -> re.Pattern:
     parts = _normalize_quotes(term).split()
     escaped = [re.escape(p) for p in parts]
     if len(parts) == 1:
-        return re.compile(rf"\b{escaped[0]}(?:es|s)?\b", re.IGNORECASE)
+        # Skip the plural suffix for title-case terms that already end in 's'
+        # (e.g. "Atlas", "Pericles"): adding "es" would match "atlases",
+        # which is a different word. Lowercase terms like "dress" still get the
+        # suffix because "dresses" is simply the plural form.
+        ends_s = parts[0].lower().endswith("s")
+        is_title = bool(parts[0]) and parts[0][0].isupper()
+        suffix = "" if (ends_s and is_title) else r"(?:es|s)?"
+        return re.compile(rf"\b{escaped[0]}{suffix}\b", re.IGNORECASE)
     sep = r"[^A-Za-z0-9]+"
     return re.compile(sep.join(escaped), re.IGNORECASE)
 

@@ -1067,6 +1067,7 @@ def prune_contained_terms(
 
 def collapse_possessive_keys(
     merged: dict[str, GlossaryCandidate],
+    proper_noun_keys: set[str] | None = None,
 ) -> dict[str, GlossaryCandidate]:
     """Collapse possessive variants into their bare form.
 
@@ -1082,12 +1083,14 @@ def collapse_possessive_keys(
     )
     for key, cand in ordered:
         bare_key = _strip_possessive_phrase(key)
-        # Never collapse to a bare key that is itself a stopword. Vermont
-        # dialect tokens like "so's" / "so'd" tokenize as single words, slip
-        # past per-extractor stopword filters because the token isn't bare
-        # "so", then get stripped here — producing a stopword-keyed candidate
-        # ("so") that adds no semantic value. Drop the candidate instead.
-        if bare_key != key and " " not in bare_key and bare_key in STOPWORDS:
+        # Never collapse to a bare key that is itself a stopword — unless the
+        # bare key is already a confirmed proper noun (e.g. character named
+        # "May" or "Will"). Vermont dialect tokens like "so's" / "so'd"
+        # tokenize as single words and would otherwise produce a stopword-keyed
+        # candidate ("so") with no semantic value.
+        _pn = proper_noun_keys or set()
+        if (bare_key != key and " " not in bare_key
+                and bare_key in STOPWORDS and bare_key not in _pn):
             continue
         bare_surface = _strip_possessive_phrase(cand.term)
         if bare_key in result:
@@ -1326,7 +1329,7 @@ def extract_candidates(
         print(f"  Merged total: {len(merged)}")
 
     # Collapse possessive variants (Nelson's → Nelson, Hood's → Hood)
-    merged = collapse_possessive_keys(merged)
+    merged = collapse_possessive_keys(merged, proper_noun_keys=set(proper_nouns.keys()))
     if verbose:
         print(f"  After possessive collapse: {len(merged)}")
 

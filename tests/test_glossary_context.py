@@ -36,6 +36,16 @@ class TestTermPattern:
         pat_nelson = _term_pattern("Nelson")
         assert pat_nelson.search("Nelsonish words don't match wholly.") is None
 
+    def test_s_ending_term_does_not_over_match(self):
+        # Terms already ending in 's' must NOT get the plural suffix because
+        # "Atlas" + "(?:es|s)?" would match "atlases" (a different word).
+        pat = _term_pattern("Atlas")
+        assert pat.search("Atlas carried the world")  # base form matches
+        assert pat.search("The atlases were worn.") is None  # must NOT match
+        pat_bus = _term_pattern("Pericles")
+        assert pat_bus.search("Pericles spoke") is not None
+        assert pat_bus.search("Pericleses") is None  # junk form must not match
+
     def test_multi_word_term_allows_punctuation_separator(self):
         pat = _term_pattern("dictator Aulus")
         assert pat.search("the dictator Aulus marched")

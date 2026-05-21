@@ -1019,6 +1019,23 @@ class TestCollapsePossessiveKeys:
         assert result["lord hood"].frequency == 7
         assert result["lord hood"].term == "Lord Hood"
 
+    def test_stopword_guard_exempts_confirmed_character_names(self):
+        # Characters named "May" or "Will" (common Victorian names) appear only
+        # in possessive form in frequent n-grams. Their bare key is a stopword,
+        # but they should survive if already in proper_noun_keys.
+        merged = {
+            "may's": GlossaryCandidate(
+                term="May's", type_guess=GlossaryTermType.CHARACTER, frequency=8,
+            ),
+        }
+        # Without proper_noun_keys: bare "may" is a stopword → dropped.
+        result_no_pn = collapse_possessive_keys(merged)
+        assert "may" not in result_no_pn
+        # With proper_noun_keys containing "may": exempted → survives.
+        result_with_pn = collapse_possessive_keys(merged, proper_noun_keys={"may"})
+        assert "may" in result_with_pn
+        assert result_with_pn["may"].term == "May"
+
 
 # ---------------------------------------------------------------------------
 # Contained-term pruning
