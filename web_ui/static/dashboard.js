@@ -691,7 +691,7 @@
                     msg.className = 'status-msg ch-label-status error';
                     return;
                 }
-                ch.label = res.data.label || null;
+                ch.label = res.data.label ?? null;
                 msg.textContent = newLabel ? 'Saved' : 'Cleared';
                 msg.className = 'status-msg ch-label-status success';
             }).catch(function() {

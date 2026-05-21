@@ -159,3 +159,23 @@ class TestPatchChapterManifestLabel:
             json={"label": "x"},
         )
         assert rv.status_code in (400, 404)
+
+    def test_null_label_treated_as_clear(self, client, project):
+        rv = client.patch(
+            "/api/project/p1/chapter-manifest/chapter_01",
+            json={"label": None},
+        )
+        assert rv.status_code == 200
+        cfg = _read_config(project)
+        entry = next(e for e in cfg["chapter_manifest"] if e["id"] == "chapter_01")
+        assert "label" not in entry
+
+    def test_label_too_long_returns_400(self, client, project):
+        rv = client.patch(
+            "/api/project/p1/chapter-manifest/chapter_01",
+            json={"label": "x" * 501},
+        )
+        assert rv.status_code == 400
+        cfg = _read_config(project)
+        entry = next(e for e in cfg["chapter_manifest"] if e["id"] == "chapter_01")
+        assert entry.get("label") == "To the Children"

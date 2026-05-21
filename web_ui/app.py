@@ -281,7 +281,10 @@ def update_chapter_manifest_label(project_id, chapter_id):
     data = request.get_json(silent=True) or {}
     if "label" not in data:
         return jsonify({"error": "Missing 'label' field"}), 400
-    label = str(data.get("label", "")).strip()
+    raw = data["label"]
+    label = (raw if isinstance(raw, str) else "").strip()
+    if len(label) > 500:
+        return jsonify({"error": "Label too long (max 500 characters)"}), 400
 
     config = _load_project_config(project_id)
     manifest = config.get("chapter_manifest")
