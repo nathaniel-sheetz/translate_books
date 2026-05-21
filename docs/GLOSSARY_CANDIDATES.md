@@ -161,7 +161,7 @@ Builds capitalized multi-word sequences token-by-token and records each as a can
   - Starting with a `GEO_WORDS` word → `PLACE`, with detection reason `geo_word_prefix`.
   - Otherwise → `CHARACTER` (default for repeated capitalized sequences).
 - Each token inside a sequence is also recorded standalone so the >80% capitalized-ratio check can use accurate totals.
-- Sentence-start single capitalized tokens (`i == 0`) only contribute to total counts, not to candidate emissions, since `The`/`He`/`She`/etc. would otherwise dominate.
+- Sentence-start single capitalized tokens (`i == 0`) increment both the capitalized count and the total count. This means protagonist names that routinely open sentences (e.g. `Betsy opened the door.`) still clear the 80% capitalized-ratio filter. Common sentence-starters like `The`/`He`/`She` are filtered by the dictionary check and stopword lists before the ratio is applied.
 - Bare title abbreviations (`Mr`, `Mrs`, `Dr`, ...) appearing alone are never emitted as standalone candidates.
 
 **Final filter on this extractor's output**
@@ -203,7 +203,7 @@ Scans bigrams and trigrams within each sentence. **Drops** an n-gram if any of t
 | Already a proper noun | Lowercase n-gram key equals a `proper_noun_keys` entry |
 | Conjoined names | Trigram is `Word and Word` or `Word or Word` |
 | All dictionary words | Every token in dict (when dict available) — drops banal English phrases |
-| Name-plus-dict noise | n-gram contains at least one known single-word proper noun key AND every non-proper token is a dictionary word. Possessives are stripped first so `Emile's comment` also matches. Catches `Jules looks`, `Uncle Paul let`, `Claire when`, `Emile Jules`. |
+| Name-plus-dict noise | n-gram contains a contiguous span matching a known proper noun key (single OR multi-word) AND every token outside that span is a dictionary word or another known proper noun key. Possessives are stripped first so `Aunt Abigail's face` matches `aunt abigail` + `face`. Catches `Jules looks`, `Uncle Paul let`, `Claire when`, `Emile Jules`, `like Cousin Ann`, `Aunt Abigail's face`. |
 
 Surviving n-grams are emitted as `TECHNICAL` with detection reason `frequent_ngram`. Title periods are restored on the surface form before storage.
 
@@ -250,15 +250,17 @@ For each duplicate key across the five extractor outputs:
 
 ### Possessive collapse (`collapse_possessive_keys`)
 
-Strips trailing `'s`, `’s`, `ʼs`, `'`, `’`, `ʼ` from each key (and the surface form's last token), then merges all variants into the bare key. `Nelson` + `Nelson's` → `Nelson`, frequencies **summed**, reasons unioned, higher type-priority kept. Surface form prefers the non-possessive variant.
+Strips trailing `’s`, `’s`, `ʼs`, `’`, `’`, `ʼ` from each key (and the surface form’s last token), then merges all variants into the bare key. `Nelson` + `Nelson’s` → `Nelson`, frequencies **summed**, reasons unioned, higher type-priority kept. Surface form prefers the non-possessive variant.
 
-Processes bare keys first so the bare surface claims the merged slot. When only a possessive variant was emitted (`Hood's` alone), the collapse pass still surfaces it under the bare key `Hood` with the bare surface form.
+Processes bare keys first so the bare surface claims the merged slot. When only a possessive variant was emitted (`Hood’s` alone), the collapse pass still surfaces it under the bare key `Hood` with the bare surface form.
+
+**Stopword guard:** if collapsing a single-word key would produce a bare key that is in `STOPWORDS`, the candidate is dropped entirely — unless the bare key is already a confirmed proper noun (e.g. a character named `May` or `Will`). This prevents Vermont dialect tokens like `so’s` ("so as") from landing under the stopword key `so` as a spurious candidate.
 
 ### Contained-term pruning (`prune_contained_terms`)
 
 Drops candidates whose every occurrence in the source text is contained inside a longer candidate. Implementation:
 
-1. For each candidate, build a regex via `_term_pattern()` from `glossary_context.py` (apostrophe-normalized, word-boundary for singles, `[^A-Za-z0-9]+` between multi-word tokens to tolerate `dictator Aulus` matching `dictator, Aulus`).
+1. For each candidate, build a regex via `_term_pattern()` from `glossary_context.py` (apostrophe-normalized; single tokens use a word-boundary plus optional `-s`/`-es` plural suffix for lowercase terms, or exact match for title-case terms ending in `s` like `Atlas`; `[^A-Za-z0-9]+` between multi-word tokens to tolerate `dictator Aulus` matching `dictator, Aulus`).
 2. Collect every match position across all candidates.
 3. Sort by `(start_asc, length_desc)` and walk leftmost-longest: at each position past the last claim, the longest candidate starting there gets credit, everything overlapping is shadowed.
 4. Drop any candidate whose **standalone** (unshadowed) hit count falls below `min_frequency`.
@@ -335,8 +337,8 @@ These are defined as module-level sets at the top of `scripts/extract_glossary_c
 
 - **`TITLE_WORDS`** — title prefixes that flag the next capitalized sequence as `CHARACTER`. `mr`, `mrs`, `ms`, `miss`, `dr`, `prof`, `professor`, `uncle`, `aunt`, `auntie`, `brother`, `sister`, `father`, `mother`, `sir`, `lady`, `lord`, `king`, `queen`, `prince`, `princess`, `captain`, `major`, `colonel`, `general`, `sergeant`, `saint`, `st`.
 - **`GEO_WORDS`** — geographic prefixes that flag the next capitalized sequence as `PLACE`. `mount`, `mt`, `lake`, `river`, `cape`, `bay`, `gulf`, `isle`, `island`, `valley`, `fort`, `port`, `north`, `south`, `east`, `west`, `new`, `old`, `great`, `upper`, `lower`.
-- **`STOPWORDS`** — English stopwords used by n-gram filtering and rare-word extraction. Common articles, pronouns, auxiliaries, prepositions, conjunctions; see source for the full list.
-- **`SEQUENCE_BREAKERS`** — capitalized words that shouldn't bridge a multi-word proper-noun sequence (`I`, `The`, `He`, `Yes`, `Oh`, prepositions, auxiliaries, ...).
+- **`STOPWORDS`** — English stopwords used by n-gram filtering and rare-word extraction. Common articles, pronouns, auxiliaries, prepositions, conjunctions, and greetings (`hello`, `hi`, `hey`, `goodbye`, `bye`, `okay`, `ok`); see source for the full list. Greetings are included because they appear at dialogue starts and would otherwise be flagged as "always capitalized" candidates.
+- **`SEQUENCE_BREAKERS`** — capitalized words that shouldn't bridge a multi-word proper-noun sequence (`I`, `The`, `He`, `Yes`, `Oh`, prepositions, auxiliaries, greetings like `Hello`/`Hi`/`Hey`/`Goodbye`/`Bye`/`Okay`/`Ok`, ...).
 - **`DIALOGUE_VERBS`** — verbs and connectives that signal narration glue rather than a glossary phrase (`said`, `asked`, `replied`, `exclaimed`, `cried`, `whispered`, ...).
 - **`FINITE_VERBS`** — auxiliary and main verbs whose presence in an n-gram signals a clause fragment (`was`, `is`, `had`, `made`, `lived`, `named`, `knew`, `seemed`, ...).
 - **`LEADING_PREPOSITIONS`** — prepositions/adverbs that often start a phrase fragment when they're not already in `STOPWORDS` (`off`, `against`, `back`, `down`, `through`, `across`, `around`, `under`).
