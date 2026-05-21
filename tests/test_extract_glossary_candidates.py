@@ -1669,7 +1669,7 @@ class TestForcedGlossaryTerms:
         monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
         first = app_config.load_forced_glossary_terms(force_reload=True)
         second = app_config.load_forced_glossary_terms()  # uses cache
-        assert first is second
+        assert first == second
 
     def test_force_injection_skipped_when_all_forced_terms_absent_from_text(self):
         """Forced entry list is non-empty but no term matches text → merge not called."""

@@ -1137,8 +1137,9 @@ def _forced_term_pattern(term: str) -> re.Pattern:
     `gobbler` matches `gobblers` and `stall` matches `stalls`. Multi-word
     phrases match exactly with no inflection.
     """
-    escaped = re.escape(term.strip())
-    if " " in term.strip():
+    normalized = re.sub(r"\s+", " ", term.strip())
+    escaped = re.escape(normalized)
+    if " " in normalized:
         return re.compile(rf"\b{escaped}\b", re.IGNORECASE)
     return re.compile(rf"\b{escaped}(?:es|s)?\b", re.IGNORECASE)
 
@@ -1182,7 +1183,7 @@ def build_forced_candidates(
             type_guess = GlossaryTermType.OTHER
 
         reasons_raw = entry.get("detection_reasons") or []
-        reasons = [r for r in reasons_raw if isinstance(r, str)]
+        reasons = [r for r in reasons_raw if isinstance(r, str)] if isinstance(reasons_raw, list) else []
         if FORCED_TERM_REASON not in reasons:
             reasons.append(FORCED_TERM_REASON)
 

@@ -82,18 +82,18 @@ def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
     """
     global _FORCED_GLOSSARY_CACHE
     if _FORCED_GLOSSARY_CACHE is not None and not force_reload:
-        return _FORCED_GLOSSARY_CACHE
+        return list(_FORCED_GLOSSARY_CACHE)
 
     if not _FORCED_GLOSSARY_PATH.exists():
         _FORCED_GLOSSARY_CACHE = []
-        return _FORCED_GLOSSARY_CACHE
+        return []
 
     try:
         data = json.loads(_FORCED_GLOSSARY_PATH.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("Failed to parse forced_glossary_terms.json: %s", e)
         _FORCED_GLOSSARY_CACHE = []
-        return _FORCED_GLOSSARY_CACHE
+        return []
 
     terms = data.get("terms") if isinstance(data, dict) else None
     if not isinstance(terms, list):
@@ -101,7 +101,7 @@ def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
             "forced_glossary_terms.json: expected top-level 'terms' list"
         )
         _FORCED_GLOSSARY_CACHE = []
-        return _FORCED_GLOSSARY_CACHE
+        return []
 
     _FORCED_GLOSSARY_CACHE = [t for t in terms if isinstance(t, dict)]
-    return _FORCED_GLOSSARY_CACHE
+    return list(_FORCED_GLOSSARY_CACHE)
