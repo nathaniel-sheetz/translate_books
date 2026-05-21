@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0.0] - 2026-05-21
+
+### Added
+- **Forced glossary candidates**: create a `forced_glossary_terms.json` file (copy from the new `forced_glossary_terms.example.json`) to list domain words that should always appear in the glossary candidate report when they occur in the source text. Useful for consistently-mistranslated words (e.g. "stall" as *establo* vs *casilla*, "gobbler" as *pavo macho* vs *guajolote*) that extraction heuristics would otherwise bury. Terms match case-insensitively, whole-word, with basic singular/plural handling for single-word entries. The feature bypasses min-frequency, demonym, and contained-term filters while still respecting the existing-glossary exclusion list.
+
 ## [0.10.3.0] - 2026-05-20
 
 ### Added
