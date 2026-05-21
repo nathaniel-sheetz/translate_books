@@ -62,10 +62,11 @@ python scripts/extract_glossary_candidates.py projects/mybook/source.txt \
 5. **Collapse possessive variants** (`Nelson's` → `Nelson`, summing frequencies).
 6. **Prune contained terms** — drop candidates whose every occurrence sits inside a longer candidate (leftmost-longest overlap resolution).
 7. **Filter demonyms** — drop single-word nationality words and demonym-led adjectival phrases.
-8. **Exclude glossary terms** that already exist in the optional `-g glossary.json`.
-9. **Score and rank**, then cap at `--max-candidates`.
+8. **Inject forced terms** — merge any terms from `forced_glossary_terms.json` that appear in the source, bypassing steps 4–7 entirely. Detection reason: `forced_user_term`.
+9. **Exclude glossary terms** that already exist in the optional `-g glossary.json`.
+10. **Score and rank**, then cap at `--max-candidates`.
 
-Each step in 3–7 is implemented as a standalone, testable function. Tests live in `tests/test_extract_glossary_candidates.py`.
+Each step in 3–8 is implemented as a standalone, testable function. Tests live in `tests/test_extract_glossary_candidates.py`.
 
 ## Source loading and pre-processing
 
@@ -275,6 +276,41 @@ Two rules:
 
 Multi-word phrases with at least one capitalized non-demonym token survive: `British Empire`, `Spanish Inquisition`, `French Revolution`. The full `DEMONYMS` list is in [Word lists and constants](#word-lists-and-constants).
 
+### Forced glossary candidates (`build_forced_candidates`)
+
+After demonym filtering, the pipeline injects any terms listed in `forced_glossary_terms.json` that actually occur in the source. This lets you pin domain words that extraction heuristics would otherwise bury — for example, "stall" (*establo* vs *casilla*) or "gobbler" (*pavo macho* vs *guajolote*) — so they always appear in the candidate report.
+
+**Setup:** copy `forced_glossary_terms.example.json` to `forced_glossary_terms.json` (gitignored) in the project root and add your terms:
+
+```json
+{
+  "terms": [
+    { "term": "stall", "type_guess": "TECHNICAL" },
+    { "term": "gobbler", "type_guess": "OTHER" }
+  ]
+}
+```
+
+Fields per entry:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `term` | yes | Word or phrase to force. |
+| `type_guess` | no | `CHARACTER`, `PLACE`, `TECHNICAL`, `CONCEPT`, or `OTHER` (default `OTHER`). |
+| `detection_reasons` | no | Extra reasons merged with `forced_user_term`. |
+
+**Matching rules:**
+- Case-insensitive, whole-word.
+- Single-word entries match with optional `-s` / `-es` plural suffix (`gobbler` → `gobblers`, `stall` → `stalls`).
+- Multi-word phrases match exactly (no plural inflection).
+- Terms with zero occurrences in the source are silently skipped.
+
+**What forced injection bypasses:** min-frequency, contained-term pruning, and demonym filters. **What it still respects:** the existing-glossary exclusion list (`-g glossary.json`).
+
+Detection reason added to every forced candidate: `forced_user_term`.
+
+The feature is implemented in `build_forced_candidates()` (`scripts/extract_glossary_candidates.py`) and `load_forced_glossary_terms()` (`src/app_config.py`).
+
 ### Glossary exclusion (`exclude_glossary_terms`)
 
 When `-g glossary.json` is provided, drops candidates whose lowercased key OR surface form matches any existing glossary term (via `Glossary.find_term()`). Excluded count is reported as `excluded_glossary_terms` in the JSON output.
@@ -463,6 +499,7 @@ A candidate's `detection_reasons` list is the union of reasons across every extr
 | `frequent_ngram` | n-grams | Survived all n-gram filters. |
 | `always_capitalized` | repeated-cap safety net | Word appears capitalized in 100% of occurrences. |
 | `rare_in_literary_english` | repeated-cap / rare-literary | Literary Zipf below the relevant threshold. |
+| `forced_user_term` | forced glossary candidates | Term was listed in `forced_glossary_terms.json` and matched in the source. |
 
 ## Requirements
 

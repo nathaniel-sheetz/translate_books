@@ -167,6 +167,7 @@ book_translation/
 │       ├── .chunk_edits/       # Pre-edit chunk backups from the chunk editor
 │       └── images/             # Downloaded images
 │
+├── forced_glossary_terms.example.json  # Template for forced glossary candidates (copy → forced_glossary_terms.json)
 ├── requirements.txt
 └── .env.example
 ```
