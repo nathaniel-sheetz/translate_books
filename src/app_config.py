@@ -19,6 +19,11 @@ _APP_CONFIG_CACHE: dict | None = None
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "app_config.json"
 
+_FORCED_GLOSSARY_PATH = (
+    Path(__file__).resolve().parent.parent / "forced_glossary_terms.json"
+)
+_FORCED_GLOSSARY_CACHE: list[dict] | None = None
+
 
 def load_app_config(*, force_reload: bool = False) -> dict:
     """Load system config from ``app_config.json``, returning ``{}`` if absent."""
@@ -64,3 +69,39 @@ def get_blacklist_path() -> Optional[Path]:
     if isinstance(val, str) and val.strip():
         return _CONFIG_PATH.parent / val
     return None
+
+
+def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
+    """Return raw forced-term entries from ``forced_glossary_terms.json``.
+
+    Returns ``[]`` when the file is absent or malformed. The file is a
+    user-maintained list of words the glossary candidate extractor should
+    always surface when they appear in source text — bypassing the normal
+    extraction heuristics that would otherwise hide consistently-mistranslated
+    domain words (e.g. "stall", "gobbler").
+    """
+    global _FORCED_GLOSSARY_CACHE
+    if _FORCED_GLOSSARY_CACHE is not None and not force_reload:
+        return list(_FORCED_GLOSSARY_CACHE)
+
+    if not _FORCED_GLOSSARY_PATH.exists():
+        _FORCED_GLOSSARY_CACHE = []
+        return []
+
+    try:
+        data = json.loads(_FORCED_GLOSSARY_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Failed to parse forced_glossary_terms.json: %s", e)
+        _FORCED_GLOSSARY_CACHE = []
+        return []
+
+    terms = data.get("terms") if isinstance(data, dict) else None
+    if not isinstance(terms, list):
+        logger.warning(
+            "forced_glossary_terms.json: expected top-level 'terms' list"
+        )
+        _FORCED_GLOSSARY_CACHE = []
+        return []
+
+    _FORCED_GLOSSARY_CACHE = [t for t in terms if isinstance(t, dict)]
+    return list(_FORCED_GLOSSARY_CACHE)

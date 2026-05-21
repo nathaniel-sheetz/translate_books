@@ -62,6 +62,9 @@ app_config.json
 # Per-user blacklist (copy from blacklist.example.json)
 blacklist.json
 
+# Per-user forced glossary terms (copy from forced_glossary_terms.example.json)
+forced_glossary_terms.json
+
 # Per-user prompt configs (copy from *.example.json / *.example.txt)
 prompts/style_guide_questions.json
 prompts/style_guide_questions.txt

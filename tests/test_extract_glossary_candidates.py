@@ -33,9 +33,12 @@ from scripts.extract_glossary_candidates import (
     collapse_possessive_keys,
     prune_contained_terms,
     filter_demonyms,
+    build_forced_candidates,
+    FORCED_TERM_REASON,
     NLTK_AVAILABLE,
     WORDFREQ_AVAILABLE,
 )
+import src.app_config as app_config
 from src.models import Glossary, GlossaryTerm, GlossaryTermType
 
 
@@ -1431,3 +1434,266 @@ class TestTitlePeriodsInCandidates:
         terms = {c.term.lower() for c in report.candidates}
         assert "mr" not in terms
         assert "mrs" not in terms
+
+
+# ---------------------------------------------------------------------------
+# Test forced glossary terms
+# ---------------------------------------------------------------------------
+
+class TestForcedGlossaryTerms:
+    """User-defined forced terms that bypass normal extraction heuristics."""
+
+    def test_build_forced_candidates_surfaces_present_term(self):
+        text = "The gobbler strutted across the yard. The gobbler was loud."
+        result = build_forced_candidates(text, [{"term": "gobbler"}])
+        assert "gobbler" in result
+        cand = result["gobbler"]
+        assert cand.frequency == 2
+        assert FORCED_TERM_REASON in cand.detection_reasons
+        assert cand.type_guess == GlossaryTermType.OTHER
+
+    def test_build_forced_candidates_skips_absent_term(self):
+        text = "A peaceful afternoon in the garden."
+        result = build_forced_candidates(text, [{"term": "kraken"}])
+        assert result == {}
+
+    def test_plural_matching_single_word(self):
+        text = "Three gobblers wandered past the stalls."
+        result = build_forced_candidates(
+            text, [{"term": "gobbler"}, {"term": "stall"}]
+        )
+        assert "gobbler" in result
+        assert "stall" in result
+        assert result["gobbler"].frequency == 1
+        assert result["stall"].frequency == 1
+
+    def test_plural_not_applied_to_multiword(self):
+        text = "The swift currents pulled the boat downstream."
+        result = build_forced_candidates(text, [{"term": "swift current"}])
+        # Multi-word phrases match exactly — no -s/-es suffix.
+        assert result == {}
+
+    def test_case_insensitive_matching(self):
+        text = "Stall, STALL, and stall all count."
+        result = build_forced_candidates(text, [{"term": "stall"}])
+        assert result["stall"].frequency == 3
+
+    def test_type_guess_parsed_from_entry(self):
+        text = "The gobbler crossed the road."
+        result = build_forced_candidates(
+            text, [{"term": "gobbler", "type_guess": "TECHNICAL"}]
+        )
+        assert result["gobbler"].type_guess == GlossaryTermType.TECHNICAL
+
+    def test_invalid_type_guess_falls_back_to_other(self):
+        text = "The gobbler crossed the road."
+        result = build_forced_candidates(
+            text, [{"term": "gobbler", "type_guess": "BOGUS"}]
+        )
+        assert result["gobbler"].type_guess == GlossaryTermType.OTHER
+
+    def test_extra_detection_reasons_preserved(self):
+        text = "The gobbler crossed the road."
+        result = build_forced_candidates(
+            text, [{"term": "gobbler", "detection_reasons": ["custom_reason"]}]
+        )
+        reasons = result["gobbler"].detection_reasons
+        assert "custom_reason" in reasons
+        assert FORCED_TERM_REASON in reasons
+
+    def test_force_injection_bypasses_min_frequency(self):
+        # "stall" appears once and is a common dictionary word — without
+        # forcing, it would never survive uncommon/rare/proper-noun extractors.
+        text = (
+            "He led the horse into the stall and shut the gate. "
+            "Then he walked back to the farmhouse and started dinner."
+        )
+        with patch(
+            "scripts.extract_glossary_candidates.load_forced_glossary_terms",
+            return_value=[{"term": "stall"}],
+        ):
+            report = extract_candidates(
+                text, min_frequency=5, max_candidates=100,
+            )
+        terms_lower = {c.term.lower() for c in report.candidates}
+        assert "stall" in terms_lower
+        stall_cand = next(c for c in report.candidates if c.term.lower() == "stall")
+        assert FORCED_TERM_REASON in stall_cand.detection_reasons
+
+    def test_force_injection_fills_context_sentence(self):
+        text = "He led the horse into the stall and shut the gate."
+        with patch(
+            "scripts.extract_glossary_candidates.load_forced_glossary_terms",
+            return_value=[{"term": "stall"}],
+        ):
+            report = extract_candidates(text, min_frequency=1, max_candidates=50)
+        stall_cand = next(c for c in report.candidates if c.term.lower() == "stall")
+        assert "stall" in stall_cand.context_sentence.lower()
+
+    def test_force_injection_still_excluded_if_in_glossary(self):
+        text = "The gobbler strutted across the yard."
+        glossary = Glossary(terms=[
+            GlossaryTerm(
+                english="gobbler",
+                spanish="guajolote",
+                type=GlossaryTermType.OTHER,
+            ),
+        ])
+        with patch(
+            "scripts.extract_glossary_candidates.load_forced_glossary_terms",
+            return_value=[{"term": "gobbler"}],
+        ):
+            report = extract_candidates(
+                text, glossary=glossary, min_frequency=1, max_candidates=50,
+            )
+        terms_lower = {c.term.lower() for c in report.candidates}
+        assert "gobbler" not in terms_lower
+        assert report.excluded_glossary_terms >= 1
+
+    def test_force_injection_no_entries_is_noop(self):
+        text = "The children gathered in the garden one warm afternoon."
+        with patch(
+            "scripts.extract_glossary_candidates.load_forced_glossary_terms",
+            return_value=[],
+        ):
+            report = extract_candidates(text, min_frequency=1, max_candidates=50)
+        assert isinstance(report, CandidateReport)
+
+    def test_load_forced_glossary_terms_missing_file(self, tmp_path, monkeypatch):
+        missing = tmp_path / "nope.json"
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", missing)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        assert app_config.load_forced_glossary_terms(force_reload=True) == []
+
+    def test_load_forced_glossary_terms_malformed_json(self, tmp_path, monkeypatch):
+        bad = tmp_path / "bad.json"
+        bad.write_text("{ not valid json", encoding="utf-8")
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", bad)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        assert app_config.load_forced_glossary_terms(force_reload=True) == []
+
+    def test_load_forced_glossary_terms_missing_terms_key(
+        self, tmp_path, monkeypatch
+    ):
+        bad = tmp_path / "no_terms.json"
+        bad.write_text(json.dumps({"other_key": []}), encoding="utf-8")
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", bad)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        assert app_config.load_forced_glossary_terms(force_reload=True) == []
+
+    def test_load_forced_glossary_terms_returns_entries(
+        self, tmp_path, monkeypatch
+    ):
+        good = tmp_path / "good.json"
+        good.write_text(
+            json.dumps({"terms": [
+                {"term": "stall", "type_guess": "TECHNICAL"},
+                {"term": "gobbler"},
+            ]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", good)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        entries = app_config.load_forced_glossary_terms(force_reload=True)
+        assert len(entries) == 2
+        assert entries[0]["term"] == "stall"
+
+    # ------------------------------------------------------------------
+    # Gap tests: uncovered branches
+    # ------------------------------------------------------------------
+
+    def test_build_forced_candidates_skips_entry_with_no_term_key(self):
+        """Entry dict has no 'term' key — should be silently skipped."""
+        text = "The gobbler crossed the road."
+        result = build_forced_candidates(text, [{"type_guess": "OTHER"}])
+        assert result == {}
+
+    def test_build_forced_candidates_skips_whitespace_only_term(self):
+        """Term that is only whitespace after strip — should be silently skipped."""
+        text = "The gobbler crossed the road."
+        result = build_forced_candidates(text, [{"term": "   "}])
+        assert result == {}
+
+    def test_build_forced_candidates_deduplicates_case_variants(self):
+        """Two entries that resolve to the same lowercase key — second is skipped."""
+        text = "gobbler Gobbler GOBBLER"
+        result = build_forced_candidates(
+            text, [{"term": "gobbler"}, {"term": "Gobbler"}]
+        )
+        assert len(result) == 1
+        assert "gobbler" in result
+
+    def test_build_forced_candidates_no_duplicate_forced_reason(self):
+        """If FORCED_TERM_REASON is already in detection_reasons it must not appear twice."""
+        text = "The gobbler crossed the road."
+        result = build_forced_candidates(
+            text,
+            [{"term": "gobbler", "detection_reasons": [FORCED_TERM_REASON]}],
+        )
+        reasons = result["gobbler"].detection_reasons
+        assert reasons.count(FORCED_TERM_REASON) == 1
+
+    def test_load_forced_glossary_terms_top_level_list_returns_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """JSON file whose root is a list (not a dict) should return []."""
+        bad = tmp_path / "list.json"
+        bad.write_text(
+            json.dumps([{"term": "stall"}]), encoding="utf-8"
+        )
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", bad)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        assert app_config.load_forced_glossary_terms(force_reload=True) == []
+
+    def test_load_forced_glossary_terms_filters_non_dict_entries(
+        self, tmp_path, monkeypatch
+    ):
+        """Non-dict items in the 'terms' list are filtered out."""
+        mixed = tmp_path / "mixed.json"
+        mixed.write_text(
+            json.dumps({"terms": [{"term": "stall"}, "a string", 42, None]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", mixed)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        entries = app_config.load_forced_glossary_terms(force_reload=True)
+        assert entries == [{"term": "stall"}]
+
+    def test_load_forced_glossary_terms_cache_hit(self, tmp_path, monkeypatch):
+        """Second call without force_reload returns the cached list."""
+        good = tmp_path / "good.json"
+        good.write_text(
+            json.dumps({"terms": [{"term": "stall"}]}), encoding="utf-8"
+        )
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", good)
+        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        first = app_config.load_forced_glossary_terms(force_reload=True)
+        second = app_config.load_forced_glossary_terms()  # uses cache
+        assert first == second
+
+    def test_force_injection_skipped_when_all_forced_terms_absent_from_text(self):
+        """Forced entry list is non-empty but no term matches text → merge not called."""
+        text = "A quiet afternoon in the peaceful garden."
+        with patch(
+            "scripts.extract_glossary_candidates.load_forced_glossary_terms",
+            return_value=[{"term": "kraken"}],
+        ):
+            report = extract_candidates(text, min_frequency=1, max_candidates=50)
+        assert isinstance(report, CandidateReport)
+        # kraken not in text, so it must not appear in candidates
+        terms_lower = {c.term.lower() for c in report.candidates}
+        assert "kraken" not in terms_lower
+
+    def test_force_injection_verbose_prints_count(self, capsys):
+        """verbose=True prints the forced-term injection line when terms match."""
+        text = (
+            "He led the horse into the stall and shut the gate. "
+            "The stall was dark."
+        )
+        with patch(
+            "scripts.extract_glossary_candidates.load_forced_glossary_terms",
+            return_value=[{"term": "stall"}],
+        ):
+            extract_candidates(text, min_frequency=1, max_candidates=50, verbose=True)
+        captured = capsys.readouterr()
+        assert "After forced-term injection" in captured.out
