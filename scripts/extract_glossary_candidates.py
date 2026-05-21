@@ -134,6 +134,10 @@ STOPWORDS = {
     "again", "each", "also", "more", "some", "any", "only", "other",
     "such", "these", "those", "same", "own", "too", "most", "s", "t",
     "yes", "oh", "ah", "well", "quite", "still", "already", "enough",
+    # Greetings and conversational fillers — common at dialogue starts and
+    # therefore "always capitalized" in narrative, which otherwise sneaks
+    # them past the repeated-capitalized safety net.
+    "hello", "hi", "hey", "goodbye", "bye", "okay", "ok",
 }
 
 # Words that should not be part of multi-word proper noun sequences
@@ -149,6 +153,8 @@ SEQUENCE_BREAKERS = {
     "yes", "exactly", "oh", "ah", "well", "now", "then", "just",
     "too", "also", "still", "indeed", "certainly", "perhaps", "maybe",
     "to", "in", "on", "at", "by", "from", "with", "of", "up", "out",
+    # Greetings — typically capitalized at dialogue starts.
+    "hello", "hi", "hey", "goodbye", "bye", "okay", "ok",
 }
 
 # Dialogue attribution verbs (and other common adjacent words) that create
@@ -372,14 +378,23 @@ class DictionaryChecker:
 
     def is_english_word(self, word: str) -> bool:
         """Check if word is in either the US or UK English dictionary."""
+        forms = {word, word.lower()}
+        # Enchant has a known case-sensitivity quirk for the pronoun "I":
+        # `check("i'll")` returns False but `check("I'll")` is True. Other
+        # contractions (`don't`, `you'll`, `so's`) work correctly lowercased,
+        # so only expand for this narrow case to avoid admitting dialect
+        # tokens like Vermont "so's" via a spurious "So's" hit.
+        if word[:2].lower() == "i'" and word[:1].islower():
+            forms.add("I" + word[1:])
         for d in (self.english_dict, self.gb_dict):
             if d is None:
                 continue
-            try:
-                if d.check(word) or d.check(word.lower()):
-                    return True
-            except Exception:
-                continue
+            for form in forms:
+                try:
+                    if d.check(form):
+                        return True
+                except Exception:
+                    continue
         return False
 
 
@@ -534,13 +549,12 @@ def extract_proper_nouns(
 
                 # Single capitalized word. Mid-sentence: record as candidate
                 # (but drop bare title abbreviations Mr/Mrs/Dr/Capt/...).
-                # Sentence-start single capitalized: just track totals so the
-                # >80% capitalized-ratio filter stays accurate.
+                # At sentence start the dictionary check at line 573 is the
+                # primary filter against common words; for the cap-ratio
+                # filter we treat the token as both capitalized AND total so
+                # protagonist names that often begin sentences (e.g. "Betsy
+                # opened the door.") aren't pushed below the 80% threshold.
                 t_lower = token.lower()
-                if i == 0:
-                    total_occurrences[t_lower] += 1
-                    i += 1
-                    continue
                 if t_lower in _ABBREV_NO_SPLIT:
                     i += 1
                     continue
@@ -1045,6 +1059,13 @@ def collapse_possessive_keys(
     )
     for key, cand in ordered:
         bare_key = _strip_possessive_phrase(key)
+        # Never collapse to a bare key that is itself a stopword. Vermont
+        # dialect tokens like "so's" / "so'd" tokenize as single words, slip
+        # past per-extractor stopword filters because the token isn't bare
+        # "so", then get stripped here — producing a stopword-keyed candidate
+        # ("so") that adds no semantic value. Drop the candidate instead.
+        if bare_key != key and " " not in bare_key and bare_key in STOPWORDS:
+            continue
         bare_surface = _strip_possessive_phrase(cand.term)
         if bare_key in result:
             existing = result[bare_key]
