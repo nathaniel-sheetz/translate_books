@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1.0] - 2026-05-21
+
+### Fixed
+- **Glossary: I-contractions no longer surface as candidates** — `i'll`, `i'd`, `i'm`, `i've` were rejected by the spell-checker in lowercase but accepted as `I'll` etc. The checker now tries the capitalized form so first-person contractions are correctly filtered from candidate output.
+- **Glossary: greetings filtered from dialogue** — `hello`, `hi`, `hey`, `goodbye`, `bye`, `okay`, and `ok` are added to stopwords and sequence-breakers so they no longer appear as "always-capitalized" candidates in dialogue-heavy books.
+- **Glossary: dialect possessives no longer collapse to stopwords** — tokens like `so's` (Vermont dialect "so as") were stripped to `so` by the possessive collapser, producing a stopword-keyed candidate. They are now dropped instead. Character names that happen to be stopwords (e.g. `May`, `Will`) are correctly exempted from this filter when they are already confirmed proper nouns.
+- **Glossary: protagonist names that often begin sentences are now detected** — sentence-initial capitalized tokens previously counted only toward total occurrences, pushing the capitalized-ratio below the 80% threshold and hiding names like `Betsy`. Both counts are now incremented so protagonist names are reliably surfaced.
+- **Glossary: multi-word proper noun n-grams filtered** — n-grams of the form `[function word] + [multi-word name]` (e.g. `like Cousin Ann`) or `[multi-word name] + [common noun]` (e.g. `Aunt Abigail's face`) were not being filtered by the existing single-token name guard. The guard is generalized to match any known proper noun key (single or multi-word) as the name span.
+- **Glossary context: plural suffix skipped for title-case s-ending terms** — `_term_pattern("Atlas")` previously generated a regex that matched `atlases` (a different word). Terms that are title-case and already end in `s` now use an exact match; lowercase terms like `dress` still match `dresses` correctly.
+
 ## [0.11.0.0] - 2026-05-21
 
 ### Added
