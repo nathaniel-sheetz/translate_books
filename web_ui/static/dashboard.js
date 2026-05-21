@@ -109,6 +109,18 @@
         }).then(function(r) { return r.json(); });
     }
 
+    function apiPatch(url, body) {
+        return fetch(url, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+        }).then(function(r) {
+            return r.json().then(function(data) {
+                return { ok: r.ok, status: r.status, data: data };
+            });
+        });
+    }
+
     function apiPostForm(url, formData) {
         return fetch(url, { method: 'POST', body: formData })
             .then(function(r) { return r.json(); });
@@ -608,17 +620,90 @@
             var cards = document.getElementById('split-existing-cards');
             cards.innerHTML = '';
             status.chapters.forEach(function(ch) {
-                var card = document.createElement('div');
-                card.className = 'chapter-card';
-                card.innerHTML =
-                    '<span class="ch-name">' + escapeHtml(ch.name) + '</span>' +
-                    '<span class="ch-words">' + (ch.words || 0) + ' words</span>' +
-                    '<span class="ch-preview">' + escapeHtml(truncate(ch.preview, 80)) + '</span>';
-                cards.appendChild(card);
+                cards.appendChild(renderExistingChapterCard(ch));
             });
         } else {
             document.getElementById('split-existing').style.display = 'none';
         }
+    }
+
+    function renderExistingChapterCard(ch) {
+        var card = document.createElement('div');
+        card.className = 'chapter-card';
+        var kind = ch.kind || 'chapter';
+        var isMatter = kind === 'front_matter' || kind === 'back_matter';
+
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'ch-name';
+        nameSpan.textContent = ch.name;
+        card.appendChild(nameSpan);
+
+        if (isMatter) {
+            var badge = document.createElement('span');
+            badge.className = 'ch-badge ch-badge-' + (kind === 'front_matter' ? 'front' : 'back');
+            badge.textContent = kind === 'front_matter' ? 'front matter' : 'back matter';
+            card.appendChild(badge);
+
+            card.appendChild(buildLabelEditor(ch));
+        } else {
+            var wordsSpan = document.createElement('span');
+            wordsSpan.className = 'ch-words';
+            wordsSpan.textContent = (ch.words || 0) + ' words';
+            card.appendChild(wordsSpan);
+
+            var previewSpan = document.createElement('span');
+            previewSpan.className = 'ch-preview';
+            previewSpan.textContent = truncate(ch.preview, 80);
+            card.appendChild(previewSpan);
+        }
+        return card;
+    }
+
+    function buildLabelEditor(ch) {
+        var wrap = document.createElement('span');
+        wrap.className = 'ch-label-editor';
+
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'ch-label-input';
+        input.placeholder = 'Heading shown in reader / EPUB';
+        if (ch.label) input.value = ch.label;
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn-save ch-label-save';
+        btn.textContent = 'Save';
+
+        var msg = document.createElement('span');
+        msg.className = 'status-msg ch-label-status';
+
+        btn.addEventListener('click', function() {
+            var newLabel = input.value.trim();
+            msg.textContent = 'Saving…';
+            msg.className = 'status-msg ch-label-status';
+            apiPatch(
+                '/api/project/' + PROJECT
+                    + '/chapter-manifest/' + encodeURIComponent(ch.id),
+                { label: newLabel }
+            ).then(function(res) {
+                if (!res.ok) {
+                    msg.textContent = (res.data && res.data.error) || 'Save failed';
+                    msg.className = 'status-msg ch-label-status error';
+                    return;
+                }
+                ch.label = res.data.label || null;
+                msg.textContent = newLabel ? 'Saved' : 'Cleared';
+                msg.className = 'status-msg ch-label-status success';
+            }).catch(function() {
+                msg.textContent = 'Network error';
+                msg.className = 'status-msg ch-label-status error';
+            });
+        });
+
+        wrap.appendChild(input);
+        wrap.appendChild(btn);
+        wrap.appendChild(msg);
+        return wrap;
     }
 
     document.getElementById('split-pattern').addEventListener('change', function() {

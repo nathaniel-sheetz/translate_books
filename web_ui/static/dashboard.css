@@ -480,6 +480,51 @@
     white-space: nowrap;
 }
 
+.chapter-card .ch-badge {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #eef2f7;
+    color: #5a6b80;
+}
+
+.chapter-card .ch-badge-front { background: #e8f1ff; color: #2b5fb3; }
+.chapter-card .ch-badge-back  { background: #f3ecff; color: #6235a8; }
+
+.chapter-card .ch-label-editor {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+}
+
+.chapter-card .ch-label-input {
+    flex: 1;
+    font-size: 13px;
+    padding: 4px 8px;
+    border: 1px solid #d4cfc8;
+    border-radius: 3px;
+    background: #fff;
+}
+
+.chapter-card .ch-label-input:focus {
+    outline: none;
+    border-color: #888;
+}
+
+.chapter-card .ch-label-save {
+    padding: 4px 10px;
+    font-size: 12px;
+}
+
+.chapter-card .ch-label-status {
+    font-size: 12px;
+    min-width: 60px;
+}
+
 /* ── Translation chapter table ── */
 
 .chapter-table {
