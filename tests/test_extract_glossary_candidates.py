@@ -1181,6 +1181,50 @@ class TestExtractFrequentNgramsTightened:
         assert "emile's comment" not in result
         assert "emile comment" not in result
 
+    def test_rejects_multi_word_name_plus_body_part(self):
+        # "Aunt Abigail's face" / "Aunt Abigail's hand" — multi-word
+        # character name + possessive + ordinary noun. The multi-word
+        # name lives in proper_noun_keys; the filter must look there too.
+        text = (
+            "Aunt Abigail's face was kind. Aunt Abigail's face turned red. "
+            "Aunt Abigail's face softened again."
+        )
+        ck = self._checker({"was", "kind", "turned", "red", "softened",
+                            "again", "face", "aunt"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"abigail", "aunt abigail"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "aunt abigail's face" not in result
+        assert "aunt abigail face" not in result
+
+    def test_rejects_multi_word_name_plus_voice(self):
+        text = (
+            "Cousin Ann's voice was loud. Cousin Ann's voice was sharp. "
+            "Cousin Ann's voice carried far."
+        )
+        ck = self._checker({"was", "loud", "sharp", "carried", "far",
+                            "voice", "cousin"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"ann", "cousin ann"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "cousin ann's voice" not in result
+        assert "cousin ann voice" not in result
+
+    def test_rejects_leading_function_word_plus_multi_word_name(self):
+        # "like Cousin Ann" — leading content word (not a STOPWORDS entry)
+        # plus a known multi-word character name. Should be dropped via
+        # the multi-word sub-span match.
+        text = (
+            "She is like Cousin Ann. He is like Cousin Ann too. "
+            "They felt like Cousin Ann that day."
+        )
+        ck = self._checker({"she", "is", "like", "he", "too", "they",
+                            "felt", "that", "day", "cousin"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"ann", "cousin ann"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "like cousin ann" not in result
+
     def test_skips_ngram_across_comma(self):
         text = (
             "There are three: Emile, Jules, and Claire. "

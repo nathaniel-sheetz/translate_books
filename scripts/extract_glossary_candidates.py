@@ -87,6 +87,35 @@ def _strip_possessive(token: str) -> str:
     return _POSSESSIVE_RE.sub("", token)
 
 
+def _ngram_matches_proper_noun_with_dict_filler(
+    words_bare: list[str],
+    proper_noun_keys: set[str],
+    dict_checker: "DictionaryChecker",
+) -> bool:
+    """True if some contiguous sub-span of ``words_bare`` matches a known
+    proper noun key (single OR multi-word) and every token outside that
+    span is either an English dictionary word OR itself a known
+    single-word proper noun.
+
+    Used by extract_frequent_ngrams to drop narrative fragments like
+    ``Betsy looked`` (name + verb), ``Aunt Abigail's face`` (multi-word
+    name + body part), ``like Cousin Ann`` (function word + multi-word
+    name), and ``Emile Jules`` (two single-word names).
+    """
+    n = len(words_bare)
+    for length in range(1, n + 1):
+        for start in range(n - length + 1):
+            span = " ".join(words_bare[start:start + length])
+            if span in proper_noun_keys:
+                remaining = words_bare[:start] + words_bare[start + length:]
+                if all(
+                    dict_checker.is_english_word(w) or w in proper_noun_keys
+                    for w in remaining
+                ):
+                    return True
+    return False
+
+
 def _restore_title_periods(tokens: list[str]) -> str:
     """Join tokens with spaces, appending '.' to title abbreviations.
 
@@ -740,12 +769,6 @@ def extract_frequent_ngrams(
                 elif first_form[key].isupper() and not surface.isupper():
                     first_form[key] = surface
 
-    # Single-word proper-noun keys (character names already captured on
-    # their own). Used to drop n-grams whose only "not in dict" tokens are
-    # known character names + ordinary English content like
-    # "Jules looks", "Uncle Paul let", "Claire When", "Emile Jules".
-    single_proper_keys = {k for k in proper_noun_keys if " " not in k}
-
     candidates = {}
     for ngram_lower, count in ngram_counts.items():
         if count < min_frequency:
@@ -762,14 +785,14 @@ def extract_frequent_ngrams(
             all_in_dict = all(dict_checker.is_english_word(w) for w in words)
             if all_in_dict:
                 continue
-            # Drop n-grams that are a known character name (or two of them)
-            # plus ordinary English content. Multi-word stable names are
-            # captured by extract_proper_nouns and filtered above. Strip
-            # possessives first so "Emile's comment" matches as well.
+            # Drop n-grams whose proper-noun tokens form a known name
+            # (single OR multi-word, e.g. "Betsy", "Uncle Paul",
+            # "Aunt Abigail") and whose remaining tokens are all
+            # dictionary words. Strip possessives first so
+            # "Aunt Abigail's face" matches "aunt abigail" + "face".
             words_bare = [_strip_possessive(w) for w in words]
-            non_proper = [w for w in words_bare if w not in single_proper_keys]
-            if (any(w in single_proper_keys for w in words_bare)
-                    and all(dict_checker.is_english_word(w) for w in non_proper)):
+            if _ngram_matches_proper_noun_with_dict_filler(
+                    words_bare, proper_noun_keys, dict_checker):
                 continue
 
         candidates[ngram_lower] = GlossaryCandidate(
