@@ -23,6 +23,19 @@ class TestTermPattern:
         assert pat.search("Nelsonish words don't match wholly.") is None
         assert pat.search("Bobson") is None
 
+    def test_single_token_matches_plural_suffix(self):
+        # Mirrors _forced_term_pattern in scripts/extract_glossary_candidates.py
+        # so forced terms whose only occurrences are plural still find context.
+        pat = _term_pattern("doughnut")
+        assert pat.search("a tray of doughnuts cooled on the counter")
+        assert pat.search("one doughnut remained")
+        pat_es = _term_pattern("dress")
+        assert pat_es.search("the dresses were stitched by hand")
+        # Suffix is optional: a term ending in something the suffix would
+        # falsely extend shouldn't bleed into adjacent word chars.
+        pat_nelson = _term_pattern("Nelson")
+        assert pat_nelson.search("Nelsonish words don't match wholly.") is None
+
     def test_multi_word_term_allows_punctuation_separator(self):
         pat = _term_pattern("dictator Aulus")
         assert pat.search("the dictator Aulus marched")

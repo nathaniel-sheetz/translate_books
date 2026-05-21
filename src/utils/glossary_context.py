@@ -22,7 +22,10 @@ def _term_pattern(term: str) -> re.Pattern:
     """Build a regex for ``term``.
 
     * Apostrophes are normalized so straight/curly/modifier variants match.
-    * Single tokens use word boundaries.
+    * Single tokens use word boundaries and an optional ``-s``/``-es`` plural
+      suffix, so ``doughnut`` also matches ``doughnuts``. Multi-word phrases
+      match exactly with no inflection (kept in sync with
+      ``_forced_term_pattern`` in ``scripts/extract_glossary_candidates.py``).
     * Multi-word terms allow any non-letter characters (commas, dashes,
       punctuation, whitespace) between tokens, so e.g. ``dictator Aulus``
       matches the text ``dictator, Aulus``.
@@ -30,7 +33,7 @@ def _term_pattern(term: str) -> re.Pattern:
     parts = _normalize_quotes(term).split()
     escaped = [re.escape(p) for p in parts]
     if len(parts) == 1:
-        return re.compile(rf"\b{escaped[0]}\b", re.IGNORECASE)
+        return re.compile(rf"\b{escaped[0]}(?:es|s)?\b", re.IGNORECASE)
     sep = r"[^A-Za-z0-9]+"
     return re.compile(sep.join(escaped), re.IGNORECASE)
 
