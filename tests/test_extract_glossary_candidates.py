@@ -1019,6 +1019,23 @@ class TestCollapsePossessiveKeys:
         assert result["lord hood"].frequency == 7
         assert result["lord hood"].term == "Lord Hood"
 
+    def test_stopword_guard_exempts_confirmed_character_names(self):
+        # Characters named "May" or "Will" (common Victorian names) appear only
+        # in possessive form in frequent n-grams. Their bare key is a stopword,
+        # but they should survive if already in proper_noun_keys.
+        merged = {
+            "may's": GlossaryCandidate(
+                term="May's", type_guess=GlossaryTermType.CHARACTER, frequency=8,
+            ),
+        }
+        # Without proper_noun_keys: bare "may" is a stopword → dropped.
+        result_no_pn = collapse_possessive_keys(merged)
+        assert "may" not in result_no_pn
+        # With proper_noun_keys containing "may": exempted → survives.
+        result_with_pn = collapse_possessive_keys(merged, proper_noun_keys={"may"})
+        assert "may" in result_with_pn
+        assert result_with_pn["may"].term == "May"
+
 
 # ---------------------------------------------------------------------------
 # Contained-term pruning
@@ -1180,6 +1197,50 @@ class TestExtractFrequentNgramsTightened:
         result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
         assert "emile's comment" not in result
         assert "emile comment" not in result
+
+    def test_rejects_multi_word_name_plus_body_part(self):
+        # "Aunt Abigail's face" / "Aunt Abigail's hand" — multi-word
+        # character name + possessive + ordinary noun. The multi-word
+        # name lives in proper_noun_keys; the filter must look there too.
+        text = (
+            "Aunt Abigail's face was kind. Aunt Abigail's face turned red. "
+            "Aunt Abigail's face softened again."
+        )
+        ck = self._checker({"was", "kind", "turned", "red", "softened",
+                            "again", "face", "aunt"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"abigail", "aunt abigail"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "aunt abigail's face" not in result
+        assert "aunt abigail face" not in result
+
+    def test_rejects_multi_word_name_plus_voice(self):
+        text = (
+            "Cousin Ann's voice was loud. Cousin Ann's voice was sharp. "
+            "Cousin Ann's voice carried far."
+        )
+        ck = self._checker({"was", "loud", "sharp", "carried", "far",
+                            "voice", "cousin"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"ann", "cousin ann"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "cousin ann's voice" not in result
+        assert "cousin ann voice" not in result
+
+    def test_rejects_leading_function_word_plus_multi_word_name(self):
+        # "like Cousin Ann" — leading content word (not a STOPWORDS entry)
+        # plus a known multi-word character name. Should be dropped via
+        # the multi-word sub-span match.
+        text = (
+            "She is like Cousin Ann. He is like Cousin Ann too. "
+            "They felt like Cousin Ann that day."
+        )
+        ck = self._checker({"she", "is", "like", "he", "too", "they",
+                            "felt", "that", "day", "cousin"})
+        sentences = split_into_sentences(text)
+        proper_keys = {"ann", "cousin ann"}
+        result = extract_frequent_ngrams(sentences, ck, proper_keys, 2)
+        assert "like cousin ann" not in result
 
     def test_skips_ngram_across_comma(self):
         text = (
@@ -1697,3 +1758,100 @@ class TestForcedGlossaryTerms:
             extract_candidates(text, min_frequency=1, max_candidates=50, verbose=True)
         captured = capsys.readouterr()
         assert "After forced-term injection" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# I-contraction and greeting filtering (regression: noise on first-person
+# narrative + dialogue-heavy books like Understood Betsy)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not __import__("scripts.extract_glossary_candidates", fromlist=["ENCHANT_AVAILABLE"]).ENCHANT_AVAILABLE,
+    reason="PyEnchant not installed",
+)
+class TestDictionaryCheckerIContractions:
+
+    def test_lowercase_i_contractions_recognised(self):
+        # Enchant accepts "I'll" but rejects "i'll" — is_english_word must
+        # try the capital-I form so contractions don't slip into candidates
+        # via the "not_in_dictionary" branch of every extractor.
+        checker = DictionaryChecker()
+        if not checker.available:
+            pytest.skip("Neither en_US nor en_GB dictionary available")
+        for word in ("i'll", "i'd", "i'm", "i've"):
+            assert checker.is_english_word(word), f"expected {word!r} to be in dict"
+
+
+class TestNoiseFromContractionsAndGreetings:
+
+    def test_i_contractions_not_in_candidates(self):
+        # First-person narrative repeating common contractions used to surface
+        # them as candidates because enchant rejects "i'll"/"i'd"/"i'm"/"i've"
+        # in lowercase. They must not appear anywhere in the output.
+        text = (
+            "I'll see Betsy tomorrow. I'll bring the book. "
+            "I'd hoped to come sooner. I'd written ahead. "
+            "I'm going to the store. I'm tired of waiting. "
+            "I've been there before. I've never seen it."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms_lower = {c.term.lower() for c in report.candidates}
+        for noise in ("i'll", "i'd", "i'm", "i've"):
+            assert noise not in terms_lower, f"{noise!r} leaked into candidates"
+        # Bigrams led by a contraction must also be filtered (the n-gram
+        # "all words in dictionary" check depends on is_english_word).
+        for noise in ("i'll see", "i'll bring", "i'm going", "i've been"):
+            assert noise not in terms_lower, f"{noise!r} leaked into candidates"
+
+    def test_protagonist_with_sentence_start_dominance_admitted(self):
+        # Betsy frequently begins sentences ("Betsy looked up.") which used
+        # to count only toward `total_occurrences`, dropping the
+        # cap-ratio below 0.8 and dropping Betsy from proper_noun_keys.
+        # Without Betsy in proper_noun_keys, the n-gram character-name
+        # filter cannot drop "Betsy looked"/"Betsy felt"/etc., so the
+        # bigrams leak into the output. Fixing the ratio fixes both.
+        text = (
+            "Betsy looked at the door. Betsy looked at the window. "
+            "Betsy felt cold. Betsy felt warm. Betsy felt happy. "
+            "Betsy turned the page. Betsy turned around. "
+            "Aunt Frances said hello. Aunt Frances waved goodbye."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms_lower = {c.term.lower() for c in report.candidates}
+        assert "betsy" in terms_lower, "Betsy should be admitted as a single proper noun"
+        for noise in ("betsy looked", "betsy felt", "betsy turned"):
+            assert noise not in terms_lower, f"{noise!r} leaked into candidates"
+
+    def test_dialect_possessive_does_not_collapse_to_stopword(self):
+        # Vermont dialect "so's" (= "so as that") is rare enough in literary
+        # English to slip past extract_uncommon_words as not_in_dictionary,
+        # then `collapse_possessive_keys` would strip the trailing 's and
+        # leave a candidate keyed "so" — a stopword. Guard against that.
+        text = (
+            "She did it so's to get it off her mind. "
+            "He watches the way so's to know where to go. "
+            "We use this room so's to keep warm. "
+            "Watch close, so's you can answer later."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms_lower = {c.term.lower() for c in report.candidates}
+        assert "so" not in terms_lower
+        assert "so's" not in terms_lower
+
+    def test_greetings_filtered_from_dialogue(self):
+        # `Hello` / `Hi` / `Hey` / `Goodbye` are usually capitalized at
+        # dialogue starts and used to slip through extract_repeated_capitalized
+        # as "always-capitalized" + (depending on Zipf source) "rare in literary
+        # English". They're now in STOPWORDS and SEQUENCE_BREAKERS.
+        text = (
+            '"Hello," said Betsy. "Hello," she said again. "Hello, dear." '
+            '"Hi," answered the cousin. "Hi," he repeated. "Hi there." '
+            '"Hey, look at this!" "Hey!" she cried. "Hey now." '
+            '"Goodbye," whispered the aunt. "Goodbye." "Goodbye then."'
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        terms_lower = {c.term.lower() for c in report.candidates}
+        for greeting in ("hello", "hi", "hey", "goodbye", "bye", "okay", "ok"):
+            assert greeting not in terms_lower, (
+                f"{greeting!r} leaked into candidates"
+            )

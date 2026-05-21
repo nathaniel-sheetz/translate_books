@@ -87,6 +87,35 @@ def _strip_possessive(token: str) -> str:
     return _POSSESSIVE_RE.sub("", token)
 
 
+def _ngram_matches_proper_noun_with_dict_filler(
+    words_bare: list[str],
+    proper_noun_keys: set[str],
+    dict_checker: "DictionaryChecker",
+) -> bool:
+    """True if some contiguous sub-span of ``words_bare`` matches a known
+    proper noun key (single OR multi-word) and every token outside that
+    span is either an English dictionary word OR itself a known
+    proper noun key.
+
+    Used by extract_frequent_ngrams to drop narrative fragments like
+    ``Betsy looked`` (name + verb), ``Aunt Abigail's face`` (multi-word
+    name + body part), ``like Cousin Ann`` (function word + multi-word
+    name), and ``Emile Jules`` (two single-word names).
+    """
+    n = len(words_bare)
+    for length in range(1, n + 1):
+        for start in range(n - length + 1):
+            span = " ".join(words_bare[start:start + length])
+            if span in proper_noun_keys:
+                remaining = words_bare[:start] + words_bare[start + length:]
+                if all(
+                    dict_checker.is_english_word(w) or w in proper_noun_keys
+                    for w in remaining
+                ):
+                    return True
+    return False
+
+
 def _restore_title_periods(tokens: list[str]) -> str:
     """Join tokens with spaces, appending '.' to title abbreviations.
 
@@ -134,6 +163,10 @@ STOPWORDS = {
     "again", "each", "also", "more", "some", "any", "only", "other",
     "such", "these", "those", "same", "own", "too", "most", "s", "t",
     "yes", "oh", "ah", "well", "quite", "still", "already", "enough",
+    # Greetings and conversational fillers — common at dialogue starts and
+    # therefore "always capitalized" in narrative, which otherwise sneaks
+    # them past the repeated-capitalized safety net.
+    "hello", "hi", "hey", "goodbye", "bye", "okay", "ok",
 }
 
 # Words that should not be part of multi-word proper noun sequences
@@ -149,6 +182,8 @@ SEQUENCE_BREAKERS = {
     "yes", "exactly", "oh", "ah", "well", "now", "then", "just",
     "too", "also", "still", "indeed", "certainly", "perhaps", "maybe",
     "to", "in", "on", "at", "by", "from", "with", "of", "up", "out",
+    # Greetings — typically capitalized at dialogue starts.
+    "hello", "hi", "hey", "goodbye", "bye", "okay", "ok",
 }
 
 # Dialogue attribution verbs (and other common adjacent words) that create
@@ -372,14 +407,23 @@ class DictionaryChecker:
 
     def is_english_word(self, word: str) -> bool:
         """Check if word is in either the US or UK English dictionary."""
+        forms = {word, word.lower()}
+        # Enchant has a known case-sensitivity quirk for the pronoun "I":
+        # `check("i'll")` returns False but `check("I'll")` is True. Other
+        # contractions (`don't`, `you'll`, `so's`) work correctly lowercased,
+        # so only expand for this narrow case to avoid admitting dialect
+        # tokens like Vermont "so's" via a spurious "So's" hit.
+        if word[:2].lower() == "i'" and word[:1].islower():
+            forms.add("I" + word[1:])
         for d in (self.english_dict, self.gb_dict):
             if d is None:
                 continue
-            try:
-                if d.check(word) or d.check(word.lower()):
-                    return True
-            except Exception:
-                continue
+            for form in forms:
+                try:
+                    if d.check(form):
+                        return True
+                except Exception:
+                    continue
         return False
 
 
@@ -534,13 +578,12 @@ def extract_proper_nouns(
 
                 # Single capitalized word. Mid-sentence: record as candidate
                 # (but drop bare title abbreviations Mr/Mrs/Dr/Capt/...).
-                # Sentence-start single capitalized: just track totals so the
-                # >80% capitalized-ratio filter stays accurate.
+                # At sentence start the dictionary check below is the primary
+                # filter against common words; for the cap-ratio
+                # filter we treat the token as both capitalized AND total so
+                # protagonist names that often begin sentences (e.g. "Betsy
+                # opened the door.") aren't pushed below the 80% threshold.
                 t_lower = token.lower()
-                if i == 0:
-                    total_occurrences[t_lower] += 1
-                    i += 1
-                    continue
                 if t_lower in _ABBREV_NO_SPLIT:
                     i += 1
                     continue
@@ -726,12 +769,6 @@ def extract_frequent_ngrams(
                 elif first_form[key].isupper() and not surface.isupper():
                     first_form[key] = surface
 
-    # Single-word proper-noun keys (character names already captured on
-    # their own). Used to drop n-grams whose only "not in dict" tokens are
-    # known character names + ordinary English content like
-    # "Jules looks", "Uncle Paul let", "Claire When", "Emile Jules".
-    single_proper_keys = {k for k in proper_noun_keys if " " not in k}
-
     candidates = {}
     for ngram_lower, count in ngram_counts.items():
         if count < min_frequency:
@@ -748,14 +785,14 @@ def extract_frequent_ngrams(
             all_in_dict = all(dict_checker.is_english_word(w) for w in words)
             if all_in_dict:
                 continue
-            # Drop n-grams that are a known character name (or two of them)
-            # plus ordinary English content. Multi-word stable names are
-            # captured by extract_proper_nouns and filtered above. Strip
-            # possessives first so "Emile's comment" matches as well.
+            # Drop n-grams whose proper-noun tokens form a known name
+            # (single OR multi-word, e.g. "Betsy", "Uncle Paul",
+            # "Aunt Abigail") and whose remaining tokens are all
+            # dictionary words. Strip possessives first so
+            # "Aunt Abigail's face" matches "aunt abigail" + "face".
             words_bare = [_strip_possessive(w) for w in words]
-            non_proper = [w for w in words_bare if w not in single_proper_keys]
-            if (any(w in single_proper_keys for w in words_bare)
-                    and all(dict_checker.is_english_word(w) for w in non_proper)):
+            if _ngram_matches_proper_noun_with_dict_filler(
+                    words_bare, proper_noun_keys, dict_checker):
                 continue
 
         candidates[ngram_lower] = GlossaryCandidate(
@@ -1030,6 +1067,7 @@ def prune_contained_terms(
 
 def collapse_possessive_keys(
     merged: dict[str, GlossaryCandidate],
+    proper_noun_keys: set[str] | None = None,
 ) -> dict[str, GlossaryCandidate]:
     """Collapse possessive variants into their bare form.
 
@@ -1045,6 +1083,15 @@ def collapse_possessive_keys(
     )
     for key, cand in ordered:
         bare_key = _strip_possessive_phrase(key)
+        # Never collapse to a bare key that is itself a stopword — unless the
+        # bare key is already a confirmed proper noun (e.g. character named
+        # "May" or "Will"). Vermont dialect tokens like "so's" / "so'd"
+        # tokenize as single words and would otherwise produce a stopword-keyed
+        # candidate ("so") with no semantic value.
+        _pn = proper_noun_keys or set()
+        if (bare_key != key and " " not in bare_key
+                and bare_key in STOPWORDS and bare_key not in _pn):
+            continue
         bare_surface = _strip_possessive_phrase(cand.term)
         if bare_key in result:
             existing = result[bare_key]
@@ -1282,7 +1329,7 @@ def extract_candidates(
         print(f"  Merged total: {len(merged)}")
 
     # Collapse possessive variants (Nelson's → Nelson, Hood's → Hood)
-    merged = collapse_possessive_keys(merged)
+    merged = collapse_possessive_keys(merged, proper_noun_keys=set(proper_nouns.keys()))
     if verbose:
         print(f"  After possessive collapse: {len(merged)}")
 
