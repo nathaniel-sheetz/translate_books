@@ -95,7 +95,7 @@ def _ngram_matches_proper_noun_with_dict_filler(
     """True if some contiguous sub-span of ``words_bare`` matches a known
     proper noun key (single OR multi-word) and every token outside that
     span is either an English dictionary word OR itself a known
-    single-word proper noun.
+    proper noun key.
 
     Used by extract_frequent_ngrams to drop narrative fragments like
     ``Betsy looked`` (name + verb), ``Aunt Abigail's face`` (multi-word
@@ -578,8 +578,8 @@ def extract_proper_nouns(
 
                 # Single capitalized word. Mid-sentence: record as candidate
                 # (but drop bare title abbreviations Mr/Mrs/Dr/Capt/...).
-                # At sentence start the dictionary check at line 573 is the
-                # primary filter against common words; for the cap-ratio
+                # At sentence start the dictionary check below is the primary
+                # filter against common words; for the cap-ratio
                 # filter we treat the token as both capitalized AND total so
                 # protagonist names that often begin sentences (e.g. "Betsy
                 # opened the door.") aren't pushed below the 80% threshold.
