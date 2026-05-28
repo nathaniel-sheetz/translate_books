@@ -56,7 +56,7 @@ server-generated timestamp. Multiple tags per hunk are allowed.
 
 ## Tag vocabulary
 
-Defined as `EDIT_TAGS` in `web_ui/app.py` and surfaced via `GET /api/edit-tags`:
+Defined as `EDIT_TAGS` in `src/edit_review_constants.py` and surfaced via `GET /api/edit-tags`:
 
 - `glossary-gender-conflict` — *e.g.* the glossary forces `Ganso` but this goose is female, producing "la Ganso"
 - `missing-paragraph-break` — speaker change wasn't broken into a new paragraph
@@ -67,7 +67,7 @@ Defined as `EDIT_TAGS` in `web_ui/app.py` and surfaced via `GET /api/edit-tags`:
 - `style-tone` — register or formality adjustment
 - `other` — escape hatch; pair with a descriptive note
 
-Add categories by editing the `EDIT_TAGS` list in `web_ui/app.py`. The
+Add categories by editing the `EDIT_TAGS` list in `src/edit_review_constants.py`. The
 predefined list is enforced server-side; the report includes whatever tags
 were in the constant at generation time.
 
@@ -178,7 +178,8 @@ In `scripts/review_edits.py`:
 | `scripts/review_edits.py` | CLI + report generator |
 | `web_ui/templates/edit_review_report.html.j2` | Jinja template for the report |
 | `web_ui/static/edit_review_report.css` | Styling for diffs and dimmed source |
-| `web_ui/app.py` (`EDIT_TAGS`, `/api/edit-tag`, `/api/edit-tags`, `/reports/<project_id>/<path:filename>`) | Server endpoints |
+| `src/edit_review_constants.py` (`EDIT_TAGS`) | Tag vocabulary (imported by both report generator and web UI) |
+| `web_ui/app.py` (`/api/edit-tag`, `/api/edit-tags`, `/reports/<project_id>/<path:filename>`) | Server endpoints |
 | `src/models.py` (`Chunk.last_llm_log`) | Provenance field |
 | `src/utils/prompt_logger.py` (`last_log_path`, `relative_log_path`) | Path peek helpers |
 | `src/api_translator.py` (`translate_chunk_realtime`, batch retrieval) | Stamp write sites |

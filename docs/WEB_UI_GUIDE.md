@@ -20,6 +20,7 @@ Runs on `http://localhost:5000`. Local use only — no authentication.
 | `/read/<id>` | Chapter list for a project |
 | `/read/<id>/<chapter>` | Bilingual reader view |
 | `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
+| `/reports/<project_id>/<filename>` | Serves generated edit-review HTML reports (same-origin for tag API) |
 
 ---
 
@@ -423,6 +424,8 @@ The reader also shows a **Realign** button (topbar icon, right of chapter naviga
 | `/api/apply-corrections/<id>` | POST | Batch apply corrections |
 | `/api/chunk/<id>/<chunk_id>/edit` | POST | Save a full-chunk text edit (recombines + realigns the chapter) |
 | `/api/project/<id>/align/<chapter>` | POST | Apply pending corrections to chunks, then recombine + realign (used by the reader Realign button) |
+| `/api/edit-tags` | GET | Returns the `EDIT_TAGS` vocabulary list for the edit-review report tag UI |
+| `/api/project/<id>/edit-tag` | POST | Persist a tag for a diff hunk; appends to `projects/<id>/edit_review_tags.jsonl` |
 
 ---
 
@@ -465,5 +468,7 @@ projects/<id>/
 │   └── _feedback.jsonl     # Append-only user feedback on individual issues
 ├── images/                 # Downloaded images (Gutenberg)
 ├── translator_note.json    # Optional "Note from the Translator" (heading + body, Stage 8)
+├── reports/                # Generated edit-review HTML reports (review_edits.py output)
+├── edit_review_tags.jsonl  # Accumulated hunk tags from the edit-review report (append-only)
 └── <id>.epub               # Built EPUB (Stage 8 Export)
 ```
