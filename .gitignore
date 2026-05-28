@@ -45,10 +45,12 @@ ENV/
 
 # Project specific
 projects/
+backups/
 test_reports/
 *.log
 .env
 batch_jobs.json
+recovery_fuzzy_review.json
 
 # Per-user project config (copy from project.example.json)
 project.json

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Edit review &mdash; {{ project_id }} ({{ scope_label }})</title>
+<link rel="stylesheet" href="/static/edit_review_report.css">
+</head>
+<body data-project-id="{{ project_id }}">
+
+<div class="report-layout">
+<main class="report-main">
+
+<header class="report-header">
+  <h1>Translation edit review</h1>
+  <div class="report-meta">
+    <span><strong>Project:</strong> {{ project_id }}</span>
+    <span><strong>Scope:</strong> {{ scope_label }}</span>
+    <span><strong>Generated:</strong> {{ generated_at }}</span>
+    <span><strong>Edited chunks:</strong> {{ edited_count }}</span>
+    {% if no_baseline_count %}
+      <span class="warn"><strong>No baseline:</strong> {{ no_baseline_count }}</span>
+    {% endif %}
+  </div>
+  <div class="report-help">
+    Baseline = the raw LLM response that produced this chunk.
+    Current = today&rsquo;s translated text. Source pane shows a wider window with
+    out-of-region context dimmed (alignment is approximate).
+  </div>
+</header>
+
+{% if not chunks %}
+  <p class="empty">No edited chunks found in this scope. Either every chunk is still
+  byte-for-byte the LLM output, or no baselines could be resolved.</p>
+{% endif %}
+
+{% for chunk in chunks %}
+<section class="chunk-block"
+         data-chunk-id="{{ chunk.chunk_id }}"
+         data-chapter-id="{{ chunk.chapter_id }}"
+         {% if chunk.is_chapter_start %}id="{% if chunk.chapter_id %}chapter-{{ chunk.chapter_id }}{% else %}chapter-_unknown{% endif %}"{% endif %}>
+  <h2>
+    {{ chunk.chapter_id }} &middot; chunk #{{ chunk.position }}
+    <span class="chunk-id">({{ chunk.chunk_id }})</span>
+  </h2>
+
+  {% if chunk.no_baseline %}
+    <p class="banner warn">No LLM baseline found for this chunk. The chunk
+    pre-dates the provenance stamp and no matching log exists under
+    prompts/history.</p>
+  {% else %}
+    {% if chunk.source_changed %}
+      <p class="banner info">Source text was also edited since the LLM call &mdash;
+      some of the translation diff may be intentional.</p>
+    {% endif %}
+    <p class="chunk-meta">Baseline log: <code>{{ chunk.baseline_log }}</code>
+      &middot; <time>{{ chunk.baseline_timestamp }}</time></p>
+
+    {% for hunk in chunk.hunks %}
+    <article class="hunk" data-hunk-index="{{ hunk.hunk_index }}">
+      <header class="hunk-header">
+        <span class="op-badge op-{{ hunk.op }}">{{ hunk.op }}</span>
+        <span class="hunk-label">Edit #{{ hunk.hunk_index + 1 }}</span>
+        {% if hunk.unique_tag_set %}
+          <span class="existing-tags">
+            {% for t in hunk.unique_tag_set %}<span class="tag-chip">{{ t }}</span>{% endfor %}
+          </span>
+        {% endif %}
+      </header>
+
+      <div class="diff-grid">
+        <div class="diff-col diff-baseline">
+          <div class="col-label">LLM baseline</div>
+          <pre class="diff-text">{% if hunk.trans_truncated_left %}&hellip;{% endif %}{{ hunk.baseline_html|safe }}{% if hunk.trans_truncated_right %}&hellip;{% endif %}</pre>
+        </div>
+        <div class="diff-col diff-current">
+          <div class="col-label">Current</div>
+          <pre class="diff-text">{% if hunk.trans_truncated_left %}&hellip;{% endif %}{{ hunk.current_html|safe }}{% if hunk.trans_truncated_right %}&hellip;{% endif %}</pre>
+        </div>
+      </div>
+
+      <div class="source-pane">
+        <div class="col-label">Source (approximate region; outer context dimmed)</div>
+        <pre class="source-text">{% if hunk.source_truncated_left %}<span class="src-dim">&hellip;</span>{% endif %}{% for span in hunk.source_spans %}<span class="src-{{ span.kind }}">{{ span.text }}</span>{% endfor %}{% if hunk.source_truncated_right %}<span class="src-dim">&hellip;</span>{% endif %}</pre>
+      </div>
+
+      <form class="tag-form" data-chunk-id="{{ chunk.chunk_id }}" data-hunk-index="{{ hunk.hunk_index }}">
+        <label>
+          Tag:
+          <select name="tag">
+            <option value="">-- pick a tag --</option>
+            {% for t in edit_tags %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="note-label">
+          Note:
+          <input type="text" name="note" placeholder="optional free-text note" autocomplete="off">
+        </label>
+        <button type="submit">Save tag</button>
+        <span class="tag-status"></span>
+      </form>
+    </article>
+    {% endfor %}
+  {% endif %}
+</section>
+{% endfor %}
+
+</main>
+
+<aside class="chapter-nav-wrap">
+<nav class="chapter-nav" aria-label="Chapters">
+  <h3>Chapters</h3>
+  {% if chapters %}
+    <ul>
+      {% for ch in chapters %}
+        <li>
+          <a href="#{{ ch.anchor_id }}" data-chapter-id="{{ ch.chapter_id }}">
+            <span class="ch-title">{{ ch.chapter_id or '(unknown)' }}</span>
+            <span class="ch-count">{{ ch.edit_count }}{% if ch.no_baseline_count %} <span class="ch-nb" title="chunks with no baseline">+{{ ch.no_baseline_count }}?</span>{% endif %}</span>
+          </a>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="ch-empty">No chapters.</p>
+  {% endif %}
+</nav>
+</aside>
+
+</div>
+
+<script>
+(function(){
+  const projectId = document.body.dataset.projectId;
+  document.querySelectorAll('form.tag-form').forEach(function(form){
+    form.addEventListener('submit', function(ev){
+      ev.preventDefault();
+      const status = form.querySelector('.tag-status');
+      const tag = form.querySelector('select[name="tag"]').value;
+      const note = form.querySelector('input[name="note"]').value;
+      const chunkId = form.dataset.chunkId;
+      const hunkIndex = parseInt(form.dataset.hunkIndex, 10);
+      if (!tag) {
+        status.textContent = 'pick a tag first';
+        status.className = 'tag-status err';
+        return;
+      }
+      status.textContent = 'saving…';
+      status.className = 'tag-status';
+      fetch('/api/project/' + encodeURIComponent(projectId) + '/edit-tag', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({chunk_id: chunkId, hunk_index: hunkIndex, tag: tag, note: note})
+      }).then(function(r){
+        if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || ('HTTP '+r.status)); });
+        return r.json();
+      }).then(function(){
+        status.textContent = 'saved ✓';
+        status.className = 'tag-status ok';
+        // Add chip if not already present
+        const header = form.closest('.hunk').querySelector('.hunk-header');
+        let chipBox = header.querySelector('.existing-tags');
+        if (!chipBox) {
+          chipBox = document.createElement('span');
+          chipBox.className = 'existing-tags';
+          header.appendChild(chipBox);
+        }
+        const existing = Array.from(chipBox.querySelectorAll('.tag-chip')).map(function(n){ return n.textContent; });
+        if (existing.indexOf(tag) < 0) {
+          const chip = document.createElement('span');
+          chip.className = 'tag-chip';
+          chip.textContent = tag;
+          chipBox.appendChild(chip);
+        }
+        form.querySelector('input[name="note"]').value = '';
+      }).catch(function(err){
+        status.textContent = 'error: ' + err.message;
+        status.className = 'tag-status err';
+      });
+    });
+  });
+
+  // Chapter nav scroll-spy
+  const navLinks = document.querySelectorAll('.chapter-nav a[data-chapter-id]');
+  if (navLinks.length && 'IntersectionObserver' in window) {
+    const linkByChapter = new Map();
+    navLinks.forEach(function(a){ linkByChapter.set(a.dataset.chapterId, a); });
+
+    const sections = document.querySelectorAll('section.chunk-block[data-chapter-id]');
+    let currentChapter = null;
+    const visible = new Set();
+
+    function setActive(chapterId){
+      if (chapterId === currentChapter) return;
+      currentChapter = chapterId;
+      navLinks.forEach(function(a){ a.classList.remove('active'); });
+      const link = linkByChapter.get(chapterId);
+      if (link) link.classList.add('active');
+    }
+
+    const observer = new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        const chapterId = entry.target.dataset.chapterId;
+        if (entry.isIntersecting) {
+          visible.add(entry.target);
+        } else {
+          visible.delete(entry.target);
+        }
+      });
+      if (visible.size === 0) return;
+      // Pick the topmost currently-visible section
+      let top = null;
+      visible.forEach(function(el){
+        const r = el.getBoundingClientRect();
+        if (top === null || r.top < top.getBoundingClientRect().top) top = el;
+      });
+      if (top) setActive(top.dataset.chapterId);
+    }, {rootMargin: '-30% 0px -65% 0px', threshold: 0});
+
+    sections.forEach(function(s){ observer.observe(s); });
+  }
+})();
+</script>
+
+</body>
+</html>

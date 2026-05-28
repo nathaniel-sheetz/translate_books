@@ -742,7 +742,7 @@ def setup_questions_generate(project_id):
     )
 
     try:
-        result = call_llm(prompt, provider=provider, model=model, call_type="style_questions")
+        result = call_llm(prompt, provider=provider, model=model, call_type="style_questions", project_slug=project_id)
         # Try to parse as JSON
         questions = json.loads(_strip_json_fences(result))
         return jsonify({"questions": questions})
@@ -778,7 +778,7 @@ def setup_style_guide_generate(project_id):
     prompt = build_style_guide_prompt(all_questions, answers, source_text, target_lang, locale)
 
     try:
-        content = call_llm(prompt, provider=provider, model=model, call_type="style_guide_generate")
+        content = call_llm(prompt, provider=provider, model=model, call_type="style_guide_generate", project_slug=project_id)
         return jsonify({"content": content})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -800,7 +800,7 @@ def setup_glossary_generate(project_id):
     prompt = _build_glossary_prompt_for_request(project_id, project_dir, data)
 
     try:
-        result = call_llm(prompt, provider=provider, model=model, max_tokens=8192, call_type="glossary")
+        result = call_llm(prompt, provider=provider, model=model, max_tokens=8192, call_type="glossary", project_slug=project_id)
         # Try to parse as JSON
         terms = json.loads(_strip_json_fences(result))
         return jsonify({"terms": terms})
@@ -3212,6 +3212,7 @@ def project_translate_realtime(project_id):
             source_language="English",
             target_language="Spanish",
             previous_chapter_context=prev_context,
+            project_slug=project_id,
         )
 
         new_text = translated.translated_text or ""
@@ -3304,6 +3305,7 @@ def project_translate_batch(project_id):
                     source_language="English",
                     target_language="Spanish",
                     previous_chapter_context=prev_context,
+                    project_slug=project_id,
                 )
                 save_chunk(translated, cp)
                 affected_chapters.add(chunk.chapter_id)
@@ -3489,10 +3491,13 @@ def batch_api_submit(project_id):
             source_language="English",
             target_language="Spanish",
             context_map=context_map,
+            project_slug=project_id,
         )
 
-        # Store chunk file map for retrieval (strip prompt_map — already persisted via prompt_logger)
-        job_info.pop("prompt_map", None)
+        # Store chunk file map for retrieval. chunk_log_map (set by submit_batch)
+        # carries the path of each chunk's submission-time prompt log; retrieval
+        # mutates that file in place to fill in the response so each completed
+        # call ends up as a single self-contained log.
         job_info["chunk_file_map"] = chunk_file_map
 
         # Save to project-level tracking
@@ -3629,7 +3634,8 @@ def batch_api_retrieve_job(project_id, job_id):
             original_chunks=original_chunks,
             output_dir=chunks_dir,
             model=job_info.get("model", ""),
-            prompt_map=job_info.get("prompt_map"),
+            chunk_log_map=job_info.get("chunk_log_map"),
+            project_slug=project_id,
         )
 
         # Save each translated chunk and run post-processing
@@ -4980,10 +4986,101 @@ def download_epub(project_id):
     return send_from_directory(str(project_dir), epub_file.name, as_attachment=True)
 
 
+# ============================================================================
+# Edit-review tagging
+# ============================================================================
+
+from src.edit_review_constants import EDIT_TAGS  # noqa: E402
+
+
+@app.route("/api/edit-tags", methods=["GET"])
+def list_edit_tags():
+    """Return the predefined edit-tag vocabulary used by the review report."""
+    return jsonify({"tags": EDIT_TAGS})
+
+
+@app.route("/api/project/<project_id>/edit-tag", methods=["POST"])
+def post_edit_tag(project_id):
+    """Append a tag (with optional free-text note) for a chunk's diff hunk.
+
+    Tags are persisted as JSONL at projects/<project_id>/edit_review_tags.jsonl.
+    Multiple tags per (chunk_id, hunk_index) are allowed — readers can collapse
+    duplicates at render time.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad project id"}), 400
+    data = request.json or {}
+    chunk_id = (data.get("chunk_id") or "").strip()
+    tag = (data.get("tag") or "").strip()
+    note = (data.get("note") or "").strip()
+    hunk_index = data.get("hunk_index")
+
+    if not _safe_id(chunk_id):
+        return jsonify({"error": "Bad chunk id"}), 400
+    if tag not in EDIT_TAGS:
+        return jsonify({"error": f"Unknown tag '{tag}'"}), 400
+    if not isinstance(hunk_index, int) or hunk_index < 0:
+        return jsonify({"error": "hunk_index must be a non-negative integer"}), 400
+
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    row = {
+        "timestamp": datetime.now().isoformat(),
+        "project_id": project_id,
+        "chunk_id": chunk_id,
+        "hunk_index": hunk_index,
+        "tag": tag,
+        "note": note,
+    }
+    tags_path = project_dir / "edit_review_tags.jsonl"
+    try:
+        with tags_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as e:
+        return jsonify({"error": f"Failed to write tag: {e}"}), 500
+
+    return jsonify({"ok": True, "row": row})
+
+
+@app.route("/reports/<project_id>/<path:filename>")
+def serve_edit_report(project_id, filename):
+    """Serve generated HTML reports from projects/<id>/reports/.
+
+    Same-origin with /api/edit-tag so the report's fetch() calls don't need CORS.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad project id"}), 400
+    # Reject path traversal in filename
+    if ".." in filename or filename.startswith("/") or "\\" in filename:
+        return jsonify({"error": "Bad filename"}), 400
+    reports_dir = _get_projects_dir() / project_id / "reports"
+    if not reports_dir.exists():
+        return jsonify({"error": "No reports for this project"}), 404
+    return send_from_directory(str(reports_dir), filename)
+
+
+def _print_access_urls(port: int) -> None:
+    import os, socket
+    # Werkzeug's reloader runs this block twice (parent + child). Only print in
+    # the child, identified by WERKZEUG_RUN_MAIN=true.
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        return
+    try:
+        addrs = sorted(set(socket.gethostbyname_ex(socket.gethostname())[2]))
+    except socket.gaierror:
+        addrs = []
+    print("=" * 70)
+    print(f"  Translation Web UI — running on port {port}")
+    print("=" * 70)
+    print(f"  Local:    http://localhost:{port}")
+    for addr in addrs:
+        print(f"  Network:  http://{addr}:{port}")
+    print("  (Phones/tablets on the same Wi-Fi: pick a Network URL above.)")
+    print("=" * 70)
+
+
 if __name__ == "__main__":
-    print("=" * 70)
-    print("Translation Web UI")
-    print("=" * 70)
-    print("\nStarting server on http://localhost:5000")
-    print("Press Ctrl+C to stop\n")
+    _print_access_urls(5000)
     app.run(debug=True, host="0.0.0.0", port=5000)

@@ -632,7 +632,7 @@ def run_comparison(args: argparse.Namespace) -> None:
     realtime_models = [m for m in models if model_providers[m] not in _BATCH_CAPABLE_PROVIDERS]
 
     submitted: dict[str, tuple[dict, list[Chunk]]] = {}
-    batch_prompt_maps: dict[str, dict[str, str]] = {}
+    batch_log_maps: dict[str, dict[str, str]] = {}
     for model in batch_models:
         mp = model_providers[model]
         try:
@@ -643,7 +643,7 @@ def run_comparison(args: argparse.Namespace) -> None:
                 project_name=project_id,
             )
             submitted[model] = (job_info, work_chunks)
-            batch_prompt_maps[model] = job_info.get("prompt_map", {})
+            batch_log_maps[model] = job_info.get("chunk_log_map", {})
             print(f"  Submitted {model} ({mp}, batch): job {job_info['job_id']}")
         except APIError as exc:
             print(f"  FAILED to submit {model} ({mp}, batch): {exc}")
@@ -686,11 +686,24 @@ def run_comparison(args: argparse.Namespace) -> None:
             failed_models.append(model)
             logger.error("Translation failed for model %s: %s", model, exc)
 
-    # Save full prompt/response logs for each model
+    # Save full prompt/response logs for each model. For batch models we
+    # resolve each chunk's exact submitted prompt from its submission log
+    # path (chunk_log_map); realtime falls back to reconstruction.
+    repo_root = Path(__file__).resolve().parents[1]
     for model, trans_chunks in translations.items():
+        log_map = batch_log_maps.get(model) or {}
+        prompt_map: dict[str, str] = {}
+        for chunk_id, rel_path in log_map.items():
+            log_file = repo_root / rel_path
+            try:
+                prompt_map[chunk_id] = json.loads(
+                    log_file.read_text(encoding="utf-8")
+                ).get("prompt", "")
+            except (OSError, json.JSONDecodeError):
+                continue
         _save_translation_logs(
             output_base, model, chunks, trans_chunks,
-            prompt_map=batch_prompt_maps.get(model),
+            prompt_map=prompt_map or None,
             glossary=glossary, style_guide=style_guide,
             project_name=project_id,
         )
