@@ -159,6 +159,10 @@ class Chunk(BaseModel):
         default=None,
         description="Review mode data (annotations, eval cache)"
     )
+    last_llm_log: Optional[str] = Field(
+        default=None,
+        description="Relative path under prompts/history pointing at the LLM call that produced this translated_text. Set at LLM-write time, preserved across user edits.",
+    )
 
     @computed_field
     @property

@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
-from src.utils.prompt_logger import log_prompt
+from src.utils.prompt_logger import last_log_path, log_prompt, relative_log_path, update_log_response
 from src.utils.text_utils import image_placeholder_instruction
 
 # Load environment variables from .env file
@@ -358,6 +358,8 @@ def _dispatch_llm_call(
     max_tokens: int = 4096,
     temperature: float = 0.3,
     call_type: str = "unknown",
+    chunk_id: str | None = None,
+    project_slug: str | None = None,
 ) -> str:
     """Low-level dispatcher — routes a single LLM call to the right SDK."""
     pconfig = get_provider_config(provider)
@@ -386,6 +388,8 @@ def _dispatch_llm_call(
         temperature=temperature,
         max_tokens=max_tokens,
         duration_seconds=duration,
+        chunk_id=chunk_id,
+        project_slug=project_slug,
     )
     return response
 
@@ -398,6 +402,8 @@ def call_llm(
     temperature: float = 0.3,
     max_retries: int = 3,
     call_type: str = "unknown",
+    chunk_id: str | None = None,
+    project_slug: str | None = None,
 ) -> str:
     """Call an LLM and return the text response.
 
@@ -410,7 +416,10 @@ def call_llm(
     last_error = None
     for attempt in range(max_retries):
         try:
-            return _dispatch_llm_call(prompt, provider, model, max_tokens, temperature, call_type=call_type)
+            return _dispatch_llm_call(
+                prompt, provider, model, max_tokens, temperature,
+                call_type=call_type, chunk_id=chunk_id, project_slug=project_slug,
+            )
         except RateLimitError as e:
             last_error = e
             if attempt < max_retries - 1:
@@ -437,6 +446,7 @@ def translate_chunk_realtime(
     target_language: str = "Spanish",
     max_retries: int = 3,
     previous_chapter_context: str = "",
+    project_slug: str | None = None,
 ) -> Chunk:
     """
     Translate a single chunk using real-time API.
@@ -486,11 +496,22 @@ def translate_chunk_realtime(
             prompt = separator + parts[1]
 
     # Use call_llm which handles retry + config-based dispatch
-    translation = call_llm(prompt, provider=provider, model=model, max_retries=max_retries, call_type="translation")
+    translation = call_llm(
+        prompt,
+        provider=provider,
+        model=model,
+        max_retries=max_retries,
+        call_type="translation",
+        chunk_id=chunk.id,
+        project_slug=project_slug,
+    )
 
     chunk.translated_text = translation.strip()
     chunk.status = ChunkStatus.TRANSLATED
     chunk.translated_at = datetime.now()
+    log_path = last_log_path()
+    if log_path is not None:
+        chunk.last_llm_log = relative_log_path(log_path)
     return chunk
 
 
@@ -510,6 +531,7 @@ def submit_batch(
     source_language: str = "English",
     target_language: str = "Spanish",
     context_map: Optional[dict[str, str]] = None,
+    project_slug: str | None = None,
 ) -> dict:
     """
     Submit a batch translation job to the API.
@@ -538,12 +560,14 @@ def submit_batch(
     if provider == "anthropic":
         return _submit_anthropic_batch(
             chunks, model, output_dir, glossary, style_guide,
-            project_name, source_language, target_language, context_map
+            project_name, source_language, target_language, context_map,
+            project_slug=project_slug,
         )
     elif provider == "openai":
         return _submit_openai_batch(
             chunks, model, output_dir, glossary, style_guide,
-            project_name, source_language, target_language, context_map
+            project_name, source_language, target_language, context_map,
+            project_slug=project_slug,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -559,6 +583,8 @@ def _submit_anthropic_batch(
     source_language: str,
     target_language: str,
     context_map: dict[str, str] | None = None,
+    *,
+    project_slug: str | None = None,
 ) -> dict:
     """Submit batch to Anthropic Message Batches API."""
     try:
@@ -616,17 +642,20 @@ def _submit_anthropic_batch(
             }
         })
 
-    # Build prompt map for later retrieval logging
-    prompt_map = {}
-    for req, chunk in zip(requests, chunks):
-        prompt_map[chunk.id] = req["params"]["messages"][0]["content"]
+    # Map chunk_id -> the prompt that was submitted (used only locally here)
+    prompts_by_chunk = {
+        chunk.id: req["params"]["messages"][0]["content"]
+        for req, chunk in zip(requests, chunks)
+    }
 
     try:
         # Submit batch
         batch = client.messages.batches.create(requests=requests)
 
-        # Log each prompt (response will arrive later)
-        for chunk_id, prompt_text in prompt_map.items():
+        # Log each prompt with response=None; capture the file path so
+        # retrieval can mutate the same log in place once results arrive.
+        chunk_log_map: dict[str, str] = {}
+        for chunk_id, prompt_text in prompts_by_chunk.items():
             log_prompt(
                 prompt=prompt_text,
                 response=None,
@@ -636,7 +665,11 @@ def _submit_anthropic_batch(
                 mode="batch",
                 batch_job_id=batch.id,
                 chunk_id=chunk_id,
+                project_slug=project_slug,
             )
+            log_path = last_log_path()
+            if log_path is not None:
+                chunk_log_map[chunk_id] = relative_log_path(log_path)
 
         # Return job info
         return {
@@ -648,7 +681,7 @@ def _submit_anthropic_batch(
             "chunk_count": len(chunks),
             "chunk_ids": [chunk.id for chunk in chunks],
             "output_dir": str(output_dir),
-            "prompt_map": prompt_map,
+            "chunk_log_map": chunk_log_map,
         }
 
     except anthropic.AuthenticationError as e:
@@ -667,6 +700,8 @@ def _submit_openai_batch(
     source_language: str,
     target_language: str,
     context_map: dict[str, str] | None = None,
+    *,
+    project_slug: str | None = None,
 ) -> dict:
     """Submit batch to OpenAI Batch API."""
     try:
@@ -728,11 +763,11 @@ def _submit_openai_batch(
 
         jsonl_lines.append(json.dumps(request))
 
-    # Build prompt map for later retrieval logging
-    prompt_map = {}
+    # Map chunk_id -> the prompt that was submitted (used only locally here)
+    prompts_by_chunk = {}
     for req_line, chunk in zip(jsonl_lines, chunks):
         req_obj = json.loads(req_line)
-        prompt_map[chunk.id] = req_obj["body"]["messages"][0]["content"]
+        prompts_by_chunk[chunk.id] = req_obj["body"]["messages"][0]["content"]
 
     try:
         # Write JSONL to temporary file
@@ -754,8 +789,10 @@ def _submit_openai_batch(
         # Clean up temp file
         jsonl_path.unlink()
 
-        # Log each prompt (response will arrive later)
-        for chunk_id, prompt_text in prompt_map.items():
+        # Log each prompt with response=None; capture the file path so
+        # retrieval can mutate the same log in place once results arrive.
+        chunk_log_map: dict[str, str] = {}
+        for chunk_id, prompt_text in prompts_by_chunk.items():
             log_prompt(
                 prompt=prompt_text,
                 response=None,
@@ -765,7 +802,11 @@ def _submit_openai_batch(
                 mode="batch",
                 batch_job_id=batch.id,
                 chunk_id=chunk_id,
+                project_slug=project_slug,
             )
+            log_path = last_log_path()
+            if log_path is not None:
+                chunk_log_map[chunk_id] = relative_log_path(log_path)
 
         # Return job info
         return {
@@ -777,7 +818,7 @@ def _submit_openai_batch(
             "chunk_count": len(chunks),
             "chunk_ids": [chunk.id for chunk in chunks],
             "output_dir": str(output_dir),
-            "prompt_map": prompt_map,
+            "chunk_log_map": chunk_log_map,
         }
 
     except openai.AuthenticationError as e:
@@ -877,7 +918,8 @@ def retrieve_batch_results(
     original_chunks: list[Chunk],
     output_dir: Path,
     model: str = "",
-    prompt_map: dict[str, str] | None = None,
+    chunk_log_map: dict[str, str] | None = None,
+    project_slug: str | None = None,
 ) -> list[Chunk]:
     """
     Retrieve and process results from a completed batch job.
@@ -888,7 +930,10 @@ def retrieve_batch_results(
         original_chunks: Original chunks (to get IDs and metadata)
         output_dir: Directory to save translated chunks
         model: Model used (for logging)
-        prompt_map: Mapping of chunk ID to the original prompt sent at submission
+        chunk_log_map: Mapping of chunk ID to the repo-relative path of the
+            submission-time prompt log. Retrieval mutates that log in place
+            (adds the response) so each completed call ends up as a single
+            self-contained file.
 
     Returns:
         List of updated chunks with translations
@@ -905,15 +950,85 @@ def retrieve_batch_results(
             f"Status: {status['status']}"
         )
 
-    if prompt_map is None:
-        prompt_map = {}
+    if chunk_log_map is None:
+        chunk_log_map = {}
 
     if provider == "anthropic":
-        return _retrieve_anthropic_results(job_id, original_chunks, output_dir, model, prompt_map)
+        return _retrieve_anthropic_results(job_id, original_chunks, output_dir, model, chunk_log_map, project_slug=project_slug)
     elif provider == "openai":
-        return _retrieve_openai_results(job_id, original_chunks, output_dir, model, prompt_map)
+        return _retrieve_openai_results(job_id, original_chunks, output_dir, model, chunk_log_map, project_slug=project_slug)
     else:
         raise ValueError(f"Unknown provider: {provider}")
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_submission_log_path(
+    chunk_id: str,
+    job_id: str,
+    chunk_log_map: dict[str, str] | None,
+) -> Path | None:
+    """Locate the submission-time prompt log for (chunk_id, job_id).
+
+    Preferred path: read from `chunk_log_map` (recorded at submission). Fallback:
+    scan `prompts/history/` for a translation log with matching batch_job_id +
+    chunk_id and a null response — covers jobs that were submitted before
+    chunk_log_map existed.
+    """
+    if chunk_log_map and chunk_id in chunk_log_map:
+        candidate = _REPO_ROOT / chunk_log_map[chunk_id]
+        if candidate.exists():
+            return candidate
+
+    history_dir = _REPO_ROOT / "prompts" / "history"
+    if not history_dir.exists():
+        return None
+    for path in sorted(history_dir.glob("*_translation_*.json"), reverse=True):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        meta = doc.get("metadata") or {}
+        if (
+            meta.get("chunk_id") == chunk_id
+            and meta.get("batch_job_id") == job_id
+            and doc.get("response") is None
+        ):
+            return path
+    return None
+
+
+def _attach_batch_response(
+    chunk: Chunk,
+    chunk_id: str,
+    job_id: str,
+    translation: str,
+    provider: str,
+    model: str,
+    chunk_log_map: dict[str, str] | None,
+    project_slug: str | None = None,
+) -> None:
+    """Mutate the submission log in place with the response and stamp
+    chunk.last_llm_log. Falls back to writing a fresh log if the submission
+    log is unfindable (e.g. it was deleted)."""
+    log_path = _resolve_submission_log_path(chunk_id, job_id, chunk_log_map)
+    if log_path is not None:
+        update_log_response(log_path, translation)
+    else:
+        log_path = log_prompt(
+            prompt="",
+            response=translation,
+            provider=provider,
+            model=model,
+            call_type="translation",
+            mode="batch",
+            batch_job_id=job_id,
+            chunk_id=chunk_id,
+            project_slug=project_slug,
+        )
+    if log_path is not None:
+        chunk.last_llm_log = relative_log_path(log_path)
 
 
 def _retrieve_anthropic_results(
@@ -921,7 +1036,9 @@ def _retrieve_anthropic_results(
     original_chunks: list[Chunk],
     output_dir: Path,
     model: str = "",
-    prompt_map: dict[str, str] | None = None,
+    chunk_log_map: dict[str, str] | None = None,
+    *,
+    project_slug: str | None = None,
 ) -> list[Chunk]:
     """Retrieve results from Anthropic batch."""
     try:
@@ -957,20 +1074,18 @@ def _retrieve_anthropic_results(
                     chunk.translated_text = translation.strip()
                     chunk.status = ChunkStatus.TRANSLATED
                     chunk.translated_at = datetime.now()
-                    updated_chunks.append(chunk)
 
-                    # Log the complete prompt + response pair
-                    original_prompt = (prompt_map or {}).get(chunk_id, "")
-                    log_prompt(
-                        prompt=original_prompt,
-                        response=translation.strip(),
+                    _attach_batch_response(
+                        chunk=chunk,
+                        chunk_id=chunk_id,
+                        job_id=job_id,
+                        translation=translation.strip(),
                         provider="anthropic",
                         model=model,
-                        call_type="translation_result",
-                        mode="batch",
-                        batch_job_id=job_id,
-                        chunk_id=chunk_id,
+                        chunk_log_map=chunk_log_map,
+                        project_slug=project_slug,
                     )
+                    updated_chunks.append(chunk)
 
         return updated_chunks
 
@@ -983,7 +1098,9 @@ def _retrieve_openai_results(
     original_chunks: list[Chunk],
     output_dir: Path,
     model: str = "",
-    prompt_map: dict[str, str] | None = None,
+    chunk_log_map: dict[str, str] | None = None,
+    *,
+    project_slug: str | None = None,
 ) -> list[Chunk]:
     """Retrieve results from OpenAI batch."""
     try:
@@ -1031,20 +1148,18 @@ def _retrieve_openai_results(
                     chunk.translated_text = translation.strip()
                     chunk.status = ChunkStatus.TRANSLATED
                     chunk.translated_at = datetime.now()
-                    updated_chunks.append(chunk)
 
-                    # Log the complete prompt + response pair
-                    original_prompt = (prompt_map or {}).get(chunk_id, "")
-                    log_prompt(
-                        prompt=original_prompt,
-                        response=translation.strip(),
+                    _attach_batch_response(
+                        chunk=chunk,
+                        chunk_id=chunk_id,
+                        job_id=job_id,
+                        translation=translation.strip(),
                         provider="openai",
                         model=model,
-                        call_type="translation_result",
-                        mode="batch",
-                        batch_job_id=job_id,
-                        chunk_id=chunk_id,
+                        chunk_log_map=chunk_log_map,
+                        project_slug=project_slug,
                     )
+                    updated_chunks.append(chunk)
 
         return updated_chunks
 
@@ -1070,6 +1185,7 @@ def translate_chapter_with_model(
     project_name: str = "Translation Project",
     source_language: str = "English",
     target_language: str = "Spanish",
+    project_slug: str | None = None,
 ) -> list[Chunk]:
     """Translate all chunks for a chapter using a specific model.
 
@@ -1114,11 +1230,13 @@ def translate_chapter_with_model(
     if prov in _BATCH_CAPABLE_PROVIDERS:
         return _translate_via_batch(work_chunks, model_id, prov, output_dir,
                                     glossary, style_guide, project_name,
-                                    source_language, target_language)
+                                    source_language, target_language,
+                                    project_slug=project_slug)
     else:
         return _translate_via_realtime(work_chunks, model_id, prov,
                                        glossary, style_guide, project_name,
-                                       source_language, target_language)
+                                       source_language, target_language,
+                                       project_slug=project_slug)
 
 
 def submit_translation_job(
@@ -1131,6 +1249,7 @@ def submit_translation_job(
     project_name: str = "Translation Project",
     source_language: str = "English",
     target_language: str = "Spanish",
+    project_slug: str | None = None,
 ) -> dict:
     """Submit a batch translation job and return the job_info without polling.
 
@@ -1144,6 +1263,7 @@ def submit_translation_job(
         project_name=project_name,
         source_language=source_language,
         target_language=target_language,
+        project_slug=project_slug,
     )
 
 
@@ -1178,7 +1298,7 @@ def await_translation_job(
 
     translated = retrieve_batch_results(
         job_id, prov, work_chunks, output_dir,
-        model=model_id, prompt_map=job_info.get("prompt_map"),
+        model=model_id, chunk_log_map=job_info.get("chunk_log_map"),
     )
 
     if not translated:
@@ -1199,6 +1319,7 @@ def _translate_via_batch(
     project_name: str,
     source_language: str,
     target_language: str,
+    project_slug: str | None = None,
 ) -> list[Chunk]:
     """Submit a batch job and poll until complete."""
     job_info = submit_translation_job(
@@ -1207,6 +1328,7 @@ def _translate_via_batch(
         project_name=project_name,
         source_language=source_language,
         target_language=target_language,
+        project_slug=project_slug,
     )
     return await_translation_job(job_info, work_chunks, output_dir)
 
@@ -1220,6 +1342,7 @@ def _translate_via_realtime(
     project_name: str,
     source_language: str,
     target_language: str,
+    project_slug: str | None = None,
 ) -> list[Chunk]:
     """Translate chunks one-by-one via realtime API calls."""
     translated: list[Chunk] = []
@@ -1230,6 +1353,7 @@ def _translate_via_realtime(
             project_name=project_name,
             source_language=source_language,
             target_language=target_language,
+            project_slug=project_slug,
         )
         translated.append(result)
     if not translated:

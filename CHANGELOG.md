@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0.0] - 2026-05-27
+
+### Added
+- **Edit-review report** — `scripts/review_edits.py` generates an HTML side-by-side diff report comparing each translated chunk's current text against the raw LLM baseline that produced it. Hunks are highlighted at the word level, source pane shows a proportionally-mapped context window, and chunks with no recoverable baseline are flagged separately.
+- **Edit-tag UI** — the report includes tag buttons so you can label each diff hunk (glossary conflict, missing paragraph break, dialogue punctuation, etc.) and persist tags to `edit_review_tags.jsonl` for later analysis.
+- **Baseline provenance stamp (`last_llm_log`)** — every translated chunk now carries a pointer to its submission-time prompt log. Realtime and batch paths both set the stamp; the stamp is preserved across user edits.
+- **New API endpoints** — `GET /api/edit-tags` returns the tag vocabulary; `POST /api/project/<id>/edit-tag` persists a tag for a hunk; `GET /reports/<project_id>/<filename>` serves generated reports same-origin with the tag API.
+- **Shared edit-review constants** — `src/edit_review_constants.py` holds the `EDIT_TAGS` vocabulary, imported by both the report generator and the web UI to keep them in sync.
+- **`chunk_log_map` in batch submission** — `submit_batch` now returns a per-chunk map of submission log paths, letting batch retrieval mutate the exact log file in place rather than writing a separate response log.
+
+### Changed
+- Batch submission log tracking renamed from `prompt_map` to `chunk_log_map` across `compare_models.py` and `api_translator.py`.
+- `submit_translation_job`, `_translate_via_batch`, and `_translate_via_realtime` all accept `project_slug` so provenance stamps are populated for every translation path.
+- `POST /api/edit-tag` moved to `/api/project/<project_id>/edit-tag` to match the existing project-scoped endpoint convention.
+
+### Fixed
+- Fallback batch log scan now sorts by filename (newest-first) so the correct log is mutated when multiple null-response logs exist for the same chunk+job.
+- `_load_tags` no longer crashes on non-integer `hunk_index` values in the JSONL file.
+- Test isolation: `_LAST_LOG_PATH` ContextVar is now reset between tests to prevent cross-test leakage.
+- `_attach_batch_response` uses the return value of `log_prompt()` directly instead of the ContextVar side-channel, eliminating a potential race condition under concurrent batch retrieval.
+
 ## [0.12.0.0] - 2026-05-21
 
 ### Added

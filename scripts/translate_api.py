@@ -374,8 +374,9 @@ def translate_batch(args):
             target_language=args.target_language,
         )
 
-        # Store chunk file paths for later retrieval (strip prompt_map — already in prompt_logger)
-        job_info.pop("prompt_map", None)
+        # Store chunk file paths for later retrieval. chunk_log_map (set by
+        # submit_batch) points each chunk at the submission-time prompt log
+        # that retrieval will mutate in place.
         chunk_file_map = {chunk.id: path for chunk, path in chunk_pairs}
         job_info["chunk_file_map"] = chunk_file_map
 
@@ -433,7 +434,7 @@ def _do_retrieve(job_id: str, job_info: dict, chunks: list[Chunk]) -> int:
             original_chunks=chunks,
             output_dir=output_dir,
             model=model,
-            prompt_map=job_info.get("prompt_map"),
+            chunk_log_map=job_info.get("chunk_log_map"),
         )
 
         # Save each translated chunk back to its original file

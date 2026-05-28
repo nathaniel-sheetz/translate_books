@@ -145,6 +145,7 @@ book_translation/
 │   ├── glossary_bootstrap.py   # Glossary candidate extraction
 │   ├── translator.py           # Prompt rendering + workbook generation
 │   ├── epub_builder.py         # EPUB export
+│   ├── edit_review_constants.py # EDIT_TAGS vocabulary (shared by report generator + web UI)
 │   ├── evaluators/             # Pluggable quality evaluators
 │   └── utils/                  # File I/O, text utilities, source loaders, glossary context helpers
 │
@@ -199,6 +200,7 @@ pytest --cov=src tests/            # With coverage
 | [`docs/CHAPTER_DETECTION_GUIDE.md`](docs/CHAPTER_DETECTION_GUIDE.md) | Chapter splitting patterns |
 | [`docs/DICTIONARY_SETUP.md`](docs/DICTIONARY_SETUP.md) | Dictionary evaluator setup |
 | [`docs/GLOSSARY_CANDIDATES.md`](docs/GLOSSARY_CANDIDATES.md) | Glossary candidate extraction pipeline reference |
+| [`docs/EDIT_REVIEW.md`](docs/EDIT_REVIEW.md) | Edit-review report: comparing translations against LLM baselines, tagging hunks |
 
 ---
 

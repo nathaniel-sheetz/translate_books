@@ -297,6 +297,24 @@ def test_translate_chunk_realtime_anthropic(mock_dispatch, sample_chunk):
 
 
 @patch('src.api_translator._dispatch_llm_call')
+def test_translate_chunk_realtime_threads_project_slug_and_chunk_id(mock_dispatch, sample_chunk):
+    """The realtime path must forward project_slug and chunk.id to the
+    dispatcher so the resulting prompt log is self-identifying."""
+    mock_dispatch.return_value = "Una traducción."
+
+    translate_chunk_realtime(
+        chunk=sample_chunk,
+        provider='anthropic',
+        model='claude-3-5-sonnet-20241022',
+        project_slug='my-book-slug',
+    )
+
+    kwargs = mock_dispatch.call_args.kwargs
+    assert kwargs.get("chunk_id") == sample_chunk.id
+    assert kwargs.get("project_slug") == "my-book-slug"
+
+
+@patch('src.api_translator._dispatch_llm_call')
 def test_translate_chunk_realtime_openai(mock_dispatch, sample_chunk):
     """Test real-time translation with OpenAI."""
     mock_dispatch.return_value = "Es una verdad universalmente reconocida..."
@@ -653,9 +671,30 @@ def test_retrieve_batch_not_complete(sample_chunk, tmp_path):
                 )
 
 
-def test_retrieve_logs_responses(sample_chunk, tmp_path):
-    """Test that batch retrieval logs each response to the prompt history."""
+def test_retrieve_mutates_submission_log(sample_chunk, tmp_path):
+    """Batch retrieval should fill in the response on the existing submission
+    log (in place) rather than writing a separate translation_result log."""
     pytest.importorskip("anthropic")
+
+    # Stand up a fake submission log on disk, matching what a real submission
+    # would have produced: prompt populated, response=None.
+    submission_log = tmp_path / "20260101_000000_translation_abc123.json"
+    submission_log.write_text(
+        json.dumps({
+            "metadata": {
+                "timestamp": "2026-01-01T00:00:00",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "call_type": "translation",
+                "mode": "batch",
+                "batch_job_id": "batch_log_test",
+                "chunk_id": sample_chunk.id,
+            },
+            "prompt": "The original prompt for this chunk",
+            "response": None,
+        }),
+        encoding="utf-8",
+    )
 
     mock_result = Mock()
     mock_result.custom_id = sample_chunk.id
@@ -675,27 +714,29 @@ def test_retrieve_logs_responses(sample_chunk, tmp_path):
         mock_anthropic_class.return_value = mock_client
 
         with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
-            with patch('src.api_translator.log_prompt') as mock_log:
+            # Bypass the repo-relative path resolution by patching the resolver
+            # to return our tmp_path log directly.
+            with patch(
+                'src.api_translator._resolve_submission_log_path',
+                return_value=submission_log,
+            ), patch('src.api_translator.log_prompt') as mock_log:
                 retrieve_batch_results(
                     job_id="batch_log_test",
                     provider="anthropic",
                     original_chunks=[sample_chunk],
                     output_dir=tmp_path,
                     model="claude-sonnet-4-6",
-                    prompt_map={sample_chunk.id: "The original prompt for this chunk"},
+                    chunk_log_map={sample_chunk.id: "fake/path"},
                 )
 
-    # Should have been called once for the one successful result
-    mock_log.assert_called_once_with(
-        prompt="The original prompt for this chunk",
-        response="Translated text here",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
-        call_type="translation_result",
-        mode="batch",
-        batch_job_id="batch_log_test",
-        chunk_id=sample_chunk.id,
-    )
+    # No new log file should have been written — the submission log is updated
+    # in place instead.
+    mock_log.assert_not_called()
+
+    updated = json.loads(submission_log.read_text(encoding="utf-8"))
+    assert updated["prompt"] == "The original prompt for this chunk"
+    assert updated["response"] == "Translated text here"
+    assert "retrieved_at" in updated["metadata"]
 
 
 def test_update_batch_job_status(tmp_path):
@@ -750,7 +791,7 @@ def test_await_translation_job_polls_then_retrieves(sample_chunk, tmp_path):
         "job_id": "batch_await_test",
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
-        "prompt_map": {sample_chunk.id: "rendered prompt"},
+        "chunk_log_map": {sample_chunk.id: "prompts/history/fake.json"},
     }
 
     translated_sample = sample_chunk.model_copy(update={"translated_text": "traducción"})
@@ -776,7 +817,7 @@ def test_await_translation_job_polls_then_retrieves(sample_chunk, tmp_path):
         mock_retrieve.assert_called_once()
         retrieve_kwargs = mock_retrieve.call_args.kwargs
         assert retrieve_kwargs["model"] == "claude-sonnet-4-6"
-        assert retrieve_kwargs["prompt_map"] == {sample_chunk.id: "rendered prompt"}
+        assert retrieve_kwargs["chunk_log_map"] == {sample_chunk.id: "prompts/history/fake.json"}
 
 
 def test_await_translation_job_raises_on_failed_batch(sample_chunk, tmp_path):
@@ -838,3 +879,166 @@ def test_batch_submission_filters_glossary(sample_chunk, tmp_path):
         # We check that the full unfiltered glossary wasn't used by verifying
         # "Hogwarts" doesn't appear in a glossary context
         assert "Hogwarts" not in prompt_text
+
+
+# ============================================================================
+# Provenance stamp (chunk.last_llm_log) — see docs/EDIT_REVIEW.md
+# ============================================================================
+#
+# These tests exist because the edit-review report uses chunk.last_llm_log
+# as its O(1) lookup from a chunk to the LLM call that produced its
+# translation. If any LLM-write site stops stamping, the feature silently
+# degrades to the heuristic chunk-id scan (or the "no baseline" banner) and
+# nothing else fails. So each write site needs an explicit guard test.
+
+
+def test_translate_chunk_realtime_stamps_last_llm_log(sample_chunk):
+    """The realtime path must stamp chunk.last_llm_log with the path of the
+    prompt log it just wrote. Patches the underlying SDK call (not
+    _dispatch_llm_call) so the real log_prompt + last_log_path plumbing runs.
+    """
+    pytest.importorskip("anthropic")
+
+    with patch('src.api_translator.call_anthropic_api',
+               return_value="Una traducción cualquiera."), \
+         patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+        updated = translate_chunk_realtime(
+            chunk=sample_chunk,
+            provider='anthropic',
+            model='claude-sonnet-4-6',
+            project_slug='my-book',
+        )
+
+    assert updated.last_llm_log, "Realtime translation must stamp last_llm_log"
+    stamp_path = Path(updated.last_llm_log)
+    assert stamp_path.exists(), (
+        f"Stamped log {stamp_path} should exist on disk "
+        "(isolated tmp history from conftest)"
+    )
+    record = json.loads(stamp_path.read_text(encoding="utf-8"))
+    assert record["response"] == "Una traducción cualquiera."
+    assert record["metadata"]["chunk_id"] == sample_chunk.id
+    assert record["metadata"]["project_slug"] == "my-book"
+    assert record["metadata"]["call_type"] == "translation"
+
+
+def _write_submission_log(path: Path, *, provider: str, model: str,
+                          job_id: str, chunk_id: str) -> None:
+    """Helper: stand up a submission-time prompt log on disk, matching the
+    shape submit_batch would write (response=None, batch_job_id set)."""
+    path.write_text(
+        json.dumps({
+            "metadata": {
+                "timestamp": "2026-01-01T00:00:00",
+                "provider": provider,
+                "model": model,
+                "call_type": "translation",
+                "mode": "batch",
+                "batch_job_id": job_id,
+                "chunk_id": chunk_id,
+            },
+            "prompt": "The original prompt for this chunk",
+            "response": None,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_retrieve_anthropic_batch_stamps_last_llm_log(sample_chunk, tmp_path):
+    """Anthropic batch retrieval must stamp chunk.last_llm_log on every
+    successfully translated chunk — and the stamp must point at the
+    submission log that retrieval mutated in place."""
+    pytest.importorskip("anthropic")
+
+    submission_log = tmp_path / "20260101_000000_translation_anth_stamp.json"
+    _write_submission_log(
+        submission_log,
+        provider="anthropic", model="claude-sonnet-4-6",
+        job_id="batch_stamp_anthropic", chunk_id=sample_chunk.id,
+    )
+
+    mock_content_block = Mock()
+    mock_content_block.text = "Translated text via Anthropic batch."
+    mock_result = Mock()
+    mock_result.custom_id = sample_chunk.id
+    mock_result.result.type = "succeeded"
+    mock_result.result.message = Mock(content=[mock_content_block])
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_stamp_anthropic"
+        mock_batch.processing_status = "ended"
+        mock_batch.request_counts = Mock(processing=0, succeeded=1, errored=0)
+        mock_client.messages.batches.retrieve.return_value = mock_batch
+        mock_client.messages.batches.results.return_value = [mock_result]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}), \
+             patch('src.api_translator._resolve_submission_log_path',
+                   return_value=submission_log):
+            chunks = retrieve_batch_results(
+                job_id="batch_stamp_anthropic",
+                provider="anthropic",
+                original_chunks=[sample_chunk],
+                output_dir=tmp_path,
+                model="claude-sonnet-4-6",
+                chunk_log_map={sample_chunk.id: "fake/path"},
+            )
+
+    assert len(chunks) == 1
+    assert chunks[0].last_llm_log, "Anthropic batch retrieval must stamp last_llm_log"
+    assert Path(chunks[0].last_llm_log).name == submission_log.name
+
+
+def test_retrieve_openai_batch_stamps_last_llm_log(sample_chunk, tmp_path):
+    """OpenAI batch retrieval must stamp chunk.last_llm_log identically to
+    the Anthropic path. Same contract; symmetric SDK shape."""
+    pytest.importorskip("openai")
+
+    submission_log = tmp_path / "20260101_000000_translation_oai_stamp.json"
+    _write_submission_log(
+        submission_log,
+        provider="openai", model="gpt-4o",
+        job_id="batch_stamp_openai", chunk_id=sample_chunk.id,
+    )
+
+    result_line = json.dumps({
+        "custom_id": sample_chunk.id,
+        "response": {
+            "status_code": 200,
+            "body": {
+                "choices": [{"message": {"content": "Translated via OpenAI batch."}}],
+            },
+        },
+    })
+    mock_output_content = Mock()
+    mock_output_content.text = result_line
+
+    with patch('openai.OpenAI') as mock_openai_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_stamp_openai"
+        mock_batch.status = "completed"
+        mock_batch.completed_at = "2026-01-01T01:00:00"
+        mock_batch.request_counts = Mock(total=1, completed=1, failed=0)
+        mock_batch.output_file_id = "file_out_stamp"
+        mock_client.batches.retrieve.return_value = mock_batch
+        mock_client.files.content.return_value = mock_output_content
+        mock_openai_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}), \
+             patch('src.api_translator._resolve_submission_log_path',
+                   return_value=submission_log):
+            chunks = retrieve_batch_results(
+                job_id="batch_stamp_openai",
+                provider="openai",
+                original_chunks=[sample_chunk],
+                output_dir=tmp_path,
+                model="gpt-4o",
+                chunk_log_map={sample_chunk.id: "fake/path"},
+            )
+
+    assert len(chunks) == 1
+    assert chunks[0].last_llm_log, "OpenAI batch retrieval must stamp last_llm_log"
+    assert Path(chunks[0].last_llm_log).name == submission_log.name
