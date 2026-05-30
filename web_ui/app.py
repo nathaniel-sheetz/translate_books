@@ -1645,26 +1645,29 @@ def apply_corrections(project_id):
 
     try:
         import time
-        from collections import defaultdict
 
         from scripts.apply_corrections import (
             apply_to_chunk,
+            dedupe_corrections,
+            group_by_chunk,
             load_corrections,
             realign_chapter,
             recombine_chapter,
         )
         from src.utils.file_io import load_chunk, save_chunk
 
-        corrections = load_corrections(project_dir)
-        if not corrections:
+        raw_corrections = load_corrections(project_dir)
+        if not raw_corrections:
             return jsonify({"error": "No corrections found"}), 404
 
-        # Group by chunk
-        by_chunk = defaultdict(list)
-        for c in corrections:
-            chunk_id = c.get("chunk_id", "")
-            if chunk_id:
-                by_chunk[chunk_id].append(c)
+        # Collapse duplicates before grouping. Without this, two identical
+        # corrections (e.g. an over-eager double Save) leave corrections.jsonl
+        # pinned forever: the first pass mutates the chunk so the duplicate's
+        # original_es no longer matches, total_applied never reaches
+        # len(corrections), and the unlink at the bottom is skipped.
+        corrections = dedupe_corrections(raw_corrections)
+
+        by_chunk = group_by_chunk(corrections)
 
         affected_chapters = set()
         total_applied = 0
@@ -1697,12 +1700,13 @@ def apply_corrections(project_id):
         for chapter_id in sorted(affected_chapters):
             realign_chapter(project_dir, chapter_id)
 
-        # 4. Archive corrections
+        # 4. Archive corrections — write the full pre-dedupe list so
+        # corrections_applied.jsonl keeps a complete record of every Save.
         archive_path = project_dir / "corrections_applied.jsonl"
+        applied_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         with open(archive_path, "a", encoding="utf-8") as f:
-            for corr in corrections:
-                corr["applied_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-                f.write(json.dumps(corr, ensure_ascii=False) + "\n")
+            for corr in raw_corrections:
+                f.write(json.dumps({**corr, "applied_at": applied_at}, ensure_ascii=False) + "\n")
 
         if total_applied == len(corrections):
             corrections_path.unlink()

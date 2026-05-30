@@ -50,6 +50,31 @@ def group_by_chunk(corrections: list[dict]) -> dict[str, list[dict]]:
     return dict(by_chunk)
 
 
+def dedupe_corrections(corrections: list[dict]) -> list[dict]:
+    """Collapse corrections that target the same edit, keeping the newest.
+
+    Two corrections collide when they share ``(chunk_id, es_idx, corrected_es)``.
+    Without this, a Save click that landed in ``corrections.jsonl`` twice (UI
+    glitch, double-click, retry) would leave one copy unable to find its
+    ``original_es`` after the first pass mutates the chunk — the file would
+    never satisfy ``total_applied == len(corrections)`` and the reader's
+    pending-corrections banner would stick forever.
+
+    Stable on order for ties: latest by ``timestamp`` wins; on tie or missing
+    timestamps, the last occurrence wins (newest queued entry).
+    """
+    by_key: dict[tuple, dict] = {}
+    for corr in corrections:
+        key = (corr.get("chunk_id", ""), corr.get("es_idx"), corr.get("corrected_es"))
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = corr
+            continue
+        if corr.get("timestamp", "") >= existing.get("timestamp", ""):
+            by_key[key] = corr
+    return list(by_key.values())
+
+
 def _resolve_correction_span(
     text: str, original: str, hint_start, hint_end,
 ) -> tuple[int, int] | None:
@@ -130,14 +155,20 @@ def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False)
     for corr in ordered:
         original = corr["original_es"]
         corrected = corr["corrected_es"]
+        hint_start = corr.get("chunk_offset_start")
+        hint_end = corr.get("chunk_offset_end")
 
-        span = _resolve_correction_span(
-            text,
-            original,
-            corr.get("chunk_offset_start"),
-            corr.get("chunk_offset_end"),
-        )
+        span = _resolve_correction_span(text, original, hint_start, hint_end)
         if span is None:
+            # Idempotent path: if corrected_es is already in the chunk, the
+            # user's intent is satisfied. Count as applied so a duplicate
+            # correction (or a re-click after Realign already consumed the
+            # row) doesn't keep corrections.jsonl pinned forever.
+            if corrected and _resolve_correction_span(
+                text, corrected, hint_start, hint_end,
+            ) is not None:
+                applied += 1
+                continue
             print(f"    WARNING: Could not find original text in chunk {chunk.id}:")
             print(f"      Looking for: {original[:60]}...")
             continue
@@ -234,12 +265,19 @@ def main():
         sys.exit(1)
 
     # 1. Load corrections
-    corrections = load_corrections(project_dir)
-    if not corrections:
+    raw_corrections = load_corrections(project_dir)
+    if not raw_corrections:
         print("No corrections found.")
         return
 
-    print(f"Loaded {len(corrections)} correction(s)")
+    corrections = dedupe_corrections(raw_corrections)
+    if len(corrections) != len(raw_corrections):
+        print(
+            f"Loaded {len(raw_corrections)} correction(s) "
+            f"({len(raw_corrections) - len(corrections)} duplicate(s) collapsed)"
+        )
+    else:
+        print(f"Loaded {len(corrections)} correction(s)")
 
     # 2. Group by chunk and apply
     by_chunk = group_by_chunk(corrections)
@@ -294,13 +332,14 @@ def main():
         print("\nRebuilding EPUB:")
         rebuild_epub(project_dir)
 
-    # 6. Archive applied corrections
+    # 6. Archive applied corrections — write the full pre-dedupe list so
+    # corrections_applied.jsonl keeps a complete audit trail of every Save.
     corrections_path = project_dir / "corrections.jsonl"
     archive_path = project_dir / "corrections_applied.jsonl"
+    applied_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     with open(archive_path, "a", encoding="utf-8") as f:
-        for corr in corrections:
-            corr["applied_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-            f.write(json.dumps(corr, ensure_ascii=False) + "\n")
+        for corr in raw_corrections:
+            f.write(json.dumps({**corr, "applied_at": applied_at}, ensure_ascii=False) + "\n")
 
     if total_applied == len(corrections):
         corrections_path.unlink()
