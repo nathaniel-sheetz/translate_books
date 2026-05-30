@@ -25,7 +25,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.apply_corrections import _resolve_correction_span, apply_to_chunk
+from scripts.apply_corrections import (
+    _resolve_correction_span,
+    apply_to_chunk,
+    dedupe_corrections,
+)
 from src.models import Chunk, ChunkMetadata, ChunkStatus
 from src.utils.file_io import load_chunk, save_chunk
 from web_ui.app import app
@@ -398,3 +402,180 @@ class TestCorrectionEndpointOffsets:
         )
         assert "chunk_offset_start" not in queued
         assert "chunk_offset_end" not in queued
+
+
+# -------- Duplicate + idempotent apply (TODOS.md P1 lockout fix) --------
+
+
+class TestDuplicateAndIdempotent:
+    """The TODOS.md P1 "corrections.jsonl lockout" — if a correction is
+    submitted twice and the first pass mutates the chunk so the duplicate's
+    original_es no longer matches, the legacy code left total_applied below
+    len(corrections) forever and corrections.jsonl was never unlinked. Fixed
+    by (1) deduping before grouping and (2) treating already-applied entries
+    as idempotent successes inside apply_to_chunk.
+    """
+
+    def test_dedupe_collapses_same_key_keeps_newest(self):
+        older = {
+            "chunk_id": "c0", "es_idx": 3,
+            "original_es": "Hola.", "corrected_es": "Buenos días.",
+            "timestamp": "2026-04-01T00:00:00",
+        }
+        newer = {
+            "chunk_id": "c0", "es_idx": 3,
+            "original_es": "Hola.", "corrected_es": "Buenos días.",
+            "timestamp": "2026-04-02T00:00:00",
+        }
+        unrelated = {
+            "chunk_id": "c0", "es_idx": 4,
+            "original_es": "Adiós.", "corrected_es": "Hasta luego.",
+            "timestamp": "2026-04-02T00:00:00",
+        }
+        result = dedupe_corrections([older, newer, unrelated])
+        assert len(result) == 2
+        # The duplicate (same chunk_id+es_idx+corrected_es) collapses to the
+        # newer timestamp; the unrelated row survives.
+        deduped_for_idx3 = next(r for r in result if r["es_idx"] == 3)
+        assert deduped_for_idx3["timestamp"] == "2026-04-02T00:00:00"
+
+    def test_dedupe_does_not_collapse_different_corrected_es(self):
+        """Two corrections that target the same sentence but with different
+        ``corrected_es`` are NOT duplicates — they're successive edits and
+        both should be preserved (the second supersedes the first when
+        applied, but both should be archived).
+        """
+        first = {
+            "chunk_id": "c0", "es_idx": 3,
+            "original_es": "Hola.", "corrected_es": "Buenos días.",
+            "timestamp": "2026-04-01T00:00:00",
+        }
+        second = {
+            "chunk_id": "c0", "es_idx": 3,
+            "original_es": "Hola.", "corrected_es": "Buenas tardes.",
+            "timestamp": "2026-04-02T00:00:00",
+        }
+        result = dedupe_corrections([first, second])
+        assert len(result) == 2
+
+    def test_apply_to_chunk_idempotent_when_already_corrected(self):
+        """Chunk already has corrected_es; original_es is gone. apply_to_chunk
+        must count it as applied (not skip), so the duplicate-pinned-banner
+        regression cannot return.
+        """
+        text = "La hormiga se rompió la pata."
+        chunk = _make_chunk("c", "ch", text, text)
+        correction = {
+            "original_es": "La hormiga se rompió la pierna.",
+            "corrected_es": "La hormiga se rompió la pata.",
+        }
+        updated, applied = apply_to_chunk(chunk, [correction])
+        assert applied == 1
+        # Text unchanged — it was already correct.
+        assert updated.translated_text == text
+
+    def test_apply_to_chunk_truly_missing_still_skips(self):
+        """If NEITHER original nor corrected is in the chunk, that's a
+        genuinely orphaned correction and applied stays 0.
+        """
+        text = "Some unrelated translated text."
+        chunk = _make_chunk("c", "ch", text, text)
+        correction = {
+            "original_es": "Nada de esto está aquí.",
+            "corrected_es": "Tampoco esto.",
+        }
+        _, applied = apply_to_chunk(chunk, [correction])
+        assert applied == 0
+
+    def test_duplicate_correction_clears_file_after_apply(
+        self, client, project_with_duplicate_for_correction,
+    ):
+        """Full round-trip of the TODOS.md P1 lockout scenario: POST the same
+        correction twice, hit /api/apply-corrections, and assert
+        corrections.jsonl is removed (banner won't stick) while
+        corrections_applied.jsonl gets both rows (audit trail preserved).
+        """
+        proj_dir, body, body_start, body_end = project_with_duplicate_for_correction
+
+        payload = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 1,
+            "original_es": body,
+            "corrected_es": f"«{body}»",
+            "en_reference": "There was a heavy sea running",
+            "chunk_offset_start": body_start,
+            "chunk_offset_end": body_end,
+        }
+        client.post("/api/correction", json=payload)
+        client.post("/api/correction", json=payload)
+
+        # Confirm two rows queued — this is the lockout precondition.
+        queued_text = (proj_dir / "corrections.jsonl").read_text(encoding="utf-8")
+        assert len([ln for ln in queued_text.splitlines() if ln.strip()]) == 2
+
+        rv = client.post("/api/apply-corrections/test-project")
+        assert rv.status_code == 200, rv.get_json()
+
+        # File is gone — banner will clear.
+        assert not (proj_dir / "corrections.jsonl").exists()
+
+        # Both Save events are recorded in the archive.
+        archive_lines = [
+            ln for ln in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+        assert len(archive_lines) == 2
+
+    def test_dedupe_empty_input(self):
+        assert dedupe_corrections([]) == []
+
+    def test_dedupe_tie_or_missing_timestamp_last_wins(self):
+        first = {
+            "chunk_id": "c0", "es_idx": 0,
+            "original_es": "A.", "corrected_es": "B.",
+        }
+        second = {
+            "chunk_id": "c0", "es_idx": 0,
+            "original_es": "A.", "corrected_es": "B.",
+        }
+        result = dedupe_corrections([first, second])
+        assert len(result) == 1
+        assert result[0] is second
+
+    def test_apply_to_chunk_falsy_corrected_es_is_skipped(self):
+        text = "Some text here."
+        chunk = _make_chunk("c", "ch", text, text)
+        # corrected_es="" — falsy, so the idempotent guard is skipped and
+        # the missing original triggers the WARNING path (applied stays 0).
+        correction = {"original_es": "Not here.", "corrected_es": ""}
+        _, applied = apply_to_chunk(chunk, [correction])
+        assert applied == 0
+
+    def test_partial_apply_leaves_corrections_file_intact(
+        self, client, project_with_duplicate_for_correction,
+    ):
+        """If a correction can't be applied (neither original nor corrected
+        found in chunk), total_applied < len(deduped corrections) and the
+        corrections.jsonl file must NOT be unlinked — the banner stays.
+        """
+        proj_dir, _, _, _ = project_with_duplicate_for_correction
+
+        # Queue a correction whose original_es doesn't exist in the chunk.
+        orphan = {
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 1,
+            "original_es": "This sentence is not in the chunk at all.",
+            "corrected_es": "Neither is this replacement.",
+            "chapter_id": "chapter_01",
+            "project_id": "test-project",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            json.dumps(orphan, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+        rv = client.post("/api/apply-corrections/test-project")
+        assert rv.status_code == 200
+
+        # File stays — banner must not clear on a partial apply.
+        assert (proj_dir / "corrections.jsonl").exists()

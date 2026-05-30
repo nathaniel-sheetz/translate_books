@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.1.0] - 2026-05-29
+
+### Fixed
+- **Corrections lockout bug** — double-clicking Save (or any UI glitch that queued the same correction twice) caused `corrections.jsonl` to never be unlinked after apply. The first pass would mutate the chunk, leaving the duplicate's `original_es` unfindable; `total_applied` never reached `len(corrections)`, so the pending-corrections banner stuck forever. Fixed by deduplicating corrections before applying (keeping the newest by timestamp) and treating already-applied corrections as idempotent successes.
+
 ## [0.13.0.0] - 2026-05-27
 
 ### Added
