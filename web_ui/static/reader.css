@@ -1057,6 +1057,24 @@ body {
     background: var(--bg-active);
 }
 
+/* Transient flash when a search result deep-link lands on a sentence.
+   Decoupled from .active (which drives the annotate/edit sheet) so a search
+   landing draws the eye without opening the drawer. (D3) */
+.sentence.search-landed {
+    animation: search-landed-flash 1.8s ease-out;
+}
+
+@keyframes search-landed-flash {
+    0%, 25% {
+        background: var(--accent-bg);
+        box-shadow: 0 0 0 3px var(--accent-bg);
+    }
+    100% {
+        background: transparent;
+        box-shadow: 0 0 0 3px transparent;
+    }
+}
+
 .sentence.corrected {
     position: relative;
 }

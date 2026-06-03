@@ -1,0 +1,249 @@
+/* Reader "Find in book" concordance — full-screen search surface.
+   Reuses reader tokens (--accent, --bg-active, --text-muted, .lang-btn,
+   .sheet-label, .sheet-close); no new colors. See design 20260603 DR1/DR2/DR7. */
+
+.search-surface {
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.search-surface[hidden] {
+    display: none;
+}
+
+.search-surface-inner {
+    width: 100%;
+    max-width: 680px;       /* matches the reader column (DR8) */
+    margin: 0 auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 0 16px;
+}
+
+/* ── Header bar ── */
+.search-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 48px;
+    flex: 0 0 auto;
+}
+
+.search-title {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 16px;
+    color: var(--text-heading);
+}
+
+/* ── Input + ES|EN toggle ── */
+.search-input-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0 12px;
+    flex: 0 0 auto;
+}
+
+.search-input {
+    flex: 1;
+    min-height: 44px;
+    padding: 8px 12px;
+    font-size: 18px;
+    font-family: Georgia, 'Times New Roman', serif;
+    color: var(--text);
+    background: var(--bg-input);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.search-toggle {
+    flex: 0 0 auto;
+}
+
+/* Reuse .lang-toggle / .lang-btn look; enforce 44px touch targets (DR8). */
+.search-toggle .lang-btn {
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 14px;
+}
+
+/* ── Resume reading ── */
+.search-resume {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    min-height: 44px;
+    margin-bottom: 8px;
+    padding: 6px 12px;
+    background: var(--accent-btn-bg);
+    border: 1px solid var(--accent-border);
+    border-radius: 8px;
+    color: var(--accent-dark);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.search-resume[hidden] {
+    display: none;
+}
+
+/* ── Status line (idle / loading / empty / error) ── */
+.search-status {
+    flex: 0 0 auto;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    color: var(--text-muted);
+    font-size: 15px;
+    line-height: 1.5;
+    padding: 8px 2px;
+}
+
+.search-status .search-status-hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--text-muted2);
+}
+
+.search-retry {
+    margin-top: 10px;
+    min-height: 44px;
+    padding: 6px 16px;
+    background: var(--bg-btn);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    color: var(--text-muted4);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+/* ── Results list ── */
+.search-results {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 24px;
+}
+
+.search-count {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: var(--text-muted2);
+    padding: 6px 2px 2px;
+}
+
+/* Chapter group divider — mirrors .sheet-label uppercase-muted style (DR7). */
+.search-chapter-divider {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted2);
+    border-bottom: 1px solid var(--border-divider);
+    padding: 14px 2px 6px;
+    margin-top: 4px;
+}
+
+.search-chapter-divider .search-divider-note {
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-muted6);
+}
+
+/* Result rows */
+.search-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--border-divider);
+    padding: 12px 2px;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+}
+
+.search-row.untranslated {
+    cursor: default;
+}
+
+.search-row-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* Spanish primary — serif, like the reader content (DR2). */
+.search-row-es {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 17px;
+    line-height: 1.5;
+    color: var(--text);
+}
+
+/* English muted reference. */
+.search-row-en {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--text-muted3);
+    margin-top: 3px;
+}
+
+/* Untranslated KWIC snippet — sans, muted, display-only. */
+.search-row-kwic {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--text-muted4);
+}
+
+.search-row mark {
+    background: var(--bg-active);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+/* Chevron for navigable rows; "no jump" marker for untranslated. */
+.search-row-chevron {
+    flex: 0 0 auto;
+    color: var(--text-muted2);
+    font-size: 20px;
+    line-height: 1.4;
+    align-self: center;
+}
+
+@media (hover: hover) {
+    .search-row:not(.untranslated):hover {
+        background: var(--bg-hover);
+    }
+}
+
+.search-row:not(.untranslated):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: 4px;
+}
+
+/* Full-screen on phones; centered column already handled above for tablets. */
+@media (max-width: 479px) {
+    .search-surface-inner {
+        max-width: none;
+    }
+}
