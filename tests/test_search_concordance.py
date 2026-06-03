@@ -317,3 +317,64 @@ def test_query_log_write_failure_keeps_serving(client, search_project, caplog):
     assert r.status_code == 200
     assert r.get_json()["n_results"] == 2     # search still served
     assert any("search query" in rec.message.lower() for rec in caplog.records)
+
+
+# ---------- accented query (integration of the query-side fold) ----------
+
+
+def test_accented_query_matches_unaccented(client, search_project):
+    # The unit tests fold via _fold() directly; this drives an accented query
+    # all the way through the endpoint to prove q is folded before matching.
+    import urllib.parse
+    q = urllib.parse.quote("habló")
+    data = client.get(f"/api/search/test-project?q={q}&side=translation").get_json()
+    assert data["n_results"] == 2          # same hits as the unaccented "hablo"
+
+
+# ---------- source-side multi-hit loop ----------
+
+
+def test_source_search_multiple_hits_in_one_chapter(client, search_project):
+    # chapter_03 (untranslated) contains "the" twice; the while-loop in
+    # _search_source_chapter must yield both with distinct, correct offsets.
+    rows = [r for r in _get(client, "the", "source").get_json()["results"]
+            if r["chapter"] == "chapter_03"]
+    assert len(rows) == 2
+    starts = set()
+    for r in rows:
+        assert r["snippet"][r["match_start"]:r["match_end"]].lower() == "the"
+        starts.add(r["match_start"])
+    assert len(starts) == 2                # offsets advanced, not duplicated
+
+
+# ---------- KWIC boundary off-by-one paths ----------
+
+
+def test_kwic_match_at_start_and_end():
+    s, ms, me = _kwic_window("TARGET a b c", 0, len("TARGET"), words_each_side=2)
+    assert ms == 0 and s[ms:me] == "TARGET" and not s.startswith("…")
+    s2, ms2, me2 = _kwic_window("a b c TARGET", len("a b c "),
+                                len("a b c TARGET"), words_each_side=2)
+    assert s2[ms2:me2] == "TARGET" and not s2.endswith("…")
+
+
+# ---------- result-click disambiguation + dead-row guard ----------
+
+
+def test_translated_rows_carry_es_idx_for_disambiguation(client, search_project):
+    # Result-click nav passes es_idx so reader.js lands on the exact sentence
+    # when several es share an anchor prefix.
+    first = _get(client, "hablo", "translation").get_json()["results"][0]
+    assert first["es_idx"] == 0
+
+
+def test_en_match_with_empty_es_is_not_a_dead_row(client, search_project):
+    # An en-side hit whose es is empty has no anchor/display, so it must be
+    # dropped rather than rendered as a navigable row that no-ops on click.
+    _write_alignment(search_project / "alignments", "chapter_05", [
+        {"es_idx": 0, "en_idx": 0, "es": "", "en": "A solitary lighthouse.",
+         "confidence": "high", "chunk_id": "chapter_05_chunk_000"},
+    ])
+    data = _get(client, "lighthouse", "source").get_json()
+    assert data["n_results"] == 0
+    assert all(r["chapter"] != "chapter_05" for r in data["results"])

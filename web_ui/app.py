@@ -1460,6 +1460,11 @@ def _search_alignment_chapter(project_dir: Path, chapter: str, field: str,
         # [IMAGE:...] placeholder rows are not readable text (design body).
         if _IMAGE_PLACEHOLDER_RE.fullmatch(es.strip()):
             continue
+        # A navigable pair displays the es (primary) and jumps via its es prefix.
+        # An en-side match whose es is empty has nothing to show or anchor to, so
+        # it would render a dead row (anchor="" -> reader.js no-ops); skip it.
+        if not es.strip():
+            continue
         haystack = es if field == "es" else en
         m = _find_match(haystack, folded_q)
         if m is None:
@@ -1474,8 +1479,10 @@ def _search_alignment_chapter(project_dir: Path, chapter: str, field: str,
             "match_field": field,
             "match_start": start,
             "match_end": end,
-            # Result-click nav: reader.js matches a.es.startsWith(anchor) (D1/D2).
+            # Result-click nav: reader.js matches a.es.startsWith(anchor) (D1/D2)
+            # and uses es_idx as a tie-breaker when several es share the prefix.
             "anchor": es[:_SEARCH_ANCHOR_LEN],
+            "es_idx": a.get("es_idx"),
         })
     return rows
 

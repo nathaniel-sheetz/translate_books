@@ -1075,6 +1075,14 @@ body {
     }
 }
 
+/* Respect reduced-motion: a brief static highlight instead of the flash. */
+@media (prefers-reduced-motion: reduce) {
+    .sentence.search-landed {
+        animation: none;
+        background: var(--accent-bg);
+    }
+}
+
 .sentence.corrected {
     position: relative;
 }

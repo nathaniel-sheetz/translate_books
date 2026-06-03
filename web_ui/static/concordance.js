@@ -119,13 +119,21 @@
         surface.hidden = false;
         document.body.style.overflow = 'hidden';
 
-        if (sess && sess.resume) {
+        // Reuse the stored spot only when it belongs to the chapter we're in;
+        // a stored resume from an earlier chapter is stale after cross-chapter
+        // nav (DR6). Otherwise re-capture the current reading spot. Never
+        // persist a null resume — if content hasn't rendered yet, leave any
+        // prior resume intact and try again on the next open.
+        if (sess && sess.resume && sess.resume.chapter === chapter) {
             resume = sess.resume;
         } else {
-            // Fresh open from a clean reading context: remember the spot (DR6).
             const es = topmostVisibleEs();
-            resume = es ? { chapter, anchor: es.slice(0, 80), label: chapterLabel() } : null;
-            saveSession({ resume });
+            if (es) {
+                resume = { chapter, anchor: es.slice(0, 80), label: chapterLabel() };
+                saveSession({ resume });
+            } else {
+                resume = (sess && sess.resume) || null;
+            }
         }
         showResume();
 
@@ -149,6 +157,29 @@
         saveSession({ listScroll: resultsEl.scrollTop, side: side });
         surface.hidden = true;
         document.body.style.overflow = '';
+        // Return focus to the trigger so keyboard / AT users aren't stranded
+        // at the top of the document after the modal closes.
+        if (btnOpen) btnOpen.focus();
+    }
+
+    // Keep Tab focus inside the modal dialog (aria-modal=true) instead of
+    // leaking to the reader page behind it.
+    function trapFocus(e) {
+        if (e.key !== 'Tab') return;
+        const focusable = surface.querySelectorAll(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const visible = Array.prototype.filter.call(focusable,
+            el => !el.hidden && el.offsetParent !== null);
+        if (!visible.length) return;
+        const first = visible[0];
+        const last = visible[visible.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
     }
 
     // ---- side toggle ----
@@ -177,6 +208,8 @@
             'Search the translation or source across the whole book.'));
     }
 
+    let searchAbort = null;
+
     function runSearch() {
         const q = input.value.trim();
         if (q.length < MIN_QUERY) { renderIdle(); return; }
@@ -184,17 +217,27 @@
         setStatus(escapeHtml(i.search_loading || 'Searching…'));
         resultsEl.innerHTML = '';
 
+        // Cancel any in-flight search so a slow earlier response can't clobber
+        // newer results (e.g. rapid ES/EN toggling or Enter spam).
+        if (searchAbort) searchAbort.abort();
+        searchAbort = new AbortController();
+        const reqSide = side;
+
         fetch('/api/search/' + encodeURIComponent(projectId) +
-            '?q=' + encodeURIComponent(q) + '&side=' + encodeURIComponent(side))
+            '?q=' + encodeURIComponent(q) + '&side=' + encodeURIComponent(side),
+            { signal: searchAbort.signal })
             .then(r => {
                 if (!r.ok) throw new Error('http ' + r.status);
                 return r.json();
             })
             .then(data => {
-                saveSession({ query: q, side: side, data: data, listScroll: 0 });
+                saveSession({ query: q, side: reqSide, data: data, listScroll: 0 });
                 renderData(data);
             })
-            .catch(() => renderError());
+            .catch((err) => {
+                if (err && err.name === 'AbortError') return;  // superseded
+                renderError();
+            });
     }
 
     function renderError() {
@@ -320,9 +363,13 @@
     function navigateTo(row) {
         // Persist list + scroll so reopening restores results (DR3).
         saveSession({ listScroll: resultsEl.scrollTop });
+        // Pass es_idx so reader.js lands on the exact sentence when several
+        // share the anchor prefix (falls back to prefix-match if renumbered).
+        const esi = (row.es_idx != null)
+            ? '&esi=' + encodeURIComponent(row.es_idx) : '';
         window.location.href = '/read/' + encodeURIComponent(projectId) + '/' +
             encodeURIComponent(row.chapter) +
-            '?anchor=' + encodeURIComponent(row.anchor) + '&hl=1';
+            '?anchor=' + encodeURIComponent(row.anchor) + '&hl=1' + esi;
     }
 
     // ---- wiring ----
@@ -336,6 +383,8 @@
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
     });
+
+    surface.addEventListener('keydown', trapFocus);
 
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && !surface.hidden) {
