@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0.0] - 2026-06-03
+
+### Added
+- **Find in book (reader concordance)** — while reading, tap the search icon to search the whole book for any fragment and see every occurrence as a source + translation pair, so you can check whether a word, dialect tell, or grammatical pattern (like *vosotros* forms) was rendered consistently. Search runs against the Spanish translation or the English source via a toggle.
+- **Accent- and case-insensitive matching** — `habló`, `hablo`, and `HABLO` all match the same occurrences, so accents never split or hide a result. Partial-word fragments work too, letting you sweep morphology patterns yourself.
+- **Jump to the exact sentence** — tapping a translated result lands you on that sentence in the reader and briefly flashes it; returning to the search restores your full result list and scroll position, and a "Resume reading" control takes you back to where you were reading.
+- **Untranslated-source coverage** — fragments found in chapters that aren't translated yet appear as read-only snippets clearly marked "not translated," so you still see every hit across the book.
+- **Query logging** — each search is recorded to `search_queries.jsonl` to inform a later decision on whether lemmatized search is worth adding.
+
 ## [0.13.1.0] - 2026-05-29
 
 ### Fixed
