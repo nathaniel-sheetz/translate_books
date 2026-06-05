@@ -11,6 +11,7 @@ import json
 import math
 import re
 import secrets
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -1339,6 +1340,250 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
     # Insert image records (reverse order to preserve indices)
     for insert_idx, img_record in reversed(insert_queue):
         alignments.insert(insert_idx, img_record)
+
+
+# ============================================================================
+# Reader-mode book search ("Find in book")
+#
+# Folded substring concordance over a single book. side=translation searches
+# the aligned Spanish (`es`); side=source searches the English source: the
+# aligned `en` for translated chapters (navigable pairs) plus a raw chunk
+# `source_text` scan for chapters that have no alignment yet (display-only
+# KWIC, "not translated"). See design 20260603-113634 (T1/T2/T7, D1/D4/D5/D7/D9).
+# ============================================================================
+
+# Minimum non-space query length; shorter queries return no results (DR4).
+_SEARCH_MIN_QUERY = 2
+# Anchor prefix length for result-click nav (D2: generous prefix, first-match).
+_SEARCH_ANCHOR_LEN = 80
+# Words of context on each side of a KWIC source snippet (D4).
+_SEARCH_KWIC_WORDS = 7
+
+
+def _fold(text: str) -> str:
+    """Accent/case-fold for substring matching: NFD, drop combining marks, casefold."""
+    decomposed = unicodedata.normalize("NFD", text)
+    no_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return no_marks.casefold()
+
+
+def _fold_with_map(text: str) -> tuple[str, list[int]]:
+    """Fold ``text`` and return ``(folded, orig_index)`` where ``orig_index[i]``
+    is the index in the ORIGINAL ``text`` that produced folded char ``i``.
+
+    Folding can change string length (combining marks dropped, ``casefold`` can
+    expand a char to several), so match offsets in folded space cannot be reused
+    against the original. This map carries them back to the original (D5).
+    """
+    folded_chars: list[str] = []
+    orig_index: list[int] = []
+    for i, ch in enumerate(text):
+        for c in unicodedata.normalize("NFD", ch):
+            if unicodedata.combining(c):
+                continue
+            for fc in c.casefold():
+                folded_chars.append(fc)
+                orig_index.append(i)
+    return "".join(folded_chars), orig_index
+
+
+def _find_match(haystack: str, folded_query: str) -> Optional[tuple[int, int]]:
+    """First folded-substring match of ``folded_query`` in ``haystack``.
+
+    Returns ``(start, end)`` offsets into the ORIGINAL ``haystack`` (D5), or
+    ``None`` if there is no match. ``folded_query`` must be pre-folded and
+    non-empty (callers guard on min length).
+    """
+    if not folded_query:
+        return None
+    folded, orig_index = _fold_with_map(haystack)
+    pos = folded.find(folded_query)
+    if pos == -1:
+        return None
+    start = orig_index[pos]
+    end = orig_index[pos + len(folded_query) - 1] + 1
+    return start, end
+
+
+def _kwic_window(text: str, start: int, end: int,
+                 words_each_side: int = _SEARCH_KWIC_WORDS) -> tuple[str, int, int]:
+    """Slice a word-window snippet around ``[start, end)`` in ``text``.
+
+    Returns ``(snippet, match_start, match_end)`` where the offsets index into
+    ``snippet``. Trimmed to word boundaries (D4); whitespace is collapsed, and
+    an ellipsis marks truncation on either side. No sentence segmentation.
+    """
+    match = text[start:end]
+    before_words = text[:start].split()
+    after_words = text[end:].split()
+    left = " ".join(before_words[-words_each_side:]) if before_words else ""
+    right = " ".join(after_words[:words_each_side]) if after_words else ""
+
+    prefix = (left + " ") if left else ""
+    if len(before_words) > words_each_side:
+        prefix = "… " + prefix
+    snippet = prefix + match
+    if right:
+        snippet += " " + right
+    if len(after_words) > words_each_side:
+        snippet += " …"
+
+    ms = len(prefix)
+    return snippet, ms, ms + len(match)
+
+
+def _chunk_chapter_ids(project_dir: Path) -> set[str]:
+    """Chapter ids that have source chunks (derived from chunk filenames)."""
+    ids: set[str] = set()
+    chunks_dir = project_dir / "chunks"
+    if chunks_dir.exists():
+        for f in chunks_dir.glob("*_chunk_*.json"):
+            stem = f.stem
+            i = stem.rfind("_chunk_")
+            if i != -1:
+                ids.add(stem[:i])
+    return ids
+
+
+def _search_alignment_chapter(project_dir: Path, chapter: str, field: str,
+                              folded_q: str, label: str) -> list[dict]:
+    """Folded-substring hits in one chapter's alignment, matching ``field``
+    (``es`` or ``en``). Returns navigable source+translation pair rows. Raises
+    on a malformed/unreadable alignment file (caller maps to a 500)."""
+    align_path = project_dir / "alignments" / f"{chapter}.json"
+    data = json.loads(align_path.read_text(encoding="utf-8"))
+
+    rows: list[dict] = []
+    for a in data.get("alignments", []):
+        es = a.get("es", "") or ""
+        en = a.get("en", "") or ""
+        # [IMAGE:...] placeholder rows are not readable text (design body).
+        if _IMAGE_PLACEHOLDER_RE.fullmatch(es.strip()):
+            continue
+        # A navigable pair displays the es (primary) and jumps via its es prefix.
+        # An en-side match whose es is empty has nothing to show or anchor to, so
+        # it would render a dead row (anchor="" -> reader.js no-ops); skip it.
+        if not es.strip():
+            continue
+        haystack = es if field == "es" else en
+        m = _find_match(haystack, folded_q)
+        if m is None:
+            continue
+        start, end = m
+        rows.append({
+            "chapter": chapter,
+            "chapter_label": label,
+            "translated": True,
+            "es": es,
+            "en": en,
+            "match_field": field,
+            "match_start": start,
+            "match_end": end,
+            # Result-click nav: reader.js matches a.es.startsWith(anchor) (D1/D2)
+            # and uses es_idx as a tie-breaker when several es share the prefix.
+            "anchor": es[:_SEARCH_ANCHOR_LEN],
+            "es_idx": a.get("es_idx"),
+        })
+    return rows
+
+
+def _search_source_chapter(project_dir: Path, chapter: str, folded_q: str,
+                           label: str) -> list[dict]:
+    """Folded-substring hits over a chapter's raw source text, returned as
+    display-only KWIC snippets (D4/D7). Used for chapters that have no
+    alignment file yet (untranslated). No jump, no segmentation."""
+    text, _mtime, _kind = load_chapter_source_text(project_dir, chapter)
+    if not text:
+        return []
+    folded, orig_index = _fold_with_map(text)
+    rows: list[dict] = []
+    search_from = 0
+    while True:
+        pos = folded.find(folded_q, search_from)
+        if pos == -1:
+            break
+        start = orig_index[pos]
+        end = orig_index[pos + len(folded_q) - 1] + 1
+        snippet, ms, me = _kwic_window(text, start, end)
+        rows.append({
+            "chapter": chapter,
+            "chapter_label": label,
+            "translated": False,
+            "snippet": snippet,
+            "match_field": "snippet",
+            "match_start": ms,
+            "match_end": me,
+        })
+        search_from = pos + len(folded_q)
+    return rows
+
+
+def _log_search_query(project_dir: Path, q: str, side: str, n_results: int) -> None:
+    """Append one query record to search_queries.jsonl. Best-effort: a write
+    failure is logged and swallowed so search keeps serving (D6/D10)."""
+    record = {
+        "q": q,
+        "side": side,
+        "n_results": n_results,
+        "ts": datetime.now().isoformat(),
+    }
+    try:
+        with open(project_dir / "search_queries.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        app.logger.warning("Failed to log search query for %s: %s", project_dir.name, exc)
+
+
+@app.route("/api/search/<project_id>")
+def search_book(project_id):
+    """Folded-substring concordance search across one book.
+
+    Query params: ``q`` (fragment), ``side`` (``translation`` | ``source``,
+    default ``translation``). Returns results in document order, each row a
+    navigable source+translation pair (translated) or a display-only KWIC
+    snippet (untranslated source).
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Invalid ID"}), 400
+
+    q = (request.args.get("q") or "").strip()
+    side = request.args.get("side", "translation")
+    if side not in ("translation", "source"):
+        side = "translation"
+
+    folded_q = _fold(q)
+    if len(q) < _SEARCH_MIN_QUERY or not folded_q:
+        return jsonify({"results": [], "query": q, "side": side,
+                        "n_results": 0, "n_chapters": 0})
+
+    project_dir = _get_projects_dir() / project_id
+    manifest = _load_chapter_manifest_for_project(project_id)
+    chapter_prefix = _reader_strings().get("chapter_prefix", "Chapter")
+
+    align_dir = project_dir / "alignments"
+    aligned = {f.stem for f in align_dir.glob("*.json")} if align_dir.exists() else set()
+    # Source side also covers untranslated chapters (chunks but no alignment).
+    source_only = (_chunk_chapter_ids(project_dir) - aligned) if side == "source" else set()
+    all_chapters = sorted(aligned | source_only)
+
+    field = "es" if side == "translation" else "en"
+    results: list[dict] = []
+    try:
+        for ch in all_chapters:
+            label = _chapter_display_label(ch, manifest, chapter_prefix)
+            if ch in aligned:
+                results.extend(
+                    _search_alignment_chapter(project_dir, ch, field, folded_q, label))
+            else:  # source-side untranslated chapter
+                results.extend(
+                    _search_source_chapter(project_dir, ch, folded_q, label))
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": str(e)}), 500
+
+    n_chapters = len({r["chapter"] for r in results})
+    _log_search_query(project_dir, q, side, len(results))
+    return jsonify({"results": results, "query": q, "side": side,
+                    "n_results": len(results), "n_chapters": n_chapters})
 
 
 @app.route("/projects/<project_id>/images/<path:filename>")

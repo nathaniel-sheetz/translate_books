@@ -288,19 +288,41 @@
         if (!anchor || !alignmentData) return;
         const prefix = anchor.trim();
         if (!prefix) return;
+        // Search result deep-links pass &hl=1 to request a transient flash on
+        // landing. Other ?anchor= landings (remove-text, chunk-edit) omit it
+        // and are unaffected — they scroll but never flash. (D3)
+        const flash = params.get('hl') === '1';
+        // Optional disambiguator from search results: when several es share the
+        // same prefix, &esi=<es_idx> picks the exact sentence. Falls back to
+        // first-prefix-match if the idx is absent or was renumbered by realign.
+        const esi = params.get('esi');
 
         let match = null;
-        for (const a of alignmentData.alignments) {
-            if (a && typeof a.es === 'string' && a.es.startsWith(prefix)) {
-                match = a;
-                break;
+        if (esi !== null && esi !== '') {
+            for (const a of alignmentData.alignments) {
+                if (a && String(a.es_idx) === esi &&
+                    typeof a.es === 'string' && a.es.startsWith(prefix)) {
+                    match = a;
+                    break;
+                }
+            }
+        }
+        if (!match) {
+            for (const a of alignmentData.alignments) {
+                if (a && typeof a.es === 'string' && a.es.startsWith(prefix)) {
+                    match = a;
+                    break;
+                }
             }
         }
         if (!match) return;
         const el = content.querySelector(`[data-es-idx="${match.es_idx}"]`);
         if (!el) return;
-        // Strip the anchor param from the URL so refreshes don't keep jumping
+        // Strip the anchor/hl/esi params from the URL so refreshes don't keep
+        // jumping or re-flashing.
         params.delete('anchor');
+        params.delete('hl');
+        params.delete('esi');
         const newSearch = params.toString();
         const newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '');
         window.history.replaceState({}, '', newUrl);
@@ -308,6 +330,12 @@
         setTimeout(() => {
             const top = el.getBoundingClientRect().top + window.scrollY - 60;
             window.scrollTo({ top, behavior: 'instant' });
+            // Transient highlight only — never .active, so the annotate/edit
+            // bottom sheet stays closed. (D3)
+            if (flash) {
+                el.classList.add('search-landed');
+                setTimeout(() => el.classList.remove('search-landed'), 1800);
+            }
         }, 0);
     }
 

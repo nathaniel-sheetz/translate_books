@@ -68,6 +68,7 @@ After translation and alignment, read chapters at `/read/<project_id>/<chapter>`
 - **Remove text…** button prunes a stray sentence (caption, OCR artifact) from both the source and translation, propagating overlap regions and re-aligning the chapter. See [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md).
 - **Retranslate…** button gets a fresh LLM translation of the tapped sentence with a per-call model picker, lets you confirm the source span (alignment isn't always perfect), and replaces the existing translation with one confirm. See [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md).
 - **Realign chapter** button appears in the topbar whenever the current chapter has unsaved pending corrections. Clicking it applies the queued corrections to chunk files, then regenerates the sentence alignment in place. Applied corrections are archived to `corrections_applied.jsonl`; unresolvable rows are archived as `skipped`.
+- **Find in book** search icon in the topbar opens a full-screen concordance: type any fragment and see every occurrence across the whole book as a source + translation pair, toggling between the Spanish translation and the English source. Matching is accent- and case-insensitive (`habló` = `hablo` = `HABLO`) so you can audit a word, dialect tell, or grammatical pattern for consistency. Tapping a translated result jumps to that exact sentence; untranslated chapters show read-only snippets marked "not translated." Queries are logged to `search_queries.jsonl`.
 - Annotation system (word choice, inconsistency, footnote, flag)
 - Mark chapters as reviewed
 - Correction workflow for batch fixes
@@ -131,6 +132,7 @@ book_translation/
 │   └── static/
 │       ├── dashboard.js/css    # Dashboard logic and styles
 │       ├── reader.js/css       # Reader logic and styles
+│       ├── concordance.js/css  # "Find in book" search surface
 │       └── setup.js/css        # Setup wizard (used by dashboard)
 │
 ├── src/                        # Core library
