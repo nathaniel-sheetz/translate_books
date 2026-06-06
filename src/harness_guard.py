@@ -66,7 +66,7 @@ def guard_glossary_proposals(proposals: list[dict]) -> list[dict]:
         if not english or not str(english).strip():
             problems.append(f"  entry {i}: missing or empty 'english' (keys present: {sorted(p.keys())})")
             continue
-        translation = (p.get("translation") or p.get("spanish") or "").strip()
+        translation = str(p.get("translation") or p.get("spanish") or "").strip()
         if not translation:
             problems.append(f"  entry {i} ({english!r}): missing both 'translation' and 'spanish'")
 

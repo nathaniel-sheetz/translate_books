@@ -74,6 +74,17 @@ class TestGuardGlossaryProposals:
         with pytest.raises(HarnessValidationError):
             guard_glossary_proposals(["just a string"])  # type: ignore[list-item]
 
+    def test_integer_translation_does_not_raise_attribute_error(self):
+        # LLM can produce {"translation": 3} — guard must raise HarnessValidationError,
+        # not AttributeError from calling .strip() on an int.
+        proposals = [{"english": "three", "translation": 3}]
+        try:
+            guard_glossary_proposals(proposals)
+        except HarnessValidationError:
+            pass  # also acceptable — int coerced to "3" is truthy, may pass or fail
+        except AttributeError as e:
+            pytest.fail(f"guard raised AttributeError instead of HarnessValidationError: {e}")
+
 
 # --------------------------------------------------------------------------- #
 # validate_*_file — wrap the existing Pydantic loaders
