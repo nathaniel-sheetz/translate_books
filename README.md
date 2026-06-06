@@ -75,6 +75,22 @@ After translation and alignment, read chapters at `/read/<project_id>/<chapter>`
 
 ---
 
+## Conversational Translation (Claude Code)
+
+The `translate-harness` skill lets you translate a book without leaving your editor. Claude drafts the style guide and glossary in-conversation, pauses for your approval at each stage, then runs the deterministic pipeline (chunk → translate → combine → EPUB).
+
+```
+/translate-harness
+```
+
+- Every artifact (style guide, glossary, chunk files) is validated before reaching the pipeline — malformed drafts produce a clear error instead of a silent schema failure.
+- A cost gate runs `--cost-only` first and presents the estimate via an approval prompt; no API spending starts until you confirm in a separate turn.
+- Intermediate state is stored in `.tmp/` and cleared at startup to prevent prior-session contamination.
+
+Requires Claude Code with the translate-harness skill checked into `.claude/skills/translate-harness/`.
+
+---
+
 ## CLI Workflow
 
 All pipeline stages are also available as CLI scripts in `scripts/`:
@@ -147,6 +163,7 @@ book_translation/
 │   ├── glossary_bootstrap.py   # Glossary candidate extraction
 │   ├── translator.py           # Prompt rendering + workbook generation
 │   ├── epub_builder.py         # EPUB export
+│   ├── harness_guard.py        # Validation guards for translate-harness skill artifacts
 │   ├── edit_review_constants.py # EDIT_TAGS vocabulary (shared by report generator + web UI)
 │   ├── evaluators/             # Pluggable quality evaluators
 │   └── utils/                  # File I/O, text utilities, source loaders, glossary context helpers
