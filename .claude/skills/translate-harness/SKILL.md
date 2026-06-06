@@ -90,6 +90,10 @@ into `projects/<slug>/source.txt`.
   glossary + style-guide beats, then run translate onward (the stages are resumable).
 - Confirm `projects/<slug>/source.txt` (or `chapters/chapter_*.txt`) exists before
   continuing.
+- Clear intermediate state from any prior harness run for this project:
+  ```bash
+  python -c "import shutil, pathlib; shutil.rmtree('.tmp', ignore_errors=True); pathlib.Path('.tmp').mkdir()"
+  ```
 
 ## Step 1 — STYLE GUIDE beat (agent drafts, refine loop, approval gate)
 
@@ -293,7 +297,7 @@ dialect, and register carry into the glossary.
 Run chunk **with `--cost-only`** so the run chunks and then halts at the cost estimate
 (`--cost-only` exits before a single chunk is translated — it physically cannot spend):
 ```bash
-python scripts/translate_book.py projects/<slug> --start-stage chunk --cost-only
+python scripts/translate_book.py projects/<slug> --start-stage chunk --cost-only --cost-limit 999999
 ```
 This produces the chunks and prints the estimate, then stops. Carry that estimate straight
 into the Step 4 gate below — do not run any command without `--cost-only` until the user
@@ -315,7 +319,7 @@ has approved.
    recompute it, re-run the cost estimate — still WITHOUT translating, so it never calls
    input() and never spends money:
    ```bash
-   python scripts/translate_book.py projects/<slug> --start-stage translate --cost-only
+   python scripts/translate_book.py projects/<slug> --start-stage translate --cost-only --cost-limit 999999
    ```
 2. **STOP — approval beat. END THE TURN HERE.** Show the estimate, then ask via
    AskUserQuestion: proceed / abort — and stop. Do not call any further tool in this
