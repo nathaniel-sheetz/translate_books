@@ -98,5 +98,7 @@ docs/design/
 
 # Claude Code project config
 CLAUDE.md
-.claude/
+.claude/*
+# ...but track project-local skills
+!.claude/skills/
 .gstack/
