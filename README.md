@@ -84,7 +84,7 @@ The `translate-harness` skill lets you translate a book without leaving your edi
 ```
 
 - Every artifact (style guide, glossary, chunk files) is validated before reaching the pipeline — malformed drafts produce a clear error instead of a silent schema failure.
-- A cost gate runs `--cost-only` first and presents the estimate via an approval prompt; no API spending starts until you confirm in a separate turn.
+- A hard cost gate always shows the estimate before API spending. The harness runs `--cost-only` first, asks for approval in a separate turn, then passes `--yes` only after you confirm.
 - Intermediate state is stored in `.tmp/` and cleared at startup to prevent prior-session contamination.
 
 Requires Claude Code with the translate-harness skill checked into `.claude/skills/translate-harness/`.

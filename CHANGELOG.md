@@ -2,18 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.1.0] - 2026-06-07
+
+### Changed
+- **Cost gate simplified** — `--cost-only` is now a pure estimator that always exits cleanly before any prompt or spend, regardless of the estimated amount. The old `--cost-limit` threshold flag is removed; the translate-harness skill now uses `--yes` to record the human's explicit approval from its own AskUserQuestion gate before passing it to the non-interactive run.
+
+### Fixed
+- Non-interactive translate runs without `--yes` now exit with code 1 and a recovery message ("re-run with --yes once you've approved the estimate") instead of silently deadlocking on `input()`.
+- translate-harness SKILL.md updated to reflect the new `--cost-only` / `--yes` API; removed the `--cost-limit 999999` workaround that was required in v0.15.0.0.
+
 ## [0.15.0.0] - 2026-06-06
 
 ### Added
 - **translate-harness skill** — translate a book conversationally without copy-pasting into an external chat. The agent drafts the style guide and glossary in-conversation, pauses for your approval at each stage, then runs the deterministic pipeline (chunk → translate → combine → EPUB). Each approval gate authorizes only its own stage; approving the glossary never triggers translation.
-- **Cost gate** — before any API spending, the skill runs `--cost-only` to produce the estimate, presents it via AskUserQuestion, and ends its turn. Translation only starts after you explicitly approve in a separate turn — no earlier approval (style guide, glossary, chunk) can authorize it.
+- **Cost gate** — before any API spending, the skill runs `--cost-only` to produce the estimate, presents it via AskUserQuestion, and ends its turn. Translation only starts with `--yes` after you explicitly approve in a separate turn — no earlier approval (style guide, glossary, chunk) can authorize it.
 - **Validation guard (`src/harness_guard.py`)** — every agent-produced artifact (glossary proposals, style.json, glossary.json, chunk files) passes a validation guard before reaching the pipeline. Malformed drafts raise a clear re-draft-friendly error instead of poisoning the run with a KeyError or silent schema mismatch.
-- **Pipeline spine tests** — 17 offline tests cover all validation guard branches and the full chunk → translate → combine → EPUB path with a stubbed LLM seam. A dedicated test asserts the translate stage never deadlocks by calling `input()` when an agent-compatible cost limit is set.
+- **Pipeline spine tests** — offline tests cover all validation guard branches and the full chunk → translate → combine → EPUB path with a stubbed LLM seam. Dedicated tests assert the approved path, `--cost-only`, and unapproved non-interactive runs never deadlock by calling `input()`.
 - **Skill tracked in version control** — `.gitignore` now tracks `.claude/skills/` so the translate-harness skill ships with the repo.
 
 ### Fixed
 - `guard_glossary_proposals` no longer raises `AttributeError` when an LLM produces a numeric `translation` value; it coerces to string before validation.
-- `--cost-only` chunk and re-estimate commands now pass `--cost-limit 999999` to prevent `input()` from firing on books estimated above $5 before the cost-only exit path runs.
+- `scripts/translate_book.py` now treats `--cost-only` as a pure estimator that exits before confirmation, and unapproved non-interactive translation exits with instructions to re-run using `--yes` after approval.
 - Intermediate harness state (`.tmp/` files) is cleared at Step 0 to prevent stale data from a prior session contaminating the next run.
 
 ## [0.14.0.0] - 2026-06-03
