@@ -1,6 +1,7 @@
 """Tests for the EPUB builder module."""
 
 import logging
+import json
 import tempfile
 import zipfile
 from pathlib import Path
@@ -9,12 +10,14 @@ import pytest
 
 from src.epub_builder import (
     _DEFAULT_TRANSLATOR_HEADING,
+    _discover_chunk_chapters,
     _int_to_roman,
     _load_chapter_manifest,
     _load_toc_format,
     _normalize_heading,
     _strip_image_blocks,
     build_epub,
+    build_epub_from_chunks,
     chapter_text_to_xhtml,
     collect_referenced_images,
     detect_chapter_heading,
@@ -389,6 +392,28 @@ class TestBuildEpub:
 
         return tmp_path
 
+    def _write_chunk(self, chunks_dir, chapter_id, position, source, translated):
+        chunk_id = f"{chapter_id}_chunk_{position:03d}"
+        payload = {
+            "id": chunk_id,
+            "chapter_id": chapter_id,
+            "position": position,
+            "source_text": source,
+            "translated_text": translated,
+            "metadata": {
+                "char_start": 0,
+                "char_end": len(source),
+                "overlap_start": 0,
+                "overlap_end": 0,
+                "paragraph_count": 1,
+                "word_count": len(source.split()),
+            },
+        }
+        (chunks_dir / f"{chunk_id}.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
     def test_builds_valid_epub(self, tmp_path):
         project = self._make_project(tmp_path)
         output = build_epub(
@@ -430,6 +455,79 @@ class TestBuildEpub:
         (tmp_path / "images").mkdir()
         with pytest.raises(FileNotFoundError, match="No chapter_"):
             build_epub(project_path=tmp_path, title="T", author="A")
+
+    def test_build_epub_from_chunks_includes_only_fully_translated(self, tmp_path):
+        project = self._make_project(tmp_path)
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+
+        self._write_chunk(chunks_dir, "chapter_01", 0, "English one.", "CAPÍTULO I\n\nUno traducido.")
+        self._write_chunk(chunks_dir, "chapter_01", 1, "English two.", "Más texto traducido.")
+        self._write_chunk(chunks_dir, "chapter_02", 0, "English three.", "CAPÍTULO II\n\nDos traducido.")
+        self._write_chunk(chunks_dir, "chapter_02", 1, "English four.", None)
+
+        result = build_epub_from_chunks(
+            project_path=project,
+            title="Test Book",
+            author="Test Author",
+        )
+
+        assert result.path.exists()
+        assert result.included == ["chapter_01"]
+        assert result.skipped == ["chapter_02"]
+        with zipfile.ZipFile(result.path) as zf:
+            xhtml_files = [
+                n for n in zf.namelist()
+                if n.endswith(".xhtml") and "chapter_" in n
+            ]
+            assert len(xhtml_files) == 1
+            content = zf.read(xhtml_files[0]).decode("utf-8")
+            assert "Uno traducido" in content
+            assert "Más texto traducido" in content
+            assert "English" not in content
+
+    def test_build_epub_from_chunks_raises_when_none_fully_translated(self, tmp_path):
+        project = self._make_project(tmp_path)
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "English one.", "CAPÍTULO I\n\nUno traducido.")
+        self._write_chunk(chunks_dir, "chapter_01", 1, "English two.", None)
+        self._write_chunk(chunks_dir, "chapter_02", 0, "English three.", None)
+
+        with pytest.raises(ValueError, match="No fully translated chapters found"):
+            build_epub_from_chunks(
+                project_path=project,
+                title="Test Book",
+                author="Test Author",
+            )
+
+    def test_build_epub_from_chunks_chapters_filter_reports_skipped(self, tmp_path):
+        project = self._make_project(tmp_path)
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "English one.", "CAPÍTULO I\n\nUno traducido.")
+        self._write_chunk(chunks_dir, "chapter_02", 0, "English two.", "CAPÍTULO II\n\nDos traducido.")
+        self._write_chunk(chunks_dir, "chapter_02", 1, "English three.", None)
+        self._write_chunk(chunks_dir, "chapter_03", 0, "English four.", "CAPÍTULO III\n\nTres traducido.")
+
+        result = build_epub_from_chunks(
+            project_path=project,
+            title="Test Book",
+            author="Test Author",
+            chapters=["chapter_01", "chapter_02", "chapter_99"],
+        )
+
+        assert result.included == ["chapter_01"]
+        assert result.skipped == ["chapter_02", "chapter_99"]
+        with zipfile.ZipFile(result.path) as zf:
+            content = "\n".join(
+                zf.read(n).decode("utf-8")
+                for n in zf.namelist()
+                if n.endswith(".xhtml") and "chapter_" in n
+            )
+            assert "Uno traducido" in content
+            assert "Dos traducido" not in content
+            assert "Tres traducido" not in content
 
     def test_cover_auto_detection(self, tmp_path):
         project = self._make_project(tmp_path)
@@ -855,4 +953,134 @@ class TestTocFormat:
             # Default branch keeps the "Heading: Subtitle" format.
             assert "Sermón I: Hay un Dios." in ncx
             assert "Sermon III: The Good Shepherd" in ncx
+
+
+# --- _discover_chunk_chapters ---
+
+class TestDiscoverChunkChapters:
+    """Unit tests for the _discover_chunk_chapters helper."""
+
+    def test_empty_dir_returns_empty(self, tmp_path):
+        result = _discover_chunk_chapters(tmp_path)
+        assert result == {}
+
+    def test_non_matching_filenames_are_skipped(self, tmp_path):
+        # Files that look like chunks but don't match *_chunk_*.json pattern
+        (tmp_path / "chapter_01.json").write_text("{}")
+        (tmp_path / "readme.txt").write_text("hi")
+        (tmp_path / "some_file_chunk_.json").write_text("{}")  # no digit after chunk_
+        result = _discover_chunk_chapters(tmp_path)
+        assert result == {}
+
+    def test_groups_by_chapter_id(self, tmp_path):
+        for ch in ["chapter_01", "chapter_02"]:
+            for i in range(2):
+                (tmp_path / f"{ch}_chunk_{i:03d}.json").write_text("{}")
+        result = _discover_chunk_chapters(tmp_path)
+        assert set(result.keys()) == {"chapter_01", "chapter_02"}
+        assert len(result["chapter_01"]) == 2
+        assert len(result["chapter_02"]) == 2
+
+    def test_paths_sorted_within_chapter(self, tmp_path):
+        for i in [2, 0, 1]:
+            (tmp_path / f"chapter_01_chunk_{i:03d}.json").write_text("{}")
+        result = _discover_chunk_chapters(tmp_path)
+        names = [p.name for p in result["chapter_01"]]
+        assert names == sorted(names)
+
+    def test_chapters_sorted_by_id(self, tmp_path):
+        for ch in ["chapter_03", "chapter_01", "chapter_02"]:
+            (tmp_path / f"{ch}_chunk_000.json").write_text("{}")
+        result = _discover_chunk_chapters(tmp_path)
+        assert list(result.keys()) == ["chapter_01", "chapter_02", "chapter_03"]
+
+
+# --- build_epub_from_chunks edge cases ---
+
+class TestBuildEpubFromChunksEdgeCases:
+    """Edge cases for build_epub_from_chunks not covered in TestBuildEpub."""
+
+    def _write_chunk(self, chunks_dir, chapter_id, position, source, translated):
+        chunk_id = f"{chapter_id}_chunk_{position:03d}"
+        payload = {
+            "id": chunk_id,
+            "chapter_id": chapter_id,
+            "position": position,
+            "source_text": source,
+            "translated_text": translated,
+            "metadata": {
+                "char_start": 0,
+                "char_end": len(source),
+                "overlap_start": 0,
+                "overlap_end": 0,
+                "paragraph_count": 1,
+                "word_count": len(source.split()),
+            },
+        }
+        (chunks_dir / f"{chunk_id}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def _make_project(self, tmp_path):
+        """Minimal project with no pre-existing chapters/ dir."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "images").mkdir()
+        return project
+
+    def test_raises_when_chunks_dir_missing(self, tmp_path):
+        project = self._make_project(tmp_path)
+        # No chunks/ directory at all — glob returns nothing, included stays empty
+        with pytest.raises(ValueError, match="No fully translated chapters found"):
+            build_epub_from_chunks(
+                project_path=project,
+                title="T",
+                author="A",
+            )
+
+    def test_requested_chapters_not_in_discovered_go_to_skipped(self, tmp_path):
+        project = self._make_project(tmp_path)
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "Hola.")
+
+        result = build_epub_from_chunks(
+            project_path=project,
+            title="T",
+            author="A",
+            chapters=["chapter_01", "chapter_99"],
+        )
+        assert "chapter_01" in result.included
+        assert "chapter_99" in result.skipped
+
+    def test_result_is_named_tuple_with_correct_fields(self, tmp_path):
+        project = self._make_project(tmp_path)
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "Hola.")
+
+        result = build_epub_from_chunks(
+            project_path=project,
+            title="T",
+            author="A",
+        )
+        assert hasattr(result, "path")
+        assert hasattr(result, "included")
+        assert hasattr(result, "skipped")
+        assert isinstance(result.included, list)
+        assert isinstance(result.skipped, list)
+
+    def test_empty_chapters_list_raises_value_error(self, tmp_path):
+        project = self._make_project(tmp_path)
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "Hola.")
+
+        with pytest.raises(ValueError, match="No fully translated chapters found"):
+            build_epub_from_chunks(
+                project_path=project,
+                title="T",
+                author="A",
+                chapters=[],
+            )
 
