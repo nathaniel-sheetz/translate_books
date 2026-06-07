@@ -19,6 +19,8 @@ Deliberately omitted:
                   validate    set, no API         *.txt        valid zip
 """
 
+import subprocess
+import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -52,25 +54,28 @@ def _fake_translate(chunk, **kwargs):
     return chunk
 
 
+_FAKE_COST_USD = 1.23  # non-zero so the cost-gate/confirmation path is exercised
+
+
 def _fake_estimate_cost(chunks, provider, model, **kwargs):
     """Stand in for estimate_cost — avoid coupling to llm_config pricing tables."""
     n = len(chunks)
     return {
         "input_tokens": 100 * n,
         "output_tokens_estimate": 100 * n,
-        "cost_usd": 0.0,
-        "cost_per_chunk_usd": 0.0,
+        "cost_usd": _FAKE_COST_USD,
+        "cost_per_chunk_usd": _FAKE_COST_USD / n if n else 0.0,
         "batch_discount_applied": False,
     }
 
 
 def _args() -> SimpleNamespace:
-    # Mirrors the non-interactive args the SKILL.md must pass: a cost_limit high enough
-    # that the input() prompt in stage_translate is never reached (T2 — no agent deadlock).
+    # Mirrors the non-interactive approved args the SKILL.md must pass after its own
+    # AskUserQuestion approval gate (T2 — no agent deadlock).
     return SimpleNamespace(
         chunk_size=2000, overlap_paragraphs=1, min_overlap_words=50,
         provider="anthropic", model="claude-sonnet-4-20250514",
-        chapters=None, cost_limit=1e9, cost_only=False,
+        chapters=None, cost_only=False, yes=True,
         project_name="Test Book", author="Tester",
         target_lang="Spanish", source_lang="English",
         target_lang_code="es", source_lang_code="en",
@@ -127,7 +132,7 @@ def test_pipeline_spine_produces_valid_epub(project: Path):
 
 
 def test_translate_stage_never_blocks_on_input(project: Path, monkeypatch):
-    """T2 guard: with an explicit high cost_limit, stage_translate must not call input()."""
+    """T2 guard: with explicit approval, stage_translate must not call input()."""
     def _boom(*_a, **_k):
         raise AssertionError("stage_translate called input() — would deadlock an agent")
 
@@ -137,3 +142,121 @@ def test_translate_stage_never_blocks_on_input(project: Path, monkeypatch):
     state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
     state = tb.STAGE_FUNCTIONS["translate"](args, project, state)  # must not raise
     assert state["stage_completed"] == "translate"
+
+
+def test_cost_only_exits_before_confirmation(project: Path, monkeypatch):
+    """The pure estimator path never prompts and never translates."""
+    def _boom(*_a, **_k):
+        raise AssertionError("stage_translate called input() in --cost-only mode")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    args = _args()
+    args.cost_only = True
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+
+    with pytest.raises(SystemExit) as exc:
+        tb.STAGE_FUNCTIONS["translate"](args, project, state)
+
+    assert exc.value.code == 0
+
+
+def test_unapproved_noninteractive_translate_exits_without_prompt(project: Path, monkeypatch):
+    """A non-interactive paid run must fail closed unless --yes was supplied."""
+    def _boom(*_a, **_k):
+        raise AssertionError("stage_translate called input() in non-interactive mode")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    args = _args()
+    args.yes = False
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+
+    with pytest.raises(SystemExit) as exc:
+        tb.STAGE_FUNCTIONS["translate"](args, project, state)
+
+    assert exc.value.code == 1
+
+
+def test_unapproved_noninteractive_translate_prints_recovery(project: Path, monkeypatch, capsys):
+    """The fail-closed path should tell agents exactly how to proceed after approval."""
+    def _boom(*_a, **_k):
+        raise AssertionError("stage_translate called input() in non-interactive mode")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    args = _args()
+    args.yes = False
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+
+    with pytest.raises(SystemExit) as exc:
+        tb.STAGE_FUNCTIONS["translate"](args, project, state)
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "re-run with --yes" in out
+
+
+@pytest.mark.parametrize("response", ["n", ""])
+def test_interactive_rejection_exits_without_translating(project: Path, monkeypatch, response: str):
+    """Human CLI users can decline the spend estimate without mutating chunks."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: response)
+    args = _args()
+    args.yes = False
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+
+    with pytest.raises(SystemExit) as exc:
+        tb.STAGE_FUNCTIONS["translate"](args, project, state)
+
+    assert exc.value.code == 0
+    for cf in (project / "chunks").glob("*_chunk_*.json"):
+        assert not validate_chunk_file(cf).has_translation
+
+
+def test_interactive_approval_translates(project: Path, monkeypatch):
+    """Human CLI users can approve the spend estimate and proceed."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "y")
+    args = _args()
+    args.yes = False
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+
+    state = tb.STAGE_FUNCTIONS["translate"](args, project, state)
+
+    assert state["stage_completed"] == "translate"
+    for cf in (project / "chunks").glob("*_chunk_*.json"):
+        assert validate_chunk_file(cf).has_translation
+
+
+def test_translate_book_cli_rejects_removed_cost_limit(tmp_path: Path):
+    """The old threshold flag should not silently come back into the harness path."""
+    project_dir = tmp_path / "book"
+    project_dir.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/translate_book.py",
+            "--project-dir",
+            str(project_dir),
+            "--start-stage",
+            "translate",
+            "--cost-only",
+            "--cost-limit",
+            "999999",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
+    assert "--cost-limit" in result.stderr
