@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-CLI script for building an EPUB from translated chapter files.
+CLI script for building an EPUB from translated chunks.
 
-Reads per-chapter .txt files, resolves [IMAGE:...] placeholders against
-the project images/ directory, and produces a valid EPUB 3 file with
-embedded images, table of contents, and basic styling.
+By default, includes only fully translated chapters discovered from
+chunks/*_chunk_*.json. If --chapters-dir is passed, builds verbatim from
+that directory of chapter_*.txt files as a legacy escape hatch.
 
 Usage:
     python build_epub.py projects/fabre2 --title "Book Title" --author "Author Name"
@@ -30,12 +30,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.epub_builder import build_epub, collect_referenced_images
+from src.epub_builder import build_epub, build_epub_from_chunks
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Build an EPUB from translated chapter files with embedded images.',
+        description='Build an EPUB from translated chunks with embedded images.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -109,16 +109,33 @@ Examples:
         chapters_dir = project_dir / chapters_dir
 
     try:
-        output = build_epub(
-            project_path=project_dir,
-            title=args.title,
-            author=args.author,
-            language=args.language,
-            cover_image=args.cover,
-            output_path=args.output,
-            chapters_dir=chapters_dir,
-        )
+        if chapters_dir is not None:
+            output = build_epub(
+                project_path=project_dir,
+                title=args.title,
+                author=args.author,
+                language=args.language,
+                cover_image=args.cover,
+                output_path=args.output,
+                chapters_dir=chapters_dir,
+            )
+            included = skipped = None
+        else:
+            result = build_epub_from_chunks(
+                project_path=project_dir,
+                title=args.title,
+                author=args.author,
+                language=args.language,
+                cover_image=args.cover,
+                output_path=args.output,
+            )
+            output = result.path
+            included = result.included
+            skipped = result.skipped
     except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
@@ -129,6 +146,9 @@ Examples:
     size_kb = output.stat().st_size / 1024
     print(f"\nEPUB built successfully: {output}")
     print(f"  Size: {size_kb:.1f} KB")
+    if included is not None:
+        print(f"  Included translated chapters ({len(included)}): {included}")
+        print(f"  Skipped untranslated/partial chapters ({len(skipped)}): {skipped}")
 
 
 if __name__ == '__main__':

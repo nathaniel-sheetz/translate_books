@@ -256,3 +256,77 @@ class TestBuildEpubPersistsNote:
         assert rv.status_code == 400
         # No file should be written
         assert not (project / "translator_note.json").exists()
+
+
+class TestBuildEpubRoute:
+    """Tests for the build-epub route post-refactor (ValueError→400, success path)."""
+
+    def _write_chunk(self, chunks_dir, chapter_id, position, source, translated):
+        chunk_id = f"{chapter_id}_chunk_{position:03d}"
+        payload = {
+            "id": chunk_id,
+            "chapter_id": chapter_id,
+            "position": position,
+            "source_text": source,
+            "translated_text": translated,
+            "metadata": {
+                "char_start": 0,
+                "char_end": len(source),
+                "overlap_start": 0,
+                "overlap_end": 0,
+                "paragraph_count": 1,
+                "word_count": len(source.split()),
+            },
+        }
+        (chunks_dir / f"{chunk_id}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def test_no_chunks_returns_400_with_error(self, client, project):
+        """No fully translated chapters raises ValueError → 400."""
+        rv = client.post(
+            "/api/project/p1/build-epub",
+            json={"title": "Book", "author": "Author"},
+        )
+        assert rv.status_code == 400
+        data = rv.get_json()
+        assert "error" in data
+        assert "translated" in data["error"].lower()
+
+    def test_success_returns_chapters_included(self, client, project):
+        """Happy path: one translated chapter → 200 with chapters_included."""
+        (project / "images").mkdir()
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(
+            chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola."
+        )
+
+        rv = client.post(
+            "/api/project/p1/build-epub",
+            json={"title": "My Book", "author": "Test Author"},
+        )
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["ok"] is True
+        assert data["chapters_included"] == 1
+        assert data["filename"].endswith(".epub")
+        assert data["size_bytes"] > 0
+
+    def test_generic_exception_returns_500(self, client, project, monkeypatch):
+        """Unexpected exceptions are caught and return 500."""
+        import web_ui.app as app_module
+        import src.epub_builder as eb_module
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(eb_module, "build_epub_from_chunks", boom)
+
+        rv = client.post(
+            "/api/project/p1/build-epub",
+            json={"title": "Book", "author": "Author"},
+        )
+        assert rv.status_code == 500
+        data = rv.get_json()
+        assert "error" in data

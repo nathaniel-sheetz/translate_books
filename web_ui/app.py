@@ -5147,55 +5147,15 @@ def build_epub_route(project_id):
 
     note = _load_translator_note(project_id)
 
-    chunks_dir = project_dir / "chunks"
-
-    # Determine which chapters are fully translated
-    chunk_index = {}
-    if chunks_dir.exists():
-        for cf in sorted(chunks_dir.glob("*_chunk_*.json")):
-            try:
-                with open(cf, "r", encoding="utf-8") as f:
-                    cdata = json.load(f)
-                ch_id = cdata.get("chapter_id", "")
-                if ch_id not in chunk_index:
-                    chunk_index[ch_id] = {"total": 0, "translated": 0, "files": []}
-                chunk_index[ch_id]["total"] += 1
-                chunk_index[ch_id]["files"].append(cf)
-                if cdata.get("translated_text"):
-                    chunk_index[ch_id]["translated"] += 1
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    translated_chapter_ids = [
-        ch_id for ch_id, info in chunk_index.items()
-        if info["total"] > 0 and info["translated"] == info["total"]
-    ]
-
-    if not translated_chapter_ids:
-        return jsonify({"error": "No fully translated chapters found"}), 400
-
-    # Auto-combine translated chapters into a temp directory for epub building
-    import shutil
-    import tempfile
-    from src.combiner import combine_chunks
-
-    temp_dir = Path(tempfile.mkdtemp(prefix="epub_"))
     try:
-        for ch_id in translated_chapter_ids:
-            chunk_files = sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json"))
-            chunks = [load_chunk(cf) for cf in chunk_files]
-            combined_text = combine_chunks(chunks)
-            (temp_dir / f"{ch_id}.txt").write_text(combined_text, encoding="utf-8")
-
-        from src.epub_builder import build_epub
-        epub_filename = Path(title).name + ".epub"
+        from src.epub_builder import build_epub_from_chunks
+        epub_filename = (Path(title).name or project_id) + ".epub"
         epub_output = project_dir / epub_filename
-        epub_path = build_epub(
+        result = build_epub_from_chunks(
             project_path=project_dir,
             title=title,
             author=author,
             language=language,
-            chapters_dir=temp_dir,
             output_path=epub_output,
             chapter_heading_config=chapter_heading_config,
             translator_note_heading=note.get("heading", ""),
@@ -5206,6 +5166,7 @@ def build_epub_route(project_id):
             source_title=metadata["source_title"] or None,
             publisher=metadata["publisher"] or None,
         )
+        epub_path = result.path
 
         size_bytes = epub_path.stat().st_size
 
@@ -5213,12 +5174,14 @@ def build_epub_route(project_id):
             "ok": True,
             "filename": epub_path.name,
             "size_bytes": size_bytes,
-            "chapters_included": len(translated_chapter_ids),
+            "chapters_included": len(result.included),
         })
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Corrupt chunk file: {e}"}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @app.route("/api/project/<project_id>/download-epub")

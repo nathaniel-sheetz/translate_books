@@ -198,3 +198,108 @@ class TestStageChunk:
         assert (tmp_path / "chunks").exists()
         chunk_files = list((tmp_path / "chunks").glob("*.json"))
         assert len(chunk_files) >= 1
+
+
+# ---------------------------------------------------------------------------
+# TestStageEpub
+# ---------------------------------------------------------------------------
+
+class TestStageEpub:
+    """Tests for stage_epub in translate_book.py."""
+
+    def _write_chunk(self, chunks_dir, chapter_id, position, source, translated):
+        chunk_id = f"{chapter_id}_chunk_{position:03d}"
+        payload = {
+            "id": chunk_id,
+            "chapter_id": chapter_id,
+            "position": position,
+            "source_text": source,
+            "translated_text": translated,
+            "metadata": {
+                "char_start": 0,
+                "char_end": len(source),
+                "overlap_start": 0,
+                "overlap_end": 0,
+                "paragraph_count": 1,
+                "word_count": len(source.split()),
+            },
+        }
+        (chunks_dir / f"{chunk_id}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def test_stage_epub_builds_epub_and_updates_state(self, tmp_path):
+        (tmp_path / "images").mkdir()
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola.")
+
+        from scripts.translate_book import stage_epub
+        args = MagicMock()
+        args.project_name = "My Book"
+        args.author = "Author"
+        args.target_lang_code = "es"
+        args.chapters = None
+
+        state = stage_epub(args, tmp_path, {})
+
+        assert state["stage_completed"] == "epub"
+        assert "epub_path" in state
+        assert Path(state["epub_path"]).exists()
+        assert state["epub_included_chapters"] == ["chapter_01"]
+        assert state["epub_skipped_chapters"] == []
+
+    def test_stage_epub_with_chapters_filter(self, tmp_path):
+        (tmp_path / "images").mkdir()
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola.")
+        self._write_chunk(chunks_dir, "chapter_02", 0, "World.", "CAPÍTULO II\n\nMundo.")
+
+        from scripts.translate_book import stage_epub
+        args = MagicMock()
+        args.project_name = "Filtered Book"
+        args.author = "Author"
+        args.target_lang_code = "es"
+        args.chapters = "1"  # parse_chapter_range("1") == {"chapter_01"}
+
+        state = stage_epub(args, tmp_path, {})
+
+        assert state["epub_included_chapters"] == ["chapter_01"]
+        assert "chapter_02" not in state["epub_included_chapters"]
+
+    def test_stage_epub_prints_skipped_when_present(self, tmp_path, capsys):
+        (tmp_path / "images").mkdir()
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola.")
+        self._write_chunk(chunks_dir, "chapter_02", 0, "World.", None)  # untranslated
+
+        from scripts.translate_book import stage_epub
+        args = MagicMock()
+        args.project_name = "Book"
+        args.author = "Author"
+        args.target_lang_code = "es"
+        args.chapters = None
+
+        stage_epub(args, tmp_path, {})
+        captured = capsys.readouterr()
+        assert "Skipped" in captured.out
+        assert "chapter_02" in captured.out
+
+    def test_stage_epub_no_skipped_line_when_all_translated(self, tmp_path, capsys):
+        (tmp_path / "images").mkdir()
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola.")
+
+        from scripts.translate_book import stage_epub
+        args = MagicMock()
+        args.project_name = "Book"
+        args.author = "Author"
+        args.target_lang_code = "es"
+        args.chapters = None
+
+        stage_epub(args, tmp_path, {})
+        captured = capsys.readouterr()
+        assert "Skipped" not in captured.out
