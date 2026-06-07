@@ -273,19 +273,25 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     # Cost estimation
     chunks_for_cost = [chunk for _, chunk in untranslated]
     cost_info = estimate_cost(chunks_for_cost, provider, model, glossary=glossary, style_guide=style_guide)
-    print(f"  Estimated cost: ${cost_info['cost_usd']:.2f} ({cost_info['input_tokens']:,} input tokens)")
-
-    cost_limit = getattr(args, "cost_limit", 5.0) or 5.0
-    if cost_info["cost_usd"] > cost_limit:
-        print(f"  WARNING: Estimated cost ${cost_info['cost_usd']:.2f} exceeds --cost-limit ${cost_limit:.2f}")
-        response = input("  Continue? [y/N] ").strip().lower()
-        if response != "y":
-            print("  Aborted.")
-            sys.exit(0)
+    print(
+        f"  Estimated cost: ${cost_info['cost_usd']:.2f} "
+        f"for {len(untranslated)} chunk(s) with {provider}/{model} "
+        f"({cost_info['input_tokens']:,} input tokens)"
+    )
 
     if getattr(args, "cost_only", False):
         print("  --cost-only: stopping after estimate")
         sys.exit(0)
+
+    if not getattr(args, "yes", False):
+        if sys.stdin.isatty():
+            response = input(f"  Spend ~${cost_info['cost_usd']:.2f} translating {len(untranslated)} chunk(s)? [y/N] ")
+            if response.strip().lower() != "y":
+                print("  Aborted.")
+                sys.exit(0)
+        else:
+            print("  Cost estimate requires approval; re-run with --yes once you've approved the estimate.")
+            sys.exit(1)
 
     # Translate
     project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
@@ -522,10 +528,10 @@ def main():
                         help="API provider (default: anthropic)")
     parser.add_argument("--model", default="claude-sonnet-4-20250514",
                         help="Model identifier (default: claude-sonnet-4-20250514)")
-    parser.add_argument("--cost-limit", type=float, default=5.0,
-                        help="Cost limit in USD, prompts if exceeded (default: $5.00)")
     parser.add_argument("--cost-only", action="store_true",
-                        help="Only estimate cost, don't translate")
+                        help="Estimate cost and exit without translating (never spends, never prompts)")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip the interactive cost confirmation; use only after you've already reviewed the estimate")
 
     # Chapter detection
     parser.add_argument("--chapter-pattern", default="roman",
