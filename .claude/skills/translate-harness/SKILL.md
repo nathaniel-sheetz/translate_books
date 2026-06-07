@@ -32,8 +32,6 @@ Long-book robustness (formal resume, batching) is out of scope.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ NEVER invoke an interactive code path — every input() prompt DEADLOCKS you.│
 │   ✗ scripts/generate_style_guide.py  (built on input() per question)       │
-│   ✗ translate_book.py translate stage WITHOUT an explicit high --cost-limit │
-│     (it calls input("Continue? [y/N]") when the estimate exceeds the limit) │
 │ Instead: call the src/ helper FUNCTIONS directly, and gate cost yourself    │
 │   via --cost-only + an AskUserQuestion approval before translating.         │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -60,6 +58,9 @@ Long-book robustness (formal resume, batching) is out of scope.
   the AskUserQuestion and wait. Do NOT run the translate command in the same response that
   produced the estimate, and never bundle "estimate → translate" into one chain. Money
   moves only after the user answers that question affirmatively in a later turn.
+- `--cost-only` is a pure estimator: it never spends and never prompts. The paid translate
+  run requires `--yes`; never pass `--yes` unless the user explicitly approved the estimate
+  in a separate turn.
 - Run every Python snippet below from the repo root so `import src...` resolves.
 
 ## Pipeline overview
@@ -283,21 +284,12 @@ dialect, and register carry into the glossary.
    > translating." After approval you proceed to chunking (Step 3) and then **stop again**
    > at the cost gate (Step 4). Do not jump to the translate command here.
 
-## Step 3 — Chunk (deterministic) — NEVER run chunk open-ended
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ There is NO --end-stage. Stages chain: chunk ─► translate ─► ... and the    │
-│ translate cost gate only prompts when the estimate EXCEEDS --cost-limit      │
-│ (default $5). So a plain `--start-stage chunk` on any book under $5 rolls   │
-│ straight into translation and SPENDS MONEY WITH NO PROMPT. Do not do that.   │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+## Step 3 — Chunk (deterministic) — run as estimator only
 
 Run chunk **with `--cost-only`** so the run chunks and then halts at the cost estimate
 (`--cost-only` exits before a single chunk is translated — it physically cannot spend):
 ```bash
-python scripts/translate_book.py projects/<slug> --start-stage chunk --cost-only --cost-limit 999999
+python scripts/translate_book.py projects/<slug> --start-stage chunk --cost-only
 ```
 This produces the chunks and prints the estimate, then stops. Carry that estimate straight
 into the Step 4 gate below — do not run any command without `--cost-only` until the user
@@ -316,10 +308,10 @@ has approved.
 ```
 
 1. You already have the estimate from Step 3 (the `--cost-only` chunk run). If you need to
-   recompute it, re-run the cost estimate — still WITHOUT translating, so it never calls
-   input() and never spends money:
+   recompute it, re-run the cost estimate — still WITHOUT translating, so it never spends
+   money:
    ```bash
-   python scripts/translate_book.py projects/<slug> --start-stage translate --cost-only --cost-limit 999999
+   python scripts/translate_book.py projects/<slug> --start-stage translate --cost-only
    ```
 2. **STOP — approval beat. END THE TURN HERE.** Show the estimate, then ask via
    AskUserQuestion: proceed / abort — and stop. Do not call any further tool in this
@@ -329,10 +321,10 @@ has approved.
    > Cost note (eng review 2026-06-05): the API path does not use prompt caching today,
    > so input tokens are not discounted across chunks. The estimate is the honest figure.
 3. **Only once the user has affirmatively approved in a separate turn**, translate with
-   `--cost-limit` set ABOVE the estimate so the input() prompt is never reached:
+   `--yes` to record that approval for the non-interactive CLI run:
    ```bash
    python scripts/translate_book.py projects/<slug> --start-stage translate \
-     --cost-limit 999999 --provider anthropic --model claude-sonnet-4-20250514
+     --yes --provider anthropic --model claude-sonnet-4-20250514
    ```
    (Pick the model the user wants; default is sonnet. Surface model choice rather than
    assuming.)
