@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.book_splitter import split_book_into_chapters, save_chapters_to_files
 from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
-from src.epub_builder import build_epub
+from src.epub_builder import build_epub_from_chunks
 from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
@@ -431,21 +431,28 @@ def stage_combine(args, project_dir: Path, state: dict) -> dict:
 
 
 def stage_epub(args, project_dir: Path, state: dict) -> dict:
-    """Stage 7: Build EPUB from combined chapters."""
+    """Stage 7: Build EPUB from fully translated chunks."""
     project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
     author = getattr(args, "author", "Unknown") or "Unknown"
     target_lang_code = getattr(args, "target_lang_code", "es") or "es"
+    chapters = parse_chapter_range(args.chapters) if getattr(args, "chapters", None) else None
 
-    epub_path = build_epub(
+    result = build_epub_from_chunks(
         project_path=project_dir,
         title=project_name,
         author=author,
         language=target_lang_code,
+        chapters=chapters,
     )
 
-    print(f"  EPUB written to: {epub_path}")
+    print(f"  EPUB written to: {result.path}")
+    print(f"  Included translated chapters ({len(result.included)}): {result.included}")
+    if result.skipped:
+        print(f"  Skipped untranslated/partial chapters ({len(result.skipped)}): {result.skipped}")
     state["stage_completed"] = "epub"
-    state["epub_path"] = str(epub_path)
+    state["epub_path"] = str(result.path)
+    state["epub_included_chapters"] = result.included
+    state["epub_skipped_chapters"] = result.skipped
     return state
 
 

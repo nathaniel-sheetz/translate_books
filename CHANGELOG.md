@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.2.0] - 2026-06-07
+
+### Changed
+- **EPUB now built from translated chapters only — everywhere.** The CLI (`scripts/build_epub.py`), the translate pipeline (`stage_epub`), and the web UI (`build_epub_route`) all share a single `build_epub_from_chunks` helper that discovers fully-translated chapters from chunk JSON files, combines them, and builds the EPUB from that set only. Partially-translated chapters are skipped rather than included as English. The translate-harness Step 5 is now a one-line `build_epub.py` call instead of a 30-line inline snippet.
+- `scripts/build_epub.py` reports included and skipped chapter lists after each build, and accepts `--chapters-dir` as a legacy escape hatch for pre-chunk workflows.
+
+### Fixed
+- Partial translations no longer produce mixed-language EPUBs from the CLI or pipeline; untranslated chapters are excluded automatically.
+- `build_epub_route` now returns HTTP 400 (with a clear message) when no chapters are fully translated, 500 when a chunk file is corrupt (previously `json.JSONDecodeError` was incorrectly caught as a 400 client error).
+- EPUB filename generation in the web route falls back to `project_id + ".epub"` when the user-supplied title resolves to an empty `Path.name` (e.g. a title of `/`).
+- `build_epub_from_chunks` handles a missing `chunks/` directory gracefully (returns empty, raises `ValueError`) on all platforms, rather than letting `OSError` escape on Linux.
+- `translate_book.stage_epub` now records `epub_included_chapters` and `epub_skipped_chapters` in pipeline state.
+
 ## [0.15.1.0] - 2026-06-07
 
 ### Changed

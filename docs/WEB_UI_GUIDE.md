@@ -347,7 +347,7 @@ The Export panel ships with a "Note from the Translator" — Amazon KDP-ready en
 - `POST /api/project/<id>/translator-note` — `{ "heading": "...", "body": "..." }` → `{ "ok": true }`. Body > 100 KB → `400`.
 - `GET /api/project/<id>/download-epub` — serves the EPUB file as a download
 
-**Backend:** `build_epub()`, `note_text_to_xhtml()`, `_DEFAULT_TRANSLATOR_HEADING` from `src/epub_builder.py`; `_load_translator_note` / `_save_translator_note` / `_read_translator_note_template` from `web_ui/app.py`; `combine_chunks()` from `src/combiner.py`.
+**Backend:** `build_epub_from_chunks()`, `build_epub()`, `note_text_to_xhtml()`, `_DEFAULT_TRANSLATOR_HEADING` from `src/epub_builder.py`; `_load_translator_note` / `_save_translator_note` / `_read_translator_note_template` from `web_ui/app.py`.
 
 ---
 

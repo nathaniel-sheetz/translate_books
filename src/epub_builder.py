@@ -10,9 +10,11 @@ import json
 import logging
 import mimetypes
 import re
+import shutil
+import tempfile
 from html import escape
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from ebooklib import epub
 
@@ -22,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_RE = re.compile(r'\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]')
 _CHAPTER_NUM_RE = re.compile(r'chapter_(\d+)\.txt$', re.IGNORECASE)
+_CHUNK_FILE_RE = re.compile(r'^(.+)_chunk_\d+\.json$')
 _HEADING_RE = re.compile(
     r'^(?:(\w+)\s+)?([IVXLCDM\d]+)\.?\s*$', re.IGNORECASE
 )
@@ -39,6 +42,12 @@ _DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
 }
 
 _DEFAULT_TRANSLATOR_HEADING = "Nota del traductor"
+
+
+class EpubBuildResult(NamedTuple):
+    path: Path
+    included: List[str]
+    skipped: List[str]
 
 
 def _int_to_roman(n: int) -> str:
@@ -478,6 +487,93 @@ def _load_chapter_manifest(project_path: Path) -> Dict[str, Dict[str, Any]]:
         if isinstance(entry, dict) and isinstance(entry.get('id'), str):
             out[entry['id']] = entry
     return out
+
+
+def _discover_chunk_chapters(chunks_dir: Path) -> Dict[str, List[Path]]:
+    """Discover chapter chunk files keyed by chapter id."""
+    if not chunks_dir.is_dir():
+        return {}
+    chapters: Dict[str, List[Path]] = {}
+    for chunk_path in sorted(chunks_dir.glob('*_chunk_*.json')):
+        match = _CHUNK_FILE_RE.match(chunk_path.name)
+        if not match:
+            continue
+        chapter_id = match.group(1)
+        chapters.setdefault(chapter_id, []).append(chunk_path)
+
+    return dict(
+        sorted(
+            (chapter_id, sorted(paths))
+            for chapter_id, paths in chapters.items()
+        )
+    )
+
+
+def build_epub_from_chunks(
+    project_path: Path,
+    title: str,
+    author: str,
+    language: str = 'es',
+    *,
+    chapters: Optional[Iterable[str]] = None,
+    output_path: Optional[Path] = None,
+    **build_epub_kwargs: Any,
+) -> EpubBuildResult:
+    """Build an EPUB from fully translated chunk JSON files only.
+
+    This keeps EPUB generation independent from project_path/chapters, which
+    may still contain English source text for chapters that are not translated.
+    """
+    from src.combiner import combine_chunks
+    from src.utils.file_io import load_chunk
+
+    project_path = Path(project_path)
+    chunks_dir = project_path / 'chunks'
+    discovered = _discover_chunk_chapters(chunks_dir)
+
+    requested = set(chapters) if chapters is not None else None
+    chapter_items = [
+        (chapter_id, paths)
+        for chapter_id, paths in discovered.items()
+        if requested is None or chapter_id in requested
+    ]
+
+    included: List[str] = []
+    skipped: List[str] = []
+    translated_chapters: Dict[str, str] = {}
+
+    for chapter_id, chunk_paths in chapter_items:
+        chunks_for_chapter = [load_chunk(path) for path in chunk_paths]
+        if chunks_for_chapter and all(chunk.has_translation for chunk in chunks_for_chapter):
+            translated_chapters[chapter_id] = combine_chunks(chunks_for_chapter)
+            included.append(chapter_id)
+        else:
+            skipped.append(chapter_id)
+
+    if requested is not None:
+        skipped.extend(sorted(requested - set(discovered)))
+
+    if not included:
+        raise ValueError('No fully translated chapters found')
+
+    temp_dir = Path(tempfile.mkdtemp(prefix='epub_'))
+    try:
+        for chapter_id, combined_text in translated_chapters.items():
+            (temp_dir / f'{chapter_id}.txt').write_text(combined_text, encoding='utf-8')
+
+        epub_path = build_epub(
+            project_path=project_path,
+            title=title,
+            author=author,
+            language=language,
+            output_path=output_path,
+            chapters_dir=temp_dir,
+            **build_epub_kwargs,
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return EpubBuildResult(path=epub_path, included=included, skipped=skipped)
 
 
 def build_epub(

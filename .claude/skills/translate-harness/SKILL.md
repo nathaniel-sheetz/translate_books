@@ -329,67 +329,17 @@ has approved.
    (Pick the model the user wants; default is sonnet. Surface model choice rather than
    assuming.)
 
-## Step 5 — Combine + EPUB (rebuild translated-only, like the web UI)
+## Step 5 — Combine + EPUB (translated chapters only)
 
-The translate run above already chained through combine, epub, and align — but **do not
-ship that auto-built EPUB.** It is wrong for any partially-translated book.
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ WHY: `stage_split` writes the ENGLISH text of every chapter into           │
-│ chapters/chapter_*.txt. `stage_combine` only overwrites the .txt for       │
-│ chapters that are FULLY translated, so untranslated chapters keep their     │
-│ English text — and `build_epub` globs ALL chapter_*.txt, so the EPUB ends   │
-│ up with English chapters mixed in. The web UI avoids this by combining only │
-│ fully-translated chapters into a temp dir and building from that.          │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-Rebuild the EPUB the web-UI way — translated chapters only — overwriting the polluted one:
+The translate run above chains through combine, epub, and align. The EPUB stage now builds
+from translated chunks only and reports exactly which chapters shipped. You can either rely
+on that `--start-stage translate` run, or rebuild explicitly with the shared CLI:
 ```bash
-python - <<'PY'
-from pathlib import Path
-import sys, tempfile, shutil; sys.path.insert(0, ".")
-from scripts.translate_book import discover_chapters
-from src.utils.file_io import load_chunk
-from src.combiner import combine_chunks
-from src.epub_builder import build_epub
-
-proj = Path("projects/<slug>")
-chunks_dir = proj / "chunks"
-
-# Include a chapter only if EVERY one of its chunks has a translation (mirrors
-# the web UI's total==translated rule).
-chapters = discover_chapters(chunks_dir)
-translated, skipped = {}, []
-for ch_id, paths in chapters.items():
-    chunks = [load_chunk(p) for p in paths]
-    if chunks and all(c.has_translation for c in chunks):
-        translated[ch_id] = chunks
-    else:
-        skipped.append(ch_id)
-
-if not translated:
-    raise SystemExit("No fully translated chapters — nothing to build.")
-
-tmp = Path(tempfile.mkdtemp(prefix="epub_"))
-try:
-    for ch_id, chunks in translated.items():
-        (tmp / f"{ch_id}.txt").write_text(combine_chunks(chunks), encoding="utf-8")
-    # Overwrite the pipeline's default output path: projects/<slug>/<slug>.epub
-    out = build_epub(
-        project_path=proj, title="<Title>", author="<Author>", language="es",
-        chapters_dir=tmp, output_path=proj / f"{proj.name}.epub",
-    )
-    print(f"EPUB rebuilt: {out}")
-    print(f"  included {len(translated)} translated chapter(s): {sorted(translated)}")
-    print(f"  skipped {len(skipped)} untranslated chapter(s): {sorted(skipped)}")
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-PY
+python scripts/build_epub.py projects/<slug> --title "<Title>" --author "<Author>" --language es
 ```
-Report the included/skipped chapter lists to the user so a partial translation is never
-mistaken for a complete book. (Use the project's real `<Title>`/`<Author>` and target
+
+Report the included/skipped chapter lists printed by the helper so a partial translation is
+never mistaken for a complete book. (Use the project's real `<Title>`/`<Author>` and target
 language code.) Confirm the EPUB landed:
 ```bash
 ls projects/<slug>/*.epub
