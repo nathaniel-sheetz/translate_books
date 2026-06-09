@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -336,8 +337,10 @@ def manifest_path(project_dir: Path) -> Path:
 
 def _save_manifest(manifest: DifficultyManifest, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(manifest.to_dict(), fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def _load_manifest(path: Path) -> Optional[DifficultyManifest]:
@@ -378,12 +381,8 @@ def _chapter_texts(project_dir: Path) -> tuple:
         ch_id = ch_file.stem
         text, mtime, _kind = load_chapter_source_text(project_dir, ch_id)
         if not text:
-            try:
-                text = ch_file.read_text(encoding="utf-8")
-                mtime = ch_file.stat().st_mtime
-            except OSError as exc:  # pragma: no cover - defensive
-                logger.warning("Failed to read chapter %s: %s", ch_file, exc)
-                continue
+            logger.warning("Skipping chapter %s: no English source text found", ch_id)
+            continue
         pairs.append((ch_id, text))
         if mtime is not None:
             max_mtime = mtime if max_mtime is None else max(max_mtime, mtime)

@@ -3212,7 +3212,7 @@ def project_difficulty(project_id):
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
-    force = request.args.get("force") in ("1", "true", "yes")
+    force = (request.args.get("force") or "").lower() in ("1", "true", "yes")
     try:
         manifest = score_book(project_dir, force=force)
         return jsonify({
