@@ -102,6 +102,11 @@ python scripts/split_book.py projects/my-book/source.txt --output projects/my-bo
 # Chunk a chapter
 python scripts/chunk_chapter.py projects/my-book/chapters/chapter_01.txt --chapter-id chapter_01
 
+# Score translation difficulty (EN→ES, per chapter)
+python scripts/score_difficulty.py my-book            # prints chapter table
+python scripts/score_difficulty.py my-book --json     # machine-readable output
+python scripts/score_difficulty.py my-book --force    # bypass cache
+
 # API translation
 python scripts/translate_api.py chunks/*.json --provider anthropic --output chunks/translated/
 
@@ -156,6 +161,7 @@ book_translation/
 │   ├── book_splitter.py        # Chapter detection + splitting
 │   ├── chunker.py              # Chapter → translation chunks
 │   ├── combiner.py             # Chunks → chapter recombination
+│   ├── difficulty_scorer.py    # EN→ES difficulty scoring (sentence length + lexical rarity)
 │   ├── api_translator.py       # LLM API translation (Anthropic/OpenAI)
 │   ├── sentence_aligner.py     # Bilingual sentence alignment
 │   ├── style_guide_wizard.py   # Style guide generation
@@ -184,6 +190,7 @@ book_translation/
 │       ├── alignments/         # Sentence alignment JSON
 │       ├── annotations.jsonl   # Reader annotations
 │       ├── reviewed.json       # Chapter review status
+│       ├── difficulty.json     # Cached difficulty scores (per-chapter + book level)
 │       ├── .chunk_edits/       # Pre-edit chunk backups from the chunk editor
 │       └── images/             # Downloaded images
 │
@@ -210,6 +217,7 @@ pytest --cov=src tests/            # With coverage
 |---|---|
 | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Dashboard walkthrough tutorial |
 | [`docs/WEB_UI_GUIDE.md`](docs/WEB_UI_GUIDE.md) | Full dashboard + reader reference |
+| [`docs/CHUNKING_GUIDE.md`](docs/CHUNKING_GUIDE.md) | Chunking algorithm, configuration, and per-chapter overrides |
 | [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md) | Reader remove-text gesture |
 | [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md) | Reader sentence retranslate flow |
 | [`docs/LLM_JUDGE_EVALUATOR.md`](docs/LLM_JUDGE_EVALUATOR.md) | LLM-judge evaluator + model comparison harness |
