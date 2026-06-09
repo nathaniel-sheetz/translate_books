@@ -519,6 +519,92 @@ class TestSmartSplitting:
             assert max(word_counts) - min(word_counts) <= 400
 
 
+class TestWeightedDP:
+    """Tests for the per-paragraph weighted-DP sizing path.
+
+    The weights steer chunk sizing in *effective-word* space: a paragraph's
+    effective size is words × weight. High-weight regions should pack into
+    smaller real chunks; uniform weights (or None) must reproduce the
+    unweighted splits byte-for-byte.
+    """
+
+    def _uniform_chapter(self, n_paras=30, words_per=100):
+        paragraphs = [" ".join(["word"] * words_per) for _ in range(n_paras)]
+        return "\n\n".join(paragraphs)
+
+    def test_none_matches_explicit_uniform_weights(self):
+        """para_weights=None and an all-1.0 vector produce identical splits."""
+        text = self._uniform_chapter()
+        config = ChunkingConfig(
+            target_size=1000, min_chunk_size=100, max_chunk_size=2000,
+            overlap_paragraphs=0, min_overlap_words=0, split_quality_weight=0.5,
+        )
+        baseline = chunk_chapter(text, config, "chapter_01")
+        uniform = chunk_chapter(text, config, "chapter_01", para_weights=[1.0] * 30)
+
+        assert [c.metadata.paragraph_count for c in uniform] == \
+            [c.metadata.paragraph_count for c in baseline]
+        assert [c.metadata.word_count for c in uniform] == \
+            [c.metadata.word_count for c in baseline]
+
+    def test_none_matches_uniform_on_real_fixture(self):
+        """On a real chapter, an all-1.0 weight vector reproduces the
+        unweighted split indices exactly."""
+        fixture_path = Path("tests/fixtures/chapter_sample.txt")
+        if not fixture_path.exists():
+            pytest.skip("Pride & Prejudice fixture not found")
+        text = fixture_path.read_text(encoding="utf-8")
+        config = ChunkingConfig(target_size=2000, overlap_paragraphs=2, min_overlap_words=100)
+
+        from src.utils.text_utils import extract_paragraphs, normalize_newlines
+        n_paras = len(extract_paragraphs(normalize_newlines(text)))
+
+        baseline = chunk_chapter(text, config, "chapter_01")
+        uniform = chunk_chapter(text, config, "chapter_01", para_weights=[1.0] * n_paras)
+        assert [c.metadata.paragraph_count for c in uniform] == \
+            [c.metadata.paragraph_count for c in baseline]
+
+    def test_high_weight_region_gets_smaller_chunks(self):
+        """Weighting the first third of the chapter heavily concentrates
+        more, smaller chunks there than in the neutral remainder."""
+        text = self._uniform_chapter(n_paras=30, words_per=100)  # 3000 real words
+        config = ChunkingConfig(
+            target_size=1000, min_chunk_size=100, max_chunk_size=2000,
+            overlap_paragraphs=0, min_overlap_words=0, split_quality_weight=0.0,
+        )
+        # First 10 paragraphs are 3x denser → effective total 5000 vs 3000.
+        weights = [3.0] * 10 + [1.0] * 20
+
+        uniform = chunk_chapter(text, config, "chapter_01")
+        weighted = chunk_chapter(text, config, "chapter_01", para_weights=weights)
+
+        # More effective words ⇒ more chunks overall.
+        assert len(weighted) > len(uniform)
+
+        # Map each weighted chunk to its starting paragraph index (no overlap,
+        # so paragraph_count is exact).
+        starts = []
+        idx = 0
+        for c in weighted:
+            starts.append(idx)
+            idx += c.metadata.paragraph_count
+
+        high = [c for c, s in zip(weighted, starts) if s < 10]
+        low = [c for c, s in zip(weighted, starts) if s >= 10]
+        assert len(high) >= 2 and len(low) >= 1
+
+        avg_high = sum(c.metadata.word_count for c in high) / len(high)
+        avg_low = sum(c.metadata.word_count for c in low) / len(low)
+        # High-weight region packs into smaller real chunks.
+        assert avg_high < avg_low
+
+    def test_mismatched_weights_length_raises(self):
+        text = self._uniform_chapter(n_paras=10)
+        config = ChunkingConfig(target_size=1000)
+        with pytest.raises(ValueError):
+            chunk_chapter(text, config, "chapter_01", para_weights=[1.0] * 5)
+
+
 class TestIntegration:
     """Integration tests with real fixtures."""
 
