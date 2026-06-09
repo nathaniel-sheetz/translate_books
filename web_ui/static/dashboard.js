@@ -798,7 +798,9 @@
     // Stage 3: Chunk
     // ========================================================================
 
-    function getChunkConfig() {
+    // Read the global default chunking config from the Stage 3 form: the
+    // visible Target Size plus the Advanced min/max ratios and overlap.
+    function getChunkDefault() {
         // Use Number.isFinite to preserve explicit 0 values (|| would treat
         // 0 as falsy and substitute the default, silently overriding the
         // user's choice for overlap_paragraphs / min_overlap_words).
@@ -806,25 +808,29 @@
             var n = parseInt(document.getElementById(id).value, 10);
             return Number.isFinite(n) ? n : def;
         }
+        function floatOrDefault(id, def) {
+            var n = parseFloat(document.getElementById(id).value);
+            return Number.isFinite(n) ? n : def;
+        }
         return {
             target_size: intOrDefault('chunk-target-size', 2000),
-            min_chunk_size: intOrDefault('chunk-min-size', 500),
-            max_chunk_size: intOrDefault('chunk-max-size', 3000),
-            overlap_paragraphs: intOrDefault('chunk-overlap-para', 2),
-            min_overlap_words: intOrDefault('chunk-overlap-words', 100),
+            min_ratio: floatOrDefault('chunk-min-ratio', 0.25),
+            max_ratio: floatOrDefault('chunk-max-ratio', 1.5),
+            overlap_paragraphs: intOrDefault('chunk-overlap-para', 0),
+            min_overlap_words: intOrDefault('chunk-overlap-words', 0),
         };
     }
 
     function populateChunkStage(status) {
-        // Pre-fill chunk parameter inputs from the project's persisted
+        // Pre-fill the global default inputs from the project's persisted
         // chunking_config (saved on the last successful chunk run). Fall
         // back to the HTML-default system values when nothing is saved.
         var cc = status.chunking_config;
         if (cc) {
             var fields = [
                 ['chunk-target-size', cc.target_size],
-                ['chunk-min-size', cc.min_chunk_size],
-                ['chunk-max-size', cc.max_chunk_size],
+                ['chunk-min-ratio', cc.min_ratio],
+                ['chunk-max-ratio', cc.max_ratio],
                 ['chunk-overlap-para', cc.overlap_paragraphs],
                 ['chunk-overlap-words', cc.min_overlap_words],
             ];
@@ -845,10 +851,36 @@
         status.chapters.forEach(function(ch) {
             var card = document.createElement('div');
             card.className = 'chapter-card';
+            card.dataset.chapterId = ch.id;
             var translated = ch.translated_count || 0;
             var chunkInfo = ch.chunk_count > 0
                 ? ch.chunk_count + ' chunks' + (translated > 0 ? ' · ' + translated + ' translated' : '')
                 : 'Not chunked';
+
+            var info = document.createElement('div');
+            info.className = 'chapter-card-info';
+            info.innerHTML =
+                '<span class="ch-name">' + escapeHtml(ch.name) + '</span>' +
+                '<span class="ch-words">' + (ch.words || ch.word_count || 0) + ' words · ' + chunkInfo + '</span>';
+            card.appendChild(info);
+
+            // Inline per-chapter Target override. Blank = inherit the global
+            // default ("auto"). Pre-filled from the persisted override.
+            var targetWrap = document.createElement('div');
+            targetWrap.className = 'dash-field chapter-target-field';
+            var lbl = document.createElement('label');
+            lbl.textContent = 'Target';
+            var tInput = document.createElement('input');
+            tInput.type = 'number';
+            tInput.min = '100';
+            tInput.className = 'chapter-target-input';
+            tInput.placeholder = 'auto';
+            if (Number.isFinite(ch.chunk_target_override)) {
+                tInput.value = ch.chunk_target_override;
+            }
+            targetWrap.appendChild(lbl);
+            targetWrap.appendChild(tInput);
+            card.appendChild(targetWrap);
 
             var btn = document.createElement('button');
             btn.type = 'button';
@@ -856,22 +888,29 @@
                 ? (translated > 0 ? 'btn-danger' : 'btn-secondary')
                 : 'btn-secondary';
             btn.textContent = ch.chunk_count > 0 ? 'Rechunk' : 'Chunk';
-            btn.style.marginLeft = 'auto';
             btn.dataset.chapterId = ch.id;
             btn.dataset.chapterName = ch.name;
             btn.dataset.translatedCount = String(translated);
             btn.addEventListener('click', onRechunkChapterClick);
-
-            card.innerHTML =
-                '<span class="ch-name">' + escapeHtml(ch.name) + '</span>' +
-                '<span class="ch-words">' + (ch.words || ch.word_count || 0) + ' words · ' + chunkInfo + '</span>';
             card.appendChild(btn);
+
             list.appendChild(card);
         });
     }
 
+    // Read a chapter card's Target input. Blank ⇒ null (inherit global / auto).
+    function getCardTarget(card) {
+        var input = card ? card.querySelector('.chapter-target-input') : null;
+        if (!input) return null;
+        var raw = input.value.trim();
+        if (raw === '') return null;
+        var n = parseInt(raw, 10);
+        return Number.isFinite(n) ? n : null;
+    }
+
     function onRechunkChapterClick(ev) {
         var btn = ev.currentTarget;
+        var card = btn.closest('.chapter-card');
         var chapterId = btn.dataset.chapterId;
         var chapterName = btn.dataset.chapterName || chapterId;
         var translated = parseInt(btn.dataset.translatedCount, 10) || 0;
@@ -883,9 +922,9 @@
             if (!confirm(msg)) return;
         }
 
-        var config = getChunkConfig();
+        var payload = { target_size: getCardTarget(card) };
         setStatus('chunk-status', 'Rechunking ' + chapterName + '...', '');
-        apiPost('/api/project/' + PROJECT + '/chapters/' + chapterId + '/rechunk', config).then(function(data) {
+        apiPost('/api/project/' + PROJECT + '/chapters/' + chapterId + '/rechunk', payload).then(function(data) {
             if (data.error) {
                 setStatus('chunk-status', data.error, 'error');
             } else {
@@ -896,9 +935,15 @@
     }
 
     document.getElementById('btn-chunk-all').addEventListener('click', function() {
-        var config = getChunkConfig();
+        // Gather the global default plus each card's per-chapter target.
+        var chapters = {};
+        document.querySelectorAll('#chunk-chapter-list .chapter-card').forEach(function(card) {
+            var id = card.dataset.chapterId;
+            if (id) chapters[id] = { target_size: getCardTarget(card) };
+        });
+        var payload = { default: getChunkDefault(), chapters: chapters };
         setStatus('chunk-status', 'Chunking...', '');
-        apiPost('/api/project/' + PROJECT + '/chunk-all', config).then(function(data) {
+        apiPost('/api/project/' + PROJECT + '/chunk-all', payload).then(function(data) {
             if (data.error) {
                 setStatus('chunk-status', data.error, 'error');
             } else {
