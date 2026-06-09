@@ -222,6 +222,7 @@
                 </div>
                 <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
                     <span class="status-msg" id="chunk-status"></span>
+                    <button class="btn-secondary" id="btn-analyze-difficulty" title="Score translation difficulty (long-tail sentence length + lexical rarity, glossary terms excluded) to suggest chunk targets. Suggestions only fill the inputs — nothing is applied until you chunk.">Analyze difficulty</button>
                     <button class="btn-primary" id="btn-chunk-all">Chunk All</button>
                 </div>
             </div>
@@ -232,6 +233,7 @@
                     <input type="number" id="chunk-target-size" value="2000" min="100">
                     <span class="field-hint">Global default. Override per chapter below (blank = auto).</span>
                 </div>
+                <div id="chunk-difficulty-summary" class="difficulty-summary"></div>
             </div>
 
             <details class="chunk-advanced" id="chunk-advanced">

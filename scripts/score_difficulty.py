@@ -85,11 +85,7 @@ def main() -> None:
         )
 
     print()
-    print(f"Cached to {manifest_relpath(project_dir)}")
-
-
-def manifest_relpath(project_dir: Path) -> str:
-    return str(manifest_path(project_dir))
+    print(f"Cached to {manifest_path(project_dir)}")
 
 
 if __name__ == "__main__":

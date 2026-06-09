@@ -76,6 +76,11 @@ class TestDifficultyRouteValidation:
         rv = client.get("/api/project/a.b/difficulty")
         assert rv.status_code == 400
 
+    def test_valid_hyphenated_project_id_not_rejected(self, client, project):
+        # Allowlist must pass valid IDs like "understood-betsy" or "my_book".
+        rv = client.get(f"/api/project/{project.name}/difficulty")
+        assert rv.status_code != 400
+
     def test_missing_project_returns_404(self, client, project):
         rv = client.get("/api/project/does-not-exist/difficulty")
         assert rv.status_code == 404
@@ -103,6 +108,12 @@ class TestDifficultyRouteHappyPath:
         chapters = rv.get_json()["chapters"]
         assert len(chapters) == 1
         assert chapters[0]["chapter_id"] == "chapter_01"
+
+    def test_chapter_items_have_metrics_fields(self, client, project):
+        rv = client.get(f"/api/project/{project.name}/difficulty")
+        ch = rv.get_json()["chapters"][0]
+        for key in ("difficulty", "suggested_target_size", "length_score", "rarity_score"):
+            assert key in ch, f"chapter item missing field: {key}"
 
     def test_force_param_rescores(self, client, project):
         # First call populates cache.

@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.sentence_aligner import split_sentences
+from src.utils.file_io import load_glossary
 from src.utils.source_text import load_chapter_source_text, load_clean_source_text
 from src.utils.text_utils import count_words
 
@@ -304,11 +305,9 @@ def score_text(text: str, glossary_skip: Optional[set] = None) -> DifficultyMetr
 
     length_score = _linear_score(weighted, LENGTH_EASY, LENGTH_HARD)
     rarity_score = _linear_score(rare_fraction, RARITY_EASY, RARITY_HARD)
-    denom = WEIGHT_LENGTH + WEIGHT_RARITY
-    difficulty = (
-        _clamp01((WEIGHT_LENGTH * length_score + WEIGHT_RARITY * rarity_score) / denom)
-        if denom
-        else 0.0
+    difficulty = _clamp01(
+        (WEIGHT_LENGTH * length_score + WEIGHT_RARITY * rarity_score)
+        / (WEIGHT_LENGTH + WEIGHT_RARITY)
     )
 
     return DifficultyMetrics(
@@ -358,8 +357,6 @@ def _load_glossary_skip(project_dir: Path) -> set:
     if not glossary_path.exists():
         return set()
     try:
-        from src.utils.file_io import load_glossary
-
         return build_glossary_skip(load_glossary(glossary_path))
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Failed to load glossary for %s: %s", project_dir, exc)

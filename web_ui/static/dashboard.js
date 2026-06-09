@@ -1031,6 +1031,9 @@
                 renderBookDifficulty();
                 applyDifficultyToCards();
                 setStatus('chunk-status', 'Difficulty analyzed — click Suggest to fill targets', 'success');
+            }).catch(function() {
+                analyzeBtn.disabled = false;
+                setStatus('chunk-status', 'Analysis failed', 'error');
             });
         });
     }
