@@ -58,11 +58,15 @@ Chunking is configured via `ChunkingConfig` in the project config or the web UI:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `target_size` | 2000 | Target words per chunk |
-| `min_chunk_size` | 500 | Minimum words per chunk |
-| `max_chunk_size` | 3000 | Maximum words per chunk |
+| `min_ratio` | 0.25 | Minimum chunk size as a fraction of `target_size` (Advanced section in dashboard) |
+| `max_ratio` | 1.5 | Maximum chunk size as a multiple of `target_size` (Advanced section in dashboard) |
+| `min_chunk_size` | derived | Derived from `target_size × min_ratio`; clamped to ≥ 50 words |
+| `max_chunk_size` | derived | Derived from `target_size × max_ratio`; clamped to ≥ 100 words |
 | `overlap_paragraphs` | 0 | Minimum paragraphs of overlap between chunks |
 | `min_overlap_words` | 0 | Minimum words in overlap region |
 | `split_quality_weight` | 0.5 | Balance between even sizing (0.0) and good split points (higher). Range: 0.0 - 2.0 |
+
+The default ratios (0.25 / 1.5) reproduce the historical 500 / 3000 word bounds exactly at `target_size=2000`. When you change the target, bounds scale automatically — you rarely need to touch the Advanced section.
 
 ### In project config JSON
 
@@ -70,7 +74,8 @@ Chunking is configured via `ChunkingConfig` in the project config or the web UI:
 {
   "chunking": {
     "target_size": 2000,
-    "max_chunk_size": 3000,
+    "min_ratio": 0.25,
+    "max_ratio": 1.5,
     "overlap_paragraphs": 2,
     "min_overlap_words": 100,
     "split_quality_weight": 0.5
@@ -100,6 +105,28 @@ This adapts to text density:
 - Short dialogue lines (5 words each): Takes 10+ lines to reach the word minimum, preserving the full dialogue exchange
 
 When chunks are combined after translation, the overlap is resolved using a "use previous" strategy: the translation from the end of chunk N is kept, and the overlapping start of chunk N+1 is discarded. This works because the translator has more context at the end of a chunk than at the beginning of the next one.
+
+## Per-Chapter Target Overrides
+
+You can set a different target word count for individual chapters without touching the global default. This is useful for unusually long or short chapters that need finer control.
+
+**In the dashboard (Stage 3):** Each chapter card has a Target field. Enter a number and click its Rechunk button. Only that chapter is re-chunked; all others keep their current chunks. Clear the field and rechunk to revert the chapter to the global default.
+
+**Via the API:** Pass per-chapter overrides in the `chapters` field of the `chunk-all` payload:
+
+```json
+{
+  "default": { "target_size": 2000, "overlap_paragraphs": 0, "min_overlap_words": 0, "min_ratio": 0.25, "max_ratio": 1.5 },
+  "chapters": {
+    "chapter_03": { "target_size": 1200 },
+    "chapter_07": { "target_size": 2800 }
+  }
+}
+```
+
+The `rechunk` endpoint for a single chapter accepts `{ "target_size": N }`. Min/max bounds are derived from the global default's ratios; overlap settings come from the persisted default config.
+
+Per-chapter overrides are stored in `project.json` under `chapter_chunking` and are surfaced on each chapter in the `/status` response as `chunk_target_override` (integer or null).
 
 ## CLI Usage
 
