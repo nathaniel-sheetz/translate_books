@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0.0] - 2026-06-08
+
+### Added
+- **Per-chapter chunk target overrides.** Each chapter card in the Stage 3 dashboard now has a Target field. Set a different word-count target for a single chapter (dense chapters, opening chapters, etc.) and click its Rechunk button — all other chapters stay at the global default. Clear the field and rechunk to revert the chapter back to the default.
+- **Ratio-based chunk bounds.** The Advanced section replaces the old absolute Min/Max size inputs with Min Ratio and Max Ratio fields (defaults: 0.25 and 1.5). Bounds are derived from the target on every chunk run, so the Advanced section rarely needs touching. The historical 500/3000 bounds are reproduced exactly at target 2000 with the defaults.
+- **`ChunkingConfig` gains `min_ratio` and `max_ratio` fields** (Pydantic, `gt=0.0`, defaults 0.25/1.5). Legacy project configs are back-filled automatically on first status load and persisted to disk.
+- **Weighted-DP chunker scaffold.** `chunk_chapter` accepts an optional `para_weights` list for paragraph-density-aware sizing (Phase 2). Phase 1 always passes `None` (uniform sizing); the infrastructure is in place for a future paragraph-scorer to provide weights without changing the API.
+
+### Changed
+- The `chunk-all` API now accepts `{ "default": {...}, "chapters": {"<id>": {"target_size": N}} }`. The old flat `{ "target_size": N, ... }` shape is still accepted for backwards compatibility.
+- The `rechunk` API now accepts only `{ "target_size": N }` per-chapter; global overlap/bounds come from the persisted default config rather than being re-sent each time.
+- The `/api/project/<id>/status` response now includes `chunk_target_override` (integer or null) on each chapter entry, and `min_ratio`/`max_ratio` on `chunking_config`.
+
+### Fixed
+- Non-finite or inverted ratio values (`max_ratio ≤ min_ratio`, `inf`, `NaN`) now raise a `ValueError` rather than silently producing degenerate chunk bounds that get persisted.
+- Non-dict `default` or `chapters` fields in the chunk-all payload no longer cause an `AttributeError` — they are coerced to `{}`.
+- Persistence failures in chunking config helpers now log a warning instead of swallowing the error silently.
+
 ## [0.15.2.0] - 2026-06-07
 
 ### Changed

@@ -12,7 +12,7 @@ import logging
 import math
 import re
 from datetime import datetime
-from typing import List, Set
+from typing import List, Optional, Sequence, Set
 
 from src.models import Chunk, ChunkMetadata, ChunkingConfig, ChunkStatus
 from src.utils.text_utils import (
@@ -142,8 +142,16 @@ def _validate_chunk_size(chunk: Chunk, config: ChunkingConfig) -> List[str]:
 
 # --- Phase 1: Optimal chunk count ---
 
-def _optimal_chunk_count(total_words: int, config: ChunkingConfig) -> int:
-    """Determine how many chunks a chapter should be split into."""
+def _optimal_chunk_count(total_words: float, config: ChunkingConfig) -> int:
+    """Determine how many chunks a chapter should be split into.
+
+    ``total_words`` is interpreted in *effective-word* space: when paragraph
+    weights are applied it is ``Σ(words_p × m_p)``. With uniform weights
+    (``m_p = 1.0``) effective words equal real words, so the result is
+    byte-for-byte identical to the unweighted case. ``target_size`` /
+    ``min_chunk_size`` / ``max_chunk_size`` stay scalar thresholds compared
+    against the effective totals.
+    """
     if total_words <= config.max_chunk_size:
         return 1
 
@@ -331,6 +339,7 @@ def _find_optimal_splits(
     ideal_size: float,
     config: ChunkingConfig,
     forced_splits: Set[int] = None,
+    para_effective: Optional[Sequence[float]] = None,
 ) -> List[int]:
     """
     Find optimal paragraph indices where new chunks start.
@@ -340,6 +349,12 @@ def _find_optimal_splits(
 
     If forced_splits is provided, any chunk straddling a forced split index
     is assigned infinite cost, forcing the DP to honor those boundaries.
+
+    Sizing operates in *effective-word* space: ``size_cost`` measures each
+    chunk's deviation from ``ideal_size`` using ``para_effective`` (= per-
+    paragraph ``words × weight``) when provided, else the raw ``para_words``.
+    Boundary scoring, forced anchors, and backtracking are unchanged, so
+    ``para_effective=None`` reproduces the unweighted splits exactly.
     """
     n_paras = len(para_words)
 
@@ -350,13 +365,16 @@ def _find_optimal_splits(
     # Sorted list of forced indices for fast straddle checks via bisect.
     forced_sorted = sorted(forced)
 
-    # Precompute prefix sums for fast range word counts
-    prefix = [0] * (n_paras + 1)
+    # Precompute prefix sums for fast range word counts. When weights are
+    # supplied, sums are over effective words so the DP balances effective
+    # (not raw) sizes; uniform weights make this identical to para_words.
+    size_basis = para_effective if para_effective is not None else para_words
+    prefix = [0.0] * (n_paras + 1)
     for i in range(n_paras):
-        prefix[i + 1] = prefix[i] + para_words[i]
+        prefix[i + 1] = prefix[i] + size_basis[i]
 
-    def range_words(a: int, b: int) -> int:
-        """Word count for paragraphs [a, b)."""
+    def range_words(a: int, b: int) -> float:
+        """Effective word count for paragraphs [a, b)."""
         return prefix[b] - prefix[a]
 
     weight = config.split_quality_weight
@@ -496,7 +514,8 @@ def _build_chunks_from_splits(
 def chunk_chapter(
     chapter_text: str,
     config: ChunkingConfig,
-    chapter_id: str = "chapter_01"
+    chapter_id: str = "chapter_01",
+    para_weights: Optional[List[float]] = None,
 ) -> List[Chunk]:
     """
     Divide chapter into translation-sized chunks with intelligent splitting.
@@ -510,6 +529,13 @@ def chunk_chapter(
         chapter_text: Full chapter text to chunk
         config: ChunkingConfig with target_size, overlap constraints, etc.
         chapter_id: Identifier for this chapter (default: "chapter_01")
+        para_weights: Optional per-paragraph density multipliers (1.0 = neutral,
+            >1.0 packs tighter ⇒ smaller chunks, <1.0 looser ⇒ bigger chunks).
+            Length must equal the chapter's paragraph count. When omitted (or
+            uniform 1.0), sizing is identical to the unweighted behavior. The
+            weights only steer *where* splits land; chunks are still built from
+            the real paragraphs, so char offsets, overlap, and metadata are
+            unaffected.
 
     Returns:
         List of Chunk objects, ordered by position
@@ -524,13 +550,29 @@ def chunk_chapter(
     para_words = [count_words(p) for p in all_paragraphs]
     total_words = sum(para_words)
 
+    # Effective-word space drives sizing. Uniform weights (or None) make
+    # `effective == para_words`, reproducing today's behavior byte-for-byte.
+    if para_weights is None:
+        para_effective = None
+        effective = para_words
+    else:
+        if len(para_weights) != len(all_paragraphs):
+            raise ValueError(
+                f"para_weights length ({len(para_weights)}) must equal paragraph "
+                f"count ({len(all_paragraphs)}) for {chapter_id}"
+            )
+        effective = [w * m for w, m in zip(para_words, para_weights)]
+        para_effective = effective
+    total_effective = sum(effective)
+
     logger.info(
         f"Starting chunking for {chapter_id}: {len(all_paragraphs)} paragraphs, "
         f"{total_words} words"
+        + ("" if para_weights is None else f", {total_effective:.0f} effective words")
     )
 
-    # Phase 1: Determine chunk count
-    n_chunks = _optimal_chunk_count(total_words, config)
+    # Phase 1: Determine chunk count (in effective-word space)
+    n_chunks = _optimal_chunk_count(total_effective, config)
 
     # Phase 1b: Detect subchapter heading anchors and adjust chunk count to
     # honor them. Anchors are feasible heading boundaries (sections on either
@@ -542,7 +584,7 @@ def chunk_chapter(
         section_starts = [0] + anchors + [len(all_paragraphs)]
         n_for_max = 0
         for a, b in zip(section_starts, section_starts[1:]):
-            section_words = sum(para_words[a:b])
+            section_words = sum(effective[a:b])
             n_for_max += max(1, math.ceil(section_words / config.max_chunk_size))
         n_chunks = max(n_chunks, len(anchors) + 1, n_for_max)
 
@@ -573,11 +615,12 @@ def chunk_chapter(
     # Phase 2: Score split points
     scores = _score_split_points(all_paragraphs)
 
-    # Phase 3: Find optimal splits
-    ideal_size = total_words / n_chunks
+    # Phase 3: Find optimal splits (in effective-word space)
+    ideal_size = total_effective / n_chunks
     split_indices = _find_optimal_splits(
         para_words, scores, n_chunks, ideal_size, config,
         forced_splits=set(anchors) if anchors else None,
+        para_effective=para_effective,
     )
 
     logger.debug(

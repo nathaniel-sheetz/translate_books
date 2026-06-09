@@ -230,24 +230,31 @@
                 <div class="dash-field">
                     <label>Target Size (words)</label>
                     <input type="number" id="chunk-target-size" value="2000" min="100">
-                </div>
-                <div class="dash-field">
-                    <label>Min Chunk Size (words)</label>
-                    <input type="number" id="chunk-min-size" value="500" min="1">
-                </div>
-                <div class="dash-field">
-                    <label>Max Chunk Size (words)</label>
-                    <input type="number" id="chunk-max-size" value="3000" min="1">
-                </div>
-                <div class="dash-field">
-                    <label>Overlap Paragraphs</label>
-                    <input type="number" id="chunk-overlap-para" value="0" min="0">
-                </div>
-                <div class="dash-field">
-                    <label>Min Overlap Words</label>
-                    <input type="number" id="chunk-overlap-words" value="0" min="0">
+                    <span class="field-hint">Global default. Override per chapter below (blank = auto).</span>
                 </div>
             </div>
+
+            <details class="chunk-advanced" id="chunk-advanced">
+                <summary>Advanced</summary>
+                <div class="dash-field-row">
+                    <div class="dash-field">
+                        <label>Min ratio (× target)</label>
+                        <input type="number" id="chunk-min-ratio" value="0.25" min="0.01" step="0.05">
+                    </div>
+                    <div class="dash-field">
+                        <label>Max ratio (× target)</label>
+                        <input type="number" id="chunk-max-ratio" value="1.5" min="0.01" step="0.05">
+                    </div>
+                    <div class="dash-field">
+                        <label>Overlap Paragraphs</label>
+                        <input type="number" id="chunk-overlap-para" value="0" min="0">
+                    </div>
+                    <div class="dash-field">
+                        <label>Min Overlap Words</label>
+                        <input type="number" id="chunk-overlap-words" value="0" min="0">
+                    </div>
+                </div>
+            </details>
 
             <div id="chunk-chapter-list"></div>
         </div>

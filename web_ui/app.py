@@ -2008,7 +2008,23 @@ def _get_project_status(project_id: str) -> dict:
     status["suggested_split_pattern"] = config.get("suggested_split_pattern")
     # Persisted chunking parameters (Stage 3 form remembers what the user
     # last successfully chunked with). May be absent for new projects.
-    status["chunking_config"] = config.get("chunking_config") or None
+    # Backfill the Advanced ratios so the GUI always has them, even for
+    # projects chunked before per-chapter tuning existed.
+    cc = config.get("chunking_config")
+    if cc:
+        changed = not ("min_ratio" in cc and "max_ratio" in cc)
+        cc.setdefault("min_ratio", 0.25)
+        cc.setdefault("max_ratio", 1.5)
+        if changed:
+            config["chunking_config"] = cc
+            try:
+                _save_project_config(project_id, config)
+            except Exception as e:
+                app.logger.warning("Failed to persist ratio backfill for %s: %s", project_id, e)
+    status["chunking_config"] = cc or None
+    # Sparse per-chapter overrides ({chapter_id: {target_size, ...}}). Used
+    # below to surface each chapter's chunk_target_override (null if none).
+    chapter_chunking = config.get("chapter_chunking") or {}
 
     # Image status: count placeholders in source.txt vs files on disk so the
     # dashboard can warn when the Gutenberg ingester failed to fetch some images.
@@ -2119,6 +2135,7 @@ def _get_project_status(project_id: str) -> dict:
             active_count = annotation_counts.get(ch_id, 0)
 
             entry = manifest_by_id.get(ch_id) or {}
+            ch_override = chapter_chunking.get(ch_id) or {}
             status["chapters"].append({
                 "id": ch_id,
                 "name": ch_id.replace("_", " ").title(),
@@ -2132,6 +2149,7 @@ def _get_project_status(project_id: str) -> dict:
                 "reviewed": ch_id in reviewed_chapters,
                 "kind": entry.get("kind", "chapter"),
                 "label": entry.get("label"),
+                "chunk_target_override": ch_override.get("target_size"),
             })
 
     status["chapter_count"] = len(status["chapters"])
@@ -2995,24 +3013,127 @@ def project_split(project_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _derive_chunk_bounds(target: int, min_ratio: float, max_ratio: float) -> tuple:
+    """Derive (min_chunk_size, max_chunk_size) from a target and ratios.
+
+    Clamped to the ChunkingConfig pydantic floors (min ≥ 50, max ≥ 100,
+    max > min). With the default ratios (0.25 / 1.5) and target 2000 this
+    reproduces the historical 500 / 3000 bounds exactly.
+    """
+    min_chunk = max(50, round(target * min_ratio))
+    max_chunk = max(100, round(target * max_ratio))
+    if max_chunk <= min_chunk:
+        max_chunk = min_chunk + 1
+    return min_chunk, max_chunk
+
+
+def _resolve_chunking(default_cfg: dict, override) -> tuple:
+    """Resolve the effective ChunkingConfig (+ optional per-paragraph weights)
+    for one chapter from the global default and an optional per-chapter override.
+
+    The override is the chapter's entry from ``chapter_chunking`` (or the
+    incoming request). Phase 1 honors only a scalar ``target_size``; min/max are
+    derived from the default's ratios, overlap is inherited from the default.
+
+    Returns ``(ChunkingConfig, para_weights | None)``. Phase 1 always yields
+    ``para_weights = None`` (uniform sizing). Phase 2 passes the override's
+    positional ``weights`` vector straight through here.
+    """
+    from src.models import ChunkingConfig
+
+    default_cfg = default_cfg or {}
+    override = override if isinstance(override, dict) else {}
+
+    target = override.get("target_size")
+    if target is None:
+        target = default_cfg.get("target_size", 2000)
+    target = int(target)
+
+    import math
+    min_ratio = float(default_cfg.get("min_ratio", 0.25))
+    max_ratio = float(default_cfg.get("max_ratio", 1.5))
+    if not (math.isfinite(min_ratio) and math.isfinite(max_ratio)):
+        raise ValueError("min_ratio and max_ratio must be finite numbers")
+    if max_ratio <= min_ratio:
+        raise ValueError(
+            f"max_ratio ({max_ratio}) must be greater than min_ratio ({min_ratio})"
+        )
+    min_chunk, max_chunk = _derive_chunk_bounds(target, min_ratio, max_ratio)
+
+    cfg = ChunkingConfig(
+        target_size=target,
+        min_chunk_size=min_chunk,
+        max_chunk_size=max_chunk,
+        min_ratio=min_ratio,
+        max_ratio=max_ratio,
+        overlap_paragraphs=int(default_cfg.get("overlap_paragraphs", 0) or 0),
+        min_overlap_words=int(default_cfg.get("min_overlap_words", 0) or 0),
+    )
+
+    # Phase 1: scalar override only ⇒ uniform weights (None == today's sizing).
+    # Phase 2 will pass override.get("weights") through as para_weights, with a
+    # length-mismatch guard in the caller to fall back to uniform.
+    para_weights = None
+    return cfg, para_weights
+
+
 def _persist_chunking_config(project_id: str, config) -> None:
-    """Save the chunking parameters used in a successful chunk run to
-    projects/<id>/project.json so the Stage 3 form pre-fills with the
-    user's last choices on subsequent visits."""
+    """Save the global default chunking parameters used in a successful chunk
+    run to projects/<id>/project.json so the Stage 3 form pre-fills with the
+    user's last choices on subsequent visits. Includes the Advanced min/max
+    ratios that future per-chapter resolution derives bounds from."""
     try:
         proj_cfg = _load_project_config(project_id)
         proj_cfg["chunking_config"] = {
             "target_size": config.target_size,
             "min_chunk_size": config.min_chunk_size,
             "max_chunk_size": config.max_chunk_size,
+            "min_ratio": config.min_ratio,
+            "max_ratio": config.max_ratio,
             "overlap_paragraphs": config.overlap_paragraphs,
             "min_overlap_words": config.min_overlap_words,
         }
         _save_project_config(project_id, proj_cfg)
-    except Exception:
+    except Exception as e:
         # Persistence is best-effort; never fail a chunk run because we
         # couldn't update project.json.
-        pass
+        app.logger.warning("Failed to persist chunking config for %s: %s", project_id, e)
+
+
+def _persist_chapter_chunking(project_id: str, overrides: dict) -> None:
+    """Upsert/clear per-chapter chunking overrides in project.json.
+
+    ``overrides`` maps ``chapter_id -> {"target_size": int | None}``. A None
+    (or absent) target_size deletes that chapter's entry, reverting it to the
+    global default. The stored ``chapter_chunking`` map stays sparse — only
+    tuned chapters appear. This is the shared contract future programmatic
+    paragraph-scorers write to (extending each entry with a positional
+    ``weights`` vector); existing keys on an entry are preserved on update.
+    Best-effort: never fails a chunk run."""
+    try:
+        proj_cfg = _load_project_config(project_id)
+        chapter_map = proj_cfg.get("chapter_chunking")
+        if not isinstance(chapter_map, dict):
+            chapter_map = {}
+
+        for chapter_id, ov in (overrides or {}).items():
+            target = ov.get("target_size") if isinstance(ov, dict) else None
+            if target is None:
+                chapter_map.pop(chapter_id, None)
+            else:
+                entry = chapter_map.get(chapter_id)
+                if not isinstance(entry, dict):
+                    entry = {}
+                entry["target_size"] = int(target)
+                chapter_map[chapter_id] = entry
+
+        if chapter_map:
+            proj_cfg["chapter_chunking"] = chapter_map
+        else:
+            proj_cfg.pop("chapter_chunking", None)
+        _save_project_config(project_id, proj_cfg)
+    except Exception as e:
+        app.logger.warning("Failed to persist chapter chunking for %s: %s", project_id, e)
 
 
 @app.route("/api/project/<project_id>/chunk-all", methods=["POST"])
@@ -3027,19 +3148,26 @@ def project_chunk_all(project_id):
 
     try:
         from src.chunker import chunk_chapter
-        from src.models import ChunkingConfig
         from src.utils.file_io import save_chunk
 
         data = request.json or {}
-        config = ChunkingConfig(**{
-            k: v for k, v in {
-                "target_size": data.get("target_size"),
-                "min_chunk_size": data.get("min_chunk_size"),
-                "max_chunk_size": data.get("max_chunk_size"),
-                "overlap_paragraphs": data.get("overlap_paragraphs"),
-                "min_overlap_words": data.get("min_overlap_words"),
-            }.items() if v is not None
-        })
+        # New shape: {default: {...}, chapters: {"<id>": {target_size}}}.
+        # Back-compat: a flat {target_size, ...} payload is the global default
+        # with no per-chapter overrides.
+        if "default" in data or "chapters" in data:
+            default_cfg = data.get("default")
+            if not isinstance(default_cfg, dict):
+                default_cfg = {}
+            chapter_overrides = data.get("chapters")
+            if not isinstance(chapter_overrides, dict):
+                chapter_overrides = {}
+        else:
+            default_cfg = data
+            chapter_overrides = {}
+
+        # The global default config (no override) is what we persist for the
+        # Stage 3 form to pre-fill from next time.
+        default_config, _ = _resolve_chunking(default_cfg, None)
 
         chunks_dir = project_dir / "chunks"
         chunks_dir.mkdir(exist_ok=True)
@@ -3047,18 +3175,22 @@ def project_chunk_all(project_id):
         total_chunks = 0
         for ch_file in sorted(chapters_dir.glob("chapter_*.txt")):
             chapter_id = ch_file.stem
+            cfg, para_weights = _resolve_chunking(
+                default_cfg, chapter_overrides.get(chapter_id)
+            )
             # Prefer chunks/ source_text so a re-chunk on a Stage-6'd project
             # preserves English in the new chunks instead of writing the
             # translated text from chapters/ back into chunk.source_text.
             text, _mtime, _kind = load_chapter_source_text(project_dir, chapter_id)
             if not text:
                 text = ch_file.read_text(encoding="utf-8")
-            chunks = chunk_chapter(text, config, chapter_id)
+            chunks = chunk_chapter(text, cfg, chapter_id, para_weights=para_weights)
             for chunk in chunks:
                 save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
                 total_chunks += 1
 
-        _persist_chunking_config(project_id, config)
+        _persist_chunking_config(project_id, default_config)
+        _persist_chapter_chunking(project_id, chapter_overrides)
         return jsonify({"ok": True, "total_chunks": total_chunks})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3113,19 +3245,16 @@ def project_chapter_rechunk(project_id, chapter_id):
 
     try:
         from src.chunker import chunk_chapter
-        from src.models import ChunkingConfig
         from src.utils.file_io import save_chunk
 
         data = request.json or {}
-        config = ChunkingConfig(**{
-            k: v for k, v in {
-                "target_size": data.get("target_size"),
-                "min_chunk_size": data.get("min_chunk_size"),
-                "max_chunk_size": data.get("max_chunk_size"),
-                "overlap_paragraphs": data.get("overlap_paragraphs"),
-                "min_overlap_words": data.get("min_overlap_words"),
-            }.items() if v is not None
-        })
+        # Per-chapter scalar target. Blank/None ⇒ revert this chapter to the
+        # global default (and clear its chapter_chunking entry below). The
+        # default's ratios + overlap come from the persisted global config.
+        raw_target = data.get("target_size")
+        default_cfg = _load_project_config(project_id).get("chunking_config") or {}
+        override = {"target_size": raw_target} if raw_target is not None else None
+        config, para_weights = _resolve_chunking(default_cfg, override)
 
         chunks_dir = project_dir / "chunks"
         chunks_dir.mkdir(exist_ok=True)
@@ -3160,11 +3289,14 @@ def project_chapter_rechunk(project_id, chapter_id):
             except OSError:
                 pass
 
-        chunks = chunk_chapter(text, config, chapter_id)
+        chunks = chunk_chapter(text, config, chapter_id, para_weights=para_weights)
         for chunk in chunks:
             save_chunk(chunk, chunks_dir / f"{chunk.id}.json")
 
-        _persist_chunking_config(project_id, config)
+        # Upsert (or clear when target was blank) this chapter's per-chapter
+        # override. We don't touch the global chunking_config from a single-
+        # chapter rechunk — Advanced defaults are owned by "Chunk All".
+        _persist_chapter_chunking(project_id, {chapter_id: {"target_size": raw_target}})
         return jsonify({"ok": True, "chunk_count": len(chunks)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

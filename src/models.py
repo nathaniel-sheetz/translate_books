@@ -457,6 +457,8 @@ class ChunkingConfig(BaseModel):
     min_overlap_words: int = Field(default=0, ge=0, description="Minimum words in overlap")
     min_chunk_size: int = Field(default=500, ge=50, description="Minimum words per chunk")
     max_chunk_size: int = Field(default=3000, ge=100, description="Maximum words per chunk")
+    min_ratio: float = Field(default=0.25, gt=0.0, description="min_chunk_size as a fraction of target_size when auto-derived (Advanced)")
+    max_ratio: float = Field(default=1.5, gt=0.0, description="max_chunk_size as a multiple of target_size when auto-derived (Advanced)")
     split_quality_weight: float = Field(default=0.5, ge=0.0, le=2.0, description="Weight for split-point quality vs even sizing (0=pure even, higher=prefer good boundaries)")
 
     @field_validator('max_chunk_size')

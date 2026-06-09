@@ -111,16 +111,16 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 - Overlap paragraphs (default: 0)
 - Minimum overlap words (default: 0)
 
-The form pre-fills with the parameters from the last successful chunk run. These are stored in `project.json` under `chunking_config` and restored automatically on dashboard load, so you don't have to re-enter them if you rechunk later.
+The form pre-fills with the parameters from the last successful chunk run. These are stored in `project.json` under `chunking_config` (including `min_ratio`/`max_ratio` for the Advanced section) and restored automatically on dashboard load. Each chapter also exposes a `chunk_target_override` field (integer or null) from the per-chapter sparse overrides map.
 
 The **Chunk All** button is in the panel header alongside the status indicator.
 
 **Workflow:**
-1. Configure chunking parameters
+1. Configure chunking parameters (optionally set per-chapter targets in the chapter cards)
 2. Click **Chunk All** to process every chapter
 3. Shows chapter list with chunk counts after completion
 
-**API:** `POST /api/project/<id>/chunk-all` — `{ "target_size": 2000, "overlap": 0, "min_overlap_words": 0 }`
+**API:** `POST /api/project/<id>/chunk-all` — `{ "default": { "target_size": 2000, "overlap_paragraphs": 0, "min_overlap_words": 0, "min_ratio": 0.25, "max_ratio": 1.5 }, "chapters": { "<chapter_id>": { "target_size": 1500 } } }`. Legacy flat payload `{ "target_size": 2000, ... }` is still accepted for backwards compatibility.
 
 **Backend:** `chunk_chapter()` from `src/chunker.py`. Each chunk is a `Chunk` Pydantic model serialized to JSON.
 

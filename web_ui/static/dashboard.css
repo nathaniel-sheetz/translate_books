@@ -459,6 +459,49 @@
     border-radius: 4px;
 }
 
+/* Left-side name + word/chunk info block; grows to fill the row so the
+   per-chapter Target field and Rechunk button cluster on the right. */
+.chapter-card .chapter-card-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Inline per-chapter Target override (overrides .dash-field block margin). */
+.chapter-card .chapter-target-field {
+    margin-bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+.chapter-card .chapter-target-field label {
+    margin-bottom: 0;
+    font-size: 12px;
+    color: #888;
+}
+
+.chapter-card .chapter-target-input {
+    width: 80px;
+}
+
+/* Collapsed Advanced disclosure for ratios + overlap. */
+.chunk-advanced {
+    margin: 0 0 16px 0;
+}
+
+.chunk-advanced > summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 8px;
+    user-select: none;
+}
+
 .chapter-card .ch-name {
     font-weight: 600;
     font-size: 14px;
