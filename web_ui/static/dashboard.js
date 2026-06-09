@@ -821,6 +821,83 @@
         };
     }
 
+    // Last fetched difficulty result, kept so the per-chapter badges survive a
+    // status reload (chapter cards are rebuilt on every loadStatus()).
+    // Shape: { book: metrics, chapters: { chapter_id: metrics } }.
+    var lastDifficulty = null;
+
+    var DIFF_HARD_THRESHOLD = 0.66;
+    var DIFF_MED_THRESHOLD = 0.33;
+
+    function difficultyBucket(d) {
+        if (d >= DIFF_HARD_THRESHOLD) return 'hard';
+        if (d >= DIFF_MED_THRESHOLD) return 'med';
+        return 'easy';
+    }
+
+    // A score badge whose tooltip breaks down the combined number into its
+    // length and rarity sub-scores plus the raw stats — so you can see which
+    // factor is driving a score and tune the weights.
+    function renderDifficultyBadge(m) {
+        var badge = document.createElement('span');
+        badge.className = 'difficulty-badge diff-' + difficultyBucket(m.difficulty);
+        badge.textContent = 'Difficulty ' + m.difficulty.toFixed(2);
+        badge.title =
+            'Length ' + m.length_score.toFixed(2) +
+            ' · Rarity ' + m.rarity_score.toFixed(2) +
+            ' · ' + Math.round(m.sentence_length_weighted) + 'w/sent' +
+            ' · ' + (m.rare_word_fraction * 100).toFixed(1) + '% rare';
+        return badge;
+    }
+
+    function renderBookDifficulty() {
+        var el = document.getElementById('chunk-difficulty-summary');
+        if (!el) return;
+        el.innerHTML = '';
+        if (!lastDifficulty || !lastDifficulty.book) return;
+        var b = lastDifficulty.book;
+        el.appendChild(renderDifficultyBadge(b));
+        var sug = document.createElement('button');
+        sug.type = 'button';
+        sug.className = 'btn-link diff-suggest';
+        sug.textContent = 'Use suggested book target (' + b.suggested_target_size + ')';
+        sug.addEventListener('click', function() {
+            var input = document.getElementById('chunk-target-size');
+            if (input) input.value = b.suggested_target_size;
+        });
+        el.appendChild(sug);
+    }
+
+    // Inject the difficulty badge + a "Suggest" link into each chapter card.
+    // Re-applied after every populateChunkStage so badges persist across reloads.
+    function applyDifficultyToCards() {
+        if (!lastDifficulty) return;
+        var map = lastDifficulty.chapters || {};
+        document.querySelectorAll('#chunk-chapter-list .chapter-card').forEach(function(card) {
+            var old = card.querySelector('.difficulty-wrap');
+            if (old) old.remove();
+            var m = map[card.dataset.chapterId];
+            if (!m) return;
+
+            var wrap = document.createElement('div');
+            wrap.className = 'difficulty-wrap';
+            wrap.appendChild(renderDifficultyBadge(m));
+
+            var sug = document.createElement('button');
+            sug.type = 'button';
+            sug.className = 'btn-link diff-suggest';
+            sug.textContent = 'Suggest ' + m.suggested_target_size;
+            sug.addEventListener('click', function() {
+                var input = card.querySelector('.chapter-target-input');
+                if (input) input.value = m.suggested_target_size;
+            });
+            wrap.appendChild(sug);
+
+            var targetField = card.querySelector('.chapter-target-field');
+            card.insertBefore(wrap, targetField);
+        });
+    }
+
     function populateChunkStage(status) {
         // Pre-fill the global default inputs from the project's persisted
         // chunking_config (saved on the last successful chunk run). Fall
@@ -896,6 +973,9 @@
 
             list.appendChild(card);
         });
+
+        // Re-attach any previously fetched difficulty badges to the fresh cards.
+        applyDifficultyToCards();
     }
 
     // Read a chapter card's Target input. Blank ⇒ null (inherit global / auto).
@@ -931,6 +1011,27 @@
                 setStatus('chunk-status', 'Rechunked ' + chapterName + ' (' + (data.chunk_count || 0) + ' chunks)', 'success');
                 loadStatus();
             }
+        });
+    }
+
+    var analyzeBtn = document.getElementById('btn-analyze-difficulty');
+    if (analyzeBtn) {
+        analyzeBtn.addEventListener('click', function() {
+            analyzeBtn.disabled = true;
+            setStatus('chunk-status', 'Analyzing difficulty…', '');
+            apiGet('/api/project/' + PROJECT + '/difficulty').then(function(data) {
+                analyzeBtn.disabled = false;
+                if (!data || data.error) {
+                    setStatus('chunk-status', (data && data.error) || 'Analysis failed', 'error');
+                    return;
+                }
+                var chMap = {};
+                (data.chapters || []).forEach(function(c) { chMap[c.chapter_id] = c; });
+                lastDifficulty = { book: data.book, chapters: chMap };
+                renderBookDifficulty();
+                applyDifficultyToCards();
+                setStatus('chunk-status', 'Difficulty analyzed — click Suggest to fill targets', 'success');
+            });
         });
     }
 

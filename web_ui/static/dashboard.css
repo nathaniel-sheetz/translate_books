@@ -488,6 +488,50 @@
     width: 80px;
 }
 
+/* ── Translation-difficulty badges (Analyze difficulty) ── */
+
+.difficulty-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.chapter-card .difficulty-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+/* The combined score; full breakdown (length/rarity sub-scores + raw stats)
+   lives in the title tooltip, so cursor: help signals there's more on hover. */
+.difficulty-badge {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #eee;
+    color: #333;
+    white-space: nowrap;
+    cursor: help;
+}
+
+.difficulty-badge.diff-easy { background: #e6f4ea; color: #1e7e34; }
+.difficulty-badge.diff-med  { background: #fdf3e2; color: #9a6700; }
+.difficulty-badge.diff-hard { background: #fce8e6; color: #b3261e; }
+
+.btn-link.diff-suggest {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #1a73e8;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.btn-link.diff-suggest:hover { text-decoration: underline; }
+.btn-link.diff-suggest:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; text-decoration: underline; }
+
 /* Collapsed Advanced disclosure for ratios + overlap. */
 .chunk-advanced {
     margin: 0 0 16px 0;
