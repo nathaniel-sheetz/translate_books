@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Non-interactive CLI for the translate-harness skill.
+
+The skill (``.claude/skills/translate-harness/SKILL.md``) drives the book-translation
+pipeline as a conversation: the agent *is* the thinking-mode LLM (it drafts the style
+guide and glossary in-chat), and this CLI is the deterministic surface it calls between
+drafts. Every command is non-interactive — it never calls ``input()`` and so never
+deadlocks an agent.
+
+Each command maps to one ``src/harness/flow.py`` function. Commands that produce data the
+agent should relay print a JSON object to stdout; commands that wrap a deterministic /
+paid stage (``chunk``/``cost``/``translate``/``epub``) inherit the wrapped CLI's output
+and exit with its code.
+
+Cost-gate safety (unchanged from the wrapped CLI):
+  * ``chunk`` and ``cost`` always pass ``--cost-only`` — they physically cannot spend.
+  * ``translate`` fails closed unless ``--yes`` is given, which the skill only supplies
+    after a separate-turn user approval of the estimate.
+
+Examples:
+    python scripts/harness.py setup --project understood-betsy --target-lang Spanish
+    python scripts/harness.py style-guide prepare-questions --project understood-betsy
+    python scripts/harness.py glossary commit --project understood-betsy
+    python scripts/harness.py chunk --project understood-betsy --size 1500
+    python scripts/harness.py translate --project understood-betsy --yes --model claude-sonnet-4-20250514
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.harness import flow
+from src.harness_guard import HarnessValidationError
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="harness", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_project(p):
+        p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+
+    # setup -----------------------------------------------------------------
+    sp = sub.add_parser("setup", help="Create project, persist config, run ingest + split")
+    add_project(sp)
+    sp.add_argument("--url", default="", help="Gutenberg URL (omit if source.txt is in place)")
+    sp.add_argument("--chapter-pattern", default="roman", choices=["roman", "numeric", "custom"])
+    sp.add_argument("--custom-regex", default=None)
+    sp.add_argument("--target-lang", dest="target_language", default=None)
+    sp.add_argument("--locale", default=None)
+    sp.add_argument("--provider", default=None)
+    sp.add_argument("--model", default=None)
+    sp.add_argument("--title", default=None)
+    sp.add_argument("--author", default=None)
+    sp.add_argument("--language-code", dest="language_code", default=None)
+
+    # style-guide <action> --------------------------------------------------
+    sg = sub.add_parser("style-guide", help="Style-guide beat (prepare/commit per draft)")
+    sg_sub = sg.add_subparsers(dest="action", required=True)
+    for action in ("prepare-questions", "prepare-followups", "commit-followups",
+                   "prepare-draft", "commit"):
+        ap = sg_sub.add_parser(action)
+        add_project(ap)
+        if action in ("prepare-followups", "prepare-draft"):
+            ap.add_argument("--answers", default=None, help="Answers JSON (default: .harness/style_answers.json)")
+        if action in ("commit-followups", "commit"):
+            ap.add_argument("--draft", default=None, help="Agent draft file (default: canonical .harness/ path)")
+
+    # glossary <action> -----------------------------------------------------
+    gl = sub.add_parser("glossary", help="Glossary beat (prepare/commit)")
+    gl_sub = gl.add_subparsers(dest="action", required=True)
+    gp = gl_sub.add_parser("prepare")
+    add_project(gp)
+    gp.add_argument("--max-candidates", type=int, default=200)
+    gc = gl_sub.add_parser("commit")
+    add_project(gc)
+    gc.add_argument("--draft", default=None, help="Proposals JSON (default: .harness/glossary_draft.json)")
+
+    # difficulty ------------------------------------------------------------
+    dp = sub.add_parser("difficulty", help="Score difficulty; suggest a chunk target size")
+    add_project(dp)
+
+    # chunk / cost / translate / epub --------------------------------------
+    cp = sub.add_parser("chunk", help="Chunk at --size and print the cost estimate (no spend)")
+    add_project(cp)
+    cp.add_argument("--size", type=int, required=True)
+
+    cop = sub.add_parser("cost", help="Re-print the cost estimate (no spend)")
+    add_project(cop)
+
+    tp = sub.add_parser("translate", help="The one paid step (requires --yes)")
+    add_project(tp)
+    tp.add_argument("--yes", action="store_true", help="Confirm the approved spend")
+    tp.add_argument("--model", default=None)
+    tp.add_argument("--provider", default=None)
+
+    ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
+    add_project(ep)
+    ep.add_argument("--title", default=None)
+    ep.add_argument("--author", default=None)
+    ep.add_argument("--language", default=None)
+
+    return parser
+
+
+def _dispatch(args: argparse.Namespace):
+    """Route a parsed command to its flow function. Returns a dict or an int exit code."""
+    cmd = args.command
+    if cmd == "setup":
+        return flow.setup(
+            args.project, url=args.url, chapter_pattern=args.chapter_pattern,
+            custom_regex=args.custom_regex, target_language=args.target_language,
+            locale=args.locale, provider=args.provider, model=args.model,
+            title=args.title, author=args.author, language_code=args.language_code,
+        )
+    if cmd == "style-guide":
+        if args.action == "prepare-questions":
+            return flow.style_guide_prepare_questions(args.project)
+        if args.action == "prepare-followups":
+            return flow.style_guide_prepare_followups(args.project, answers=args.answers)
+        if args.action == "commit-followups":
+            return flow.style_guide_commit_followups(args.project, draft=args.draft)
+        if args.action == "prepare-draft":
+            return flow.style_guide_prepare_draft(args.project, answers=args.answers)
+        if args.action == "commit":
+            return flow.style_guide_commit(args.project, draft=args.draft)
+    if cmd == "glossary":
+        if args.action == "prepare":
+            return flow.glossary_prepare(args.project, max_candidates=args.max_candidates)
+        if args.action == "commit":
+            return flow.glossary_commit(args.project, draft=args.draft)
+    if cmd == "difficulty":
+        return flow.difficulty(args.project)
+    if cmd == "chunk":
+        return flow.chunk(args.project, size=args.size)
+    if cmd == "cost":
+        return flow.cost(args.project)
+    if cmd == "translate":
+        return flow.translate(args.project, yes=args.yes, model=args.model, provider=args.provider)
+    if cmd == "epub":
+        return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
+    raise SystemExit(f"unknown command: {cmd}")
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
+    try:
+        result = _dispatch(args)
+    except HarnessValidationError as e:
+        print(f"VALIDATION ERROR — fix every issue below and re-draft:\n{e}", file=sys.stderr)
+        sys.exit(1)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"DRAFT PARSE ERROR — fix the JSON/format and re-run:\n{e}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if isinstance(result, int):
+        sys.exit(result)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
