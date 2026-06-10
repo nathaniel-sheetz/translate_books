@@ -70,6 +70,19 @@ Verified against the codebase on 2026-05-18. Line numbers refreshed from main HE
 **Why:** Surfaced during the harness-mode eng review (2026-06-05). The harness design's cost argument for choosing the API backend over per-chunk subagents assumed this caching already existed; it does not. Prompt caching is the single highest-leverage cost lever on the existing API path, and it is the prerequisite for an honest Approach-A-vs-B cost comparison (subagents amplify the lost-caching cost 2–4x). Note: the glossary is filtered per-chunk (`filter_glossary_for_chunk`, line 472), so it must stay in the variable suffix, not the cached prefix.
 **How:** Split the rendered prompt into a stable prefix (system + style guide) carrying `cache_control: {type: "ephemeral"}` and a variable suffix (per-chunk filtered glossary + source text). Confirm cache hits via `usage.cache_read_input_tokens` on the Anthropic response. This is a prompt-structure refactor of the translate path, not a harness-mode deliverable.
 
+### Parallel subagent translation backend for long books (Harness Phase B follow-on)
+**What:** Upgrade the sequential subagent translation backend (Phase B v1) to a parallel
+fan-out: the orchestrator spawns a capped pool of workers instead of one-at-a-time, with
+backoff and partial-failure collation.
+**Why:** Sequential per-chunk spawning is fine for the chapter-batch workflow v1 targets, but a
+full long book is slow. This is the deferred speed path (eng review 2026-06-10, decision D1 chose
+sequential to shrink the riskiest surface first).
+**How:** Keep the same `translate-prepare` / `translate-commit` seam; replace the one-at-a-time
+spawn loop in `SKILL.md` with a concurrency-capped pool. Continuity must come from the
+pre-computed `context_map` (previous-chunk source tail) since parallel workers lose ordering.
+Add rate-limit backoff for subscription fair-use caps.
+**Depends on:** Phase B v1 (sequential) shipped + a real long-book translation proving latency hurts.
+
 ## P3 — Documented but not currently impactful
 
 ### Reader realign races an in-flight bottom-sheet save
@@ -138,6 +151,16 @@ Verified against the codebase on 2026-05-18. Line numbers refreshed from main HE
 **What:** `src/epub_builder._discover_chunk_chapters` and `scripts/translate_book.discover_chapters` are near-identical: both glob `*_chunk_*.json`, apply the same regex, sort paths, and return `Dict[str, List[Path]]`. Deferred from maintainability specialist review on epub-translated-chapters-only (2026-06-07).
 **Why:** Drift risk — a bug fix to one function won't propagate to the other.
 **How:** Extract to `src/utils/chunk_discovery.py` with a single `discover_chunk_chapters(chunks_dir: Path) -> Dict[str, List[Path]]` function. Import it in both callers.
+
+### Consolidate the two `[IMAGE:...]` token regexes
+**What:** `src/utils/text_utils.py:21` `_IMAGE_PLACEHOLDER_RE` and `web_ui/app.py:3637`
+`_IMAGE_TOKEN_RE` are two regexes for the same `[IMAGE:filename(:desc)?]` token.
+**Why:** Drift risk — a change to the token format (or a fix to one) won't reach the other. Surfaced
+by the harness Phase B eng review (2026-06-10): the new `guard_translation_draft` reuses the
+`text_utils` canonical one, leaving the `web_ui` copy as the odd duplicate.
+**How:** Make `text_utils._IMAGE_PLACEHOLDER_RE` the single source and import it in `web_ui/app.py`;
+delete `_IMAGE_TOKEN_RE`. Confirm the retranslate-path token check still behaves identically.
+**Depends on:** nothing.
 
 ### Model comparison in dry-run
 **What:** When running cost/dry estimation, translate the same chunk with 2-3 models side by side to compare quality + cost before committing.
