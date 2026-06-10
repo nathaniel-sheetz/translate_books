@@ -366,38 +366,266 @@ def difficulty(project: str) -> dict:
     }
 
 
+# ── translate subagent backend (Phase B): prepare / commit ─────────────────
+#
+#   translate-prepare ─► .harness/translate/<id>.prompt.txt + manifest.json
+#        (no spend)        the agent spawns one model-pinned worker per entry:
+#                          worker reads prompt_path -> writes prose to draft_path
+#   translate-commit  ─► guard each draft -> apply_translation + save_chunk
+#        (idempotent)      + a provenance log per chunk; reports failed/missing
+#
+# The worker returns PROSE only and writes it to draft_path, so the orchestrator
+# never holds translation text in its context (eng review A2). The actual prompt
+# is build_translation_prompt's output — identical to the API path (A1).
+
+
+def translate_prepare(
+    project: str,
+    *,
+    chapters: str | None = None,
+    worker_model: str | None = None,
+    max_candidates: int = 0,  # unused; kept for CLI-arg symmetry
+) -> dict:
+    """Render per-chunk prompts + a manifest for the subagent backend (no spend).
+
+    For every UNTRANSLATED chunk in the requested chapters (``--chapters`` like
+    ``1-2`` / ``3,7``; all chapters when omitted), render the same prompt the API
+    path sends and write it to ``.harness/translate/<id>.prompt.txt``; assign a
+    ``draft_path`` the worker writes its prose to. ``previous_chapter_context`` is
+    pre-computed as the tail of the preceding chunk's source (document order),
+    matching ``stage_translate``'s running context so workers keep continuity.
+    """
+    project_dir = state.resolve_project_dir(project)
+    hdir = state.ensure_harness_dir(project_dir)
+    cfg = state.load_config(project_dir)
+    worker_model = worker_model or cfg.get("worker_model") or "sonnet"
+
+    sys.path.insert(0, str(state.REPO_ROOT))
+    from scripts.translate_book import discover_chapters, parse_chapter_range
+    from src.api_translator import build_translation_prompt
+    from src.utils.file_io import load_chunk, load_glossary, load_style_guide
+
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return {"error": "no chunks yet — run `chunk` first", "manifest": []}
+
+    discovered = discover_chapters(chunks_dir)
+    if chapters:
+        requested = parse_chapter_range(chapters)
+        discovered = {k: v for k, v in discovered.items() if k in requested}
+        if not discovered:
+            return {
+                "manifest": [],
+                "chapters": chapters,
+                "available_chapters": sorted(discover_chapters(chunks_dir).keys()),
+                "note": f"no matching chapters for --chapters {chapters}",
+            }
+
+    glossary = None
+    if (project_dir / "glossary.json").exists():
+        glossary = load_glossary(project_dir / "glossary.json")
+    style_guide = None
+    if (project_dir / "style.json").exists():
+        style_guide = load_style_guide(project_dir / "style.json")
+
+    title = cfg.get("title") or project_dir.name
+    target_lang = cfg.get("target_language") or "Spanish"
+
+    translate_dir = hdir / "translate"
+    translate_dir.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict] = []
+    total_words = 0
+    previous_context = ""
+    for chapter_id in sorted(discovered):
+        for cp in discovered[chapter_id]:
+            chunk = load_chunk(cp)
+            if chunk.has_translation:
+                continue
+            prompt = build_translation_prompt(
+                chunk,
+                glossary=glossary,
+                style_guide=style_guide,
+                project_name=title,
+                source_language="English",
+                target_language=target_lang,
+                previous_chapter_context=previous_context,
+            )
+            prompt_path = translate_dir / f"{chunk.id}.prompt.txt"
+            draft_path = translate_dir / f"{chunk.id}.draft.txt"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            total_words += chunk.word_count
+            entries.append({
+                "chunk_id": chunk.id,
+                "chapter_id": chunk.chapter_id,
+                "chunk_path": str(cp),
+                "prompt_path": str(prompt_path),
+                "draft_path": str(draft_path),
+                "source_word_count": chunk.word_count,
+            })
+            paragraphs = chunk.source_text.strip().split("\n\n")
+            previous_context = (
+                "\n\n".join(paragraphs[-2:]) if len(paragraphs) >= 2 else chunk.source_text.strip()
+            )
+
+    manifest_doc = {"worker_model": worker_model, "chapters": chapters or "all", "entries": entries}
+    (translate_dir / "manifest.json").write_text(
+        json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return {
+        "manifest": entries,
+        "manifest_path": str(translate_dir / "manifest.json"),
+        "worker_model": worker_model,
+        "usage_summary": {
+            "chunks": len(entries),
+            "source_words": total_words,
+            "worker_model": worker_model,
+        },
+        "chapters": chapters or "all",
+        "instructions": (
+            "For each manifest entry, spawn a worker pinned to worker_model that reads "
+            "prompt_path and writes ONLY the translated prose to draft_path. Then run "
+            "`translate-commit`. Nothing here spends or calls an API."
+            if entries else
+            "Nothing to translate — all chunks in scope already have translations."
+        ),
+    }
+
+
+def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
+    """Validate worker drafts, stamp the chunks, and report results (idempotent).
+
+    Reads the ``translate-prepare`` manifest; for each entry reads the worker's
+    draft prose, runs ``guard_translation_draft``, and on success writes a
+    provenance prompt-log + stamps the chunk (``apply_translation`` + ``save_chunk``).
+    Already-translated chunks are skipped, so a killed run resumes by re-running.
+    Failed/missing chunks are reported for re-spawn (never stamped).
+    """
+    project_dir = state.resolve_project_dir(project)
+    hdir = state.harness_dir(project_dir)
+
+    from src.api_translator import apply_translation
+    from src.harness_guard import guard_translation_draft
+    from src.utils.file_io import load_chunk, save_chunk
+    from src.utils.prompt_logger import log_prompt
+
+    manifest_path = hdir / "translate" / "manifest.json"
+    if not manifest_path.exists():
+        return {"error": "no manifest — run `translate-prepare` first", "committed": []}
+    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    worker_model = worker_model or doc.get("worker_model") or "sonnet"
+    entries = doc.get("entries", [])
+
+    committed: list[str] = []
+    failed: list[dict] = []
+    missing: list[str] = []
+    skipped: list[str] = []
+    project_slug = project_dir.name
+
+    for entry in entries:
+        cp = Path(entry["chunk_path"])
+        chunk = load_chunk(cp)
+        if chunk.has_translation:
+            skipped.append(entry["chunk_id"])
+            continue
+        draft_path = Path(entry["draft_path"])
+        if not draft_path.exists():
+            missing.append(entry["chunk_id"])
+            continue
+        prose = draft_path.read_text(encoding="utf-8")
+        problems = guard_translation_draft(chunk, prose)
+        if problems:
+            failed.append({"chunk_id": entry["chunk_id"], "problems": problems})
+            continue
+        prompt_path = Path(entry["prompt_path"])
+        prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+        log_path = log_prompt(
+            prompt=prompt_text,
+            response=prose.strip(),
+            provider="harness-subagent",
+            model=worker_model,
+            call_type="translation",
+            mode="harness-subagent",
+            chunk_id=chunk.id,
+            project_slug=project_slug,
+        )
+        apply_translation(chunk, prose, log_path=log_path)
+        save_chunk(chunk, cp)
+        committed.append(entry["chunk_id"])
+
+    return {
+        "committed": committed,
+        "failed": failed,
+        "missing": missing,
+        "skipped_already_translated": skipped,
+        "counts": {
+            "committed": len(committed),
+            "failed": len(failed),
+            "missing": len(missing),
+            "skipped": len(skipped),
+        },
+        "instructions": (
+            "Re-spawn workers for any `failed` (fix per the named problems) and `missing` "
+            "chunk_ids — write fresh prose to their draft_path — then run `translate-commit` "
+            "again. Cap re-spawns ~3, then surface for manual edit."
+            if (failed or missing) else
+            "All in-scope chunks committed. Proceed to combine/epub."
+        ),
+    }
+
+
 # ── chunk / cost / translate / epub (subprocess wrappers) ──────────────────
 
-def chunk(project: str, *, size: int) -> int:
+def chunk(project: str, *, size: int, chapters: str | None = None) -> int:
     """Chunk at ``size`` and print the cost estimate, halting before any spend.
 
     Wraps ``translate_book.py --start-stage chunk --cost-only`` so the run chunks
     once and then stops at the estimate (``--cost-only`` exits before a single
-    chunk is translated — it physically cannot spend).
+    chunk is translated — it physically cannot spend). ``--chapters`` scopes the
+    printed estimate to those chapters (chunking itself still covers the book).
     """
     project_dir = state.resolve_project_dir(project)
-    return _run_script([
+    cmd = [
         "scripts/translate_book.py",
         "--project-dir", str(project_dir),
         "--start-stage", "chunk",
         "--cost-only",
         "--chunk-size", str(int(size)),
-    ])
+    ]
+    if chapters:
+        cmd += ["--chapters", chapters]
+    return _run_script(cmd)
 
 
-def cost(project: str) -> int:
+def cost(project: str, *, chapters: str | None = None) -> int:
     """Re-print the translation cost estimate WITHOUT spending (pure estimator)."""
     project_dir = state.resolve_project_dir(project)
-    return _run_script([
+    cmd = [
         "scripts/translate_book.py",
         "--project-dir", str(project_dir),
         "--start-stage", "translate",
         "--cost-only",
-    ])
+    ]
+    if chapters:
+        cmd += ["--chapters", chapters]
+    return _run_script(cmd)
 
 
-def translate(project: str, *, yes: bool, model: str | None = None, provider: str | None = None) -> int:
-    """The one paid step. Fails closed without ``--yes`` (cost gate, defense-in-depth)."""
+def translate(
+    project: str,
+    *,
+    yes: bool,
+    model: str | None = None,
+    provider: str | None = None,
+    chapters: str | None = None,
+) -> int:
+    """The one paid step. Fails closed without ``--yes`` (cost gate, defense-in-depth).
+
+    ``--chapters`` (e.g. ``1-2`` / ``3,7``) translates only those chapters — the
+    chapter-at-a-time workflow (translate, read, then continue). Resume is free:
+    re-running skips chunks that already have a translation.
+    """
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
     if not yes:
@@ -407,14 +635,17 @@ def translate(project: str, *, yes: bool, model: str | None = None, provider: st
             file=sys.stderr,
         )
         return 2
-    return _run_script([
+    cmd = [
         "scripts/translate_book.py",
         "--project-dir", str(project_dir),
         "--start-stage", "translate",
         "--yes",
         "--provider", provider or cfg["provider"],
         "--model", model or cfg["model"],
-    ])
+    ]
+    if chapters:
+        cmd += ["--chapters", chapters]
+    return _run_script(cmd)
 
 
 def epub(project: str, *, title: str | None = None, author: str | None = None, language: str | None = None) -> int:

@@ -260,3 +260,88 @@ def test_translate_book_cli_rejects_removed_cost_limit(tmp_path: Path):
     assert result.returncode != 0
     assert "unrecognized arguments" in result.stderr
     assert "--cost-limit" in result.stderr
+
+
+# ===========================================================================
+# Subagent backend spine (Phase B): prepare -> (worker writes prose) -> commit
+# ===========================================================================
+#
+# The API-path spine above stubs translate_chunk_realtime. The subagent path
+# never calls it — it goes prepare -> worker writes prose to draft_path ->
+# commit (guard + stamp). This twin proves that spine offline: fake worker
+# prose -> commit -> combine -> epub, with provenance + idempotent resume.
+
+
+def test_subagent_spine_prepare_commit_produces_valid_epub(project: Path):
+    from src.harness import flow
+
+    # Chunk the fixture (deterministic), then prepare per-chunk prompts.
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project), worker_model="sonnet")
+    assert prep["manifest"], "prepare produced no work"
+    assert prep["usage_summary"]["worker_model"] == "sonnet"
+    assert prep["usage_summary"]["chunks"] == len(prep["manifest"])
+
+    # Simulate workers: each writes prose (not an echo) to its draft_path.
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        Path(entry["draft_path"]).write_text("[ES] " + chunk.source_text, encoding="utf-8")
+
+    res = flow.translate_commit(str(project), worker_model="sonnet")
+    assert res["counts"]["committed"] == len(prep["manifest"])
+    assert res["counts"]["failed"] == 0 and res["counts"]["missing"] == 0
+
+    # Chunks are translated AND carry provenance.
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        assert chunk.has_translation, f"{entry['chunk_id']} not stamped"
+        assert chunk.last_llm_log, "subagent commit must stamp provenance (last_llm_log)"
+
+    # Idempotent: re-commit touches nothing (resume safety).
+    res2 = flow.translate_commit(str(project), worker_model="sonnet")
+    assert res2["counts"]["committed"] == 0
+    assert res2["counts"]["skipped"] == len(prep["manifest"])
+
+    # combine + epub build from the subagent-translated chunks.
+    state: dict = {}
+    for stage in ("combine", "epub"):
+        state = tb.STAGE_FUNCTIONS[stage](_args(), project, state)
+    epubs = list(project.rglob("*.epub"))
+    assert epubs, "no EPUB produced from subagent-translated chunks"
+    with zipfile.ZipFile(epubs[0]) as z:
+        assert z.testzip() is None
+        assert any(n.endswith((".xhtml", ".html")) for n in z.namelist())
+
+
+def test_translate_commit_flags_bad_worker_output(project: Path):
+    """A draft that fails the guard is reported, never stamped."""
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project))
+    # Worker echoes the English source verbatim -> echo guard fails.
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        Path(entry["draft_path"]).write_text(chunk.source_text, encoding="utf-8")
+
+    res = flow.translate_commit(str(project))
+    assert res["counts"]["committed"] == 0
+    assert res["counts"]["failed"] == len(prep["manifest"])
+    assert all(any("verbatim copy" in p for p in f["problems"]) for f in res["failed"])
+    # Nothing was stamped.
+    for entry in prep["manifest"]:
+        assert not validate_chunk_file(Path(entry["chunk_path"])).has_translation
+
+
+def test_translate_prepare_chapter_scope(project: Path):
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+
+    only1 = flow.translate_prepare(str(project), chapters="1")
+    assert only1["manifest"], "chapter 1 should have work"
+    assert all(e["chapter_id"] == "chapter_01" for e in only1["manifest"])
+
+    none = flow.translate_prepare(str(project), chapters="9")
+    assert none["manifest"] == []
+    assert "no matching chapters" in none.get("note", "")

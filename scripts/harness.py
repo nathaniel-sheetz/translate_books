@@ -84,19 +84,39 @@ def _build_parser() -> argparse.ArgumentParser:
     dp = sub.add_parser("difficulty", help="Score difficulty; suggest a chunk target size")
     add_project(dp)
 
+    def add_chapters(p):
+        p.add_argument("--chapters", default=None,
+                       help="Limit to these chapters, e.g. '1-2' or '3,7,12' (default: all)")
+
     # chunk / cost / translate / epub --------------------------------------
     cp = sub.add_parser("chunk", help="Chunk at --size and print the cost estimate (no spend)")
     add_project(cp)
     cp.add_argument("--size", type=int, required=True)
+    add_chapters(cp)
 
     cop = sub.add_parser("cost", help="Re-print the cost estimate (no spend)")
     add_project(cop)
+    add_chapters(cop)
 
-    tp = sub.add_parser("translate", help="The one paid step (requires --yes)")
+    tp = sub.add_parser("translate", help="The one paid API step (requires --yes)")
     add_project(tp)
     tp.add_argument("--yes", action="store_true", help="Confirm the approved spend")
     tp.add_argument("--model", default=None)
     tp.add_argument("--provider", default=None)
+    add_chapters(tp)
+
+    # translate-prepare / translate-commit (harness subagent backend) -------
+    tpp = sub.add_parser("translate-prepare",
+                         help="Render per-chunk prompts + manifest for subagent workers (no spend)")
+    add_project(tpp)
+    add_chapters(tpp)
+    tpp.add_argument("--worker-model", dest="worker_model", default=None,
+                     help="Model tier to pin workers to (default: sonnet)")
+
+    tcp = sub.add_parser("translate-commit",
+                         help="Validate worker drafts and stamp the chunks (idempotent)")
+    add_project(tcp)
+    tcp.add_argument("--worker-model", dest="worker_model", default=None)
 
     ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
     add_project(ep)
@@ -136,11 +156,17 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "difficulty":
         return flow.difficulty(args.project)
     if cmd == "chunk":
-        return flow.chunk(args.project, size=args.size)
+        return flow.chunk(args.project, size=args.size, chapters=args.chapters)
     if cmd == "cost":
-        return flow.cost(args.project)
+        return flow.cost(args.project, chapters=args.chapters)
     if cmd == "translate":
-        return flow.translate(args.project, yes=args.yes, model=args.model, provider=args.provider)
+        return flow.translate(args.project, yes=args.yes, model=args.model,
+                              provider=args.provider, chapters=args.chapters)
+    if cmd == "translate-prepare":
+        return flow.translate_prepare(args.project, chapters=args.chapters,
+                                      worker_model=args.worker_model)
+    if cmd == "translate-commit":
+        return flow.translate_commit(args.project, worker_model=args.worker_model)
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
     raise SystemExit(f"unknown command: {cmd}")
