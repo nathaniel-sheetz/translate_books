@@ -21,32 +21,44 @@ allowed-tools:
 
 Drive the translation pipeline as a conversation. You (the agent) are the thinking-mode
 LLM: you draft the glossary and style guide in-chat, the user approves or edits, and the
-existing scripts produce the EPUB. The deterministic steps stay scripts; you call them.
+existing scripts produce the EPUB. The deterministic steps stay scripts; you call them
+through one non-interactive surface — **`scripts/harness.py`**.
 
 Scope (v1, eng review 2026-06-05): **short texts** — a single chapter or a small book.
 Long-book robustness (formal resume, batching) is out of scope.
 
-## NON-NEGOTIABLE CONSTRAINTS (read first)
+## How the harness CLI works (read first)
+
+Every command is `python scripts/harness.py <command> ...`, run from the repo root, and is
+**non-interactive** — it never calls `input()`, so it can never deadlock you. Each beat has
+the same shape:
+
+- **`prepare`** commands gather inputs, build the LLM prompt, and print JSON telling you the
+  `prompt_path` to read and the `draft_path` to write.
+- **You are the LLM:** read the prompt, draft the answer, and **Write it to `draft_path`**
+  yourself (the harness does not call an API for these — that is the whole point).
+- **`commit`** commands parse + **validate/guard** your draft and write the final artifact
+  (`style.json` / `glossary.json`). A bad draft fails loudly with a re-draft message instead
+  of poisoning the run; fix what it names and re-run the same `commit` (cap ~3, then
+  hand-edit-or-abort).
+
+Commands that produce data for you print a JSON object to stdout. Commands that wrap a
+deterministic/paid stage (`chunk`/`cost`/`translate`/`epub`) stream the underlying script's
+output through. Per-project working state lives in `projects/<slug>/.harness/`; `setup`
+wipes it for a clean run, so there is no global `.tmp/` to manage.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ NEVER invoke an interactive code path — every input() prompt DEADLOCKS you.│
 │   ✗ scripts/generate_style_guide.py  (built on input() per question)       │
-│ Instead: call the src/ helper FUNCTIONS directly, and gate cost yourself    │
-│   via --cost-only + an AskUserQuestion approval before translating.         │
+│ Always go through scripts/harness.py: it is the non-interactive surface,    │
+│ and it gates cost via --cost-only + a --yes you only pass after approval.    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **You fill the LLM roles, the helpers don't.** `build_question_prompt`,
-  `build_glossary_prompt`, `build_style_guide_prompt` only *build* prompts;
-  `parse_*`/`*_to_glossary` only *parse*. The actual LLM step in the scripts is a
-  `call_llm(...)` you replace by drafting the answer yourself in-conversation.
-- **Validate every draft before the pipeline consumes it** with `src/harness_guard.py`.
-  A bad draft must fail loudly and trigger a re-draft, never poison the run.
-- **Approval gates:** on each STOP beat, present the draft and ask. On approve → write
-  the file and continue. On reject → re-draft with the feedback and re-present. Cap
-  automated re-drafts at ~3, then force "hand-edit (use verbatim) or abort". The user
-  may say "change my answer to Q3" at any point — honor it.
+- **Approval gates:** on each STOP beat, present the draft and ask. On approve → continue.
+  On reject → re-draft with the feedback and re-present. The user may say "change my answer
+  to Q3" at any point — honor it.
 - **Each gate authorizes ONLY its own stage — approvals never cascade.** Approving the
   style guide does not authorize the glossary. Approving the glossary does **NOT** authorize
   translation. Approving the cost estimate is the *only* thing that authorizes the paid
@@ -55,346 +67,197 @@ Long-book robustness (formal resume, batching) is out of scope.
   explicit "yes, translate" — never inferred from any earlier approval.
 - **The cost beat is a hard stop.** Showing the cost estimate and *starting* the
   translation must be two separate turns. After you print the estimate, END your turn with
-  the AskUserQuestion and wait. Do NOT run the translate command in the same response that
-  produced the estimate, and never bundle "estimate → translate" into one chain. Money
-  moves only after the user answers that question affirmatively in a later turn.
-- `--cost-only` is a pure estimator: it never spends and never prompts. The paid translate
-  run requires `--yes`; never pass `--yes` unless the user explicitly approved the estimate
-  in a separate turn.
-- Run every Python snippet below from the repo root so `import src...` resolves.
+  the AskUserQuestion and wait. Do NOT run `translate` in the same response that produced the
+  estimate, and never bundle "estimate → translate" into one chain. Money moves only after
+  the user answers that question affirmatively in a later turn.
+- `chunk` and `cost` always run with `--cost-only`: they never spend and never prompt.
+  `translate` fails closed unless you pass `--yes`; never pass `--yes` unless the user
+  explicitly approved the estimate in a separate turn.
 
 ## Pipeline overview
 
 ```
-ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► score difficulty ─► chunk ─► [COST beat] ─►
- (deterministic)  agent drafts          agent drafts      (det.; sizes        (det.)   translate ─►
-                  + refine + approval    + approval         chunks)                     combine ─► epub
+ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► difficulty ─► chunk ─► [COST beat] ─►
+ (setup)         agent drafts          agent drafts      (det.; sizes  (det.)   translate ─►
+                 + refine + approval    + approval         chunks)               combine ─► epub
 ```
 
 The style guide goes **first** on purpose: it captures the user's key decisions
-(dialect/locale, name conventions, register, formatting) and those decisions then steer
-the glossary — `build_glossary_prompt` takes the approved style guide as an input.
+(dialect/locale, name conventions, register, formatting) and those decisions then steer the
+glossary — `glossary prepare` feeds the approved style guide into the proposal prompt.
 
-The glossary goes **before chunking** on purpose too: the difficulty scorer
-(`scripts/score_difficulty.py`) excludes glossary terms from its lexical-rarity signal, and the
-book-level difficulty it produces sets the **default chunk target size** (harder text → smaller
-chunks). So chunking is deferred until after the glossary is finalized — ingest/split is the only
-deterministic prep that runs during setup.
+The glossary goes **before chunking** on purpose too: the difficulty scorer excludes glossary
+terms from its lexical-rarity signal, and the book-level difficulty sets the **default chunk
+target size** (harder text → smaller chunks). So chunking is deferred until after the glossary
+is finalized — ingest/split (in `setup`) is the only deterministic prep that runs up front.
 
 ## Step 0 — Set up the project
 
-Identify (or create) the project directory `projects/<slug>/` and get the source text
-into `projects/<slug>/source.txt`.
+Get the source text into `projects/<slug>/source.txt` (or pass a Gutenberg `--url`), then run
+ingest + split (NOT chunk — chunking is deferred to Step 3 so it can use the glossary-informed
+difficulty score). `setup` also persists `target-lang` / `locale` / `model` / `title` /
+`author` so later steps stop repeating them.
 
-- Run **ingest + split only** — do NOT chunk yet. Chunking is deferred to Step 3 so it can use
-  the glossary-informed difficulty score (see the pipeline overview). The CLI has no "stop after
-  split" flag, so call the two stage functions directly (the same inline-helper idiom this skill
-  uses elsewhere):
-  ```bash
-  python - <<'PY'
-  import sys; sys.path.insert(0, ".")
-  from pathlib import Path
-  from types import SimpleNamespace
-  from scripts.translate_book import (
-      stage_ingest, stage_split, load_pipeline_state, save_pipeline_state,
-  )
-  proj = Path("projects/<slug>"); proj.mkdir(parents=True, exist_ok=True)
-  # url="" is fine when a local source.txt is already in place. Pick the chapter
-  # pattern that matches the book: "roman" (Chapter I, II …), "numeric" (Chapter 1,
-  # 2 …), or "custom" (set custom_regex). If split raises "No chapters detected",
-  # switch chapter_pattern and re-run.
-  args = SimpleNamespace(
-      url="<gutenberg-url-or-empty>",
-      chapter_pattern="roman", custom_regex=None, min_chapter_size=100,
-  )
-  state = load_pipeline_state(proj)
-  state = stage_ingest(args, proj, state); save_pipeline_state(proj, state)
-  state = stage_split(args, proj, state);  save_pipeline_state(proj, state)
-  print("ingest + split complete; chunking deferred to Step 3 (after the glossary)")
-  PY
-  ```
-- Confirm `projects/<slug>/source.txt` (or `chapters/chapter_*.txt`) exists before
-  continuing. The `chunks/` directory should NOT exist yet — Step 3 creates it.
-- Clear intermediate state from any prior harness run for this project:
-  ```bash
-  python -c "import shutil, pathlib; shutil.rmtree('.tmp', ignore_errors=True); pathlib.Path('.tmp').mkdir()"
-  ```
+```bash
+python scripts/harness.py setup --project projects/<slug> \
+  --target-lang Spanish --locale mx --model claude-sonnet-4-20250514 \
+  --title "<Title>" --author "<Author>"
+# add --url <gutenberg-url> if there is no local source.txt yet.
+```
+
+Pick the chapter pattern that matches the book: `--chapter-pattern roman` (Chapter I, II …),
+`numeric` (Chapter 1, 2 …), or `custom` (with `--custom-regex`). If split reports "No chapters
+detected," re-run with a different pattern. Confirm the printed `chapter_count` looks right and
+`chunks_dir_exists` is `false`. (The lang/locale/model defaults are Spanish/mx/sonnet — surface
+them to the user rather than assuming silently.)
 
 ## Step 1 — STYLE GUIDE beat (agent drafts, refine loop, approval gate)
 
-Mirrors the real order in `scripts/generate_style_guide.py` (fixed + conditional Qs →
-answers → LLM follow-up Qs → answers → draft guide). `answers` is a dict keyed by
-`question["id"]`; the value is the **0-based option index** for choice questions, or the
-**custom string** for free-text answers — exactly what the CLI produces.
-
-**1a. Gather questions (fixed + deterministic feature-sweep) and present them:**
+**1a. Gather questions and present them:**
 ```bash
-python - <<'PY'
-from pathlib import Path
-import json, sys; sys.path.insert(0, ".")
-from src.style_guide_wizard import get_active_questions, load_source_sample
+python scripts/harness.py style-guide prepare-questions --project projects/<slug>
+```
+This prints `detected_features`, the `questions` (each with `id`, `question`, `options`, and a
+`hint`), and an `answers_path`.
 
-proj = Path("projects/<slug>")
-source = load_source_sample(proj)
-fixed, conditional, manifest = get_active_questions(proj)
-present = [n for n, r in manifest.features.items() if r.present]
-for q in conditional:  # attach detected hints
-    f = q.get("requires", {}).get("feature")
-    if f and f in manifest.features and manifest.features[f].evidence:
-        q["_detected_hint"] = manifest.features[f].evidence[0]
-allq = list(fixed) + list(conditional)
-Path(".tmp").mkdir(exist_ok=True)
-Path(".tmp/style_source.txt").write_text(source, encoding="utf-8")
-Path(".tmp/style_fixed.json").write_text(json.dumps(fixed), encoding="utf-8")
-Path(".tmp/style_questions.json").write_text(json.dumps(allq), encoding="utf-8")
-print(f"detected features: {present or '(none)'}")
-print(json.dumps([{"id": q["id"], "question": q["question"],
-                   "options": [o["label"] for o in q.get("options", [])],
-                   "hint": q.get("_detected_hint", "")} for q in allq],
-                 indent=2, ensure_ascii=False))
-PY
-```
+**1b. Collect answers inline, question by question.** Ask each question in chat with its options
+and hint. Record the chosen **option index** (0-based) or **custom string** under the question's
+`id`. Let the user revise earlier answers. Then **Write** the dict to the printed `answers_path`:
+`{question_id: index_or_string}`.
 
-**1b. Collect answers inline, question by question** (D6). Ask each question in chat with
-its options and detected hint. Record the chosen **option index** (or custom string)
-under the question's `id`. Let the user revise earlier answers ("change my answer to
-Q3"). When done, write the answers:
+**1c. Generate follow-up questions (you are the LLM).**
 ```bash
-python - <<'PY'
-from pathlib import Path
-import json
-# Replace the dict below with the answers you collected: {question_id: index_or_string}
-answers = {}
-Path(".tmp/style_answers.json").write_text(json.dumps(answers), encoding="utf-8")
-print(f"{len(answers)} answers recorded")
-PY
+python scripts/harness.py style-guide prepare-followups --project projects/<slug>
 ```
+Read the printed `prompt_path`, draft the follow-up questions as a JSON array, **Write** them to
+the printed `draft_path`, then:
+```bash
+python scripts/harness.py style-guide commit-followups --project projects/<slug>
+```
+Ask the printed `new_questions` inline, then **rewrite `answers_path` with the full answer set**
+(prior answers + the new ones).
 
-**1c. Generate LLM follow-up questions (you are the LLM).** Build the prompt, draft the
-extra questions yourself, write them to `.tmp/style_llm_questions.txt`, then parse + ask
-them too (append their answers to `.tmp/style_answers.json`):
+**1d. Draft the style guide (you are the LLM), refine, save.**
 ```bash
-python - <<'PY'
-from pathlib import Path
-import json, sys; sys.path.insert(0, ".")
-from src.style_guide_wizard import build_question_prompt
-source = Path(".tmp/style_source.txt").read_text(encoding="utf-8")
-fixed = json.loads(Path(".tmp/style_fixed.json").read_text(encoding="utf-8"))
-answers = json.loads(Path(".tmp/style_answers.json").read_text(encoding="utf-8"))
-# build_question_prompt(source_text, target_lang, locale, fixed_questions, fixed_answers)
-prompt = build_question_prompt(source, "Spanish", "mx", fixed, answers)
-Path(".tmp/style_qprompt.txt").write_text(prompt, encoding="utf-8")
-print("follow-up-question prompt at .tmp/style_qprompt.txt")
-PY
+python scripts/harness.py style-guide prepare-draft --project projects/<slug>
 ```
-Read `.tmp/style_qprompt.txt`, draft follow-up questions → `.tmp/style_llm_questions.txt`,
-then merge + present them:
+Read the printed `prompt_path`, draft the style-guide prose, **Write** it to the printed
+`draft_path`, and **refine it with the user in chat** until they sign off. Then:
 ```bash
-python - <<'PY'
-from pathlib import Path
-import json, sys; sys.path.insert(0, ".")
-from src.style_guide_wizard import parse_llm_questions
-extra = parse_llm_questions(Path(".tmp/style_llm_questions.txt").read_text(encoding="utf-8"))
-allq = json.loads(Path(".tmp/style_questions.json").read_text(encoding="utf-8")) + extra
-Path(".tmp/style_questions.json").write_text(json.dumps(allq), encoding="utf-8")
-print(json.dumps([{"id": q["id"], "question": q["question"],
-                   "options": [o["label"] for o in q.get("options", [])]} for q in extra],
-                 indent=2, ensure_ascii=False))
-PY
+python scripts/harness.py style-guide commit --project projects/<slug>
 ```
-Ask the follow-up questions inline, add their answers to the dict, and rewrite
-`.tmp/style_answers.json` (re-run the 1b snippet with the full answer set).
+This parses, saves `style.json`, and validates it. If it prints a VALIDATION/PARSE error, fix the
+draft and re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort).
 
-**1d. Draft the style guide (you are the LLM), refine, save.** Build the prompt:
-```bash
-python - <<'PY'
-from pathlib import Path
-import json, sys; sys.path.insert(0, ".")
-from src.style_guide_wizard import build_style_guide_prompt
-allq = json.loads(Path(".tmp/style_questions.json").read_text(encoding="utf-8"))
-answers = json.loads(Path(".tmp/style_answers.json").read_text(encoding="utf-8"))
-source = Path(".tmp/style_source.txt").read_text(encoding="utf-8")
-# build_style_guide_prompt(questions, answers, source_text, target_lang, locale)
-prompt = build_style_guide_prompt(allq, answers, source, "Spanish", "mx")
-Path(".tmp/style_guide_prompt.txt").write_text(prompt, encoding="utf-8")
-print("style-guide prompt at .tmp/style_guide_prompt.txt")
-PY
-```
-Read it, draft the style-guide prose to `.tmp/style_guide_draft.txt`, and **refine it with
-the user in chat** until they sign off. Then save + validate:
-```bash
-python - <<'PY'
-from pathlib import Path
-import sys; sys.path.insert(0, ".")
-from src.style_guide_wizard import parse_style_guide_response, save_style_guide_json
-from src.harness_guard import validate_style_guide_file
-content = parse_style_guide_response(Path(".tmp/style_guide_draft.txt").read_text(encoding="utf-8"))
-out = Path("projects/<slug>/style.json")
-save_style_guide_json(content, out)
-validate_style_guide_file(out)
-print(f"style.json written ({len(content)} chars)")
-PY
-```
-
-**1e. STOP — approval beat.** Present the final style guide. Approve / edit / re-draft
-(cap ~3 re-drafts, then hand-edit-or-abort). This is the user's chance to lock in the key
-decisions (dialect/locale, name conventions, register) **before** they shape the glossary.
+**1e. STOP — approval beat.** Present the final style guide. Approve / edit / re-draft. This is the
+user's chance to lock in the key decisions (dialect/locale, name conventions, register) **before**
+they shape the glossary.
 
 ## Step 2 — GLOSSARY beat (agent drafts, approval gate)
 
-The approved style guide now steers term choices — read it back in so name conventions,
-dialect, and register carry into the glossary.
-
-1. Extract candidates deterministically and build the proposal prompt, feeding in the
-   approved style guide. Run:
-   ```bash
-   python - <<'PY'
-   from pathlib import Path
-   import sys; sys.path.insert(0, ".")
-   from scripts.extract_glossary_candidates import extract_candidates
-   from src.glossary_bootstrap import build_glossary_prompt
-   from src.style_guide_wizard import load_source_sample
-
-   proj = Path("projects/<slug>")
-   source = (proj / "source.txt").read_text(encoding="utf-8")
-   report = extract_candidates(source, verbose=False)
-   candidates = [c.model_dump() for c in report.candidates[:200]]
-   sample = load_source_sample(proj)
-   style_path = proj / "style.json"
-   style_guide = style_path.read_text(encoding="utf-8") if style_path.exists() else ""
-   # build_glossary_prompt(candidates, source_text_sample, style_guide_content, target_lang)
-   prompt = build_glossary_prompt(candidates, sample, style_guide, "Spanish")
-   Path(".tmp/glossary_prompt.txt").parent.mkdir(exist_ok=True)
-   Path(".tmp/glossary_prompt.txt").write_text(prompt, encoding="utf-8")
-   print(f"{len(candidates)} candidates; style guide {'loaded' if style_guide else 'MISSING'};"
-         f" prompt written to .tmp/glossary_prompt.txt")
-   PY
-   ```
-2. **Read `.tmp/glossary_prompt.txt`** and draft the glossary proposals yourself — this
-   is the thinking-mode step. Produce a JSON array of
-   `{english, translation, type, context}` objects. Write it to `.tmp/glossary_draft.json`.
-   As you draft, **track every term whose translation you were unsure about** (ambiguous
-   sense, multiple valid renderings, dialect/register judgement calls) and note why — keep
-   that running list for the approval beat below.
-3. Validate + build the glossary, guarding the parse boundary:
-   ```bash
-   python - <<'PY'
-   from pathlib import Path
-   import json, sys; sys.path.insert(0, ".")
-   from src.harness_guard import guard_glossary_proposals, validate_glossary_file
-   from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
-   from src.utils.file_io import save_glossary
-
-   proposals = json.loads(Path(".tmp/glossary_draft.json").read_text(encoding="utf-8"))
-   guard_glossary_proposals(proposals)          # raises HarnessValidationError -> re-draft
-   glossary = proposals_to_glossary(glossary_terms_from_proposals(proposals))
-   out = Path("projects/<slug>/glossary.json")
-   save_glossary(glossary, out)
-   validate_glossary_file(out)                  # belt-and-suspenders
-   print(f"glossary.json written: {len(glossary.terms)} terms")
-   PY
-   ```
-   If the guard raises, fix the offending entries it names and re-draft (cap ~3).
-4. **STOP — approval beat.** Do all three, in this order:
-   - **Show the full list of glossary terms**, not just a count or summary — render every
-     `english → translation` pair (with type/context) so the user can scan the actual
-     decisions. Offer it as a table or list; do not collapse it to "N terms drafted."
-   - **Call out the uncertain translations** you tracked in step 2: name each term, its
-     chosen rendering, the alternative(s) you considered, and why you hesitated, so the
-     user can adjudicate the close calls deliberately.
-   - **AskUserQuestion: approve / edit / re-draft.** On edit, let the user hand the
-     corrected JSON; write it verbatim and re-validate. Only continue once approved.
-   > Approving the glossary approves **the glossary only**. It does NOT mean "start
-   > translating." After approval you proceed to difficulty scoring + chunking (Step 3) and
-   > then **stop again** at the cost gate (Step 4). Do not jump to the translate command here.
-
-## Step 3 — Difficulty-aware chunk (deterministic) — run as estimator only
-
-The chunk **target size defaults to the difficulty scorer's suggestion** instead of a flat 2000.
-Score first (the glossary now exists, so it's reflected), then chunk at the suggested size.
-
-**3a — Score difficulty → default chunk target size.** Run the scorer with `--force` so the
-just-approved glossary is reflected (`difficulty.json` is cached on the *source* mtime, not the
-glossary, so without `--force` a prior run's glossary-less numbers could be reused):
 ```bash
-python scripts/score_difficulty.py projects/<slug> --force
+python scripts/harness.py glossary prepare --project projects/<slug>
 ```
-This prints a book line ending `-> suggested target Nw` plus a per-chapter table. Present the
-book difficulty and that suggested `N` to the user (the per-chapter table is informational only —
-the harness applies one global size). Treat `N` as the **default**: if the user wants a different
-chunk size, honor their override; otherwise chunk at `N`. (If `wordfreq` isn't installed the
-scorer warns and the rarity signal is 0, so the suggestion leans toward 2000 — still usable.)
+This extracts candidates, feeds in the approved style guide, and prints `candidate_count`,
+`style_guide_loaded` (must be `true` — if not, the style guide isn't saved yet; go back to Step 1),
+a `prompt_path`, and a `draft_path`.
 
-**3b — Chunk at that size (estimator only).** Pass the chosen size via `--chunk-size` and keep
-`--cost-only` so the run chunks once and then halts at the cost estimate (`--cost-only` exits
-before a single chunk is translated — it physically cannot spend):
+**Read the printed `prompt_path`** and draft the glossary proposals yourself — the thinking-mode
+step. Produce a JSON array of `{english, translation, type, context}` objects and **Write** it to
+the printed `draft_path`. As you draft, **track every term whose translation you were unsure about**
+(ambiguous sense, multiple valid renderings, dialect/register judgement calls) and why — keep that
+running list for the approval beat. Then:
 ```bash
-python scripts/translate_book.py --project-dir projects/<slug> --start-stage chunk --cost-only --chunk-size <N>
+python scripts/harness.py glossary commit --project projects/<slug>
 ```
-This produces the chunks and prints the estimate, then stops. Carry that estimate straight
-into the Step 4 gate below — do not run any command without `--cost-only` until the user
-has approved.
+This guards the proposals, builds + saves `glossary.json`, and validates it; it prints the full
+`terms` list. If it prints a VALIDATION ERROR, fix the entries it names and re-run `commit` (cap ~3).
 
-## Step 4 — COST beat, then translate (no input() ever)
+**STOP — approval beat.** Do all three, in this order:
+- **Show the full list of glossary terms** (use the `terms` the command printed) — render every
+  `english → translation` pair with type/context so the user can scan the actual decisions. Do not
+  collapse it to "N terms drafted."
+- **Call out the uncertain translations** you tracked: name each term, its chosen rendering, the
+  alternative(s) you considered, and why you hesitated, so the user can adjudicate the close calls.
+- **AskUserQuestion: approve / edit / re-draft.** On edit, let the user hand corrected JSON; Write
+  it to the `draft_path` and re-run `commit`. Only continue once approved.
+
+> Approving the glossary approves **the glossary only**. It does NOT mean "start translating."
+> After approval you proceed to difficulty scoring + chunking (Step 3) and then **stop again** at
+> the cost gate (Step 4). Do not jump to translate here.
+
+## Step 3 — Difficulty-aware chunk (deterministic) — estimator only
+
+**3a — Score difficulty → default chunk target size.** The glossary now exists, so the scorer
+reflects it:
+```bash
+python scripts/harness.py difficulty --project projects/<slug>
+```
+This prints `book_difficulty` and a `suggested_target_size` (N), plus a per-chapter table.
+Present the book difficulty and that suggested `N`. Treat `N` as the **default**: honor a user
+override; otherwise chunk at `N`. (If `wordfreq` isn't installed, `wordfreq_available` is `false`
+and the suggestion leans toward 2000 — still usable.)
+
+**3b — Chunk at that size (estimator only).**
+```bash
+python scripts/harness.py chunk --project projects/<slug> --size <N>
+```
+This chunks once and prints the cost estimate, then halts — it runs `--cost-only` and physically
+cannot spend. Carry that estimate straight into the Step 4 gate below.
+
+## Step 4 — COST beat, then translate
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ THIS IS THE ONLY PAID STEP AND THE ONLY HARD STOP THAT COSTS MONEY.        │
 │ Estimating cost and starting translation are TWO SEPARATE TURNS.           │
-│ Print the estimate, ask, and END YOUR TURN. Never run --cost-only and the  │
-│ translate command in the same response. No earlier approval (style guide,  │
+│ Print the estimate, ask, and END YOUR TURN. Never run `chunk`/`cost` and   │
+│ `translate` in the same response. No earlier approval (style guide,        │
 │ glossary, chunk) authorizes this — only the answer to the question below.  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-1. You already have the estimate from Step 3 (the `--cost-only` chunk run). If you need to
-   recompute it, re-run the cost estimate — still WITHOUT translating, so it never spends
-   money:
+1. You already have the estimate from Step 3. To recompute it (still WITHOUT spending):
    ```bash
-   python scripts/translate_book.py --project-dir projects/<slug> --start-stage translate --cost-only
+   python scripts/harness.py cost --project projects/<slug>
    ```
-2. **STOP — approval beat. END THE TURN HERE.** Show the estimate, then ask via
-   AskUserQuestion: proceed / abort — and stop. Do not call any further tool in this
-   response. Resume to step 3 ONLY after the user has, in a *later* turn, explicitly chosen
-   to proceed. If you are unsure whether they approved, treat it as NOT approved and ask
-   again. Confirm the model with them here too (it determines the price).
-   > Cost note (eng review 2026-06-05): the API path does not use prompt caching today,
-   > so input tokens are not discounted across chunks. The estimate is the honest figure.
-3. **Only once the user has affirmatively approved in a separate turn**, translate with
-   `--yes` to record that approval for the non-interactive CLI run:
+2. **STOP — approval beat. END THE TURN HERE.** Show the estimate, then ask via AskUserQuestion:
+   proceed / abort — and stop. Do not call any further tool in this response. Resume ONLY after the
+   user has, in a *later* turn, explicitly chosen to proceed. If unsure whether they approved, treat
+   it as NOT approved and ask again. Confirm the model with them here too (it determines the price).
+   > Cost note (eng review 2026-06-05): the API path does not use prompt caching today, so input
+   > tokens are not discounted across chunks. The estimate is the honest figure.
+3. **Only once the user has affirmatively approved in a separate turn**, translate:
    ```bash
-   python scripts/translate_book.py --project-dir projects/<slug> --start-stage translate \
-     --yes --provider anthropic --model claude-sonnet-4-20250514
+   python scripts/harness.py translate --project projects/<slug> --yes --model claude-sonnet-4-20250514
    ```
-   (Pick the model the user wants; default is sonnet. Surface model choice rather than
-   assuming.)
+   `translate` refuses to run without `--yes`. The model defaults to the one set at `setup`; pass
+   `--model` to override, and surface the choice rather than assuming.
 
 ## Step 5 — Combine + EPUB (translated chapters only)
 
-The translate run above chains through combine, epub, and align. The EPUB stage now builds
-from translated chunks only and reports exactly which chapters shipped. You can either rely
-on that `--start-stage translate` run, or rebuild explicitly with the shared CLI:
+The `translate` run chains through combine, epub, and align, building the EPUB from translated
+chunks only and reporting exactly which chapters shipped. To (re)build explicitly:
 ```bash
-python scripts/build_epub.py projects/<slug> --title "<Title>" --author "<Author>" --language es
+python scripts/harness.py epub --project projects/<slug>
+# --title / --author / --language default to what you set at setup; pass them to override.
 ```
-
-Report the included/skipped chapter lists printed by the helper so a partial translation is
-never mistaken for a complete book. (Use the project's real `<Title>`/`<Author>` and target
-language code.) Confirm the EPUB landed:
+Report the included/skipped chapter lists so a partial translation is never mistaken for a complete
+book. Confirm the EPUB landed:
 ```bash
 ls projects/<slug>/*.epub
 ```
 
 ## Done
 
-Report: glossary terms count, style-guide length, chunk count, EPUB path. Confirm the
-copy-paste loop is gone — the user drafted nothing in an external chat.
+Report: glossary terms count, style-guide length, chunk count, EPUB path. Confirm the copy-paste
+loop is gone — the user drafted nothing in an external chat.
 
 ## What this skill deliberately does NOT do (v1)
 
-- No `TranslationBackend` abstraction — translation goes straight through the existing
-  API path (`translate_chunk_realtime`). The subagent backend + a backend Protocol are
-  deferred until Approach B is scheduled (eng review D9).
-- No long-book resume beyond the pipeline's existing chunk-level idempotency
-  (`stage_translate` skips chunks that already have a translation).
+- No `TranslationBackend` abstraction — translation goes straight through the existing API path.
+  The subagent backend + a backend Protocol are deferred until Approach B is scheduled (eng review
+  D9). `scripts/harness.py` is orchestration only; it adds no new translation business logic.
+- No long-book resume beyond the pipeline's existing chunk-level idempotency (`stage_translate`
+  skips chunks that already have a translation).
 - No prompt caching (tracked separately in TODOS.md).
