@@ -170,7 +170,8 @@ def style_guide_prepare_questions(project: str) -> dict:
         ],
         "answers_path": str(hdir / "style_answers.json"),
         "instructions": (
-            "Ask each question in chat. Write {question_id: option_index_or_custom_string} "
+            "STOP: ask the user every question and WAIT for their answers — do not answer "
+            "for them or pick defaults. Then Write {question_id: option_index_or_custom_string} "
             "to answers_path, then run `style-guide prepare-followups`."
         ),
     }
@@ -224,7 +225,8 @@ def style_guide_commit_followups(project: str, *, draft: str | None = None) -> d
         ],
         "answers_path": str(hdir / "style_answers.json"),
         "instructions": (
-            "Ask these follow-ups, then rewrite answers_path with the FULL answer set "
+            "STOP: ask the user these follow-ups and WAIT for their answers — do not answer "
+            "for them or pick defaults. Then rewrite answers_path with the FULL answer set "
             "(prior answers + these), then run `style-guide prepare-draft`."
         ),
     }

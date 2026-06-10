@@ -56,6 +56,20 @@ wipes it for a clean run, so there is no global `.tmp/` to manage.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+- **Two kinds of STOP beat — not every stop is a draft approval.** Some STOP beats are
+  *question-collection* stops that happen **before any draft exists**: you ask the user
+  questions, END your turn, and wait for their real answers. The others are *approval* stops:
+  you present a finished draft and ask approve / edit / re-draft. Both end your turn and wait.
+- **Step 1 alone has THREE pause points, not one** — do not treat 1e as the only stop:
+  - **G1 — standard + deterministic questions (step 1b):** ask, wait for answers.
+  - **G2 — LLM-driven follow-up questions (step 1c):** ask, wait for answers.
+  - **G3 — style-guide approval (step 1e):** present the draft, wait for sign-off.
+  Drafting the style guide (1d) MUST NOT begin until G1 and G2 both hold *real user answers*.
+- **Never answer the style-guide questions on the user's behalf.** The whole point of the beat
+  is to capture *the user's* decisions. The `options` and `hint` on each question exist to help
+  the user choose — they are NOT defaults for you to auto-pick. Inventing answers, picking
+  defaults, or skipping ahead to the next command before the user has responded defeats the
+  skill. If the user hasn't answered yet, STOP and wait.
 - **Approval gates:** on each STOP beat, present the draft and ask. On approve → continue.
   On reject → re-draft with the feedback and re-present. The user may say "change my answer
   to Q3" at any point — honor it.
@@ -111,21 +125,31 @@ detected," re-run with a different pattern. Confirm the printed `chapter_count` 
 `chunks_dir_exists` is `false`. (The lang/locale/model defaults are Spanish/mx/sonnet — surface
 them to the user rather than assuming silently.)
 
-## Step 1 — STYLE GUIDE beat (agent drafts, refine loop, approval gate)
+## Step 1 — STYLE GUIDE beat (two question gates, then draft + approval)
 
-**1a. Gather questions and present them:**
+This beat has **three STOP points**: G1 (1b) and G2 (1c) collect the user's answers *before*
+any draft exists; G3 (1e) approves the finished guide. Do not reach the draft (1d) until the
+user has answered both question gates.
+
+**1a. Gather the standard + deterministic questions:**
 ```bash
 python scripts/harness.py style-guide prepare-questions --project projects/<slug>
 ```
-This prints `detected_features`, the `questions` (each with `id`, `question`, `options`, and a
-`hint`), and an `answers_path`.
+This prints `detected_features`, the `questions` (the 4 **standard** fixed questions plus the
+**deterministic** feature-detected ones, each with `id`, `question`, `options`, and a `hint`),
+and an `answers_path`. Nothing here is answered yet — these are *for the user*.
 
-**1b. Collect answers inline, question by question.** Ask each question in chat with its options
-and hint. Record the chosen **option index** (0-based) or **custom string** under the question's
-`id`. Let the user revise earlier answers. Then **Write** the dict to the printed `answers_path`:
-`{question_id: index_or_string}`.
+**1b. STOP — G1: ask the standard + deterministic questions and WAIT.** Present **every**
+question in chat with its options and hint, then **END your turn** and wait for the user's
+answers. Do **not** answer them yourself, pick defaults, or run the next command first. (There
+are usually more than 4 — 4 fixed + N detected — so ask in chat, optionally batching via
+`AskUserQuestion` in groups of ≤ 4; don't assume one `AskUserQuestion` holds them all.) Once the
+user has answered (let them revise earlier answers), record each as a 0-based **option index**
+or a **custom string** and **Write** the dict to the printed `answers_path`:
+`{question_id: index_or_string}`. Only then continue to 1c.
 
-**1c. Generate follow-up questions (you are the LLM).**
+**1c. Generate the LLM-driven follow-up questions, then STOP to ask them.** First draft them —
+you are the LLM:
 ```bash
 python scripts/harness.py style-guide prepare-followups --project projects/<slug>
 ```
@@ -134,8 +158,10 @@ the printed `draft_path`, then:
 ```bash
 python scripts/harness.py style-guide commit-followups --project projects/<slug>
 ```
-Ask the printed `new_questions` inline, then **rewrite `answers_path` with the full answer set**
-(prior answers + the new ones).
+**STOP — G2: ask the printed `new_questions` and WAIT.** Present them in chat, **END your turn**,
+and wait for the user's answers (same rule — do not answer them for the user). Only after the
+user responds, **rewrite `answers_path` with the full answer set** (prior answers + the new
+ones), then continue to 1d.
 
 **1d. Draft the style guide (you are the LLM), refine, save.**
 ```bash
@@ -149,9 +175,9 @@ python scripts/harness.py style-guide commit --project projects/<slug>
 This parses, saves `style.json`, and validates it. If it prints a VALIDATION/PARSE error, fix the
 draft and re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort).
 
-**1e. STOP — approval beat.** Present the final style guide. Approve / edit / re-draft. This is the
-user's chance to lock in the key decisions (dialect/locale, name conventions, register) **before**
-they shape the glossary.
+**1e. STOP — G3: approval beat.** Present the final style guide. Approve / edit / re-draft. This is
+the user's chance to lock in the key decisions (dialect/locale, name conventions, register)
+**before** they shape the glossary.
 
 ## Step 2 — GLOSSARY beat (agent drafts, approval gate)
 
