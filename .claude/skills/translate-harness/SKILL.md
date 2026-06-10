@@ -15,6 +15,7 @@ allowed-tools:
   - Glob
   - Grep
   - AskUserQuestion
+  - Task
 ---
 
 # translate-harness
@@ -260,6 +261,57 @@ cannot spend. Carry that estimate straight into the Step 4 gate below.
    `translate` refuses to run without `--yes`. The model defaults to the one set at `setup`; pass
    `--model` to override, and surface the choice rather than assuming.
 
+## Step 4B — Subagent backend (zero-API-key, model-pinned) — ALTERNATIVE to Step 4
+
+Two translation backends, same downstream pipeline. Pick one with the user:
+
+- **API backend (Step 4):** fast, batchable, but needs an `ANTHROPIC_API_KEY` and spends metered dollars.
+- **Subagent backend (this step):** no API key — translation runs as **spawned worker subagents on
+  the running subscription**, so a stranger can translate token-free. You (the orchestrator, e.g.
+  Opus) stay the smart driver while workers run on a **cheaper pinned model** (default `sonnet`). v1
+  is **sequential** (one worker at a time) and best for short texts or a chapter batch.
+
+**Chapter-at-a-time:** pass `--chapters 1-2` (or `3,7`) to translate just those chapters; read them in
+the reader, then come back and translate `3-4`. Re-running only fills chunks that still need a
+translation, so resume is free. Works on Step 4 too.
+
+**4B-a. Prepare (no spend).** Renders one prompt file per untranslated chunk + a manifest:
+```bash
+python scripts/harness.py translate-prepare --project projects/<slug> [--chapters 1-2] [--worker-model sonnet]
+```
+This prints a `manifest` (each entry has `chunk_id`, `prompt_path`, `draft_path`), a `usage_summary`
+(`chunks`, `source_words`, `worker_model`), and the `worker_model`. It does **not** call an API.
+
+**4B-b. STOP — usage gate. END THE TURN.** This is the subagent analog of the cost gate. There is no
+dollar cost, but spawning N workers consumes real subscription/rate usage. Show the `usage_summary`
+("N workers on `<model>`"), confirm the worker model, and ask via AskUserQuestion: proceed / abort.
+**End your turn and wait.** Do not spawn workers in the same turn that produced the manifest.
+
+**4B-c. Spawn workers (sequential), then commit.** Only after the user approves in a later turn, loop
+the manifest **one entry at a time**. For each entry, spawn a worker with the **Task** tool:
+- `subagent_type`: `translator` (defined in `.claude/agents/translator.md`)
+- `model`: the approved `worker_model` (e.g. `sonnet` / `haiku`) — this is how the worker is pinned
+  cheaper than you, the orchestrator.
+- prompt: "Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to
+  `<draft_path>`. Nothing else." (Pass the entry's real `prompt_path` and `draft_path`.)
+
+The worker writes its prose to `draft_path` — **do not** have it return the translation to you (that
+floods your context; the whole point is the worker writes the file). Once all workers in the batch
+have written their drafts:
+```bash
+python scripts/harness.py translate-commit --project projects/<slug>
+```
+This guards each draft (length / completeness / image-token filename parity / echo), writes a
+provenance log, stamps the chunk, and prints `committed` / `failed` / `missing` / `skipped`. It is
+idempotent — already-translated chunks are skipped.
+
+**4B-d. Re-spawn the misses.** For any `failed` (the report names the problem per chunk) or `missing`
+(no draft written), re-spawn a worker for just those `chunk_id`s — write fresh prose to the same
+`draft_path` — and re-run `translate-commit`. Cap re-spawns at ~3 per chunk, then surface the chunk
+for a manual edit-or-skip decision rather than looping.
+
+Then continue to Step 5 (combine + EPUB) exactly as the API path does.
+
 ## Step 5 — Combine + EPUB (translated chapters only)
 
 The `translate` run chains through combine, epub, and align, building the EPUB from translated
@@ -281,9 +333,11 @@ loop is gone — the user drafted nothing in an external chat.
 
 ## What this skill deliberately does NOT do (v1)
 
-- No `TranslationBackend` abstraction — translation goes straight through the existing API path.
-  The subagent backend + a backend Protocol are deferred until Approach B is scheduled (eng review
-  D9). `scripts/harness.py` is orchestration only; it adds no new translation business logic.
+- No `TranslationBackend` Protocol. Both backends share one prompt builder
+  (`build_translation_prompt`) and one stamp (`apply_translation`), so the seam is two functions,
+  not a class hierarchy. The subagent backend (Phase B) is the `translate-prepare` /
+  `translate-commit` path (Step 4B). Still deferred: **parallel** worker fan-out (v1 is sequential),
+  the **judge** backend, and the portable `claude -p --model` worker (Approach C). See TODOS.md.
 - No long-book resume beyond the pipeline's existing chunk-level idempotency (`stage_translate`
   skips chunks that already have a translation).
 - No prompt caching (tracked separately in TODOS.md).
