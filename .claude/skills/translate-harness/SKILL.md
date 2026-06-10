@@ -66,31 +66,55 @@ Long-book robustness (formal resume, batching) is out of scope.
 ## Pipeline overview
 
 ```
-ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► chunk ─► [COST beat] ─►
- (deterministic)  agent drafts          agent drafts      (det.)   translate ─►
-                  + refine + approval    + approval                combine ─► epub
+ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► score difficulty ─► chunk ─► [COST beat] ─►
+ (deterministic)  agent drafts          agent drafts      (det.; sizes        (det.)   translate ─►
+                  + refine + approval    + approval         chunks)                     combine ─► epub
 ```
 
 The style guide goes **first** on purpose: it captures the user's key decisions
 (dialect/locale, name conventions, register, formatting) and those decisions then steer
 the glossary — `build_glossary_prompt` takes the approved style guide as an input.
 
+The glossary goes **before chunking** on purpose too: the difficulty scorer
+(`scripts/score_difficulty.py`) excludes glossary terms from its lexical-rarity signal, and the
+book-level difficulty it produces sets the **default chunk target size** (harder text → smaller
+chunks). So chunking is deferred until after the glossary is finalized — ingest/split is the only
+deterministic prep that runs during setup.
+
 ## Step 0 — Set up the project
 
 Identify (or create) the project directory `projects/<slug>/` and get the source text
 into `projects/<slug>/source.txt`.
 
-- If the user gives a Gutenberg URL or a local text, run ingest + split (non-interactive):
+- Run **ingest + split only** — do NOT chunk yet. Chunking is deferred to Step 3 so it can use
+  the glossary-informed difficulty score (see the pipeline overview). The CLI has no "stop after
+  split" flag, so call the two stage functions directly (the same inline-helper idiom this skill
+  uses elsewhere):
   ```bash
-  python scripts/translate_book.py projects/<slug> --start-stage ingest \
-    --url "<url>" --project-name "<Title>" --author "<Author>" \
-    --target-lang Spanish --target-lang-code es
+  python - <<'PY'
+  import sys; sys.path.insert(0, ".")
+  from pathlib import Path
+  from types import SimpleNamespace
+  from scripts.translate_book import (
+      stage_ingest, stage_split, load_pipeline_state, save_pipeline_state,
+  )
+  proj = Path("projects/<slug>"); proj.mkdir(parents=True, exist_ok=True)
+  # url="" is fine when a local source.txt is already in place. Pick the chapter
+  # pattern that matches the book: "roman" (Chapter I, II …), "numeric" (Chapter 1,
+  # 2 …), or "custom" (set custom_regex). If split raises "No chapters detected",
+  # switch chapter_pattern and re-run.
+  args = SimpleNamespace(
+      url="<gutenberg-url-or-empty>",
+      chapter_pattern="roman", custom_regex=None, min_chapter_size=100,
+  )
+  state = load_pipeline_state(proj)
+  state = stage_ingest(args, proj, state); save_pipeline_state(proj, state)
+  state = stage_split(args, proj, state);  save_pipeline_state(proj, state)
+  print("ingest + split complete; chunking deferred to Step 3 (after the glossary)")
+  PY
   ```
-  Stop it before it reaches the translate stage, or just run `--start-stage ingest`
-  through `split` by pre-checking. Simplest: run ingest/split/chunk first, do the
-  glossary + style-guide beats, then run translate onward (the stages are resumable).
 - Confirm `projects/<slug>/source.txt` (or `chapters/chapter_*.txt`) exists before
-  continuing.
+  continuing. The `chunks/` directory should NOT exist yet — Step 3 creates it.
 - Clear intermediate state from any prior harness run for this project:
   ```bash
   python -c "import shutil, pathlib; shutil.rmtree('.tmp', ignore_errors=True); pathlib.Path('.tmp').mkdir()"
@@ -281,15 +305,31 @@ dialect, and register carry into the glossary.
    - **AskUserQuestion: approve / edit / re-draft.** On edit, let the user hand the
      corrected JSON; write it verbatim and re-validate. Only continue once approved.
    > Approving the glossary approves **the glossary only**. It does NOT mean "start
-   > translating." After approval you proceed to chunking (Step 3) and then **stop again**
-   > at the cost gate (Step 4). Do not jump to the translate command here.
+   > translating." After approval you proceed to difficulty scoring + chunking (Step 3) and
+   > then **stop again** at the cost gate (Step 4). Do not jump to the translate command here.
 
-## Step 3 — Chunk (deterministic) — run as estimator only
+## Step 3 — Difficulty-aware chunk (deterministic) — run as estimator only
 
-Run chunk **with `--cost-only`** so the run chunks and then halts at the cost estimate
-(`--cost-only` exits before a single chunk is translated — it physically cannot spend):
+The chunk **target size defaults to the difficulty scorer's suggestion** instead of a flat 2000.
+Score first (the glossary now exists, so it's reflected), then chunk at the suggested size.
+
+**3a — Score difficulty → default chunk target size.** Run the scorer with `--force` so the
+just-approved glossary is reflected (`difficulty.json` is cached on the *source* mtime, not the
+glossary, so without `--force` a prior run's glossary-less numbers could be reused):
 ```bash
-python scripts/translate_book.py projects/<slug> --start-stage chunk --cost-only
+python scripts/score_difficulty.py projects/<slug> --force
+```
+This prints a book line ending `-> suggested target Nw` plus a per-chapter table. Present the
+book difficulty and that suggested `N` to the user (the per-chapter table is informational only —
+the harness applies one global size). Treat `N` as the **default**: if the user wants a different
+chunk size, honor their override; otherwise chunk at `N`. (If `wordfreq` isn't installed the
+scorer warns and the rarity signal is 0, so the suggestion leans toward 2000 — still usable.)
+
+**3b — Chunk at that size (estimator only).** Pass the chosen size via `--chunk-size` and keep
+`--cost-only` so the run chunks once and then halts at the cost estimate (`--cost-only` exits
+before a single chunk is translated — it physically cannot spend):
+```bash
+python scripts/translate_book.py --project-dir projects/<slug> --start-stage chunk --cost-only --chunk-size <N>
 ```
 This produces the chunks and prints the estimate, then stops. Carry that estimate straight
 into the Step 4 gate below — do not run any command without `--cost-only` until the user
@@ -311,7 +351,7 @@ has approved.
    recompute it, re-run the cost estimate — still WITHOUT translating, so it never spends
    money:
    ```bash
-   python scripts/translate_book.py projects/<slug> --start-stage translate --cost-only
+   python scripts/translate_book.py --project-dir projects/<slug> --start-stage translate --cost-only
    ```
 2. **STOP — approval beat. END THE TURN HERE.** Show the estimate, then ask via
    AskUserQuestion: proceed / abort — and stop. Do not call any further tool in this
@@ -323,7 +363,7 @@ has approved.
 3. **Only once the user has affirmatively approved in a separate turn**, translate with
    `--yes` to record that approval for the non-interactive CLI run:
    ```bash
-   python scripts/translate_book.py projects/<slug> --start-stage translate \
+   python scripts/translate_book.py --project-dir projects/<slug> --start-stage translate \
      --yes --provider anthropic --model claude-sonnet-4-20250514
    ```
    (Pick the model the user wants; default is sonnet. Surface model choice rather than
