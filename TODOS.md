@@ -24,6 +24,11 @@ Verified against the codebase on 2026-05-18. Line numbers refreshed from main HE
 
 ## P2 — UX rough edges
 
+### Aggregate book-level difficulty metrics from chapter metrics instead of re-running score_text
+**What:** `score_book` in `src/difficulty_scorer.py` joins all chapter texts and calls `score_text` on the concatenation, duplicating all sentence-splitting and per-token Zipf lookups already done per-chapter (O(2N) total work). Fix: derive book metrics by weighted aggregation of per-chapter `DifficultyMetrics` (weighted by `word_count`) instead.
+**Why:** Performance optimization — deferred from difficulty-scorer pre-landing review because scoring is cached and only runs once per book.
+**How:** In `score_book`, after building `chapters`, compute book metrics from `{c.metrics for c in chapters}` weighted by `c.metrics.word_count`; only fall back to `score_text(book_text)` when `chapters` is empty.
+
 ### Add TypeError guard for bare-string `chapters` argument in `build_epub_from_chunks`
 **What:** `build_epub_from_chunks(chapters="chapter_01")` calls `set("chapter_01")` which produces `{'c','h','a','p','t','e','r','_','0','1'}` — a set of characters. No real chapter ID matches, so the function raises `ValueError('No fully translated chapters found')` instead of a clear `TypeError`. Deferred from pre-landing review on epub-translated-chapters-only (2026-06-07).
 **Why:** Confusing error message; the actual mistake (passing a string instead of a list) is invisible.

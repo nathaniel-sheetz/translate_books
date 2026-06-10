@@ -38,6 +38,7 @@ from src.utils.file_io import (
     save_style_guide,
 )
 from src.utils.source_text import load_chapter_source_text
+from src.difficulty_scorer import score_book
 from src.utils.text_utils import image_placeholder_instruction
 from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
@@ -223,8 +224,8 @@ def _chapter_display_label(chapter_id: str, manifest: dict, chapter_prefix: str)
 
 
 def _safe_id(value: str) -> bool:
-    """Return False if ID contains path traversal characters."""
-    return bool(value) and ".." not in value and "/" not in value and "\\" not in value
+    """Return True only for IDs that are safe filesystem names."""
+    return bool(value) and bool(re.fullmatch(r"[A-Za-z0-9_\-]+", value))
 
 
 def _get_ui_lang() -> str:
@@ -3194,6 +3195,37 @@ def project_chunk_all(project_id):
         return jsonify({"ok": True, "total_chunks": total_chunks})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/project/<project_id>/difficulty", methods=["GET"])
+def project_difficulty(project_id):
+    """Translation-difficulty scores for the book and each chapter.
+
+    Read-only. Returns the combined ``difficulty`` plus the individual
+    sub-scores and raw stats (so the dashboard can show a breakdown tooltip) and
+    a ``suggested_target_size`` the UI can fill into the chunk target inputs.
+    Results are cached to ``difficulty.json``; pass ``?force=1`` to re-score.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _get_projects_dir() / project_id
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    force = (request.args.get("force") or "").lower() in ("1", "true", "yes")
+    try:
+        manifest = score_book(project_dir, force=force)
+        return jsonify({
+            "ok": True,
+            "book": manifest.book.to_dict(),
+            "chapters": [
+                {"chapter_id": cd.chapter_id, **cd.metrics.to_dict()}
+                for cd in manifest.chapters
+            ],
+        })
+    except Exception:
+        app.logger.exception("Difficulty scoring failed for %s", project_id)
+        return jsonify({"error": "Difficulty scoring failed"}), 500
 
 
 def _reconstruct_chapter_source_from_chunks(chunks) -> str:

@@ -120,9 +120,26 @@ The **Chunk All** button is in the panel header alongside the status indicator.
 2. Click **Chunk All** to process every chapter
 3. Shows chapter list with chunk counts after completion
 
-**API:** `POST /api/project/<id>/chunk-all` — `{ "default": { "target_size": 2000, "overlap_paragraphs": 0, "min_overlap_words": 0, "min_ratio": 0.25, "max_ratio": 1.5 }, "chapters": { "<chapter_id>": { "target_size": 1500 } } }`. Legacy flat payload `{ "target_size": 2000, ... }` is still accepted for backwards compatibility.
+**APIs:**
+- `POST /api/project/<id>/chunk-all` — `{ "default": { "target_size": 2000, "overlap_paragraphs": 0, "min_overlap_words": 0, "min_ratio": 0.25, "max_ratio": 1.5 }, "chapters": { "<chapter_id>": { "target_size": 1500 } } }`. Legacy flat payload `{ "target_size": 2000, ... }` is still accepted for backwards compatibility.
+- `GET /api/project/<id>/difficulty` — returns cached difficulty scores for the book and all chapters. Query params: `?force=1` (also `true`/`yes`, case-insensitive) to bypass the cache and re-score from source. Response: `{ "book": { "difficulty": 0–1, "label": "easy"|"med"|"hard", "length_score": 0–1, "rarity_score": 0–1, "suggested_target": N }, "chapters": [ { "chapter_id": "...", "difficulty": 0–1, "label": "...", "suggested_target": N }, ... ] }`. Returns `404` if no chapter source files exist, `500` (sanitized) on internal errors.
 
-**Backend:** `chunk_chapter()` from `src/chunker.py`. Each chunk is a `Chunk` Pydantic model serialized to JSON.
+**Backend:** `chunk_chapter()` from `src/chunker.py`. Each chunk is a `Chunk` Pydantic model serialized to JSON. Difficulty scoring via `score_book()` from `src/difficulty_scorer.py`; results cached to `projects/<id>/difficulty.json`.
+
+### Difficulty Scoring
+
+Click **Analyze difficulty** on the Stage 3 dashboard to score all chapters for EN→ES translation difficulty. Two signals are computed:
+
+- **Sentence length (long-tail-weighted)** — long sentences carry more subordinate clauses and are where LLMs most often drop or mangle content.
+- **Lexical rarity** — fraction of tokens below the Zipf frequency threshold, using `wordfreq`. Glossary terms are excluded so recurring proper names don't inflate the score.
+
+Results are shown as **easy / med / hard** color badges on each chapter card. An overall book-level badge appears above the list with a tooltip breaking down the sub-scores.
+
+Each badge includes a **Suggest** link that fills the chapter's Target input with the difficulty-derived recommendation (harder chapters → smaller chunks). The suggestion only fills the input — nothing is applied until you click Rechunk.
+
+Scores are cached to `projects/<id>/difficulty.json` and reused until the source file mtime changes. Click **Analyze difficulty** again (or pass `?force=1` to the API) to force a re-score.
+
+The same scores are available from the CLI: `python scripts/score_difficulty.py <project-id>`.
 
 ---
 
@@ -460,6 +477,7 @@ projects/<id>/
 ├── alignments/             # Sentence alignment JSON
 ├── annotations.jsonl       # Reader annotations (append-only)
 ├── reviewed.json           # Chapter reviewed status
+├── difficulty.json         # Cached difficulty scores (per-chapter + book level; invalidated by source mtime)
 ├── corrections.jsonl       # Pending corrections (purged automatically when a chunk's translation is replaced)
 ├── corrections_applied.jsonl # Archive of applied corrections
 ├── .chunk_edits/           # Pre-edit chunk backups (last 10 per chunk, created by any translation save)

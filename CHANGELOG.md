@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0.0] - 2026-06-09
+
+### Added
+- **Translation difficulty scoring.** Click "Analyze difficulty" on the Stage 3 dashboard to score the book and each chapter for EN→ES translation difficulty. Two signals: long-tail sentence length (dense sentences surface subordinate clauses that LLMs mangle) and lexical rarity (Zipf frequency via `wordfreq`, glossary terms excluded so recurring proper names don't inflate the score). Results show as easy/med/hard colour badges on each chapter card.
+- **"Suggest" button per chapter.** Each difficulty badge includes a "Suggest" link that fills the chapter's Target input with the difficulty-derived recommendation (harder chapters → smaller chunks). Nothing is applied until you click Rechunk — the suggestion only fills the input.
+- **Book-level difficulty summary.** An overall book difficulty badge appears above the chapter list after scoring, with a tooltip breaking down length and rarity sub-scores.
+- **Difficulty manifest caching.** Scores are cached to `{project}/difficulty.json` and reused until the source mtime changes. Pass `?force=1` (or `true`/`yes`, case-insensitive) to re-score unconditionally.
+- **`scripts/score_difficulty.py` CLI.** Score any project from the command line: `python scripts/score_difficulty.py <project-id>`. Prints a chapter table with difficulty, length score, rarity, and suggested target. Add `--json` for machine-readable output and `--force` to bypass the cache.
+
+### Fixed
+- `_safe_id` input validation switched from a blocklist (`..`, `/`, `\`) to an allowlist (`[A-Za-z0-9_-]+`), closing a Windows drive-relative path escape via project IDs containing `:`.
+- Difficulty manifest writes are now atomic (`os.replace(tmp, dest)`) — no torn JSON if two requests score simultaneously.
+- Chapters whose English source is unavailable (e.g. the `chapters/` file was overwritten with translated text before chunking) are now skipped with a warning rather than scored using the translated Spanish text, which produced misleading difficulty badges.
+- `GET /api/project/<id>/difficulty` 500 responses no longer include the raw exception message; the internal detail is logged server-side only.
+
 ## [0.16.0.0] - 2026-06-08
 
 ### Added
