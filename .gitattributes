@@ -1,0 +1,11 @@
+# Normalize line endings: store text as LF in the repo, regardless of platform.
+* text=auto eol=lf
+
+# Binary/asset types — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.epub binary
+*.zip binary
