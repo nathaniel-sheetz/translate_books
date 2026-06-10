@@ -14,6 +14,7 @@ import pytest
 from src.harness_guard import (
     HarnessValidationError,
     guard_glossary_proposals,
+    guard_translation_draft,
     validate_chunk_file,
     validate_glossary_file,
     validate_style_guide_file,
@@ -142,3 +143,66 @@ class TestValidateChunkFile:
         path.write_text('{"id": 123}', encoding="utf-8")  # wrong types / missing fields
         with pytest.raises(HarnessValidationError):
             validate_chunk_file(path)
+
+
+# --------------------------------------------------------------------------- #
+# guard_translation_draft — worker-prose validation before stamping (Phase B A4)
+# --------------------------------------------------------------------------- #
+
+def _chunk(source_text: str) -> Chunk:
+    """Build a PENDING chunk with the given English source (no translation yet)."""
+    return Chunk(
+        id="ch01_chunk_001",
+        chapter_id="chapter_01",
+        position=1,
+        source_text=source_text,
+        metadata=ChunkMetadata(
+            char_start=0, char_end=max(1, len(source_text)),
+            overlap_start=0, overlap_end=0, paragraph_count=1,
+            word_count=len(source_text.split()),
+        ),
+    )
+
+
+# A natural-length English source and a plausible Spanish rendering (~same length).
+_SRC = "The sun rose over the quiet village and the children ran out to play in the fresh morning air."
+_OK = "El sol salio sobre el tranquilo pueblo y los ninos corrieron a jugar en el aire fresco de la manana."
+
+
+class TestGuardTranslationDraft:
+    def test_valid_translation_passes(self):
+        assert guard_translation_draft(_chunk(_SRC), _OK) == []
+
+    def test_empty_is_flagged(self):
+        assert guard_translation_draft(_chunk(_SRC), "") == ["empty or whitespace-only translation"]
+        assert guard_translation_draft(_chunk(_SRC), "   \n  ")[0].startswith("empty")
+
+    def test_echo_of_source_is_flagged(self):
+        problems = guard_translation_draft(_chunk(_SRC), _SRC)
+        assert any("verbatim copy" in p for p in problems)
+
+    def test_dropped_image_token_is_flagged(self):
+        src = f"{_SRC} [IMAGE:img/p7.jpg]"
+        # Same prose but the image token was dropped by the worker.
+        problems = guard_translation_draft(_chunk(src), _OK)
+        assert any("image-token filename mismatch" in p and "dropped" in p for p in problems)
+
+    def test_hallucinated_image_token_is_flagged(self):
+        problems = guard_translation_draft(_chunk(_SRC), f"{_OK} [IMAGE:fake.png]")
+        assert any("image-token filename mismatch" in p and "hallucinated" in p for p in problems)
+
+    def test_preserved_image_token_with_translated_description_passes(self):
+        src = f"{_SRC} [IMAGE:img/p7.jpg:a dog runs]"
+        out = f"{_OK} [IMAGE:img/p7.jpg:un perro corre]"
+        # Filename matches; description differs (translated) -> no image problem.
+        problems = guard_translation_draft(_chunk(src), out)
+        assert not any("image-token" in p for p in problems)
+
+    def test_too_short_translation_is_flagged_by_length(self):
+        # < 0.5x source length -> length evaluator ERROR.
+        problems = guard_translation_draft(_chunk(_SRC), "El sol.")
+        assert any(p.startswith("length:") for p in problems)
+
+    def test_placeholder_text_is_flagged_by_completeness(self):
+        problems = guard_translation_draft(_chunk(_SRC), _OK + " [TRANSLATION HERE]")
+        assert any(p.startswith("completeness:") for p in problems)

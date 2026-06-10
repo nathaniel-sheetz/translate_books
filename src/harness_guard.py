@@ -27,7 +27,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.evaluators.completeness_eval import CompletenessEvaluator
+from src.evaluators.length_eval import LengthEvaluator
+from src.models import Chunk, IssueLevel
 from src.utils.file_io import load_chunk, load_glossary, load_style_guide
+from src.utils.text_utils import image_filenames
 
 
 class HarnessValidationError(Exception):
@@ -76,6 +80,71 @@ def guard_glossary_proposals(proposals: list[dict]) -> list[dict]:
             + "\n".join(problems)
         )
     return proposals
+
+
+def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
+    """Validate a worker-produced translation draft before it is stamped.
+
+    Harness Phase B lets a spawned subagent translate a chunk and write the
+    prose to a file. That prose is untrusted (cheaper worker models wander), so
+    the commit path runs it through this guard; a non-empty return flags the
+    chunk for re-spawn instead of poisoning combine/align/epub with a bad chunk.
+
+    Returns a list of human-readable problems (empty list == OK). Checks (eng
+    review A4, 2026-06-10):
+
+      - non-empty / not whitespace-only
+      - NOT a verbatim echo of the English source (worker didn't translate)
+      - image-token FILENAME parity vs source: ``[IMAGE:file]`` tokens are
+        PRESERVED through translation (only the description is translated), so a
+        dropped or hallucinated filename fails — the token's presence does not.
+      - ``completeness_eval`` + ``length_eval`` ERROR-severity issues
+        (placeholder text, empty, wildly off length); WARNINGS do not block.
+
+        AGENT PROSE (untrusted)            guard_translation_draft           COMMIT
+        ──────────────────────            ───────────────────────           ──────
+        worker draft  ──────────►  empty? echo? image parity?  ──ok──►  apply_translation
+                                   completeness/length ERROR?            + save_chunk
+                                        │ problems
+                                        ▼ return [..]  ──► re-spawn (cap 3) ─► manual
+    """
+    text = (prose or "").strip()
+    if not text:
+        return ["empty or whitespace-only translation"]
+
+    problems: list[str] = []
+
+    # Echo guard: the worker returned the English source instead of translating.
+    if text == (chunk.source_text or "").strip():
+        problems.append("translation is a verbatim copy of the English source (not translated)")
+
+    # Image-token filename parity. Descriptions are translated, so compare the
+    # filename set only — the token must survive, just not gain/lose filenames.
+    src_files = image_filenames(chunk.source_text)
+    out_files = image_filenames(prose)
+    if src_files != out_files:
+        detail = []
+        missing = sorted(src_files - out_files)
+        extra = sorted(out_files - src_files)
+        if missing:
+            detail.append(f"dropped {missing}")
+        if extra:
+            detail.append(f"hallucinated {extra}")
+        problems.append("image-token filename mismatch vs source: " + "; ".join(detail))
+
+    # Reuse the existing evaluators; only ERROR-severity issues block the commit.
+    eval_chunk = chunk.model_copy(update={"translated_text": text})
+    for evaluator in (CompletenessEvaluator(), LengthEvaluator()):
+        try:
+            result = evaluator.evaluate(eval_chunk, {})
+        except Exception as e:  # defensive: a broken evaluator shouldn't crash commit
+            problems.append(f"{evaluator.name} evaluator failed: {e}")
+            continue
+        for issue in result.issues:
+            if issue.severity == IssueLevel.ERROR:
+                problems.append(f"{evaluator.name}: {issue.message}")
+
+    return problems
 
 
 def _wrap_loader(path: Path, loader, label: str):
