@@ -89,6 +89,8 @@ workbook.md
 clean_*.py
 scripts/run_eval_test.py
 scripts/experiments/
+# Legacy repo-global harness scratch (superseded by per-project projects/<slug>/.harness/)
+.tmp/
 
 # Comparison run outputs
 comparisons/
