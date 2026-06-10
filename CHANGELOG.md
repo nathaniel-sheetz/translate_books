@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.1.0] - 2026-06-09
+
+### Changed
+- **translate-harness skill: difficulty-aware chunking.** The `translate-harness` SKILL.md now wires the difficulty scorer into the interactive pipeline. Step 0 runs ingest + split only (chunking deferred), Step 3a scores difficulty with `--force` after the glossary is approved (so glossary terms are excluded from the lexical-rarity signal), and Step 3b chunks at the scorer's suggested target size. The pipeline diagram is updated to show the new ordering: glossary → score difficulty → chunk.
+- Step 0 ingest+split uses an inline Python helper instead of the `--start-stage ingest` CLI flag, matching the actual API (no "stop after split" flag exists).
+- `translate_book.py` invocations in Step 3 and Step 4 updated to use the `--project-dir` flag consistently.
+
 ## [0.17.0.0] - 2026-06-09
 
 ### Added
