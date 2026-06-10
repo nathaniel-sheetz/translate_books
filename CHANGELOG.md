@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.2.0] - 2026-06-10
+
+### Changed
+- **translate-harness: one non-interactive CLI surface.** The skill's pipeline orchestration moved out of ~nine inline-Python heredocs in SKILL.md (and a repo-global `.tmp/` scratch dir) into a tested CLI, `scripts/harness.py`, backed by a new `src/harness/` package (`flow.py` — one function per beat; `state.py` — per-project `.harness/` paths + `config.json`). No new business logic: each beat reuses the existing `style_guide_wizard` / `glossary_bootstrap` / `harness_guard` / `translate_book` / `difficulty_scorer` primitives. Working state is now per-project (`projects/<slug>/.harness/`) instead of a single global `.tmp/` shared across books, and `setup` wipes it for a clean run.
+- The cost gate semantics are unchanged but now live in one place: `chunk` and `cost` always pass `--cost-only` (they cannot spend), and `translate` fails closed (exit 2) unless `--yes` is supplied after a separate-turn approval. SKILL.md is rewritten to drive the prepare → (agent drafts) → commit contract through the CLI.
+
+### Added
+- **`tests/test_harness_flow.py`.** Offline coverage for the harness orchestration that previously lived untested in markdown: the style-guide and glossary prepare/commit beats (with stubbed agent drafts), malformed-draft rejection (fails loudly, writes nothing), difficulty scoring, and the `translate` fail-closed-without-`--yes` guard.
+
 ## [0.17.1.0] - 2026-06-09
 
 ### Changed
