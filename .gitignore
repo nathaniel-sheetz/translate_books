@@ -101,6 +101,7 @@ docs/design/
 # Claude Code project config
 CLAUDE.md
 .claude/*
-# ...but track project-local skills
+# ...but track project-local skills and agents (they ship with the repo)
 !.claude/skills/
+!.claude/agents/
 .gstack/
