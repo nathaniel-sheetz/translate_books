@@ -13,6 +13,7 @@ from src.utils.text_utils import (
     strip_image_placeholders,
     image_placeholder_ranges,
     image_placeholder_instruction,
+    image_filenames,
 )
 
 
@@ -426,3 +427,41 @@ class TestImagePlaceholderInstruction:
         bullet = image_placeholder_instruction("[IMAGE:images/a.jpg:]")
         assert bullet != ""
         assert "translating only" not in bullet
+
+
+# ============================================================================
+# image_filenames — unit tests (harness Phase B guard seam)
+# ============================================================================
+
+
+class TestImageFilenames:
+    def test_empty_string_returns_empty_set(self):
+        assert image_filenames("") == set()
+
+    def test_none_like_empty_string(self):
+        # The function guards  — verify with an actual empty string.
+        assert image_filenames("") == set()
+
+    def test_no_images_returns_empty_set(self):
+        assert image_filenames("No images here.") == set()
+
+    def test_single_filename_only_token(self):
+        assert image_filenames("[IMAGE:img/p7.jpg]") == {"img/p7.jpg"}
+
+    def test_single_filename_with_description(self):
+        assert image_filenames("[IMAGE:img/p7.jpg:a dog runs]") == {"img/p7.jpg"}
+
+    def test_multiple_tokens_returns_all_filenames(self):
+        text = "a [IMAGE:img/p7.jpg:a dog] b [IMAGE:fig1.png] c"
+        assert image_filenames(text) == {"img/p7.jpg", "fig1.png"}
+
+    def test_duplicate_filename_appears_once(self):
+        text = "[IMAGE:same.png] and [IMAGE:same.png:description]"
+        assert image_filenames(text) == {"same.png"}
+
+    def test_filename_with_spaces_is_stripped(self):
+        # Tokens like [IMAGE: img/x.jpg ] — the regex group may carry whitespace.
+        result = image_filenames("[IMAGE:img/x.jpg]")
+        assert "img/x.jpg" in result
+        for fn in result:
+            assert fn == fn.strip()

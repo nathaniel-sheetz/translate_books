@@ -345,3 +345,91 @@ def test_translate_prepare_chapter_scope(project: Path):
     none = flow.translate_prepare(str(project), chapters="9")
     assert none["manifest"] == []
     assert "no matching chapters" in none.get("note", "")
+
+
+# ===========================================================================
+# Edge-case / error paths for prepare + commit
+# ===========================================================================
+
+
+def test_translate_prepare_no_chunks_dir_returns_error(tmp_path: Path):
+    """If chunks/ has not been created yet, prepare returns an error, not an exception."""
+    from src.harness import flow, state as hstate
+
+    # Minimal project: harness config exists but no chunks/ dir.
+    hstate.save_config(tmp_path, {})
+    result = flow.translate_prepare(str(tmp_path))
+    assert "error" in result
+    assert "chunk" in result["error"]
+    assert result["manifest"] == []
+
+
+def test_translate_prepare_all_already_translated_returns_empty_manifest(project: Path):
+    """If every chunk is already translated, the manifest is empty and the
+    instructions say 'Nothing to translate'."""
+    from src.harness import flow
+
+    # Chunk, then fake-translate all chunks in place.
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    tb.STAGE_FUNCTIONS["translate"](_args(), project, {})
+
+    prep = flow.translate_prepare(str(project))
+    assert prep["manifest"] == []
+    assert "Nothing to translate" in prep["instructions"]
+
+
+def test_translate_commit_no_manifest_returns_error(tmp_path: Path):
+    """Calling commit before prepare returns an error dict, not an exception."""
+    from src.harness import flow, state as hstate
+
+    hstate.save_config(tmp_path, {})
+    result = flow.translate_commit(str(tmp_path))
+    assert "error" in result
+    assert "translate-prepare" in result["error"]
+    assert result["committed"] == []
+
+
+def test_translate_commit_missing_draft_reported_not_stamped(project: Path):
+    """Chunks whose draft file was never written appear in 'missing', are never stamped."""
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project))
+    assert prep["manifest"], "need at least one entry"
+
+    # Write drafts for all but the first entry — first stays missing.
+    for entry in prep["manifest"][1:]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        Path(entry["draft_path"]).write_text("[ES] " + chunk.source_text, encoding="utf-8")
+
+    res = flow.translate_commit(str(project))
+    assert res["counts"]["missing"] >= 1
+    assert prep["manifest"][0]["chunk_id"] in res["missing"]
+    # The missing chunk must not be stamped.
+    first_chunk = validate_chunk_file(Path(prep["manifest"][0]["chunk_path"]))
+    assert not first_chunk.has_translation
+
+
+def test_translate_commit_missing_prompt_file_still_commits(project: Path):
+    """If the prompt file is absent, commit still stamps the chunk (prose = '')."""
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project))
+
+    # Write valid prose but delete the prompt file for the first entry.
+    entry = prep["manifest"][0]
+    chunk = validate_chunk_file(Path(entry["chunk_path"]))
+    Path(entry["draft_path"]).write_text("[ES] " + chunk.source_text, encoding="utf-8")
+    prompt_file = Path(entry["prompt_path"])
+    if prompt_file.exists():
+        prompt_file.unlink()
+
+    # Write normal drafts for the rest so commit can fully run.
+    for e in prep["manifest"][1:]:
+        c = validate_chunk_file(Path(e["chunk_path"]))
+        Path(e["draft_path"]).write_text("[ES] " + c.source_text, encoding="utf-8")
+
+    res = flow.translate_commit(str(project))
+    # The first chunk should still be committed even without its prompt file.
+    assert entry["chunk_id"] in res["committed"]
