@@ -99,7 +99,8 @@ def setup(
     state.ensure_harness_dir(project_dir, clean=True)  # fresh drafts/prompts
     state.save_config(project_dir, cfg)
 
-    sys.path.insert(0, str(state.REPO_ROOT))
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
     from scripts.translate_book import (
         stage_ingest,
         stage_split,
@@ -139,7 +140,8 @@ def style_guide_prepare_questions(project: str) -> dict:
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
 
-    sys.path.insert(0, str(state.REPO_ROOT))
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
     from src.style_guide_wizard import get_active_questions, load_source_sample
 
     source = load_source_sample(project_dir)
@@ -282,7 +284,8 @@ def glossary_prepare(project: str, *, max_candidates: int = 200) -> dict:
     hdir = state.harness_dir(project_dir)
     cfg = state.load_config(project_dir)
 
-    sys.path.insert(0, str(state.REPO_ROOT))
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
     from scripts.extract_glossary_candidates import extract_candidates
     from src.glossary_bootstrap import build_glossary_prompt
     from src.style_guide_wizard import load_source_sample
@@ -399,7 +402,8 @@ def translate_prepare(
     cfg = state.load_config(project_dir)
     worker_model = worker_model or cfg.get("worker_model") or "sonnet"
 
-    sys.path.insert(0, str(state.REPO_ROOT))
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
     from scripts.translate_book import discover_chapters, parse_chapter_range
     from src.api_translator import build_translation_prompt
     from src.utils.file_io import load_chunk, load_glossary, load_style_guide
@@ -496,10 +500,11 @@ def translate_prepare(
                     # committed. Keep it in the new manifest so translate-commit sees it.
                     if not any(e["chunk_id"] == prior_entry["chunk_id"] for e in entries):
                         rescued.append(prior_entry)
-        except (json.JSONDecodeError, OSError):
-            pass  # corrupt prior manifest — ignore and proceed
+        except (json.JSONDecodeError, OSError, KeyError, TypeError):
+            pass  # corrupt or schema-changed prior manifest — ignore and proceed
 
     if rescued:
+        total_words += sum(e.get("source_word_count", 0) for e in rescued)
         entries = rescued + entries
 
     manifest_doc = {"worker_model": worker_model, "chapters": chapters or "all", "entries": entries}

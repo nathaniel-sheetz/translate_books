@@ -31,7 +31,7 @@ from src.evaluators.completeness_eval import CompletenessEvaluator
 from src.evaluators.length_eval import LengthEvaluator
 from src.models import Chunk, IssueLevel
 from src.utils.file_io import load_chunk, load_glossary, load_style_guide
-from src.utils.text_utils import image_filenames
+from src.utils.text_utils import image_filename_counts, image_filenames
 
 
 class HarnessValidationError(Exception):
@@ -127,10 +127,10 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
                 f"near-verbatim echo: token overlap with source is {jaccard:.0%} (≥85% threshold)"
             )
 
-    # Image-token filename parity. Descriptions are translated, so compare the
-    # filename set only — the token must survive, just not gain/lose filenames.
-    src_files = image_filenames(chunk.source_text)
-    out_files = image_filenames(prose)
+    # Image-token filename parity. Compare counts (Counter) not sets — a worker
+    # that duplicates an image token would pass a set equality check.
+    src_files = image_filename_counts(chunk.source_text)
+    out_files = image_filename_counts(prose)
     if src_files != out_files:
         detail = []
         missing = sorted(src_files - out_files)

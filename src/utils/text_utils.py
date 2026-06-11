@@ -217,6 +217,19 @@ def image_filenames(text: str) -> set[str]:
     return {m.group(1).strip() for m in _IMAGE_PLACEHOLDER_RE.finditer(text)}
 
 
+def image_filename_counts(text: str) -> "Counter[str]":
+    """Return a Counter of ``[IMAGE:filename]`` occurrences in *text*.
+
+    Unlike :func:`image_filenames` (which deduplicates), this preserves the
+    count of each filename so that a worker that emits a token twice is caught
+    by a mismatch against the source's single occurrence.
+    """
+    from collections import Counter
+    if not text:
+        return Counter()
+    return Counter(m.group(1).strip() for m in _IMAGE_PLACEHOLDER_RE.finditer(text))
+
+
 def strip_image_placeholders(text: str) -> str:
     """
     Replace [IMAGE:...] tokens with equal-length whitespace.

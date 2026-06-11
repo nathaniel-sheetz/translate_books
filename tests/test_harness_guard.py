@@ -198,6 +198,13 @@ class TestGuardTranslationDraft:
         problems = guard_translation_draft(_chunk(src), out)
         assert not any("image-token" in p for p in problems)
 
+    def test_duplicated_image_token_in_output_is_flagged(self):
+        # Worker echoed the source block then translated below it — token appears twice.
+        src = f"{_SRC} [IMAGE:img/p7.jpg]"
+        out = f"{_OK} [IMAGE:img/p7.jpg] [IMAGE:img/p7.jpg]"
+        problems = guard_translation_draft(_chunk(src), out)
+        assert any("image-token filename mismatch" in p for p in problems)
+
     def test_too_short_translation_is_flagged_by_length(self):
         # < 0.5x source length -> length evaluator ERROR.
         problems = guard_translation_draft(_chunk(_SRC), "El sol.")

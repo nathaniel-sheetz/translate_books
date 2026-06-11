@@ -14,6 +14,7 @@ from src.utils.text_utils import (
     image_placeholder_ranges,
     image_placeholder_instruction,
     image_filenames,
+    image_filename_counts,
 )
 
 
@@ -465,3 +466,26 @@ class TestImageFilenames:
         assert "img/x.jpg" in result
         for fn in result:
             assert fn == fn.strip()
+
+
+class TestImageFilenameCounts:
+    """image_filename_counts preserves duplicates that image_filenames masks."""
+
+    def test_empty_string_returns_empty_counter(self):
+        from collections import Counter
+        assert image_filename_counts("") == Counter()
+
+    def test_single_token_count_is_one(self):
+        from collections import Counter
+        assert image_filename_counts("[IMAGE:img.png]") == Counter({"img.png": 1})
+
+    def test_duplicate_token_counted_twice(self):
+        # The guard uses this to reject a worker that doubled an image token.
+        from collections import Counter
+        text = "[IMAGE:img.png] some text [IMAGE:img.png:description]"
+        assert image_filename_counts(text) == Counter({"img.png": 2})
+
+    def test_different_filenames_counted_separately(self):
+        from collections import Counter
+        text = "[IMAGE:a.jpg] [IMAGE:b.jpg] [IMAGE:a.jpg]"
+        assert image_filename_counts(text) == Counter({"a.jpg": 2, "b.jpg": 1})
