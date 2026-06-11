@@ -197,6 +197,39 @@ def image_placeholder_ranges(text: str) -> list[tuple[int, int]]:
     return [(m.start(), m.end()) for m in _IMAGE_PLACEHOLDER_RE.finditer(text)]
 
 
+def image_filenames(text: str) -> set[str]:
+    """Return the set of ``[IMAGE:filename]`` filenames (group 1) in *text*.
+
+    Used to check that a translation preserves exactly the source's image
+    placeholders. The description (group 2) is meant to be translated, so the
+    filename is the stable identity of the token: a filename present in the
+    source but missing from the translation is a dropped image; a filename in
+    the translation but not the source is a hallucinated one.
+
+    Example:
+        >>> sorted(image_filenames("a [IMAGE:img/p7.jpg:a dog] b [IMAGE:fig1.png]"))
+        ['fig1.png', 'img/p7.jpg']
+        >>> image_filenames("no images here")
+        set()
+    """
+    if not text:
+        return set()
+    return {m.group(1).strip() for m in _IMAGE_PLACEHOLDER_RE.finditer(text)}
+
+
+def image_filename_counts(text: str) -> "Counter[str]":
+    """Return a Counter of ``[IMAGE:filename]`` occurrences in *text*.
+
+    Unlike :func:`image_filenames` (which deduplicates), this preserves the
+    count of each filename so that a worker that emits a token twice is caught
+    by a mismatch against the source's single occurrence.
+    """
+    from collections import Counter
+    if not text:
+        return Counter()
+    return Counter(m.group(1).strip() for m in _IMAGE_PLACEHOLDER_RE.finditer(text))
+
+
 def strip_image_placeholders(text: str) -> str:
     """
     Replace [IMAGE:...] tokens with equal-length whitespace.

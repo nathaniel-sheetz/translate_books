@@ -13,6 +13,8 @@ from src.utils.text_utils import (
     strip_image_placeholders,
     image_placeholder_ranges,
     image_placeholder_instruction,
+    image_filenames,
+    image_filename_counts,
 )
 
 
@@ -426,3 +428,64 @@ class TestImagePlaceholderInstruction:
         bullet = image_placeholder_instruction("[IMAGE:images/a.jpg:]")
         assert bullet != ""
         assert "translating only" not in bullet
+
+
+# ============================================================================
+# image_filenames — unit tests (harness Phase B guard seam)
+# ============================================================================
+
+
+class TestImageFilenames:
+    def test_empty_string_returns_empty_set(self):
+        assert image_filenames("") == set()
+
+    def test_none_like_empty_string(self):
+        # The function guards  — verify with an actual empty string.
+        assert image_filenames("") == set()
+
+    def test_no_images_returns_empty_set(self):
+        assert image_filenames("No images here.") == set()
+
+    def test_single_filename_only_token(self):
+        assert image_filenames("[IMAGE:img/p7.jpg]") == {"img/p7.jpg"}
+
+    def test_single_filename_with_description(self):
+        assert image_filenames("[IMAGE:img/p7.jpg:a dog runs]") == {"img/p7.jpg"}
+
+    def test_multiple_tokens_returns_all_filenames(self):
+        text = "a [IMAGE:img/p7.jpg:a dog] b [IMAGE:fig1.png] c"
+        assert image_filenames(text) == {"img/p7.jpg", "fig1.png"}
+
+    def test_duplicate_filename_appears_once(self):
+        text = "[IMAGE:same.png] and [IMAGE:same.png:description]"
+        assert image_filenames(text) == {"same.png"}
+
+    def test_filename_with_spaces_is_stripped(self):
+        # Tokens like [IMAGE: img/x.jpg ] — the regex group may carry whitespace.
+        result = image_filenames("[IMAGE:img/x.jpg]")
+        assert "img/x.jpg" in result
+        for fn in result:
+            assert fn == fn.strip()
+
+
+class TestImageFilenameCounts:
+    """image_filename_counts preserves duplicates that image_filenames masks."""
+
+    def test_empty_string_returns_empty_counter(self):
+        from collections import Counter
+        assert image_filename_counts("") == Counter()
+
+    def test_single_token_count_is_one(self):
+        from collections import Counter
+        assert image_filename_counts("[IMAGE:img.png]") == Counter({"img.png": 1})
+
+    def test_duplicate_token_counted_twice(self):
+        # The guard uses this to reject a worker that doubled an image token.
+        from collections import Counter
+        text = "[IMAGE:img.png] some text [IMAGE:img.png:description]"
+        assert image_filename_counts(text) == Counter({"img.png": 2})
+
+    def test_different_filenames_counted_separately(self):
+        from collections import Counter
+        text = "[IMAGE:a.jpg] [IMAGE:b.jpg] [IMAGE:a.jpg]"
+        assert image_filename_counts(text) == Counter({"a.jpg": 2, "b.jpg": 1})

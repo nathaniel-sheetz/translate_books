@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.0.0] - 2026-06-10
+
+### Added
+- **Subagent translation backend (`translate-prepare` / `translate-commit`).** You can now translate a book — or any chapter subset — without an API key. `translate-prepare` renders one prompt file per untranslated chunk and writes a manifest (no spend); you then spawn one lightweight worker agent per entry; `translate-commit` guards each draft (length, echo detection, image-token parity), stamps the chunk, and writes a provenance log. The backend is idempotent: re-running commit resumes from where workers left off, and chunks already translated are skipped. Pass `--chapters 1-2` or `3,7,12` to either command to work in chapter batches — translate a batch, read it in the reader, then translate the next.
+- **`guard_translation_draft` validation.** Worker prose is validated before any chunk is stamped: empty or whitespace-only output, verbatim/near-verbatim echo of the English source (exact match and ≥85% token-overlap), image-token filename parity (dropped, hallucinated, or duplicated tokens all caught), and evaluator-flagged issues (placeholder text, wildly-off length) block the commit. Failed chunks are reported by name so you can re-spawn or edit them directly.
+- **`image_filename_counts` utility.** The image-parity check now uses a `Counter` rather than a set, so a worker that emits an image token twice is correctly caught even though the filename itself is not new.
+- **Translator agent definition (`.claude/agents/translator.md`).** Defines the `translator` agent type that the harness spawns as a worker: read a prompt file, write translated prose to a draft file, stop. The agent is tracked in git so the subagent backend is self-contained in the repo.
+- **`--chapters` scope on all pipeline subcommands.** `chunk`, `cost`, `translate`, `translate-prepare`, and `translate-commit` all now accept `--chapters` so you can target a chapter range at any stage.
+
+### Changed
+- **Shared prompt/stamp seam.** `build_translation_prompt` and `apply_translation` are now the single source of truth for building the translation prompt and recording a translated chunk. The realtime path, both batch-API paths, and the subagent backend all call the same functions — no more prompt-rendering drift between backends.
+- Manifest rescue: if `translate-prepare` is re-run before `translate-commit`, any worker drafts from the prior run that haven't been committed are carried forward into the new manifest rather than silently orphaned.
+- `translate_prepare` now handles malformed `--chapters` values gracefully (returns an error dict instead of propagating a `ValueError`).
+- Corrupted or partially-written `manifest.json` returns a descriptive error dict from `translate-commit` instead of crashing.
+
 ## [0.17.2.0] - 2026-06-10
 
 ### Changed

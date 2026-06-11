@@ -87,6 +87,16 @@ The `translate-harness` skill lets you translate a book without leaving your edi
 - A hard cost gate always shows the estimate before API spending. The harness runs `--cost-only` first, asks for approval in a separate turn, then passes `--yes` only after you confirm.
 - Intermediate state is stored in `.tmp/` and cleared at startup to prevent prior-session contamination.
 
+**Subagent backend (no API key).** Step 4B offers a second translation path that needs no `ANTHROPIC_API_KEY` — translation runs as spawned worker subagents on your Claude subscription. Use `translate-prepare` to render one prompt file per chunk and produce a manifest (no spend), then `translate-commit` to validate each draft and stamp the chunks. Pass `--chapters 1-2` to either command to work in chapter batches.
+
+```bash
+python scripts/harness.py translate-prepare --project projects/my-book --chapters 1-2
+# spawn worker agents per the manifest, then:
+python scripts/harness.py translate-commit  --project projects/my-book
+```
+
+Worker drafts are validated before stamping — empty output, echo of the source, dropped or hallucinated image tokens, and evaluator-flagged issues all block the commit and report the chunk by name for re-spawn.
+
 Requires Claude Code with the translate-harness skill checked into `.claude/skills/translate-harness/`.
 
 ---
@@ -169,6 +179,7 @@ book_translation/
 │   ├── glossary_bootstrap.py   # Glossary candidate extraction
 │   ├── translator.py           # Prompt rendering + workbook generation
 │   ├── epub_builder.py         # EPUB export
+│   ├── harness/                # translate-harness CLI backend (flow.py beats, state.py paths)
 │   ├── harness_guard.py        # Validation guards for translate-harness skill artifacts
 │   ├── edit_review_constants.py # EDIT_TAGS vocabulary (shared by report generator + web UI)
 │   ├── evaluators/             # Pluggable quality evaluators

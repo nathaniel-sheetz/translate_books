@@ -173,6 +173,81 @@ def get_api_key(provider: Provider) -> str:
     return api_key
 
 
+# ---------------------------------------------------------------------------
+# Translation seam — shared by the API paths and the harness subagent backend
+# ---------------------------------------------------------------------------
+#
+#   build_translation_prompt(chunk, ...) ── str ──┬─► call_llm        (realtime/batch: API path)
+#                                                  └─► written to file (harness subagent worker)
+#   apply_translation(chunk, prose, log) ── stamps translated_text/status/
+#                                           translated_at/last_llm_log
+#
+# One prompt builder and one stamp keep the API path and the subagent path
+# byte-identical (harness Phase B eng review A1/A2, 2026-06-10) — the last time
+# two paths stamped chunk text independently they drifted (two_edit_paths_to_chunk_text).
+
+
+def build_translation_prompt(
+    chunk: Chunk,
+    glossary: Optional[Glossary] = None,
+    style_guide: Optional[StyleGuide] = None,
+    project_name: str = "Translation Project",
+    source_language: str = "English",
+    target_language: str = "Spanish",
+    previous_chapter_context: str = "",
+) -> str:
+    """Render the translation prompt for a single chunk.
+
+    This is the one place the *actual sent* translation prompt is built: the
+    realtime path and both batch submitters call it, and the harness subagent
+    backend renders the same string to a file for a worker. Keeping it in one
+    function is what lets the API and subagent paths stay byte-identical.
+
+    The glossary is filtered to terms relevant to this chunk's source text, so
+    it lives in the variable suffix (it is NOT a stable cacheable prefix).
+    """
+    chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
+    template = load_prompt_template()
+    variables = {
+        "book_title": project_name,
+        "source_text": chunk.source_text,
+        "target_language": target_language,
+        "source_language": source_language,
+        "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
+        "style_guide": style_guide.content if style_guide else "No style guide provided.",
+        "context": "",
+        "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
+        "previous_chapter_context": previous_chapter_context,
+        "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+    }
+
+    prompt = render_prompt(template, variables)
+
+    # Strip header comments (everything before the first 80-'=' separator).
+    separator = "=" * 80
+    if separator in prompt:
+        parts = prompt.split(separator, 1)
+        if len(parts) > 1:
+            prompt = separator + parts[1]
+    return prompt
+
+
+def apply_translation(chunk: Chunk, prose: str, log_path: Optional[Path] = None) -> Chunk:
+    """Stamp a translated chunk in place: text, status, timestamp, provenance.
+
+    Single source of truth for how a translated chunk is recorded, shared by the
+    API realtime path and the harness subagent commit path so the two cannot
+    drift. ``log_path`` is the prompt-log this translation came from; when given
+    it is stamped onto ``chunk.last_llm_log`` (preserved, not cleared, when None).
+    """
+    chunk.translated_text = prose.strip()
+    chunk.status = ChunkStatus.TRANSLATED
+    chunk.translated_at = datetime.now()
+    if log_path is not None:
+        chunk.last_llm_log = relative_log_path(log_path)
+    return chunk
+
+
 def estimate_cost(
     chunks: list[Chunk],
     provider: Provider,
@@ -468,32 +543,15 @@ def translate_chunk_realtime(
     Raises:
         APIError: If translation fails after retries
     """
-    # Filter glossary to terms relevant to this chunk
-    chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
-
-    # Load and render prompt
-    template = load_prompt_template()
-    variables = {
-        "book_title": project_name,
-        "source_text": chunk.source_text,
-        "target_language": target_language,
-        "source_language": source_language,
-        "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
-        "style_guide": style_guide.content if style_guide else "No style guide provided.",
-        "context": "",
-        "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
-        "previous_chapter_context": previous_chapter_context,
-        "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
-    }
-
-    prompt = render_prompt(template, variables)
-
-    # Strip header comments (like in workbook generation)
-    separator = "=" * 80
-    if separator in prompt:
-        parts = prompt.split(separator, 1)
-        if len(parts) > 1:
-            prompt = separator + parts[1]
+    prompt = build_translation_prompt(
+        chunk,
+        glossary=glossary,
+        style_guide=style_guide,
+        project_name=project_name,
+        source_language=source_language,
+        target_language=target_language,
+        previous_chapter_context=previous_chapter_context,
+    )
 
     # Use call_llm which handles retry + config-based dispatch
     translation = call_llm(
@@ -506,13 +564,7 @@ def translate_chunk_realtime(
         project_slug=project_slug,
     )
 
-    chunk.translated_text = translation.strip()
-    chunk.status = ChunkStatus.TRANSLATED
-    chunk.translated_at = datetime.now()
-    log_path = last_log_path()
-    if log_path is not None:
-        chunk.last_llm_log = relative_log_path(log_path)
-    return chunk
+    return apply_translation(chunk, translation, log_path=last_log_path())
 
 
 # ============================================================================
@@ -599,35 +651,18 @@ def _submit_anthropic_batch(
     client = anthropic.Anthropic(api_key=api_key)
 
     # Build requests for each chunk
-    template = load_prompt_template()
     requests = []
 
     for chunk in chunks:
-        # Filter glossary to terms relevant to this chunk
-        chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
-
-        # Render prompt for this chunk
-        variables = {
-            "book_title": project_name,
-            "source_text": chunk.source_text,
-            "target_language": target_language,
-            "source_language": source_language,
-            "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
-            "style_guide": style_guide.content if style_guide else "No style guide provided.",
-            "context": "",
-            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
-            "previous_chapter_context": context_map.get(chunk.id, ""),
-            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
-        }
-
-        prompt = render_prompt(template, variables)
-
-        # Strip header comments
-        separator = "=" * 80
-        if separator in prompt:
-            parts = prompt.split(separator, 1)
-            if len(parts) > 1:
-                prompt = separator + parts[1]
+        prompt = build_translation_prompt(
+            chunk,
+            glossary=glossary,
+            style_guide=style_guide,
+            project_name=project_name,
+            source_language=source_language,
+            target_language=target_language,
+            previous_chapter_context=context_map.get(chunk.id, ""),
+        )
 
         # Create batch request
         requests.append({
@@ -716,35 +751,18 @@ def _submit_openai_batch(
     client = openai.OpenAI(api_key=api_key)
 
     # Build JSONL file with requests
-    template = load_prompt_template()
     jsonl_lines = []
 
     for chunk in chunks:
-        # Filter glossary to terms relevant to this chunk
-        chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
-
-        # Render prompt for this chunk
-        variables = {
-            "book_title": project_name,
-            "source_text": chunk.source_text,
-            "target_language": target_language,
-            "source_language": source_language,
-            "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
-            "style_guide": style_guide.content if style_guide else "No style guide provided.",
-            "context": "",
-            "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
-            "previous_chapter_context": context_map.get(chunk.id, ""),
-            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
-        }
-
-        prompt = render_prompt(template, variables)
-
-        # Strip header comments
-        separator = "=" * 80
-        if separator in prompt:
-            parts = prompt.split(separator, 1)
-            if len(parts) > 1:
-                prompt = separator + parts[1]
+        prompt = build_translation_prompt(
+            chunk,
+            glossary=glossary,
+            style_guide=style_guide,
+            project_name=project_name,
+            source_language=source_language,
+            target_language=target_language,
+            previous_chapter_context=context_map.get(chunk.id, ""),
+        )
 
         # Create batch request
         request = {

@@ -14,6 +14,8 @@ from src.models import Chunk, ChunkMetadata, ChunkStatus, Glossary, GlossaryTerm
 from src.api_translator import (
     get_api_key,
     estimate_cost,
+    build_translation_prompt,
+    apply_translation,
     translate_chunk_realtime,
     call_anthropic_api,
     call_openai_api,
@@ -1042,3 +1044,87 @@ def test_retrieve_openai_batch_stamps_last_llm_log(sample_chunk, tmp_path):
     assert len(chunks) == 1
     assert chunks[0].last_llm_log, "OpenAI batch retrieval must stamp last_llm_log"
     assert Path(chunks[0].last_llm_log).name == submission_log.name
+
+
+# ============================================================================
+# Translation seam extract — regression guard (harness Phase B eng review A1)
+# ============================================================================
+#
+# build_translation_prompt + apply_translation were factored OUT of
+# translate_chunk_realtime so the harness subagent backend can render the SAME
+# prompt and stamp chunks the SAME way. These tests pin the extract: the
+# realtime path must send byte-identical output to build_translation_prompt,
+# and the stamp must match the inline behavior it replaced. If either drifts,
+# every existing translation silently changes.
+
+
+def _seam_glossary():
+    return Glossary(terms=[
+        GlossaryTerm(english="truth", spanish="verdad", type=GlossaryTermType.CONCEPT),
+        GlossaryTerm(english="Hogwarts", spanish="Hogwarts", type=GlossaryTermType.PLACE),
+    ])
+
+
+def _seam_style_guide():
+    return StyleGuide(content="TONE: formal. DIALECT: neutral Latin American Spanish.")
+
+
+def test_realtime_sends_exactly_build_translation_prompt(sample_chunk):
+    """REGRESSION: the realtime path must send byte-identical output to what
+    build_translation_prompt produces for the same inputs."""
+    glossary = _seam_glossary()
+    style_guide = _seam_style_guide()
+    prev = "El capitulo anterior termino asi."
+
+    expected = build_translation_prompt(
+        sample_chunk,
+        glossary=glossary,
+        style_guide=style_guide,
+        project_name="Pride and Prejudice",
+        source_language="English",
+        target_language="Spanish",
+        previous_chapter_context=prev,
+    )
+
+    with patch("src.api_translator.call_llm", return_value="una traduccion") as mock_call:
+        translate_chunk_realtime(
+            chunk=sample_chunk,
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            glossary=glossary,
+            style_guide=style_guide,
+            project_name="Pride and Prejudice",
+            previous_chapter_context=prev,
+        )
+
+    sent_prompt = mock_call.call_args.args[0]
+    assert sent_prompt == expected, "realtime path drifted from build_translation_prompt"
+
+
+def test_build_translation_prompt_strips_header(sample_chunk):
+    """The builder strips any header before the first 80-'=' separator and keeps
+    the source text."""
+    prompt = build_translation_prompt(sample_chunk)
+    separator = "=" * 80
+    if separator in prompt:
+        assert prompt.startswith(separator), "header before the separator must be stripped"
+    assert "truth" in prompt.lower()
+
+
+def test_apply_translation_stamps(sample_chunk):
+    """apply_translation strips + stamps text/status/timestamp; last_llm_log is
+    set only when a log path is given and preserved (not cleared) when None."""
+    assert sample_chunk.status == ChunkStatus.PENDING
+    out = apply_translation(sample_chunk, "  una traduccion  ")
+    assert out.translated_text == "una traduccion"   # stripped
+    assert out.status == ChunkStatus.TRANSLATED
+    assert out.translated_at is not None
+    assert out.last_llm_log is None                  # no log path -> preserved (was None)
+
+    with patch("src.api_translator.relative_log_path", return_value="prompts/history/x.json"):
+        apply_translation(sample_chunk, "y", log_path=Path("whatever.json"))
+    assert sample_chunk.last_llm_log == "prompts/history/x.json"
+
+    # log_path=None with an existing value: must NOT clear the field (preserved).
+    apply_translation(sample_chunk, "z", log_path=None)
+    assert sample_chunk.last_llm_log == "prompts/history/x.json"  # still the prior value
