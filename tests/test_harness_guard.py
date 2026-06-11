@@ -206,3 +206,15 @@ class TestGuardTranslationDraft:
     def test_placeholder_text_is_flagged_by_completeness(self):
         problems = guard_translation_draft(_chunk(_SRC), _OK + " [TRANSLATION HERE]")
         assert any(p.startswith("completeness:") for p in problems)
+
+    def test_broken_evaluator_caught_not_propagated(self, monkeypatch):
+        """A crashing evaluator must NOT raise — its error is captured as a problem string."""
+        from unittest.mock import MagicMock
+        from src import harness_guard
+
+        bad_eval = MagicMock()
+        bad_eval.name = "boom"
+        bad_eval.evaluate.side_effect = RuntimeError("internal evaluator failure")
+        monkeypatch.setattr(harness_guard, "CompletenessEvaluator", lambda: bad_eval)
+        problems = guard_translation_draft(_chunk(_SRC), _OK)
+        assert any("boom evaluator failed" in p for p in problems)

@@ -54,6 +54,16 @@ def _fake_translate(chunk, **kwargs):
     return chunk
 
 
+def _fake_draft(source_text: str) -> str:
+    """Fake translated prose for subagent tests.
+
+    Each English token is prefixed with 'es_' so Jaccard overlap with the
+    source is ~0 and the near-verbatim echo guard does not fire, while the
+    word count stays the same so the length evaluator passes.
+    """
+    return " ".join(f"es_{w.lower().rstrip('.,!?;:')}" for w in source_text.split())
+
+
 _FAKE_COST_USD = 1.23  # non-zero so the cost-gate/confirmation path is exercised
 
 
@@ -285,7 +295,7 @@ def test_subagent_spine_prepare_commit_produces_valid_epub(project: Path):
     # Simulate workers: each writes prose (not an echo) to its draft_path.
     for entry in prep["manifest"]:
         chunk = validate_chunk_file(Path(entry["chunk_path"]))
-        Path(entry["draft_path"]).write_text("[ES] " + chunk.source_text, encoding="utf-8")
+        Path(entry["draft_path"]).write_text(_fake_draft(chunk.source_text), encoding="utf-8")
 
     res = flow.translate_commit(str(project), worker_model="sonnet")
     assert res["counts"]["committed"] == len(prep["manifest"])
@@ -400,7 +410,7 @@ def test_translate_commit_missing_draft_reported_not_stamped(project: Path):
     # Write drafts for all but the first entry — first stays missing.
     for entry in prep["manifest"][1:]:
         chunk = validate_chunk_file(Path(entry["chunk_path"]))
-        Path(entry["draft_path"]).write_text("[ES] " + chunk.source_text, encoding="utf-8")
+        Path(entry["draft_path"]).write_text(_fake_draft(chunk.source_text), encoding="utf-8")
 
     res = flow.translate_commit(str(project))
     assert res["counts"]["missing"] >= 1
@@ -408,6 +418,31 @@ def test_translate_commit_missing_draft_reported_not_stamped(project: Path):
     # The missing chunk must not be stamped.
     first_chunk = validate_chunk_file(Path(prep["manifest"][0]["chunk_path"]))
     assert not first_chunk.has_translation
+
+
+def test_translate_prepare_malformed_chapters_returns_error(project: Path):
+    """An invalid --chapters spec (e.g. 'abc') returns an error dict, not an exception."""
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    result = flow.translate_prepare(str(project), chapters="abc")
+    assert "error" in result
+    assert result["manifest"] == []
+
+
+def test_translate_commit_corrupted_manifest_returns_error(project: Path):
+    """A truncated/invalid manifest.json returns an error dict instead of crashing."""
+    from src.harness import flow, state as hstate
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    # Create a harness dir with a corrupt manifest.
+    hdir = hstate.ensure_harness_dir(project)
+    (hdir / "translate").mkdir(parents=True, exist_ok=True)
+    (hdir / "translate" / "manifest.json").write_text('{"incomplete":', encoding="utf-8")
+
+    result = flow.translate_commit(str(project))
+    assert "error" in result
+    assert result["committed"] == []
 
 
 def test_translate_commit_missing_prompt_file_still_commits(project: Path):
@@ -420,7 +455,7 @@ def test_translate_commit_missing_prompt_file_still_commits(project: Path):
     # Write valid prose but delete the prompt file for the first entry.
     entry = prep["manifest"][0]
     chunk = validate_chunk_file(Path(entry["chunk_path"]))
-    Path(entry["draft_path"]).write_text("[ES] " + chunk.source_text, encoding="utf-8")
+    Path(entry["draft_path"]).write_text(_fake_draft(chunk.source_text), encoding="utf-8")
     prompt_file = Path(entry["prompt_path"])
     if prompt_file.exists():
         prompt_file.unlink()
@@ -428,7 +463,7 @@ def test_translate_commit_missing_prompt_file_still_commits(project: Path):
     # Write normal drafts for the rest so commit can fully run.
     for e in prep["manifest"][1:]:
         c = validate_chunk_file(Path(e["chunk_path"]))
-        Path(e["draft_path"]).write_text("[ES] " + c.source_text, encoding="utf-8")
+        Path(e["draft_path"]).write_text(_fake_draft(c.source_text), encoding="utf-8")
 
     res = flow.translate_commit(str(project))
     # The first chunk should still be committed even without its prompt file.

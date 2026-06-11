@@ -384,7 +384,6 @@ def translate_prepare(
     *,
     chapters: str | None = None,
     worker_model: str | None = None,
-    max_candidates: int = 0,  # unused; kept for CLI-arg symmetry
 ) -> dict:
     """Render per-chunk prompts + a manifest for the subagent backend (no spend).
 
@@ -409,15 +408,19 @@ def translate_prepare(
     if not chunks_dir.exists():
         return {"error": "no chunks yet — run `chunk` first", "manifest": []}
 
-    discovered = discover_chapters(chunks_dir)
+    all_discovered = discover_chapters(chunks_dir)
+    discovered = all_discovered
     if chapters:
-        requested = parse_chapter_range(chapters)
-        discovered = {k: v for k, v in discovered.items() if k in requested}
+        try:
+            requested = parse_chapter_range(chapters)
+        except (ValueError, TypeError) as exc:
+            return {"error": f"invalid --chapters value {chapters!r}: {exc}", "manifest": []}
+        discovered = {k: v for k, v in all_discovered.items() if k in requested}
         if not discovered:
             return {
                 "manifest": [],
                 "chapters": chapters,
-                "available_chapters": sorted(discover_chapters(chunks_dir).keys()),
+                "available_chapters": sorted(all_discovered.keys()),
                 "note": f"no matching chapters for --chapters {chapters}",
             }
 
@@ -440,7 +443,14 @@ def translate_prepare(
     for chapter_id in sorted(discovered):
         for cp in discovered[chapter_id]:
             chunk = load_chunk(cp)
+            # Always update context so untranslated chunks get the real preceding tail,
+            # even when some earlier chunks in the same batch are already translated.
+            paragraphs = chunk.source_text.strip().split("\n\n")
+            chunk_tail = (
+                "\n\n".join(paragraphs[-2:]) if len(paragraphs) >= 2 else chunk.source_text.strip()
+            )
             if chunk.has_translation:
+                previous_context = chunk_tail
                 continue
             prompt = build_translation_prompt(
                 chunk,
@@ -455,6 +465,7 @@ def translate_prepare(
             draft_path = translate_dir / f"{chunk.id}.draft.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
             total_words += chunk.word_count
+            draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare run
             entries.append({
                 "chunk_id": chunk.id,
                 "chapter_id": chunk.chapter_id,
@@ -463,10 +474,33 @@ def translate_prepare(
                 "draft_path": str(draft_path),
                 "source_word_count": chunk.word_count,
             })
-            paragraphs = chunk.source_text.strip().split("\n\n")
-            previous_context = (
-                "\n\n".join(paragraphs[-2:]) if len(paragraphs) >= 2 else chunk.source_text.strip()
-            )
+            previous_context = chunk_tail
+
+    # Rescue uncommitted-but-drafted entries from a prior prepare run so they are
+    # not silently orphaned when prepare is called again before translate-commit.
+    prior_manifest_path = translate_dir / "manifest.json"
+    rescued: list[dict] = []
+    if prior_manifest_path.exists():
+        try:
+            prior_doc = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
+            for prior_entry in prior_doc.get("entries", []):
+                draft = Path(prior_entry["draft_path"])
+                chunk_cp = Path(prior_entry["chunk_path"])
+                from src.utils.file_io import load_chunk as _lc
+                try:
+                    prior_chunk = _lc(chunk_cp)
+                except Exception:
+                    continue
+                if draft.exists() and not prior_chunk.has_translation:
+                    # Worker already wrote a draft for this chunk and it has not been
+                    # committed. Keep it in the new manifest so translate-commit sees it.
+                    if not any(e["chunk_id"] == prior_entry["chunk_id"] for e in entries):
+                        rescued.append(prior_entry)
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt prior manifest — ignore and proceed
+
+    if rescued:
+        entries = rescued + entries
 
     manifest_doc = {"worker_model": worker_model, "chapters": chapters or "all", "entries": entries}
     (translate_dir / "manifest.json").write_text(
@@ -482,6 +516,7 @@ def translate_prepare(
             "source_words": total_words,
             "worker_model": worker_model,
         },
+        "rescued_prior_drafts": len(rescued),
         "chapters": chapters or "all",
         "instructions": (
             "For each manifest entry, spawn a worker pinned to worker_model that reads "
@@ -513,7 +548,10 @@ def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
     manifest_path = hdir / "translate" / "manifest.json"
     if not manifest_path.exists():
         return {"error": "no manifest — run `translate-prepare` first", "committed": []}
-    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"error": f"manifest unreadable (truncated write?): {exc}", "committed": []}
     worker_model = worker_model or doc.get("worker_model") or "sonnet"
     entries = doc.get("entries", [])
 

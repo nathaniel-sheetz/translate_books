@@ -1124,3 +1124,7 @@ def test_apply_translation_stamps(sample_chunk):
     with patch("src.api_translator.relative_log_path", return_value="prompts/history/x.json"):
         apply_translation(sample_chunk, "y", log_path=Path("whatever.json"))
     assert sample_chunk.last_llm_log == "prompts/history/x.json"
+
+    # log_path=None with an existing value: must NOT clear the field (preserved).
+    apply_translation(sample_chunk, "z", log_path=None)
+    assert sample_chunk.last_llm_log == "prompts/history/x.json"  # still the prior value

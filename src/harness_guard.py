@@ -114,9 +114,18 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
 
     problems: list[str] = []
 
-    # Echo guard: the worker returned the English source instead of translating.
-    if text == (chunk.source_text or "").strip():
+    # Echo guard: exact match and near-verbatim overlap both catch untranslated prose.
+    source_text = (chunk.source_text or "").strip()
+    if text == source_text:
         problems.append("translation is a verbatim copy of the English source (not translated)")
+    elif source_text:
+        src_tokens = set(source_text.lower().split())
+        out_tokens = set(text.lower().split())
+        jaccard = len(src_tokens & out_tokens) / len(src_tokens | out_tokens) if (src_tokens | out_tokens) else 0.0
+        if jaccard >= 0.85:
+            problems.append(
+                f"near-verbatim echo: token overlap with source is {jaccard:.0%} (≥85% threshold)"
+            )
 
     # Image-token filename parity. Descriptions are translated, so compare the
     # filename set only — the token must survive, just not gain/lose filenames.
