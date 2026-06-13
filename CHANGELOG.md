@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0.0] - 2026-06-13
+
+### Added
+- **Dialogue-conditional prompt injection.** Spanish translation prompts now automatically include a DIALOGUE FORMATTING block whenever the source chunk contains dialogue (as detected by the chunker's `_is_dialogue` rules). Non-dialogue chunks receive no injection, so token cost is only incurred when the block is relevant. The same conditional-wildcard pattern as image placeholders: a `{{dialogue_instructions}}` variable in the translation template renders to the framed block or `""`. The house-style rules live in `prompts/dialogue.txt` (user-local, gitignored) with a committed `prompts/dialogue.example.txt` fallback — edit your local copy without touching the repo.
+- **`dialogue_instruction(source_text, target_language)` utility** in `src/utils/text_utils.py`. Returns the framed DIALOGUE FORMATTING section when the chunk has dialogue and the target is Spanish; otherwise `""`. Gated to Spanish to avoid injecting Spanish raya/guillemet rules into other-language pipelines.
+- **`prompts/dialogue.example.txt`** — committed example dialogue style guide covering raya conversion, one-turn-one-paragraph, interrupted speech, and attribution patterns.
+
+### Changed
+- `prompts/translation.example.txt` updated to include the `{{dialogue_instructions}}` wildcard and updated STRUCTURE PRESERVATION wording that defers to the injected DIALOGUE FORMATTING section when present.
+- `prompts/style_guide_questions.example.json` — removed `dialogue_formatting` conditional question (superseded by inline injection).
+- `prompts/translation.txt` removed from git (it is per-user and gitignored; a fresh checkout uses `translation.example.txt` as the fallback).
+
 ## [0.18.0.0] - 2026-06-10
 
 ### Added
