@@ -98,7 +98,7 @@ from src.utils.file_io import (
     render_prompt,
 )
 from src.utils.source_text import load_chapter_source_text
-from src.utils.text_utils import image_placeholder_instruction
+from src.utils.text_utils import dialogue_instruction, image_placeholder_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,7 @@ def _build_translator_context(
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": "",
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+        "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
     }
     return render_prompt(template, variables)
 
@@ -200,6 +201,7 @@ def _build_translator_prompt(
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": "",
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+        "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
     }
     prompt = render_prompt(template, variables)
     # Strip header comments (same as translate_chunk_realtime)

@@ -1111,6 +1111,75 @@ def test_build_translation_prompt_strips_header(sample_chunk):
     assert "truth" in prompt.lower()
 
 
+def test_build_translation_prompt_includes_dialogue_block_when_source_has_dialogue():
+    """build_translation_prompt must embed the framed DIALOGUE FORMATTING block
+    when the source chunk contains dialogue and the target language is Spanish."""
+    # Build a chunk whose source starts with a straight-quote dialogue opener
+    # so that _source_has_dialogue returns True.
+    dialogue_text = (
+        chr(34) + "We must leave at once," + chr(34) + " she said.\n\n"
+        "He nodded and reached for his coat."
+    )
+    chunk = Chunk(
+        id="ch01_chunk_dlg",
+        chapter_id="chapter_01",
+        position=1,
+        source_text=dialogue_text,
+        metadata=ChunkMetadata(
+            char_start=0,
+            char_end=len(dialogue_text),
+            overlap_start=0,
+            overlap_end=0,
+            paragraph_count=2,
+            word_count=len(dialogue_text.split()),
+        ),
+        status=ChunkStatus.PENDING,
+        created_at=datetime(2025, 1, 28, 10, 0, 0),
+    )
+    prompt = build_translation_prompt(chunk, target_language="Spanish")
+    # The injected block is framed with "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80.
+    framed_marker = "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80
+    assert framed_marker in prompt, (
+        "Prompt for a dialogue chunk must contain the framed DIALOGUE FORMATTING section"
+    )
+
+
+def test_build_translation_prompt_omits_dialogue_block_for_narration():
+    """build_translation_prompt must NOT embed the framed DIALOGUE FORMATTING
+    section when the source is pure narration (no dialogue paragraphs).
+
+    Note: the template body references "DIALOGUE FORMATTING" in prose, so we
+    look for the distinctive 80-char separator that frames the injected block,
+    not the bare string.
+    """
+    narration = "He walked slowly down the lane.\n\nThe trees were silent."
+    chunk = Chunk(
+        id="ch01_chunk_nar",
+        chapter_id="chapter_01",
+        position=2,
+        source_text=narration,
+        metadata=ChunkMetadata(
+            char_start=0,
+            char_end=len(narration),
+            overlap_start=0,
+            overlap_end=0,
+            paragraph_count=2,
+            word_count=len(narration.split()),
+        ),
+        status=ChunkStatus.PENDING,
+        created_at=datetime(2025, 1, 28, 10, 0, 0),
+    )
+    prompt = build_translation_prompt(chunk, target_language="Spanish")
+    # The framed block starts with "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80.
+    # The template itself also contains "=" * 80 separators but NOT immediately
+    # followed by "DIALOGUE FORMATTING\n" + "=" * 80 — that pattern only appears
+    # when the injected block is non-empty.
+    framed_marker = "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80
+    assert framed_marker not in prompt, (
+        "Prompt for a narration-only chunk must NOT contain the framed DIALOGUE FORMATTING block"
+    )
+
+
 def test_apply_translation_stamps(sample_chunk):
     """apply_translation strips + stamps text/status/timestamp; last_llm_log is
     set only when a log path is given and preserved (not cleared) when None."""
