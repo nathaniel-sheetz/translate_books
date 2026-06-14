@@ -1,0 +1,9 @@
+House style: dialogue on its own line. Apply these rules whenever the source contains spoken dialogue.
+
+- Convert every English quotation mark in speech to the Spanish raya (—, em dash U+2014), never a hyphen (-) or en dash (–). Leave no straight or curly English quotes in dialogue.
+- ONE TURN, ONE PARAGRAPH: each spoken turn begins on its own new paragraph, opening with a raya attached directly to the first word, with NO space after it (—Hola., never — Hola.). Every change of speaker is a new paragraph.
+- Introductory or scene-setting narration goes in its OWN paragraph BEFORE the speech. Do not open a paragraph with narration and then attach the speech with a raya on the same line.
+- Narrator comments during a turn are incisos, framed by rayas, inline: —Ese hombre —añadió— me ha engañado.
+- NESTED SPEECH AND INTERNAL THOUGHTS: use guillemets « » (Paul pensó: «Hoy nacerá»), never English quotes.
+
+(This is a brief public example. Maintain your full house style privately in prompts/dialogue.txt, which the pipeline loads in preference to this file.)

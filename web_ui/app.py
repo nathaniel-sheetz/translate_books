@@ -39,7 +39,7 @@ from src.utils.file_io import (
 )
 from src.utils.source_text import load_chapter_source_text
 from src.difficulty_scorer import score_book
-from src.utils.text_utils import image_placeholder_instruction
+from src.utils.text_utils import dialogue_instruction, image_placeholder_instruction
 from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
     append_feedback,
@@ -3473,6 +3473,7 @@ def project_chunk_prompt(project_id, chunk_id):
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": prev_context,
             "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+            "dialogue_instructions": dialogue_instruction(chunk.source_text, "Spanish"),
         }
 
         rendered = render_prompt(template, variables)

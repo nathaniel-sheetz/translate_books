@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
 from src.utils.prompt_logger import last_log_path, log_prompt, relative_log_path, update_log_response
-from src.utils.text_utils import image_placeholder_instruction
+from src.utils.text_utils import dialogue_instruction, image_placeholder_instruction
 
 # Load environment variables from .env file
 load_dotenv()
@@ -219,6 +219,7 @@ def build_translation_prompt(
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": previous_chapter_context,
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+        "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
     }
 
     prompt = render_prompt(template, variables)
@@ -299,6 +300,7 @@ def estimate_cost(
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": "",
             "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+            "dialogue_instructions": dialogue_instruction(chunk.source_text, "Spanish"),
         }
 
         # Render prompt

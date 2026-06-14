@@ -12,6 +12,7 @@ and mixed newline conventions.
 """
 
 import re
+from pathlib import Path
 from typing import List
 
 
@@ -304,3 +305,85 @@ def image_placeholder_instruction(source_text: str) -> str:
         "     them into the translation exactly as-is at the same position "
         "in the text."
     )
+
+
+# Dialogue-handling instructions live in a standalone prompt file so the (long)
+# house-style block can be maintained separately from the system prompt and
+# injected only into chunks that actually contain dialogue — the same
+# conditional-wildcard pattern as image_placeholder_instruction above.
+_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+
+# Inject the block when at least this many paragraphs in the chunk look like
+# dialogue. 1 favors coverage over token-thrift: any dialogue in the chunk gets
+# the rules. Bump this if incidental quotes trigger it too eagerly.
+_DIALOGUE_MIN_PARAGRAPHS = 1
+
+
+def _resolve_dialogue_path() -> Path:
+    """Return the user's ``prompts/dialogue.txt`` if present, else the committed
+    ``prompts/dialogue.example.txt`` fallback (mirrors the per-user prompt
+    convention in ``style_guide_wizard._resolve_prompt_path``)."""
+    user_path = _PROMPTS_DIR / "dialogue.txt"
+    if user_path.exists():
+        return user_path
+    example_path = _PROMPTS_DIR / "dialogue.example.txt"
+    if example_path.exists():
+        return example_path
+    raise FileNotFoundError(f"Neither {user_path} nor {example_path} found")
+
+
+def _load_dialogue_block() -> str:
+    """Load the dialogue instructions, framed as a self-contained prompt section.
+
+    Framing the section here (rather than in the template) keeps the empty case
+    clean: when a chunk has no dialogue the wildcard renders to "" with no orphan
+    header. Read fresh each call (like ``load_prompt_template``) so edits to the
+    file take effect without restarting a long-running process.
+    """
+    path = _resolve_dialogue_path()
+    body = path.read_text(encoding="utf-8").strip()
+    if not body:
+        raise FileNotFoundError(f"{path} exists but is empty")
+    separator = "=" * 80
+    return f"{separator}\nDIALOGUE FORMATTING\n{separator}\n\n{body}"
+
+
+def _source_has_dialogue(source_text: str) -> bool:
+    """True when the chunk contains at least ``_DIALOGUE_MIN_PARAGRAPHS`` dialogue
+    paragraphs, using the chunker's own ``_is_dialogue`` rules."""
+    # Lazy import: chunker imports this module, so a top-level import would cycle.
+    try:
+        from src.chunker import _is_dialogue
+    except ImportError:
+        return False
+
+    hits = sum(1 for para in extract_paragraphs(source_text) if _is_dialogue(para))
+    return hits >= _DIALOGUE_MIN_PARAGRAPHS
+
+
+def dialogue_instruction(source_text: str, target_language: str = "Spanish") -> str:
+    """Build the DIALOGUE FORMATTING prompt section for a single chunk.
+
+    Returns the framed instructions block when ``source_text`` contains dialogue
+    and the target is Spanish, otherwise ``""``. The instructions encode Spanish
+    raya/guillemet house style, so they are gated to Spanish targets to avoid
+    injecting Spanish-specific rules into other languages.
+
+    Args:
+        source_text: The chunk's source text.
+        target_language: The translation target language.
+
+    Returns:
+        The framed dialogue section (no trailing newline) or an empty string.
+    """
+    if not source_text:
+        return ""
+
+    target = target_language.lower() if target_language else ""
+    if not any(key in target for key in ("spanish", "español", "espanol")):
+        return ""
+
+    if not _source_has_dialogue(source_text):
+        return ""
+
+    return _load_dialogue_block()

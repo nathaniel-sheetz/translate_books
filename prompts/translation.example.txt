@@ -18,6 +18,9 @@
 #   image_placeholder_instructions - Conditional bullet describing how to handle
 #       [IMAGE:...] placeholders, or empty when the source has none. Build with
 #       src.utils.text_utils.image_placeholder_instruction(source_text).
+#   dialogue_instructions - Conditional DIALOGUE FORMATTING section, injected only
+#       when the chunk contains dialogue (Spanish targets), or empty otherwise.
+#       Build with src.utils.text_utils.dialogue_instruction(source_text, target_language).
 #
 # Instructions:
 # - All variables must be provided when rendering this template
@@ -55,6 +58,8 @@ Follow these style guidelines for this translation:
 
 {{style_guide}}
 
+{{dialogue_instructions}}
+
 ================================================================================
 BOOK CONTEXT
 ================================================================================
@@ -68,7 +73,7 @@ TRANSLATION INSTRUCTIONS
 ================================================================================
 
 1. STRUCTURE PRESERVATION:
-   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (refer to style guide for details)
+   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (see the DIALOGUE FORMATTING section above, present when the source contains dialogue)
    - When the source contains verse or poetry (short lines separated by single newlines within a stanza), preserve every line break exactly.  Each verse line in the source must correspond to one verse line in the translation, with the same single-newline structure.  Stanza breaks (blank lines between groups of verse lines) must also be preserved.
 {{image_placeholder_instructions}}
 

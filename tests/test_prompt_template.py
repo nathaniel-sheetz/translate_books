@@ -393,6 +393,12 @@ class TestLiveTranslationTemplate:
     def test_example_template_uses_image_placeholder_variable(self, example_template):
         assert "{{image_placeholder_instructions}}" in example_template
 
+    def test_live_template_uses_dialogue_variable(self, live_template):
+        assert "{{dialogue_instructions}}" in live_template
+
+    def test_example_template_uses_dialogue_variable(self, example_template):
+        assert "{{dialogue_instructions}}" in example_template
+
     def test_live_template_renders_with_empty_instruction(self, live_template):
         """Rendering with image_placeholder_instructions='' must succeed (no orphan KeyError)."""
         variables = {
@@ -406,9 +412,30 @@ class TestLiveTranslationTemplate:
             "chapter_info": "",
             "previous_chapter_context": "",
             "image_placeholder_instructions": "",
+            "dialogue_instructions": "",
         }
         result = render_prompt(live_template, variables)
         # No unreplaced variables left.
+        assert "{{" not in result
+
+    def test_live_template_renders_with_dialogue_instruction(self, live_template):
+        """Rendering with a non-empty dialogue_instructions block must embed the block."""
+        block = "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80 + "\n\nUse a raya."
+        variables = {
+            "book_title": "Test",
+            "source_language": "English",
+            "target_language": "Spanish",
+            "source_text": 'Hello world.\n\n"Go now," she said.',
+            "glossary": "(none)",
+            "style_guide": "(none)",
+            "context": "",
+            "chapter_info": "",
+            "previous_chapter_context": "",
+            "image_placeholder_instructions": "",
+            "dialogue_instructions": block,
+        }
+        result = render_prompt(live_template, variables)
+        assert "DIALOGUE FORMATTING" in result
         assert "{{" not in result
 
     def test_live_template_renders_with_filename_only_instruction(self, live_template):
@@ -427,6 +454,7 @@ class TestLiveTranslationTemplate:
             "chapter_info": "",
             "previous_chapter_context": "",
             "image_placeholder_instructions": bullet,
+            "dialogue_instructions": "",
         }
         result = render_prompt(live_template, variables)
         # Bullet appears in the rendered prompt; "translating only" wording does NOT.
@@ -449,6 +477,7 @@ class TestLiveTranslationTemplate:
             "chapter_info": "",
             "previous_chapter_context": "",
             "image_placeholder_instructions": bullet,
+            "dialogue_instructions": "",
         }
         result = render_prompt(live_template, variables)
         # With-description wording must appear; filename-only wording must NOT.

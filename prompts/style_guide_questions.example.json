@@ -103,29 +103,6 @@
   ],
   "conditional": [
     {
-      "id": "dialogue_formatting",
-      "glossary_relevant": false,
-      "requires": {"feature": "dialogue", "min_count": 5},
-      "question": "How should dialogue be formatted?",
-      "options": [
-        {
-          "label": "Standard: raya (\u2014) marks speaker changes",
-          "style_guide_effect": "Mark dialogue using standard Spanish raya conventions (\u2014). Break character speech into a new paragraph when it follows narrative. Use guillemets (\u00ab \u00bb) for nested speech (dialogue within dialogue) and internal thoughts."
-        },
-        {
-          "label": "Quotation marks (\u201c...\u201d)",
-          "style_guide_effect": "Mark dialogue using quotation marks (\u201c...\u201d). Use single quotes (\u2018...\u2019) for nested speech."
-        },
-        {
-          "label": "Guillemets (\u00ab...\u00bb)",
-          "style_guide_effect": "Mark dialogue using guillemets (\u00ab...\u00bb). Use quotation marks for nested speech within guillemets."
-        }
-      ],
-      "allow_custom": true,
-      "custom_prompt": "Describe the dialogue formatting rules",
-      "default": 0
-    },
-    {
       "id": "verse_handling",
       "glossary_relevant": false,
       "requires": {"feature": "verse"},

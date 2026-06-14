@@ -18,7 +18,7 @@ from src.utils.file_io import (
     format_glossary_for_prompt,
     save_chunk,
 )
-from src.utils.text_utils import image_placeholder_instruction
+from src.utils.text_utils import dialogue_instruction, image_placeholder_instruction
 
 
 def _extract_tail_paragraphs(
@@ -391,6 +391,7 @@ def _generate_chunk_section(
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position} of {total_chunks}",
         "previous_chapter_context": previous_chapter_context,
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
+        "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
     }
 
     # Render the complete prompt

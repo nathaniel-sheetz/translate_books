@@ -15,6 +15,10 @@ from src.utils.text_utils import (
     image_placeholder_instruction,
     image_filenames,
     image_filename_counts,
+    dialogue_instruction,
+    _resolve_dialogue_path,
+    _load_dialogue_block,
+    _source_has_dialogue,
 )
 
 
@@ -428,6 +432,124 @@ class TestImagePlaceholderInstruction:
         bullet = image_placeholder_instruction("[IMAGE:images/a.jpg:]")
         assert bullet != ""
         assert "translating only" not in bullet
+
+
+class TestDialogueInstruction:
+    """Tests for dialogue_instruction — the conditional DIALOGUE FORMATTING block."""
+
+    _DIALOGUE_SRC = 'Intro line.\n\n"Do it right," she said.\n\nMore narration.'
+    _NARRATION_SRC = "Just narration here.\n\nNothing is spoken at all."
+    _FRAMED_HEADER = "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80
+
+    def test_empty_string_returns_empty(self):
+        assert dialogue_instruction("") == ""
+
+    def test_no_dialogue_returns_empty(self):
+        assert dialogue_instruction(self._NARRATION_SRC, "Spanish") == ""
+
+    def test_non_spanish_target_returns_empty(self):
+        # The block encodes Spanish raya house style; never inject it for other targets.
+        assert dialogue_instruction(self._DIALOGUE_SRC, "French") == ""
+
+    def test_dialogue_spanish_returns_framed_block(self):
+        block = dialogue_instruction(self._DIALOGUE_SRC, "Spanish")
+        assert block != ""
+        assert block.startswith(self._FRAMED_HEADER)
+        # Body after the framed header is non-empty.
+        assert block[len(self._FRAMED_HEADER):].strip() != ""
+
+    def test_espanol_accented_target_matches(self):
+        assert dialogue_instruction(self._DIALOGUE_SRC, "Español") != ""
+
+    def test_example_file_is_a_sane_public_fallback(self):
+        # The committed fallback (what CI / a fresh checkout resolves to) must
+        # carry the core Spanish raya guidance.
+        example = (
+            Path(__file__).parent.parent / "prompts" / "dialogue.example.txt"
+        ).read_text(encoding="utf-8")
+        assert example.strip() != ""
+        assert "raya" in example.lower()
+
+    def test_none_target_language_returns_empty(self):
+        # target_language=None must not raise; guard coerces it to "".
+        assert dialogue_instruction(self._DIALOGUE_SRC, None) == ""
+
+    def test_espanol_without_accent_matches(self):
+        # "espanol" (no tilde) is also a recognised keyword.
+        assert dialogue_instruction(self._DIALOGUE_SRC, "espanol") != ""
+
+    def test_default_target_language_is_spanish(self):
+        # Calling with no target_language arg defaults to Spanish.
+        assert dialogue_instruction(self._DIALOGUE_SRC) != ""
+
+    def test_attribution_dialogue_detected(self):
+        # ATTRIBUTION_RE path: para has attribution verb + quote chars but
+        # does NOT start with a DIALOGUE_STARTERS character.
+        attr_src = chr(34) + "Hello," + chr(34) + " he said quietly."
+        assert dialogue_instruction(attr_src, "Spanish") != ""
+
+    def test_source_has_dialogue_false_for_narration(self):
+        assert _source_has_dialogue(self._NARRATION_SRC) is False
+
+    def test_source_has_dialogue_true_for_quote_opener(self):
+        # Paragraph starts with a DIALOGUE_STARTERS character.
+        assert _source_has_dialogue(self._DIALOGUE_SRC) is True
+
+    def test_source_has_dialogue_true_for_attribution(self):
+        attr_src = chr(34) + "Exactly," + chr(34) + " she replied."
+        assert _source_has_dialogue(attr_src) is True
+
+
+class TestResolveDialoguePath:
+    """Unit tests for _resolve_dialogue_path — file-resolution logic."""
+
+    def test_prefers_user_txt_over_example(self, tmp_path, monkeypatch):
+        # When dialogue.txt exists alongside dialogue.example.txt, the user
+        # file must be returned.
+        (tmp_path / "dialogue.txt").write_text("user content", encoding="utf-8")
+        (tmp_path / "dialogue.example.txt").write_text("example content", encoding="utf-8")
+        import src.utils.text_utils as tu
+        monkeypatch.setattr(tu, "_PROMPTS_DIR", tmp_path)
+        assert _resolve_dialogue_path() == tmp_path / "dialogue.txt"
+
+    def test_falls_back_to_example_when_user_txt_absent(self, tmp_path, monkeypatch):
+        # When dialogue.txt is missing, the example fallback must be returned.
+        (tmp_path / "dialogue.example.txt").write_text("example content", encoding="utf-8")
+        import src.utils.text_utils as tu
+        monkeypatch.setattr(tu, "_PROMPTS_DIR", tmp_path)
+        assert _resolve_dialogue_path() == tmp_path / "dialogue.example.txt"
+
+    def test_raises_file_not_found_when_neither_exists(self, tmp_path, monkeypatch):
+        # Neither file present must raise FileNotFoundError.
+        import src.utils.text_utils as tu
+        monkeypatch.setattr(tu, "_PROMPTS_DIR", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            _resolve_dialogue_path()
+
+
+class TestLoadDialogueBlock:
+    """Unit tests for _load_dialogue_block — framing logic."""
+
+    def test_framed_block_structure(self, tmp_path, monkeypatch):
+        # The block must wrap the body with the 80-'=' header/footer.
+        body = "Use a raya for dialogue."
+        (tmp_path / "dialogue.example.txt").write_text(body, encoding="utf-8")
+        import src.utils.text_utils as tu
+        monkeypatch.setattr(tu, "_PROMPTS_DIR", tmp_path)
+        block = _load_dialogue_block()
+        separator = "=" * 80
+        assert block.startswith(separator)
+        assert "DIALOGUE FORMATTING" in block
+        assert body in block
+
+    def test_body_is_stripped(self, tmp_path, monkeypatch):
+        # Leading/trailing whitespace in the file body must be stripped.
+        body = "  \nRaya rule here.\n  "
+        (tmp_path / "dialogue.example.txt").write_text(body, encoding="utf-8")
+        import src.utils.text_utils as tu
+        monkeypatch.setattr(tu, "_PROMPTS_DIR", tmp_path)
+        block = _load_dialogue_block()
+        assert block.endswith("Raya rule here.")
 
 
 # ============================================================================
