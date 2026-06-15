@@ -45,7 +45,8 @@ def test_calibration_returns_all_expected_keys():
     for key in (
         "length_easy", "length_hard", "rare_zipf",
         "rarity_easy", "rarity_hard",
-        "weight_length", "weight_rarity",
+        "dialect_easy", "dialect_hard",
+        "weight_length", "weight_rarity", "weight_dialect",
         "target_easy", "target_hard",
         "wordfreq_available",
     ):

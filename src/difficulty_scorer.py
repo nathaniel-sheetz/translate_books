@@ -2,7 +2,7 @@
 Deterministic translation-difficulty scoring for English source text.
 
 Rates how hard a block of English text will be to translate into Spanish using
-two orthogonal, deterministic signals:
+three orthogonal, deterministic signals:
 
 1. **Sentence length (long-tail-weighted)** — long sentences carry more
    subordinate clauses; EN→ES translation often reorders clauses / triggers the
@@ -15,12 +15,23 @@ two orthogonal, deterministic signals:
    **Glossary terms are excluded** so recurring proper names (Betsy,
    Aunt Harriet) — which are handled deterministically by the glossary and would
    otherwise look "rare" — don't inflate the stat.
+3. **Dialect density (eye-dialect markers)** — non-standard / dialect speech
+   (``jes'``, ``comin'``, ``a-thinkin'``, ``'twas``, ``reckon``) is a real
+   translation hazard that tracks neither sentence length nor vocabulary rarity:
+   the LLM must reorder and re-register dialogue-heavy passages. We count
+   deterministic eye-dialect markers (apostrophe-elisions outside the standard
+   contraction set, ``a-``prefixed progressives, and a small curated lexicon)
+   and normalize by word count. Unlike length+rarity this signal is an *additive
+   boost* — it can only ever raise difficulty, leaving non-dialect books exactly
+   unchanged.
 
-Each sub-metric is mapped to ``[0, 1]`` via fixed (absolute) calibration
-thresholds and combined into a single ``difficulty`` score, which maps to a
+Sentence length and rarity are mapped to ``[0, 1]`` via fixed (absolute)
+calibration thresholds and combined into a ``base`` difficulty; the dialect
+sub-score is then added on top. The combined ``difficulty`` score maps to a
 suggested chunk ``target_size`` (harder ⇒ smaller). Scores are produced at the
 book and per-chapter level and cached to ``{project_dir}/difficulty.json``
-(re-run when the source mtime is newer), mirroring ``text_feature_detector``.
+(re-run when the source mtime is newer or the calibration changes), mirroring
+``text_feature_detector``.
 
 Phase 1: book + chapter suggestions only. The suggestions populate the existing
 dashboard target inputs; nothing is auto-applied. Per-paragraph weights
@@ -73,22 +84,186 @@ RARE_ZIPF = 3.0
 RARITY_EASY = 0.015
 RARITY_HARD = 0.10
 
-# Relative weights of the two sub-scores in the combined difficulty. Length is
-# the stronger signal (it tracks human difficulty ordering best); rarity is a
+# Relative weights of the two base sub-scores (length + rarity). Length is the
+# stronger signal (it tracks human difficulty ordering best); rarity is a
 # lighter tiebreaker that pushes rare-vocabulary books down further.
 WEIGHT_LENGTH = 0.85
 WEIGHT_RARITY = 0.15
 
+# Dialect-density sub-score: fraction of word-tokens that are eye-dialect
+# markers. At or below DIALECT_EASY scores 0.0; at or above DIALECT_HARD scores
+# 1.0; linear between. Calibrated on stormy-misty-s-foal, whose dialect chapters
+# run ~2–5% markers: 0.035 spreads that band so the densest chapters (ch7/11/23,
+# ~4–5%) separate from the merely heavy ones (ch3, ~2.2%) instead of all pinning
+# at 1.0 — keeping ch3 in the ~1300–1400 band while the worst reach the floor.
+DIALECT_EASY = 0.0
+DIALECT_HARD = 0.035
+
+# How much a fully dialect-saturated block adds on top of the length+rarity
+# base. Applied additively (see score_text), so dialect can only raise
+# difficulty — non-dialect text (dialect_score == 0) is byte-for-byte unchanged.
+# Pulled strongly (0.9) per the calibration goal that the most dialect-heavy
+# chapters reach the TARGET_HARD floor (~1200w).
+WEIGHT_DIALECT = 0.9
+
 # difficulty → suggested chunk target_size (words). difficulty 0.0 yields
 # TARGET_EASY (bigger chunks), 1.0 yields TARGET_HARD (smaller chunks).
 # Calibrated so an easy book lands on the standard 2000-word default and the
-# hardest books fall toward ~1300.
+# hardest (dialect-saturated) text falls toward ~1200.
 TARGET_EASY = 2000
-TARGET_HARD = 1260
+TARGET_HARD = 1200
 
 # Token pattern for rarity: alphabetic runs with optional internal apostrophe
 # (don't, O'Hara). Lowercased before lookup. Digits/punctuation are ignored.
 _WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+
+# ---------------------------------------------------------------------------
+# Dialect detection (eye-dialect markers)
+# ---------------------------------------------------------------------------
+
+# Standard English contractions. Any apostrophe-bearing token *outside* this
+# closed, stable set (and not a possessive) is treated as a dialect marker.
+STANDARD_CONTRACTIONS = frozenset({
+    "don't", "doesn't", "didn't", "won't", "wouldn't", "can't", "couldn't",
+    "shouldn't", "mustn't", "needn't", "mightn't", "oughtn't", "daren't",
+    "mayn't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't",
+    "hadn't", "shan't", "you're", "we're", "they're", "i've", "you've", "we've",
+    "they've", "would've", "should've", "could've", "i'll", "you'll", "he'll",
+    "she'll", "we'll", "they'll", "it'll", "that'll", "i'd", "you'd", "he'd",
+    "she'd", "we'd", "they'd", "it'd", "that'd", "i'm", "it's", "he's", "she's",
+    "that's", "what's", "who's", "there's", "here's", "let's", "where's",
+    "how's", "o'clock", "ma'am",
+})
+
+# Common eye-dialect trailing reductions (token ends in a bare apostrophe).
+# Trailing apostrophes are otherwise ambiguous with closing single-quotes
+# (``separate'``) and plural possessives (``horses'``), so non-``-in'`` g-drops
+# are matched against this curated set rather than counted wholesale. Clearly
+# extensible — grow as new books surface reductions.
+_TRAILING_REDUCTIONS = frozenset({
+    "o'", "an'", "ol'", "jes'", "jus'", "mo'", "wi'", "t'", "d'", "sho'",
+    "fo'", "yo'",
+})
+
+# Leading-apostrophe elisions — a curated closed set. Leading apostrophes are
+# otherwise ambiguous with closing quotes, so a general pattern is unsafe.
+_LEADING_ELISIONS = frozenset({
+    "'twas", "'tis", "'twasn't", "'em", "'cause", "'round", "'bout", "'nuff",
+    "'fraid", "'gainst", "'neath", "'cept", "'peared", "'specially",
+})
+
+# Small curated apostrophe-free dialect lexicon. Clearly extensible starter set
+# — grow it as new books surface markers. Lowercased before lookup.
+_DIALECT_LEXICON = frozenset({
+    "reckon", "yonder", "naw", "yep", "yup", "nope", "gonna", "gotta", "wanna",
+    "gimme", "lemme", "dunno", "kinda", "sorta", "critter", "varmint",
+    "vittles", "hoss", "hosses", "nacherel", "acrost", "wimmenfolk", "menfolk",
+    "afeared", "onliest", "heerd", "deef", "nary", "yer", "ye", "younguns",
+})
+
+# Apostrophe-bearing token: an alphabetic run, an apostrophe (straight or
+# curly), then an optional alphabetic run. Catches don't, comin', jes', off'n,
+# young'un, smarter'n, ain't, o'.
+_APOSTROPHE_TOKEN_RE = re.compile(r"[A-Za-z]+['’][A-Za-z]*")
+
+# Leading-apostrophe token (for matching the curated elision set). The leading
+# apostrophe may be a straight or curly quote.
+_LEADING_APOSTROPHE_RE = re.compile(r"['’][A-Za-z]+")
+
+# a-prefixed progressives: a-thinkin', a-ridin', a-walking. Hyphen may be a
+# plain or non-breaking hyphen; the verb ends in -in, optionally + g/'/’.
+_A_PREFIX_RE = re.compile(r"\ba[-‑][a-z]+in[g'’]?\b", re.IGNORECASE)
+
+# Plain-word token (no apostrophes) for lexicon membership tests.
+_PLAIN_WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def _norm_apos(s: str) -> str:
+    """Normalize typographic apostrophes to a straight ``'``.
+
+    Most typeset books use the curly apostrophe ``’`` (U+2019), so ``don’t``
+    must compare equal to the whitelisted ``don't``. The regexes already match
+    both forms; this keeps the whitelist/elision lookups in step.
+    """
+    return s.replace("’", "'").replace("ʼ", "'")
+
+
+def _is_possessive(token: str) -> bool:
+    """True for ``'s`` possessives (``Misty's``, ``Grandpa's``).
+
+    These carry an apostrophe but are standard English, not dialect. Only the
+    ``'s`` form is excluded — a bare trailing apostrophe is the g-drop signal
+    (``comin'``, ``jes'``, ``o'``), which must stay counted.
+    """
+    low = _norm_apos(token.lower())
+    return low.endswith("'s")
+
+
+def dialect_marker_count(text: str) -> int:
+    """Count deterministic eye-dialect markers in ``text``.
+
+    Whitelist-based and dependency-free. Counts, once per occurrence:
+
+    * **Internal-apostrophe tokens** (letters on both sides) not in
+      :data:`STANDARD_CONTRACTIONS` and not a ``'s`` possessive — catches
+      mid-word elisions (``off'n``), non-standard contractions (``ain't``,
+      ``young'un``, ``t'other``), reliably (a closing quote can't be internal).
+    * **Trailing-apostrophe tokens** only when they are ``-in'`` g-drops
+      (``comin'``, ``standin'``) or a curated reduction in
+      :data:`_TRAILING_REDUCTIONS` (``o'``, ``jes'``). Bare trailing apostrophes
+      are otherwise ambiguous with closing single-quotes (``separate'``) and
+      plural possessives (``horses'``), which must not count.
+    * **Leading-apostrophe elisions** in :data:`_LEADING_ELISIONS` (``'twas``,
+      ``'em``).
+    * **a-prefixed progressives** (``a-thinkin'``, ``a-ridin'``).
+    * **Curated apostrophe-free lexicon** hits (``reckon``, ``yonder``,
+      ``nacherel``).
+
+    Each textual occurrence is counted at most once: a marker matched by more
+    than one rule (e.g. ``a-thinkin'`` hits both the a-prefix and the
+    apostrophe-token rule) does not double-count. Magnitude is normalized to a
+    density by the caller, so nothing is capped.
+    """
+    counted: List[tuple] = []  # (start, end) spans already counted
+
+    def _take(start: int, end: int) -> int:
+        for s, e in counted:
+            if start < e and s < end:  # overlaps an already-counted span
+                return 0
+        counted.append((start, end))
+        return 1
+
+    count = 0
+
+    # Apostrophe-bearing tokens. Internal apostrophes are reliable; bare
+    # trailing apostrophes are filtered to real g-drops / reductions.
+    for m in _APOSTROPHE_TOKEN_RE.finditer(text):
+        low = _norm_apos(m.group().lower())
+        if low in STANDARD_CONTRACTIONS:
+            continue
+        if low.endswith("'"):
+            if not (low.endswith("in'") or low in _TRAILING_REDUCTIONS):
+                continue
+        elif _is_possessive(m.group()):
+            continue
+        count += _take(m.start(), m.end())
+
+    # Leading-apostrophe elisions (curated set only — avoids closing-quote noise).
+    for m in _LEADING_APOSTROPHE_RE.finditer(text):
+        if _norm_apos(m.group().lower()) in _LEADING_ELISIONS:
+            count += _take(m.start(), m.end())
+
+    # a-prefixed progressives (a-walking has no apostrophe, so this rule earns
+    # its keep; a-thinkin' overlaps the apostrophe rule above and won't recount).
+    for m in _A_PREFIX_RE.finditer(text):
+        count += _take(m.start(), m.end())
+
+    # Curated apostrophe-free lexicon.
+    for m in _PLAIN_WORD_RE.finditer(text):
+        if m.group().lower() in _DIALECT_LEXICON:
+            count += _take(m.start(), m.end())
+
+    return count
 
 
 def calibration() -> dict:
@@ -103,8 +278,11 @@ def calibration() -> dict:
         "rare_zipf": RARE_ZIPF,
         "rarity_easy": RARITY_EASY,
         "rarity_hard": RARITY_HARD,
+        "dialect_easy": DIALECT_EASY,
+        "dialect_hard": DIALECT_HARD,
         "weight_length": WEIGHT_LENGTH,
         "weight_rarity": WEIGHT_RARITY,
+        "weight_dialect": WEIGHT_DIALECT,
         "target_easy": TARGET_EASY,
         "target_hard": TARGET_HARD,
         "wordfreq_available": WORDFREQ_AVAILABLE,
@@ -127,8 +305,11 @@ class DifficultyMetrics:
     sentence_length_weighted: float = 0.0
     tokens_scored: int = 0
     rare_word_fraction: float = 0.0
+    dialect_marker_count: int = 0
+    dialect_density: float = 0.0
     length_score: float = 0.0
     rarity_score: float = 0.0
+    dialect_score: float = 0.0
     difficulty: float = 0.0
     suggested_target_size: int = TARGET_EASY
 
@@ -304,12 +485,20 @@ def score_text(text: str, glossary_skip: Optional[set] = None) -> DifficultyMetr
     else:
         rare_fraction = 0.0
 
+    marker_count = dialect_marker_count(text)
+    dialect_density = marker_count / max(word_count, 1)
+
     length_score = _linear_score(weighted, LENGTH_EASY, LENGTH_HARD)
     rarity_score = _linear_score(rare_fraction, RARITY_EASY, RARITY_HARD)
-    difficulty = _clamp01(
-        (WEIGHT_LENGTH * length_score + WEIGHT_RARITY * rarity_score)
-        / (WEIGHT_LENGTH + WEIGHT_RARITY)
+    dialect_score = _linear_score(dialect_density, DIALECT_EASY, DIALECT_HARD)
+
+    # Length+rarity form the base; dialect is an additive boost so non-dialect
+    # text (dialect_score == 0) yields difficulty == base, byte-for-byte
+    # unchanged, and dialect can only ever raise difficulty.
+    base = (WEIGHT_LENGTH * length_score + WEIGHT_RARITY * rarity_score) / (
+        WEIGHT_LENGTH + WEIGHT_RARITY
     )
+    difficulty = _clamp01(base + WEIGHT_DIALECT * dialect_score)
 
     return DifficultyMetrics(
         sentence_count=len(counts),
@@ -319,8 +508,11 @@ def score_text(text: str, glossary_skip: Optional[set] = None) -> DifficultyMetr
         sentence_length_weighted=round(weighted, 2),
         tokens_scored=tokens_scored,
         rare_word_fraction=round(rare_fraction, 4),
+        dialect_marker_count=marker_count,
+        dialect_density=round(dialect_density, 4),
         length_score=round(length_score, 4),
         rarity_score=round(rarity_score, 4),
+        dialect_score=round(dialect_score, 4),
         difficulty=round(difficulty, 4),
         suggested_target_size=suggest_target_size(difficulty),
     )
@@ -412,7 +604,11 @@ def score_book(project_dir, *, force: bool = False) -> DifficultyManifest:
         cached = _load_manifest(cache_path)
         if cached is not None:
             cached_mtime = cached.source_mtime or 0.0
-            if source_mtime is None or cached_mtime >= source_mtime:
+            fresh = source_mtime is None or cached_mtime >= source_mtime
+            # Re-score when the calibration (algorithm/thresholds) changed, even
+            # if the source is untouched — otherwise cached numbers go stale
+            # silently after a re-tune.
+            if fresh and cached.calibration == calibration():
                 logger.info("Using cached difficulty manifest at %s", cache_path)
                 return cached
 

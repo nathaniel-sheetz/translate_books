@@ -5,9 +5,12 @@ import json
 import pytest
 
 from src.difficulty_scorer import (
+    WEIGHT_LENGTH,
+    WEIGHT_RARITY,
     WORDFREQ_AVAILABLE,
     DifficultyMetrics,
     build_glossary_skip,
+    dialect_marker_count,
     score_book,
     score_text,
     suggest_target_size,
@@ -133,6 +136,107 @@ def test_metrics_roundtrip():
 
 
 # ---------------------------------------------------------------------------
+# Dialect density
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ain't", "comin'", "jes'", "off'n", "young'un", "smarter'n",
+        "a-thinkin'", "'twas", "'em", "reckon", "yonder", "o'", "t'other",
+        "nacherel", "acrost",
+    ],
+)
+def test_dialect_markers_counted(token):
+    assert dialect_marker_count(token) == 1
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "don't", "doesn't", "it's", "we're", "would've", "o'clock", "ma'am",
+        "needn't", "Misty's", "Grandpa's", "horses'", "girls'", "horse",
+        "morning",
+    ],
+)
+def test_standard_and_possessive_not_counted(token):
+    assert dialect_marker_count(token) == 0
+
+
+def test_curly_apostrophe_contractions_not_counted():
+    # Typeset books use the curly apostrophe (U+2019); standard contractions
+    # written that way must still be whitelisted (regression for false positives
+    # that scored a clean book as wall-to-wall dialect).
+    text = "I don’t think you’d say it couldn’t be done, ma’am."
+    assert dialect_marker_count(text) == 0
+
+
+def test_curly_apostrophe_gdrop_still_counts():
+    # A g-drop written with a curly apostrophe is still dialect.
+    assert dialect_marker_count("comin’") == 1
+
+
+def test_closing_single_quote_not_counted_as_gdrop():
+    # A word wrapped in single quotes ends in a bare apostrophe but is not a
+    # g-drop; it must not be counted.
+    assert dialect_marker_count("He said the word 'separate' aloud.") == 0
+
+
+def test_a_prefixed_progressive_counted_once():
+    # a-thinkin' matches both the a-prefix and apostrophe rules; count once.
+    assert dialect_marker_count("a-thinkin'") == 1
+    assert dialect_marker_count("a-walking") == 1
+
+
+def test_dialect_text_scores_higher_than_clean_prose():
+    # Two passages of comparable sentence length and common vocabulary; only the
+    # second is eye-dialect. The dialect one must score strictly higher.
+    clean = (
+        "The young horse walked along the misty shore in the cool morning. "
+        "He looked at the water and waited for his mother to come back."
+    )
+    dialect = (
+        "The young'un were a-thinkin' 'twas time to go, jes' like his ma "
+        "reckoned. He weren't comin' back, naw, not nohow, an' that critter "
+        "knowed it."
+    )
+    mc = score_text(clean)
+    md = score_text(dialect)
+    assert mc.dialect_score == 0.0
+    assert md.dialect_score > mc.dialect_score
+    assert md.difficulty > mc.difficulty
+
+
+def test_dialect_score_in_unit_interval():
+    md = score_text("jes' a-thinkin' 'twas comin' reckon young'un ain't off'n")
+    assert 0.0 <= md.dialect_score <= 1.0
+    assert 0.0 <= md.difficulty <= 1.0
+
+
+def test_additive_boost_leaves_nondialect_at_base():
+    # With zero dialect markers, difficulty must equal the pre-change
+    # length+rarity base — the additive boost only ever raises difficulty.
+    text = (
+        "The narrator described the wide green valley and the slow river that "
+        "wound between the hills under a pale and quiet morning sky."
+    )
+    m = score_text(text)
+    assert m.dialect_marker_count == 0
+    assert m.dialect_score == 0.0
+    base = (WEIGHT_LENGTH * m.length_score + WEIGHT_RARITY * m.rarity_score) / (
+        WEIGHT_LENGTH + WEIGHT_RARITY
+    )
+    assert m.difficulty == pytest.approx(base, abs=1e-4)
+
+
+def test_dialect_metrics_roundtrip():
+    m = score_text("He were a-comin' back, jes' like he reckoned, young'un.")
+    assert DifficultyMetrics.from_dict(m.to_dict()) == m
+    assert m.dialect_marker_count > 0
+
+
+# ---------------------------------------------------------------------------
 # Book-level scoring + caching
 # ---------------------------------------------------------------------------
 
@@ -177,6 +281,20 @@ def test_score_book_uses_cache_until_force(tmp_path):
     # force=True must re-score (new generated_at timestamp).
     forced = score_book(proj, force=True)
     assert forced.generated_at != first.generated_at
+
+
+def test_score_book_rescores_when_calibration_changes(tmp_path, monkeypatch):
+    # Changing the algorithm/thresholds (not the source) must invalidate the
+    # cache so cached numbers don't silently go stale after a re-tune.
+    import src.difficulty_scorer as ds
+
+    proj = _make_project(tmp_path, {"chapter_01": "Plain simple text right here."})
+    first = score_book(proj)
+    # Same calibration ⇒ cached (no new timestamp).
+    assert score_book(proj).generated_at == first.generated_at
+    # Different calibration ⇒ re-score.
+    monkeypatch.setattr(ds, "WEIGHT_DIALECT", ds.WEIGHT_DIALECT + 0.1)
+    assert score_book(proj).generated_at != first.generated_at
 
 
 def test_score_book_glossary_excluded_from_chapter_rarity(tmp_path):
