@@ -164,6 +164,14 @@ def test_standard_and_possessive_not_counted(token):
     assert dialect_marker_count(token) == 0
 
 
+@pytest.mark.parametrize(
+    "token",
+    ["O'Brien", "O'Hara", "O'Neill", "O'Malley"],
+)
+def test_irish_surname_prefix_not_counted(token):
+    assert dialect_marker_count(token) == 0
+
+
 def test_curly_apostrophe_contractions_not_counted():
     # Typeset books use the curly apostrophe (U+2019); standard contractions
     # written that way must still be whitelisted (regression for false positives

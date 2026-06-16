@@ -11,6 +11,7 @@ Gaps addressed:
   - score_book with no chapters/ dir (falls back to load_clean_source_text)
   - score_book with stale cache (source_mtime newer) triggers re-score
   - suggest_target_size edge values (0.0, 1.0) and custom targets
+  - _norm_apos modifier-letter apostrophe (U+02BC) second normalization branch
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ from src.difficulty_scorer import (
     DifficultyMetrics,
     _linear_score,
     _load_manifest,
+    _norm_apos,
     calibration,
+    dialect_marker_count,
     manifest_path,
     score_book,
     score_text,
@@ -57,6 +60,7 @@ def test_calibration_weights_are_positive():
     cal = calibration()
     assert 0 < cal["weight_length"] <= 1
     assert 0 < cal["weight_rarity"] <= 1
+    assert 0 < cal["weight_dialect"]
 
 
 # ---------------------------------------------------------------------------
@@ -246,5 +250,89 @@ def test_score_book_stale_cache_rescores(tmp_path):
     cache_file.write_text(json.dumps(cached_data), encoding="utf-8")
 
     # Without force, the stale cache should be discarded and a fresh score generated.
+    second = score_book(proj)
+    assert second.generated_at != first.generated_at
+
+
+# ---------------------------------------------------------------------------
+# _norm_apos — modifier-letter apostrophe (U+02BC) branch
+# ---------------------------------------------------------------------------
+
+
+def test_norm_apos_normalizes_left_curly_apostrophe():
+    # U+2018 (left single quotation mark, ') is the opening-quote character in
+    # typeset books. _norm_apos must collapse it to a straight apostrophe so
+    # a leading elision like ‘em (typed with a left curly) is recognized.
+    left_apos = "‘"
+    assert _norm_apos(left_apos + "em") == "'em"
+    assert _norm_apos("comin" + left_apos) == "comin'"
+
+
+def test_left_curly_em_counted_as_leading_elision():
+    # '‘em' must be recognized as the dialect elision 'em even when the
+    # opening apostrophe is a left curly quote (as found in typeset books).
+    assert dialect_marker_count("‘em went ahead") == 1
+
+
+def test_there_ll_not_counted_as_dialect():
+    # there'll, where'll, who'll, what'll are standard English contractions and
+    # must not be counted as dialect markers.
+    for word in ("there'll", "where'll", "who'll", "what'll"):
+        assert dialect_marker_count(word) == 0, f"{word!r} should not be dialect"
+
+
+def test_norm_apos_normalizes_modifier_letter_apostrophe():
+    # U+02BC (modifier letter apostrophe, ʼ) is the second replace branch in
+    # _norm_apos. It must be collapsed to a straight apostrophe so whitelist
+    # comparisons (STANDARD_CONTRACTIONS, _LEADING_ELISIONS) stay consistent
+    # even if a source file uses that rarer Unicode codepoint.
+    modifier_apos = "ʼ"
+    assert _norm_apos("comin" + modifier_apos) == "comin'"
+    assert _norm_apos("don" + modifier_apos + "t") == "don't"
+    # Plain text without either apostrophe variant is returned unchanged.
+    assert _norm_apos("hello") == "hello"
+
+
+# ---------------------------------------------------------------------------
+# dialect_marker_count — edge cases not covered by test_difficulty_scorer.py
+# ---------------------------------------------------------------------------
+
+
+def test_leading_apostrophe_not_in_elisions_not_counted():
+    # A leading apostrophe that does NOT match _LEADING_ELISIONS (e.g. an
+    # opening single-quote before a capitalized word) must not be counted.
+    assert dialect_marker_count("He quoted 'Evening is nigh' aloud.") == 0
+    assert dialect_marker_count("She read 'Winter is coming' to herself.") == 0
+
+
+def test_a_prefix_non_breaking_hyphen_counted():
+    # _A_PREFIX_RE includes the non-breaking hyphen (U+2011 ‑) as an
+    # alternative to the plain hyphen. Verify the pattern fires on it.
+    assert dialect_marker_count("a‑thinkin'") == 1
+    assert dialect_marker_count("a‑walkin") == 1
+
+
+def test_score_book_compound_cache_invalidation(tmp_path, monkeypatch):
+    # When BOTH source_mtime is stale AND calibration changed, the cache must
+    # still be discarded. Exercises the compound `fresh and cached.calibration
+    # == calibration()` branch where fresh=True but calibration diverges.
+    import json as _json
+    import src.difficulty_scorer as ds
+
+    src_dir = tmp_path / "chapters"
+    src_dir.mkdir()
+    (src_dir / "chapter_01.txt").write_text("Plain simple text.", encoding="utf-8")
+    proj = tmp_path
+
+    first = score_book(proj)
+
+    # Re-write cache with a stale source_mtime but an old calibration snapshot
+    cache_path = proj / "difficulty.json"
+    cached_data = _json.loads(cache_path.read_text(encoding="utf-8"))
+    cached_data["source_mtime"] = first.source_mtime  # still fresh
+    cached_data["calibration"]["weight_dialect"] = 0.0  # stale calibration
+    cache_path.write_text(_json.dumps(cached_data), encoding="utf-8")
+
+    # Cache appears mtime-fresh but calibration differs → must re-score.
     second = score_book(proj)
     assert second.generated_at != first.generated_at

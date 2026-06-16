@@ -1,4 +1,4 @@
-"""
+﻿"""
 Deterministic translation-difficulty scoring for English source text.
 
 Rates how hard a block of English text will be to translate into Spanish using
@@ -102,8 +102,10 @@ DIALECT_HARD = 0.035
 # How much a fully dialect-saturated block adds on top of the length+rarity
 # base. Applied additively (see score_text), so dialect can only raise
 # difficulty — non-dialect text (dialect_score == 0) is byte-for-byte unchanged.
-# Pulled strongly (0.9) per the calibration goal that the most dialect-heavy
-# chapters reach the TARGET_HARD floor (~1200w).
+# Pulled strongly (0.9) per the calibration goal that dialect-heavy chapters
+# push well below 1400w; pure-dialect max (no length/rarity signal) yields
+# difficulty 0.9 → ~1280w, reaching TARGET_HARD (1200w) only when combined
+# with a non-trivial length+rarity base.
 WEIGHT_DIALECT = 0.9
 
 # difficulty → suggested chunk target_size (words). difficulty 0.0 yields
@@ -129,7 +131,8 @@ STANDARD_CONTRACTIONS = frozenset({
     "mayn't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't",
     "hadn't", "shan't", "you're", "we're", "they're", "i've", "you've", "we've",
     "they've", "would've", "should've", "could've", "i'll", "you'll", "he'll",
-    "she'll", "we'll", "they'll", "it'll", "that'll", "i'd", "you'd", "he'd",
+    "she'll", "we'll", "they'll", "it'll", "that'll", "there'll", "where'll",
+    "who'll", "what'll", "i'd", "you'd", "he'd",
     "she'd", "we'd", "they'd", "it'd", "that'd", "i'm", "it's", "he's", "she's",
     "that's", "what's", "who's", "there's", "here's", "let's", "where's",
     "how's", "o'clock", "ma'am",
@@ -148,8 +151,10 @@ _TRAILING_REDUCTIONS = frozenset({
 # Leading-apostrophe elisions — a curated closed set. Leading apostrophes are
 # otherwise ambiguous with closing quotes, so a general pattern is unsafe.
 _LEADING_ELISIONS = frozenset({
-    "'twas", "'tis", "'twasn't", "'em", "'cause", "'round", "'bout", "'nuff",
+    "'twas", "'tis", "'em", "'cause", "'round", "'bout", "'nuff",
     "'fraid", "'gainst", "'neath", "'cept", "'peared", "'specially",
+    # "'twasn't" omitted: its internal apostrophe is matched by the
+    # apostrophe-token rule first; the leading-apostrophe RE only sees "'twasn".
 })
 
 # Small curated apostrophe-free dialect lexicon. Clearly extensible starter set
@@ -164,11 +169,11 @@ _DIALECT_LEXICON = frozenset({
 # Apostrophe-bearing token: an alphabetic run, an apostrophe (straight or
 # curly), then an optional alphabetic run. Catches don't, comin', jes', off'n,
 # young'un, smarter'n, ain't, o'.
-_APOSTROPHE_TOKEN_RE = re.compile(r"[A-Za-z]+['’][A-Za-z]*")
+_APOSTROPHE_TOKEN_RE = re.compile("[A-Za-z]+['‘’][A-Za-z]*")
 
 # Leading-apostrophe token (for matching the curated elision set). The leading
 # apostrophe may be a straight or curly quote.
-_LEADING_APOSTROPHE_RE = re.compile(r"['’][A-Za-z]+")
+_LEADING_APOSTROPHE_RE = re.compile("['‘’][A-Za-z]+")
 
 # a-prefixed progressives: a-thinkin', a-ridin', a-walking. Hyphen may be a
 # plain or non-breaking hyphen; the verb ends in -in, optionally + g/'/’.
@@ -185,7 +190,7 @@ def _norm_apos(s: str) -> str:
     must compare equal to the whitelisted ``don't``. The regexes already match
     both forms; this keeps the whitelist/elision lookups in step.
     """
-    return s.replace("’", "'").replace("ʼ", "'")
+    return s.replace("‘", "'").replace("’", "'").replace("ʼ", "'")
 
 
 def _is_possessive(token: str) -> bool:
@@ -197,6 +202,20 @@ def _is_possessive(token: str) -> bool:
     """
     low = _norm_apos(token.lower())
     return low.endswith("'s")
+
+
+def _is_proper_name_prefix(token: str) -> bool:
+    """True for Irish/Scottish surname prefixes: ``O'Brien``, ``O'Hara``.
+
+    Pattern: single uppercase letter before the apostrophe, capitalized word
+    after. These are standard proper nouns, not eye-dialect.
+    """
+    norm = _norm_apos(token)
+    idx = norm.find("'")
+    if idx < 0:
+        return False
+    prefix, suffix = norm[:idx], norm[idx + 1:]
+    return len(prefix) == 1 and prefix.isupper() and bool(suffix) and suffix[0].isupper()
 
 
 def dialect_marker_count(text: str) -> int:
@@ -245,6 +264,8 @@ def dialect_marker_count(text: str) -> int:
             if not (low.endswith("in'") or low in _TRAILING_REDUCTIONS):
                 continue
         elif _is_possessive(m.group()):
+            continue
+        elif _is_proper_name_prefix(m.group()):
             continue
         count += _take(m.start(), m.end())
 
