@@ -100,7 +100,8 @@ class TestDifficultyRouteHappyPath:
     def test_book_metrics_fields_present(self, client, project):
         rv = client.get(f"/api/project/{project.name}/difficulty")
         book = rv.get_json()["book"]
-        for key in ("difficulty", "length_score", "rarity_score", "suggested_target_size"):
+        for key in ("difficulty", "length_score", "rarity_score", "suggested_target_size",
+                     "dialect_score", "dialect_marker_count"):
             assert key in book, f"missing field: {key}"
 
     def test_chapters_list_contains_chapter_id(self, client, project):
@@ -112,7 +113,8 @@ class TestDifficultyRouteHappyPath:
     def test_chapter_items_have_metrics_fields(self, client, project):
         rv = client.get(f"/api/project/{project.name}/difficulty")
         ch = rv.get_json()["chapters"][0]
-        for key in ("difficulty", "suggested_target_size", "length_score", "rarity_score"):
+        for key in ("difficulty", "suggested_target_size", "length_score", "rarity_score",
+                     "dialect_score", "dialect_marker_count"):
             assert key in ch, f"chapter item missing field: {key}"
 
     def test_force_param_rescores(self, client, project):
