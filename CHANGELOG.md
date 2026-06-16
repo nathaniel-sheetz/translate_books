@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0.0] - 2026-06-15
+
+### Added
+- **Dialect-density signal in translation-difficulty scorer.** A third orthogonal dimension — eye-dialect marker density — now contributes to the difficulty score alongside sentence length and lexical rarity. `dialect_marker_count()` counts deterministic markers: internal-apostrophe tokens outside the standard contraction whitelist (`ain't`, `young'un`, `off'n`), g-drop trailing apostrophes (`comin'`, `standin'`), curated trailing reductions (`o'`, `jes'`), leading-apostrophe elisions (`'twas`, `'em`), `a-`prefixed progressives (`a-thinkin'`, `a-walking`), and a small apostrophe-free lexicon (`reckon`, `yonder`, `nacherel`, `acrost`). Score is additive — non-dialect books are byte-for-byte unchanged; dialect can only raise difficulty. Standard contractions, possessives (`horse's`, `horses'`), and Irish/Scottish surname prefixes (`O'Brien`) are excluded. Both straight and typographic apostrophes (U+2019, U+2018, U+02BC) are normalized before whitelist comparison.
+- **`DifficultyMetrics` dialect fields.** `dialect_marker_count`, `dialect_density`, `dialect_score` added to the dataclass (and serialized to `difficulty.json`). `DifficultyMetrics.from_dict` / `to_dict` round-trips include the new fields; the cache is automatically invalidated when calibration constants change.
+- **Calibration constants.** `DIALECT_EASY`, `DIALECT_HARD`, `WEIGHT_DIALECT` added alongside existing length/rarity constants; all now returned by `calibration()` and stored in the manifest for traceability.
+- **Dashboard dialect tooltip.** Difficulty badges now include dialect score and marker count in their hover tooltip when dialect is non-zero.
+- **`/api/project/<id>/difficulty` API fields.** `dialect_score` and `dialect_marker_count` included in both book and chapter metric responses.
+
+### Changed
+- `TARGET_HARD` reduced from 1260 → 1200 (the hardest dialect-saturated chapters now reach a smaller target chunk size).
+- `score_book()` cache invalidation extended: the manifest is also re-scored when calibration constants change, not only when source mtime is newer.
+
 ## [0.19.0.0] - 2026-06-13
 
 ### Added

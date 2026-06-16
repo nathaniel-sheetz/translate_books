@@ -842,9 +842,13 @@
         var badge = document.createElement('span');
         badge.className = 'difficulty-badge diff-' + difficultyBucket(m.difficulty);
         badge.textContent = 'Difficulty ' + m.difficulty.toFixed(2);
+        var dialectPart = (m.dialect_score && m.dialect_score > 0)
+            ? ' · Dialect ' + m.dialect_score.toFixed(2) + ' (' + (m.dialect_marker_count || 0) + ' markers)'
+            : '';
         badge.title =
             'Length ' + m.length_score.toFixed(2) +
             ' · Rarity ' + m.rarity_score.toFixed(2) +
+            dialectPart +
             ' · ' + Math.round(m.sentence_length_weighted) + 'w/sent' +
             ' · ' + (m.rare_word_fraction * 100).toFixed(1) + '% rare';
         return badge;
