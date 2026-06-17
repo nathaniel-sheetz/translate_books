@@ -22,6 +22,11 @@ Verified against the codebase on 2026-05-18. Line numbers refreshed from main HE
 **Depends on:** nothing.
 **Completed:** v0.15.2.0 (2026-06-07)
 
+### Stale `batch_complete` SSE event shows wrong popup after consecutive realtime chapter translations
+**What:** `closeBatchModal()` (web_ui/static/dashboard.js:2474-2476) only hides the modal — it never calls `batchEventSource.close()`. If the modal is closed (or a new chapter's translation is started) before the current realtime job actually reports `batch_complete`, the old `EventSource` is left open and still listening. When that earlier server-side job (`project_translate_batch`, web_ui/app.py:3652, tracked in `_batch_jobs`) eventually finishes, its `batch_complete` event still fires on the stale source's handler (dashboard.js:2555-2563), writing "Complete!" into the shared `#batch-progress-text`/`#batch-modal` elements and force-closing the modal — even while a different chapter's translation is now in flight. Reloading the page is the only way to clear the dangling listener.
+**Why:** Reported by user: after a non-batch (realtime/sequential) chapter translation completes, starting another chapter's translation without refreshing the page surfaces a stale "previous chapter is complete" popup.
+**How:** In `closeBatchModal` and at the top of the `btn-start-batch` click handler (dashboard.js:2512), explicitly call `batchEventSource.close()` and null the reference before reusing the modal or opening a new `EventSource`. Consider tagging `chunk_done`/`batch_complete` handlers with the job_id they were created for so a late event from a stale source can't mutate UI state belonging to a newer job.
+
 ## P2 — UX rough edges
 
 ### Aggregate book-level difficulty metrics from chapter metrics instead of re-running score_text
