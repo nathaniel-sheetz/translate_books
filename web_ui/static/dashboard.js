@@ -2448,6 +2448,7 @@
     // ── Batch translation ──
 
     document.getElementById('btn-batch-translate').addEventListener('click', function() {
+        resetBatchProgressUI();
         document.getElementById('batch-modal').classList.add('visible');
         updateBatchCostEstimate();
     });
@@ -2462,6 +2463,7 @@
             }
         });
         updateBatchButtonState();
+        resetBatchProgressUI();
         document.getElementById('batch-modal').classList.add('visible');
         updateBatchCostEstimate();
     });
@@ -2471,8 +2473,24 @@
         if (e.target === this) closeBatchModal();
     });
 
+    // Restore the batch-translate modal's progress UI to its pristine state so a
+    // previous run's "Complete!" bar can't linger into the next translation.
+    function resetBatchProgressUI() {
+        var prog = document.getElementById('batch-progress');
+        if (prog) prog.style.display = 'none';
+        var txt = document.getElementById('batch-progress-text');
+        if (txt) txt.textContent = 'Translating...';
+        var fill = document.getElementById('batch-progress-fill');
+        if (fill) fill.style.width = '0%';
+        var start = document.getElementById('btn-start-batch');
+        if (start) start.disabled = false;
+        var cancel = document.getElementById('btn-cancel-batch');
+        if (cancel) cancel.style.display = 'none';
+    }
+
     function closeBatchModal() {
         document.getElementById('batch-modal').classList.remove('visible');
+        resetBatchProgressUI();
     }
 
     // (provider/model dropdown setup is handled by initAllLLMSelectors)
@@ -2558,8 +2576,9 @@
             document.getElementById('batch-progress-text').textContent = 'Complete!';
             document.getElementById('btn-start-batch').disabled = false;
             document.getElementById('btn-cancel-batch').style.display = 'none';
-            loadStatus();
+            // Schedule the close before loadStatus() so a rebuild error can't strand the modal open.
             setTimeout(closeBatchModal, 1500);
+            try { loadStatus(); } catch (e) { console.error('loadStatus after batch failed:', e); }
         });
 
         batchEventSource.onerror = function() {
