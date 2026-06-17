@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.1.0] - 2026-06-17
+
+### Fixed
+- **Stale batch-translate "Complete!" popup.** The batch-translation modal's progress UI is now reset to its pristine state (progress bar hidden, status text back to "Translating...", fill at 0%, Start re-enabled, Cancel hidden) whenever the modal opens or closes, so a previous run's completed progress bar can no longer linger into the next translation. On batch completion, the modal close is now scheduled before `loadStatus()` and that call is wrapped in a guard, so a rebuild error can't strand the modal open.
+
+### Changed
+- `TODOS.md` removed from version control (the file is gitignored and user-local).
+
 ## [0.20.0.0] - 2026-06-15
 
 ### Added
