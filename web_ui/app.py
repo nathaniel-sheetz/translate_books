@@ -99,6 +99,8 @@ def _iter_project_dirs(root: Optional[Path] = None):
     if not root.exists():
         return
     for entry in sorted(root.iterdir()):
+        if entry.is_symlink():      # skip symlinks to avoid infinite recursion on cycles
+            continue
         if not entry.is_dir():
             continue
         if _is_project_dir(entry):

@@ -25,7 +25,8 @@ def _make_project(parent: Path, name: str) -> Path:
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr(app_module, "_NESTED_PROJECT_CACHE", {})
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c
@@ -115,3 +116,61 @@ def test_duplicate_id_warns_and_dedups(client, tmp_path, monkeypatch, caplog):
         rv = client.get("/read/")
     assert rv.status_code == 200
     assert "Duplicate project id" in caplog.text
+
+
+def test_iter_project_dirs_nonexistent_root(tmp_path):
+    """_iter_project_dirs returns nothing (no error) when root doesn't exist."""
+    from web_ui.app import _iter_project_dirs
+    result = list(_iter_project_dirs(tmp_path / "does-not-exist"))
+    assert result == []
+
+
+def test_is_project_dir_via_source_txt(tmp_path):
+    """_is_project_dir returns True for a dir that has source.txt (no chunks/)."""
+    from web_ui.app import _is_project_dir
+    d = tmp_path / "proj"
+    d.mkdir()
+    (d / "source.txt").write_text("text")
+    assert _is_project_dir(d) is True
+
+
+def test_is_project_dir_neither_marker(tmp_path):
+    """_is_project_dir returns False when neither chunks/ nor source.txt present."""
+    from web_ui.app import _is_project_dir
+    d = tmp_path / "groupdir"
+    d.mkdir()
+    assert _is_project_dir(d) is False
+
+
+def test_resolve_stale_cache_falls_through_to_scan(tmp_path, monkeypatch):
+    """A stale cache entry (path deleted) causes a fresh scan instead of returning the bad path."""
+    projects_dir = tmp_path / "projects"
+    proj = _make_project(projects_dir, "stale-book")
+    monkeypatch.setattr(app_module, "_get_projects_dir", lambda: projects_dir)
+    # Pre-populate cache with a non-existent path to simulate staleness.
+    stale_path = tmp_path / "gone" / "stale-book"
+    monkeypatch.setattr(app_module, "_NESTED_PROJECT_CACHE", {"stale-book": stale_path})
+    # stale_path.is_dir() is False, so resolution should fall through to the scan,
+    # which finds the flat project.
+    result = app_module._resolve_project_dir("stale-book")
+    assert result == proj
+
+
+def test_create_project_dedup_against_nested_id(client, tmp_path, monkeypatch):
+    """create_project does not reuse a slug already taken by a nested project."""
+    projects_dir = tmp_path / "projects"
+    # A nested project "my-book" lives under a grouping folder (not at flat root).
+    _make_project(projects_dir / "by-author", "my-book")
+    monkeypatch.setattr(app_module, "_get_projects_dir", lambda: projects_dir)
+    monkeypatch.setattr(app_module, "_NESTED_PROJECT_CACHE", {})
+
+    rv = client.post(
+        "/api/projects/create",
+        json={"title": "My Book"},
+        content_type="application/json",
+    )
+    assert rv.status_code == 200
+    data = rv.get_json()
+    # The slug "my-book" is taken by the nested project; a suffix must be added.
+    assert data["id"] != "my-book"
+    assert data["id"].startswith("my-book-")

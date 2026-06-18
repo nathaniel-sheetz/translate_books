@@ -56,9 +56,20 @@ def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
     # of that name (a project dir has chunks/ or source.txt).
     projects_root = REPO_ROOT / "projects"
     if projects_root.exists():
+        _found = None
         for entry in projects_root.rglob(project):
             if entry.is_dir() and ((entry / "chunks").exists() or (entry / "source.txt").exists()):
-                return entry
+                if _found is None:
+                    _found = entry
+                else:
+                    import logging as _log
+                    _log.getLogger(__name__).warning(
+                        "Duplicate project id %r found at %s and %s; using %s",
+                        project, _found, entry, _found,
+                    )
+                    break
+        if _found is not None:
+            return _found
     if not must_exist:
         return candidate
     raise FileNotFoundError(

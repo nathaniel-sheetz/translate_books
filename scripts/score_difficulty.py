@@ -28,15 +28,13 @@ from src.difficulty_scorer import WORDFREQ_AVAILABLE, manifest_path, score_book
 
 
 def _resolve_project_dir(project: str) -> Path:
-    """Accept either a project id (folder under projects/) or a path."""
-    p = Path(project)
-    if p.exists():
-        return p
-    candidate = Path(__file__).parent.parent / "projects" / project
-    if candidate.exists():
-        return candidate
-    print(f"Error: project not found: {project}", file=sys.stderr)
-    sys.exit(1)
+    """Accept either a project id (folder under projects/, incl. nested) or a path."""
+    from src.harness.state import resolve_project_dir
+    try:
+        return resolve_project_dir(project, must_exist=True)
+    except FileNotFoundError:
+        print(f"Error: project not found: {project}", file=sys.stderr)
+        sys.exit(1)
 
 
 def main() -> None:
