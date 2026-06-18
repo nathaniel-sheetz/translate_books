@@ -73,7 +73,10 @@ def _load_footnote_annotations(project_path: Path, chapter_id: str) -> Dict[int,
         if record.get("removed"):
             by_idx.pop(record.get("es_idx"), None)
         else:
-            by_idx[record["es_idx"]] = record
+            es_idx = record.get("es_idx")
+            if es_idx is None:
+                continue
+            by_idx[es_idx] = record
 
     return {
         idx: (rec.get("content") or "")
@@ -93,7 +96,7 @@ def _load_alignment_es_map(project_path: Path, chapter_id: str) -> Dict[int, str
         logger.warning("Corrupt alignment file, skipping endnotes for %s", chapter_id)
         return {}
     out: Dict[int, str] = {}
-    for a in data.get("alignments", []):
+    for a in (data.get("alignments") or []):
         if "es_idx" in a and "es" in a:
             out[a["es_idx"]] = a["es"]
     return out
@@ -234,6 +237,8 @@ def render_endnotes_xhtml(
         heading = chapter_headings.get(chapter_id, chapter_id)
         body.append(f"<h2>{escape(heading)}</h2>")
         href_base = chapter_files.get(chapter_id, "")
+        if not href_base:
+            logger.warning("No chapter file mapped for %s — back-links will be fragment-only", chapter_id)
         for e in notes:
             text_html = _EM_RE.sub(r"<em>\1</em>", escape(e.text))
             back = f"{href_base}#enref-{e.number}"
