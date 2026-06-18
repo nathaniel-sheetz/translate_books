@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.0.0] - 2026-06-18
+
+### Added
+- **Endnotes in exported EPUBs.** Footnote annotations created in the reader are now collected into a numbered "Notas" back-matter section when you export an EPUB. Each in-text superscript links forward to the endnote; each endnote links back to its position in the chapter. Notes are grouped by chapter and numbered sequentially across the book, ordered by their position in the translated text (not the source-language alignment index, so reorganized sentences are handled correctly).
+
+### Fixed
+- **Endnote ordering when Spanish sentences are reorganized.** Endnotes are now numbered by their text position in the chapter body rather than by alignment `es_idx` order. Previously, if a translator reorganized sentences relative to the English alignment, a footnote on an out-of-order sentence could be silently skipped.
+- **Crash on malformed annotation records.** `_load_footnote_annotations` now safely skips records missing the `es_idx` key instead of raising `KeyError` and aborting the EPUB build.
+- **Crash when alignment JSON has `"alignments": null`.** `_load_alignment_es_map` now treats a `null` alignments field the same as an empty list instead of raising `TypeError`.
+
 ## [0.20.1.0] - 2026-06-17
 
 ### Fixed
