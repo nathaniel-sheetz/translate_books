@@ -64,3 +64,48 @@ def test_explicit_path_passthrough(repo, tmp_path):
     explicit = tmp_path / "somewhere" / "book"
     explicit.mkdir(parents=True)
     assert state.resolve_project_dir(str(explicit)) == Path(str(explicit))
+
+
+def test_resolve_nested_via_source_txt(repo):
+    """A project identified by source.txt (not chunks/) is found in nested search."""
+    d = repo / "projects" / "by-genre" / "source-only-book"
+    d.mkdir(parents=True)
+    (d / "source.txt").write_text("content")
+    assert state.resolve_project_dir("source-only-book") == d
+
+
+def test_resolve_when_projects_root_missing_must_exist_false(tmp_path, monkeypatch):
+    """With no projects/ dir at all and must_exist=False, returns flat candidate."""
+    monkeypatch.setattr(state, "REPO_ROOT", tmp_path)
+    # Don't create tmp_path / "projects" at all.
+    result = state.resolve_project_dir("ghost", must_exist=False)
+    assert result == tmp_path / "projects" / "ghost"
+
+
+def test_resolve_when_projects_root_missing_must_exist_true(tmp_path, monkeypatch):
+    """With no projects/ dir at all and must_exist=True, FileNotFoundError is raised."""
+    monkeypatch.setattr(state, "REPO_ROOT", tmp_path)
+    with pytest.raises(FileNotFoundError):
+        state.resolve_project_dir("ghost")
+
+
+def test_explicit_path_not_exist_raises(repo, tmp_path):
+    """An explicit path (with separator) that doesn't exist raises FileNotFoundError."""
+    missing = tmp_path / "no-such" / "dir"
+    # must_exist=True is the default
+    with pytest.raises(FileNotFoundError, match="project path not found"):
+        state.resolve_project_dir(str(missing))
+
+
+def test_duplicate_nested_id_warns(repo, caplog):
+    """Two nested project dirs with the same leaf name trigger a warning; first is returned."""
+    import logging
+
+    dupe_a = _make_project(repo / "projects" / "group-a", "twin-book")
+    _make_project(repo / "projects" / "group-b", "twin-book")
+
+    with caplog.at_level(logging.WARNING, logger="src.harness.state"):
+        result = state.resolve_project_dir("twin-book")
+
+    assert result == dupe_a
+    assert "Duplicate project id" in caplog.text

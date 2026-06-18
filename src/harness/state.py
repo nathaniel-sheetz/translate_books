@@ -15,8 +15,11 @@ orchestration in markdown. This module gives every harness command one place to:
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # src/harness/state.py -> parents[0]=harness, [1]=src, [2]=repo root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +38,25 @@ DEFAULTS: dict[str, str] = {
 
 # Config keys a command may override (CLI flag -> config key); used by setup.
 CONFIG_KEYS = tuple(DEFAULTS.keys())
+
+
+def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
+    """Yield project dirs whose leaf name equals project_id, sorted alphabetically.
+
+    Uses an explicit walk so it never follows symlinks, never expands glob
+    metacharacters, and never descends into a project directory — consistent
+    with _iter_project_dirs in web_ui/app.py.
+    """
+    if _depth > 20:
+        return
+    for entry in sorted(root.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        is_proj = (entry / "chunks").exists() or (entry / "source.txt").exists()
+        if entry.name == project_id and is_proj:
+            yield entry
+        elif not is_proj:
+            yield from _iter_nested_match(entry, project_id, _depth + 1)
 
 
 def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
@@ -57,17 +79,15 @@ def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
     projects_root = REPO_ROOT / "projects"
     if projects_root.exists():
         _found = None
-        for entry in projects_root.rglob(project):
-            if entry.is_dir() and ((entry / "chunks").exists() or (entry / "source.txt").exists()):
-                if _found is None:
-                    _found = entry
-                else:
-                    import logging as _log
-                    _log.getLogger(__name__).warning(
-                        "Duplicate project id %r found at %s and %s; using %s",
-                        project, _found, entry, _found,
-                    )
-                    break
+        for entry in _iter_nested_match(projects_root, project):
+            if _found is None:
+                _found = entry
+            else:
+                _log.warning(
+                    "Duplicate project id %r found at %s and %s; using %s",
+                    project, _found, entry, _found,
+                )
+                break
         if _found is not None:
             return _found
     if not must_exist:

@@ -92,11 +92,11 @@ def _is_project_dir(p: Path) -> bool:
     return p.is_dir() and ((p / "chunks").exists() or (p / "source.txt").exists())
 
 
-def _iter_project_dirs(root: Optional[Path] = None):
+def _iter_project_dirs(root: Optional[Path] = None, _depth: int = 0):
     """Yield project dirs under projects/, descending through grouping subfolders
     but never into a project itself. Order is stable (sorted)."""
     root = root or _get_projects_dir()
-    if not root.exists():
+    if not root.exists() or _depth > 20:
         return
     for entry in sorted(root.iterdir()):
         if entry.is_symlink():      # skip symlinks to avoid infinite recursion on cycles
@@ -106,7 +106,7 @@ def _iter_project_dirs(root: Optional[Path] = None):
         if _is_project_dir(entry):
             yield entry
         else:                       # grouping/container folder -> recurse
-            yield from _iter_project_dirs(entry)
+            yield from _iter_project_dirs(entry, _depth + 1)
 
 
 _NESTED_PROJECT_CACHE: dict[str, Path] = {}
