@@ -30,6 +30,13 @@ _HEADING_RE = re.compile(
 )
 _HR_RE = re.compile(r'^-{3,}$')
 _EM_RE = re.compile(r'(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])')
+# In-text endnote marker token emitted by src.endnotes; rendered to a linked
+# superscript. Substituted after html.escape() (the {{...}} token is escape-safe).
+_ENDNOTE_RE = re.compile(r'\{\{ENDNOTE:(\d+)\}\}')
+_ENDNOTE_SUP = (
+    r'<sup class="endnote-ref">'
+    r'<a id="enref-\1" href="endnotes.xhtml#en-\1">\1</a></sup>'
+)
 
 # Default configuration for synthesizing a chapter heading when the chapter
 # text does not begin with a recognizable numeral line. Override per project
@@ -132,6 +139,10 @@ div.verse p.verse-line {
 }
 nav ol { list-style: none; padding-left: 0; }
 nav ol ol { padding-left: 1.5em; }
+sup.endnote-ref { vertical-align: super; font-size: 0.75em; line-height: 0; }
+sup.endnote-ref a { text-decoration: none; color: inherit; }
+p.endnote { text-indent: 0; margin: 0.4em 0; }
+p.endnote a { text-decoration: none; }
 """
 
 
@@ -254,7 +265,9 @@ def _render_body_blocks(body: str) -> List[str]:
             _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
         ):
             verse_lines = [
-                f'  <p class="verse-line">{_EM_RE.sub(r"<em>\1</em>", escape(line.strip()))}</p>'
+                f'  <p class="verse-line">'
+                f'{_ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(r"<em>\1</em>", escape(line.strip())))}'
+                f'</p>'
                 for line in block.split('\n')
                 if line.strip()
             ]
@@ -267,7 +280,8 @@ def _render_body_blocks(body: str) -> List[str]:
         # untouched, so substituting after it is safe.
         escaped = escape(block)
         with_em = _EM_RE.sub(r'<em>\1</em>', escaped)
-        out.append(f'<p>{with_em}</p>')
+        with_notes = _ENDNOTE_RE.sub(_ENDNOTE_SUP, with_em)
+        out.append(f'<p>{with_notes}</p>')
 
     return out
 
@@ -646,6 +660,20 @@ def build_epub(
     chapter_files = _sort_chapter_files(chapter_files)
     logger.info(f"Found {len(chapter_files)} chapter files")
 
+    # Turn 'footnote' annotations into endnotes: inject in-text markers and
+    # collect the globally-numbered list for the back-matter "Notas" section.
+    from src.endnotes import build_endnote_artifacts, render_endnotes_xhtml
+    ordered_chapters = [
+        (cf.stem, cf.read_text(encoding='utf-8')) for cf in chapter_files
+    ]
+    injected_texts, endnote_entries = build_endnote_artifacts(
+        project_path, ordered_chapters,
+    )
+    # Captured during the chapter loop so the Notas section can title each group
+    # and link back to the right body file.
+    chapter_headings: Dict[str, str] = {}
+    chapter_files_map: Dict[str, str] = {}
+
     # Create EPUB book
     book = epub.EpubBook()
     book.set_identifier(f'translate-books-{project_path.name}')
@@ -733,8 +761,9 @@ def build_epub(
     toc = []
 
     for i, chapter_file in enumerate(chapter_files, 1):
-        text = chapter_file.read_text(encoding='utf-8')
         chapter_id = chapter_file.stem  # e.g. "chapter_03"
+        # Endnote markers were injected into this text by build_endnote_artifacts.
+        text = injected_texts[chapter_id]
         manifest_entry = chapter_manifest.get(chapter_id) or {}
         kind = manifest_entry.get('kind', 'chapter')
 
@@ -751,6 +780,7 @@ def build_epub(
             )
             norm_heading = _normalize_heading(heading) if heading else ''
             toc_label = norm_heading or f'Chapter {display_number}'
+            section_heading = toc_label
             if subtitle and toc_format != 'heading_only':
                 toc_label = f'{toc_label}: {subtitle}'
         else:
@@ -762,12 +792,14 @@ def build_epub(
             display_label = heading or label or chapter_id.replace('_', ' ').title()
             xhtml_content = matter_text_to_xhtml(text, display_label)
             toc_label = display_label
+            section_heading = display_label
             if subtitle and subtitle != display_label:
                 toc_label = f'{display_label}: {subtitle}'
 
+        file_name = f'chapter_{i:02d}.xhtml'
         chapter_item = epub.EpubHtml(
             title=toc_label,
-            file_name=f'chapter_{i:02d}.xhtml',
+            file_name=file_name,
             lang=language,
         )
         chapter_item.set_content(xhtml_content.encode('utf-8'))
@@ -776,6 +808,28 @@ def build_epub(
 
         spine.append(chapter_item)
         toc.append(chapter_item)
+
+        chapter_headings[chapter_id] = section_heading
+        chapter_files_map[chapter_id] = file_name
+
+    # Append the "Notas" endnotes section after the last chapter and before the
+    # translator note (which is appended last below).
+    if endnote_entries:
+        endnotes_xhtml = render_endnotes_xhtml(
+            endnote_entries, chapter_headings, chapter_files_map,
+        )
+        endnotes_item = epub.EpubHtml(
+            uid='endnotes',
+            title='Notas',
+            file_name='endnotes.xhtml',
+            lang=language,
+        )
+        endnotes_item.set_content(endnotes_xhtml.encode('utf-8'))
+        endnotes_item.add_item(css_item)
+        book.add_item(endnotes_item)
+        spine.append(endnotes_item)
+        toc.append(endnotes_item)
+        logger.info("Endnotes section appended (%d notes)", len(endnote_entries))
 
     # Append optional "Note from the Translator" as the final chapter.
     if translator_note_body is not None:
