@@ -87,9 +87,51 @@ def _get_projects_dir() -> Path:
     return _PROJECT_ROOT / "projects"
 
 
+def _is_project_dir(p: Path) -> bool:
+    """A project dir has chunks/ or source.txt (matches existing discovery filter)."""
+    return p.is_dir() and ((p / "chunks").exists() or (p / "source.txt").exists())
+
+
+def _iter_project_dirs(root: Optional[Path] = None):
+    """Yield project dirs under projects/, descending through grouping subfolders
+    but never into a project itself. Order is stable (sorted)."""
+    root = root or _get_projects_dir()
+    if not root.exists():
+        return
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if _is_project_dir(entry):
+            yield entry
+        else:                       # grouping/container folder -> recurse
+            yield from _iter_project_dirs(entry)
+
+
+_NESTED_PROJECT_CACHE: dict[str, Path] = {}
+
+
+def _resolve_project_dir(project_id: str) -> Path:
+    """Map a project id (leaf folder name) to its actual dir, flat or nested.
+
+    Falls back to the flat path when not found so existing existence checks
+    (``if not project_dir.exists(): 404``) behave exactly as before."""
+    root = _get_projects_dir()
+    flat = root / project_id
+    if flat.is_dir():               # fast path: flat layout + newly created projects
+        return flat
+    cached = _NESTED_PROJECT_CACHE.get(project_id)
+    if cached is not None and cached.is_dir():
+        return cached
+    for proj_dir in _iter_project_dirs(root):
+        if proj_dir.name == project_id:
+            _NESTED_PROJECT_CACHE[project_id] = proj_dir
+            return proj_dir
+    return flat
+
+
 def _load_project_config(project_id: str) -> dict:
     """Load per-project config from projects/<id>/project.json."""
-    config_path = _get_projects_dir() / project_id / "project.json"
+    config_path = _resolve_project_dir(project_id) / "project.json"
     if config_path.exists():
         try:
             with open(config_path, encoding="utf-8") as f:
@@ -101,7 +143,7 @@ def _load_project_config(project_id: str) -> dict:
 
 def _save_project_config(project_id: str, config: dict) -> None:
     """Save per-project config to projects/<id>/project.json."""
-    config_path = _get_projects_dir() / project_id / "project.json"
+    config_path = _resolve_project_dir(project_id) / "project.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
@@ -143,7 +185,7 @@ def _load_translator_note(project_id: str) -> dict:
     import time
 
     log = logging.getLogger(__name__)
-    note_path = _get_projects_dir() / project_id / "translator_note.json"
+    note_path = _resolve_project_dir(project_id) / "translator_note.json"
 
     def _defaults() -> dict:
         return {"heading": "", "body": _read_translator_note_template()}
@@ -177,7 +219,7 @@ def _load_translator_note(project_id: str) -> dict:
 
 def _save_translator_note(project_id: str, heading: str, body: str) -> None:
     """Persist the translator note to projects/<id>/translator_note.json."""
-    note_path = _get_projects_dir() / project_id / "translator_note.json"
+    note_path = _resolve_project_dir(project_id) / "translator_note.json"
     note_path.parent.mkdir(parents=True, exist_ok=True)
     with open(note_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -348,7 +390,7 @@ def setup_questions_prompt(project_id):
     """Return the full prompt for LLM question generation (for copy/paste)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     from src.style_guide_wizard import (
         build_question_prompt,
@@ -382,7 +424,7 @@ def setup_style_guide_prompt(project_id):
     """Return the full prompt for style guide generation (for copy/paste)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     from src.style_guide_wizard import (
         build_style_guide_prompt,
@@ -409,7 +451,7 @@ def setup_save_style_guide(project_id):
     """Save style guide content to style.json. Preserves light_content if set."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     data = request.get_json()
     content = data.get("content", "")
@@ -449,7 +491,7 @@ def setup_save_light_style_guide(project_id):
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     style_path = project_dir / "style.json"
     if not style_path.exists():
         return jsonify({"error": "Save the main style guide first."}), 404
@@ -482,7 +524,7 @@ def setup_style_guide_fallback(project_id):
     answers = {k: int(v) if isinstance(v, str) and v.isdigit() else v for k, v in answers.items()}
     extra_questions = data.get("extra_questions", [])
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     fixed_questions, conditional_questions, _manifest = get_active_questions(project_dir)
     all_questions = list(fixed_questions) + list(conditional_questions) + list(extra_questions)
     content = answers_to_style_guide_fallback(all_questions, answers)
@@ -498,7 +540,7 @@ def setup_text_features_rescan(project_id):
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     from src.style_guide_wizard import get_active_questions
 
@@ -522,7 +564,7 @@ def setup_extract_candidates(project_id):
     """Run heuristic glossary extraction and return candidates."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     payload = request.get_json(silent=True) or {}
     try:
@@ -634,7 +676,7 @@ def setup_glossary_prompt(project_id):
     """Return the full prompt for glossary bootstrap (for copy/paste)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     data = request.get_json() or {}
     prompt = _build_glossary_prompt_for_request(project_id, project_dir, data)
@@ -646,7 +688,7 @@ def setup_load_glossary(project_id):
     """Return existing glossary terms in proposal-shaped rows for the edit table."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    glossary_path = _get_projects_dir() / project_id / "glossary.json"
+    glossary_path = _resolve_project_dir(project_id) / "glossary.json"
     if not glossary_path.exists():
         return jsonify({"terms": []})
     g = load_glossary(glossary_path)
@@ -672,7 +714,7 @@ def setupsave_glossary(project_id):
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     data = request.get_json() or {}
     terms_data = data.get("terms", [])
@@ -717,7 +759,7 @@ def setup_questions_generate(project_id):
     """Generate additional style-guide questions via LLM (direct API call)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     from src.style_guide_wizard import build_question_prompt, get_active_questions, load_source_sample
     from src.api_translator import call_llm
@@ -759,7 +801,7 @@ def setup_style_guide_generate(project_id):
     """Generate a style guide via LLM (direct API call)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     from src.style_guide_wizard import get_active_questions, build_style_guide_prompt, load_source_sample
     from src.api_translator import call_llm
@@ -791,7 +833,7 @@ def setup_glossary_generate(project_id):
     """Generate glossary translations via LLM (direct API call)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     from src.api_translator import call_llm
 
@@ -823,9 +865,10 @@ def create_project():
     slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or "project"
 
     projects_dir = _get_projects_dir()
+    existing_ids = {p.name for p in _iter_project_dirs(projects_dir)}
     candidate = slug
     suffix = 2
-    while (projects_dir / candidate).exists():
+    while candidate in existing_ids or (projects_dir / candidate).exists():
         candidate = f"{slug}-{suffix}"
         suffix += 1
     project_id = candidate
@@ -846,15 +889,15 @@ def reader_projects():
         return render_template("reader.html", mode="no_projects", t=t, lang=_get_ui_lang())
 
     projects = []
-    for proj_dir in sorted(projects_dir.iterdir()):
-        if not proj_dir.is_dir():
+    seen_ids: dict[str, Path] = {}
+    for proj_dir in _iter_project_dirs(projects_dir):
+        if proj_dir.name in seen_ids:
+            app.logger.warning(
+                "Duplicate project id %r at %s and %s; skipping the latter",
+                proj_dir.name, seen_ids[proj_dir.name], proj_dir,
+            )
             continue
-
-        # Include any project dir with chunks/ or source.txt
-        has_chunks = (proj_dir / "chunks").exists()
-        has_source = (proj_dir / "source.txt").exists()
-        if not has_chunks and not has_source:
-            continue
+        seen_ids[proj_dir.name] = proj_dir
 
         # Count alignment chapters (for Read link)
         align_dir = proj_dir / "alignments"
@@ -911,13 +954,13 @@ def reader_chapters(project_id):
     """List chapters with alignments for a project."""
     if not _safe_id(project_id):
         return "Bad request", 400
-    align_dir = _get_projects_dir() / project_id / "alignments"
+    align_dir = _resolve_project_dir(project_id) / "alignments"
     t = _reader_strings()
     if not align_dir.exists():
         return render_template("reader.html", mode="not_found", project_id=project_id, t=t, lang=_get_ui_lang()), 404
 
     # Load all annotations for this project
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     all_annotations = {}  # chapter_id -> {type -> count}
     ann_path = project_dir / "annotations.jsonl"
     if ann_path.exists():
@@ -1005,7 +1048,7 @@ def reader_view(project_id, chapter):
     t = _reader_strings()
     if not _safe_id(project_id) or not _safe_id(chapter):
         return "Bad request", 400
-    align_dir = _get_projects_dir() / project_id / "alignments"
+    align_dir = _resolve_project_dir(project_id) / "alignments"
     align_path = align_dir / f"{chapter}.json"
     if not align_path.exists():
         return render_template(
@@ -1024,7 +1067,7 @@ def reader_view(project_id, chapter):
     chapter_prefix = t.get("chapter_prefix", "Chapter")
     display_label = _chapter_display_label(chapter, manifest, chapter_prefix)
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     has_pending_corrections = _chapter_has_pending_corrections(project_dir, chapter)
 
     return render_template(
@@ -1042,8 +1085,8 @@ def get_alignment(project_id, chapter):
     """Return alignment JSON for a chapter, enriched with paragraph breaks."""
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
-    projects_dir = _get_projects_dir()
-    align_path = projects_dir / project_id / "alignments" / f"{chapter}.json"
+    project_dir = _resolve_project_dir(project_id)
+    align_path = project_dir / "alignments" / f"{chapter}.json"
     if not align_path.exists():
         return jsonify({"error": f"Alignment not found: {project_id}/{chapter}"}), 404
 
@@ -1055,7 +1098,7 @@ def get_alignment(project_id, chapter):
         # populate the "current translation" textarea with the literal chunk
         # substring (the aligner's `es` field is normalized and not byte-identical
         # to chunk.translated_text).
-        chunks_dir = projects_dir / project_id / "chunks"
+        chunks_dir = project_dir / "chunks"
         if chunks_dir.exists():
             _attach_text_in_chunk(data, chunks_dir)
 
@@ -1063,7 +1106,7 @@ def get_alignment(project_id, chapter):
         # chapters/<chapter>.txt is the canonical output of Combine (see
         # project_combine / project_align); align refreshes it before writing
         # alignment JSON, so it should always be in sync here.
-        chapter_text_path = projects_dir / project_id / "chapters" / f"{chapter}.txt"
+        chapter_text_path = project_dir / "chapters" / f"{chapter}.txt"
         if chapter_text_path.exists():
             _enrich_alignment(data, chapter_text_path, project_id)
 
@@ -1557,7 +1600,7 @@ def search_book(project_id):
         return jsonify({"results": [], "query": q, "side": side,
                         "n_results": 0, "n_chapters": 0})
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     manifest = _load_chapter_manifest_for_project(project_id)
     chapter_prefix = _reader_strings().get("chapter_prefix", "Chapter")
 
@@ -1592,7 +1635,7 @@ def serve_project_image(project_id, filename):
     """Serve an image file from a project's images/ directory."""
     if not _safe_id(project_id):
         return "Bad request", 400
-    images_dir = _get_projects_dir() / project_id / "images"
+    images_dir = _resolve_project_dir(project_id) / "images"
     if not images_dir.exists():
         return jsonify({"error": "Images directory not found"}), 404
     return send_from_directory(str(images_dir), filename)
@@ -1616,8 +1659,7 @@ def save_correction():
         if not _safe_id(project_id) or not _safe_id(chapter_id):
             return jsonify({"error": "Invalid ID"}), 400
 
-        projects_dir = _get_projects_dir()
-        project_dir = projects_dir / project_id
+        project_dir = _resolve_project_dir(project_id)
 
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
@@ -1740,8 +1782,7 @@ def get_annotations(project_id, chapter):
     """Return annotations for a chapter."""
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
-    projects_dir = _get_projects_dir()
-    project_dir = projects_dir / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": f"Project not found: {project_id}"}), 404
 
@@ -1765,8 +1806,7 @@ def save_annotation():
         if not _safe_id(project_id) or not _safe_id(chapter_id):
             return jsonify({"error": "Invalid ID"}), 400
 
-        projects_dir = _get_projects_dir()
-        project_dir = projects_dir / project_id
+        project_dir = _resolve_project_dir(project_id)
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
@@ -1803,8 +1843,7 @@ def remove_annotation():
         if not _safe_id(project_id) or not _safe_id(chapter_id):
             return jsonify({"error": "Invalid ID"}), 400
 
-        projects_dir = _get_projects_dir()
-        project_dir = projects_dir / project_id
+        project_dir = _resolve_project_dir(project_id)
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
@@ -1842,7 +1881,7 @@ def get_reviewed(project_id, chapter):
     """Check if a chapter is reviewed."""
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     reviewed = _load_reviewed(project_dir)
     return jsonify({"reviewed": chapter in reviewed})
 
@@ -1852,7 +1891,7 @@ def mark_reviewed(project_id, chapter):
     """Mark a chapter as reviewed."""
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -1869,7 +1908,7 @@ def unmark_reviewed(project_id, chapter):
     """Unmark a chapter as reviewed."""
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     reviewed = _load_reviewed(project_dir)
     reviewed.pop(chapter, None)
     (project_dir / "reviewed.json").write_text(
@@ -1884,7 +1923,7 @@ def apply_corrections(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Invalid ID"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     corrections_path = project_dir / "corrections.jsonl"
     if not corrections_path.exists():
         return jsonify({"error": "No corrections to apply"}), 404
@@ -1975,7 +2014,7 @@ def apply_corrections(project_id):
 
 def _get_project_status(project_id: str) -> dict:
     """Scan filesystem to derive full project status."""
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     status = {
         "project_id": project_id,
@@ -2193,7 +2232,7 @@ def removal_context(project_id, chapter_id, es_idx):
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -2293,7 +2332,7 @@ def remove_text():
     if _chapter_id_from_chunk_id(chunk_id) != chapter_id:
         return jsonify({"error": "chunk_id does not belong to chapter_id"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -2479,7 +2518,7 @@ def _validate_chunk_request(project_id: str, chapter_id: str, chunk_id: str):
         return jsonify({"error": "Bad request"}), 400
     if _chapter_id_from_chunk_id(chunk_id) != chapter_id:
         return jsonify({"error": "chunk_id does not belong to chapter_id"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
@@ -2736,7 +2775,7 @@ def dashboard_page(project_id):
     """Render the unified project dashboard."""
     if not _safe_id(project_id):
         return "Bad request", 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return "Project not found", 404
 
@@ -2776,7 +2815,7 @@ def project_status(project_id):
     """Return full project status as JSON."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
     return jsonify(_get_project_status(project_id))
@@ -2795,7 +2834,7 @@ def project_config_save(project_id):
     """Save per-project configuration."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
     data = request.get_json() or {}
@@ -2811,7 +2850,7 @@ def project_ingest(project_id):
     """Upload/paste source text."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     project_dir.mkdir(parents=True, exist_ok=True)
 
     data = request.json or {}
@@ -2852,7 +2891,7 @@ def project_ingest_gutenberg(project_id):
         suggest_split_pattern = _mod.suggest_split_pattern
         from bs4 import BeautifulSoup
 
-        project_dir = _get_projects_dir() / project_id
+        project_dir = _resolve_project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
         images_dir = project_dir / "images"
 
@@ -2895,7 +2934,7 @@ def project_fetch_missing_images(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not (project_dir / "source.txt").exists():
         return jsonify({"error": "Project has no source.txt"}), 400
 
@@ -2945,7 +2984,7 @@ def project_split_preview(project_id):
     """Preview chapter splits without writing files."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     source_path = project_dir / "source.txt"
     if not source_path.exists():
         return jsonify({"error": "No source.txt found"}), 404
@@ -2988,7 +3027,7 @@ def project_split(project_id):
     """Execute chapter split and write files."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     source_path = project_dir / "source.txt"
     if not source_path.exists():
         return jsonify({"error": "No source.txt found"}), 404
@@ -3142,7 +3181,7 @@ def project_chunk_all(project_id):
     """Chunk all (or selected) chapters."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chapters_dir = project_dir / "chapters"
     if not chapters_dir.exists():
         return jsonify({"error": "No chapters directory"}), 404
@@ -3208,7 +3247,7 @@ def project_difficulty(project_id):
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -3272,7 +3311,7 @@ def project_chapter_rechunk(project_id, chapter_id):
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chapter_path = project_dir / "chapters" / f"{chapter_id}.txt"
 
     try:
@@ -3340,7 +3379,7 @@ def project_chapter_chunks(project_id, chapter_id):
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
-    chunks_dir = _get_projects_dir() / project_id / "chunks"
+    chunks_dir = _resolve_project_dir(project_id) / "chunks"
     if not chunks_dir.exists():
         return jsonify({"error": "No chunks directory"}), 404
 
@@ -3430,7 +3469,7 @@ def project_chunk_prompt(project_id, chunk_id):
     if not _safe_id(project_id) or not _safe_id(chunk_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
     if not chunk_path.exists():
         return jsonify({"error": "Chunk not found"}), 404
@@ -3494,7 +3533,7 @@ def project_chunk_translate(project_id, chunk_id):
     if not _safe_id(project_id) or not _safe_id(chunk_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
     if not chunk_path.exists():
         return jsonify({"error": "Chunk not found"}), 404
@@ -3522,7 +3561,7 @@ def project_translate_cost_estimate(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     data = request.json or {}
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")
@@ -3584,7 +3623,7 @@ def project_translate_realtime(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     data = request.json or {}
     chunk_id = data.get("chunk_id", "")
 
@@ -3654,7 +3693,7 @@ def project_translate_batch(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     data = request.json or {}
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")
@@ -3841,7 +3880,7 @@ def batch_api_submit(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     data = request.json or {}
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")
@@ -3938,7 +3977,7 @@ def batch_api_list_jobs(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     jobs = _load_batch_api_jobs(project_dir)
 
     # Return jobs without the chunk_file_map (too verbose for listing)
@@ -3963,7 +4002,7 @@ def batch_api_check_job(project_id, job_id):
     if not _safe_id(project_id) or not _safe_id(job_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     # Find job in tracking
     with _batch_api_tracking_lock:
@@ -4006,7 +4045,7 @@ def batch_api_retrieve_job(project_id, job_id):
     if not _safe_id(project_id) or not _safe_id(job_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
 
     # Find job and atomically mark it as "retrieving" to prevent double-retrieve
     with _batch_api_tracking_lock:
@@ -4140,7 +4179,7 @@ def batch_api_retrieve_job(project_id, job_id):
 def batch_api_delete_job(project_id, job_id):
     if not _safe_id(project_id) or not _safe_id(job_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     with _batch_api_tracking_lock:
         jobs = _load_batch_api_jobs(project_dir)
         jobs = [j for j in jobs if j.get("job_id") != job_id]
@@ -4154,7 +4193,7 @@ def project_combine(project_id, chapter_id):
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunks_dir = project_dir / "chunks"
 
     try:
@@ -4191,7 +4230,7 @@ def project_align(project_id, chapter_id):
     if not _safe_id(project_id) or not _safe_id(chapter_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunks_dir = project_dir / "chunks"
 
     try:
@@ -4804,7 +4843,7 @@ def project_chunk_evaluation_get(project_id, chunk_id):
     if not _safe_id(project_id) or not _safe_id(chunk_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -4824,7 +4863,7 @@ def project_chunk_evaluation_rerun(project_id, chunk_id):
     if not _safe_id(project_id) or not _safe_id(chunk_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
     if not chunk_path.exists():
         return jsonify({"error": "Chunk not found"}), 404
@@ -4859,7 +4898,7 @@ def project_chunk_evaluation_llm_judge(project_id, chunk_id):
     if not _llm_judge_is_configured():
         return jsonify({"error": "LLM judge is not configured"}), 409
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
     if not chunk_path.exists():
         return jsonify({"error": "Chunk not found"}), 404
@@ -4923,7 +4962,7 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
     if not _safe_id(project_id) or not _safe_id(chunk_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -4970,7 +5009,7 @@ def project_evaluations_summary(project_id):
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -5004,7 +5043,7 @@ def chunk_editor_view(project_id, chapter, chunk_id):
     if derived_chapter != chapter:
         return "Chunk does not belong to chapter", 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
     if not chunk_path.exists():
         return "Chunk not found", 404
@@ -5060,7 +5099,7 @@ def save_chunk_edit(project_id, chunk_id):
     if not isinstance(new_text, str) or not new_text.strip():
         return jsonify({"error": "translated_text is required"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -5135,7 +5174,7 @@ def epub_status(project_id):
     """Return epub readiness: which chapters are fully translated."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -5221,7 +5260,7 @@ def get_translator_note(project_id):
     """Return the per-book translator note (heading + body)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
     return jsonify(_load_translator_note(project_id))
@@ -5232,7 +5271,7 @@ def save_translator_note(project_id):
     """Persist the per-book translator note (heading + body)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -5261,7 +5300,7 @@ def build_epub_route(project_id):
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -5354,7 +5393,7 @@ def download_epub(project_id):
     """Serve the built EPUB file for download."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     epub_files = list(project_dir.glob("*.epub"))
     if not epub_files:
         return jsonify({"error": "EPUB not found. Build it first."}), 404
@@ -5399,7 +5438,7 @@ def post_edit_tag(project_id):
     if not isinstance(hunk_index, int) or hunk_index < 0:
         return jsonify({"error": "hunk_index must be a non-negative integer"}), 400
 
-    project_dir = _get_projects_dir() / project_id
+    project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
@@ -5432,7 +5471,7 @@ def serve_edit_report(project_id, filename):
     # Reject path traversal in filename
     if ".." in filename or filename.startswith("/") or "\\" in filename:
         return jsonify({"error": "Bad filename"}), 400
-    reports_dir = _get_projects_dir() / project_id / "reports"
+    reports_dir = _resolve_project_dir(project_id) / "reports"
     if not reports_dir.exists():
         return jsonify({"error": "No reports for this project"}), 404
     return send_from_directory(str(reports_dir), filename)

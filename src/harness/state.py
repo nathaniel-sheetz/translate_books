@@ -50,7 +50,16 @@ def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
             raise FileNotFoundError(f"project path not found: {project!r}")
         return p
     candidate = REPO_ROOT / "projects" / project
-    if candidate.exists() or not must_exist:
+    if candidate.exists():
+        return candidate
+    # bare id not at the flat root: search grouping subfolders for a project dir
+    # of that name (a project dir has chunks/ or source.txt).
+    projects_root = REPO_ROOT / "projects"
+    if projects_root.exists():
+        for entry in projects_root.rglob(project):
+            if entry.is_dir() and ((entry / "chunks").exists() or (entry / "source.txt").exists()):
+                return entry
+    if not must_exist:
         return candidate
     raise FileNotFoundError(
         f"project not found: {project!r} (looked for a path and projects/{project})"
