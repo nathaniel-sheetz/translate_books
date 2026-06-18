@@ -164,9 +164,11 @@ def build_endnote_artifacts(
             continue
 
         es_map = _load_alignment_es_map(project_path, chapter_id)
-        insertions: List[Tuple[int, int]] = []  # (position, number)
-        cursor = 0
 
+        # Pass 1: find injection positions without assuming es_idx order matches
+        # text order. Searching from text-start prevents silent note-dropping
+        # when the translator reorganises sentences relative to the alignment.
+        pending: List[Tuple[int, int, str]] = []  # (inject_pos, es_idx, display_text)
         for es_idx in sorted(annotations):
             anchor, display_text = parse_endnote_content(annotations[es_idx])
             if not display_text:
@@ -180,7 +182,7 @@ def build_endnote_artifacts(
                 )
                 continue
 
-            sent_start = text.find(sentence, cursor)
+            sent_start = text.find(sentence)
             if sent_start == -1:
                 logger.warning(
                     "Endnote skipped: sentence not found in body for %s es_idx=%s",
@@ -188,13 +190,18 @@ def build_endnote_artifacts(
                 )
                 continue
             sent_end = sent_start + len(sentence)
-
-            counter += 1
-            insertions.append(
-                (_injection_point(text, sent_start, sent_end, anchor), counter)
+            pending.append(
+                (_injection_point(text, sent_start, sent_end, anchor), es_idx, display_text)
             )
+
+        # Pass 2: sort by text position and assign sequential numbers so the
+        # in-text markers always read 1, 2, 3, … regardless of es_idx order.
+        pending.sort(key=lambda x: x[0])
+        insertions: List[Tuple[int, int]] = []
+        for inject_pos, es_idx, display_text in pending:
+            counter += 1
+            insertions.append((inject_pos, counter))
             entries.append(Endnote(chapter_id, es_idx, counter, display_text))
-            cursor = sent_end
 
         if not insertions:
             injected_texts[chapter_id] = text
