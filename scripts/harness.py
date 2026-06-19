@@ -91,7 +91,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # chunk / cost / translate / epub --------------------------------------
     cp = sub.add_parser("chunk", help="Chunk at --size and print the cost estimate (no spend)")
     add_project(cp)
-    cp.add_argument("--size", type=int, required=True)
+    cp.add_argument("--size", type=int, required=True,
+                    help="Book-level target words/chunk; also the per-chapter fallback")
+    cp.add_argument("--per-chapter", dest="per_chapter", action="store_true",
+                    help="Size each chapter by its difficulty.json suggested_target_size "
+                         "(run `difficulty` first); --size is the fallback")
     add_chapters(cp)
 
     cop = sub.add_parser("cost", help="Re-print the cost estimate (no spend)")
@@ -156,7 +160,8 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "difficulty":
         return flow.difficulty(args.project)
     if cmd == "chunk":
-        return flow.chunk(args.project, size=args.size, chapters=args.chapters)
+        return flow.chunk(args.project, size=args.size, chapters=args.chapters,
+                          per_chapter=args.per_chapter)
     if cmd == "cost":
         return flow.cost(args.project, chapters=args.chapters)
     if cmd == "translate":

@@ -220,17 +220,24 @@ reflects it:
 ```bash
 python scripts/harness.py difficulty --project projects/<slug>
 ```
-This prints `book_difficulty` and a `suggested_target_size` (N), plus a per-chapter table.
-Present the book difficulty and that suggested `N`. Treat `N` as the **default**: honor a user
-override; otherwise chunk at `N`. (If `wordfreq` isn't installed, `wordfreq_available` is `false`
-and the suggestion leans toward 2000 — still usable.)
+This prints `book_difficulty` and a book-level `suggested_target_size` (N), plus a **per-chapter
+table** (each chapter's `difficulty` and its own `suggested_target_size`). Present the book
+difficulty and `N`, and surface the per-chapter spread when chapters differ markedly (e.g. a
+dialect-heavy chapter scored harder/smaller). Treat the suggestions as **defaults**: honor a user
+override; otherwise chunk at them. (If `wordfreq` isn't installed, `wordfreq_available` is `false`
+and suggestions lean toward 2000 — still usable.)
 
-**3b — Chunk at that size (estimator only).**
+**3b — Chunk (estimator only).** Default to per-chapter sizing so each chapter uses its own
+`suggested_target_size`:
 ```bash
-python scripts/harness.py chunk --project projects/<slug> --size <N>
+python scripts/harness.py chunk --project projects/<slug> --size <N> --per-chapter
 ```
-This chunks once and prints the cost estimate, then halts — it runs `--cost-only` and physically
-cannot spend. Carry that estimate straight into the Step 4 gate below.
+With `--per-chapter`, the chunker reads the per-chapter suggestions from `difficulty.json` (so run
+`difficulty` first) and `--size <N>` is the **fallback** for any chapter not in the manifest. Each
+chapter's target also rescales its min/max bounds, so a harder/smaller target actually splits more.
+Drop `--per-chapter` to chunk the whole book uniformly at `--size <N>` instead (e.g. if the user
+prefers one size). Either way this chunks once, prints the cost estimate, then halts — it runs
+`--cost-only` and physically cannot spend. Carry that estimate straight into the Step 4 gate below.
 
 ## Step 4 — COST beat, then translate
 

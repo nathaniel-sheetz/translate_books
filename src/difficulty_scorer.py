@@ -567,6 +567,16 @@ def _load_manifest(path: Path) -> Optional[DifficultyManifest]:
         return None
 
 
+def load_manifest(project_dir) -> Optional[DifficultyManifest]:
+    """Load the cached difficulty manifest for ``project_dir`` (or ``None``).
+
+    Public accessor over the on-disk ``difficulty.json`` so callers (e.g. the
+    harness chunk step) can read the per-chapter ``suggested_target_size`` the
+    ``difficulty`` step produced without re-scoring or touching private helpers.
+    """
+    return _load_manifest(manifest_path(Path(project_dir)))
+
+
 def _load_glossary_skip(project_dir: Path) -> set:
     """Load the project's glossary (if any) and build the rarity skip-set."""
     glossary_path = Path(project_dir) / "glossary.json"

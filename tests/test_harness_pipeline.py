@@ -141,6 +141,33 @@ def test_pipeline_spine_produces_valid_epub(project: Path):
     assert state["stage_completed"] == "epub"
 
 
+def test_stage_chunk_applies_per_chapter_sizes(tmp_path: Path):
+    """stage_chunk reads --chunk-sizes and sizes each chapter independently,
+    falling back to --chunk-size for chapters absent from the map."""
+    import json as _json
+
+    chapters = tmp_path / "chapters"
+    chapters.mkdir()
+    # ~1560 words / 6 paragraphs: one chunk at target 2000, several at 400.
+    para = ("The travelers crossed the wide green valley before the long rains came "
+            "and rested by the river where the tall reeds bent in the steady wind. ") * 10
+    big_chapter = "\n\n".join(para.strip() for _ in range(6))
+    (chapters / "chapter_01.txt").write_text(big_chapter, encoding="utf-8")
+    (chapters / "chapter_02.txt").write_text(big_chapter, encoding="utf-8")
+
+    sizes_path = tmp_path / "chunk_sizes.json"
+    sizes_path.write_text(_json.dumps({"chapter_01": 400}), encoding="utf-8")  # ch2 omitted
+
+    args = SimpleNamespace(chunk_size=2000, overlap_paragraphs=1,
+                           min_overlap_words=50, chunk_sizes=str(sizes_path))
+    tb.STAGE_FUNCTIONS["chunk"](args, tmp_path, {})
+
+    ch1 = list((tmp_path / "chunks").glob("chapter_01_chunk_*.json"))
+    ch2 = list((tmp_path / "chunks").glob("chapter_02_chunk_*.json"))
+    assert len(ch1) > 1, "chapter_01 (target 400) should split into multiple chunks"
+    assert len(ch2) == 1, "chapter_02 (fallback target 2000) should stay one chunk"
+
+
 def test_translate_stage_never_blocks_on_input(project: Path, monkeypatch):
     """T2 guard: with explicit approval, stage_translate must not call input()."""
     def _boom(*_a, **_k):

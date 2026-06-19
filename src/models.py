@@ -5,6 +5,7 @@ This module defines the Pydantic models that represent all data structures
 used throughout the translation pipeline.
 """
 
+import math
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -449,6 +450,25 @@ class ChunkingMethod(str, Enum):
     FIXED = "fixed"
 
 
+def derive_chunk_bounds(
+    target: int, min_ratio: float = 0.25, max_ratio: float = 1.5
+) -> tuple[int, int]:
+    """Derive ``(min_chunk_size, max_chunk_size)`` from ``target * ratios``.
+
+    Clamped to the ChunkingConfig pydantic floors (min ≥ 50, max ≥ 100, max >
+    min). With the default ratios (0.25 / 1.5) and ``target=2000`` this
+    reproduces the historical 500 / 3000 bounds exactly. Pure: it does **not**
+    validate the ratios or construct a model (so callers can derive bounds for
+    sub-100 targets); :meth:`ChunkingConfig.from_target` layers that validation.
+    """
+    target = int(target)
+    min_chunk = max(50, round(target * min_ratio))
+    max_chunk = max(100, round(target * max_ratio))
+    if max_chunk <= min_chunk:
+        max_chunk = min_chunk + 1
+    return min_chunk, max_chunk
+
+
 class ChunkingConfig(BaseModel):
     """Configuration for chunking chapters."""
     method: ChunkingMethod = ChunkingMethod.PARAGRAPH
@@ -468,6 +488,44 @@ class ChunkingConfig(BaseModel):
         if 'min_chunk_size' in info.data and v <= info.data['min_chunk_size']:
             raise ValueError('max_chunk_size must be > min_chunk_size')
         return v
+
+    @classmethod
+    def from_target(
+        cls,
+        target: int,
+        *,
+        min_ratio: float = 0.25,
+        max_ratio: float = 1.5,
+        overlap_paragraphs: int = 0,
+        min_overlap_words: int = 0,
+    ) -> "ChunkingConfig":
+        """Build a config whose min/max bounds scale with ``target``.
+
+        ``min_chunk_size``/``max_chunk_size`` are derived as ``target * min_ratio``
+        / ``target * max_ratio`` and clamped to the pydantic floors (min ≥ 50,
+        max ≥ 100, max > min). With the default ratios (0.25 / 1.5) and
+        ``target=2000`` this reproduces the historical 500 / 3000 bounds exactly,
+        so the unweighted default path is unchanged. Centralizes the derivation
+        shared by the web UI (``_resolve_chunking``) and the CLI chunk stage so a
+        per-chapter ``target_size`` actually rescales the bounds and bites.
+        """
+        target = int(target)
+        if not (math.isfinite(min_ratio) and math.isfinite(max_ratio)):
+            raise ValueError("min_ratio and max_ratio must be finite numbers")
+        if max_ratio <= min_ratio:
+            raise ValueError(
+                f"max_ratio ({max_ratio}) must be greater than min_ratio ({min_ratio})"
+            )
+        min_chunk, max_chunk = derive_chunk_bounds(target, min_ratio, max_ratio)
+        return cls(
+            target_size=target,
+            min_chunk_size=min_chunk,
+            max_chunk_size=max_chunk,
+            min_ratio=min_ratio,
+            max_ratio=max_ratio,
+            overlap_paragraphs=overlap_paragraphs,
+            min_overlap_words=min_overlap_words,
+        )
 
 
 class TranslationMode(str, Enum):

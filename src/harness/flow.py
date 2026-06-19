@@ -620,13 +620,24 @@ def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
 
 # ── chunk / cost / translate / epub (subprocess wrappers) ──────────────────
 
-def chunk(project: str, *, size: int, chapters: str | None = None) -> int:
+def chunk(
+    project: str,
+    *,
+    size: int,
+    chapters: str | None = None,
+    per_chapter: bool = False,
+) -> int:
     """Chunk at ``size`` and print the cost estimate, halting before any spend.
 
     Wraps ``translate_book.py --start-stage chunk --cost-only`` so the run chunks
     once and then stops at the estimate (``--cost-only`` exits before a single
     chunk is translated — it physically cannot spend). ``--chapters`` scopes the
     printed estimate to those chapters (chunking itself still covers the book).
+
+    With ``per_chapter`` set, each chapter is sized by the difficulty scorer's
+    ``suggested_target_size`` (read from the cached ``difficulty.json`` the
+    ``difficulty`` step wrote); ``size`` stays the fallback for any chapter not in
+    the manifest. Requires a prior ``difficulty`` run — fails loudly otherwise.
     """
     project_dir = state.resolve_project_dir(project)
     cmd = [
@@ -636,6 +647,27 @@ def chunk(project: str, *, size: int, chapters: str | None = None) -> int:
         "--cost-only",
         "--chunk-size", str(int(size)),
     ]
+
+    if per_chapter:
+        from src.difficulty_scorer import load_manifest
+
+        manifest = load_manifest(project_dir)
+        if manifest is None:
+            raise FileNotFoundError(
+                "per-chapter chunking needs difficulty.json - run "
+                "`harness.py difficulty` first."
+            )
+        sizes = {
+            cd.chapter_id: cd.metrics.suggested_target_size
+            for cd in manifest.chapters
+        }
+        hdir = state.ensure_harness_dir(project_dir)
+        sizes_path = Path(hdir) / "chunk_sizes.json"
+        sizes_path.write_text(
+            json.dumps(sizes, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        cmd += ["--chunk-sizes", str(sizes_path)]
+
     if chapters:
         cmd += ["--chapters", chapters]
     return _run_script(cmd)
