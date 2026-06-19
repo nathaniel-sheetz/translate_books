@@ -17,7 +17,7 @@ Open `http://localhost:5000` to see your projects, or go directly to `http://loc
 
 ### Create a project (CLI)
 
-Projects live in `projects/`. Create one manually or use the Gutenberg ingestor:
+Projects live in `projects/`. You can keep them flat or organize them into grouping subfolders (e.g. `projects/by-author/fabre/my-book/`) — the dashboard, all API endpoints, and the CLI all find projects wherever they live. Create one manually or use the Gutenberg ingestor:
 
 ```bash
 # From a Project Gutenberg URL
@@ -190,7 +190,9 @@ book_translation/
 ├── tests/                      # pytest test suite
 ├── docs/                       # Documentation
 ├── projects/                   # Working data (gitignored)
-│   └── my-book/
+│   ├── my-book/                # flat layout (default)
+│   └── by-author/fabre/        # grouping subfolders also supported
+│       └── my-book/
 │       ├── source.txt          # Raw source text
 │       ├── chapters/           # Split chapter files
 │       ├── chunks/             # Chunk JSON files
