@@ -15,8 +15,11 @@ orchestration in markdown. This module gives every harness command one place to:
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # src/harness/state.py -> parents[0]=harness, [1]=src, [2]=repo root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +40,29 @@ DEFAULTS: dict[str, str] = {
 CONFIG_KEYS = tuple(DEFAULTS.keys())
 
 
+def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
+    """Yield project dirs whose leaf name equals project_id, sorted alphabetically.
+
+    Uses an explicit walk so it never follows symlinks, never expands glob
+    metacharacters, and never descends into a project directory — consistent
+    with _iter_project_dirs in web_ui/app.py.
+    """
+    if _depth > 20:
+        return
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        is_proj = (entry / "chunks").exists() or (entry / "source.txt").exists()
+        if entry.name == project_id and is_proj:
+            yield entry
+        elif not is_proj:
+            yield from _iter_nested_match(entry, project_id, _depth + 1)
+
+
 def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
     """Accept either a project id (a folder under ``projects/``) or a path.
 
@@ -50,7 +76,25 @@ def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
             raise FileNotFoundError(f"project path not found: {project!r}")
         return p
     candidate = REPO_ROOT / "projects" / project
-    if candidate.exists() or not must_exist:
+    if candidate.exists():
+        return candidate
+    # bare id not at the flat root: search grouping subfolders for a project dir
+    # of that name (a project dir has chunks/ or source.txt).
+    projects_root = REPO_ROOT / "projects"
+    if projects_root.exists():
+        _found = None
+        for entry in _iter_nested_match(projects_root, project):
+            if _found is None:
+                _found = entry
+            else:
+                _log.warning(
+                    "Duplicate project id %r found at %s and %s; using %s",
+                    project, _found, entry, _found,
+                )
+                break
+        if _found is not None:
+            return _found
+    if not must_exist:
         return candidate
     raise FileNotFoundError(
         f"project not found: {project!r} (looked for a path and projects/{project})"

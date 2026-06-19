@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.0.0] - 2026-06-18
+
+### Added
+- **Project grouping subfolders.** Books in `projects/` can now be organized into arbitrary subfolders (e.g. `projects/by-author/fabre/`, `projects/experimental/drafts/my-book/`) at any nesting depth. The reader listing, all API endpoints, and the `translate-harness` CLI all find projects wherever they live — you no longer need to keep every book at the flat root.
+- **Automatic slug deduplication against nested projects.** When creating a new project, if the generated slug is already in use by a book in a grouping subfolder (not just the flat root), a numeric suffix is appended to avoid collision.
+
+### Fixed
+- **Duplicate project id warning.** If two folders at different paths share the same leaf name, a `WARNING` is logged and the first one wins — consistent between the web UI and CLI.
+- **Stale project cache recovery.** If a cached project path is deleted or moved, the resolver now re-scans the tree to find the current location instead of returning a non-existent path.
+- **Recursion depth guard.** Project discovery stops at 20 levels of nesting so a pathologically deep directory tree can never cause a stack overflow.
+- **Symlink safety.** Directory traversal during project discovery never follows symlinks.
+
 ## [0.21.0.0] - 2026-06-18
 
 ### Added
