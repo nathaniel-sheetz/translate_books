@@ -6,6 +6,7 @@ grouping subfolders so ``translate-harness --project <id>`` keeps working after
 a book is moved into a group.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -99,8 +100,6 @@ def test_explicit_path_not_exist_raises(repo, tmp_path):
 
 def test_duplicate_nested_id_warns(repo, caplog):
     """Two nested project dirs with the same leaf name trigger a warning; first is returned."""
-    import logging
-
     dupe_a = _make_project(repo / "projects" / "group-a", "twin-book")
     _make_project(repo / "projects" / "group-b", "twin-book")
 
@@ -109,3 +108,29 @@ def test_duplicate_nested_id_warns(repo, caplog):
 
     assert result == dupe_a
     assert "Duplicate project id" in caplog.text
+
+
+def test_iter_nested_match_depth_limit(repo):
+    """_iter_nested_match stops recursing at depth > 20 and never yields the target."""
+    # Build a chain of 22 plain grouping folders (no project markers) so that
+    # the recursion limit fires before reaching the leaf.
+    current = repo / "projects"
+    for i in range(22):
+        current = current / f"d{i}"
+    # Put a project at the very bottom — it must NOT be found because the depth
+    # guard fires first (depth reaches 21 > 20 while still descending).
+    target = current / "deep-id"
+    (target / "chunks").mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError):
+        state.resolve_project_dir("deep-id", must_exist=True)
+
+
+def test_iter_nested_match_skips_non_dir_files(repo):
+    """Plain files inside a grouping folder are silently skipped."""
+    grouping = repo / "projects" / "group"
+    grouping.mkdir(parents=True)
+    # A plain file that would choke on .iterdir() children if iterated wrongly.
+    (grouping / "readme.txt").write_text("not a dir")
+    proj = _make_project(grouping, "real-book")
+    assert state.resolve_project_dir("real-book") == proj

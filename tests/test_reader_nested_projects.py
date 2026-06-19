@@ -116,6 +116,9 @@ def test_duplicate_id_warns_and_dedups(client, tmp_path, monkeypatch, caplog):
         rv = client.get("/read/")
     assert rv.status_code == 200
     assert "Duplicate project id" in caplog.text
+    # Only one project card rendered despite two dirs sharing the same id.
+    # Count "group-a" and "group-b" occurrences: group-b should be absent (skipped).
+    assert b"group-b" not in rv.data
 
 
 def test_iter_project_dirs_nonexistent_root(tmp_path):
@@ -145,13 +148,14 @@ def test_is_project_dir_neither_marker(tmp_path):
 def test_resolve_stale_cache_falls_through_to_scan(tmp_path, monkeypatch):
     """A stale cache entry (path deleted) causes a fresh scan instead of returning the bad path."""
     projects_dir = tmp_path / "projects"
-    proj = _make_project(projects_dir, "stale-book")
+    # Project must be *nested* (not flat) so the flat fast-path is skipped and the
+    # stale-cache branch is actually reached.
+    proj = _make_project(projects_dir / "some-group", "stale-book")
     monkeypatch.setattr(app_module, "_get_projects_dir", lambda: projects_dir)
     # Pre-populate cache with a non-existent path to simulate staleness.
     stale_path = tmp_path / "gone" / "stale-book"
     monkeypatch.setattr(app_module, "_NESTED_PROJECT_CACHE", {"stale-book": stale_path})
-    # stale_path.is_dir() is False, so resolution should fall through to the scan,
-    # which finds the flat project.
+    # stale_path.is_dir() is False → cache miss → scan finds the nested project.
     result = app_module._resolve_project_dir("stale-book")
     assert result == proj
 
@@ -174,3 +178,60 @@ def test_create_project_dedup_against_nested_id(client, tmp_path, monkeypatch):
     # The slug "my-book" is taken by the nested project; a suffix must be added.
     assert data["id"] != "my-book"
     assert data["id"].startswith("my-book-")
+
+
+def test_iter_project_dirs_depth_limit(tmp_path):
+    """_iter_project_dirs stops at depth > 20 and never yields deeply nested projects."""
+    # Build a chain of 22 plain grouping folders; a project at the very bottom
+    # must NOT be found because the depth guard fires first.
+    current = tmp_path / "projects"
+    for i in range(22):
+        current = current / f"d{i}"
+    target = current / "buried-book"
+    (target / "chunks").mkdir(parents=True)
+
+    found = list(_iter_project_dirs(tmp_path / "projects"))
+    assert all(p.name != "buried-book" for p in found)
+
+
+def test_iter_project_dirs_skips_plain_files(tmp_path):
+    """Plain files inside the projects root (e.g. .gitkeep) are silently skipped."""
+    projects_dir = tmp_path / "projects"
+    _make_project(projects_dir, "good-book")
+    (projects_dir / "notes.txt").write_text("not a project")
+
+    found = [p.name for p in _iter_project_dirs(projects_dir)]
+    assert found == ["good-book"]
+    assert "notes.txt" not in found
+
+
+def test_iter_project_dirs_default_root(tmp_path, monkeypatch):
+    """Calling _iter_project_dirs() with no root argument uses _get_projects_dir()."""
+    projects_dir = tmp_path / "projects"
+    _make_project(projects_dir, "default-root-book")
+    monkeypatch.setattr(app_module, "_get_projects_dir", lambda: projects_dir)
+    monkeypatch.setattr(app_module, "_NESTED_PROJECT_CACHE", {})
+
+    # root=None triggers the `root or _get_projects_dir()` default path.
+    found = [p.name for p in _iter_project_dirs()]
+    assert "default-root-book" in found
+
+
+def test_score_difficulty_resolve_missing_project_exits(tmp_path, monkeypatch, capsys):
+    """score_difficulty._resolve_project_dir calls sys.exit(1) for unknown projects."""
+    import sys
+
+    # Patch REPO_ROOT in state so the real projects/ dir is not consulted.
+    from src.harness import state as state_mod
+    monkeypatch.setattr(state_mod, "REPO_ROOT", tmp_path)
+    (tmp_path / "projects").mkdir()
+
+    # The monkeypatch on state_mod.REPO_ROOT takes effect at call time (lazy import
+    # inside the function body), so no reload is needed or useful here.
+    import scripts.score_difficulty as sd
+
+    with pytest.raises(SystemExit) as exc_info:
+        sd._resolve_project_dir("no-such-project")
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "no-such-project" in captured.err

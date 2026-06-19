@@ -49,7 +49,11 @@ def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
     """
     if _depth > 20:
         return
-    for entry in sorted(root.iterdir()):
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
         if entry.is_symlink() or not entry.is_dir():
             continue
         is_proj = (entry / "chunks").exists() or (entry / "source.txt").exists()

@@ -98,7 +98,11 @@ def _iter_project_dirs(root: Optional[Path] = None, _depth: int = 0):
     root = root or _get_projects_dir()
     if not root.exists() or _depth > 20:
         return
-    for entry in sorted(root.iterdir()):
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
         if entry.is_symlink():      # skip symlinks to avoid infinite recursion on cycles
             continue
         if not entry.is_dir():
@@ -124,11 +128,19 @@ def _resolve_project_dir(project_id: str) -> Path:
     cached = _NESTED_PROJECT_CACHE.get(project_id)
     if cached is not None and cached.is_dir():
         return cached
+    _found = None
     for proj_dir in _iter_project_dirs(root):
         if proj_dir.name == project_id:
-            _NESTED_PROJECT_CACHE[project_id] = proj_dir
-            return proj_dir
-    return flat
+            if _found is None:
+                _found = proj_dir
+                _NESTED_PROJECT_CACHE[project_id] = proj_dir
+            else:
+                app.logger.warning(
+                    "Duplicate project id %r found at %s and %s; using %s",
+                    project_id, _found, proj_dir, _found,
+                )
+                break
+    return _found if _found is not None else flat
 
 
 def _load_project_config(project_id: str) -> dict:
