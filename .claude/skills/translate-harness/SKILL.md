@@ -48,6 +48,12 @@ deterministic/paid stage (`chunk`/`cost`/`translate`/`epub`) stream the underlyi
 output through. Per-project working state lives in `projects/<slug>/.harness/`; `setup`
 wipes it for a clean run, so there is no global `.tmp/` to manage.
 
+**Reading harness output — Read the artifact, don't grep stdout.** Every JSON-returning command
+also mirrors its full result to `projects/<slug>/.harness/last_output.json` (UTF-8) and prints
+`OUTPUT_JSON: <path>` to stderr. **Prefer `Read`ing that file** over capturing stdout — it is
+always clean UTF-8 regardless of the console. **Never pipe harness output through `grep`**: on
+Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ NEVER invoke an interactive code path — every input() prompt DEADLOCKS you.│

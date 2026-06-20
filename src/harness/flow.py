@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -57,9 +58,12 @@ def _run_script(cmd: list[str]) -> int:
 
     The agent sees the script's real output (cost estimate, progress) directly,
     and the cost-gate logic stays in the wrapped CLI rather than being re-derived.
+    Force UTF-8 in the child so accented output survives a cp1252 Windows console
+    (friction-log #4); reconfiguring the parent's stdout does not reach the child.
     """
     sys.stdout.flush()
-    return subprocess.run([sys.executable, *cmd], cwd=str(state.REPO_ROOT)).returncode
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run([sys.executable, *cmd], cwd=str(state.REPO_ROOT), env=env).returncode
 
 
 def _read(path: Path) -> str:

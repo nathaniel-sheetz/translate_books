@@ -307,6 +307,41 @@ def test_translate_book_cli_rejects_removed_cost_limit(tmp_path: Path):
     assert "--cost-limit" in result.stderr
 
 
+def test_harness_stdout_is_utf8_and_writes_artifact(tmp_path: Path):
+    """Friction-log #4: harness stdout must be UTF-8 (not the Windows cp1252 default) and the
+    result must also land in .harness/last_output.json so the agent never has to parse stdout."""
+    from src.harness import state as hstate
+
+    # Minimal project: a config (creates .harness/) plus an agent glossary draft whose
+    # translation carries accents/ñ — the bytes that broke cp1252 stdout in the dogfood run.
+    hstate.save_config(tmp_path, {})
+    draft = [{"english": "queen", "translation": "la reina pequeña",
+              "type": "noun", "context": "la niña"}]
+    (tmp_path / ".harness" / "glossary_draft.json").write_text(
+        json.dumps(draft), encoding="utf-8")
+
+    # capture_output WITHOUT text=True -> raw bytes, so we control the decode ourselves.
+    result = subprocess.run(
+        [sys.executable, "scripts/harness.py", "glossary", "commit", "--project", str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+    # stdout decodes as UTF-8 and the accented translation survives round-trip.
+    payload = json.loads(result.stdout.decode("utf-8"))
+    assert any(t["translation"] == "la reina pequeña" for t in payload["terms"])
+
+    # The artifact mirror exists and matches (this is what the agent should Read).
+    artifact = tmp_path / ".harness" / "last_output.json"
+    assert artifact.exists(), "last_output.json artifact was not written"
+    mirrored = json.loads(artifact.read_text(encoding="utf-8"))
+    assert mirrored == payload
+    assert b"OUTPUT_JSON:" in result.stderr
+
+
 # ===========================================================================
 # Subagent backend spine (Phase B): prepare -> (worker writes prose) -> commit
 # ===========================================================================
