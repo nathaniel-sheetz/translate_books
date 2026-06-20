@@ -19,6 +19,7 @@ Deliberately omitted:
                   validate    set, no API         *.txt        valid zip
 """
 
+import json
 import subprocess
 import sys
 import zipfile
@@ -35,8 +36,15 @@ from src.harness_guard import (
     validate_glossary_file,
     validate_style_guide_file,
 )
-from src.models import ChunkStatus, Glossary, GlossaryTerm, StyleGuide
-from src.utils.file_io import save_glossary, save_style_guide
+from src.models import (
+    Chunk,
+    ChunkMetadata,
+    ChunkStatus,
+    Glossary,
+    GlossaryTerm,
+    StyleGuide,
+)
+from src.utils.file_io import load_chunk, save_chunk, save_glossary, save_style_guide
 
 FIXTURE_TEXT = """The sun rose over the quiet village.
 
@@ -495,3 +503,121 @@ def test_translate_commit_missing_prompt_file_still_commits(project: Path):
     res = flow.translate_commit(str(project))
     # The first chunk should still be committed even without its prompt file.
     assert entry["chunk_id"] in res["committed"]
+
+
+# ===========================================================================
+# Spawn modes (Step 4B): EN+ES context, config persistence, and align
+# ===========================================================================
+
+
+def _save_chunks(chunks_dir: Path, chapter_id: str, sources: list[str],
+                 translations: list | None = None) -> list[Path]:
+    """Write a chapter as N chunks (optionally pre-translated); return their paths."""
+    translations = translations or [None] * len(sources)
+    paths: list[Path] = []
+    for pos, (src, tr) in enumerate(zip(sources, translations)):
+        chunk = Chunk(
+            id=f"{chapter_id}_chunk_{pos:03d}",
+            chapter_id=chapter_id,
+            position=pos,
+            source_text=src,
+            translated_text=tr,
+            metadata=ChunkMetadata(
+                char_start=0, char_end=len(src), overlap_start=0, overlap_end=0,
+                paragraph_count=src.count("\n\n") + 1, word_count=len(src.split()),
+            ),
+            status=ChunkStatus.TRANSLATED if tr else ChunkStatus.PENDING,
+        )
+        cp = chunks_dir / f"{chapter_id}_chunk_{pos:03d}.json"
+        save_chunk(chunk, cp)
+        paths.append(cp)
+    return paths
+
+
+def _prompt_for(prep: dict, chunk_id: str) -> str:
+    entry = next(e for e in prep["manifest"] if e["chunk_id"] == chunk_id)
+    return Path(entry["prompt_path"]).read_text(encoding="utf-8")
+
+
+def test_translate_prepare_injects_committed_translation_context(tmp_path: Path):
+    """A chunk whose predecessor is committed gets the predecessor's EN+ES; an
+    uncommitted predecessor yields source-only context (never blocking)."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=["UNIQUESOURCEMARKER alpha beta gamma.", "Second chunk body text."],
+    )
+
+    # Pass 1: predecessor (chunk_000) untranslated -> chunk_001 gets source only.
+    prep1 = flow.translate_prepare(str(tmp_path))
+    p1 = _prompt_for(prep1, "chapter_01_chunk_001")
+    assert "UNIQUESOURCEMARKER" in p1, "predecessor source tail must be present"
+    assert "Spanish Translation" not in p1, "no Spanish yet — must not fabricate it"
+
+    # Commit chunk_000 with a distinctive Spanish translation.
+    c0 = load_chunk(chunks_dir / "chapter_01_chunk_000.json")
+    c0.translated_text = "UNIQUETRANSMARKER alfa beta gama."
+    c0.status = ChunkStatus.TRANSLATED
+    save_chunk(c0, chunks_dir / "chapter_01_chunk_000.json")
+
+    # Pass 2: re-prepare -> chunk_001 now sees the predecessor's Spanish too.
+    prep2 = flow.translate_prepare(str(tmp_path))
+    assert [e["chunk_id"] for e in prep2["manifest"]] == ["chapter_01_chunk_001"]
+    p2 = _prompt_for(prep2, "chapter_01_chunk_001")
+    assert "UNIQUESOURCEMARKER" in p2 and "UNIQUETRANSMARKER" in p2
+    assert "Spanish Translation" in p2
+
+
+def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
+    """--parallelism/--window round-trip through project config and echo back."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
+
+    prep = flow.translate_prepare(str(tmp_path), parallelism="all", window=3)
+    assert prep["spawn_plan"] == {"parallelism": "all", "window": 3}
+    assert prep["usage_summary"]["parallelism"] == "all"
+
+    # Persisted: a later prepare with no spawn args reuses the saved choice.
+    prep2 = flow.translate_prepare(str(tmp_path))
+    assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3}
+
+    # Invalid mode is reported, not raised.
+    bad = flow.translate_prepare(str(tmp_path), parallelism="bogus")
+    assert "error" in bad and bad["manifest"] == []
+
+
+def test_align_command_aligns_ready_chapters_and_links(tmp_path: Path, monkeypatch):
+    """align processes only fully-translated chapters and returns a reader link."""
+    import src.sentence_aligner as aligner
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A.", "B."],
+                 translations=["es A.", "es B."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["C."])  # untranslated -> skipped
+
+    calls: list[str] = []
+
+    def fake_align(chunk_paths, project_id, chapter_id, source_lang="en",
+                   target_lang="es", output_path=None):
+        calls.append(chapter_id)
+        if output_path:
+            Path(output_path).write_text(
+                json.dumps({"chapter_id": chapter_id, "alignments": []}), encoding="utf-8")
+        return {"chapter_id": chapter_id, "es_count": 2, "high_confidence_pct": 100.0}
+
+    monkeypatch.setattr(aligner, "align_chapter_chunks", fake_align)
+
+    res = flow.align(str(tmp_path))
+    assert calls == ["chapter_01"], "only fully-translated chapters are aligned"
+    assert [a["chapter_id"] for a in res["aligned"]] == ["chapter_01"]
+    assert [s["chapter_id"] for s in res["skipped"]] == ["chapter_02"]
+    assert res["reader_first"].endswith(f"/read/{tmp_path.name}/chapter_01")
+    assert (tmp_path / "alignments" / "chapter_01.json").exists()
