@@ -57,6 +57,41 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title", default=None)
     sp.add_argument("--author", default=None)
     sp.add_argument("--language-code", dest="language_code", default=None)
+    sp.add_argument("--front-matter-title", dest="front_matter_titles", action="append",
+                    help="Heading to force-tag as front matter (repeatable)")
+    sp.add_argument("--back-matter-title", dest="back_matter_titles", action="append",
+                    help="Heading to force-tag as back matter (repeatable)")
+    sp.add_argument("--min-chapter-size", dest="min_chapter_size", type=int, default=None,
+                    help="Min chars for a real chapter; filters short false matches "
+                         "(default 100; raise to ~500 to drop stray front-matter lines)")
+
+    def add_split_opts(p):
+        """Shared chapter-split controls for the split-preview / split commands."""
+        p.add_argument("--chapter-pattern", default="roman",
+                       choices=["roman", "numeric", "custom"])
+        p.add_argument("--custom-regex", default=None)
+        p.add_argument("--min-chapter-size", dest="min_chapter_size", type=int, default=None,
+                       help="Min chars for a real chapter (default 100; raise to ~500 to "
+                            "drop stray front-matter lines)")
+        p.add_argument("--front-matter-title", dest="front_matter_titles", action="append",
+                       help="Heading to force-tag as front matter (repeatable)")
+        p.add_argument("--back-matter-title", dest="back_matter_titles", action="append",
+                       help="Heading to force-tag as back matter (repeatable)")
+        p.add_argument("--no-auto-front-matter", dest="auto_detect_front_matter",
+                       action="store_false", help="Disable built-in front-matter keyword detection")
+        p.add_argument("--no-auto-back-matter", dest="auto_detect_back_matter",
+                       action="store_false", help="Disable built-in back-matter keyword detection")
+
+    # split-preview / split (chapter-split review beat) ---------------------
+    spp = sub.add_parser("split-preview",
+                         help="Dry-run a chapter split and print the detected sections (no files)")
+    add_project(spp)
+    add_split_opts(spp)
+
+    swp = sub.add_parser("split",
+                         help="(Re)write chapters/ from source.txt with the chosen split controls")
+    add_project(swp)
+    add_split_opts(swp)
 
     # style-guide <action> --------------------------------------------------
     sg = sub.add_parser("style-guide", help="Style-guide beat (prepare/commit per draft)")
@@ -140,6 +175,19 @@ def _dispatch(args: argparse.Namespace):
             custom_regex=args.custom_regex, target_language=args.target_language,
             locale=args.locale, provider=args.provider, model=args.model,
             title=args.title, author=args.author, language_code=args.language_code,
+            front_matter_titles=args.front_matter_titles,
+            back_matter_titles=args.back_matter_titles,
+            min_chapter_size=args.min_chapter_size,
+        )
+    if cmd in ("split-preview", "split"):
+        fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
+        return fn(
+            args.project, pattern_type=args.chapter_pattern,
+            custom_regex=args.custom_regex, min_chapter_size=args.min_chapter_size,
+            front_matter_titles=args.front_matter_titles,
+            back_matter_titles=args.back_matter_titles,
+            auto_detect_front_matter=args.auto_detect_front_matter,
+            auto_detect_back_matter=args.auto_detect_back_matter,
         )
     if cmd == "style-guide":
         if args.action == "prepare-questions":

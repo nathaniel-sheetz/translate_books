@@ -146,6 +146,28 @@ class TestStageIngest:
         with pytest.raises(ValueError, match="--url is required"):
             stage_ingest(args, tmp_path, {})
 
+    def test_ingest_stashes_heading_report_and_pattern(self, tmp_path):
+        """The URL/HTML path records heading-derived hints (a per-chapter report
+        and an auto-suggested split pattern) so the harness can relay them."""
+        html = (
+            "<html><body>"
+            "<h2>Chapter I</h2><p>" + ("word " * 60) + "</p>"
+            "<h2>Chapter II</h2><p>" + ("word " * 60) + "</p>"
+            "</body></html>"
+        )
+        src = tmp_path / "book.html"
+        src.write_text(html, encoding="utf-8")
+
+        args = MagicMock()
+        args.url = str(src)  # fetch_html reads a local path
+
+        from scripts.translate_book import stage_ingest
+        state = stage_ingest(args, tmp_path, {})
+
+        assert state["stage_completed"] == "ingest"
+        assert [c["heading"] for c in state["chapter_report"]] == ["Chapter I", "Chapter II"]
+        assert state["suggested_pattern"] is not None
+
 
 class TestStageSplit:
     """Tests for the split stage."""
