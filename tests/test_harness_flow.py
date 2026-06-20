@@ -166,10 +166,12 @@ def test_difficulty_returns_suggested_size(project: Path):
 
 def test_chunk_per_chapter_without_difficulty_raises(project: Path, monkeypatch):
     """--per-chapter needs a prior difficulty run; fail loudly before any spend."""
-    monkeypatch.setattr(flow, "_run_script", lambda cmd: 0)  # must not be reached
+    called = []
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: called.append(cmd))
     with pytest.raises(FileNotFoundError) as exc:
         flow.chunk(str(project), size=1800, per_chapter=True)
     assert "difficulty" in str(exc.value)
+    assert not called, "_run_script must not be reached before the guard raises"
     assert not (project / ".harness" / "chunk_sizes.json").exists()
 
 

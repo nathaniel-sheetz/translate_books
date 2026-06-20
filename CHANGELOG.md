@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.1.0] - 2026-06-19
+
+### Added
+- **Per-chapter chunk sizing.** `harness.py chunk --per-chapter` reads each chapter's `suggested_target_size` from the cached `difficulty.json` (produced by `harness.py difficulty`) and sizes chunks independently per chapter. Harder chapters get smaller targets, which actually bite because min/max bounds now scale with the target via the new `ChunkingConfig.from_target()` factory. `--size` remains the fallback for any chapter not in the manifest.
+- **`ChunkingConfig.from_target()` factory.** Centralizes the derivation of `min_chunk_size` / `max_chunk_size` from a target and ratio pair. Used by both the CLI chunk stage and the web UI split endpoint so the two paths cannot drift. With default ratios (0.25 / 1.5) and `target=2000` it reproduces the historical 500 / 3000 bounds exactly.
+- **`translate_book.py --chunk-sizes`** argument accepts a JSON map `{chapter_id: target_size}` for per-chapter sizing without going through the harness flow wrapper.
+
+### Fixed
+- **Web UI split bounds now match CLI.** `_resolve_chunking` in `web_ui/app.py` now delegates to `derive_chunk_bounds` (the same function used by `ChunkingConfig.from_target`) instead of a local copy, eliminating the risk of the two paths drifting.
+
 ## [0.22.0.0] - 2026-06-18
 
 ### Added
