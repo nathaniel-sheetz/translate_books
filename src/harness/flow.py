@@ -607,10 +607,14 @@ def translate_prepare(
         persist["parallelism"] = parallelism
     if window is not None:
         try:
-            persist["parallel_window"] = max(1, int(window))
+            window_int = int(window)
         except (TypeError, ValueError):
             return {"error": f"invalid window {window!r}; must be a positive integer",
                     "manifest": []}
+        if window_int < 1:
+            return {"error": f"invalid window {window!r}; must be a positive integer",
+                    "manifest": []}
+        persist["parallel_window"] = window_int
     if persist:
         cfg.update(persist)
         state.save_config(project_dir, cfg)
@@ -1046,6 +1050,9 @@ def align(
 
     aligned: list[dict] = []
     skipped: list[dict] = []
+    # Surface a per-chapter aligner failure (e.g. embedding model unavailable)
+    # without crashing the batch — keep the clean-JSON-on-stdout contract.
+    align_error: str | None = None
     # The aligner loads an embedding model and is chatty; keep stdout clean JSON.
     with _quiet_stdout():
         for chapter_id in sorted(discovered):
@@ -1054,14 +1061,19 @@ def align(
             if not all(c.has_translation for c in chunks):
                 skipped.append({"chapter_id": chapter_id, "reason": "not fully translated"})
                 continue
-            result = align_chapter_chunks(
-                chunk_paths=[str(p) for p in chunk_paths],
-                project_id=slug,
-                chapter_id=chapter_id,
-                source_lang=source_lang_code,
-                target_lang=target_lang_code,
-                output_path=str(align_dir / f"{chapter_id}.json"),
-            )
+            try:
+                result = align_chapter_chunks(
+                    chunk_paths=[str(p) for p in chunk_paths],
+                    project_id=slug,
+                    chapter_id=chapter_id,
+                    source_lang=source_lang_code,
+                    target_lang=target_lang_code,
+                    output_path=str(align_dir / f"{chapter_id}.json"),
+                )
+            except Exception as exc:  # noqa: BLE001 - report, don't crash the batch
+                align_error = f"align failed at {chapter_id}: {exc}"
+                skipped.append({"chapter_id": chapter_id, "reason": f"align error: {exc}"})
+                break
             aligned.append({
                 "chapter_id": chapter_id,
                 "es_count": result.get("es_count"),
@@ -1070,7 +1082,7 @@ def align(
 
     reader_base = f"http://{reader_host}:{reader_port}/read/{slug}"
     first = aligned[0]["chapter_id"] if aligned else None
-    return {
+    out = {
         "aligned": aligned,
         "skipped": skipped,
         "alignments_dir": str(align_dir),
@@ -1084,3 +1096,6 @@ def align(
             "No chapters were aligned — translate a chapter set fully first."
         ),
     }
+    if align_error:
+        out["error"] = align_error
+    return out

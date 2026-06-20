@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.3.0] - 2026-06-20
+
+### Added
+- **User-chosen spawn modes for the subagent translate backend.** `harness.py translate-prepare` accepts `--parallelism sequential|chapter|all` and `--window <X>`, persisted to the project config and echoed back under `spawn_plan` (and `usage_summary`) so the later "translate the rest" batch reuses the choice without re-asking. The `chapter` mode (default, window 8) runs a window of chapters wave-by-wave on chunk position; `sequential` maximizes continuity; `all` is fastest with no cross-chunk context.
+- **Committed-predecessor EN+ES context injection.** When a chunk's preceding chunk is already committed, `translate-prepare` now renders BOTH the predecessor's source tail and its Spanish translation into the prompt (the same `extract_previous_chapter_context` block the reader uses), so re-running prepare after each commit flows finished Spanish into the next chunk. An uncommitted predecessor degrades to source-only context — never blocking.
+- **`harness.py align` command.** Aligns fully-translated chapters for the web reader and prints a `reader_first` link, the per-set finisher run after each `translate-commit` batch. Partially-translated chapters are skipped; `--chapters` limits the work; `--reader-host`/`--reader-port` shape the printed link.
+
+### Fixed
+- **`--window` below 1 is rejected** with the documented "must be a positive integer" error instead of being silently clamped to 1.
+- **`align` reports a per-chapter aligner failure** (e.g. embedding model unavailable) as a partial result with an `error` key rather than crashing the batch and breaking the clean-JSON-on-stdout contract.
+
 ## [0.22.2.0] - 2026-06-19
 
 ### Added

@@ -587,9 +587,32 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     prep2 = flow.translate_prepare(str(tmp_path))
     assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3}
 
-    # Invalid mode is reported, not raised.
+    # window persists in isolation (no parallelism passed) without disturbing the
+    # previously-saved parallelism.
+    prep3 = flow.translate_prepare(str(tmp_path), window=5)
+    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 5}
+
+    # Invalid mode is reported, not raised, and must not corrupt the saved config.
+    from src.harness import state
     bad = flow.translate_prepare(str(tmp_path), parallelism="bogus")
     assert "error" in bad and bad["manifest"] == []
+    assert state.load_config(state.resolve_project_dir(str(tmp_path)))["parallelism"] == "all"
+
+
+def test_translate_prepare_rejects_nonpositive_window(tmp_path: Path):
+    """--window below 1 is reported as an error and not persisted to config."""
+    from src.harness import flow, state
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
+
+    for bad_window in (0, -5):
+        res = flow.translate_prepare(str(tmp_path), window=bad_window)
+        assert "error" in res and res["manifest"] == []
+        assert "parallel_window" not in state.load_config(
+            state.resolve_project_dir(str(tmp_path))
+        )
 
 
 def test_align_command_aligns_ready_chapters_and_links(tmp_path: Path, monkeypatch):
@@ -621,3 +644,24 @@ def test_align_command_aligns_ready_chapters_and_links(tmp_path: Path, monkeypat
     assert [s["chapter_id"] for s in res["skipped"]] == ["chapter_02"]
     assert res["reader_first"].endswith(f"/read/{tmp_path.name}/chapter_01")
     assert (tmp_path / "alignments" / "chapter_01.json").exists()
+
+
+def test_align_command_reports_aligner_failure_without_crashing(tmp_path: Path, monkeypatch):
+    """An aligner exception is reported (error + skipped), not propagated."""
+    import src.sentence_aligner as aligner
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("embedding model unavailable")
+
+    monkeypatch.setattr(aligner, "align_chapter_chunks", boom)
+
+    res = flow.align(str(tmp_path))
+    assert res["aligned"] == []
+    assert "error" in res and "embedding model unavailable" in res["error"]
+    assert [s["chapter_id"] for s in res["skipped"]] == ["chapter_01"]
+    assert res["reader_first"] is None
