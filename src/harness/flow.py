@@ -287,6 +287,7 @@ def split_apply(
         "chapter_count": len(chapters),
         "counts": _kind_counts(chapters),
         "chapters": [p.stem for p in written],
+        "files_written": True,
         "sections": [
             {
                 "name": _section_display_name(ch),

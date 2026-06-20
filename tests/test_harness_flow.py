@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _chapter_body(seed: str) -> str:
-    # ~320 words so the splitter's 100-word minimum keeps the chapter.
+    # Well over the splitter's 100-character minimum so the chapter is kept.
     sentence = f"{seed} walked through the quiet village past the old well and the great oak tree. "
     return (sentence * 20).strip()
 
@@ -133,6 +133,7 @@ def test_split_apply_writes_files_and_clears_stale(tmp_path: Path):
     )
 
     assert result["chapter_count"] == 4
+    assert result["files_written"] is True  # paired-API symmetry with split_preview
     assert result["counts"] == {"front_matter": 1, "chapter": 2, "back_matter": 1}
     written = sorted(p.name for p in chapters_dir.glob("chapter_*.txt"))
     assert written == [f"chapter_0{i}.txt" for i in range(1, 5)]

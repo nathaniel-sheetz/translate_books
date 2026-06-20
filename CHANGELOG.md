@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.2.0] - 2026-06-19
+
+### Added
+- **Chapter-split review beat in the harness (GUI parity).** New `harness.py split-preview` dry-runs a chapter split and prints every detected section tagged `front_matter` / `chapter` / `back_matter` without writing files; `harness.py split` then commits the split, rewriting `chapters/` from `source.txt`. Both accept the full set of split controls (`--chapter-pattern`, `--custom-regex`, `--min-chapter-size`, repeatable `--front-matter-title` / `--back-matter-title`, and `--no-auto-front-matter` / `--no-auto-back-matter`). This mirrors the web GUI's Stage 2 so a misfired `setup` split can be refined without hand-editing `source.txt`.
+- **Heading-derived split hints from ingest.** A Gutenberg `--url` ingest now records a per-chapter `chapter_report` and an auto-suggested `suggested_pattern` (both computed from the book's HTML headings) and surfaces them on the `setup` result so the agent can spot a wrong pattern or stray front/back matter. The keys are always present (null on the no-URL path).
+- **`setup` split controls.** `harness.py setup` accepts `--front-matter-title`, `--back-matter-title`, and `--min-chapter-size` for a one-shot run that matches the review-beat behavior.
+
+### Fixed
+- **`split` clears stale chapter files.** `split` removes existing `chapter_*.txt` before rewriting so a smaller re-split never leaves orphaned higher-numbered files behind.
+- **Paired-API symmetry.** `split` now returns `files_written: True`, matching `split-preview`'s `files_written: False`, so a consumer keying off that flag no longer hits a `KeyError` on the commit path.
+
 ## [0.22.1.0] - 2026-06-19
 
 ### Added
