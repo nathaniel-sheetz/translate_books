@@ -112,7 +112,14 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
     # Import ingest functions from script
     scripts_dir = Path(__file__).parent
     sys.path.insert(0, str(scripts_dir))
-    from ingest_gutenberg import Converter, fetch_html, find_book_body, _normalize_whitespace
+    from ingest_gutenberg import (
+        Converter,
+        fetch_html,
+        find_book_body,
+        _normalize_whitespace,
+        build_chapter_report,
+        suggest_split_pattern,
+    )
 
     url = args.url
     if not url:
@@ -151,6 +158,11 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
     state["stage_completed"] = "ingest"
     state["source_words"] = word_count
     state["url"] = url
+    # Heading-derived hints the agent can relay (parity with the web GUI's
+    # Gutenberg report): a per-chapter report and an auto-suggested split
+    # pattern, both computed from the HTML headings the Converter tracked.
+    state["chapter_report"] = build_chapter_report(converter.chapters, word_count)
+    state["suggested_pattern"] = suggest_split_pattern(converter.chapters)
     return state
 
 
@@ -171,6 +183,10 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
         pattern_type=pattern_type,
         custom_regex=custom_regex,
         min_chapter_size=min_size,
+        front_matter_titles=getattr(args, "front_matter_titles", None) or None,
+        back_matter_titles=getattr(args, "back_matter_titles", None) or None,
+        auto_detect_front_matter=getattr(args, "auto_detect_front_matter", True),
+        auto_detect_back_matter=getattr(args, "auto_detect_back_matter", True),
     )
 
     chapters_dir = project_dir / "chapters"

@@ -75,6 +75,86 @@ def test_setup_runs_ingest_split_and_persists_config(tmp_path: Path):
     assert (proj / ".harness" / "config.json").exists()
 
 
+def test_setup_returns_heading_hint_keys_null_on_no_url_path(tmp_path: Path):
+    """The hint keys must always be present; on the no-URL path there is no HTML
+    to read headings from, so they come back null."""
+    proj = tmp_path / "newbook"
+    proj.mkdir()
+    (proj / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
+
+    result = flow.setup(str(proj), url="", target_language="Spanish", locale="mx")
+
+    assert "suggested_pattern" in result and result["suggested_pattern"] is None
+    assert "chapter_report" in result and result["chapter_report"] is None
+
+
+# ── split review beat ───────────────────────────────────────────────────────
+
+def _front_back_source() -> str:
+    """A book with a declared front-matter heading and an auto-detectable
+    back-matter heading bracketing two roman chapters."""
+    return (
+        "To the Teacher\n\n" + _chapter_body("A note") + "\n\n"
+        "Chapter I\n\n" + _chapter_body("Old Thomas") + "\n\n"
+        "Chapter II\n\n" + _chapter_body("Young Betsy") + "\n\n"
+        "Afterword\n\n" + _chapter_body("The end") + "\n"
+    )
+
+
+def test_split_preview_tags_matter_and_writes_nothing(tmp_path: Path):
+    proj = tmp_path / "book"
+    proj.mkdir()
+    (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
+
+    result = flow.split_preview(
+        str(proj), pattern_type="roman",
+        front_matter_titles=["To the Teacher"], back_matter_titles=["Afterword"],
+    )
+
+    assert [s["kind"] for s in result["sections"]] == [
+        "front_matter", "chapter", "chapter", "back_matter",
+    ]
+    assert result["counts"] == {"front_matter": 1, "chapter": 2, "back_matter": 1}
+    assert result["files_written"] is False
+    assert not (proj / "chapters").exists()  # dry run writes nothing
+
+
+def test_split_apply_writes_files_and_clears_stale(tmp_path: Path):
+    proj = tmp_path / "book"
+    proj.mkdir()
+    (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
+    chapters_dir = proj / "chapters"
+    chapters_dir.mkdir()
+    (chapters_dir / "chapter_99.txt").write_text("stale", encoding="utf-8")  # from a prior split
+
+    result = flow.split_apply(
+        str(proj), pattern_type="roman",
+        front_matter_titles=["To the Teacher"], back_matter_titles=["Afterword"],
+    )
+
+    assert result["chapter_count"] == 4
+    assert result["counts"] == {"front_matter": 1, "chapter": 2, "back_matter": 1}
+    written = sorted(p.name for p in chapters_dir.glob("chapter_*.txt"))
+    assert written == [f"chapter_0{i}.txt" for i in range(1, 5)]
+    assert not (chapters_dir / "chapter_99.txt").exists()  # stale orphan cleared
+
+
+def test_split_apply_min_chapter_size_filters_short_sections(tmp_path: Path):
+    """A stray chapter whose body is below the threshold is dropped, not written."""
+    proj = tmp_path / "book"
+    proj.mkdir()
+    source = (
+        "Chapter I\n\n" + _chapter_body("Old Thomas") + "\n\n"
+        "Chapter II\n\nToo short.\n"
+    )
+    (proj / "source.txt").write_text(source, encoding="utf-8")
+
+    result = flow.split_apply(str(proj), pattern_type="roman", min_chapter_size=500)
+
+    assert result["chapter_count"] == 1
+    assert [s["number"] for s in result["sections"]] == [1]
+
+
 # ── style guide beat ───────────────────────────────────────────────────────
 
 def test_style_guide_beat_writes_valid_style_json(project: Path):

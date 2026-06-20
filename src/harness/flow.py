@@ -73,6 +73,9 @@ def setup(
     title: str | None = None,
     author: str | None = None,
     language_code: str | None = None,
+    front_matter_titles: list[str] | None = None,
+    back_matter_titles: list[str] | None = None,
+    min_chapter_size: int | None = None,
 ) -> dict:
     """Create the project, persist config, run ingest + split (NOT chunk).
 
@@ -112,7 +115,9 @@ def setup(
         url=url or "",
         chapter_pattern=chapter_pattern,
         custom_regex=custom_regex,
-        min_chapter_size=100,
+        min_chapter_size=min_chapter_size if min_chapter_size is not None else 100,
+        front_matter_titles=front_matter_titles or None,
+        back_matter_titles=back_matter_titles or None,
     )
     with _quiet_stdout():
         pstate = load_pipeline_state(project_dir)
@@ -128,8 +133,170 @@ def setup(
         "chapters": [c.stem for c in chapters],
         "chapter_count": len(chapters),
         "source_words": pstate.get("source_words"),
+        # Heading-derived hints from ingest (null on the no-URL path, where there
+        # is no HTML to read headings from). Relay these so the agent can spot a
+        # wrong pattern or stray front/back matter and refine via split-preview.
+        "suggested_pattern": pstate.get("suggested_pattern"),
+        "chapter_report": pstate.get("chapter_report"),
         "chunks_dir_exists": (project_dir / "chunks").exists(),  # expected False
         "next": "style-guide prepare-questions",
+    }
+
+
+# ── split (review beat) ─────────────────────────────────────────────────────
+
+def _read_source(project_dir: Path) -> str:
+    source_path = project_dir / "source.txt"
+    if not source_path.exists():
+        raise FileNotFoundError(f"source.txt not found in {project_dir}")
+    return source_path.read_text(encoding="utf-8")
+
+
+def _detect_sections(
+    book_text: str,
+    *,
+    pattern_type: str,
+    custom_regex: str | None,
+    min_chapter_size: int | None,
+    front_matter_titles: list[str] | None,
+    back_matter_titles: list[str] | None,
+    auto_detect_front_matter: bool,
+    auto_detect_back_matter: bool,
+):
+    """Run the shared splitter with the harness's defaults filled in."""
+    from src.book_splitter import split_book_into_chapters
+
+    return split_book_into_chapters(
+        book_text=book_text,
+        pattern_type=pattern_type or "roman",
+        custom_regex=custom_regex,
+        min_chapter_size=min_chapter_size if min_chapter_size is not None else 100,
+        front_matter_titles=front_matter_titles or None,
+        back_matter_titles=back_matter_titles or None,
+        auto_detect_front_matter=auto_detect_front_matter,
+        auto_detect_back_matter=auto_detect_back_matter,
+    )
+
+
+def _section_display_name(ch) -> str:
+    """Mirror the GUI's label logic so chapters and matter read sensibly."""
+    if ch.kind == "chapter":
+        return ch.chapter_title or f"Chapter {ch.number or ch.position_index}"
+    return ch.label or ch.chapter_title or ch.kind
+
+
+def _kind_counts(chapters) -> dict:
+    counts = {"front_matter": 0, "chapter": 0, "back_matter": 0}
+    for ch in chapters:
+        counts[ch.kind] = counts.get(ch.kind, 0) + 1
+    return counts
+
+
+def split_preview(
+    project: str,
+    *,
+    pattern_type: str = "roman",
+    custom_regex: str | None = None,
+    min_chapter_size: int | None = None,
+    front_matter_titles: list[str] | None = None,
+    back_matter_titles: list[str] | None = None,
+    auto_detect_front_matter: bool = True,
+    auto_detect_back_matter: bool = True,
+) -> dict:
+    """Dry-run a chapter split and return the detected sections — writes NO files.
+
+    Mirrors the web GUI's ``/split/preview`` so the agent can see how the chosen
+    pattern and any declared front/back-matter titles resolve (each section comes
+    back tagged ``front_matter`` / ``chapter`` / ``back_matter``) before
+    committing the split with :func:`split_apply`.
+    """
+    project_dir = state.resolve_project_dir(project, must_exist=True)
+    book_text = _read_source(project_dir)
+    with _quiet_stdout():
+        chapters = _detect_sections(
+            book_text,
+            pattern_type=pattern_type,
+            custom_regex=custom_regex,
+            min_chapter_size=min_chapter_size,
+            front_matter_titles=front_matter_titles,
+            back_matter_titles=back_matter_titles,
+            auto_detect_front_matter=auto_detect_front_matter,
+            auto_detect_back_matter=auto_detect_back_matter,
+        )
+    sections = [
+        {
+            "name": _section_display_name(ch),
+            "kind": ch.kind,
+            "label": ch.label,
+            "number": ch.number,
+            "words": len(ch.content.split()),
+            "preview": ch.content[:200],
+        }
+        for ch in chapters
+    ]
+    return {
+        "project_dir": str(project_dir),
+        "section_count": len(sections),
+        "counts": _kind_counts(chapters),
+        "sections": sections,
+        "files_written": False,
+    }
+
+
+def split_apply(
+    project: str,
+    *,
+    pattern_type: str = "roman",
+    custom_regex: str | None = None,
+    min_chapter_size: int | None = None,
+    front_matter_titles: list[str] | None = None,
+    back_matter_titles: list[str] | None = None,
+    auto_detect_front_matter: bool = True,
+    auto_detect_back_matter: bool = True,
+) -> dict:
+    """Commit a chapter split: (re)write ``chapters/`` from ``source.txt``.
+
+    Mirrors the web GUI's ``/split``. Clears stale ``chapter_*.txt`` first so a
+    smaller re-split never leaves orphaned files behind (``save_chapters_to_files``
+    writes by ``position_index`` and would otherwise leave higher-numbered files).
+    """
+    from src.book_splitter import save_chapters_to_files
+
+    project_dir = state.resolve_project_dir(project, must_exist=True)
+    book_text = _read_source(project_dir)
+    chapters_dir = project_dir / "chapters"
+    with _quiet_stdout():
+        chapters = _detect_sections(
+            book_text,
+            pattern_type=pattern_type,
+            custom_regex=custom_regex,
+            min_chapter_size=min_chapter_size,
+            front_matter_titles=front_matter_titles,
+            back_matter_titles=back_matter_titles,
+            auto_detect_front_matter=auto_detect_front_matter,
+            auto_detect_back_matter=auto_detect_back_matter,
+        )
+        if chapters_dir.exists():
+            for stale in chapters_dir.glob("chapter_*.txt"):
+                stale.unlink()
+        save_chapters_to_files(chapters, str(chapters_dir))
+
+    written = sorted(chapters_dir.glob("chapter_*.txt"))
+    return {
+        "project_dir": str(project_dir),
+        "chapter_count": len(chapters),
+        "counts": _kind_counts(chapters),
+        "chapters": [p.stem for p in written],
+        "sections": [
+            {
+                "name": _section_display_name(ch),
+                "kind": ch.kind,
+                "label": ch.label,
+                "number": ch.number,
+                "words": len(ch.content.split()),
+            }
+            for ch in chapters
+        ],
     }
 
 
