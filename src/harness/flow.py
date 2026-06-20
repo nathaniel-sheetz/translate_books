@@ -34,6 +34,14 @@ from types import SimpleNamespace
 
 from src.harness import state
 
+# Spawn modes for the subagent backend (Step 4B). The agent asks the user to pick
+# one and it is persisted to the project config:
+#   sequential — one chunk at a time, document order (max continuity).
+#   chapter    — DEFAULT: a window of N chapters runs in parallel, each completed
+#                wave-by-wave on chunk position before the next window starts.
+#   all        — every chunk in bounded batches, no cross-chunk ordering (fastest).
+_PARALLELISM_MODES = ("sequential", "chapter", "all")
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -555,25 +563,73 @@ def translate_prepare(
     *,
     chapters: str | None = None,
     worker_model: str | None = None,
+    parallelism: str | None = None,
+    window: int | None = None,
 ) -> dict:
     """Render per-chunk prompts + a manifest for the subagent backend (no spend).
 
     For every UNTRANSLATED chunk in the requested chapters (``--chapters`` like
     ``1-2`` / ``3,7``; all chapters when omitted), render the same prompt the API
     path sends and write it to ``.harness/translate/<id>.prompt.txt``; assign a
-    ``draft_path`` the worker writes its prose to. ``previous_chapter_context`` is
-    pre-computed as the tail of the preceding chunk's source (document order),
-    matching ``stage_translate``'s running context so workers keep continuity.
+    ``draft_path`` the worker writes its prose to.
+
+    ``previous_chapter_context`` carries continuity from the preceding chunk
+    (document order). When that preceding chunk is already **committed**, the
+    context now includes BOTH its source tail and its translation (the same
+    ``extract_previous_chapter_context`` block the web reader uses), so a chunk
+    translated *after* its predecessor sees the predecessor's Spanish. That is
+    why the sequential / chapter-parallel spawn modes re-run ``translate-prepare``
+    after each ``translate-commit``: a just-finished translation then flows into
+    the next chunk's prompt. When the predecessor is not yet translated (e.g. the
+    all-parallel mode, or two chunks prepared in one pass) the context degrades
+    to source-only — never blocking.
+
+    ``parallelism`` (``sequential`` | ``chapter`` | ``all``) and ``window`` are the
+    user's spawn-mode choice; when passed they are persisted to the project config
+    so the later "translate the rest" batch reuses them, and they are echoed back
+    under ``spawn_plan`` so the agent can confirm "same behavior as before".
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
     cfg = state.load_config(project_dir)
-    worker_model = worker_model or cfg.get("worker_model") or "sonnet"
+
+    # Persist the spawn knobs the agent passes (the "save that response" beat).
+    persist: dict = {}
+    if worker_model is not None:
+        persist["worker_model"] = worker_model
+    if parallelism is not None:
+        if parallelism not in _PARALLELISM_MODES:
+            return {
+                "error": f"invalid parallelism {parallelism!r}; "
+                         f"use one of {sorted(_PARALLELISM_MODES)}",
+                "manifest": [],
+            }
+        persist["parallelism"] = parallelism
+    if window is not None:
+        try:
+            window_int = int(window)
+        except (TypeError, ValueError):
+            return {"error": f"invalid window {window!r}; must be a positive integer",
+                    "manifest": []}
+        if window_int < 1:
+            return {"error": f"invalid window {window!r}; must be a positive integer",
+                    "manifest": []}
+        persist["parallel_window"] = window_int
+    if persist:
+        cfg.update(persist)
+        state.save_config(project_dir, cfg)
+
+    worker_model = cfg.get("worker_model") or "sonnet"
+    spawn_plan = {
+        "parallelism": cfg.get("parallelism") or "chapter",
+        "window": int(cfg.get("parallel_window") or 8),
+    }
 
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
     from scripts.translate_book import discover_chapters, parse_chapter_range
     from src.api_translator import build_translation_prompt
+    from src.translator import extract_previous_chapter_context
     from src.utils.file_io import load_chunk, load_glossary, load_style_guide
 
     chunks_dir = project_dir / "chunks"
@@ -611,19 +667,29 @@ def translate_prepare(
 
     entries: list[dict] = []
     total_words = 0
-    previous_context = ""
+    # Track the preceding chunk's source AND translation (document order) so an
+    # untranslated chunk whose predecessor is already committed gets EN+ES context.
+    prev_source: str | None = None
+    prev_translated: str | None = None
     for chapter_id in sorted(discovered):
         for cp in discovered[chapter_id]:
             chunk = load_chunk(cp)
-            # Always update context so untranslated chunks get the real preceding tail,
-            # even when some earlier chunks in the same batch are already translated.
-            paragraphs = chunk.source_text.strip().split("\n\n")
-            chunk_tail = (
-                "\n\n".join(paragraphs[-2:]) if len(paragraphs) >= 2 else chunk.source_text.strip()
-            )
             if chunk.has_translation:
-                previous_context = chunk_tail
+                # Already committed: it is the continuity context for the next
+                # untranslated chunk — carry both its source and its Spanish.
+                prev_source = chunk.source_text
+                prev_translated = chunk.translated_text
                 continue
+            prev_context = (
+                extract_previous_chapter_context(
+                    prev_source,
+                    previous_translated_text=prev_translated,
+                    context_language="both",
+                    source_language="English",
+                    target_language=target_lang,
+                )
+                if prev_source else ""
+            )
             prompt = build_translation_prompt(
                 chunk,
                 glossary=glossary,
@@ -631,7 +697,7 @@ def translate_prepare(
                 project_name=title,
                 source_language="English",
                 target_language=target_lang,
-                previous_chapter_context=previous_context,
+                previous_chapter_context=prev_context,
             )
             prompt_path = translate_dir / f"{chunk.id}.prompt.txt"
             draft_path = translate_dir / f"{chunk.id}.draft.txt"
@@ -646,7 +712,11 @@ def translate_prepare(
                 "draft_path": str(draft_path),
                 "source_word_count": chunk.word_count,
             })
-            previous_context = chunk_tail
+            # This untranslated chunk becomes the next chunk's predecessor; only
+            # its source exists yet, so the next prompt gets source-only context
+            # until this chunk is committed and prepare re-runs.
+            prev_source = chunk.source_text
+            prev_translated = None
 
     # Rescue uncommitted-but-drafted entries from a prior prepare run so they are
     # not silently orphaned when prepare is called again before translate-commit.
@@ -675,7 +745,12 @@ def translate_prepare(
         total_words += sum(e.get("source_word_count", 0) for e in rescued)
         entries = rescued + entries
 
-    manifest_doc = {"worker_model": worker_model, "chapters": chapters or "all", "entries": entries}
+    manifest_doc = {
+        "worker_model": worker_model,
+        "chapters": chapters or "all",
+        "spawn_plan": spawn_plan,
+        "entries": entries,
+    }
     (translate_dir / "manifest.json").write_text(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -684,10 +759,13 @@ def translate_prepare(
         "manifest": entries,
         "manifest_path": str(translate_dir / "manifest.json"),
         "worker_model": worker_model,
+        "spawn_plan": spawn_plan,
         "usage_summary": {
             "chunks": len(entries),
             "source_words": total_words,
             "worker_model": worker_model,
+            "parallelism": spawn_plan["parallelism"],
+            "window": spawn_plan["window"],
         },
         "rescued_prior_drafts": len(rescued),
         "chapters": chapters or "all",
@@ -912,3 +990,112 @@ def epub(project: str, *, title: str | None = None, author: str | None = None, l
         "--author", author,
         "--language", language,
     ])
+
+
+def align(
+    project: str,
+    *,
+    chapters: str | None = None,
+    source_lang_code: str | None = None,
+    target_lang_code: str | None = None,
+    reader_host: str = "localhost",
+    reader_port: int = 5000,
+) -> dict:
+    """Compute sentence alignments for fully-translated chapters (reader mode).
+
+    Wraps ``align_chapter_chunks`` per chapter so a freshly-translated set becomes
+    readable in the web reader with zero manual steps — the per-set finisher the
+    skill runs after each ``translate-commit`` batch. ``chapters`` (e.g. ``1-2`` /
+    ``3,7``; all when omitted) limits the work; a chapter that is not *fully*
+    translated is skipped (so running over the whole book only aligns what is
+    ready). Returns the aligned / skipped chapter lists plus a reader link to the
+    first newly-aligned chapter.
+    """
+    project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return {"error": "no chunks yet — translate first", "aligned": [], "skipped": []}
+
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
+    from scripts.translate_book import discover_chapters, parse_chapter_range
+    from src.sentence_aligner import align_chapter_chunks
+    from src.utils.file_io import load_chunk
+
+    source_lang_code = source_lang_code or "en"
+    target_lang_code = target_lang_code or cfg.get("language_code") or "es"
+
+    all_discovered = discover_chapters(chunks_dir)
+    discovered = all_discovered
+    if chapters:
+        try:
+            requested = parse_chapter_range(chapters)
+        except (ValueError, TypeError) as exc:
+            return {"error": f"invalid chapters value {chapters!r}: {exc}",
+                    "aligned": [], "skipped": []}
+        discovered = {k: v for k, v in all_discovered.items() if k in requested}
+        if not discovered:
+            return {
+                "aligned": [],
+                "skipped": [],
+                "chapters": chapters,
+                "available_chapters": sorted(all_discovered.keys()),
+                "note": f"no matching chapters for chapters {chapters}",
+            }
+
+    align_dir = project_dir / "alignments"
+    align_dir.mkdir(exist_ok=True)
+    slug = project_dir.name
+
+    aligned: list[dict] = []
+    skipped: list[dict] = []
+    # Surface a per-chapter aligner failure (e.g. embedding model unavailable)
+    # without crashing the batch — keep the clean-JSON-on-stdout contract.
+    align_error: str | None = None
+    # The aligner loads an embedding model and is chatty; keep stdout clean JSON.
+    with _quiet_stdout():
+        for chapter_id in sorted(discovered):
+            chunk_paths = discovered[chapter_id]
+            chunks = [load_chunk(cp) for cp in chunk_paths]
+            if not all(c.has_translation for c in chunks):
+                skipped.append({"chapter_id": chapter_id, "reason": "not fully translated"})
+                continue
+            try:
+                result = align_chapter_chunks(
+                    chunk_paths=[str(p) for p in chunk_paths],
+                    project_id=slug,
+                    chapter_id=chapter_id,
+                    source_lang=source_lang_code,
+                    target_lang=target_lang_code,
+                    output_path=str(align_dir / f"{chapter_id}.json"),
+                )
+            except Exception as exc:  # noqa: BLE001 - report, don't crash the batch
+                align_error = f"align failed at {chapter_id}: {exc}"
+                skipped.append({"chapter_id": chapter_id, "reason": f"align error: {exc}"})
+                break
+            aligned.append({
+                "chapter_id": chapter_id,
+                "es_count": result.get("es_count"),
+                "high_confidence_pct": result.get("high_confidence_pct"),
+            })
+
+    reader_base = f"http://{reader_host}:{reader_port}/read/{slug}"
+    first = aligned[0]["chapter_id"] if aligned else None
+    out = {
+        "aligned": aligned,
+        "skipped": skipped,
+        "alignments_dir": str(align_dir),
+        "reader_base": reader_base,
+        "reader_first": f"{reader_base}/{first}" if first else None,
+        "reader_links": [f"{reader_base}/{a['chapter_id']}" for a in aligned],
+        "instructions": (
+            f"Aligned {len(aligned)} chapter(s). Ensure the reader is running "
+            f"(`python web_ui/app.py`), then open reader_first."
+            if aligned else
+            "No chapters were aligned — translate a chapter set fully first."
+        ),
+    }
+    if align_error:
+        out["error"] = align_error
+    return out

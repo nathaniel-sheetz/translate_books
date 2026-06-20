@@ -151,6 +151,11 @@ def _build_parser() -> argparse.ArgumentParser:
     add_chapters(tpp)
     tpp.add_argument("--worker-model", dest="worker_model", default=None,
                      help="Model tier to pin workers to (default: sonnet)")
+    tpp.add_argument("--parallelism", default=None,
+                     choices=["sequential", "chapter", "all"],
+                     help="Spawn mode (persisted): sequential | chapter (default) | all")
+    tpp.add_argument("--window", type=int, default=None,
+                     help="Chapter-parallel window width X (default 8); persisted")
 
     tcp = sub.add_parser("translate-commit",
                          help="Validate worker drafts and stamp the chunks (idempotent)")
@@ -162,6 +167,20 @@ def _build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--title", default=None)
     ep.add_argument("--author", default=None)
     ep.add_argument("--language", default=None)
+
+    # align (reader mode) ---------------------------------------------------
+    al = sub.add_parser("align",
+                        help="Align translated chapters for the reader; print a reader link")
+    add_project(al)
+    add_chapters(al)
+    al.add_argument("--source-lang-code", dest="source_lang_code", default=None,
+                    help="Source language code for alignment (default: en)")
+    al.add_argument("--target-lang-code", dest="target_lang_code", default=None,
+                    help="Target language code (default: config language_code or es)")
+    al.add_argument("--reader-host", dest="reader_host", default="localhost",
+                    help="Host for the printed reader link (default: localhost)")
+    al.add_argument("--reader-port", dest="reader_port", type=int, default=5000,
+                    help="Port for the printed reader link (default: 5000)")
 
     return parser
 
@@ -217,11 +236,17 @@ def _dispatch(args: argparse.Namespace):
                               provider=args.provider, chapters=args.chapters)
     if cmd == "translate-prepare":
         return flow.translate_prepare(args.project, chapters=args.chapters,
-                                      worker_model=args.worker_model)
+                                      worker_model=args.worker_model,
+                                      parallelism=args.parallelism, window=args.window)
     if cmd == "translate-commit":
         return flow.translate_commit(args.project, worker_model=args.worker_model)
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
+    if cmd == "align":
+        return flow.align(args.project, chapters=args.chapters,
+                          source_lang_code=args.source_lang_code,
+                          target_lang_code=args.target_lang_code,
+                          reader_host=args.reader_host, reader_port=args.reader_port)
     raise SystemExit(f"unknown command: {cmd}")
 
 

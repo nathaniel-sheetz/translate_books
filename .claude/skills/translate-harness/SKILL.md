@@ -298,54 +298,108 @@ Two translation backends, same downstream pipeline. Pick one with the user:
 - **API backend (Step 4):** fast, batchable, but needs an `ANTHROPIC_API_KEY` and spends metered dollars.
 - **Subagent backend (this step):** no API key — translation runs as **spawned worker subagents on
   the running subscription**, so a stranger can translate token-free. You (the orchestrator, e.g.
-  Opus) stay the smart driver while workers run on a **cheaper pinned model** (default `sonnet`). v1
-  is **sequential** (one worker at a time) and best for short texts or a chapter batch.
+  Opus) stay the smart driver while workers run on a **cheaper pinned model** (default `sonnet`).
 
-**Chapter-at-a-time:** pass `--chapters 1-2` (or `3,7`) to translate just those chapters; read them in
-the reader, then come back and translate `3-4`. Re-running only fills chunks that still need a
-translation, so resume is free. Works on Step 4 too.
+The translate phase is a **review-first, set-by-set** flow: translate a small batch, auto-align it so
+it is instantly readable, then translate the rest with the same spawn settings. Do the beats in order
+— do **not** improvise parallelism; the spawn mode is the user's call (4B-0b).
 
-**4B-a. Prepare (no spend).** Renders one prompt file per untranslated chunk + a manifest:
+**4B-0. STOP — propose a review batch first.** Before translating anything, suggest translating
+**10–20% of the book's chapters** as a concrete range (e.g. "chapters 1–6 of 40") so the user can read
+a sample in the reader and catch glossary/voice problems before the whole book is spent. They may
+accept it, give a different range, or choose **all chapters in one go**. END your turn and wait.
+Record the choice as `<set>` (a `--chapters` spec like `1-6`, or "all" = omit `--chapters`).
+
+**4B-0b. STOP — spawn-mode gate (ask once, then save).** *Immediately after* the batch is chosen and
+**before any translation**, ask via AskUserQuestion how workers should be spawned. Three options;
+**bias toward #2 (the default)**:
+
+  1. **Sequential** — one chunk at a time, in order. Slowest, but every chunk after the first sees the
+     previous chunk's **English + Spanish** (max continuity). Pick if continuity beats speed.
+  2. **Chapter-parallel (recommended, default)** — run a **window of X chapters (default 8)** at once
+     and **finish that window before moving on**. Within a window, spawn **wave by wave on chunk
+     position**: first the opening chunk of every chapter in parallel, then each chapter's second
+     chunk, etc. First chunks across chapters run concurrently; later chunks within a chapter wait for
+     that chapter's previous chunk, so within-chapter EN+Spanish continuity is preserved.
+  3. **All-parallel** — every chunk at once (in bounded batches). Fastest; **no** cross-chunk Spanish
+     context (nothing is committed when prompts render). Pick only when speed clearly wins.
+
+END your turn and wait. When answered, **save it** by passing it on the next `translate-prepare`
+(`--parallelism sequential|chapter|all`, plus `--window <X>` for #2) — it is persisted to the project
+config so the "translate the rest" batch reuses it without re-asking. Confirm X for mode 2 (default 8).
+
+**4B-a. Prepare (no spend).** Render one prompt per untranslated chunk in the set + a manifest, saving
+the spawn mode:
 ```bash
-python scripts/harness.py translate-prepare --project projects/<slug> [--chapters 1-2] [--worker-model sonnet]
+python scripts/harness.py translate-prepare --project projects/<slug> --chapters <set> \
+  --parallelism <mode> [--window <X>] [--worker-model sonnet]
 ```
-This prints a `manifest` (each entry has `chunk_id`, `prompt_path`, `draft_path`), a `usage_summary`
-(`chunks`, `source_words`, `worker_model`), and the `worker_model`. It does **not** call an API.
+This prints a `manifest` (each entry: `chunk_id`, `chapter_id`, `prompt_path`, `draft_path`), a
+`usage_summary`, the `worker_model`, and the saved `spawn_plan` (`parallelism` + `window`). It does
+**not** call an API. (Omit `--chapters` for the whole book.) Re-running only fills chunks that still
+need a translation, so resume is free.
 
-**4B-b. STOP — usage gate. END THE TURN.** This is the subagent analog of the cost gate. There is no
-dollar cost, but spawning N workers consumes real subscription/rate usage. Show the `usage_summary`
-("N workers on `<model>`"), confirm the worker model, and ask via AskUserQuestion: proceed / abort.
-**End your turn and wait.** Do not spawn workers in the same turn that produced the manifest.
+**4B-b. STOP — usage gate. END THE TURN.** The subagent analog of the cost gate: no dollars, but
+spawning N workers consumes real subscription/rate usage. Show the `usage_summary` ("N workers on
+`<model>`, mode `<parallelism>`"), confirm the worker model, and ask via AskUserQuestion: proceed /
+abort. **End your turn and wait.** Do not spawn workers in the same turn that produced the manifest.
 
-**4B-c. Spawn workers (sequential), then commit.** Only after the user approves in a later turn, loop
-the manifest **one entry at a time**. For each entry, spawn a worker with the **Task** tool:
-- `subagent_type`: `translator` (defined in `.claude/agents/translator.md`)
-- `model`: the approved `worker_model` (e.g. `sonnet` / `haiku`) — this is how the worker is pinned
-  cheaper than you, the orchestrator.
-- prompt: "Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to
-  `<draft_path>`. Nothing else." (Pass the entry's real `prompt_path` and `draft_path`.)
-
-The worker writes its prose to `draft_path` — **do not** have it return the translation to you (that
-floods your context; the whole point is the worker writes the file). Once all workers in the batch
-have written their drafts:
+**4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
+Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
+`model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt:
+*"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Nothing
+else."* The worker writes its file — **do not** have it return the prose to you (that floods your
+context). After a wave's drafts are written, commit:
 ```bash
 python scripts/harness.py translate-commit --project projects/<slug>
 ```
-This guards each draft (length / completeness / image-token filename parity / echo), writes a
-provenance log, stamps the chunk, and prints `committed` / `failed` / `missing` / `skipped`. It is
-idempotent — already-translated chunks are skipped.
+which guards each draft (length / completeness / image-token parity / echo), writes provenance, stamps
+the chunks, and prints `committed` / `failed` / `missing` / `skipped` (idempotent — done chunks are
+skipped). Spawn according to the saved mode:
+
+- **Sequential:** take the single lowest-position still-untranslated chunk, spawn **one** worker,
+  `translate-commit`, then **re-run `translate-prepare`** (so the just-committed Spanish is baked into
+  the next chunk's prompt) and repeat until the set is done.
+- **Chapter-parallel (default):** work in windows of **X** chapters. For the current window:
+  1. From the manifest, group entries by `chapter_id`; the **next wave** is the lowest-position
+     still-untranslated chunk of each chapter in the window.
+  2. Spawn those workers **in parallel** (multiple `Task` calls in one message), then `translate-commit`.
+  3. **Re-run `translate-prepare --chapters <window>`** so each committed chunk's translation flows
+     into its chapter's next chunk, and repeat from step 1 until every chunk in the window is committed.
+  4. Only then advance to the next window of X chapters. Complete chapters, **not** "all first chunks
+     first" — each window is fully finished before the next starts.
+- **All-parallel:** spawn workers for **all** manifest entries in bounded batches of ~X (rate limits),
+  `translate-commit` after each batch. No re-prepare (this mode has no cross-chunk Spanish context).
 
 **4B-d. Re-spawn the misses.** For any `failed` (the report names the problem per chunk) or `missing`
 (no draft written), re-spawn a worker for just those `chunk_id`s — write fresh prose to the same
 `draft_path` — and re-run `translate-commit`. Cap re-spawns at ~3 per chunk, then surface the chunk
 for a manual edit-or-skip decision rather than looping.
 
+**4B-e. Align the set + give a reader link.** Once the set's chunks are all committed, make it readable
+with no manual steps:
+```bash
+python scripts/harness.py align --project projects/<slug> --chapters <set>
+```
+This writes `alignments/<chapter>.json` for each fully-translated chapter and prints `reader_first` (a
+link to the first chapter of the set). Ensure the reader is up — if nothing answers on port 5000,
+start it in the background (`python web_ui/app.py`, serving `http://localhost:5000`). Then give the
+user the `reader_first` link (e.g. `http://localhost:5000/read/<slug>/chapter_01`) so they can read the
+new chapters immediately.
+
+**4B-f. Translate the rest (if a subset was done).** If you only did a review batch, prompt the user to
+translate the **remaining** chapters now, noting the **same spawn mode/window as before** will be used
+(it is saved — you can omit `--parallelism`/`--window`). On yes, repeat 4B-a → 4B-e for the remaining
+`--chapters` range. When the whole book is translated, continue to Step 5 (combine + EPUB).
+
 Then continue to Step 5 (combine + EPUB) exactly as the API path does.
 
 ## Step 5 — Combine + EPUB (translated chapters only)
 
-The `translate` run chains through combine, epub, and align, building the EPUB from translated
-chunks only and reporting exactly which chapters shipped. To (re)build explicitly:
+The API `translate` run chains through combine, epub, and align, building the EPUB from translated
+chunks only and reporting exactly which chapters shipped. On the **subagent** path you already aligned
+each set in Step 4B-e (the reader reads `alignments/`, not the EPUB), so here you only (re)build the
+EPUB — the downloadable deliverable — from whatever chapters are translated so far:
 ```bash
 python scripts/harness.py epub --project projects/<slug>
 # --title / --author / --language default to what you set at setup; pass them to override.
@@ -366,8 +420,9 @@ loop is gone — the user drafted nothing in an external chat.
 - No `TranslationBackend` Protocol. Both backends share one prompt builder
   (`build_translation_prompt`) and one stamp (`apply_translation`), so the seam is two functions,
   not a class hierarchy. The subagent backend (Phase B) is the `translate-prepare` /
-  `translate-commit` path (Step 4B). Still deferred: **parallel** worker fan-out (v1 is sequential),
-  the **judge** backend, and the portable `claude -p --model` worker (Approach C). See TODOS.md.
+  `translate-commit` path (Step 4B), which now supports user-chosen spawn modes (sequential /
+  chapter-parallel / all-parallel). Still deferred: the **judge** backend and the portable
+  `claude -p --model` worker (Approach C). See TODOS.md.
 - No long-book resume beyond the pipeline's existing chunk-level idempotency (`stage_translate`
   skips chunks that already have a translation).
 - No prompt caching (tracked separately in TODOS.md).
