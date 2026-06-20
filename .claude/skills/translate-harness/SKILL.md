@@ -121,10 +121,33 @@ python scripts/harness.py setup --project projects/<slug> \
 ```
 
 Pick the chapter pattern that matches the book: `--chapter-pattern roman` (Chapter I, II …),
-`numeric` (Chapter 1, 2 …), or `custom` (with `--custom-regex`). If split reports "No chapters
-detected," re-run with a different pattern. Confirm the printed `chapter_count` looks right and
-`chunks_dir_exists` is `false`. (The lang/locale/model defaults are Spanish/mx/sonnet — surface
-them to the user rather than assuming silently.)
+`numeric` (Chapter 1, 2 …), or `custom` (with `--custom-regex`). For a Gutenberg `--url`, the
+returned `suggested_pattern` and `chapter_report` are read from the book's HTML headings —
+relay them and prefer the suggestion when it differs from your guess. Confirm the printed
+`chapter_count` looks right and `chunks_dir_exists` is `false`. (The lang/locale/model defaults
+are Spanish/mx/sonnet — surface them to the user rather than assuming silently.)
+
+**Refine the split if it looks wrong** — the `setup` split misfires, reports "No chapters
+detected," or Gutenberg front/back matter (title page, copyright, the CONTENTS listing, a
+teacher's note) leaked in as spurious chapters. Don't hand-edit `source.txt`; use the review
+beat, which mirrors the web GUI's Stage 2:
+
+```bash
+# Dry-run: prints each section tagged front_matter / chapter / back_matter; writes nothing.
+python scripts/harness.py split-preview --project projects/<slug> \
+  --chapter-pattern custom --custom-regex '(?<=\n---\n\n)[A-Z][^\n]*' \
+  --min-chapter-size 500 \
+  --front-matter-title "Contents" --back-matter-title "A Word to the Teacher"
+
+# Happy with the preview? Commit it (rewrites chapters/, clearing any stale files).
+python scripts/harness.py split --project projects/<slug>  # + the same split flags
+```
+
+`--front-matter-title` / `--back-matter-title` are repeatable and force-tag a heading so it
+isn't mis-numbered as a chapter; built-in keyword auto-detect (preface, dedication, epilogue …)
+stays on unless you pass `--no-auto-front-matter` / `--no-auto-back-matter`. Raising
+`--min-chapter-size` (~500) drops short stray front-matter lines a loose pattern would otherwise
+capture. The same three controls also work directly on `setup` for a one-shot run.
 
 ## Step 1 — STYLE GUIDE beat (two question gates, then draft + approval)
 
