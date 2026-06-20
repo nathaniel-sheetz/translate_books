@@ -3070,15 +3070,13 @@ def project_split(project_id):
 def _derive_chunk_bounds(target: int, min_ratio: float, max_ratio: float) -> tuple:
     """Derive (min_chunk_size, max_chunk_size) from a target and ratios.
 
-    Clamped to the ChunkingConfig pydantic floors (min ≥ 50, max ≥ 100,
-    max > min). With the default ratios (0.25 / 1.5) and target 2000 this
-    reproduces the historical 500 / 3000 bounds exactly.
+    Thin wrapper over :func:`src.models.derive_chunk_bounds` (the single source
+    of truth shared with ``ChunkingConfig.from_target`` and the CLI chunk stage)
+    so the two paths can never drift.
     """
-    min_chunk = max(50, round(target * min_ratio))
-    max_chunk = max(100, round(target * max_ratio))
-    if max_chunk <= min_chunk:
-        max_chunk = min_chunk + 1
-    return min_chunk, max_chunk
+    from src.models import derive_chunk_bounds
+
+    return derive_chunk_bounds(target, min_ratio, max_ratio)
 
 
 def _resolve_chunking(default_cfg: dict, override) -> tuple:
@@ -3103,23 +3101,12 @@ def _resolve_chunking(default_cfg: dict, override) -> tuple:
         target = default_cfg.get("target_size", 2000)
     target = int(target)
 
-    import math
-    min_ratio = float(default_cfg.get("min_ratio", 0.25))
-    max_ratio = float(default_cfg.get("max_ratio", 1.5))
-    if not (math.isfinite(min_ratio) and math.isfinite(max_ratio)):
-        raise ValueError("min_ratio and max_ratio must be finite numbers")
-    if max_ratio <= min_ratio:
-        raise ValueError(
-            f"max_ratio ({max_ratio}) must be greater than min_ratio ({min_ratio})"
-        )
-    min_chunk, max_chunk = _derive_chunk_bounds(target, min_ratio, max_ratio)
-
-    cfg = ChunkingConfig(
-        target_size=target,
-        min_chunk_size=min_chunk,
-        max_chunk_size=max_chunk,
-        min_ratio=min_ratio,
-        max_ratio=max_ratio,
+    # from_target validates the ratios and derives the bounds (single source of
+    # truth shared with the CLI chunk stage).
+    cfg = ChunkingConfig.from_target(
+        target,
+        min_ratio=float(default_cfg.get("min_ratio", 0.25)),
+        max_ratio=float(default_cfg.get("max_ratio", 1.5)),
         overlap_paragraphs=int(default_cfg.get("overlap_paragraphs", 0) or 0),
         min_overlap_words=int(default_cfg.get("min_overlap_words", 0) or 0),
     )

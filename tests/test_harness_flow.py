@@ -162,6 +162,55 @@ def test_difficulty_returns_suggested_size(project: Path):
     assert len(out["chapters"]) == 2
 
 
+# ── per-chapter chunk sizing ────────────────────────────────────────────────
+
+def test_chunk_per_chapter_without_difficulty_raises(project: Path, monkeypatch):
+    """--per-chapter needs a prior difficulty run; fail loudly before any spend."""
+    called = []
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: called.append(cmd))
+    with pytest.raises(FileNotFoundError) as exc:
+        flow.chunk(str(project), size=1800, per_chapter=True)
+    assert "difficulty" in str(exc.value)
+    assert not called, "_run_script must not be reached before the guard raises"
+    assert not (project / ".harness" / "chunk_sizes.json").exists()
+
+
+def test_chunk_per_chapter_writes_sizes_map(project: Path, monkeypatch):
+    """After difficulty, --per-chapter writes the per-chapter map and passes it down."""
+    flow.difficulty(str(project))  # writes difficulty.json (per-chapter suggestions)
+
+    captured: dict = {}
+
+    def _fake_run(cmd):
+        captured["cmd"] = cmd
+        return 0
+
+    monkeypatch.setattr(flow, "_run_script", _fake_run)
+
+    rc = flow.chunk(str(project), size=1800, per_chapter=True)
+    assert rc == 0
+
+    sizes_path = project / ".harness" / "chunk_sizes.json"
+    assert sizes_path.exists()
+    sizes = json.loads(sizes_path.read_text(encoding="utf-8"))
+    assert set(sizes) == {"chapter_01", "chapter_02"}
+    assert all(isinstance(v, int) and v > 0 for v in sizes.values())
+
+    cmd = captured["cmd"]
+    assert "--chunk-sizes" in cmd and str(sizes_path) in cmd
+    assert "--chunk-size" in cmd and "1800" in cmd  # fallback still passed
+
+
+def test_chunk_without_per_chapter_omits_sizes_map(project: Path, monkeypatch):
+    """The uniform path passes no --chunk-sizes and writes no map."""
+    captured: dict = {}
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: captured.update(cmd=cmd) or 0)
+
+    flow.chunk(str(project), size=1800)
+    assert "--chunk-sizes" not in captured["cmd"]
+    assert not (project / ".harness" / "chunk_sizes.json").exists()
+
+
 # ── cost gate (the one paid step) ──────────────────────────────────────────
 
 def test_translate_fails_closed_without_yes(project: Path):

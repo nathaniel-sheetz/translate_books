@@ -196,16 +196,29 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
     if not chapter_files:
         raise FileNotFoundError(f"No chapter files in {chapters_dir}")
 
-    config = ChunkingConfig(
-        target_size=getattr(args, "chunk_size", 2000) or 2000,
-        overlap_paragraphs=getattr(args, "overlap_paragraphs", 1) or 1,
-        min_overlap_words=getattr(args, "min_overlap_words", 50) or 50,
-    )
+    default_target = getattr(args, "chunk_size", 2000) or 2000
+    overlap_paragraphs = getattr(args, "overlap_paragraphs", 1) or 1
+    min_overlap_words = getattr(args, "min_overlap_words", 50) or 50
+
+    # Optional per-chapter target sizes (e.g. from difficulty scoring). Chapters
+    # absent from the map fall back to default_target. Bounds scale with each
+    # target via ChunkingConfig.from_target so the size actually bites.
+    sizes_map: dict = {}
+    sizes_path = getattr(args, "chunk_sizes", None)
+    if isinstance(sizes_path, (str, Path)) and sizes_path:
+        sizes_map = json.loads(Path(sizes_path).read_text(encoding="utf-8"))
 
     total_chunks = 0
     for chapter_file in chapter_files:
         chapter_text = chapter_file.read_text(encoding="utf-8")
         chapter_id = chapter_file.stem  # e.g., "chapter_01"
+
+        target = int(sizes_map.get(chapter_id, default_target))
+        config = ChunkingConfig.from_target(
+            target,
+            overlap_paragraphs=overlap_paragraphs,
+            min_overlap_words=min_overlap_words,
+        )
 
         chunks = chunk_chapter(chapter_text, config, chapter_id)
         for chunk in chunks:
@@ -213,7 +226,7 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
             save_chunk(chunk, output_file)
 
         total_chunks += len(chunks)
-        print(f"    {chapter_id}: {len(chunks)} chunks")
+        print(f"    {chapter_id}: {len(chunks)} chunks (target {target}w)")
 
     print(f"  Total: {total_chunks} chunks across {len(chapter_files)} chapters")
 
@@ -551,6 +564,10 @@ def main():
     # Chunking
     parser.add_argument("--chunk-size", type=int, default=2000,
                         help="Target words per chunk (default: 2000)")
+    parser.add_argument("--chunk-sizes", default=None,
+                        help="Path to a JSON map {chapter_id: target_size} for per-chapter "
+                             "chunk sizing; chapters absent from the map fall back to "
+                             "--chunk-size (default: none, uniform sizing)")
     parser.add_argument("--overlap-paragraphs", type=int, default=1,
                         help="Paragraphs of overlap between chunks (default: 1)")
     parser.add_argument("--min-overlap-words", type=int, default=50,

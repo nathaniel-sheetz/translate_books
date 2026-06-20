@@ -1007,3 +1007,48 @@ class TestRealWonderBookChapters:
                 f"Chapter {chap_num} chunk {idx} does not start on a heading: "
                 f"{first_para!r}"
             )
+
+
+class TestChunkingConfigFromTarget:
+    """ChunkingConfig.from_target derives min/max bounds from the target."""
+
+    def test_default_ratios_at_2000_reproduce_legacy_bounds(self):
+        cfg = ChunkingConfig.from_target(2000)
+        # 0.25/1.5 * 2000 == the historical 500/3000 defaults exactly.
+        assert (cfg.min_chunk_size, cfg.max_chunk_size) == (500, 3000)
+        assert cfg.target_size == 2000
+
+    def test_bounds_scale_with_target(self):
+        cfg = ChunkingConfig.from_target(1400)
+        assert (cfg.min_chunk_size, cfg.max_chunk_size) == (350, 2100)
+        cfg = ChunkingConfig.from_target(1200)
+        assert (cfg.min_chunk_size, cfg.max_chunk_size) == (300, 1800)
+
+    def test_overlap_passthrough(self):
+        cfg = ChunkingConfig.from_target(1400, overlap_paragraphs=1, min_overlap_words=50)
+        assert cfg.overlap_paragraphs == 1
+        assert cfg.min_overlap_words == 50
+
+    def test_floors_clamped_for_tiny_target(self):
+        cfg = ChunkingConfig.from_target(100)  # 0.25*100=25 -> floored to 50
+        assert cfg.min_chunk_size >= 50
+        assert cfg.max_chunk_size > cfg.min_chunk_size
+
+    def test_bad_ratios_raise(self):
+        with pytest.raises(ValueError):
+            ChunkingConfig.from_target(1400, min_ratio=1.5, max_ratio=1.0)
+        with pytest.raises(ValueError):
+            ChunkingConfig.from_target(1400, max_ratio=float("inf"))
+
+    def test_smaller_target_yields_more_chunks(self):
+        # ~1200 words across 6 paragraphs: one chunk at 2000 (max 3000),
+        # several once the target (and its derived max) shrink.
+        para = ("The travelers crossed the wide green valley before the long rains came "
+                "and rested by the river where the tall reeds bent in the steady wind. ") * 10
+        text = "\n\n".join(para.strip() for _ in range(6))
+
+        big = chunk_chapter(text, ChunkingConfig.from_target(2000), "chapter_01")
+        small = chunk_chapter(text, ChunkingConfig.from_target(400), "chapter_01")
+
+        assert len(big) == 1
+        assert len(small) > len(big)
