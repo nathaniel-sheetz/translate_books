@@ -163,11 +163,27 @@ def test_style_guide_beat_writes_valid_style_json(project: Path):
     assert prep["questions"], "expected at least the fixed questions"
     assert Path(prep["answers_path"]).parent.name == ".harness"
 
-    # Agent answers nothing controversial (empty dict is valid: unanswered Qs are skipped).
-    Path(prep["answers_path"]).write_text(json.dumps({}), encoding="utf-8")
+    # Each option is surfaced as an {id, label} pair so the agent can answer by id.
+    first_q = prep["questions"][0]
+    assert first_q["options"], "expected the question to carry options"
+    assert all({"id", "label"} <= opt.keys() for opt in first_q["options"])
+
+    # Answer the first question by its option id; leave the rest unanswered.
+    chosen = first_q["options"][0]
+    Path(prep["answers_path"]).write_text(
+        json.dumps({first_q["id"]: chosen["id"]}), encoding="utf-8"
+    )
 
     draft = flow.style_guide_prepare_draft(str(project))
     assert Path(draft["prompt_path"]).exists()
+
+    # The answer resolved to the intended option (not silently demoted to custom).
+    resolved = {r["id"]: r for r in draft["resolved_answers"]}
+    assert resolved[first_q["id"]]["source"] == "option"
+    assert resolved[first_q["id"]]["answer"] == chosen["label"]
+    # Every other question is reported unanswered.
+    assert first_q["id"] not in draft["unanswered"]
+    assert len(draft["unanswered"]) == len(prep["questions"]) - 1
 
     # Agent drafts the style-guide prose.
     Path(draft["draft_path"]).write_text("TONE: warm, plain, period-faithful Mexican Spanish.",
@@ -193,6 +209,8 @@ def test_commit_followups_merges_into_question_set(project: Path):
 
     out = flow.style_guide_commit_followups(str(project))
     assert len(out["new_questions"]) == 1
+    new_opts = out["new_questions"][0]["options"]
+    assert [o["id"] for o in new_opts] == ["em_dashes", "quotation_marks"]
     merged = json.loads((project / ".harness" / "style_questions.json").read_text(encoding="utf-8"))
     assert len(merged) == base_count + 1
 

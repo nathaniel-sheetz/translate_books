@@ -315,6 +315,21 @@ def split_apply(
 
 # ── style guide beat ───────────────────────────────────────────────────────
 
+def _options_with_ids(q: dict) -> list[dict]:
+    """Render a question's options as ``[{"id": slug, "label": label}, …]``.
+
+    The stable ``id`` lets the agent pass the user's pick straight through to
+    ``style_answers.json`` instead of bookkeeping a positional index.
+    """
+    from src.style_guide_wizard import option_ids
+
+    ids = option_ids(q)
+    return [
+        {"id": ids[i], "label": o["label"]}
+        for i, o in enumerate(q.get("options", []))
+    ]
+
+
 def style_guide_prepare_questions(project: str) -> dict:
     """Gather fixed + feature-detected questions; print them for the agent to ask."""
     project_dir = state.resolve_project_dir(project)
@@ -345,7 +360,7 @@ def style_guide_prepare_questions(project: str) -> dict:
             {
                 "id": q["id"],
                 "question": q["question"],
-                "options": [o["label"] for o in q.get("options", [])],
+                "options": _options_with_ids(q),
                 "hint": q.get("_detected_hint", ""),
             }
             for q in allq
@@ -353,8 +368,9 @@ def style_guide_prepare_questions(project: str) -> dict:
         "answers_path": str(hdir / "style_answers.json"),
         "instructions": (
             "STOP: ask the user every question and WAIT for their answers — do not answer "
-            "for them or pick defaults. Then Write {question_id: option_index_or_custom_string} "
-            "to answers_path, then run `style-guide prepare-followups`."
+            "for them or pick defaults. Then Write {question_id: option_id_or_label_or_custom_string} "
+            "to answers_path (use each option's `id` or exact `label`; a numeric index still "
+            "works; any other string is a custom answer), then run `style-guide prepare-followups`."
         ),
     }
 
@@ -401,7 +417,7 @@ def style_guide_commit_followups(project: str, *, draft: str | None = None) -> d
             {
                 "id": q["id"],
                 "question": q["question"],
-                "options": [o["label"] for o in q.get("options", [])],
+                "options": _options_with_ids(q),
             }
             for q in extra
         ],
@@ -409,7 +425,8 @@ def style_guide_commit_followups(project: str, *, draft: str | None = None) -> d
         "instructions": (
             "STOP: ask the user these follow-ups and WAIT for their answers — do not answer "
             "for them or pick defaults. Then rewrite answers_path with the FULL answer set "
-            "(prior answers + these), then run `style-guide prepare-draft`."
+            "(prior answers + these; use each option's `id` or exact `label`, or a custom string), "
+            "then run `style-guide prepare-draft`."
         ),
     }
 
@@ -420,7 +437,7 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
     hdir = state.harness_dir(project_dir)
     cfg = state.load_config(project_dir)
 
-    from src.style_guide_wizard import build_style_guide_prompt
+    from src.style_guide_wizard import build_style_guide_prompt, resolve_answer
 
     allq = json.loads(_read(hdir / "style_questions.json"))
     answers_path = Path(answers) if answers else hdir / "style_answers.json"
@@ -430,12 +447,30 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
     prompt = build_style_guide_prompt(allq, ans, source, cfg["target_language"], cfg["locale"])
     prompt_path = hdir / "style_guide_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
+
+    # Echo how each answer resolved so the agent can confirm a mistyped id wasn't
+    # silently demoted to a custom answer before the draft is generated.
+    resolved = []
+    for q in allq:
+        if q["id"] in ans:
+            label, _effect, matched = resolve_answer(q, ans[q["id"]])
+            resolved.append({
+                "id": q["id"],
+                "question": q["question"],
+                "answer": label,
+                "source": "option" if matched else "custom",
+            })
+    unanswered = [q["id"] for q in allq if q["id"] not in ans]
     return {
         "prompt_path": str(prompt_path),
         "draft_path": str(hdir / "style_guide_draft.txt"),
+        "resolved_answers": resolved,
+        "unanswered": unanswered,
         "instructions": (
-            "Read prompt_path, draft the style-guide prose to draft_path, refine it with the "
-            "user, then run `style-guide commit`."
+            "Check resolved_answers (each should read 'option' unless you meant a custom "
+            "answer; 'custom' on a question you tried to answer by id means a typo). Then read "
+            "prompt_path, draft the style-guide prose to draft_path, refine it with the user, "
+            "then run `style-guide commit`."
         ),
     }
 

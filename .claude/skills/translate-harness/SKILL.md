@@ -167,16 +167,22 @@ python scripts/harness.py style-guide prepare-questions --project projects/<slug
 ```
 This prints `detected_features`, the `questions` (the 4 **standard** fixed questions plus the
 **deterministic** feature-detected ones, each with `id`, `question`, `options`, and a `hint`),
-and an `answers_path`. Nothing here is answered yet — these are *for the user*.
+and an `answers_path`. Each option is an `{id, label}` pair — the `id` is a stable slug you pass
+straight through, so you never count positions. Nothing here is answered yet — these are
+*for the user*.
 
 **1b. STOP — G1: ask the standard + deterministic questions and WAIT.** Present **every**
 question in chat with its options and hint, then **END your turn** and wait for the user's
 answers. Do **not** answer them yourself, pick defaults, or run the next command first. (There
 are usually more than 4 — 4 fixed + N detected — so ask in chat, optionally batching via
 `AskUserQuestion` in groups of ≤ 4; don't assume one `AskUserQuestion` holds them all.) Once the
-user has answered (let them revise earlier answers), record each as a 0-based **option index**
-or a **custom string** and **Write** the dict to the printed `answers_path`:
-`{question_id: index_or_string}`. Only then continue to 1c.
+user has answered (let them revise earlier answers), record each as the chosen option's **`id`**
+(or its exact `label`) from the prepare-questions output — or a **custom string** for anything not
+among the options — and **Write** the dict to the printed `answers_path`:
+`{question_id: option_id_or_label_or_custom_string}`, e.g.
+`{"dialect": "mexican_spanish", "forms_of_address": "tú throughout; the kittens speak familiarly"}`.
+(A 0-based numeric index still works for back-compat, but the `id` is safer — no position counting.)
+Only then continue to 1c.
 
 **1c. Generate the LLM-driven follow-up questions, then STOP to ask them.** First draft them —
 you are the LLM:
@@ -191,14 +197,17 @@ python scripts/harness.py style-guide commit-followups --project projects/<slug>
 **STOP — G2: ask the printed `new_questions` and WAIT.** Present them in chat, **END your turn**,
 and wait for the user's answers (same rule — do not answer them for the user). Only after the
 user responds, **rewrite `answers_path` with the full answer set** (prior answers + the new
-ones), then continue to 1d.
+ones, same `id`/label/custom-string format), then continue to 1d.
 
 **1d. Draft the style guide (you are the LLM), refine, save.**
 ```bash
 python scripts/harness.py style-guide prepare-draft --project projects/<slug>
 ```
-Read the printed `prompt_path`, draft the style-guide prose, **Write** it to the printed
-`draft_path`, and **refine it with the user in chat** until they sign off. Then:
+This also reports `resolved_answers` (each tagged `option` or `custom`) and `unanswered` — glance
+at it to confirm every answer matched the option you intended (a `custom` tag on a question you
+answered by `id` means a typo; fix `answers_path` and re-run). Then read the printed `prompt_path`,
+draft the style-guide prose, **Write** it to the printed `draft_path`, and **refine it with the
+user in chat** until they sign off. Then:
 ```bash
 python scripts/harness.py style-guide commit --project projects/<slug>
 ```

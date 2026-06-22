@@ -68,6 +68,64 @@ def load_conditional_questions(path: Optional[Path] = None) -> list[dict]:
     return load_question_config(path)["conditional"]
 
 
+def _slug(label: str) -> str:
+    """Slugify an option label into a stable, terse id (lowercase, ``_``-joined)."""
+    s = re.sub(r"[^a-z0-9]+", "_", str(label).strip().lower())
+    return s.strip("_")[:48] or "option"
+
+
+def option_ids(question: dict) -> list[str]:
+    """Stable per-option ids for a question, aligned to ``question["options"]``.
+
+    Ids are slugs derived from each option's label (order-independent and
+    human-meaningful, unlike positional indices). Collisions within a single
+    question are disambiguated with a ``_2``, ``_3`` … suffix.
+    """
+    ids: list[str] = []
+    seen: dict[str, int] = {}
+    for opt in question.get("options", []):
+        base = _slug(opt.get("label", ""))
+        n = seen.get(base, 0) + 1
+        seen[base] = n
+        ids.append(base if n == 1 else f"{base}_{n}")
+    return ids
+
+
+def resolve_answer(question: dict, answer: int | str) -> tuple[str, str, bool]:
+    """Resolve a raw answer to ``(label, style_guide_effect, matched_option)``.
+
+    Accepts, in priority order: a 0-based ``int`` (or all-digit ``str``) index
+    into the question's options (back-compat), an option **id** (slug) or exact
+    option **label** (case/space-insensitive), or — failing all of those — free
+    text, which is returned verbatim as a custom answer with ``matched=False``.
+    """
+    options = question.get("options", [])
+
+    # int / numeric-string index — back-compat with the old positional contract.
+    idx: int | None = None
+    if isinstance(answer, bool):
+        idx = None
+    elif isinstance(answer, int):
+        idx = answer
+    elif isinstance(answer, str) and answer.strip().lstrip("-").isdigit():
+        idx = int(answer.strip())
+    if idx is not None and 0 <= idx < len(options):
+        opt = options[idx]
+        return opt["label"], opt.get("style_guide_effect", ""), True
+
+    # id / label match.
+    if isinstance(answer, str):
+        norm = answer.strip().casefold()
+        ids = option_ids(question)
+        for i, opt in enumerate(options):
+            if norm == ids[i].casefold() or norm == str(opt.get("label", "")).strip().casefold():
+                return opt["label"], opt.get("style_guide_effect", ""), True
+        return answer.strip(), "", False
+
+    # anything else (out-of-range int, etc.) — treat as custom text.
+    return str(answer), "", False
+
+
 def format_answered_questions(
     questions: list[dict],
     answers: dict[str, int | str],
@@ -77,7 +135,8 @@ def format_answered_questions(
 
     Args:
         questions: list of question dicts (fixed or LLM-generated)
-        answers: map of question id -> selected option index (int) or custom text (str)
+        answers: map of question id -> option index (int), option id/label, or
+            custom text — see ``resolve_answer``
         include_effects: if True, append style_guide_effect text after each answer label
     """
     lines = []
@@ -85,16 +144,9 @@ def format_answered_questions(
         qid = q["id"]
         if qid not in answers:
             continue
-        answer = answers[qid]
-        if isinstance(answer, int) and 0 <= answer < len(q["options"]):
-            option = q["options"][answer]
-            label = option["label"]
-            effect = option.get("style_guide_effect", "") if include_effects else ""
-        else:
-            label = str(answer)
-            effect = ""
+        label, effect, _matched = resolve_answer(q, answers[qid])
         lines.append(f"- {q['question']} -> {label}")
-        if effect:
+        if include_effects and effect:
             lines.append(f"  {effect}")
     return "\n".join(lines)
 
@@ -211,15 +263,14 @@ def answers_to_style_guide_fallback(
         qid = q["id"]
         if qid not in answers:
             continue
-        answer = answers[qid]
-        if isinstance(answer, int) and 0 <= answer < len(q["options"]):
-            effect = q["options"][answer].get("style_guide_effect", "")
+        label, effect, matched = resolve_answer(q, answers[qid])
+        if matched:
             if effect:
                 sections.append(effect)
-        elif isinstance(answer, str) and answer.strip():
+        elif label.strip():
             # Custom text answer — use the question id as section header
             header = qid.upper().replace("_", " ")
-            sections.append(f"{header}\n{answer.strip()}")
+            sections.append(f"{header}\n{label.strip()}")
     return "\n\n".join(sections)
 
 
