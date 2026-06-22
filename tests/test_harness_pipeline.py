@@ -444,6 +444,56 @@ def test_subagent_spine_prepare_commit_produces_valid_epub(project: Path):
         assert any(n.endswith((".xhtml", ".html")) for n in z.namelist())
 
 
+def test_show_translation_returns_committed_text(project: Path):
+    """Read-back surface for review (friction-log #7): show-translation returns the
+    committed translated_text/source_text from chunks/*.json, not the consumed drafts."""
+    from src.harness import flow
+
+    # No chunks yet -> graceful error dict, never a traceback.
+    assert "error" in flow.show_translation(str(project))
+
+    # Translate via the subagent spine so chunks carry translated_text.
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project), worker_model="sonnet")
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        Path(entry["draft_path"]).write_text(_fake_draft(chunk.source_text), encoding="utf-8")
+    flow.translate_commit(str(project), worker_model="sonnet")
+
+    res = flow.show_translation(str(project))
+    assert res["chapters"], "no chapters returned"
+    assert res["fields"] == {"translation": "translated_text", "source": "source_text"}
+    rows = [r for ch in res["chapters"] for r in ch["chunks"]]
+    assert rows, "no chunk rows returned"
+    for row in rows:
+        assert row["translated_text"], f"{row['id']} has no translated_text"
+        assert row["has_translation"] is True
+        # The returned text matches what was committed to the chunk file.
+        committed = load_chunk(project / "chunks" / f"{row['id']}.json")
+        assert row["translated_text"] == committed.translated_text
+        assert row["source_text"] == committed.source_text  # source on by default
+
+    # include_source=False drops source_text.
+    lean = flow.show_translation(str(project), include_source=False)
+    assert all("source_text" not in r for ch in lean["chapters"] for r in ch["chunks"])
+
+    # max_chunks caps the sample and flags truncation when chunks remain.
+    total = res["total_chunks"]
+    if total > 1:
+        capped = flow.show_translation(str(project), max_chunks=1)
+        assert capped["shown_chunks"] == 1
+        assert capped["truncated"] is True
+        assert capped["total_chunks"] == total
+
+    # An out-of-range chapter spec returns available_chapters, not a crash.
+    miss = flow.show_translation(str(project), chapters="999")
+    assert miss["chapters"] == [] and miss["available_chapters"]
+
+    # An unparseable chapter spec is caught and reported, not raised.
+    bad = flow.show_translation(str(project), chapters="abc")
+    assert "error" in bad and bad["chapters"] == []
+
+
 def test_translate_commit_flags_bad_worker_output(project: Path):
     """A draft that fails the guard is reported, never stamped."""
     from src.harness import flow

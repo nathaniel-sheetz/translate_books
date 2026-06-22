@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.5.4] - 2026-06-22
+
+### Added
+- **`harness show-translation` reads committed translations back out for review (friction-log #7).** A read-only command that returns `source_text` + `translated_text` per chunk straight from `projects/<slug>/chunks/*.json` (the field that actually holds the translation, which the agent previously had to guess by trying `translation`/`translated_text`/`translated`). `--chapters` scopes it, `--max-chunks` caps the sample so a gut-check can't flood context, and `--no-source` returns translation-only; the output names the keys under `fields` and mirrors to `last_output.json` like the other JSON commands. The translate-harness SKILL Step 4B-e now points the agent here for an in-chat sample and states that the per-worker `.harness/translate/*.draft.txt` files are consumed at `translate-commit` (empty afterward) — so neither the agent nor a human reads internal files or guesses the schema. Covered by `test_show_translation_returns_committed_text`.
+
 ## [0.22.5.3] - 2026-06-22
 
 ### Changed

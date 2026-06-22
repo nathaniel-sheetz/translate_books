@@ -188,6 +188,17 @@ def _build_parser() -> argparse.ArgumentParser:
     al.add_argument("--reader-port", dest="reader_port", type=int, default=5000,
                     help="Port for the printed reader link (default: 5000)")
 
+    # show-translation (read-back for review) -------------------------------
+    stp = sub.add_parser("show-translation",
+                         help="Print source+translation for chapters from chunks/*.json "
+                              "(read-only; no spend)")
+    add_project(stp)
+    add_chapters(stp)
+    stp.add_argument("--max-chunks", dest="max_chunks", type=int, default=None,
+                     help="Cap total chunks returned (default: all) — keeps a sample small")
+    stp.add_argument("--no-source", dest="include_source", action="store_false",
+                     help="Omit source_text; return only the translation per chunk")
+
     return parser
 
 
@@ -253,6 +264,10 @@ def _dispatch(args: argparse.Namespace):
                           source_lang_code=args.source_lang_code,
                           target_lang_code=args.target_lang_code,
                           reader_host=args.reader_host, reader_port=args.reader_port)
+    if cmd == "show-translation":
+        return flow.show_translation(args.project, chapters=args.chapters,
+                                     max_chunks=args.max_chunks,
+                                     include_source=args.include_source)
     raise SystemExit(f"unknown command: {cmd}")
 
 
