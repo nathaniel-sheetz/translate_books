@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.5.0] - 2026-06-21
+
+### Added
+- **Style-guide answers can be recorded by option `id` or label, not just a positional index.** `style-guide prepare-questions` and `commit-followups` now surface each option as an `{id, label}` pair, where `id` is a stable slug derived from the label, so the agent passes the user's pick straight through to `style_answers.json` without counting positions. `resolve_answer` accepts (in priority order) a 0-based index (back-compat), an option id, the exact label (case- and whitespace-insensitive), or free text as a custom answer. `prepare-draft` now echoes `resolved_answers` (each tagged `option` or `custom`) plus `unanswered`, so a mistyped id that silently became a custom answer is caught before the draft is generated.
+
+### Fixed
+- **Whitespace-symmetric label matching and label-less options.** Label matching now collapses internal whitespace the same way slug ids do, so a label is reachable by typing it regardless of irregular spacing; options missing a `label` key resolve to an empty string instead of raising `KeyError`.
+
 ## [0.22.4.0] - 2026-06-21
 
 ### Fixed

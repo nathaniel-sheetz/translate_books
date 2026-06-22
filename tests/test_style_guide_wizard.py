@@ -157,6 +157,15 @@ class TestResolveAnswer:
     def test_exact_label_case_and_space_insensitive(self):
         assert resolve_answer(_DIALECT_Q, "  mexican spanish ") == ("Mexican Spanish", "Use MX.", True)
 
+    def test_label_internal_whitespace_collapsed(self):
+        q = {"options": [{"label": "Keep  it  literal", "style_guide_effect": "Keep."}]}
+        # Matching ignores irregular spacing, but the canonical label is returned verbatim.
+        assert resolve_answer(q, "keep it literal") == ("Keep  it  literal", "Keep.", True)
+
+    def test_label_less_option_does_not_crash(self):
+        q = {"options": [{"style_guide_effect": "No label."}]}
+        assert resolve_answer(q, 0) == ("", "No label.", True)
+
     def test_unknown_string_is_custom(self):
         label, effect, matched = resolve_answer(_DIALECT_Q, "tú throughout, kittens speak familiarly")
         assert matched is False

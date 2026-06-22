@@ -94,7 +94,7 @@ def option_ids(question: dict) -> list[str]:
 def resolve_answer(question: dict, answer: int | str) -> tuple[str, str, bool]:
     """Resolve a raw answer to ``(label, style_guide_effect, matched_option)``.
 
-    Accepts, in priority order: a 0-based ``int`` (or all-digit ``str``) index
+    Accepts, in priority order: a 0-based ``int`` (or numeric ``str``) index
     into the question's options (back-compat), an option **id** (slug) or exact
     option **label** (case/space-insensitive), or — failing all of those — free
     text, which is returned verbatim as a custom answer with ``matched=False``.
@@ -111,15 +111,18 @@ def resolve_answer(question: dict, answer: int | str) -> tuple[str, str, bool]:
         idx = int(answer.strip())
     if idx is not None and 0 <= idx < len(options):
         opt = options[idx]
-        return opt["label"], opt.get("style_guide_effect", ""), True
+        return opt.get("label", ""), opt.get("style_guide_effect", ""), True
 
     # id / label match.
     if isinstance(answer, str):
-        norm = answer.strip().casefold()
+        # Collapse internal whitespace too, so a label matches by typing regardless
+        # of irregular spacing — symmetric with option_ids' slug normalization.
+        norm = " ".join(answer.split()).casefold()
         ids = option_ids(question)
         for i, opt in enumerate(options):
-            if norm == ids[i].casefold() or norm == str(opt.get("label", "")).strip().casefold():
-                return opt["label"], opt.get("style_guide_effect", ""), True
+            label_norm = " ".join(str(opt.get("label", "")).split()).casefold()
+            if norm == ids[i].casefold() or norm == label_norm:
+                return opt.get("label", ""), opt.get("style_guide_effect", ""), True
         return answer.strip(), "", False
 
     # anything else (out-of-range int, etc.) — treat as custom text.
