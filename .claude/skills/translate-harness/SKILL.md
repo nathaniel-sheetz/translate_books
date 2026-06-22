@@ -66,7 +66,8 @@ Windows, accented/curly-quote bytes make `grep` treat the stream as binary and t
 - **Two kinds of STOP beat — not every stop is a draft approval.** Some STOP beats are
   *question-collection* stops that happen **before any draft exists**: you ask the user
   questions, END your turn, and wait for their real answers. The others are *approval* stops:
-  you present a finished draft and ask approve / edit / re-draft. Both end your turn and wait.
+  you present a finished draft and ask via AskUserQuestion — **Approve all / Reject & talk it
+  through** — with the custom (_Other_) field reserved for specific swaps. Both end your turn and wait.
 - **Step 1 alone has THREE pause points, not one** — do not treat 1e as the only stop:
   - **G1 — standard + deterministic questions (step 1b):** ask, wait for answers.
   - **G2 — LLM-driven follow-up questions (step 1c):** ask, wait for answers.
@@ -214,7 +215,11 @@ python scripts/harness.py style-guide commit --project projects/<slug>
 This parses, saves `style.json`, and validates it. If it prints a VALIDATION/PARSE error, fix the
 draft and re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort).
 
-**1e. STOP — G3: approval beat.** Present the final style guide. Approve / edit / re-draft. This is
+**1e. STOP — G3: approval beat.** Present the final style guide, then **AskUserQuestion with exactly
+two predefined options** — **"Approve all"** and **"Reject & talk it through"**. **Remind the user in
+the question text that to approve *with specific changes* they should pick _Other_ and type the edits
+directly** (e.g. "switch register to tú", "keep place names in English"). A custom (_Other_) answer is
+approve-with-changes: apply the edits to the draft, re-run `style-guide commit`, and continue. This is
 the user's chance to lock in the key decisions (dialect/locale, name conventions, register)
 **before** they shape the glossary.
 
@@ -244,8 +249,14 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
   collapse it to "N terms drafted."
 - **Call out the uncertain translations** you tracked: name each term, its chosen rendering, the
   alternative(s) you considered, and why you hesitated, so the user can adjudicate the close calls.
-- **AskUserQuestion: approve / edit / re-draft.** On edit, let the user hand corrected JSON; Write
-  it to the `draft_path` and re-run `commit`. Only continue once approved.
+- **AskUserQuestion with exactly two predefined options** — **"Approve all"** (accept the list as-is
+  and continue) and **"Reject & talk it through"** (open-ended: END the turn, discuss, then re-draft /
+  re-run `commit` and re-present this gate). **In the question text, remind the user that to approve
+  *with specific changes* they should pick _Other_ and type the swaps directly** — e.g.
+  `Gatito → Minino`, `keep "Granny Gray" untranslated`, or paste corrected JSON. A custom (_Other_)
+  answer is approve-with-changes: apply exactly those swaps to the JSON at `draft_path`, re-run
+  `commit`, briefly confirm what changed, and continue (the swap submission *is* the approval — don't
+  loop back into this gate unless the user asks). Only continue once the user approves.
 
 > Approving the glossary approves **the glossary only**. It does NOT mean "start translating."
 > After approval you proceed to difficulty scoring + chunking (Step 3) and then **stop again** at
