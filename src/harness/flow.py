@@ -335,9 +335,15 @@ def style_guide_prepare_questions(project: str) -> dict:
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
 
+    cfg = state.load_config(project_dir)
+
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
-    from src.style_guide_wizard import get_active_questions, load_source_sample
+    from src.style_guide_wizard import (
+        dialect_id_from_locale,
+        get_active_questions,
+        load_source_sample,
+    )
 
     source = load_source_sample(project_dir)
     with _quiet_stdout():
@@ -350,28 +356,46 @@ def style_guide_prepare_questions(project: str) -> dict:
             q["_detected_hint"] = manifest.features[feature].evidence[0]
     allq = list(fixed) + list(conditional)
 
+    # Pre-answer the redundant `dialect` question from the locale chosen at setup
+    # (es-mx → mexican_spanish) so the agent confirms rather than re-asks it.
+    locale = cfg.get("locale") or ""
+    dialect_q = next((q for q in allq if q.get("id") == "dialect"), None)
+    prefilled_dialect = dialect_id_from_locale(locale, dialect_q) if dialect_q else None
+
     (hdir / "style_source.txt").write_text(source, encoding="utf-8")
     (hdir / "style_fixed.json").write_text(json.dumps(fixed), encoding="utf-8")
     (hdir / "style_questions.json").write_text(json.dumps(allq), encoding="utf-8")
 
+    def _question_entry(q: dict) -> dict:
+        entry = {
+            "id": q["id"],
+            "question": q["question"],
+            "options": _options_with_ids(q),
+            "hint": q.get("_detected_hint", ""),
+        }
+        if q.get("id") == "dialect" and prefilled_dialect:
+            entry["prefilled"] = prefilled_dialect
+            entry["prefilled_reason"] = f"from setup locale {locale!r}"
+        return entry
+
+    instructions = (
+        "STOP: ask the user every question and WAIT for their answers — do not answer "
+        "for them or pick defaults. Then Write {question_id: option_id_or_label_or_custom_string} "
+        "to answers_path (use each option's `id` or exact `label`; a numeric index still "
+        "works; any other string is a custom answer), then run `style-guide prepare-followups`."
+    )
+    if prefilled_dialect:
+        instructions += (
+            f" The `dialect` question is pre-answered from the setup locale "
+            f"(`prefilled`: {prefilled_dialect!r}) — present it as a confirm/override default, "
+            "not a blank ask, and keep that id in answers unless the user changes it."
+        )
+
     return {
         "detected_features": present or [],
-        "questions": [
-            {
-                "id": q["id"],
-                "question": q["question"],
-                "options": _options_with_ids(q),
-                "hint": q.get("_detected_hint", ""),
-            }
-            for q in allq
-        ],
+        "questions": [_question_entry(q) for q in allq],
         "answers_path": str(hdir / "style_answers.json"),
-        "instructions": (
-            "STOP: ask the user every question and WAIT for their answers — do not answer "
-            "for them or pick defaults. Then Write {question_id: option_id_or_label_or_custom_string} "
-            "to answers_path (use each option's `id` or exact `label`; a numeric index still "
-            "works; any other string is a custom answer), then run `style-guide prepare-followups`."
-        ),
+        "instructions": instructions,
     }
 
 
@@ -437,12 +461,25 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
     hdir = state.harness_dir(project_dir)
     cfg = state.load_config(project_dir)
 
-    from src.style_guide_wizard import build_style_guide_prompt, resolve_answer
+    from src.style_guide_wizard import (
+        build_style_guide_prompt,
+        dialect_id_from_locale,
+        resolve_answer,
+    )
 
     allq = json.loads(_read(hdir / "style_questions.json"))
     answers_path = Path(answers) if answers else hdir / "style_answers.json"
     ans = json.loads(_read(answers_path))
     source = _read(hdir / "style_source.txt")
+
+    # Defense-in-depth: if the agent treated the locale-prefilled dialect as
+    # confirmed-by-default and left it out of the answers, fill it from the
+    # locale so the dialect section is never blank.
+    if "dialect" not in ans:
+        dialect_q = next((q for q in allq if q.get("id") == "dialect"), None)
+        mapped = dialect_id_from_locale(cfg.get("locale") or "", dialect_q) if dialect_q else None
+        if mapped:
+            ans["dialect"] = mapped
 
     prompt = build_style_guide_prompt(allq, ans, source, cfg["target_language"], cfg["locale"])
     prompt_path = hdir / "style_guide_prompt.txt"

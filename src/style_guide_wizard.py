@@ -91,6 +91,50 @@ def option_ids(question: dict) -> list[str]:
     return ids
 
 
+# Locale tokens (normalized: lowercased, non-alphanumerics stripped) → dialect
+# option id. Keyed by the slugs that ``option_ids`` derives from the dialect
+# question's labels, so a mapped id is always a real option.
+_LOCALE_DIALECT_ALIASES: dict[str, str] = {
+    alias: dialect_id
+    for dialect_id, aliases in {
+        "mexican_spanish": ("mx", "mex", "mexico", "esmx", "mexican"),
+        "castilian_spanish": (
+            "es", "esp", "spain", "espana", "eses", "castilian", "iberian",
+        ),
+        "rioplatense_spanish": (
+            "ar", "arg", "argentina", "esar", "uy", "uruguay", "esuy", "rioplatense",
+        ),
+        "colombian_spanish": ("co", "col", "colombia", "esco", "colombian"),
+        "generic_latin_america": (
+            "latam", "la", "419", "es419", "generic", "latinamerica",
+        ),
+    }.items()
+    for alias in aliases
+}
+
+
+def _normalize_locale(locale: str) -> str:
+    """Lowercase a locale and strip everything but ``a-z0-9`` (``es-MX`` → ``esmx``)."""
+    return re.sub(r"[^a-z0-9]+", "", str(locale).lower())
+
+
+def dialect_id_from_locale(locale: str, dialect_question: dict) -> Optional[str]:
+    """Map a setup ``locale`` (e.g. ``"mx"``, ``"es-MX"``, ``"Mexico"``) to a
+    ``dialect`` option id, or ``None`` when it doesn't resolve.
+
+    The returned id is validated against ``dialect_question``'s actual options
+    (via :func:`option_ids`), so it always names a selectable option and stays
+    correct if the labels are reworded. Used to pre-answer the redundant dialect
+    question from the locale already chosen at ``setup``.
+    """
+    if not locale:
+        return None
+    mapped = _LOCALE_DIALECT_ALIASES.get(_normalize_locale(locale))
+    if mapped and mapped in option_ids(dialect_question):
+        return mapped
+    return None
+
+
 def resolve_answer(question: dict, answer: int | str) -> tuple[str, str, bool]:
     """Resolve a raw answer to ``(label, style_guide_effect, matched_option)``.
 

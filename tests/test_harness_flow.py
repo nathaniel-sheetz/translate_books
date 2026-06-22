@@ -215,6 +215,41 @@ def test_commit_followups_merges_into_question_set(project: Path):
     assert len(merged) == base_count + 1
 
 
+def test_prepare_questions_prefills_dialect_from_locale(project: Path):
+    # The project fixture inherits the default locale ("mx").
+    prep = flow.style_guide_prepare_questions(str(project))
+    dialect = next(q for q in prep["questions"] if q["id"] == "dialect")
+    assert dialect["prefilled"] == "mexican_spanish"
+    assert "mx" in dialect["prefilled_reason"]
+    assert "prefilled" in prep["instructions"]
+
+
+def test_prepare_questions_no_prefill_for_unmapped_locale(project: Path):
+    cfg = state.load_config(project)
+    cfg["locale"] = "fr-FR"
+    state.save_config(project, cfg)
+
+    prep = flow.style_guide_prepare_questions(str(project))
+    dialect = next(q for q in prep["questions"] if q["id"] == "dialect")
+    assert "prefilled" not in dialect
+    assert "prefilled" not in prep["instructions"]
+
+
+def test_prepare_draft_fills_dialect_from_locale_when_omitted(project: Path):
+    flow.style_guide_prepare_questions(str(project))
+    # Agent confirms the prefilled dialect by default and writes NO dialect answer.
+    Path(project / ".harness" / "style_answers.json").write_text(
+        json.dumps({}), encoding="utf-8"
+    )
+
+    draft = flow.style_guide_prepare_draft(str(project))
+    resolved = {r["id"]: r for r in draft["resolved_answers"]}
+    assert "dialect" in resolved
+    assert resolved["dialect"]["source"] == "option"
+    assert resolved["dialect"]["answer"] == "Mexican Spanish"
+    assert "dialect" not in draft["unanswered"]
+
+
 # ── glossary beat ──────────────────────────────────────────────────────────
 
 def test_glossary_commit_writes_valid_glossary(project: Path):

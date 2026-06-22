@@ -12,6 +12,7 @@ import pytest
 from src.style_guide_wizard import (
     answers_to_style_guide_fallback,
     build_question_prompt,
+    dialect_id_from_locale,
     format_answered_questions,
     get_active_questions,
     load_conditional_questions,
@@ -177,6 +178,57 @@ class TestResolveAnswer:
         label, effect, matched = resolve_answer(_DIALECT_Q, 9)
         assert matched is False
         assert effect == ""
+
+
+# A dialect question carrying the full shipped option set, so the locale→dialect
+# mapping can resolve every region (the trimmed _DIALECT_Q only has three).
+_FULL_DIALECT_Q = {
+    "id": "dialect",
+    "question": "Dialect?",
+    "options": [
+        {"label": "Mexican Spanish"},
+        {"label": "Castilian Spanish"},
+        {"label": "Rioplatense Spanish"},
+        {"label": "Colombian Spanish"},
+        {"label": "Generic Latin America"},
+    ],
+}
+
+
+class TestDialectFromLocale:
+    @pytest.mark.parametrize(
+        "locale,expected",
+        [
+            ("mx", "mexican_spanish"),
+            ("MX", "mexican_spanish"),
+            ("es-MX", "mexican_spanish"),
+            ("es_mx", "mexican_spanish"),
+            ("Mexico", "mexican_spanish"),
+            ("es", "castilian_spanish"),
+            ("spain", "castilian_spanish"),
+            ("ar", "rioplatense_spanish"),
+            ("argentina", "rioplatense_spanish"),
+            ("co", "colombian_spanish"),
+            ("latam", "generic_latin_america"),
+            ("419", "generic_latin_america"),
+            ("es-419", "generic_latin_america"),
+        ],
+    )
+    def test_known_locales_map_to_option_ids(self, locale, expected):
+        assert dialect_id_from_locale(locale, _FULL_DIALECT_Q) == expected
+
+    def test_unknown_locale_returns_none(self):
+        assert dialect_id_from_locale("fr-FR", _FULL_DIALECT_Q) is None
+
+    def test_empty_locale_returns_none(self):
+        assert dialect_id_from_locale("", _FULL_DIALECT_Q) is None
+
+    def test_mapped_id_absent_from_options_returns_none(self):
+        # _DIALECT_Q has no Rioplatense option, so an Argentine locale must not
+        # resolve to an id the question can't offer.
+        assert dialect_id_from_locale("ar", _DIALECT_Q) is None
+        # …but a region that IS present still resolves.
+        assert dialect_id_from_locale("mx", _DIALECT_Q) == "mexican_spanish"
 
 
 class TestFormatAnsweredQuestions:
