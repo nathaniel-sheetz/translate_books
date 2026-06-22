@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [0.22.4.0] - 2026-06-21
 
 ### Fixed
-- **Harness output is now reliably UTF-8 (friction-log #4).** `harness.py` reconfigures stdout/stderr to UTF-8 and `_run_script` passes `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8` to the wrapped `chunk`/`cost`/`translate`/`epub` subprocesses, so accented/curly-quote JSON no longer mojibakes or fails to decode on a cp1252 Windows console. The `RequestsDependencyWarning` that forced a lossy `grep` is filtered at import, so the CLI emits zero stderr noise. Every JSON-returning command also mirrors its result to `projects/<slug>/.harness/last_output.json` (UTF-8) and prints `OUTPUT_JSON: <path>`; the skill now tells the agent to Read that artifact instead of grepping stdout.
+- **Harness output is now reliably UTF-8 (friction-log #4).** `harness.py` reconfigures stdout/stderr to UTF-8 and `_run_script` passes `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8` to the wrapped `chunk`/`cost`/`translate`/`epub` subprocesses, so accented/curly-quote JSON no longer mojibakes or fails to decode on a cp1252 Windows console. The `RequestsDependencyWarning` that forced a lossy `grep` is filtered at import, so the CLI emits zero stderr noise. Every JSON-returning command also mirrors its result to `projects/<slug>/.harness/last_output.json` (UTF-8) and prints `OUTPUT_JSON: <path>`; the skill now tells the agent to Read that artifact instead of grepping stdout. Covered by tests asserting UTF-8 stdout + artifact mirror and that `_run_script` injects `PYTHONUTF8`/`PYTHONIOENCODING` into the child environment.
 
 ## [0.22.3.0] - 2026-06-20
 

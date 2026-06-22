@@ -20,6 +20,7 @@ Deliberately omitted:
 """
 
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -340,6 +341,32 @@ def test_harness_stdout_is_utf8_and_writes_artifact(tmp_path: Path):
     mirrored = json.loads(artifact.read_text(encoding="utf-8"))
     assert mirrored == payload
     assert b"OUTPUT_JSON:" in result.stderr
+
+
+def test_run_script_forces_utf8_in_child_env(monkeypatch):
+    """Friction-log #4: reconfiguring the parent's stdout doesn't reach the wrapped
+    chunk/cost/translate/epub subprocess, so _run_script must hand the child PYTHONUTF8=1
+    /PYTHONIOENCODING=utf-8 on top of the inherited environment."""
+    from src.harness import flow
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(flow.subprocess, "run", fake_run)
+
+    rc = flow._run_script(["scripts/translate_book.py", "chunk"])
+    assert rc == 0
+
+    env = captured["env"]
+    assert env is not None, "_run_script must pass an explicit env to the child"
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    # The forced vars are layered on top of the inherited environment, not a bare dict.
+    assert env.get("PATH") == os.environ.get("PATH")
 
 
 # ===========================================================================
