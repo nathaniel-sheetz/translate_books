@@ -1175,3 +1175,98 @@ def align(
     if align_error:
         out["error"] = align_error
     return out
+
+
+def show_translation(
+    project: str,
+    *,
+    chapters: str | None = None,
+    max_chunks: int | None = None,
+    include_source: bool = True,
+) -> dict:
+    """Read committed source+translation back out of ``chunks/*.json`` (read-only).
+
+    The supported way to display a translation for review. Committed translations
+    live in ``projects/<slug>/chunks/*.json`` under **``translated_text``** (the
+    English is ``source_text``); the per-worker ``.harness/translate/*.draft.txt``
+    files are consumed at ``translate-commit`` and are empty afterward, so reading
+    *them* for a sample returns nothing (friction-log #7). This command returns the
+    real text so the agent never reads internal files or guesses the JSON key.
+
+    ``chapters`` (e.g. ``1-2`` / ``3,7``; all when omitted) limits the scope;
+    ``max_chunks`` caps the total chunks returned so a "show me a sample" call cannot
+    flood context; ``include_source=False`` drops ``source_text`` from each chunk.
+    """
+    project_dir = state.resolve_project_dir(project)
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return {"error": "no chunks yet — translate first", "chapters": []}
+
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
+    from scripts.translate_book import discover_chapters, parse_chapter_range
+    from src.utils.file_io import load_chunk
+
+    all_discovered = discover_chapters(chunks_dir)
+    discovered = all_discovered
+    if chapters:
+        try:
+            requested = parse_chapter_range(chapters)
+        except (ValueError, TypeError) as exc:
+            return {"error": f"invalid chapters value {chapters!r}: {exc}", "chapters": []}
+        discovered = {k: v for k, v in all_discovered.items() if k in requested}
+        if not discovered:
+            return {
+                "chapters": [],
+                "requested": chapters,
+                "available_chapters": sorted(all_discovered.keys()),
+                "note": f"no matching chapters for chapters {chapters}",
+            }
+
+    out_chapters: list[dict] = []
+    shown = 0
+    total = 0
+    truncated = False
+    for chapter_id in sorted(discovered):
+        chunks = sorted((load_chunk(cp) for cp in discovered[chapter_id]),
+                        key=lambda c: c.position)
+        rows: list[dict] = []
+        translated = 0
+        for chunk in chunks:
+            total += 1
+            if chunk.has_translation:
+                translated += 1
+            if max_chunks is not None and shown >= max_chunks:
+                truncated = True
+                continue
+            row = {
+                "id": chunk.id,
+                "chapter_id": chunk.chapter_id,
+                "position": chunk.position,
+                "status": chunk.display_status,
+                "has_translation": chunk.has_translation,
+                "source_words": chunk.word_count,
+                "translation_words": chunk.translation_word_count,
+                "translated_text": chunk.translated_text,
+            }
+            if include_source:
+                row["source_text"] = chunk.source_text
+            rows.append(row)
+            shown += 1
+        out_chapters.append({
+            "chapter_id": chapter_id,
+            "total_chunks": len(chunks),
+            "translated_chunks": translated,
+            "chunks": rows,
+        })
+
+    return {
+        "chapters": out_chapters,
+        "available_chapters": sorted(all_discovered.keys()),
+        "chunks_dir": str(chunks_dir),
+        "shown_chunks": shown,
+        "total_chunks": total,
+        "truncated": truncated,
+        # Self-document the keys the friction log #7 agent had to guess.
+        "fields": {"translation": "translated_text", "source": "source_text"},
+    }

@@ -425,6 +425,16 @@ start it in the background (`python web_ui/app.py`, serving `http://localhost:50
 user the `reader_first` link (e.g. `http://localhost:5000/read/<slug>/chapter_01`) so they can read the
 new chapters immediately.
 
+To also show a sample **in chat** (a quick EN→ES gut-check before spending the rest), use the read-back
+command — never read `.harness/translate/*.draft.txt` (consumed/empty after commit) or hand-parse the
+chunk files:
+```bash
+python scripts/harness.py show-translation --project projects/<slug> --chapters <set> --max-chunks 4
+```
+Read the result from `OUTPUT_JSON` (`.harness/last_output.json`). Committed translations live in
+`projects/<slug>/chunks/*.json` — **`translated_text`** holds the target-language prose, **`source_text`**
+the original. `--max-chunks` caps the sample; add `--no-source` for translation-only.
+
 **4B-f. Translate the rest (if a subset was done).** If you only did a review batch, prompt the user to
 translate the **remaining** chapters now, noting the **same spawn mode/window as before** will be used
 (it is saved — you can omit `--parallelism`/`--window`). On yes, repeat 4B-a → 4B-e for the remaining
