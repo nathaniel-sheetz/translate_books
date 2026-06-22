@@ -285,8 +285,12 @@ With `--per-chapter`, the chunker reads the per-chapter suggestions from `diffic
 `difficulty` first) and `--size <N>` is the **fallback** for any chapter not in the manifest. Each
 chapter's target also rescales its min/max bounds, so a harder/smaller target actually splits more.
 Drop `--per-chapter` to chunk the whole book uniformly at `--size <N>` instead (e.g. if the user
-prefers one size). Either way this chunks once, prints the cost estimate, then halts — it runs
-`--cost-only` and physically cannot spend. Carry that estimate straight into the Step 4 gate below.
+prefers one size). Either way this chunks once, prints the estimate, then halts — it runs
+`--cost-only` and physically cannot spend. The estimate is **backend-neutral**: it shows the job
+size, the metered-API price framed as *conditional* ("If translated via the metered API: ~$X"), and
+a reminder that the subagent backend uses your subscription (no API $). Carry the dollar figure into
+the Step 4 gate **only if** the user picks the API backend; on the subagent path (Step 4B) ignore it
+— that path's gate is the `usage_summary` from `translate-prepare`, not this dollar estimate.
 
 ## Step 4 — COST beat, then translate
 
@@ -325,6 +329,8 @@ Two translation backends, same downstream pipeline. Pick one with the user:
 - **Subagent backend (this step):** no API key — translation runs as **spawned worker subagents on
   the running subscription**, so a stranger can translate token-free. You (the orchestrator, e.g.
   Opus) stay the smart driver while workers run on a **cheaper pinned model** (default `sonnet`).
+  The dollar figure from `chunk`/`cost` is the **metered-API** price and does **not** apply here;
+  this path's gate is the `usage_summary` from `translate-prepare` (4B-b), not a cost estimate.
 
 The translate phase is a **review-first, set-by-set** flow: translate a small batch, auto-align it so
 it is instantly readable, then translate the rest with the same spawn settings. Do the beats in order

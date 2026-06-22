@@ -207,6 +207,30 @@ def test_cost_only_exits_before_confirmation(project: Path, monkeypatch):
     assert exc.value.code == 0
 
 
+def test_cost_only_estimate_is_backend_neutral(project: Path, capsys):
+    """The estimator path must not present the dollar figure as *the* cost.
+
+    On the subagent backend there is no metered API spend (friction-log #9), and the
+    backend isn't chosen yet when `chunk`/`cost` run — so the estimate frames the API
+    price as conditional and notes the subagent backend is free, rather than printing
+    an unconditional "Estimated cost: $...".
+    """
+    args = _args()
+    args.cost_only = True
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+
+    with pytest.raises(SystemExit) as exc:
+        tb.STAGE_FUNCTIONS["translate"](args, project, state)
+    assert exc.value.code == 0
+
+    out = capsys.readouterr().out
+    assert "If translated via the metered API" in out
+    assert "Subagent backend uses your subscription" in out
+    # The unconditional API-cost lead-in belongs only to the paid translate run.
+    assert "Estimated cost:" not in out
+
+
 def test_unapproved_noninteractive_translate_exits_without_prompt(project: Path, monkeypatch):
     """A non-interactive paid run must fail closed unless --yes was supplied."""
     def _boom(*_a, **_k):

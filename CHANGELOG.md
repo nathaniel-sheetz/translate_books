@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.5.2] - 2026-06-22
+
+### Changed
+- **The `chunk`/`cost` estimate is backend-neutral (friction-log #9).** When `stage_translate` runs with `--cost-only` (the harness `chunk`/`cost` commands), it no longer prints an unconditional `Estimated cost: $...` — at that point the translation backend isn't chosen yet, and the subagent backend has no metered-API spend. The estimator now prints the job size, frames the API price as conditional (`If translated via the metered API: ~$X`), and reminds that the subagent backend uses the subscription (no API $). The unconditional cost lead-in is reserved for the real paid translate run. The translate-harness SKILL clarifies that the dollar figure feeds the Step 4 gate **only** on the API backend; the subagent path (Step 4B) gates on the `usage_summary` from `translate-prepare`, not the estimate.
+
 ## [0.22.5.1] - 2026-06-22
 
 ### Changed

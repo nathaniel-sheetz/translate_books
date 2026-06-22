@@ -302,15 +302,25 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     # Cost estimation
     chunks_for_cost = [chunk for _, chunk in untranslated]
     cost_info = estimate_cost(chunks_for_cost, provider, model, glossary=glossary, style_guide=style_guide)
+
+    if getattr(args, "cost_only", False):
+        # Estimator path (the harness `chunk` / `cost` commands). The user may
+        # translate via the metered API OR the zero-API-cost subagent backend, and
+        # the backend isn't chosen yet at this point in the flow — so keep the dollar
+        # figure explicitly conditional and never present it as *the* cost
+        # (friction-log #9).
+        print(f"  Size: {len(untranslated)} chunk(s), ~{cost_info['input_tokens']:,} input tokens")
+        print(f"  If translated via the metered API: ~${cost_info['cost_usd']:.2f} ({provider}/{model})")
+        print("  Subagent backend uses your subscription (no API $)")
+        print("  --cost-only: stopping after estimate")
+        sys.exit(0)
+
+    # Real (paid) API translate run: the dollar figure IS the spend.
     print(
         f"  Estimated cost: ${cost_info['cost_usd']:.2f} "
         f"for {len(untranslated)} chunk(s) with {provider}/{model} "
         f"({cost_info['input_tokens']:,} input tokens)"
     )
-
-    if getattr(args, "cost_only", False):
-        print("  --cost-only: stopping after estimate")
-        sys.exit(0)
 
     if not getattr(args, "yes", False):
         if sys.stdin.isatty():
