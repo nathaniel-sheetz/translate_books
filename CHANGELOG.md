@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.5.3] - 2026-06-22
+
+### Changed
+- **The setup `locale` auto-answers the redundant `dialect` question (friction-log #8).** `style-guide prepare-questions` now maps the locale chosen at setup to a `dialect` option (`es-MX` → `mexican_spanish`, etc.) and returns it as a `prefilled` id + `prefilled_reason` with instructions to present it as a confirm/override default rather than a blank re-ask. `prepare-draft` adds defense-in-depth: if the agent confirms the prefill by leaving `dialect` out of the answers, it backfills from the locale so the dialect section is never blank. The new `dialect_id_from_locale` helper validates every mapped id against the dialect question's actual options, so it stays correct if labels are reworded and never names a non-selectable option. Region-less bare `es` deliberately resolves to `generic_latin_america` (not Castilian); asserting Castilian requires an explicit Spain token (`es-ES`/`spain`/`castilian`). The SKILL also documents the first-class informal-tú `forms_of_address` option (`t_dominates_informal`).
+
 ## [0.22.5.2] - 2026-06-22
 
 ### Changed

@@ -98,15 +98,18 @@ _LOCALE_DIALECT_ALIASES: dict[str, str] = {
     alias: dialect_id
     for dialect_id, aliases in {
         "mexican_spanish": ("mx", "mex", "mexico", "esmx", "mexican"),
+        # Bare ``es`` (region-less Spanish) deliberately maps to generic Latin
+        # America, not Castilian: require an explicit Spain token (``es-ES`` →
+        # ``eses``, ``esp``, ``spain``, ``castilian``…) to assert Castilian.
         "castilian_spanish": (
-            "es", "esp", "spain", "espana", "eses", "castilian", "iberian",
+            "esp", "spain", "espana", "eses", "castilian", "iberian",
         ),
         "rioplatense_spanish": (
             "ar", "arg", "argentina", "esar", "uy", "uruguay", "esuy", "rioplatense",
         ),
         "colombian_spanish": ("co", "col", "colombia", "esco", "colombian"),
         "generic_latin_america": (
-            "latam", "la", "419", "es419", "generic", "latinamerica",
+            "es", "latam", "la", "419", "es419", "generic", "latinamerica",
         ),
     }.items()
     for alias in aliases
