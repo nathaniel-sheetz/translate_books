@@ -28,11 +28,17 @@ Examples:
 import argparse
 import json
 import sys
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.harness import flow
+# urllib3/chardet version-mismatch noise that ``requests`` emits at import time. It forced the
+# agent to pipe harness output through ``grep``, which then mangled the UTF-8 JSON (friction-log
+# #4). Filter it before the import below triggers it.
+warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
+
+from src.harness import flow, state
 from src.harness_guard import HarnessValidationError
 
 
@@ -250,7 +256,33 @@ def _dispatch(args: argparse.Namespace):
     raise SystemExit(f"unknown command: {cmd}")
 
 
+def _write_output_artifact(args: argparse.Namespace, result: dict) -> None:
+    """Mirror a command's JSON result to ``.harness/last_output.json`` (UTF-8).
+
+    The agent reads this file instead of capturing stdout, sidestepping Windows console
+    encoding entirely (friction-log #4). Best-effort: the artifact must never break a command,
+    so any resolution/write failure is swallowed.
+    """
+    project = getattr(args, "project", None)
+    if not project:
+        return
+    try:
+        project_dir = state.resolve_project_dir(project)
+        state.ensure_harness_dir(project_dir)
+        out = state.harness_dir(project_dir) / "last_output.json"
+        out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"OUTPUT_JSON: {out}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - the artifact is a convenience, never a hard dependency
+        pass
+
+
 def main() -> None:
+    # Force UTF-8 so accented/curly-quote JSON survives a cp1252 Windows console (friction-log
+    # #4). Guarded because pytest replaces stdout/stderr with non-reconfigurable captures.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8")
+
     args = _build_parser().parse_args()
     try:
         result = _dispatch(args)
@@ -266,6 +298,7 @@ def main() -> None:
 
     if isinstance(result, int):
         sys.exit(result)
+    _write_output_artifact(args, result)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
