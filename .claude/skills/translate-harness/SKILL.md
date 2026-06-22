@@ -170,7 +170,11 @@ This prints `detected_features`, the `questions` (the 4 **standard** fixed quest
 **deterministic** feature-detected ones, each with `id`, `question`, `options`, and a `hint`),
 and an `answers_path`. Each option is an `{id, label}` pair — the `id` is a stable slug you pass
 straight through, so you never count positions. Nothing here is answered yet — these are
-*for the user*.
+*for the user*. Two notes: (a) the `dialect` question may arrive with a `prefilled` id +
+`prefilled_reason` derived from the setup locale (es-mx → `mexican_spanish`) — present it as a
+confirm/override default, not a blank ask. (b) `forms_of_address` has a first-class informal-tú
+option (id `t_dominates_informal` — the `ú` is dropped by the slug rule); prefer that id over
+inventing custom text when the user wants tú to dominate.
 
 **1b. STOP — G1: ask the standard + deterministic questions and WAIT.** Present **every**
 question in chat with its options and hint, then **END your turn** and wait for the user's
@@ -181,7 +185,9 @@ user has answered (let them revise earlier answers), record each as the chosen o
 (or its exact `label`) from the prepare-questions output — or a **custom string** for anything not
 among the options — and **Write** the dict to the printed `answers_path`:
 `{question_id: option_id_or_label_or_custom_string}`, e.g.
-`{"dialect": "mexican_spanish", "forms_of_address": "tú throughout; the kittens speak familiarly"}`.
+`{"dialect": "mexican_spanish", "forms_of_address": "t_dominates_informal"}` (here `dialect` keeps
+the `prefilled` id from setup and `forms_of_address` uses the first-class tú option — reserve a
+custom string for genuinely off-menu rules).
 (A 0-based numeric index still works for back-compat, but the `id` is safer — no position counting.)
 Only then continue to 1c.
 
