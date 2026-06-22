@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.5.1] - 2026-06-22
+
+### Changed
+- **Approval gates capture specific swaps via the custom field.** The translate-harness style-guide (G3) and glossary approval beats now present `AskUserQuestion` with exactly two predefined options — **"Approve all"** and **"Reject & talk it through"** — and instruct the user to pick **_Other_** to approve *with specific changes* (e.g. `Gatito → Minino`, "keep place names in English", or pasted corrected JSON). A custom answer is treated as approve-with-changes: apply the edits, re-run `commit`, briefly confirm, and continue without looping back into the gate. The two-kinds-of-STOP overview is updated to match.
+
 ## [0.22.5.0] - 2026-06-21
 
 ### Added
