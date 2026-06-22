@@ -10,11 +10,15 @@ from pathlib import Path
 import pytest
 
 from src.style_guide_wizard import (
+    answers_to_style_guide_fallback,
     build_question_prompt,
+    format_answered_questions,
     get_active_questions,
     load_conditional_questions,
     load_fixed_questions,
     load_question_config,
+    option_ids,
+    resolve_answer,
 )
 from src.text_feature_detector import FeatureManifest, FeatureResult
 
@@ -114,6 +118,85 @@ class TestGetActiveQuestions:
             None, config_path=sample_config, manifest=m
         )
         assert conditional == []
+
+
+_DIALECT_Q = {
+    "id": "dialect",
+    "question": "Dialect?",
+    "options": [
+        {"label": "Mexican Spanish", "style_guide_effect": "Use MX."},
+        {"label": "Castilian Spanish", "style_guide_effect": "Use ES."},
+        {"label": "Generic Latin America", "style_guide_effect": "Use LATAM."},
+    ],
+}
+
+
+class TestOptionIds:
+    def test_ids_are_slugs_aligned_to_options(self):
+        assert option_ids(_DIALECT_Q) == [
+            "mexican_spanish",
+            "castilian_spanish",
+            "generic_latin_america",
+        ]
+
+    def test_colliding_labels_are_disambiguated(self):
+        q = {"options": [{"label": "Keep it"}, {"label": "keep  it!"}, {"label": "Keep it"}]}
+        assert option_ids(q) == ["keep_it", "keep_it_2", "keep_it_3"]
+
+
+class TestResolveAnswer:
+    def test_int_index(self):
+        assert resolve_answer(_DIALECT_Q, 0) == ("Mexican Spanish", "Use MX.", True)
+
+    def test_numeric_string_index(self):
+        assert resolve_answer(_DIALECT_Q, "2") == ("Generic Latin America", "Use LATAM.", True)
+
+    def test_option_id(self):
+        assert resolve_answer(_DIALECT_Q, "castilian_spanish") == ("Castilian Spanish", "Use ES.", True)
+
+    def test_exact_label_case_and_space_insensitive(self):
+        assert resolve_answer(_DIALECT_Q, "  mexican spanish ") == ("Mexican Spanish", "Use MX.", True)
+
+    def test_label_internal_whitespace_collapsed(self):
+        q = {"options": [{"label": "Keep  it  literal", "style_guide_effect": "Keep."}]}
+        # Matching ignores irregular spacing, but the canonical label is returned verbatim.
+        assert resolve_answer(q, "keep it literal") == ("Keep  it  literal", "Keep.", True)
+
+    def test_label_less_option_does_not_crash(self):
+        q = {"options": [{"style_guide_effect": "No label."}]}
+        assert resolve_answer(q, 0) == ("", "No label.", True)
+
+    def test_unknown_string_is_custom(self):
+        label, effect, matched = resolve_answer(_DIALECT_Q, "tú throughout, kittens speak familiarly")
+        assert matched is False
+        assert label == "tú throughout, kittens speak familiarly"
+        assert effect == ""
+
+    def test_out_of_range_int_is_custom_not_wrong_option(self):
+        # The old code silently dropped this; it must never resolve to an option.
+        label, effect, matched = resolve_answer(_DIALECT_Q, 9)
+        assert matched is False
+        assert effect == ""
+
+
+class TestFormatAnsweredQuestions:
+    def test_effects_only_when_requested(self):
+        without = format_answered_questions([_DIALECT_Q], {"dialect": "mexican_spanish"})
+        assert without == "- Dialect? -> Mexican Spanish"
+        with_fx = format_answered_questions(
+            [_DIALECT_Q], {"dialect": "mexican_spanish"}, include_effects=True
+        )
+        assert "Use MX." in with_fx
+
+
+class TestAnswersToStyleGuideFallback:
+    def test_option_id_pulls_effect(self):
+        out = answers_to_style_guide_fallback([_DIALECT_Q], {"dialect": "castilian_spanish"})
+        assert out == "Use ES."
+
+    def test_custom_text_uses_question_header(self):
+        out = answers_to_style_guide_fallback([_DIALECT_Q], {"dialect": "andean Spanish, formal"})
+        assert out == "DIALECT\nandean Spanish, formal"
 
 
 class TestBuildQuestionPromptManifest:
