@@ -163,6 +163,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Spawn mode (persisted): sequential | chapter (default) | all")
     tpp.add_argument("--window", type=int, default=None,
                      help="Chapter-parallel window width X (default 8); persisted")
+    tpp.add_argument("--batch-size", dest="batch_size", type=int, default=None,
+                     help="Recommended workers to spawn per wave (default 5); persisted. "
+                          "Ramp from this; throttle back to ~1 on a 529 (overloaded)")
 
     tcp = sub.add_parser("translate-commit",
                          help="Validate worker drafts and stamp the chunks (idempotent)")
@@ -199,6 +202,20 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Cap total chunks returned (default: all) — keeps a sample small")
     stp.add_argument("--no-source", dest="include_source", action="store_false",
                      help="Omit source_text; return only the translation per chunk")
+
+    # status (resume at a glance) -------------------------------------------
+    stp2 = sub.add_parser("status",
+                          help="Report pipeline progress: translated/pending per chapter, "
+                               "saved spawn plan, artifacts (read-only; no spend)")
+    add_project(stp2)
+
+    # runs (summarize the run log) ------------------------------------------
+    rnp = sub.add_parser("runs",
+                         help="Summarize a run from logs/harness_runs.jsonl: command "
+                              "timeline, beats, outcomes (read-only)")
+    add_project(rnp)
+    rnp.add_argument("--run-id", dest="run_id", default=None,
+                     help="Run id to summarize (default: the project's most recent run)")
 
     # log-event (record a qualitative beat in the run log) ------------------
     lep = sub.add_parser("log-event",
@@ -265,7 +282,8 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "translate-prepare":
         return flow.translate_prepare(args.project, chapters=args.chapters,
                                       worker_model=args.worker_model,
-                                      parallelism=args.parallelism, window=args.window)
+                                      parallelism=args.parallelism, window=args.window,
+                                      batch_size=args.batch_size)
     if cmd == "translate-commit":
         return flow.translate_commit(args.project, worker_model=args.worker_model)
     if cmd == "epub":
@@ -279,6 +297,10 @@ def _dispatch(args: argparse.Namespace):
         return flow.show_translation(args.project, chapters=args.chapters,
                                      max_chunks=args.max_chunks,
                                      include_source=args.include_source)
+    if cmd == "status":
+        return flow.status(args.project)
+    if cmd == "runs":
+        return flow.runs(args.project, run_id=args.run_id)
     if cmd == "log-event":
         return flow.log_event(args.project, event=args.event, data=args.data)
     raise SystemExit(f"unknown command: {cmd}")
@@ -311,6 +333,7 @@ _RESULT_SUMMARY_KEYS = (
     "style_guide_loaded", "term_count", "chars", "book_difficulty",
     "suggested_target_size", "usage_summary", "spawn_plan", "counts",
     "rescued_prior_drafts", "shown_chunks", "total_chunks", "error",
+    "stage", "spawn_mode_moot", "totals",
 )
 
 
