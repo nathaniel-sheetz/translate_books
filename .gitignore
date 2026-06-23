@@ -81,6 +81,9 @@ prompts/previous/
 prompts/history/
 !prompts/history/.gitkeep
 
+# Harness run log (per-user record of how each run went)
+logs/
+
 # Backlog
 backlog/
 
