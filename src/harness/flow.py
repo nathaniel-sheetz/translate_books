@@ -112,6 +112,7 @@ def setup(
             cfg[key] = value
 
     state.ensure_harness_dir(project_dir, clean=True)  # fresh drafts/prompts
+    cfg["run_id"] = state.new_run_id(project_dir)  # a clean run starts a new run id
     state.save_config(project_dir, cfg)
 
     if str(state.REPO_ROOT) not in sys.path:
@@ -1270,3 +1271,31 @@ def show_translation(
         # Self-document the keys the friction log #7 agent had to guess.
         "fields": {"translation": "translated_text", "source": "source_text"},
     }
+
+
+# ── run log (qualitative beats the CLI can't see) ───────────────────────────
+
+def log_event(project: str, *, event: str, data: str | None = None) -> dict:
+    """Append a quality/friction beat to the central run log.
+
+    The automatic per-command timeline (harness.py) covers durations and
+    outcomes, but the conversational beats — approve-vs-reject, the chosen
+    backend / spawn mode, worker re-spawns — live only in the chat. This is how
+    the agent records them: ``event`` names the beat and ``data`` is a JSON
+    object of fields merged into the logged record. Stamped with the project's
+    current ``run_id`` so it groups with the rest of the run.
+    """
+    project_dir = state.resolve_project_dir(project)
+    fields: dict = {}
+    if data:
+        parsed = json.loads(data)  # bad JSON -> ValueError -> CLI re-run message
+        if not isinstance(parsed, dict):
+            raise ValueError("--data must be a JSON object, e.g. '{\"beat\":\"glossary\"}'")
+        fields = parsed
+
+    run_id = state.ensure_run_id(project_dir)
+
+    from src.utils.run_logger import log_run_event
+
+    log_run_event(run_id=run_id, project=project_dir.name, event=event, **fields)
+    return {"logged": True, "run_id": run_id, "event": event, "fields": fields}

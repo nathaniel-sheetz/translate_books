@@ -54,6 +54,20 @@ also mirrors its full result to `projects/<slug>/.harness/last_output.json` (UTF
 always clean UTF-8 regardless of the console. **Never pipe harness output through `grep`**: on
 Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.
 
+**Run logging — automatic timeline + a few beats you log.** Every harness command appends one
+event (command, duration, outcome, key counts) to `logs/harness_runs.jsonl`, tied together by a
+`run_id` minted at `setup`. That timeline is automatic — you do nothing. But four *conversational*
+signals the CLI can't see are yours to record with `log-event` at the beats called out below
+(backend choice, style-guide / glossary approval, spawn-mode choice, worker re-spawns):
+
+```bash
+python scripts/harness.py log-event --project projects/<slug> \
+  --event approval --data '{"beat":"glossary","decision":"approved_first_pass"}'
+```
+
+`--data` is a free-form JSON object, so new fields need no new flags. These calls never spend and
+must never gate the flow — log and move on; a failed log must not stop a run.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ NEVER invoke an interactive code path — every input() prompt DEADLOCKS you.│
@@ -229,6 +243,10 @@ approve-with-changes: apply the edits to the draft, re-run `style-guide commit`,
 the user's chance to lock in the key decisions (dialect/locale, name conventions, register)
 **before** they shape the glossary.
 
+**Log the outcome** once decided: `log-event --event approval --data '{"beat":"style_guide",
+"decision":"approved_first_pass"|"reject_then_redraft"|"approve_with_changes","redrafts":<n>}'`
+(`redrafts` = how many times you re-ran `commit` after a validation/rejection before this approval).
+
 ## Step 2 — GLOSSARY beat (agent drafts, approval gate)
 
 ```bash
@@ -263,6 +281,8 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
   answer is approve-with-changes: apply exactly those swaps to the JSON at `draft_path`, re-run
   `commit`, briefly confirm what changed, and continue (the swap submission *is* the approval — don't
   loop back into this gate unless the user asks). Only continue once the user approves.
+- **Log the outcome:** `log-event --event approval --data '{"beat":"glossary",
+  "decision":"approved_first_pass"|"reject_then_redraft"|"approve_with_changes","redrafts":<n>}'`.
 
 > Approving the glossary approves **the glossary only**. It does NOT mean "start translating."
 > After approval you proceed to difficulty scoring + chunking (Step 3) and then **stop again** at
@@ -338,6 +358,9 @@ Two translation backends, same downstream pipeline. Pick one with the user:
   The dollar figure from `chunk`/`cost` is the **metered-API** price and does **not** apply here;
   this path's gate is the `usage_summary` from `translate-prepare` (4B-b), not a cost estimate.
 
+Once the user picks, **log it**: `log-event --event backend --data '{"backend":"api"|"subagent",
+"model":"<model>"}'` (records the model/cost path the int-return `translate` wrapper can't).
+
 The translate phase is a **review-first, set-by-set** flow: translate a small batch, auto-align it so
 it is instantly readable, then translate the rest with the same spawn settings. Do the beats in order
 — do **not** improvise parallelism; the spawn mode is the user's call (4B-0b).
@@ -365,6 +388,8 @@ Record the choice as `<set>` (a `--chapters` spec like `1-6`, or "all" = omit `-
 END your turn and wait. When answered, **save it** by passing it on the next `translate-prepare`
 (`--parallelism sequential|chapter|all`, plus `--window <X>` for #2) — it is persisted to the project
 config so the "translate the rest" batch reuses it without re-asking. Confirm X for mode 2 (default 8).
+**Log the choice:** `log-event --event spawn_mode --data '{"mode":"sequential"|"chapter"|"all",
+"window":<X>}'`.
 
 **4B-a. Prepare (no spend).** Render one prompt per untranslated chunk in the set + a manifest, saving
 the spawn mode:
@@ -412,7 +437,8 @@ skipped). Spawn according to the saved mode:
 **4B-d. Re-spawn the misses.** For any `failed` (the report names the problem per chunk) or `missing`
 (no draft written), re-spawn a worker for just those `chunk_id`s — write fresh prose to the same
 `draft_path` — and re-run `translate-commit`. Cap re-spawns at ~3 per chunk, then surface the chunk
-for a manual edit-or-skip decision rather than looping.
+for a manual edit-or-skip decision rather than looping. **Log each re-spawn:** `log-event
+--event respawn --data '{"chunk_id":"<id>","attempt":<n>,"reason":"failed"|"missing"}'`.
 
 **4B-e. Align the set + give a reader link.** Once the set's chunks are all committed, make it readable
 with no manual steps:

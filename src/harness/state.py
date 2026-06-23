@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -129,10 +130,51 @@ def load_config(project_dir: Path) -> dict:
 
 
 def save_config(project_dir: Path, cfg: dict) -> None:
-    """Write ``.harness/config.json`` (merged over DEFAULTS so it is complete)."""
+    """Write ``.harness/config.json`` (merged over DEFAULTS so it is complete).
+
+    Keys not in DEFAULTS (e.g. ``run_id``, the persisted spawn knobs) are kept
+    as-is, so callers can stash extra state in the config without registering it
+    as a CLI-overridable key.
+    """
     merged = dict(DEFAULTS)
     merged.update({k: v for k, v in cfg.items() if v is not None})
     ensure_harness_dir(project_dir)
     config_path(project_dir).write_text(
         json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+# ── run id (one per pass through the harness) ───────────────────────────────
+#
+# A "run" is one trip through the pipeline, bounded by ``setup`` (which wipes
+# ``.harness/`` for a clean run). The id lives in config.json so every later
+# command can stamp the same run, and it is deliberately NOT in DEFAULTS /
+# CONFIG_KEYS so it is never exposed as a CLI override.
+
+_RUN_ID_TS_FMT = "%Y%m%d_%H%M%S_%f"  # microseconds break ties on fast re-runs
+
+
+def new_run_id(project_dir: Path) -> str:
+    """Mint a fresh run id, ``<slug>_<YYYYMMDD_HHMMSS_ffffff>`` (not persisted here)."""
+    return f"{project_dir.name}_{datetime.now():{_RUN_ID_TS_FMT}}"
+
+
+def ensure_run_id(project_dir: Path) -> str:
+    """Return the project's current run id, minting + persisting one if absent.
+
+    ``setup`` mints a fresh id each run; this is the read path every other
+    command uses (and the back-fill for projects created before run-logging
+    existed). Best-effort persistence: if the config can't be written, the
+    minted id is still returned so the event can be stamped.
+    """
+    cfg = load_config(project_dir)
+    rid = cfg.get("run_id")
+    if rid:
+        return rid
+    rid = new_run_id(project_dir)
+    cfg["run_id"] = rid
+    try:
+        save_config(project_dir, cfg)
+    except OSError:
+        _log.warning("Could not persist run_id for %s", project_dir, exc_info=True)
+    return rid

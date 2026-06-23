@@ -28,6 +28,7 @@ Examples:
 import argparse
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -199,6 +200,16 @@ def _build_parser() -> argparse.ArgumentParser:
     stp.add_argument("--no-source", dest="include_source", action="store_false",
                      help="Omit source_text; return only the translation per chunk")
 
+    # log-event (record a qualitative beat in the run log) ------------------
+    lep = sub.add_parser("log-event",
+                         help="Append a quality/friction beat to logs/harness_runs.jsonl")
+    add_project(lep)
+    lep.add_argument("--event", required=True,
+                     help="Beat name, e.g. approval | backend | spawn_mode | respawn")
+    lep.add_argument("--data", default=None,
+                     help="JSON object of fields to record, e.g. "
+                          "'{\"beat\":\"glossary\",\"decision\":\"approved_first_pass\"}'")
+
     return parser
 
 
@@ -268,6 +279,8 @@ def _dispatch(args: argparse.Namespace):
         return flow.show_translation(args.project, chapters=args.chapters,
                                      max_chunks=args.max_chunks,
                                      include_source=args.include_source)
+    if cmd == "log-event":
+        return flow.log_event(args.project, event=args.event, data=args.data)
     raise SystemExit(f"unknown command: {cmd}")
 
 
@@ -291,6 +304,55 @@ def _write_output_artifact(args: argparse.Namespace, result: dict) -> None:
         pass
 
 
+# Result keys worth carrying into the run-log timeline — a small whitelist so a
+# "command" event stays a compact summary (counts/sizes), never the full payload.
+_RESULT_SUMMARY_KEYS = (
+    "chapter_count", "source_words", "section_count", "candidate_count",
+    "style_guide_loaded", "term_count", "chars", "book_difficulty",
+    "suggested_target_size", "usage_summary", "spawn_plan", "counts",
+    "rescued_prior_drafts", "shown_chunks", "total_chunks", "error",
+)
+
+
+def _log_command(args: argparse.Namespace, *, status: str, duration: float,
+                 result: dict | None = None) -> None:
+    """Append one ``command`` event to the run log. Best-effort: never raises.
+
+    Fires on every outcome path in ``main()`` (success, wrapped-CLI exit code, or
+    a caught error) so the log is a complete timeline of the run. ``log-event``
+    is excluded — it writes its own beat and would otherwise double-log.
+    """
+    cmd = getattr(args, "command", None)
+    if cmd in (None, "log-event"):
+        return
+    try:
+        from src.utils.run_logger import log_run_event
+
+        action = getattr(args, "action", None)
+        label = f"{cmd} {action}" if action else cmd
+
+        project = getattr(args, "project", None)
+        run_id = None
+        slug = None
+        if project:
+            try:
+                project_dir = state.resolve_project_dir(project)
+                slug = project_dir.name
+                run_id = state.ensure_run_id(project_dir)
+            except Exception:  # noqa: BLE001 - never let resolution break logging
+                slug = project
+
+        fields = {"cmd": label, "status": status, "dur_s": round(duration, 3)}
+        if isinstance(result, dict):
+            for key in _RESULT_SUMMARY_KEYS:
+                if key in result:
+                    fields[key] = result[key]
+
+        log_run_event(run_id=run_id, project=slug, event="command", **fields)
+    except Exception:  # noqa: BLE001 - logging is a convenience, never a dependency
+        pass
+
+
 def main() -> None:
     # Force UTF-8 so accented/curly-quote JSON survives a cp1252 Windows console (friction-log
     # #4). Guarded because pytest replaces stdout/stderr with non-reconfigurable captures.
@@ -299,20 +361,32 @@ def main() -> None:
             _stream.reconfigure(encoding="utf-8")
 
     args = _build_parser().parse_args()
+    started = time.monotonic()
     try:
         result = _dispatch(args)
     except HarnessValidationError as e:
+        _log_command(args, status="validation_error", duration=time.monotonic() - started)
         print(f"VALIDATION ERROR — fix every issue below and re-draft:\n{e}", file=sys.stderr)
         sys.exit(1)
     except (json.JSONDecodeError, ValueError) as e:
+        _log_command(args, status="parse_error", duration=time.monotonic() - started)
         print(f"DRAFT PARSE ERROR — fix the JSON/format and re-run:\n{e}", file=sys.stderr)
         sys.exit(1)
     except FileNotFoundError as e:
+        _log_command(args, status="not_found", duration=time.monotonic() - started)
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+    except Exception:
+        _log_command(args, status="unexpected_error", duration=time.monotonic() - started)
+        raise
 
+    elapsed = time.monotonic() - started
     if isinstance(result, int):
+        # chunk/cost/translate/epub wrap a subprocess and return its exit code; the
+        # dollar/progress detail is the wrapped CLI's own stdout, so log only the outcome.
+        _log_command(args, status=("ok" if result == 0 else f"exit_{result}"), duration=elapsed)
         sys.exit(result)
+    _log_command(args, status="ok", duration=elapsed, result=result)
     _write_output_artifact(args, result)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
