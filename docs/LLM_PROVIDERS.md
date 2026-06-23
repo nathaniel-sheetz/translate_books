@@ -29,7 +29,7 @@ The file lives at the project root. It defines which providers and models are av
 ```json
 {
   "default_provider": "anthropic",
-  "default_model": "claude-sonnet-4-20250514",
+  "default_model": "claude-sonnet-4-6",
   "providers": [
     {
       "id": "anthropic",
@@ -38,8 +38,8 @@ The file lives at the project root. It defines which providers and models are av
       "api_key_env_var": "ANTHROPIC_API_KEY",
       "models": [
         {
-          "id": "claude-sonnet-4-20250514",
-          "name": "Claude Sonnet 4",
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
           "pricing": { "input": 3.00, "output": 15.00 }
         }
       ]

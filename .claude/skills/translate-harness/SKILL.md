@@ -136,7 +136,7 @@ difficulty score). `setup` also persists `target-lang` / `locale` / `model` / `t
 
 ```bash
 python scripts/harness.py setup --project projects/<slug> \
-  --target-lang Spanish --locale mx --model claude-sonnet-4-20250514 \
+  --target-lang Spanish --locale mx --model claude-sonnet-4-6 \
   --title "<Title>" --author "<Author>"
 # add --url <gutenberg-url> if there is no local source.txt yet.
 ```
@@ -146,7 +146,7 @@ Pick the chapter pattern that matches the book: `--chapter-pattern roman` (Chapt
 returned `suggested_pattern` and `chapter_report` are read from the book's HTML headings —
 relay them and prefer the suggestion when it differs from your guess. Confirm the printed
 `chapter_count` looks right and `chunks_dir_exists` is `false`. (The lang/locale/model defaults
-are Spanish/mx/sonnet — surface them to the user rather than assuming silently.)
+are Spanish/mx/sonnet 4.6 — surface them to the user rather than assuming silently.)
 
 **Refine the split if it looks wrong** — the `setup` split misfires, reports "No chapters
 detected," or Gutenberg front/back matter (title page, copyright, the CONTENTS listing, a
@@ -342,7 +342,7 @@ the Step 4 gate **only if** the user picks the API backend; on the subagent path
    > tokens are not discounted across chunks. The estimate is the honest figure.
 3. **Only once the user has affirmatively approved in a separate turn**, translate:
    ```bash
-   python scripts/harness.py translate --project projects/<slug> --yes --model claude-sonnet-4-20250514
+   python scripts/harness.py translate --project projects/<slug> --yes --model claude-sonnet-4-6
    ```
    `translate` refuses to run without `--yes`. The model defaults to the one set at `setup`; pass
    `--model` to override, and surface the choice rather than assuming.

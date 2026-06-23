@@ -248,7 +248,7 @@ After all chunks finish translating, the dashboard automatically combines each a
 - `POST /api/project/<id>/translate/batch` — `{ "chapters": [...], "provider": "...", "model": "..." }` -> `{ "job_id": "abc123" }`
 - `GET /api/project/<id>/translate/sse?job_id=abc123` — SSE stream with events: `chunk_started`, `chunk_done`, `chunk_error`, `chapter_aligned`, `batch_complete`
 
-**Available models** are configured in `llm_config.json`. By default: Anthropic (Claude Sonnet 4, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku), OpenAI (GPT-4o, GPT-4o Mini), and DeepInfra (Llama 3.3 70B). Any OpenAI-compatible provider can be added.
+**Available models** are configured in `llm_config.json`. By default: Anthropic (Claude Sonnet 4.6, Claude Haiku 4.5, Claude 3.5 Sonnet, Claude 3.5 Haiku), OpenAI (GPT-4o, GPT-4o Mini), and DeepInfra (Llama 3.3 70B). Any OpenAI-compatible provider can be added.
 
 **Backend:** `translate_chunk_realtime()` and `estimate_cost()` from `src/api_translator.py`. Glossary filtering via `filter_glossary_for_chunk()` from `src/glossary_bootstrap.py`.
 

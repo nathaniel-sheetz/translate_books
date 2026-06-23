@@ -35,7 +35,7 @@ _LLM_CONFIG_CACHE: dict | None = None
 
 _FALLBACK_CONFIG = {
     "default_provider": "anthropic",
-    "default_model": "claude-sonnet-4-20250514",
+    "default_model": "claude-sonnet-4-6",
     "providers": [
         {
             "id": "anthropic",
@@ -43,7 +43,7 @@ _FALLBACK_CONFIG = {
             "type": "anthropic",
             "api_key_env_var": "ANTHROPIC_API_KEY",
             "models": [
-                {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "pricing": {"input": 3.00, "output": 15.00}},
+                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "pricing": {"input": 3.00, "output": 15.00}},
                 {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "pricing": {"input": 1.00, "output": 5.00}},
             ],
         },
@@ -86,7 +86,7 @@ def get_provider_config(provider_id: str) -> dict:
 
 
 def get_default_model() -> str:
-    return load_llm_config().get("default_model", "claude-sonnet-4-20250514")
+    return load_llm_config().get("default_model", "claude-sonnet-4-6")
 
 
 def get_default_provider() -> str:
@@ -129,7 +129,7 @@ def get_pricing_table() -> dict:
 
 
 # Keep module-level constant for backward compat in scripts that import it
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 class APIError(Exception):

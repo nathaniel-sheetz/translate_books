@@ -572,8 +572,8 @@ def main():
     # Translation API
     parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"],
                         help="API provider (default: anthropic)")
-    parser.add_argument("--model", default="claude-sonnet-4-20250514",
-                        help="Model identifier (default: claude-sonnet-4-20250514)")
+    parser.add_argument("--model", default="claude-sonnet-4-6",
+                        help="Model identifier (default: claude-sonnet-4-6)")
     parser.add_argument("--cost-only", action="store_true",
                         help="Estimate cost and exit without translating (never spends, never prompts)")
     parser.add_argument("--yes", action="store_true",

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.6.1] - 2026-06-23
+
+### Changed
+- **Default Anthropic model is now `claude-sonnet-4-6` (was `claude-sonnet-4-20250514`).** The new id is applied uniformly across the harness state default (`src/harness/state.py`), the `api_translator` fallback config + `DEFAULT_MODEL` constant, every CLI `--model` default (`extract_glossary_candidates.py`, `generate_style_guide.py`, `translate_api.py`, `translate_book.py`, `harness.py`), the example config (`llm_config.example.json`), and the docs (`LLM_PROVIDERS.md`, `GLOSSARY_CANDIDATES.md`, `WEB_UI_GUIDE.md`, the translate-harness SKILL). Display names updated `Claude Sonnet 4` → `Claude Sonnet 4.6`; pricing unchanged. This also resolves a pre-existing inconsistency where the judge/retranslate/compare tooling already referenced `claude-sonnet-4-6` while the defaults lagged on the dated id.
+
 ## [0.22.6.0] - 2026-06-22
 
 ### Added

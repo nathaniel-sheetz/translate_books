@@ -93,7 +93,7 @@ def _args() -> SimpleNamespace:
     # AskUserQuestion approval gate (T2 — no agent deadlock).
     return SimpleNamespace(
         chunk_size=2000, overlap_paragraphs=1, min_overlap_words=50,
-        provider="anthropic", model="claude-sonnet-4-20250514",
+        provider="anthropic", model="claude-sonnet-4-6",
         chapters=None, cost_only=False, yes=True,
         project_name="Test Book", author="Tester",
         target_lang="Spanish", source_lang="English",
