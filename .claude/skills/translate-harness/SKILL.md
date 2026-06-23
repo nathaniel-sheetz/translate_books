@@ -430,9 +430,12 @@ abort. **End your turn and wait.** Do not spawn workers in the same turn that pr
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
 Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
 `model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt:
-*"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Nothing
-else."* The worker writes its file — **do not** have it return the prose to you (that floods your
-context). After a wave's drafts are written, commit:
+*"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Then
+reply with exactly `done <chunk_id>` and nothing else — no summary, no list of choices."* The worker
+writes its file and reports back only that token — **do not** have it return the prose *or a recap of
+its choices* to you (either one floods your context). You learn each worker's success from
+`translate-commit`'s `committed`/`failed`/`missing` lists, not from its chat-back. After a wave's
+drafts are written, commit:
 ```bash
 python scripts/harness.py translate-commit --project projects/<slug>
 ```
