@@ -592,7 +592,7 @@ def main():
         epilog="""
 Examples:
   # Real-time translation with Claude
-  python translate_api.py chunks/*.json --provider anthropic --model claude-sonnet-4-20250514
+  python translate_api.py chunks/*.json --provider anthropic --model claude-sonnet-4-6
 
   # Batch translation (50% discount, ~24h processing)
   python translate_api.py chunks/*.json --provider openai --model gpt-4o --batch
@@ -646,8 +646,8 @@ Examples:
 
     parser.add_argument(
         '--model',
-        default='claude-sonnet-4-20250514',
-        help='Model to use (default: claude-sonnet-4-20250514)'
+        default='claude-sonnet-4-6',
+        help='Model to use (default: claude-sonnet-4-6)'
     )
 
     parser.add_argument(

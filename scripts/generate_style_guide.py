@@ -84,7 +84,7 @@ def main():
     parser.add_argument("--fixed-only", action="store_true", help="Use only fixed questions (no LLM)")
     parser.add_argument("--non-interactive", action="store_true", help="Use default answers")
     parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
-    parser.add_argument("--model", default="claude-sonnet-4-20250514")
+    parser.add_argument("--model", default="claude-sonnet-4-6")
     parser.add_argument("--questions-config", help="Path to custom questions JSON")
     parser.add_argument(
         "--force-rescan",

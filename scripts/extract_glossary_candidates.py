@@ -1444,8 +1444,8 @@ Examples:
         help="API provider for bootstrap (default: anthropic)"
     )
     parser.add_argument(
-        "--model", default="claude-sonnet-4-20250514",
-        help="Model for bootstrap (default: claude-sonnet-4-20250514)"
+        "--model", default="claude-sonnet-4-6",
+        help="Model for bootstrap (default: claude-sonnet-4-6)"
     )
     parser.add_argument(
         "--max-literary-zipf-capitalized", type=float, default=4.0,

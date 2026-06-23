@@ -22,7 +22,7 @@ Examples:
     python scripts/harness.py style-guide prepare-questions --project understood-betsy
     python scripts/harness.py glossary commit --project understood-betsy
     python scripts/harness.py chunk --project understood-betsy --size 1500
-    python scripts/harness.py translate --project understood-betsy --yes --model claude-sonnet-4-20250514
+    python scripts/harness.py translate --project understood-betsy --yes --model claude-sonnet-4-6
 """
 
 import argparse
