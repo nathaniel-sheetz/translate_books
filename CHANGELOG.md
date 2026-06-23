@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.22.5.5] - 2026-06-22
+## [0.22.6.0] - 2026-06-22
 
 ### Added
 - **Every harness command now writes a timestamped JSONL event to `logs/harness_runs.jsonl`.** Each entry carries `run_id`, `project`, `event`, `cmd`, `status`, `dur_s`, and result-summary counts — giving every run a queryable timeline. The `run_id` (`<slug>_YYYYMMDD_HHMMSS_ffffff`) is minted at `setup` and stamped on every subsequent command for the same run, so a full session can be replayed or diffed later.
