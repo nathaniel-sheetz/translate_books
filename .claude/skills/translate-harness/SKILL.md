@@ -48,11 +48,24 @@ deterministic/paid stage (`chunk`/`cost`/`translate`/`epub`) stream the underlyi
 output through. Per-project working state lives in `projects/<slug>/.harness/`; `setup`
 wipes it for a clean run, so there is no global `.tmp/` to manage.
 
-**Reading harness output — Read the artifact, don't grep stdout.** Every JSON-returning command
+**Reading harness output — Read the artifact, NEVER parse stdout.** Every JSON-returning command
 also mirrors its full result to `projects/<slug>/.harness/last_output.json` (UTF-8) and prints
-`OUTPUT_JSON: <path>` to stderr. **Prefer `Read`ing that file** over capturing stdout — it is
-always clean UTF-8 regardless of the console. **Never pipe harness output through `grep`**: on
-Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.
+`OUTPUT_JSON: <path>` to stderr. **Always `Read` that file** to consume a result — it is the only
+clean machine-readable surface. Stdout is a *mixed human+JSON stream*: `translate-commit` /
+`chunk` / `epub` print progress lines and the full `terms`/counts dump *around* the JSON, so
+piping stdout into a JSON parser (`... | python -c "json.load(sys.stdin)"`) fails immediately with
+`Expecting value: line 1 column 1 (char 0)` on the leading non-JSON text. Don't learn this the hard
+way — read `last_output.json`. (Same reason **never pipe harness output through `grep`**: on
+Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.)
+
+**Resuming a project? Run `status` first.** `python scripts/harness.py status --project <slug>`
+reports, in one call, each chapter's translated-vs-pending chunk counts, the saved `spawn_plan`
+(`parallelism`/`window`/`batch_size`), which artifacts exist (`style_guide`/`glossary`/`difficulty`/
+`chunks`), any built EPUBs, and a `stage` (`pre-chunk`/`untranslated`/`partial`/`fully-translated`)
+with a `next` hint. **Never hand-roll a loop over `chunks/*.json` to discover what's left** —
+`status` (or, for the work list itself, `translate-prepare`, which already returns *only*
+untranslated chunks) answers it directly. To read a past run back, `runs --project <slug>` summarizes
+the command timeline + logged beats.
 
 **Run logging — automatic timeline + a few beats you log.** Every harness command appends one
 event (command, duration, outcome, key counts) to `logs/harness_runs.jsonl`, tied together by a
@@ -372,8 +385,15 @@ accept it, give a different range, or choose **all chapters in one go**. END you
 Record the choice as `<set>` (a `--chapters` spec like `1-6`, or "all" = omit `--chapters`).
 
 **4B-0b. STOP — spawn-mode gate (ask once, then save).** *Immediately after* the batch is chosen and
-**before any translation**, ask via AskUserQuestion how workers should be spawned. Three options;
-**bias toward #2 (the default)**:
+**before any translation**, ask via AskUserQuestion how workers should be spawned.
+
+> **Skip this gate when the spawn mode is moot.** If `status` (or `translate-prepare`) reports
+> `spawn_mode_moot: true` — i.e. every chapter is a single chunk — the three modes below are
+> **equivalent** (there is no later chunk to inherit a previous chunk's Spanish, so "continuity"
+> buys nothing). Don't make the user choose: just use all-parallel in bounded batches of
+> `batch_size` and move on. The gate matters only for books with multi-chunk chapters.
+
+Otherwise, three options; **bias toward #2 (the default)**:
 
   1. **Sequential** — one chunk at a time, in order. Slowest, but every chunk after the first sees the
      previous chunk's **English + Spanish** (max continuity). Pick if continuity beats speed.
@@ -418,7 +438,24 @@ python scripts/harness.py translate-commit --project projects/<slug>
 ```
 which guards each draft (length / completeness / image-token parity / echo), writes provenance, stamps
 the chunks, and prints `committed` / `failed` / `missing` / `skipped` (idempotent — done chunks are
-skipped). Spawn according to the saved mode:
+skipped).
+
+> **Spawning into a flaky API — probe, throttle, commit-then-check.** Worker spawns can fail when the
+> API is degraded. Handle it deterministically instead of hammering:
+> - **Probe before a big wave.** After *any* spawn failure (or a known incident), spawn **ONE** worker
+>   first and confirm it writes a draft before fanning out. A 1-worker probe discovers an outage at a
+>   fraction of the context/usage cost of a failed full wave.
+> - **`500` vs `529` are opposite signals.** A **500** is a server outage — concurrency is irrelevant;
+>   **wait / back off**, don't change batch size, don't spam retries (pause and tell the user if it
+>   persists). A **529** is *overloaded* — **reduce concurrency**: step the wave down the ladder
+>   `batch_size → 3 → 1` until drafts land, then ramp back up toward `batch_size`.
+> - **Commit-then-check, regardless of the Agent error.** A worker often `529`s on its final *wrap-up*
+>   turn **after** it already wrote a valid draft (you'll see `tool_uses: 2`). So an Agent-call error is
+>   **not** a reliable "no draft" signal: after every wave (success or error) run `translate-commit` and
+>   trust its `missing`/`failed` lists — not the Agent error text — to decide what to re-spawn. This
+>   avoids re-translating chunks that already landed.
+
+Spawn according to the saved mode (each wave is `batch_size` workers wide unless throttling down):
 
 - **Sequential:** take the single lowest-position still-untranslated chunk, spawn **one** worker,
   `translate-commit`, then **re-run `translate-prepare`** (so the just-committed Spanish is baked into
@@ -431,8 +468,9 @@ skipped). Spawn according to the saved mode:
      into its chapter's next chunk, and repeat from step 1 until every chunk in the window is committed.
   4. Only then advance to the next window of X chapters. Complete chapters, **not** "all first chunks
      first" — each window is fully finished before the next starts.
-- **All-parallel:** spawn workers for **all** manifest entries in bounded batches of ~X (rate limits),
-  `translate-commit` after each batch. No re-prepare (this mode has no cross-chunk Spanish context).
+- **All-parallel:** spawn workers for **all** manifest entries in bounded batches of `batch_size`
+  (the saved fan-out width; rate limits), `translate-commit` after each batch. No re-prepare (this mode
+  has no cross-chunk Spanish context). This is also the mode to use whenever `spawn_mode_moot` is true.
 
 **4B-d. Re-spawn the misses.** For any `failed` (the report names the problem per chunk) or `missing`
 (no draft written), re-spawn a worker for just those `chunk_id`s — write fresh prose to the same

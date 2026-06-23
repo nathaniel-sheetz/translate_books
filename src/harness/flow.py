@@ -642,6 +642,7 @@ def translate_prepare(
     worker_model: str | None = None,
     parallelism: str | None = None,
     window: int | None = None,
+    batch_size: int | None = None,
 ) -> dict:
     """Render per-chunk prompts + a manifest for the subagent backend (no spend).
 
@@ -661,10 +662,17 @@ def translate_prepare(
     all-parallel mode, or two chunks prepared in one pass) the context degrades
     to source-only — never blocking.
 
-    ``parallelism`` (``sequential`` | ``chapter`` | ``all``) and ``window`` are the
-    user's spawn-mode choice; when passed they are persisted to the project config
-    so the later "translate the rest" batch reuses them, and they are echoed back
-    under ``spawn_plan`` so the agent can confirm "same behavior as before".
+    ``parallelism`` (``sequential`` | ``chapter`` | ``all``), ``window``, and
+    ``batch_size`` are the user's spawn-mode choice; when passed they are persisted
+    to the project config so the later "translate the rest" batch reuses them, and
+    they are echoed back under ``spawn_plan`` so the agent can confirm "same behavior
+    as before". ``batch_size`` is the recommended fan-out width for one spawn wave —
+    a saved number the agent ramps from and throttles back to on a 529 (SKILL.md
+    Step 4B backoff guidance).
+
+    ``spawn_mode_moot`` is ``True`` when every in-scope chapter is a single chunk: the
+    continuity modes are then equivalent to all-parallel, so the agent can skip the
+    spawn-mode question entirely.
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
@@ -692,6 +700,16 @@ def translate_prepare(
             return {"error": f"invalid window {window!r}; must be a positive integer",
                     "manifest": []}
         persist["parallel_window"] = window_int
+    if batch_size is not None:
+        try:
+            batch_int = int(batch_size)
+        except (TypeError, ValueError):
+            return {"error": f"invalid batch_size {batch_size!r}; must be a positive integer",
+                    "manifest": []}
+        if batch_int < 1:
+            return {"error": f"invalid batch_size {batch_size!r}; must be a positive integer",
+                    "manifest": []}
+        persist["batch_size"] = batch_int
     if persist:
         cfg.update(persist)
         state.save_config(project_dir, cfg)
@@ -700,6 +718,10 @@ def translate_prepare(
     spawn_plan = {
         "parallelism": cfg.get("parallelism") or "chapter",
         "window": int(cfg.get("parallel_window") or 8),
+        # Recommended fan-out width for one spawn wave. Saved so the agent has an
+        # explicit number to ramp from (and to throttle back to on a 529); see the
+        # 500-vs-529 backoff guidance in SKILL.md Step 4B.
+        "batch_size": int(cfg.get("batch_size") or 5),
     }
 
     if str(state.REPO_ROOT) not in sys.path:
@@ -822,10 +844,20 @@ def translate_prepare(
         total_words += sum(e.get("source_word_count", 0) for e in rescued)
         entries = rescued + entries
 
+    # When every in-scope chapter is a single chunk, the continuity spawn modes
+    # (sequential / chapter-parallel window) collapse to "all-parallel in bounded
+    # batches" — there is no later chunk to inherit a previous chunk's Spanish. The
+    # agent uses this to skip the spawn-mode ceremony for single-chunk-per-chapter
+    # books (SKILL.md Step 4B-0b).
+    spawn_mode_moot = bool(discovered) and all(
+        len(cps) <= 1 for cps in discovered.values()
+    )
+
     manifest_doc = {
         "worker_model": worker_model,
         "chapters": chapters or "all",
         "spawn_plan": spawn_plan,
+        "spawn_mode_moot": spawn_mode_moot,
         "entries": entries,
     }
     (translate_dir / "manifest.json").write_text(
@@ -837,12 +869,15 @@ def translate_prepare(
         "manifest_path": str(translate_dir / "manifest.json"),
         "worker_model": worker_model,
         "spawn_plan": spawn_plan,
+        "spawn_mode_moot": spawn_mode_moot,
         "usage_summary": {
             "chunks": len(entries),
             "source_words": total_words,
             "worker_model": worker_model,
             "parallelism": spawn_plan["parallelism"],
             "window": spawn_plan["window"],
+            "batch_size": spawn_plan["batch_size"],
+            "spawn_mode_moot": spawn_mode_moot,
         },
         "rescued_prior_drafts": len(rescued),
         "chapters": chapters or "all",
@@ -1273,6 +1308,115 @@ def show_translation(
     }
 
 
+# ── status (resume at a glance) ─────────────────────────────────────────────
+
+def status(project: str) -> dict:
+    """Report a project's pipeline progress at a glance (read-only; no spend).
+
+    Answers "where is this project and what's left?" on a RESUME without hand-rolling
+    a loop over ``chunks/*.json`` (friction-log #11). Reports which pipeline artifacts
+    exist, per-chapter translated-vs-pending counts (via ``chunk.has_translation``),
+    the saved spawn plan, and whether the book is single-chunk-per-chapter (so the
+    spawn-mode choice is moot). ``stage`` is the one-word summary the agent leads with.
+    """
+    project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
+
+    artifacts = {
+        "source": (project_dir / "source.txt").exists(),
+        "chapters": (project_dir / "chapters").exists(),
+        "style_guide": (project_dir / "style.json").exists(),
+        "glossary": (project_dir / "glossary.json").exists(),
+        "difficulty": (project_dir / "difficulty.json").exists(),
+        "chunks": (project_dir / "chunks").exists(),
+    }
+    epubs = sorted(p.name for p in project_dir.glob("*.epub"))
+    spawn_plan = {
+        "parallelism": cfg.get("parallelism") or "chapter",
+        "window": int(cfg.get("parallel_window") or 8),
+        "batch_size": int(cfg.get("batch_size") or 5),
+    }
+    base = {
+        "project": project_dir.name,
+        "artifacts": artifacts,
+        "epubs": epubs,
+        "spawn_plan": spawn_plan,
+        "worker_model": cfg.get("worker_model") or "sonnet",
+        "run_id": cfg.get("run_id"),
+    }
+
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return {
+            **base,
+            "stage": "pre-chunk",
+            "spawn_mode_moot": None,
+            "totals": {},
+            "pending_chapters": [],
+            "chapters": [],
+            "next": "no chunks yet — run `difficulty` then `chunk` before translating.",
+        }
+
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
+    from scripts.translate_book import discover_chapters
+    from src.utils.file_io import load_chunk
+
+    discovered = discover_chapters(chunks_dir)
+    chapters_out: list[dict] = []
+    total_chunks = translated_chunks = 0
+    max_per_chapter = 0
+    pending_chapters: list[str] = []
+    for chapter_id in sorted(discovered):
+        cps = discovered[chapter_id]
+        max_per_chapter = max(max_per_chapter, len(cps))
+        n_trans = sum(1 for cp in cps if load_chunk(cp).has_translation)
+        total_chunks += len(cps)
+        translated_chunks += n_trans
+        complete = n_trans == len(cps)
+        if not complete:
+            pending_chapters.append(chapter_id)
+        chapters_out.append({
+            "chapter_id": chapter_id,
+            "chunks": len(cps),
+            "translated": n_trans,
+            "complete": complete,
+        })
+
+    if total_chunks == 0:
+        stage = "pre-chunk"
+    elif translated_chunks == 0:
+        stage = "untranslated"
+    elif translated_chunks < total_chunks:
+        stage = "partial"
+    else:
+        stage = "fully-translated"
+
+    if stage == "fully-translated":
+        nxt = "all chunks translated — run `epub` to (re)build the book."
+    elif stage in ("untranslated", "partial"):
+        nxt = ("run `translate-prepare` (optionally --chapters) to render prompts for "
+               "the pending chunks, then spawn workers and `translate-commit`.")
+    else:
+        nxt = "no chunks yet — run `difficulty` then `chunk` before translating."
+
+    return {
+        **base,
+        "stage": stage,
+        "spawn_mode_moot": (max_per_chapter <= 1) if total_chunks else None,
+        "totals": {
+            "chapters": len(discovered),
+            "complete_chapters": sum(1 for c in chapters_out if c["complete"]),
+            "total_chunks": total_chunks,
+            "translated_chunks": translated_chunks,
+            "pending_chunks": total_chunks - translated_chunks,
+        },
+        "pending_chapters": pending_chapters,
+        "chapters": chapters_out,
+        "next": nxt,
+    }
+
+
 # ── run log (qualitative beats the CLI can't see) ───────────────────────────
 
 def log_event(project: str, *, event: str, data: str | None = None) -> dict:
@@ -1299,3 +1443,58 @@ def log_event(project: str, *, event: str, data: str | None = None) -> dict:
 
     log_run_event(run_id=run_id, project=project_dir.name, event=event, **fields)
     return {"logged": True, "run_id": run_id, "event": event, "fields": fields}
+
+
+def runs(project: str, *, run_id: str | None = None) -> dict:
+    """Summarize one harness run from ``logs/harness_runs.jsonl`` (read-only).
+
+    ``log_event`` / the automatic per-command timeline write the run log but nothing
+    read it back. This turns it into a compact retro for a single run: the command
+    timeline (with durations + outcomes), the qualitative beats (approval / backend /
+    spawn_mode / respawn), and outcome tallies. Defaults to the project's MOST RECENT
+    run; pass ``run_id`` for a specific one. ``available_run_ids`` lists the rest.
+    """
+    from collections import Counter
+
+    project_dir = state.resolve_project_dir(project)
+    slug = project_dir.name
+
+    from src.utils.run_logger import read_run_events
+
+    all_events = read_run_events(project=slug)
+    available = sorted({e.get("run_id") for e in all_events if e.get("run_id")})
+    if not all_events:
+        return {"project": slug, "run_id": None, "available_run_ids": [],
+                "note": "no run-log events for this project yet"}
+
+    if run_id is None:
+        run_id = all_events[-1].get("run_id")  # latest event's run = most recent run
+    run_events = [e for e in all_events if e.get("run_id") == run_id]
+
+    commands = [e for e in run_events if e.get("event") == "command"]
+    beats = [e for e in run_events if e.get("event") != "command"]
+
+    timeline = [
+        {"cmd": e.get("cmd"), "status": e.get("status"),
+         "dur_s": e.get("dur_s"), "ts": e.get("ts")}
+        for e in commands
+    ]
+    # Beats keep their own fields, minus the keys already on every record.
+    beat_summary = [
+        {k: v for k, v in e.items() if k not in ("run_id", "project")}
+        for e in beats
+    ]
+
+    return {
+        "project": slug,
+        "run_id": run_id,
+        "available_run_ids": available,
+        "command_count": len(commands),
+        "beat_count": len(beats),
+        "total_command_seconds": round(
+            sum(e.get("dur_s") or 0 for e in commands), 3
+        ),
+        "status_counts": dict(Counter(e.get("status", "?") for e in commands)),
+        "timeline": timeline,
+        "beats": beat_summary,
+    }

@@ -64,3 +64,40 @@ def log_run_event(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 - logging must never break a command
         _log.warning("Failed to write run log to %s", _RUNS_PATH, exc_info=True)
+
+
+def read_run_events(
+    *,
+    project: str | None = None,
+    run_id: str | None = None,
+) -> list[dict]:
+    """Read events back from ``logs/harness_runs.jsonl`` in append (chronological) order.
+
+    The write side (``log_run_event``) had no reader — the run log was write-only.
+    This is the read path the ``runs`` summarizer uses. Filters by ``project`` and/or
+    ``run_id`` when given. Best-effort to match the write side: a missing or corrupt
+    file yields ``[]`` and individual unparseable lines are skipped, never raised.
+    """
+    if not _RUNS_PATH.exists():
+        return []
+    events: list[dict] = []
+    try:
+        lines = _RUNS_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # tolerate a torn final write / hand-edit
+        if not isinstance(rec, dict):
+            continue
+        if project is not None and rec.get("project") != project:
+            continue
+        if run_id is not None and rec.get("run_id") != run_id:
+            continue
+        events.append(rec)
+    return events

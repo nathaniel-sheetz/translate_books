@@ -716,17 +716,31 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
 
     prep = flow.translate_prepare(str(tmp_path), parallelism="all", window=3)
-    assert prep["spawn_plan"] == {"parallelism": "all", "window": 3}
+    assert prep["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 5}
     assert prep["usage_summary"]["parallelism"] == "all"
 
     # Persisted: a later prepare with no spawn args reuses the saved choice.
     prep2 = flow.translate_prepare(str(tmp_path))
-    assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3}
+    assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 5}
 
     # window persists in isolation (no parallelism passed) without disturbing the
     # previously-saved parallelism.
     prep3 = flow.translate_prepare(str(tmp_path), window=5)
-    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 5}
+    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 5, "batch_size": 5}
+
+    # batch_size persists in isolation too, and is echoed in the usage summary.
+    prep4 = flow.translate_prepare(str(tmp_path), batch_size=3)
+    assert prep4["spawn_plan"] == {"parallelism": "all", "window": 5, "batch_size": 3}
+    assert prep4["usage_summary"]["batch_size"] == 3
+
+    # A single-chunk-per-chapter book makes the spawn-mode choice moot.
+    assert prep4["spawn_mode_moot"] is True
+
+    # Invalid batch_size is reported, not raised, and must not corrupt the saved config.
+    bad_bs = flow.translate_prepare(str(tmp_path), batch_size=0)
+    assert "error" in bad_bs and bad_bs["manifest"] == []
+    from src.harness import state as _state
+    assert _state.load_config(_state.resolve_project_dir(str(tmp_path)))["batch_size"] == 3
 
     # Invalid mode is reported, not raised, and must not corrupt the saved config.
     from src.harness import state
@@ -749,6 +763,100 @@ def test_translate_prepare_rejects_nonpositive_window(tmp_path: Path):
         assert "parallel_window" not in state.load_config(
             state.resolve_project_dir(str(tmp_path))
         )
+
+
+def test_status_reports_progress_artifacts_and_spawn_plan(tmp_path: Path):
+    """status answers 'where is this project / what's left?' without a chunk-file loop."""
+    from src.harness import flow
+
+    # Before chunking: pre-chunk stage, no crash, artifacts reflect the empty project.
+    pre = flow.status(str(tmp_path))
+    assert pre["stage"] == "pre-chunk"
+    assert pre["artifacts"]["chunks"] is False
+    assert pre["spawn_mode_moot"] is None
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    # ch1 fully translated; ch2 one-of-two translated; ch3 untranslated.
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B.", "C."],
+                 translations=["es B.", None])
+    _save_chunks(chunks_dir, "chapter_03", sources=["D."])
+
+    st = flow.status(str(tmp_path))
+    assert st["stage"] == "partial"
+    assert st["totals"] == {
+        "chapters": 3, "complete_chapters": 1,
+        "total_chunks": 4, "translated_chunks": 2, "pending_chunks": 2,
+    }
+    assert st["pending_chapters"] == ["chapter_02", "chapter_03"]
+    # ch2 has two chunks, so the continuity spawn modes are NOT moot here.
+    assert st["spawn_mode_moot"] is False
+    assert st["spawn_plan"] == {"parallelism": "chapter", "window": 8, "batch_size": 5}
+    assert "translate-prepare" in st["next"]
+
+    # Finishing every chunk flips the stage to fully-translated and points at epub.
+    _save_chunks(chunks_dir, "chapter_02", sources=["B.", "C."],
+                 translations=["es B.", "es C."])
+    _save_chunks(chunks_dir, "chapter_03", sources=["D."], translations=["es D."])
+    done = flow.status(str(tmp_path))
+    assert done["stage"] == "fully-translated"
+    assert done["totals"]["pending_chunks"] == 0
+    # moot reflects chunk STRUCTURE, not translation state: ch2 still has 2 chunks.
+    assert done["spawn_mode_moot"] is False
+    assert "epub" in done["next"]
+
+
+def test_status_single_chunk_per_chapter_is_moot(tmp_path: Path):
+    """A book that is one chunk per chapter reports spawn_mode_moot True."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B."])
+    assert flow.status(str(tmp_path))["spawn_mode_moot"] is True
+
+
+def test_runs_summarizes_latest_run_from_log(tmp_path: Path, monkeypatch):
+    """runs() reads the write-only run log back into a per-run retro (friction-log #11)."""
+    from src.harness import flow
+    from src.utils import run_logger
+
+    # Isolate the run log to a temp file so the test never touches the repo's log.
+    monkeypatch.setattr(run_logger, "_RUNS_PATH", tmp_path / "harness_runs.jsonl")
+    (tmp_path / "chunks").mkdir()  # make tmp_path resolve as a project dir
+    slug = tmp_path.name
+
+    # Two runs; the newer one (r2) carries a command + a qualitative beat.
+    run_logger.log_run_event(run_id="r1", project=slug, event="command",
+                             cmd="setup", status="ok", dur_s=1.0)
+    run_logger.log_run_event(run_id="r2", project=slug, event="command",
+                             cmd="translate-prepare", status="ok", dur_s=2.0)
+    run_logger.log_run_event(run_id="r2", project=slug, event="approval",
+                             beat="glossary", decision="approved_first_pass")
+    # A different project's event must not leak into this project's summary.
+    run_logger.log_run_event(run_id="rX", project="someone_else", event="command",
+                             cmd="setup", status="ok", dur_s=9.0)
+
+    res = flow.runs(str(tmp_path))
+    assert res["run_id"] == "r2"  # most recent by default
+    assert res["available_run_ids"] == ["r1", "r2"]
+    assert res["command_count"] == 1 and res["beat_count"] == 1
+    assert res["total_command_seconds"] == 2.0
+    assert res["status_counts"] == {"ok": 1}
+    assert res["beats"][0]["decision"] == "approved_first_pass"
+
+    # An explicit run id selects an earlier run instead of the latest.
+    r1 = flow.runs(str(tmp_path), run_id="r1")
+    assert r1["command_count"] == 1 and r1["beat_count"] == 0
+
+    # A project with no logged events returns a note, not a crash.
+    other = tmp_path.parent / f"{tmp_path.name}_empty"
+    other.mkdir()
+    (other / "chunks").mkdir()
+    empty = flow.runs(str(other))
+    assert empty["run_id"] is None and "no run-log events" in empty["note"]
 
 
 def test_align_command_aligns_ready_chapters_and_links(tmp_path: Path, monkeypatch):

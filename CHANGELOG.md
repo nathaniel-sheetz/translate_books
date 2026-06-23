@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.7.0] - 2026-06-23
+
+### Added
+- **`harness status` reports a project's pipeline progress at a glance (read-only; no spend).** On a resume it answers "where is this project and what's left?" in one call instead of hand-rolling a loop over `chunks/*.json`: per-chapter translated-vs-pending chunk counts (via `chunk.has_translation`), the saved spawn plan (`parallelism`/`window`/`batch_size`), which artifacts exist (`source`/`chapters`/`style_guide`/`glossary`/`difficulty`/`chunks`), any built EPUBs, and a one-word `stage` (`pre-chunk`/`untranslated`/`partial`/`fully-translated`) plus a `next` hint and `pending_chapters` list. `spawn_mode_moot` reflects chunk **structure** (single-chunk-per-chapter), not translation state.
+- **`harness runs` reads `logs/harness_runs.jsonl` back into a per-run retro (read-only).** The run log was previously write-only; `runs` summarizes a single run into a command timeline (durations + outcomes), the qualitative beats (`approval`/`backend`/`spawn_mode`/`respawn`), status tallies, and total command seconds. Defaults to the project's most recent run; `--run-id` selects a specific one and `available_run_ids` lists the rest. Backed by the new `read_run_events()` reader in `src/utils/run_logger.py`, which tolerates a missing/corrupt log (`[]`) and skips unparseable lines.
+- **`translate-prepare --batch-size` persists a recommended fan-out width.** A saved number (default 5) the agent ramps from and throttles back toward ~1 on a `529` (overloaded), echoed under `spawn_plan`/`usage_summary`; invalid values are reported, not raised, and never corrupt the saved config. `translate-prepare` also now returns `spawn_mode_moot` (True when every in-scope chapter is a single chunk) so the agent can skip the spawn-mode gate when the continuity modes are equivalent.
+- **SKILL guidance for the above:** resume-with-`status` first, the spawn-mode-moot gate skip, a 500-vs-529 backoff playbook (probe → throttle → commit-then-check), and a hardened "never parse stdout — always `Read` `last_output.json`" instruction.
+
 ## [0.22.6.1] - 2026-06-23
 
 ### Changed
