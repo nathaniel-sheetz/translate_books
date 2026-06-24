@@ -523,6 +523,8 @@ def split_book_into_chapters(
     back_matter_titles: Optional[List[str]] = None,
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
+    auto_strip_boilerplate: bool = True,
+    collect_dropped: Optional[List[dict]] = None,
 ) -> List[DetectedChapter]:
     """
     Split a full book text into individual chapters and front/back matter.
@@ -544,6 +546,15 @@ def split_book_into_chapters(
             keyword list (preface, foreword, prologue, ...).
         auto_detect_back_matter: If True (default), also match the built-in
             back-matter keyword list (epilogue, afterword, appendix, ...).
+        auto_strip_boilerplate: If True (default), drop navigation/boilerplate
+            sections (Contents, Title Page, List of Illustrations, Copyright,
+            ...) entirely so they are never written, numbered, or translated —
+            even when a chapter pattern matched them or the user declared them
+            as front matter. Set False to keep a section whose heading happens
+            to be one of those words.
+        collect_dropped: Optional list the caller supplies to receive a record
+            of each stripped section ({"label": <heading>, "reason":
+            "boilerplate"}) for transparency. Left untouched when None.
 
     Returns:
         List of DetectedChapter objects in reading order. position_index is
@@ -583,6 +594,7 @@ def split_book_into_chapters(
     # Compile matter patterns
     front_patterns = _compile_matter_patterns("front_matter_patterns") if auto_detect_front_matter else []
     back_patterns = _compile_matter_patterns("back_matter_patterns") if auto_detect_back_matter else []
+    drop_patterns = _compile_matter_patterns("drop_matter_patterns") if auto_strip_boilerplate else []
 
     # Determine numbering strategy from pattern definition
     if pattern_type == "custom":
@@ -703,6 +715,22 @@ def split_book_into_chapters(
                      header_image: Optional[str] = None,
                      body_override: Optional[str] = None) -> None:
         nonlocal detected
+        # Drop navigation/boilerplate (Contents, Title Page, ...) outright so it
+        # is never written, numbered, or translated — whether it arrived as a
+        # matched "chapter", an auto-detected matter heading, or a user-declared
+        # title. Match against the section's first heading line and its label.
+        if drop_patterns:
+            heading_line = (raw_heading or label or "").splitlines()[0:1]
+            drop_hit = (
+                _matches_builtin_pattern(heading_line[0], drop_patterns)
+                if heading_line else None
+            )
+            if drop_hit is None and label:
+                drop_hit = _matches_builtin_pattern(label, drop_patterns)
+            if drop_hit is not None:
+                if collect_dropped is not None:
+                    collect_dropped.append({"label": drop_hit, "reason": "boilerplate"})
+                return
         if body_override is not None:
             content = body_override.strip()
         else:

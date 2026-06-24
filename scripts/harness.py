@@ -74,6 +74,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-chapter-size", dest="min_chapter_size", type=int, default=None,
                     help="Min chars for a real chapter; filters short false matches "
                          "(default 100; raise to ~500 to drop stray front-matter lines)")
+    sp.add_argument("--no-auto-strip", dest="auto_strip_boilerplate",
+                    action="store_false",
+                    help="Keep navigation/boilerplate (Contents, Title Page, ...) "
+                         "instead of stripping it (default: strip)")
 
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
@@ -91,6 +95,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        action="store_false", help="Disable built-in front-matter keyword detection")
         p.add_argument("--no-auto-back-matter", dest="auto_detect_back_matter",
                        action="store_false", help="Disable built-in back-matter keyword detection")
+        p.add_argument("--no-auto-strip", dest="auto_strip_boilerplate",
+                       action="store_false",
+                       help="Keep navigation/boilerplate (Contents, Title Page, ...) "
+                            "instead of stripping it (default: strip)")
 
     # split-preview / split (chapter-split review beat) ---------------------
     spp = sub.add_parser("split-preview",
@@ -251,6 +259,7 @@ def _dispatch(args: argparse.Namespace):
             front_matter_titles=args.front_matter_titles,
             back_matter_titles=args.back_matter_titles,
             min_chapter_size=args.min_chapter_size,
+            auto_strip_boilerplate=args.auto_strip_boilerplate,
         )
     if cmd in ("split-preview", "split"):
         fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
@@ -261,6 +270,7 @@ def _dispatch(args: argparse.Namespace):
             back_matter_titles=args.back_matter_titles,
             auto_detect_front_matter=args.auto_detect_front_matter,
             auto_detect_back_matter=args.auto_detect_back_matter,
+            auto_strip_boilerplate=args.auto_strip_boilerplate,
         )
     if cmd == "style-guide":
         if args.action == "prepare-questions":

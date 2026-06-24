@@ -178,6 +178,7 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
     custom_regex = getattr(args, "custom_regex", None)
     min_size = getattr(args, "min_chapter_size", 100) or 100
 
+    dropped: list = []
     chapters = split_book_into_chapters(
         book_text=book_text,
         pattern_type=pattern_type,
@@ -187,6 +188,8 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
         back_matter_titles=getattr(args, "back_matter_titles", None) or None,
         auto_detect_front_matter=getattr(args, "auto_detect_front_matter", True),
         auto_detect_back_matter=getattr(args, "auto_detect_back_matter", True),
+        auto_strip_boilerplate=getattr(args, "auto_strip_boilerplate", True),
+        collect_dropped=dropped,
     )
 
     chapters_dir = project_dir / "chapters"
@@ -196,9 +199,12 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
     for ch in chapters:
         words = len(ch.content.split())
         print(f"    {ch.chapter_title}: {words:,} words")
+    for d in dropped:
+        print(f"    [stripped boilerplate] {d.get('label')}")
 
     state["stage_completed"] = "split"
     state["chapter_count"] = len(chapters)
+    state["dropped"] = dropped
     return state
 
 

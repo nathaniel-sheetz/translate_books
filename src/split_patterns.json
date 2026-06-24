@@ -64,5 +64,14 @@
     "^\\s*appendix(\\s+[A-Z0-9]+)?\\s*$",
     "^\\s*colophon\\s*$",
     "^\\s*bibliography\\s*$"
+  ],
+  "drop_matter_patterns": [
+    "^\\s*contents\\s*$",
+    "^\\s*table\\s+of\\s+contents\\s*$",
+    "^\\s*list\\s+of\\s+illustrations\\s*$",
+    "^\\s*illustrations\\s*$",
+    "^\\s*title\\s+page\\s*$",
+    "^\\s*copyright\\s*$",
+    "^\\s*transcriber'?s\\s+note\\s*$"
   ]
 }

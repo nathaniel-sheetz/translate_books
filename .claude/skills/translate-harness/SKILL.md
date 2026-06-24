@@ -169,27 +169,40 @@ relay them and prefer the suggestion when it differs from your guess. Confirm th
 `chapter_count` looks right and `chunks_dir_exists` is `false`. (The lang/locale/model defaults
 are Spanish/mx/sonnet 4.6 — surface them to the user rather than assuming silently.)
 
+Navigation/boilerplate (the title page, a `CONTENTS`/table-of-contents listing, a list of
+illustrations, a copyright/transcriber's note) is **auto-stripped** — never written, numbered, or
+translated — and each stripped heading is reported back under `dropped` in the `setup` /
+`split-preview` / `split` output. Confirm `dropped` matches what you expected. Real front matter
+(foreword, preface, prologue, dedication, author's note …) is auto-detected and **kept**, and it
+renders its *translated* heading in the EPUB automatically — no manual relabel.
+
 **Refine the split if it looks wrong** — the `setup` split misfires, reports "No chapters
-detected," or Gutenberg front/back matter (title page, copyright, the CONTENTS listing, a
-teacher's note) leaked in as spurious chapters. Don't hand-edit `source.txt`; use the review
-beat, which mirrors the web GUI's Stage 2:
+detected," or a *real* section is mis-numbered as a chapter (or vice-versa). Don't hand-edit
+`source.txt`; use the review beat, which mirrors the web GUI's Stage 2:
 
 ```bash
-# Dry-run: prints each section tagged front_matter / chapter / back_matter; writes nothing.
+# Dry-run: prints each section tagged front_matter / chapter / back_matter,
+# plus a `dropped` list of stripped boilerplate. Writes nothing.
 python scripts/harness.py split-preview --project projects/<slug> \
   --chapter-pattern custom --custom-regex '(?<=\n---\n\n)[A-Z][^\n]*' \
   --min-chapter-size 500 \
-  --front-matter-title "Contents" --back-matter-title "A Word to the Teacher"
+  --front-matter-title "To the Teacher" --back-matter-title "A Word to the Children"
 
 # Happy with the preview? Commit it (rewrites chapters/, clearing any stale files).
 python scripts/harness.py split --project projects/<slug>  # + the same split flags
 ```
 
-`--front-matter-title` / `--back-matter-title` are repeatable and force-tag a heading so it
-isn't mis-numbered as a chapter; built-in keyword auto-detect (preface, dedication, epilogue …)
-stays on unless you pass `--no-auto-front-matter` / `--no-auto-back-matter`. Raising
-`--min-chapter-size` (~500) drops short stray front-matter lines a loose pattern would otherwise
-capture. The same three controls also work directly on `setup` for a one-shot run.
+**Force-tagging KEEPS a section, it never removes one.** `--front-matter-title` /
+`--back-matter-title` are repeatable and force a *real* heading the keyword auto-detect missed
+(e.g. "To the Teacher") to be tagged matter so it isn't mis-numbered as a chapter — the section is
+still written, translated, and included. **Do not** declare the title page / `CONTENTS` /
+boilerplate here: that would un-strip them and push the junk through the whole pipeline. They drop
+on their own; leave them alone. Built-in keyword auto-detect (preface, dedication, epilogue …)
+stays on unless you pass `--no-auto-front-matter` / `--no-auto-back-matter`; boilerplate
+auto-strip stays on unless you pass `--no-auto-strip` (only needed for the rare book with a genuine
+chapter literally titled "Contents"). Raising `--min-chapter-size` (~500) drops short stray
+front-matter lines a loose pattern would otherwise capture. All of these controls also work
+directly on `setup` for a one-shot run.
 
 ## Step 1 — STYLE GUIDE beat (two question gates, then draft + approval)
 

@@ -135,6 +135,7 @@ def setup(
     front_matter_titles: list[str] | None = None,
     back_matter_titles: list[str] | None = None,
     min_chapter_size: int | None = None,
+    auto_strip_boilerplate: bool = True,
 ) -> dict:
     """Create the project, persist config, run ingest + split (NOT chunk).
 
@@ -178,6 +179,7 @@ def setup(
         min_chapter_size=min_chapter_size if min_chapter_size is not None else 100,
         front_matter_titles=front_matter_titles or None,
         back_matter_titles=back_matter_titles or None,
+        auto_strip_boilerplate=auto_strip_boilerplate,
     )
     with _quiet_stdout():
         pstate = load_pipeline_state(project_dir)
@@ -192,6 +194,7 @@ def setup(
         "config": state.load_config(project_dir),
         "chapters": [c.stem for c in chapters],
         "chapter_count": len(chapters),
+        "dropped": pstate.get("dropped", []),  # boilerplate stripped at split
         "source_words": pstate.get("source_words"),
         # Heading-derived hints from ingest (null on the no-URL path, where there
         # is no HTML to read headings from). Relay these so the agent can spot a
@@ -222,6 +225,8 @@ def _detect_sections(
     back_matter_titles: list[str] | None,
     auto_detect_front_matter: bool,
     auto_detect_back_matter: bool,
+    auto_strip_boilerplate: bool = True,
+    collect_dropped: list | None = None,
 ):
     """Run the shared splitter with the harness's defaults filled in."""
     from src.book_splitter import split_book_into_chapters
@@ -235,6 +240,8 @@ def _detect_sections(
         back_matter_titles=back_matter_titles or None,
         auto_detect_front_matter=auto_detect_front_matter,
         auto_detect_back_matter=auto_detect_back_matter,
+        auto_strip_boilerplate=auto_strip_boilerplate,
+        collect_dropped=collect_dropped,
     )
 
 
@@ -262,16 +269,19 @@ def split_preview(
     back_matter_titles: list[str] | None = None,
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
+    auto_strip_boilerplate: bool = True,
 ) -> dict:
     """Dry-run a chapter split and return the detected sections — writes NO files.
 
     Mirrors the web GUI's ``/split/preview`` so the agent can see how the chosen
     pattern and any declared front/back-matter titles resolve (each section comes
     back tagged ``front_matter`` / ``chapter`` / ``back_matter``) before
-    committing the split with :func:`split_apply`.
+    committing the split with :func:`split_apply`. Navigation/boilerplate
+    (Contents, Title Page, ...) is stripped and reported under ``dropped``.
     """
     project_dir = state.resolve_project_dir(project, must_exist=True)
     book_text = _read_source(project_dir)
+    dropped: list[dict] = []
     with _quiet_stdout():
         chapters = _detect_sections(
             book_text,
@@ -282,6 +292,8 @@ def split_preview(
             back_matter_titles=back_matter_titles,
             auto_detect_front_matter=auto_detect_front_matter,
             auto_detect_back_matter=auto_detect_back_matter,
+            auto_strip_boilerplate=auto_strip_boilerplate,
+            collect_dropped=dropped,
         )
     sections = [
         {
@@ -299,6 +311,7 @@ def split_preview(
         "section_count": len(sections),
         "counts": _kind_counts(chapters),
         "sections": sections,
+        "dropped": dropped,
         "files_written": False,
     }
 
@@ -313,18 +326,22 @@ def split_apply(
     back_matter_titles: list[str] | None = None,
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
+    auto_strip_boilerplate: bool = True,
 ) -> dict:
     """Commit a chapter split: (re)write ``chapters/`` from ``source.txt``.
 
     Mirrors the web GUI's ``/split``. Clears stale ``chapter_*.txt`` first so a
     smaller re-split never leaves orphaned files behind (``save_chapters_to_files``
     writes by ``position_index`` and would otherwise leave higher-numbered files).
+    Navigation/boilerplate (Contents, Title Page, ...) is stripped and reported
+    under ``dropped``.
     """
     from src.book_splitter import save_chapters_to_files
 
     project_dir = state.resolve_project_dir(project, must_exist=True)
     book_text = _read_source(project_dir)
     chapters_dir = project_dir / "chapters"
+    dropped: list[dict] = []
     with _quiet_stdout():
         chapters = _detect_sections(
             book_text,
@@ -335,6 +352,8 @@ def split_apply(
             back_matter_titles=back_matter_titles,
             auto_detect_front_matter=auto_detect_front_matter,
             auto_detect_back_matter=auto_detect_back_matter,
+            auto_strip_boilerplate=auto_strip_boilerplate,
+            collect_dropped=dropped,
         )
         if chapters_dir.exists():
             for stale in chapters_dir.glob("chapter_*.txt"):
@@ -347,6 +366,7 @@ def split_apply(
         "chapter_count": len(chapters),
         "counts": _kind_counts(chapters),
         "chapters": [p.stem for p in written],
+        "dropped": dropped,
         "files_written": True,
         "sections": [
             {
@@ -1589,6 +1609,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code)",
         "chapters": "list of written chapter file stems (e.g. 'chapter_01')",
         "chapter_count": "number of sections written to chapters/",
+        "dropped": "list of {label, reason} for boilerplate stripped at split (Contents, Title Page, ...)",
         "source_words": "word count of the ingested source (null on the no-URL path)",
         "suggested_pattern": "heading-derived chapter-pattern hint, or null",
         "chapter_report": "heading-structure report from ingest, or null",
@@ -1600,6 +1621,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "section_count": "number of detected sections",
         "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
         "sections": "list of {name, kind, label, number, words, preview}",
+        "dropped": "list of {label, reason} for boilerplate stripped (Contents, Title Page, ...)",
         "files_written": "always False for the dry-run preview",
     },
     "split": {
@@ -1607,6 +1629,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapter_count": "number of sections written",
         "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
         "chapters": "list of written chapter file stems",
+        "dropped": "list of {label, reason} for boilerplate stripped (Contents, Title Page, ...)",
         "files_written": "always True for the apply",
         "sections": "list of {name, kind, label, number, words}",
     },

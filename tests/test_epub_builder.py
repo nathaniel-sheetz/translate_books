@@ -879,6 +879,38 @@ class TestChapterManifest:
             # Should NOT contain the off-by-one synthesized label
             assert "Chapter 3" not in ncx
 
+    def test_translated_front_matter_uses_translated_heading(self, tmp_path):
+        """Regression (#17): a translated Foreword body ('Prólogo…') must render
+        its own translated heading, not the stale English manifest label stacked
+        on top of the Spanish body."""
+        import json as _json
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+        # Body was translated: the prepended heading is now Spanish.
+        (chapters_dir / "chapter_01.txt").write_text(
+            "Prólogo\n\nEste es el cuerpo traducido del prólogo.",
+            encoding="utf-8",
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "CHAPTER I\n\nEl Principio\n\nContenido del primer capítulo.",
+            encoding="utf-8",
+        )
+        # Manifest label is still the source-language 'Foreword' from split time.
+        manifest = [
+            {"id": "chapter_01", "kind": "front_matter", "label": "Foreword"},
+            {"id": "chapter_02", "kind": "chapter", "number": 1},
+        ]
+        (tmp_path / "project.json").write_text(
+            _json.dumps({"chapter_manifest": manifest}), encoding="utf-8"
+        )
+        output = build_epub(project_path=tmp_path, title="T", author="A", language="es")
+        with zipfile.ZipFile(output) as zf:
+            fm_name = next(n for n in zf.namelist() if n.endswith("chapter_01.xhtml"))
+            fm = zf.read(fm_name).decode("utf-8")
+        assert "<h1>Prólogo</h1>" in fm
+        assert "Foreword" not in fm  # the stale English label is gone
+
     def test_no_manifest_keeps_existing_behavior(self, tmp_path):
         """Without a manifest, build_epub falls back to today's enumeration."""
         chapters_dir = tmp_path / "chapters"

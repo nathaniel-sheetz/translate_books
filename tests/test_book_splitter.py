@@ -265,6 +265,73 @@ class TestFrontBackMatterDetection:
         assert sections[-1].label == "ABOUT THE AUTHOR"
         assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
 
+    def test_declared_boilerplate_is_stripped_not_kept(self):
+        """Regression (#13): force-tagging CONTENTS as front matter must NOT
+        keep it. Boilerplate is auto-stripped (never written/numbered) and the
+        real chapters renumber from 1 with no offset."""
+        text = (
+            "Contents\n\n"
+            + "Foreword .... 1\nChapter I .... 5\n\n"
+            + "Foreword\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter I\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter II\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="roman",
+            front_matter_titles=["Contents"],  # the friction-log mistake
+            collect_dropped=dropped,
+        )
+        assert [s.kind for s in sections] == ["front_matter", "chapter", "chapter"]
+        assert sections[0].label == "Foreword"  # real front matter kept
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
+        assert dropped == [{"label": "Contents", "reason": "boilerplate"}]
+
+    def test_auto_strip_off_keeps_boilerplate(self):
+        """The --no-auto-strip escape hatch keeps a declared 'Contents'."""
+        text = (
+            "Contents\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter I\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="roman",
+            front_matter_titles=["Contents"],
+            auto_strip_boilerplate=False,
+            collect_dropped=dropped,
+        )
+        assert [s.kind for s in sections] == ["front_matter", "chapter"]
+        assert sections[0].label == "Contents"
+        assert dropped == []
+
+    def test_boilerplate_matched_as_chapter_is_dropped(self):
+        """An all-caps 'CONTENTS' the chapter regex grabs is still stripped."""
+        text = (
+            "\n\nCONTENTS\n\n"
+            + "Early Days\nLater Days\n\n"
+            + "EARLY DAYS\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "LATER DAYS\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="allcaps_heading",
+            collect_dropped=dropped,
+        )
+        assert [s.kind for s in sections] == ["chapter", "chapter"]
+        assert [s.chapter_title for s in sections] == ["EARLY DAYS", "LATER DAYS"]
+        assert [s.number for s in sections] == [1, 2]
+        assert dropped == [{"label": "Contents", "reason": "boilerplate"}]
+
 
 # ---------------------------------------------------------------------------
 # save_chapters_to_files writes manifest
