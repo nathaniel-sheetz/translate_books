@@ -113,6 +113,25 @@ class TestDetectChapterHeading:
         assert subtitle == "The Good Shepherd"
         assert body == "Body."
 
+    def test_splitter_saved_chapter_with_image_before_title(self):
+        """Regression (#16): splitter lifts title; EPUB detects heading + subtitle."""
+        from src.book_splitter import split_book_into_chapters
+
+        body = "lorem ipsum dolor sit amet " * 30
+        text = (
+            "CHAPTER I\n\n"
+            "[IMAGE:images/illus01.jpg]\n\n"
+            "The First Signpost\n\n"
+            + body
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        saved = f"{sections[0].chapter_title}\n\n{sections[0].content}"
+        heading, subtitle, saved_body = detect_chapter_heading(saved)
+        assert heading == "Chapter I"
+        assert subtitle == "The First Signpost"
+        assert "[IMAGE:images/illus01.jpg]" in saved_body
+        assert "The First Signpost" not in saved_body
+
 
 # --- chapter_text_to_xhtml ---
 
