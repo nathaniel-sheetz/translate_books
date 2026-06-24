@@ -443,6 +443,17 @@ which guards each draft (length / completeness / image-token parity / echo), wri
 the chunks, and prints `committed` / `failed` / `missing` / `skipped` (idempotent — done chunks are
 skipped).
 
+> **Waiving a confirmed guard false-positive (`--allow-problem`).** Rarely a guard flags a chunk that is
+> actually fine — e.g. the placeholder check trips on a legitimate Roman numeral heading. When you have
+> *confirmed* the `failed` problem is spurious (read the named problem and the draft), re-commit with
+> `--allow-problem <substring>` (repeatable) to drop only that problem:
+> ```bash
+> python scripts/harness.py translate-commit --project projects/<slug> --allow-problem XXX
+> ```
+> Every other guard stays enforced (a real defect still lands the chunk in `failed`), and the waive is
+> reported under `waived` and recorded in the chunk's provenance log. Use this instead of hand-writing a
+> stamping script. Do **not** blanket-waive — match the smallest substring of the specific false-positive.
+
 > **Spawning into a flaky API — probe, throttle, commit-then-check.** Worker spawns can fail when the
 > API is degraded. Handle it deterministically instead of hammering:
 > - **Probe before a big wave.** After *any* spawn failure (or a known incident), spawn **ONE** worker

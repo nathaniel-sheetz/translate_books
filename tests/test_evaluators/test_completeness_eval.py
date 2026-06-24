@@ -167,6 +167,32 @@ class TestPlaceholderDetection:
         assert result.passed is False
         assert any("XXX" in issue.message for issue in result.issues)
 
+    def test_xxx_roman_numeral_heading_not_flagged(self):
+        """Roman numeral XXX in a chapter heading is not a placeholder (friction #15)."""
+        not_placeholders = [
+            "Capítulo XXX",                       # heading word + trailing numeral
+            "XXX",                                # bare numeral line
+            "Capítulo XXX — Duelo entre caballo", # number-then-title heading
+            "Chapter XXX",
+            "Primera parte\n\nXXX\n\nEra una tarde de verano.",  # numeral on its own line
+        ]
+        evaluator = CompletenessEvaluator()
+        for text in not_placeholders:
+            chunk = create_test_chunk(source_text="Some source.", translated_text=text)
+            result = evaluator.evaluate(chunk, {})
+            placeholder_issues = [i for i in result.issues if "placeholder" in i.message.lower()]
+            assert placeholder_issues == [], f"False positive on Roman numeral: {text!r}"
+
+    def test_xxx_marker_still_flagged(self):
+        """A genuine XXX marker (followed by prose) is still flagged."""
+        chunk = create_test_chunk(
+            source_text="This is some text.",
+            translated_text="XXX incomplete sección por traducir"
+        )
+        evaluator = CompletenessEvaluator()
+        result = evaluator.evaluate(chunk, {})
+        assert any("XXX" in issue.message for issue in result.issues)
+
     def test_bracket_placeholders_detected(self):
         """Test bracket-style placeholders are detected."""
         test_cases = [

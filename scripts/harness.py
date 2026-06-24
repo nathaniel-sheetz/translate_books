@@ -171,6 +171,12 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Validate worker drafts and stamp the chunks (idempotent)")
     add_project(tcp)
     tcp.add_argument("--worker-model", dest="worker_model", default=None)
+    tcp.add_argument("--allow-problem", dest="allow_problems", action="append", default=None,
+                     metavar="SUBSTRING",
+                     help="Waive a known guard false-positive: drop any guard problem whose message "
+                          "contains SUBSTRING (case-insensitive) so the chunk commits if no other "
+                          "problem remains. Repeatable. Other guards stay enforced; waives are "
+                          "reported under `waived` and logged in provenance.")
 
     ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
     add_project(ep)
@@ -285,7 +291,8 @@ def _dispatch(args: argparse.Namespace):
                                       parallelism=args.parallelism, window=args.window,
                                       batch_size=args.batch_size)
     if cmd == "translate-commit":
-        return flow.translate_commit(args.project, worker_model=args.worker_model)
+        return flow.translate_commit(args.project, worker_model=args.worker_model,
+                                     allow_problems=args.allow_problems)
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
     if cmd == "align":

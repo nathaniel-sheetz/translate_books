@@ -32,11 +32,24 @@ class CompletenessEvaluator(BaseEvaluator):
     version = "1.0.0"
     description = "Checks translation completeness and integrity"
 
+    # The placeholder spelling that collides with the Roman numeral XXX (30).
+    # Matched like the others, but a hit is dropped when it reads as a chapter
+    # heading rather than a marker (see ``_xxx_is_roman_heading``).
+    XXX_PATTERN = r'\bXXX\b'
+
+    # Chapter keywords (any target language) that precede a numeral heading,
+    # e.g. "Capítulo XXX" / "Chapter XXX — Duel". Used to spare a trailing or
+    # mid-line Roman XXX that follows one of these.
+    CHAPTER_KEYWORDS = (
+        "capítulo", "capitulo", "cap.", "chapter", "chap.",
+        "chapitre", "kapitel", "capitolo",
+    )
+
     # Common placeholder patterns
     PLACEHOLDER_PATTERNS = [
         r'\bTODO\b',
         r'\bFIXME\b',
-        r'\bXXX\b',
+        XXX_PATTERN,
         r'\[.*?TRANSLATION.*?\]',
         r'\[.*?INSERT.*?\]',
         r'\[.*?MISSING.*?\]',
@@ -164,6 +177,10 @@ class CompletenessEvaluator(BaseEvaluator):
         for pattern in all_patterns:
             matches = list(re.finditer(pattern, text, re.MULTILINE))
             for match in matches:
+                # Spare a legitimate Roman numeral XXX (e.g. "Capítulo XXX")
+                # that the placeholder marker spelling collides with.
+                if pattern == self.XXX_PATTERN and self._xxx_is_roman_heading(text, match):
+                    continue
                 issues.append(Issue(
                     severity=IssueLevel.ERROR,
                     message=f"Placeholder text found: '{match.group()}'",
@@ -172,6 +189,39 @@ class CompletenessEvaluator(BaseEvaluator):
                 ))
 
         return issues
+
+    def _xxx_is_roman_heading(self, text: str, match: re.Match) -> bool:
+        """Decide whether an ``XXX`` hit is the Roman numeral (30), not a marker.
+
+        ``XXX`` the placeholder and ``XXX`` the Roman numeral are the same
+        string, so only line context disambiguates. Treat the hit as a chapter
+        numeral — and therefore NOT a placeholder — when, on its own line, it is:
+
+        - the only non-whitespace token (bare ``XXX``), OR
+        - the trailing token, with only whitespace/closing punctuation after it
+          (``Capítulo XXX``), OR
+        - immediately preceded by a chapter keyword, which also covers
+          number-then-title headings (``Capítulo XXX — Duelo``).
+
+        A marker like ``XXX incomplete`` matches none of these and stays flagged.
+        """
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(text)
+        line = text[line_start:line_end]
+
+        before = line[:match.start() - line_start]
+        after = line[match.end() - line_start:]
+
+        # Trailing token: nothing but whitespace / closing punctuation follows
+        # (covers a bare "XXX" line and "Capítulo XXX").
+        is_trailing = re.fullmatch(r'[\s.,;:!?)\]}»"\'—–-]*', after) is not None
+        # Preceded by a chapter keyword (covers number-then-title "<kw> XXX — Title").
+        before_lower = before.strip().lower()
+        after_keyword = any(before_lower.endswith(kw) for kw in self.CHAPTER_KEYWORDS)
+
+        return is_trailing or after_keyword
 
     def _check_truncation(self, text: str) -> Issue | None:
         """

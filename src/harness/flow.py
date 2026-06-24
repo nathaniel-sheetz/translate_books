@@ -891,7 +891,12 @@ def translate_prepare(
     }
 
 
-def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
+def translate_commit(
+    project: str,
+    *,
+    worker_model: str | None = None,
+    allow_problems: list[str] | None = None,
+) -> dict:
     """Validate worker drafts, stamp the chunks, and report results (idempotent).
 
     Reads the ``translate-prepare`` manifest; for each entry reads the worker's
@@ -899,6 +904,13 @@ def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
     provenance prompt-log + stamps the chunk (``apply_translation`` + ``save_chunk``).
     Already-translated chunks are skipped, so a killed run resumes by re-running.
     Failed/missing chunks are reported for re-spawn (never stamped).
+
+    ``allow_problems`` waives known guard false-positives (e.g. the Roman numeral
+    ``XXX`` tripping the placeholder check): any guard problem whose message
+    contains one of these substrings (case-insensitive) is dropped, and the chunk
+    commits if no *other* problem remains — so image-parity / echo / length guards
+    still block. Waived problems are reported (top-level ``waived`` map) and logged
+    in the chunk's provenance, so a forced commit is never silent.
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
@@ -917,11 +929,13 @@ def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
         return {"error": f"manifest unreadable (truncated write?): {exc}", "committed": []}
     worker_model = worker_model or doc.get("worker_model") or "sonnet"
     entries = doc.get("entries", [])
+    allow_subs = [s.lower() for s in (allow_problems or []) if s.strip()]
 
     committed: list[str] = []
     failed: list[dict] = []
     missing: list[str] = []
     skipped: list[str] = []
+    waived: dict[str, list[str]] = {}
     project_slug = project_dir.name
 
     for entry in entries:
@@ -936,11 +950,21 @@ def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
             continue
         prose = draft_path.read_text(encoding="utf-8")
         problems = guard_translation_draft(chunk, prose)
+        if problems and allow_subs:
+            kept = [p for p in problems if not any(s in p.lower() for s in allow_subs)]
+            waived_here = [p for p in problems if p not in kept]
+            if waived_here:
+                waived[entry["chunk_id"]] = waived_here
+            problems = kept
         if problems:
             failed.append({"chunk_id": entry["chunk_id"], "problems": problems})
             continue
         prompt_path = Path(entry["prompt_path"])
         prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+        waived_note = waived.get(entry["chunk_id"])
+        if waived_note:
+            prompt_text += "\n\n[translate-commit] guard problems waived via --allow-problem:\n" + \
+                "\n".join(f"  - {p}" for p in waived_note)
         log_path = log_prompt(
             prompt=prompt_text,
             response=prose.strip(),
@@ -960,6 +984,7 @@ def translate_commit(project: str, *, worker_model: str | None = None) -> dict:
         "failed": failed,
         "missing": missing,
         "skipped_already_translated": skipped,
+        "waived": waived,
         "counts": {
             "committed": len(committed),
             "failed": len(failed),
