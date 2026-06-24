@@ -375,15 +375,22 @@ def test_run_script_forces_utf8_in_child_env(monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, **kwargs):
+    class FakeProc:
+        stdout = iter(())  # no output to stream
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr(flow.subprocess, "run", fake_run)
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
 
-    rc = flow._run_script(["scripts/translate_book.py", "chunk"])
+    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
     assert rc == 0
+    assert summary is None  # no HARNESS_RESULT sentinel was emitted
 
     env = captured["env"]
     assert env is not None, "_run_script must pass an explicit env to the child"
@@ -391,6 +398,34 @@ def test_run_script_forces_utf8_in_child_env(monkeypatch):
     assert env["PYTHONIOENCODING"] == "utf-8"
     # The forced vars are layered on top of the inherited environment, not a bare dict.
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_run_script_captures_and_hides_harness_result_sentinel(monkeypatch, capsys):
+    """Friction-log #18: _run_script tees the child's stdout — passing human output
+    through live — but lifts the single HARNESS_RESULT: line out as the parsed summary
+    and never echoes that machine-only line to the human stream."""
+    from src.harness import flow, state
+
+    sentinel = (
+        f'{state.HARNESS_RESULT_PREFIX} '
+        '{"stage": "cost-estimate", "total_chunks_in_scope": 7}\n'
+    )
+
+    class FakeProc:
+        stdout = iter(("Chunking the book...\n", sentinel, "Estimate ready.\n"))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
+
+    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    assert rc == 0
+    assert summary == {"stage": "cost-estimate", "total_chunks_in_scope": 7}
+
+    out = capsys.readouterr().out
+    assert "Chunking the book..." in out and "Estimate ready." in out
+    assert state.HARNESS_RESULT_PREFIX not in out  # machine-only line stays hidden
 
 
 # ===========================================================================

@@ -41,6 +41,27 @@ DEFAULTS: dict[str, str] = {
 CONFIG_KEYS = tuple(DEFAULTS.keys())
 
 
+# ── machine-readable result sentinel (streaming wrapped scripts) ──────────────
+#
+# The streaming harness commands (chunk/cost/translate/epub) wrap a subprocess
+# whose human-facing progress goes to stdout. To ALSO give the agent a fresh,
+# structured last_output.json (friction-log #18 — those commands used to leave the
+# previous command's result in place), the wrapped script prints exactly one line
+# ``HARNESS_RESULT: {...json...}``; ``flow._run_script`` tees the child's stdout,
+# strips that one line, and returns the parsed dict as the command's result.
+HARNESS_RESULT_PREFIX = "HARNESS_RESULT:"
+
+
+def emit_harness_result(data: dict) -> None:
+    """Print the structured-result sentinel a streaming harness wrapper exposes.
+
+    One line, machine-only. ``flow._run_script`` captures it (and keeps it out of
+    the human stream) so the streaming command can mirror a fresh structured result
+    to ``last_output.json`` instead of leaving a stale one behind (friction-log #18).
+    """
+    print(f"{HARNESS_RESULT_PREFIX} {json.dumps(data, ensure_ascii=False)}", flush=True)
+
+
 def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
     """Yield project dirs whose leaf name equals project_id, sorted alphabetically.
 

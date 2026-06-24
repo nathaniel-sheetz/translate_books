@@ -317,12 +317,13 @@ def test_chunk_per_chapter_writes_sizes_map(project: Path, monkeypatch):
 
     def _fake_run(cmd):
         captured["cmd"] = cmd
-        return 0
+        return 0, None  # (returncode, captured HARNESS_RESULT summary)
 
     monkeypatch.setattr(flow, "_run_script", _fake_run)
 
-    rc = flow.chunk(str(project), size=1800, per_chapter=True)
-    assert rc == 0
+    result = flow.chunk(str(project), size=1800, per_chapter=True)
+    # Streaming commands now return a fresh dict carrying the exit code (friction-log #18).
+    assert result["command"] == "chunk" and result["exit_code"] == 0
 
     sizes_path = project / ".harness" / "chunk_sizes.json"
     assert sizes_path.exists()
@@ -338,11 +339,75 @@ def test_chunk_per_chapter_writes_sizes_map(project: Path, monkeypatch):
 def test_chunk_without_per_chapter_omits_sizes_map(project: Path, monkeypatch):
     """The uniform path passes no --chunk-sizes and writes no map."""
     captured: dict = {}
-    monkeypatch.setattr(flow, "_run_script", lambda cmd: captured.update(cmd=cmd) or 0)
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: (captured.update(cmd=cmd), (0, None))[1])
 
     flow.chunk(str(project), size=1800)
     assert "--chunk-sizes" not in captured["cmd"]
     assert not (project / ".harness" / "chunk_sizes.json").exists()
+
+
+# ── fresh, self-documenting last_output.json (friction-log #18, #19) ─────────
+
+def test_streaming_command_refreshes_last_output(project: Path, monkeypatch):
+    """Friction-log #18: a streaming command (chunk/cost/translate/epub) must overwrite
+    last_output.json with ITS OWN fresh result — never leave the previous command's behind."""
+    import scripts.harness as harness
+
+    artifact = project / ".harness" / "last_output.json"
+    # Plant a STALE prior result, as a preceding `difficulty` run would have left it.
+    artifact.write_text(
+        json.dumps({"book_difficulty": 0.42, "suggested_target_size": 1800, "chapters": []}),
+        encoding="utf-8",
+    )
+
+    # Stub the wrapped subprocess: no spend, a fresh chunk summary via the sentinel.
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: (0, {
+        "stage": "cost-estimate", "total_chunks_in_scope": 7, "chunks_needing_translation": 7,
+    }))
+    monkeypatch.setattr(
+        sys, "argv", ["harness.py", "chunk", "--project", str(project), "--size", "1500"])
+
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 0  # the wrapped exit code is propagated (cost gate intact)
+
+    fresh = json.loads(artifact.read_text(encoding="utf-8"))
+    assert fresh["command"] == "chunk" and fresh["exit_code"] == 0
+    assert fresh["total_chunks_in_scope"] == 7
+    assert "book_difficulty" not in fresh, "the stale difficulty result must be gone"
+    assert "total_chunks_in_scope" in fresh["_schema"]  # self-documents its keys (#19)
+
+
+def test_streaming_refusal_still_refreshes_artifact(project: Path, monkeypatch):
+    """Even a pre-flight refusal (translate without --yes -> bare int 2) leaves a fresh
+    minimal artifact, so a prior result can't be mistaken for this command (friction-log #18)."""
+    import scripts.harness as harness
+
+    artifact = project / ".harness" / "last_output.json"
+    artifact.write_text(json.dumps({"book_difficulty": 0.42}), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["harness.py", "translate", "--project", str(project)])
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 2
+
+    fresh = json.loads(artifact.read_text(encoding="utf-8"))
+    assert fresh["command"] == "translate" and fresh["exit_code"] == 2
+    assert "book_difficulty" not in fresh
+
+
+def test_dict_command_artifact_carries_schema(project: Path, monkeypatch):
+    """Friction-log #19: every artifact self-documents its keys under _schema, so the agent
+    reads the schema instead of guessing field names."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(sys, "argv", ["harness.py", "difficulty", "--project", str(project)])
+    harness.main()  # a dict command returns normally (no SystemExit)
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"]
+    for key in ("book_difficulty", "suggested_target_size", "chapters"):
+        assert key in out and key in out["_schema"]
 
 
 # ── cost gate (the one paid step) ──────────────────────────────────────────

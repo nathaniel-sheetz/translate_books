@@ -12,11 +12,14 @@ Two shapes of beat:
   * **In-process** (return a dict the CLI prints as JSON): the style-guide and
     glossary beats, ``setup``, and ``difficulty`` — the parts that had *no*
     non-interactive entry point before (the gap this layer fills).
-  * **Subprocess** (return an int exit code): ``chunk`` / ``cost`` / ``translate``
-    / ``epub`` wrap the existing CLIs so the cost-gate semantics stay in exactly
-    one place (``translate_book.py``). ``chunk``/``cost`` always pass
-    ``--cost-only`` and physically cannot spend; ``translate`` fails closed
-    without ``--yes``.
+  * **Subprocess** (stream live output, return a dict carrying ``exit_code``):
+    ``chunk`` / ``cost`` / ``translate`` / ``epub`` wrap the existing CLIs so the
+    cost-gate semantics stay in exactly one place (``translate_book.py``).
+    ``chunk``/``cost`` always pass ``--cost-only`` and physically cannot spend;
+    ``translate`` fails closed without ``--yes`` (returning a bare int there). The
+    wrapped script prints a ``HARNESS_RESULT:`` sentinel that ``_run_script`` captures
+    so the command mirrors a FRESH structured result to ``last_output.json``
+    (friction-log #18) rather than leaving the previous command's behind.
 
 The agent writes the four *draft* artifacts itself (answers, follow-ups, style
 guide, glossary proposals); the harness writes the *prompts* and the *final*
@@ -53,17 +56,61 @@ def _quiet_stdout():
         yield
 
 
-def _run_script(cmd: list[str]) -> int:
-    """Run a repo script as a subprocess from the repo root, inheriting stdio.
+def _run_script(cmd: list[str]) -> tuple[int, dict | None]:
+    """Run a repo script as a subprocess from the repo root, streaming its stdout.
 
-    The agent sees the script's real output (cost estimate, progress) directly,
-    and the cost-gate logic stays in the wrapped CLI rather than being re-derived.
+    The agent sees the script's real output (cost estimate, progress) live as it
+    happens, and the cost-gate logic stays in the wrapped CLI rather than being
+    re-derived. While streaming, capture the single ``HARNESS_RESULT:`` sentinel
+    line the wrapper prints (``state.emit_harness_result``) and return it parsed,
+    so the streaming command can mirror a FRESH structured result to
+    ``last_output.json`` instead of leaving the previous command's behind
+    (friction-log #18). The sentinel line is kept out of the human stream.
+
     Force UTF-8 in the child so accented output survives a cp1252 Windows console
     (friction-log #4); reconfiguring the parent's stdout does not reach the child.
+    Returns ``(returncode, summary | None)``.
     """
     sys.stdout.flush()
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-    return subprocess.run([sys.executable, *cmd], cwd=str(state.REPO_ROOT), env=env).returncode
+    proc = subprocess.Popen(
+        [sys.executable, *cmd],
+        cwd=str(state.REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=None,  # inherit: errors/tracebacks still surface live
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    summary: dict | None = None
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            if line.startswith(state.HARNESS_RESULT_PREFIX):
+                payload = line[len(state.HARNESS_RESULT_PREFIX):].strip()
+                try:
+                    summary = json.loads(payload)
+                except json.JSONDecodeError:
+                    summary = None  # malformed sentinel -> fall back to a minimal result
+                continue  # machine-only line: never echo to the human stream
+            print(line, end="")
+    rc = proc.wait()
+    return rc, summary
+
+
+def _stream_result(command: str, rc: int, summary: dict | None) -> dict:
+    """Shape a streaming command's return: a fresh dict carrying the exit code.
+
+    Always returns a dict (never a bare int) so ``main()`` writes a fresh
+    ``last_output.json`` for this command — closing the stale-artifact trap
+    (friction-log #18) even when the wrapped script emitted no sentinel. ``main()``
+    propagates ``exit_code`` as the process exit status.
+    """
+    result = {"command": command, "exit_code": rc}
+    if summary:
+        result.update(summary)
+    return result
 
 
 def _read(path: Path) -> str:
@@ -1009,7 +1056,7 @@ def chunk(
     size: int,
     chapters: str | None = None,
     per_chapter: bool = False,
-) -> int:
+) -> dict:
     """Chunk at ``size`` and print the cost estimate, halting before any spend.
 
     Wraps ``translate_book.py --start-stage chunk --cost-only`` so the run chunks
@@ -1053,10 +1100,10 @@ def chunk(
 
     if chapters:
         cmd += ["--chapters", chapters]
-    return _run_script(cmd)
+    return _stream_result("chunk", *_run_script(cmd))
 
 
-def cost(project: str, *, chapters: str | None = None) -> int:
+def cost(project: str, *, chapters: str | None = None) -> dict:
     """Re-print the translation cost estimate WITHOUT spending (pure estimator)."""
     project_dir = state.resolve_project_dir(project)
     cmd = [
@@ -1067,7 +1114,7 @@ def cost(project: str, *, chapters: str | None = None) -> int:
     ]
     if chapters:
         cmd += ["--chapters", chapters]
-    return _run_script(cmd)
+    return _stream_result("cost", *_run_script(cmd))
 
 
 def translate(
@@ -1077,7 +1124,7 @@ def translate(
     model: str | None = None,
     provider: str | None = None,
     chapters: str | None = None,
-) -> int:
+) -> int | dict:
     """The one paid step. Fails closed without ``--yes`` (cost gate, defense-in-depth).
 
     ``--chapters`` (e.g. ``1-2`` / ``3,7``) translates only those chapters — the
@@ -1103,10 +1150,10 @@ def translate(
     ]
     if chapters:
         cmd += ["--chapters", chapters]
-    return _run_script(cmd)
+    return _stream_result("translate", *_run_script(cmd))
 
 
-def epub(project: str, *, title: str | None = None, author: str | None = None, language: str | None = None) -> int:
+def epub(project: str, *, title: str | None = None, author: str | None = None, language: str | None = None) -> int | dict:
     """Build the EPUB from translated chunks (title/author/language default from config)."""
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
@@ -1120,13 +1167,13 @@ def epub(project: str, *, title: str | None = None, author: str | None = None, l
             file=sys.stderr,
         )
         return 2
-    return _run_script([
+    return _stream_result("epub", *_run_script([
         "scripts/build_epub.py",
         str(project_dir),
         "--title", title,
         "--author", author,
         "--language", language,
-    ])
+    ]))
 
 
 def align(
@@ -1523,3 +1570,223 @@ def runs(project: str, *, run_id: str | None = None) -> dict:
         "timeline": timeline,
         "beats": beat_summary,
     }
+
+# ── output schemas (self-documenting last_output.json) ────────────────────────
+#
+# Friction-log #19: the JSON each command writes to ``.harness/last_output.json``
+# had undocumented keys, so the agent guessed wrong field names and burned
+# round-trips introspecting with ``python -c``. ``harness.py`` stamps the matching
+# entry below into every artifact under ``_schema`` (and into the printed JSON), so
+# the keys are self-describing at the point of use. Keep this in sync with the
+# return dicts above; ``tests/test_harness_pipeline.py`` guards the core commands.
+#
+# Each value maps a top-level result key to a one-line description; nested shapes
+# are noted inline in the description text. Commands with sub-actions are keyed
+# ``"<command> <action>"`` (e.g. ``"glossary commit"``).
+OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
+    "setup": {
+        "project_dir": "absolute path to the project directory",
+        "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code)",
+        "chapters": "list of written chapter file stems (e.g. 'chapter_01')",
+        "chapter_count": "number of sections written to chapters/",
+        "source_words": "word count of the ingested source (null on the no-URL path)",
+        "suggested_pattern": "heading-derived chapter-pattern hint, or null",
+        "chapter_report": "heading-structure report from ingest, or null",
+        "chunks_dir_exists": "whether chunks/ exists yet (expected False right after setup)",
+        "next": "the next command to run",
+    },
+    "split-preview": {
+        "project_dir": "absolute path to the project directory",
+        "section_count": "number of detected sections",
+        "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
+        "sections": "list of {name, kind, label, number, words, preview}",
+        "files_written": "always False for the dry-run preview",
+    },
+    "split": {
+        "project_dir": "absolute path to the project directory",
+        "chapter_count": "number of sections written",
+        "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
+        "chapters": "list of written chapter file stems",
+        "files_written": "always True for the apply",
+        "sections": "list of {name, kind, label, number, words}",
+    },
+    "style-guide prepare-questions": {
+        "detected_features": "list of source features that triggered conditional questions",
+        "questions": "list of {id, question, options:[{id,label}], hint, [prefilled, prefilled_reason]}",
+        "answers_path": "path to write the {question_id: answer} JSON to",
+        "instructions": "what to do next (ask the user, then write answers_path)",
+    },
+    "style-guide prepare-followups": {
+        "prompt_path": "path to the follow-up-question prompt to read",
+        "draft_path": "path to write the drafted follow-up questions JSON to",
+        "instructions": "what to do next",
+    },
+    "style-guide commit-followups": {
+        "new_questions": "list of merged-in follow-ups: {id, question, options:[{id,label}]}",
+        "answers_path": "path to rewrite with the FULL answer set",
+        "instructions": "what to do next",
+    },
+    "style-guide prepare-draft": {
+        "prompt_path": "path to the style-guide prompt to read",
+        "draft_path": "path to write the drafted style-guide prose to",
+        "resolved_answers": "list of {id, question, answer, source} ('option' vs 'custom')",
+        "unanswered": "list of question ids with no answer",
+        "instructions": "what to do next",
+    },
+    "style-guide commit": {
+        "style_path": "path to the written style.json",
+        "chars": "character length of the committed style guide",
+    },
+    "glossary prepare": {
+        "prompt_path": "path to the glossary-proposal prompt to read",
+        "candidate_count": "number of extracted candidate terms",
+        "style_guide_loaded": "whether style.json was fed into the prompt",
+        "draft_path": "path to write the drafted proposals JSON to",
+        "instructions": "what to do next",
+    },
+    "glossary commit": {
+        "glossary_path": "path to the written glossary.json",
+        "term_count": "number of committed terms",
+        "terms": "list of {english, translation, type, context}",
+    },
+    "difficulty": {
+        "book_difficulty": "overall difficulty score (0-1, rounded)",
+        "length_score": "length component of difficulty (rounded)",
+        "rarity_score": "rare-word component of difficulty (rounded)",
+        "suggested_target_size": "recommended whole-book chunk size in words",
+        "wordfreq_available": "whether the wordfreq rarity model was available",
+        "chapters": "list of {chapter_id, difficulty, suggested_target_size}",
+        "next": "the next command to run",
+    },
+    "translate-prepare": {
+        "manifest": "list of work entries: {chunk_id, chapter_id, chunk_path, prompt_path, draft_path, source_word_count}",
+        "manifest_path": "path to the written manifest.json",
+        "worker_model": "model each worker should be pinned to",
+        "spawn_plan": "dict {parallelism, window, batch_size}",
+        "spawn_mode_moot": "True when every in-scope chapter is a single chunk (skip the spawn-mode question)",
+        "usage_summary": "dict {chunks, source_words, worker_model, parallelism, window, batch_size, spawn_mode_moot}",
+        "rescued_prior_drafts": "count of uncommitted drafts carried over from a prior prepare",
+        "chapters": "the --chapters scope echoed back ('all' when omitted)",
+        "instructions": "what to do next (spawn workers, then translate-commit)",
+        "error": "present only on failure (e.g. no chunks, bad --chapters)",
+        "note": "present when no chapters matched the requested scope",
+        "available_chapters": "present with note: chapter ids that do exist",
+    },
+    "translate-commit": {
+        "committed": "list of chunk_ids stamped this run",
+        "failed": "list of {chunk_id, problems} that did not pass the guard",
+        "missing": "list of chunk_ids whose draft file was absent",
+        "skipped_already_translated": "list of chunk_ids already translated (idempotent skip)",
+        "waived": "map of chunk_id -> waived guard problems (via --allow-problem)",
+        "counts": "dict {committed, failed, missing, skipped}",
+        "instructions": "what to do next (re-spawn failed/missing, or proceed)",
+        "error": "present only on failure (e.g. no manifest)",
+    },
+    "chunk": {
+        "command": "the harness command ('chunk')",
+        "exit_code": "wrapped-script exit code (0 = ok)",
+        "stage": "'cost-estimate' (chunk runs chunking then halts at the estimate)",
+        "chunks_needing_translation": "number of untranslated chunks in scope",
+        "total_chunks_in_scope": "total chunks produced (the chunk count)",
+        "input_tokens": "estimated input tokens for the metered API",
+        "api_cost_usd": "conditional metered-API cost (subagent backend is free)",
+        "provider": "provider used for the estimate",
+        "model": "model used for the estimate",
+        "cost_only": "always True — this command never spends",
+    },
+    "cost": {
+        "command": "the harness command ('cost')",
+        "exit_code": "wrapped-script exit code (0 = ok)",
+        "stage": "'cost-estimate'",
+        "chunks_needing_translation": "number of untranslated chunks in scope",
+        "total_chunks_in_scope": "total chunks in scope",
+        "input_tokens": "estimated input tokens for the metered API",
+        "api_cost_usd": "conditional metered-API cost (subagent backend is free)",
+        "provider": "provider used for the estimate",
+        "model": "model used for the estimate",
+        "cost_only": "always True — this command never spends",
+    },
+    "translate": {
+        "command": "the harness command ('translate')",
+        "exit_code": "wrapped-script exit code (0 = ok; non-zero = refused/aborted)",
+        "stage": "'translate'",
+        "translated": "number of chunks translated this run",
+        "chapters_done": "list of chapter_ids fully covered this run",
+        "estimated_cost_usd": "estimated spend for this batch",
+        "remaining_untranslated": "untranslated chunks left in the book after this batch",
+        "note": "present when nothing was translated (already done / no match)",
+    },
+    "epub": {
+        "command": "the harness command ('epub')",
+        "exit_code": "wrapped-script exit code (0 = ok)",
+        "stage": "'epub'",
+        "path": "path to the built .epub",
+        "size_kb": "EPUB size in KB",
+        "included": "list of translated chapter_ids included",
+        "skipped": "list of untranslated/partial chapter_ids skipped",
+    },
+    "align": {
+        "aligned": "list of {chapter_id, es_count, high_confidence_pct}",
+        "skipped": "list of {chapter_id, reason} not aligned",
+        "alignments_dir": "directory the alignment JSON was written to",
+        "reader_base": "base reader URL for this project",
+        "reader_first": "reader URL for the first newly-aligned chapter, or null",
+        "reader_links": "reader URLs for every aligned chapter",
+        "instructions": "what to do next",
+        "error": "present only on a per-chapter aligner failure",
+    },
+    "show-translation": {
+        "chapters": "list of {chapter_id, total_chunks, translated_chunks, chunks:[...]}",
+        "available_chapters": "all chapter ids discovered",
+        "chunks_dir": "path to chunks/",
+        "shown_chunks": "number of chunk rows returned (capped by --max-chunks)",
+        "total_chunks": "total chunks in scope",
+        "truncated": "True when --max-chunks capped the sample",
+        "fields": "key aliases: {translation: 'translated_text', source: 'source_text'}",
+    },
+    "status": {
+        "project": "project slug",
+        "artifacts": "dict of which pipeline artifacts exist (source, chapters, style_guide, glossary, difficulty, chunks)",
+        "epubs": "list of built .epub filenames",
+        "spawn_plan": "dict {parallelism, window, batch_size}",
+        "worker_model": "configured worker model",
+        "run_id": "current run id",
+        "stage": "one-word progress: pre-chunk | untranslated | partial | fully-translated",
+        "spawn_mode_moot": "True if one chunk per chapter (else False; null pre-chunk)",
+        "totals": "dict {chapters, complete_chapters, total_chunks, translated_chunks, pending_chunks}",
+        "pending_chapters": "list of chapter_ids not yet fully translated",
+        "chapters": "list of {chapter_id, chunks, translated, complete}",
+        "next": "suggested next command",
+    },
+    "runs": {
+        "project": "project slug",
+        "run_id": "the summarized run id (most recent unless one was requested)",
+        "available_run_ids": "all run ids logged for this project",
+        "command_count": "number of command events in the run",
+        "beat_count": "number of qualitative beats in the run",
+        "total_command_seconds": "summed command durations",
+        "status_counts": "dict of command status -> count",
+        "timeline": "list of {cmd, status, dur_s, ts}",
+        "beats": "list of logged qualitative beats (minus run_id/project)",
+        "note": "present when there are no events yet",
+    },
+    "log-event": {
+        "logged": "always True on success",
+        "run_id": "the run id the beat was stamped with",
+        "event": "the beat name",
+        "fields": "the extra fields merged into the logged record",
+    },
+}
+
+
+def schema_for(command: str, action: str | None = None) -> dict | None:
+    """Return the documented output schema for a command (friction-log #19).
+
+    Sub-action commands (``style-guide``/``glossary``) are keyed ``"<command>
+    <action>"``; falls back to the bare command name.
+    """
+    if action:
+        keyed = OUTPUT_SCHEMAS.get(f"{command} {action}")
+        if keyed is not None:
+            return keyed
+    return OUTPUT_SCHEMAS.get(command)

@@ -266,6 +266,12 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         if not chapters:
             print(f"  No matching chapters found for --chapters {args.chapters}")
             print(f"  Available: {', '.join(sorted(discover_chapters(chunks_dir).keys()))}")
+            from src.harness.state import emit_harness_result
+            emit_harness_result({
+                "stage": "translate",
+                "translated": 0,
+                "note": f"no matching chapters for --chapters {args.chapters}",
+            })
             state["stage_completed"] = "translate"
             return state
 
@@ -291,12 +297,20 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             if not chunk.has_translation:
                 untranslated.append((cp, chunk))
 
+    total = sum(len(paths) for paths in chapters.values())
+
     if not untranslated:
         print("  All chunks already translated!")
+        from src.harness.state import emit_harness_result
+        emit_harness_result({
+            "stage": "translate",
+            "translated": 0,
+            "total_chunks_in_scope": total,
+            "note": "all chunks already translated",
+        })
         state["stage_completed"] = "translate"
         return state
 
-    total = sum(len(paths) for paths in chapters.values())
     print(f"  {len(untranslated)} of {total} chunks need translation")
 
     # Cost estimation
@@ -313,6 +327,17 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         print(f"  If translated via the metered API: ~${cost_info['cost_usd']:.2f} ({provider}/{model})")
         print("  Subagent backend uses your subscription (no API $)")
         print("  --cost-only: stopping after estimate")
+        from src.harness.state import emit_harness_result
+        emit_harness_result({
+            "stage": "cost-estimate",
+            "chunks_needing_translation": len(untranslated),
+            "total_chunks_in_scope": total,
+            "input_tokens": cost_info["input_tokens"],
+            "api_cost_usd": round(cost_info["cost_usd"], 2),
+            "provider": provider,
+            "model": model,
+            "cost_only": True,
+        })
         sys.exit(0)
 
     # Real (paid) API translate run: the dollar figure IS the spend.
@@ -384,6 +409,15 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
                 remaining += 1
     if remaining > 0:
         print(f"  Remaining: {remaining} untranslated chunks (~${remaining * cost_per_chunk:.2f})")
+
+    from src.harness.state import emit_harness_result
+    emit_harness_result({
+        "stage": "translate",
+        "translated": len(untranslated),
+        "chapters_done": chapter_ids_done,
+        "estimated_cost_usd": round(actual_cost, 2),
+        "remaining_untranslated": remaining,
+    })
 
     state["stage_completed"] = "translate"
     return state

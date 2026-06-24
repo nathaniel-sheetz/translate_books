@@ -48,15 +48,23 @@ deterministic/paid stage (`chunk`/`cost`/`translate`/`epub`) stream the underlyi
 output through. Per-project working state lives in `projects/<slug>/.harness/`; `setup`
 wipes it for a clean run, so there is no global `.tmp/` to manage.
 
-**Reading harness output — Read the artifact, NEVER parse stdout.** Every JSON-returning command
-also mirrors its full result to `projects/<slug>/.harness/last_output.json` (UTF-8) and prints
-`OUTPUT_JSON: <path>` to stderr. **Always `Read` that file** to consume a result — it is the only
-clean machine-readable surface. Stdout is a *mixed human+JSON stream*: `translate-commit` /
-`chunk` / `epub` print progress lines and the full `terms`/counts dump *around* the JSON, so
-piping stdout into a JSON parser (`... | python -c "json.load(sys.stdin)"`) fails immediately with
+**Reading harness output — Read the artifact, NEVER parse stdout.** **Every** command — including
+the streaming ones (`chunk`/`cost`/`translate`/`epub`) — mirrors a **fresh** structured result to
+`projects/<slug>/.harness/last_output.json` (UTF-8) and prints `OUTPUT_JSON: <path>` to stderr.
+**Always `Read` that file** to consume a result — it is the only clean machine-readable surface,
+and it is always the *current* command's result (the streaming commands used to leave the previous
+command's payload here; they no longer do). Stdout is a *mixed human+JSON stream*: `translate-commit`
+/ `chunk` / `epub` print progress lines and the full `terms`/counts dump *around* the JSON, so piping
+stdout into a JSON parser (`... | python -c "json.load(sys.stdin)"`) fails immediately with
 `Expecting value: line 1 column 1 (char 0)` on the leading non-JSON text. Don't learn this the hard
 way — read `last_output.json`. (Same reason **never pipe harness output through `grep`**: on
 Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.)
+
+**Don't guess field names — read the `_schema`.** Every `last_output.json` carries a `_schema`
+block mapping each result key (and nested shapes) to a one-line description. Read it to learn the
+exact keys instead of probing with `python -c` (e.g. `status` chapters use `chunks`/`translated`/
+`complete` under a top-level `totals`, *not* `total_chunks`/`pending_chunks`). The `_schema` is the
+contract; the sibling keys are the data.
 
 **Resuming a project? Run `status` first.** `python scripts/harness.py status --project <slug>`
 reports, in one call, each chapter's translated-vs-pending chunk counts, the saved `spawn_plan`

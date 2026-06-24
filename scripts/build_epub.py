@@ -150,6 +150,15 @@ Examples:
         print(f"  Included translated chapters ({len(included)}): {included}")
         print(f"  Skipped untranslated/partial chapters ({len(skipped)}): {skipped}")
 
+    from src.harness.state import emit_harness_result
+    emit_harness_result({
+        "stage": "epub",
+        "path": str(output),
+        "size_kb": round(size_kb, 1),
+        "included": list(included) if included is not None else [],
+        "skipped": list(skipped) if skipped is not None else [],
+    })
+
 
 if __name__ == '__main__':
     main()

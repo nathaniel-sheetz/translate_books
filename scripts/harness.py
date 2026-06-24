@@ -8,9 +8,12 @@ drafts. Every command is non-interactive — it never calls ``input()`` and so n
 deadlocks an agent.
 
 Each command maps to one ``src/harness/flow.py`` function. Commands that produce data the
-agent should relay print a JSON object to stdout; commands that wrap a deterministic /
-paid stage (``chunk``/``cost``/``translate``/``epub``) inherit the wrapped CLI's output
-and exit with its code.
+agent should relay print a JSON object to stdout. Commands that wrap a deterministic /
+paid stage (``chunk``/``cost``/``translate``/``epub``) stream the wrapped CLI's live
+output and exit with its code, but ALSO mirror a fresh structured result to
+``last_output.json`` (friction-log #18 — they used to leave the previous command's result
+in place). Every artifact additionally carries a ``_schema`` block documenting its keys
+(friction-log #19), so the agent never has to guess field names.
 
 Cost-gate safety (unchanged from the wrapped CLI):
   * ``chunk`` and ``cost`` always pass ``--cost-only`` — they physically cannot spend.
@@ -313,12 +316,38 @@ def _dispatch(args: argparse.Namespace):
     raise SystemExit(f"unknown command: {cmd}")
 
 
+# Commands that wrap a subprocess: they stream the wrapped CLI's output live and return
+# a dict carrying ``exit_code`` (via ``flow._stream_result``), or a bare int on a pre-flight
+# refusal (``epub`` missing metadata, ``translate`` without ``--yes``). Either way ``main()``
+# leaves a FRESH ``last_output.json`` and propagates the wrapped exit code (friction-log #18).
+_STREAMING_COMMANDS = ("chunk", "cost", "translate", "epub")
+
+
+def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
+    """Stamp the command's documented output schema into ``result`` under ``_schema``.
+
+    Friction-log #19: the agent reads ``last_output.json`` but had to guess key names and
+    burn round-trips introspecting them. The registry lives in ``flow.OUTPUT_SCHEMAS``; this
+    mutates the result in place so both the printed JSON and the mirrored artifact carry it.
+    No-op when the command has no registered schema.
+    """
+    if not isinstance(result, dict):
+        return
+    cmd = getattr(args, "command", None)
+    if not cmd:
+        return
+    schema = flow.schema_for(cmd, getattr(args, "action", None))
+    if schema:
+        result["_schema"] = schema
+
+
 def _write_output_artifact(args: argparse.Namespace, result: dict) -> None:
     """Mirror a command's JSON result to ``.harness/last_output.json`` (UTF-8).
 
     The agent reads this file instead of capturing stdout, sidestepping Windows console
-    encoding entirely (friction-log #4). Best-effort: the artifact must never break a command,
-    so any resolution/write failure is swallowed.
+    encoding entirely (friction-log #4); it carries a ``_schema`` block documenting its keys
+    (friction-log #19). Best-effort: the artifact must never break a command, so any
+    resolution/write failure is swallowed.
     """
     project = getattr(args, "project", None)
     if not project:
@@ -411,11 +440,27 @@ def main() -> None:
         raise
 
     elapsed = time.monotonic() - started
+
+    if args.command in _STREAMING_COMMANDS:
+        # The wrapped CLI's progress/cost already streamed live. Still leave a FRESH
+        # structured last_output.json (friction-log #18 — never the previous command's
+        # result) and propagate the wrapped exit code so the cost gate keeps its teeth.
+        # `result` is a dict carrying exit_code, or a bare int on a pre-flight refusal.
+        rc = result["exit_code"] if isinstance(result, dict) else result
+        payload = result if isinstance(result, dict) else {"command": args.command, "exit_code": rc}
+        _stamp_schema(args, payload)
+        _log_command(args, status=("ok" if rc == 0 else f"exit_{rc}"), duration=elapsed,
+                     result=payload)
+        _write_output_artifact(args, payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        sys.exit(rc)
+
     if isinstance(result, int):
-        # chunk/cost/translate/epub wrap a subprocess and return its exit code; the
-        # dollar/progress detail is the wrapped CLI's own stdout, so log only the outcome.
+        # A non-streaming command returning a bare exit code (defensive; none today).
         _log_command(args, status=("ok" if result == 0 else f"exit_{result}"), duration=elapsed)
         sys.exit(result)
+
+    _stamp_schema(args, result)
     _log_command(args, status="ok", duration=elapsed, result=result)
     _write_output_artifact(args, result)
     print(json.dumps(result, indent=2, ensure_ascii=False))
