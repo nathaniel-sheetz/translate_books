@@ -267,9 +267,26 @@ def test_glossary_commit_writes_valid_glossary(project: Path):
     out = flow.glossary_commit(str(project))
     assert out["term_count"] == 2
     assert {t["english"] for t in out["terms"]} == {"Thomas", "oak tree"}
+    # A correct draft (carries "Tomás") raises no accent-stripping warning (#21).
+    assert out["warnings"] == []
     # File validates against the model (belt-and-suspenders the flow already ran).
     from src.harness_guard import validate_glossary_file
     assert len(validate_glossary_file(project / "glossary.json").terms) == 2
+
+
+def test_glossary_commit_warns_on_ascii_folded_spanish(project: Path):
+    # An all-ASCII Spanish glossary commits, but surfaces a non-blocking accent-stripping
+    # warning the approval gate shows the user (#21).
+    state.ensure_harness_dir(project)
+    draft = project / ".harness" / "glossary_draft.json"
+    draft.write_text(json.dumps([
+        {"english": f"e{i}", "translation": w}
+        for i, w in enumerate(["senor", "lenera", "manana", "Tia", "Dia", "nino", "arbol", "cancion"])
+    ]), encoding="utf-8")
+
+    out = flow.glossary_commit(str(project))
+    assert out["term_count"] == 8
+    assert out["warnings"] and "accent" in out["warnings"][0].lower()
 
 
 def test_glossary_commit_rejects_malformed_draft(project: Path):

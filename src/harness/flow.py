@@ -639,13 +639,17 @@ def glossary_commit(project: str, *, draft: str | None = None) -> dict:
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
 
-    from src.harness_guard import guard_glossary_proposals, validate_glossary_file
+    from src.harness_guard import diacritic_warning, guard_glossary_proposals, validate_glossary_file
     from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
     from src.utils.file_io import save_glossary
 
+    cfg = state.load_config(project_dir)
     draft_path = Path(draft) if draft else hdir / "glossary_draft.json"
     proposals = json.loads(_read(draft_path))
     guard_glossary_proposals(proposals)  # raises HarnessValidationError -> re-draft
+    # Soft, non-blocking smell-check for an accent-stripped draft (see #21): the structural
+    # guard above passes pure ASCII, so surface the warning for the agent + approval gate.
+    warn = diacritic_warning(proposals, cfg.get("language_code"))
     glossary = proposals_to_glossary(glossary_terms_from_proposals(proposals))
     out = project_dir / "glossary.json"
     save_glossary(glossary, out)
@@ -653,6 +657,7 @@ def glossary_commit(project: str, *, draft: str | None = None) -> dict:
     return {
         "glossary_path": str(out),
         "term_count": len(glossary.terms),
+        "warnings": [warn] if warn else [],
         "terms": [
             {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context}
             for t in glossary.terms
@@ -1675,6 +1680,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "glossary commit": {
         "glossary_path": "path to the written glossary.json",
         "term_count": "number of committed terms",
+        "warnings": "advisory, non-blocking smells to surface at the approval gate (e.g. accent-stripping); empty when clean",
         "terms": "list of {english, translation, type, context}",
     },
     "difficulty": {

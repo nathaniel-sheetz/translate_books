@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from src.harness_guard import (
+    MIN_TERMS_FOR_DIACRITIC_CHECK,
     HarnessValidationError,
+    diacritic_warning,
     guard_glossary_proposals,
     guard_translation_draft,
     validate_chunk_file,
@@ -85,6 +87,47 @@ class TestGuardGlossaryProposals:
             pass  # also acceptable — int coerced to "3" is truthy, may pass or fail
         except AttributeError as e:
             pytest.fail(f"guard raised AttributeError instead of HarnessValidationError: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# diacritic_warning — soft accent-stripping smell-check (#21)
+# --------------------------------------------------------------------------- #
+
+class TestDiacriticWarning:
+    @staticmethod
+    def _ascii_spanish(n: int) -> list[dict]:
+        # n all-ASCII "Spanish" proposals — the accent-stripped smell.
+        words = ["senor", "lenera", "manana", "Tia", "Dia", "montana", "nino", "cancion",
+                 "corazon", "pequeno", "arbol", "rapido"]
+        return [{"english": f"e{i}", "translation": words[i % len(words)]} for i in range(n)]
+
+    def test_all_ascii_spanish_warns(self):
+        warn = diacritic_warning(self._ascii_spanish(MIN_TERMS_FOR_DIACRITIC_CHECK), "es")
+        assert warn is not None
+        assert "es" in warn
+
+    def test_one_accented_term_silences_warning(self):
+        proposals = self._ascii_spanish(MIN_TERMS_FOR_DIACRITIC_CHECK)
+        proposals[0]["translation"] = "Tomás"  # a single real accent is enough
+        assert diacritic_warning(proposals, "es") is None
+
+    def test_english_target_never_warns(self):
+        # English glossary is legitimately ASCII — language gate must skip it.
+        assert diacritic_warning(self._ascii_spanish(MIN_TERMS_FOR_DIACRITIC_CHECK), "en") is None
+
+    def test_small_glossary_below_threshold_no_warning(self):
+        assert diacritic_warning(self._ascii_spanish(MIN_TERMS_FOR_DIACRITIC_CHECK - 1), "es") is None
+
+    def test_none_language_code_no_crash(self):
+        assert diacritic_warning(self._ascii_spanish(MIN_TERMS_FOR_DIACRITIC_CHECK), None) is None
+
+    def test_uppercase_and_padded_language_code_normalized(self):
+        assert diacritic_warning(self._ascii_spanish(MIN_TERMS_FOR_DIACRITIC_CHECK), " ES ") is not None
+
+    def test_reads_spanish_key_alias(self):
+        # Proposals may carry "spanish" instead of "translation" (same alias the guard accepts).
+        proposals = [{"english": f"e{i}", "spanish": "senor"} for i in range(MIN_TERMS_FOR_DIACRITIC_CHECK)]
+        assert diacritic_warning(proposals, "es") is not None
 
 
 # --------------------------------------------------------------------------- #

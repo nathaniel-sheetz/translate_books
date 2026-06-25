@@ -82,6 +82,62 @@ def guard_glossary_proposals(proposals: list[dict]) -> list[dict]:
     return proposals
 
 
+# Languages whose orthography routinely carries diacritics. Keyed by the config's
+# ``language_code`` (src/harness/state.py default "es") — stable and short, unlike the
+# free-text ``target_language`` name. A code NOT in this set (e.g. "en") never warns.
+DIACRITIC_LANGUAGE_CODES: frozenset[str] = frozenset({
+    "es", "fr", "pt", "it", "de", "ca", "pl", "cs", "ro", "tr",
+    "vi", "hu", "nl", "sv", "no", "da", "fi", "is", "sk", "sl", "hr",
+})
+
+# Below this many terms a glossary can legitimately be all proper names (ASCII), so the
+# zero-diacritic signal is too noisy to act on. Above it, an accent-using language almost
+# always carries at least one ñ/accented vowel — zero is the accent-stripping tell.
+MIN_TERMS_FOR_DIACRITIC_CHECK = 8
+
+
+def diacritic_warning(proposals: list[dict], language_code: str | None) -> str | None:
+    """Soft, advisory smell-check for an accent-stripped glossary draft.
+
+    The agent drafts the glossary in-conversation; "playing it safe" by writing pure ASCII
+    (``Tia`` for ``Tía``, ``senor`` for ``señor``) silently ships the wrong canonical forms to
+    every translator worker — and the structural guard (:func:`guard_glossary_proposals`) passes
+    them clean. This catches that *one* failure mode and returns a human-readable warning the
+    commit path surfaces to the agent and the human approval gate.
+
+    Advisory by design: it NEVER raises and NEVER blocks. Untranslated proper names are
+    legitimately ASCII, so a high ASCII fraction is normal; the actionable tell is **zero**
+    non-ASCII across a non-trivial glossary in a diacritic-using target language.
+
+    Returns the warning string, or ``None`` when nothing looks off (wrong/ASCII language,
+    too few terms, or at least one term already carries a diacritic).
+    """
+    code = (language_code or "").strip().lower()
+    if code not in DIACRITIC_LANGUAGE_CODES:
+        return None
+    if not isinstance(proposals, list):
+        return None
+
+    translations = [
+        str((p.get("translation") or p.get("spanish") or "")).strip()
+        for p in proposals
+        if isinstance(p, dict)
+    ]
+    translations = [t for t in translations if t]
+    if len(translations) < MIN_TERMS_FOR_DIACRITIC_CHECK:
+        return None
+
+    if any(any(ord(ch) > 127 for ch in t) for t in translations):
+        return None
+
+    return (
+        f"Possible accent-stripping: all {len(translations)} glossary translations are pure ASCII, "
+        f"but the target language ({code}) normally carries diacritics. The Write tool is UTF-8 — "
+        "do not ASCII-fold. Re-read glossary.json and restore accents (e.g. Tía/señor/Día) before "
+        "approving; these forms are fed verbatim to every translator worker."
+    )
+
+
 def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
     """Validate a worker-produced translation draft before it is stamped.
 

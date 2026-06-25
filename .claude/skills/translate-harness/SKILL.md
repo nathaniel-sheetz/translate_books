@@ -292,7 +292,10 @@ a `prompt_path`, and a `draft_path`.
 
 **Read the printed `prompt_path`** and draft the glossary proposals yourself — the thinking-mode
 step. Produce a JSON array of `{english, translation, type, context}` objects and **Write** it to
-the printed `draft_path`. As you draft, **track every term whose translation you were unsure about**
+the printed `draft_path`. **Write the target language WITH its diacritics** (Spanish: á é í ó ú ñ
+¿ ¡). The `Write` tool is UTF-8 — do **not** ASCII-fold "to be safe"; stripped accents (`Tia` for
+`Tía`, `senor` for `señor`) become the canonical forms fed verbatim to every translator worker.
+As you draft, **track every term whose translation you were unsure about**
 (ambiguous sense, multiple valid renderings, dialect/register judgement calls) and why — keep that
 running list for the approval beat. Then:
 ```bash
@@ -307,6 +310,9 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
   collapse it to "N terms drafted."
 - **Call out the uncertain translations** you tracked: name each term, its chosen rendering, the
   alternative(s) you considered, and why you hesitated, so the user can adjudicate the close calls.
+- **Surface any `warnings`** — if `commit`'s result carries a non-empty `warnings` array (e.g. an
+  accent-stripping smell when the target language carries diacritics), re-read `glossary.json`, fix
+  any ASCII-folded terms, re-run `commit`, **then** present the gate.
 - **AskUserQuestion with exactly two predefined options** — **"Approve all"** (accept the list as-is
   and continue) and **"Reject & talk it through"** (open-ended: END the turn, discuss, then re-draft /
   re-run `commit` and re-present this gate). **In the question text, remind the user that to approve
