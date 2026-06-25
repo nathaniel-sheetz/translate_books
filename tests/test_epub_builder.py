@@ -11,6 +11,7 @@ import pytest
 from src.epub_builder import (
     _DEFAULT_TRANSLATOR_HEADING,
     _discover_chunk_chapters,
+    _first_nonempty_line,
     _int_to_roman,
     _load_chapter_manifest,
     _load_toc_format,
@@ -361,6 +362,31 @@ class TestNormalizeHeading:
         # Defensive fallback: raw line that didn't match the regex still
         # gets a period stripped so callers can rely on idempotent output.
         assert _normalize_heading("Some Title.") == "Some Title"
+
+
+# --- _first_nonempty_line ---
+
+class TestFirstNonemptyLine:
+    def test_returns_first_real_line(self):
+        assert _first_nonempty_line("\n\n  Prólogo  \n\nbody") == "Prólogo"
+
+    def test_skips_leading_image_line(self):
+        # The splitter prepends a header image to the body; that [IMAGE:...]
+        # token must never be promoted to the section heading / TOC label.
+        text = "[IMAGE:images/front.jpg]\n\nPrólogo\n\nbody text"
+        assert _first_nonempty_line(text) == "Prólogo"
+
+    def test_skips_described_image_line(self):
+        text = "[IMAGE:images/front.jpg:Una portada]\n\nIntroducción"
+        assert _first_nonempty_line(text) == "Introducción"
+
+    def test_image_only_body_returns_empty(self):
+        # No heading hides behind the image -> empty, so the caller falls back
+        # to the manifest label rather than to an image token.
+        assert _first_nonempty_line("[IMAGE:images/front.jpg]\n\n") == ""
+
+    def test_empty_text_returns_empty(self):
+        assert _first_nonempty_line("") == ""
 
 
 # --- collect_referenced_images ---

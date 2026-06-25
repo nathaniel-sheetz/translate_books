@@ -477,6 +477,22 @@ def test_dict_command_artifact_carries_schema(project: Path, monkeypatch):
         assert key in out and key in out["_schema"]
 
 
+def test_stream_result_keeps_harness_authoritative_keys():
+    """A wrapped script's HARNESS_RESULT sentinel must never overwrite the harness's
+    own command name or the real process exit code recorded in last_output.json."""
+    rogue = {"command": "spoofed", "exit_code": 99, "stage": "done"}
+    result = flow._stream_result("translate", rc=0, summary=rogue)
+    assert result["command"] == "translate"  # harness command wins, not "spoofed"
+    assert result["exit_code"] == 0           # real exit code wins, not the sentinel's 99
+    assert result["stage"] == "done"          # non-conflicting summary keys pass through
+
+
+def test_stream_result_without_summary_is_minimal_dict():
+    """No sentinel -> still a fresh dict carrying command + exit_code (never a bare int)."""
+    assert flow._stream_result("epub", rc=1, summary=None) == {
+        "command": "epub", "exit_code": 1}
+
+
 # ── cost gate (the one paid step) ──────────────────────────────────────────
 
 def test_translate_fails_closed_without_yes(project: Path):
