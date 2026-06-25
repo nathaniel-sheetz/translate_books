@@ -6,6 +6,7 @@ grouping subfolders so ``translate-harness --project <id>`` keeps working after
 a book is moved into a group.
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -170,3 +171,30 @@ def test_available_project_dir_collision_suffixes_from_2(repo):
     assert state.available_project_dir("understood-betsy") == (
         repo / "projects" / "understood-betsy-3"
     )
+
+
+# ── emit_harness_result sentinel ─────────────────────────────────────────────
+
+def test_emit_harness_result_format(capsys):
+    """The sentinel line is 'HARNESS_RESULT: {json}' on stdout."""
+    state.emit_harness_result({"command": "chunk", "total_chunks": 10})
+    line = capsys.readouterr().out.rstrip("\n")
+    assert line.startswith(state.HARNESS_RESULT_PREFIX + " ")
+    payload = json.loads(line[len(state.HARNESS_RESULT_PREFIX):].strip())
+    assert payload == {"command": "chunk", "total_chunks": 10}
+
+
+def test_emit_harness_result_non_ascii_not_escaped(capsys):
+    """ensure_ascii=False: Spanish characters are emitted literally, not as \\uXXXX."""
+    state.emit_harness_result({"title": "Comprendida Betsy"})
+    out = capsys.readouterr().out
+    assert "Comprendida Betsy" in out
+    assert "\\u" not in out
+
+
+def test_emit_harness_result_prefix_matches_constant(capsys):
+    """The prefix in the emitted line matches HARNESS_RESULT_PREFIX exactly."""
+    state.emit_harness_result({})
+    line = capsys.readouterr().out.rstrip("\n")
+    prefix_part = line.split(" ", 1)[0]  # "HARNESS_RESULT:" (already includes the colon)
+    assert prefix_part == state.HARNESS_RESULT_PREFIX

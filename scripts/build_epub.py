@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.epub_builder import build_epub, build_epub_from_chunks
+from src.harness.state import emit_harness_result
 
 
 def main():
@@ -150,7 +151,6 @@ Examples:
         print(f"  Included translated chapters ({len(included)}): {included}")
         print(f"  Skipped untranslated/partial chapters ({len(skipped)}): {skipped}")
 
-    from src.harness.state import emit_harness_result
     emit_harness_result({
         "stage": "epub",
         "path": str(output),

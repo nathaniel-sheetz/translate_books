@@ -428,6 +428,33 @@ def test_run_script_captures_and_hides_harness_result_sentinel(monkeypatch, caps
     assert state.HARNESS_RESULT_PREFIX not in out  # machine-only line stays hidden
 
 
+def test_run_script_malformed_sentinel_falls_back_to_none(monkeypatch, capsys):
+    """A HARNESS_RESULT: line with invalid JSON is silently swallowed (summary=None).
+
+    The malformed line must still be hidden from the human stream; the returncode
+    and any surrounding human-readable output must pass through normally.
+    """
+    from src.harness import flow, state
+
+    bad_sentinel = f"{state.HARNESS_RESULT_PREFIX} {{not valid json\n"
+
+    class FakeProc:
+        stdout = iter(("Progress line.\n", bad_sentinel, "Done.\n"))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
+
+    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    assert rc == 0
+    assert summary is None  # malformed JSON -> graceful fallback, not a crash
+
+    out = capsys.readouterr().out
+    assert "Progress line." in out and "Done." in out
+    assert state.HARNESS_RESULT_PREFIX not in out  # still hidden even when malformed
+
+
 # ===========================================================================
 # Subagent backend spine (Phase B): prepare -> (worker writes prose) -> commit
 # ===========================================================================

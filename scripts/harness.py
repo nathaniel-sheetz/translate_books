@@ -361,11 +361,16 @@ def _write_output_artifact(args: argparse.Namespace, result: dict) -> None:
     (friction-log #19). Best-effort: the artifact must never break a command, so any
     resolution/write failure is swallowed.
     """
-    project = getattr(args, "project", None)
-    if not project:
-        return
     try:
-        project_dir = state.resolve_project_dir(project)
+        project = getattr(args, "project", None)
+        if not project:
+            # setup --title (no --project) resolves the dir itself; carry it in result.
+            project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
+            if not project_dir_str:
+                return
+            project_dir = Path(project_dir_str)
+        else:
+            project_dir = state.resolve_project_dir(project)
         state.ensure_harness_dir(project_dir)
         out = state.harness_dir(project_dir) / "last_output.json"
         out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -405,6 +410,7 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
         project = getattr(args, "project", None)
         run_id = None
         slug = None
+        project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
         if project:
             try:
                 project_dir = state.resolve_project_dir(project)
@@ -412,6 +418,13 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
                 run_id = state.ensure_run_id(project_dir)
             except Exception:  # noqa: BLE001 - never let resolution break logging
                 slug = project
+        elif project_dir_str:
+            try:
+                project_dir = Path(project_dir_str)
+                slug = project_dir.name
+                run_id = state.ensure_run_id(project_dir)
+            except Exception:  # noqa: BLE001
+                slug = project_dir_str
 
         fields = {"cmd": label, "status": status, "dur_s": round(duration, 3)}
         if isinstance(result, dict):

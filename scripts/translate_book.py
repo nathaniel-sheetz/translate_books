@@ -34,6 +34,7 @@ from src.book_splitter import split_book_into_chapters, save_chapters_to_files
 from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
+from src.harness.state import emit_harness_result
 from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
@@ -276,7 +277,6 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         if not chapters:
             print(f"  No matching chapters found for --chapters {args.chapters}")
             print(f"  Available: {', '.join(sorted(discover_chapters(chunks_dir).keys()))}")
-            from src.harness.state import emit_harness_result
             emit_harness_result({
                 "stage": "translate",
                 "translated": 0,
@@ -311,7 +311,6 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
 
     if not untranslated:
         print("  All chunks already translated!")
-        from src.harness.state import emit_harness_result
         emit_harness_result({
             "stage": "translate",
             "translated": 0,
@@ -337,7 +336,6 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         print(f"  If translated via the metered API: ~${cost_info['cost_usd']:.2f} ({provider}/{model})")
         print("  Subagent backend uses your subscription (no API $)")
         print("  --cost-only: stopping after estimate")
-        from src.harness.state import emit_harness_result
         emit_harness_result({
             "stage": "cost-estimate",
             "chunks_needing_translation": len(untranslated),
@@ -420,7 +418,6 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     if remaining > 0:
         print(f"  Remaining: {remaining} untranslated chunks (~${remaining * cost_per_chunk:.2f})")
 
-    from src.harness.state import emit_harness_result
     emit_harness_result({
         "stage": "translate",
         "translated": len(untranslated),

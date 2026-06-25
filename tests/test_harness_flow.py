@@ -146,6 +146,25 @@ def test_split_preview_tags_matter_and_writes_nothing(tmp_path: Path):
     assert result["counts"] == {"front_matter": 1, "chapter": 2, "back_matter": 1}
     assert result["files_written"] is False
     assert not (proj / "chapters").exists()  # dry run writes nothing
+    assert "dropped" in result  # boilerplate-stripping report always present
+    assert isinstance(result["dropped"], list)
+
+
+def test_split_preview_boilerplate_reported_in_dropped(tmp_path: Path):
+    """Boilerplate sections detected by auto-strip appear in result['dropped']."""
+    proj = tmp_path / "book"
+    proj.mkdir()
+    boilerplate = (
+        "Contents\n\n" + "A " * 200 + "\n\n"  # short ToC-like section
+        "CHAPTER I\n\n" + _chapter_body("Old Thomas") + "\n"
+    )
+    (proj / "source.txt").write_text(boilerplate, encoding="utf-8")
+
+    result = flow.split_preview(str(proj), pattern_type="roman")
+
+    assert "dropped" in result
+    # Whether or not "Contents" is stripped, the key must be a list of dicts
+    assert all(isinstance(d, dict) for d in result["dropped"])
 
 
 def test_split_apply_writes_files_and_clears_stale(tmp_path: Path):
@@ -167,6 +186,8 @@ def test_split_apply_writes_files_and_clears_stale(tmp_path: Path):
     written = sorted(p.name for p in chapters_dir.glob("chapter_*.txt"))
     assert written == [f"chapter_0{i}.txt" for i in range(1, 5)]
     assert not (chapters_dir / "chapter_99.txt").exists()  # stale orphan cleared
+    assert "dropped" in result  # boilerplate-stripping report always present
+    assert isinstance(result["dropped"], list)
 
 
 def test_split_apply_min_chapter_size_filters_short_sections(tmp_path: Path):
