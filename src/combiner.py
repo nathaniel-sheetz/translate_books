@@ -1,10 +1,16 @@
 """
 Combiner module for merging translated chunks back into complete chapters.
 
-This module implements the "use_previous" overlap resolution strategy:
-- Keep overlap from the chunk that ends with it
-- Discard overlap from the chunk that starts with it
-- Rationale: Translator has more context at the END of a chunk
+Chunks are stitched by **plain concatenation** with a normalized paragraph break
+at each boundary. Chunk *overlap* is disabled: the historical "use_previous"
+char-slice de-dup path is known-broken — a worker that sees the prior translation
+in its prompt may drop the overlapping text, so slicing ``overlap_start`` chars
+off its draft would chop real content. ``validate_chunk_completeness`` therefore
+rejects any chunk that still carries nonzero overlap metadata, and the harness
+creates chunks with zero overlap. The prompt's "previous section" block is
+continuity context only and is never re-combined here.
+
+See ``docs/design/TRANSLATE_HARNESS_FRICTION_LOG_4.md`` #20.
 """
 
 import logging
@@ -132,6 +138,23 @@ def validate_chunk_completeness(chunks: List[Chunk]) -> Tuple[bool, List[str]]:
             f"All chunks must be translated before combining."
         )
 
+    # Check 4: No chunk carries overlap. The overlap/combine de-dup path is
+    # disabled (known-broken); chunks must be produced with zero overlap. A
+    # nonzero overlap_start would make the old char-slice chop real translated
+    # content, so refuse loudly here instead of silently corrupting the chapter.
+    overlapping = [
+        f"{c.id} (overlap_start={c.metadata.overlap_start}, "
+        f"overlap_end={c.metadata.overlap_end})"
+        for c in sorted_chunks
+        if c.metadata.overlap_start > 0 or c.metadata.overlap_end > 0
+    ]
+    if overlapping:
+        errors.append(
+            "Overlap/combine de-dup is disabled (known-broken). These chunks "
+            f"carry overlap: {', '.join(overlapping)}. Re-chunk with "
+            "--overlap-paragraphs 0 --min-overlap-words 0."
+        )
+
     is_valid = len(errors) == 0
     if is_valid:
         logger.debug("Chunk validation passed")
@@ -141,54 +164,13 @@ def validate_chunk_completeness(chunks: List[Chunk]) -> Tuple[bool, List[str]]:
     return is_valid, errors
 
 
-def _remove_start_overlap(text: str, overlap_chars: int) -> str:
-    """
-    Remove overlap characters from the start of text.
-
-    Used to extract the non-overlapping portion of subsequent chunks
-    when applying "use_previous" strategy.
-
-    Args:
-        text: Full text of chunk
-        overlap_chars: Number of characters to remove from start
-
-    Returns:
-        Text with overlap removed
-
-    Example:
-        >>> _remove_start_overlap("overlap text here", 7)
-        ' text here'
-
-    Edge Cases:
-        - overlap_chars > len(text): Returns empty string
-        - overlap_chars = 0: Returns full text
-        - overlap_chars < 0: Treated as 0
-    """
-    if overlap_chars <= 0:
-        return text
-
-    if overlap_chars >= len(text):
-        # Overlap exceeds text length - return empty
-        # This might indicate a metadata error
-        return ""
-
-    return text[overlap_chars:]
-
-
 def combine_chunks(chunks: List[Chunk]) -> str:
     """
-    Combine translated chunks into a complete chapter.
+    Combine translated chunks into a complete chapter by plain concatenation.
 
-    Uses "use_previous" overlap resolution strategy:
-    - First chunk: Use entire translated_text
-    - Subsequent chunks: Remove overlap_start characters, use remainder
-
-    The overlap from chunk N is kept (it ends with the overlap).
-    The overlap from chunk N+1 is discarded (it starts with the overlap).
-
-    Rationale: Translator has more context at the END of chunk N
-    (they've been reading it) than at the START of chunk N+1
-    (they're just beginning).
+    Chunk overlap is disabled (the "use_previous" char-slice de-dup is
+    known-broken), so each chunk contributes its full ``translated_text``. The
+    boundary between consecutive chunks is normalized to exactly one blank line.
 
     Args:
         chunks: List of Chunk objects (may be unsorted)
@@ -197,7 +179,9 @@ def combine_chunks(chunks: List[Chunk]) -> str:
         Combined chapter text
 
     Raises:
-        ValueError: If chunks fail validation (gaps, untranslated, etc.)
+        ValueError: If chunks fail validation — gaps, untranslated chunks, or
+            (per ``validate_chunk_completeness``) any chunk that still carries
+            nonzero overlap metadata.
 
     Example:
         >>> chunks = [chunk1, chunk2, chunk3]
@@ -205,18 +189,13 @@ def combine_chunks(chunks: List[Chunk]) -> str:
         >>> print(f"Combined: {len(chapter_text)} characters")
 
     Algorithm:
-        1. Validate chunks (completeness, translations, etc.)
-        2. Sort chunks by position
-        3. For first chunk: Add entire translated_text
-        4. For each subsequent chunk:
-           a. Get overlap_start from metadata
-           b. Remove overlap_start chars from beginning
-           c. Append remaining text to chapter
-        5. Return combined chapter
+        1. Validate chunks (completeness, translations, zero overlap).
+        2. Sort chunks by position.
+        3. Concatenate each chunk's translated_text, normalizing every chunk
+           boundary to a single blank line.
 
     Edge Cases:
         - Single chunk: Returns translated_text as-is
-        - Zero overlap: Just concatenates chunks
         - Empty translated_text: Caught by validation
     """
     # Validate chunks
@@ -226,7 +205,7 @@ def combine_chunks(chunks: List[Chunk]) -> str:
         logger.error(error_msg)
         raise ValueError(error_msg)
 
-    logger.info(f"Combining {len(chunks)} chunks using 'use_previous' strategy")
+    logger.info(f"Combining {len(chunks)} chunks by plain concatenation")
 
     # Sort chunks by position
     sorted_chunks = sorted(chunks, key=lambda c: c.position)
@@ -236,44 +215,25 @@ def combine_chunks(chunks: List[Chunk]) -> str:
         logger.info("Single chunk - returning translated text as-is")
         return sorted_chunks[0].translated_text
 
-    # Combine chunks using "use_previous" strategy
+    # Stitch by plain concatenation. Overlap is disabled (rejected by validation
+    # above), so each chunk's full translated_text belongs in the chapter.
     chapter_text = ""
 
     for i, chunk in enumerate(sorted_chunks):
         if i == 0:
             # First chunk: use entire translated text
             chapter_text = chunk.translated_text
-        else:
-            # Subsequent chunks: remove overlap from start
-            overlap_chars = chunk.metadata.overlap_start
+            continue
 
-            # Remove overlap and append remainder
-            non_overlap_text = _remove_start_overlap(
-                chunk.translated_text,
-                overlap_chars
-            )
-
-            logger.debug(
-                f"Chunk {chunk.id}: removed {overlap_chars} overlap chars, "
-                f"appending {len(non_overlap_text)} chars"
-            )
-
-            # Chunks are paragraph-aligned by construction (the chunker splits
-            # on \n\n and stores "\n\n".join(paragraphs) with no leading or
-            # trailing separator), so the boundary between two consecutive
-            # chunks is always a paragraph break in the source. Normalize it
-            # to exactly one blank line so the break survives reassembly
-            # regardless of overlap_start and regardless of any stray trailing
-            # newlines (or Windows-style \r\n) the translator may have emitted.
-            # Skip the separator entirely if overlap removal consumed the whole
-            # chunk (non_overlap_text is empty or whitespace-only).
-            non_overlap_stripped = non_overlap_text.lstrip("\r\n")
-            if non_overlap_stripped:
-                chapter_text = (
-                    chapter_text.rstrip("\r\n")
-                    + "\n\n"
-                    + non_overlap_stripped
-                )
+        # Chunks are paragraph-aligned by construction (the chunker splits on
+        # \n\n and stores "\n\n".join(paragraphs) with no leading or trailing
+        # separator), so the boundary between two consecutive chunks is always a
+        # paragraph break. Normalize it to exactly one blank line so the break
+        # survives reassembly regardless of any stray trailing newlines (or
+        # Windows-style \r\n) the translator may have emitted.
+        chunk_text = chunk.translated_text.lstrip("\r\n")
+        if chunk_text:
+            chapter_text = chapter_text.rstrip("\r\n") + "\n\n" + chunk_text
 
     logger.info(
         f"Combination complete: {len(chapter_text)} characters total from "

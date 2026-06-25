@@ -547,6 +547,15 @@ The API `translate` run chains through combine, epub, and align, building the EP
 chunks only and reporting exactly which chapters shipped. On the **subagent** path you already aligned
 each set in Step 4B-e (the reader reads `alignments/`, not the EPUB), so here you only (re)build the
 EPUB — the downloadable deliverable — from whatever chapters are translated so far:
+
+> **Stitching contract.** Chunks are created with **zero overlap**, so `combine` is a plain
+> concatenation of each chunk's translation (one blank line at every boundary) — there is no
+> overlap de-dup, on either backend. The prompt's "previous section" block is **continuity context
+> only and is never re-combined.** Overlap/combine de-dup is disabled (known-broken): `combine`
+> hard-fails if a chunk ever carries overlap. So a worker must translate its **whole** chunk and
+> never drop content that also appears in the previous-section block. See
+> `docs/design/TRANSLATE_HARNESS_FRICTION_LOG_4.md` #20.
+
 ```bash
 python scripts/harness.py epub --project projects/<slug>
 # --title / --author / --language default to what you set at setup; pass them to override.

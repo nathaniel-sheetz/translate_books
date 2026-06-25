@@ -1,4 +1,10 @@
-"""Tests for combiner module."""
+"""Tests for combiner module.
+
+Chunk overlap is disabled (the overlap/combine de-dup path is known-broken; see
+docs/design/TRANSLATE_HARNESS_FRICTION_LOG_4.md #20). Chunks are stitched by plain
+concatenation, and any chunk that still carries nonzero overlap metadata is
+rejected. These tests cover both behaviors.
+"""
 
 import pytest
 from datetime import datetime
@@ -6,7 +12,6 @@ from datetime import datetime
 from src.combiner import (
     combine_chunks,
     validate_chunk_completeness,
-    _remove_start_overlap
 )
 from src.models import Chunk, ChunkMetadata, ChunkStatus
 
@@ -37,40 +42,6 @@ def create_test_chunk(
         status=ChunkStatus.TRANSLATED,
         created_at=datetime.now()
     )
-
-
-class TestRemoveStartOverlap:
-    """Tests for _remove_start_overlap helper function."""
-
-    def test_basic_removal(self):
-        """Test removing characters from start."""
-        text = "overlap text here"
-        result = _remove_start_overlap(text, 8)
-        assert result == "text here"
-
-    def test_zero_overlap(self):
-        """Test with zero overlap - should return full text."""
-        text = "full text here"
-        result = _remove_start_overlap(text, 0)
-        assert result == text
-
-    def test_negative_overlap(self):
-        """Test with negative overlap - treated as zero."""
-        text = "full text"
-        result = _remove_start_overlap(text, -5)
-        assert result == text
-
-    def test_overlap_exceeds_length(self):
-        """Test when overlap > text length - returns empty."""
-        text = "short"
-        result = _remove_start_overlap(text, 100)
-        assert result == ""
-
-    def test_overlap_equals_length(self):
-        """Test when overlap equals text length."""
-        text = "exact"
-        result = _remove_start_overlap(text, len(text))
-        assert result == ""
 
 
 class TestValidateChunkCompleteness:
@@ -184,9 +155,47 @@ class TestValidateChunkCompleteness:
         assert is_valid is True
         assert len(errors) == 0
 
+    def test_overlap_start_rejected(self):
+        """A chunk with nonzero overlap_start is rejected (overlap disabled)."""
+        chunks = [
+            create_test_chunk(0, translated_text="First", overlap_end=5),
+            create_test_chunk(1, translated_text="Second", overlap_start=5),
+        ]
+
+        is_valid, errors = validate_chunk_completeness(chunks)
+
+        assert is_valid is False
+        assert any("Overlap/combine de-dup is disabled" in e for e in errors)
+        assert any("chapter_01_chunk_001" in e for e in errors)
+        assert any("--overlap-paragraphs 0" in e for e in errors)
+
+    def test_overlap_end_only_rejected(self):
+        """overlap_end alone is also enough to reject (overlap was created)."""
+        chunks = [
+            create_test_chunk(0, translated_text="First", overlap_end=4),
+            create_test_chunk(1, translated_text="Second", overlap_start=0),
+        ]
+
+        is_valid, errors = validate_chunk_completeness(chunks)
+
+        assert is_valid is False
+        assert any("Overlap/combine de-dup is disabled" in e for e in errors)
+
+    def test_zero_overlap_not_rejected(self):
+        """The common, supported case: zero overlap validates cleanly."""
+        chunks = [
+            create_test_chunk(0, translated_text="First", overlap_start=0, overlap_end=0),
+            create_test_chunk(1, translated_text="Second", overlap_start=0, overlap_end=0),
+        ]
+
+        is_valid, errors = validate_chunk_completeness(chunks)
+
+        assert is_valid is True
+        assert len(errors) == 0
+
 
 class TestCombineChunks:
-    """Tests for main combine_chunks function."""
+    """Tests for main combine_chunks function (plain concatenation)."""
 
     def test_single_chunk(self):
         """Test combining single chunk."""
@@ -198,98 +207,67 @@ class TestCombineChunks:
 
         assert result == "Single chunk translation"
 
-    def test_two_chunks_with_overlap(self):
-        """Test combining 2 chunks with overlap."""
-        # Chunk 1: "First chunk" + overlap "shared text"
-        # Chunk 2: overlap "shared text" + "second chunk"
-        # After overlap removal, non-overlap is " second chunk" (leading space
-        # is a toy-data artifact from word-level overlap, not paragraph text).
-        # combine_chunks inserts \n\n at every chunk boundary.
-
+    def test_two_chunks_concatenate(self):
+        """Two zero-overlap chunks concatenate with a paragraph break."""
         chunks = [
-            create_test_chunk(
-                0,
-                translated_text="First chunk shared text",
-                overlap_start=0,  # First chunk has no overlap at start
-                overlap_end=11  # "shared text" = 11 chars
-            ),
-            create_test_chunk(
-                1,
-                translated_text="shared text second chunk",
-                overlap_start=11,  # "shared text" = 11 chars to remove
-                overlap_end=0
-            )
+            create_test_chunk(0, translated_text="First chunk"),
+            create_test_chunk(1, translated_text="Second chunk"),
         ]
 
         result = combine_chunks(chunks)
 
-        # combine_chunks normalizes the chunk boundary to a paragraph break.
-        assert result == "First chunk shared text\n\n second chunk"
-
-    def test_three_chunks_with_overlap(self):
-        """Test combining 3 chunks with varying overlaps."""
-        chunks = [
-            create_test_chunk(
-                0,
-                translated_text="Chunk one overlap",
-                overlap_start=0,
-                overlap_end=7  # "overlap" = 7 chars
-            ),
-            create_test_chunk(
-                1,
-                translated_text="overlap chunk two ending",
-                overlap_start=7,  # Remove "overlap"
-                overlap_end=6  # "ending" = 6 chars
-            ),
-            create_test_chunk(
-                2,
-                translated_text="ending chunk three",
-                overlap_start=6,  # Remove "ending"
-                overlap_end=0
-            )
-        ]
-
-        result = combine_chunks(chunks)
-
-        # combine_chunks normalizes each chunk boundary to a paragraph break.
-        assert result == "Chunk one overlap\n\n chunk two ending\n\n chunk three"
-
-    def test_zero_overlap_combination(self):
-        """Test combining chunks with no overlap."""
-        chunks = [
-            create_test_chunk(
-                0,
-                translated_text="First chunk",
-                overlap_start=0,
-                overlap_end=0
-            ),
-            create_test_chunk(
-                1,
-                translated_text="Second chunk",
-                overlap_start=0,
-                overlap_end=0
-            )
-        ]
-
-        result = combine_chunks(chunks)
-
-        # Chunk boundaries are always paragraph boundaries (the chunker
-        # only splits on \n\n), so combine_chunks inserts the separator.
         assert result == "First chunk\n\nSecond chunk"
 
-    def test_unsorted_chunks(self):
-        """Test that function sorts chunks correctly."""
+    def test_three_chunks_concatenate(self):
+        """Three zero-overlap chunks concatenate in order."""
         chunks = [
-            create_test_chunk(2, translated_text="Second Third", overlap_start=6),
-            create_test_chunk(0, translated_text="First chunk", overlap_start=0),
-            create_test_chunk(1, translated_text="chunk Second", overlap_start=5),
+            create_test_chunk(0, translated_text="Chunk one"),
+            create_test_chunk(1, translated_text="Chunk two"),
+            create_test_chunk(2, translated_text="Chunk three"),
         ]
 
         result = combine_chunks(chunks)
 
-        # Should combine in correct order: 0, 1, 2, with paragraph-break
-        # separators inserted between chunks.
-        assert result == "First chunk\n\n Second\n\n Third"
+        assert result == "Chunk one\n\nChunk two\n\nChunk three"
+
+    def test_unsorted_chunks(self):
+        """Test that function sorts chunks correctly before concatenating."""
+        chunks = [
+            create_test_chunk(2, translated_text="Third"),
+            create_test_chunk(0, translated_text="First"),
+            create_test_chunk(1, translated_text="Second"),
+        ]
+
+        result = combine_chunks(chunks)
+
+        # Should combine in correct order: 0, 1, 2.
+        assert result == "First\n\nSecond\n\nThird"
+
+    def test_overlap_start_raises(self):
+        """A chunk carrying overlap_start makes combine_chunks raise (blocked)."""
+        chunks = [
+            create_test_chunk(0, translated_text="First chunk shared text", overlap_end=11),
+            create_test_chunk(1, translated_text="shared text second chunk", overlap_start=11),
+        ]
+
+        with pytest.raises(ValueError) as exc_info:
+            combine_chunks(chunks)
+
+        msg = str(exc_info.value)
+        assert "Overlap/combine de-dup is disabled" in msg
+        assert "--overlap-paragraphs 0 --min-overlap-words 0" in msg
+
+    def test_overlap_end_raises(self):
+        """overlap_end alone also makes combine_chunks raise."""
+        chunks = [
+            create_test_chunk(0, translated_text="Chunk one overlap", overlap_end=7),
+            create_test_chunk(1, translated_text="overlap chunk two", overlap_start=0),
+        ]
+
+        with pytest.raises(ValueError) as exc_info:
+            combine_chunks(chunks)
+
+        assert "Overlap/combine de-dup is disabled" in str(exc_info.value)
 
     def test_validation_failure_raises_error(self):
         """Test that validation errors raise ValueError."""
@@ -318,77 +296,63 @@ class TestCombineChunks:
 
 
 class TestIntegration:
-    """Integration tests with realistic scenarios."""
+    """Integration tests with realistic, zero-overlap scenarios."""
 
     def test_realistic_paragraph_combination(self):
-        """Test combining chunks with paragraph structure."""
-        # Simulate chunks with paragraph breaks
+        """Combining disjoint multi-paragraph chunks preserves structure with no
+        duplicates (chunks no longer share an overlap)."""
         chunks = [
             create_test_chunk(
                 0,
-                translated_text="Párrafo uno.\n\nPárrafo dos.\n\nPárrafo tres compartido.",
-                overlap_start=0,
-                overlap_end=25  # "Párrafo tres compartido." = 25 chars
+                translated_text="Párrafo uno.\n\nPárrafo dos.\n\nPárrafo tres.",
             ),
             create_test_chunk(
                 1,
-                translated_text="Párrafo tres compartido.\n\nPárrafo cuatro.\n\nPárrafo cinco final.",
-                overlap_start=25,
-                overlap_end=22  # "Párrafo cinco final." = 22 chars (actually 21 + space)
+                translated_text="Párrafo cuatro.\n\nPárrafo cinco.",
             ),
             create_test_chunk(
                 2,
-                translated_text="Párrafo cinco final.\n\nPárrafo seis.",
-                overlap_start=22,
-                overlap_end=0
-            )
+                translated_text="Párrafo seis.",
+            ),
         ]
 
         result = combine_chunks(chunks)
 
-        # Verify structure is maintained
         assert "Párrafo uno" in result
         assert "Párrafo seis" in result
-        # Verify overlap was handled (shouldn't have duplicates)
-        assert result.count("Párrafo tres compartido") == 1
-        assert result.count("Párrafo cinco final") == 1
+        # Nothing is shared between chunks, so every paragraph appears exactly once.
+        for n in ("uno", "dos", "tres", "cuatro", "cinco", "seis"):
+            assert result.count(f"Párrafo {n}") == 1
 
     def test_chunk_and_combine_roundtrip(self):
-        """Test that chunking and combining preserves content structure."""
-        # This would ideally use actual chunker, but we'll simulate
-        original_text = "Para 1\n\nPara 2\n\nPara 3\n\nPara 4"
-
-        # Simulate 2 chunks with overlap
+        """Chunking and combining preserves content structure (zero overlap)."""
         chunks = [
             create_test_chunk(
                 0,
                 source_text="Para 1\n\nPara 2",
                 translated_text="Párrafo 1\n\nPárrafo 2",
-                overlap_start=0,
-                overlap_end=11  # "Párrafo 2" + newlines
             ),
             create_test_chunk(
                 1,
-                source_text="Para 2\n\nPara 3\n\nPara 4",
-                translated_text="Párrafo 2\n\nPárrafo 3\n\nPárrafo 4",
-                overlap_start=11,  # len("Párrafo 2\n\n") == 11
-                overlap_end=0
-            )
+                source_text="Para 3\n\nPara 4",
+                translated_text="Párrafo 3\n\nPárrafo 4",
+            ),
         ]
 
         result = combine_chunks(chunks)
 
-        # Should have all paragraphs, no duplicates
+        # Should have all paragraphs, no duplicates.
         assert result.count("Párrafo 1") == 1
         assert result.count("Párrafo 2") == 1
         assert result.count("Párrafo 3") == 1
         assert result.count("Párrafo 4") == 1
+        assert result == "Párrafo 1\n\nPárrafo 2\n\nPárrafo 3\n\nPárrafo 4"
 
     def test_paragraph_break_preserved_at_zero_overlap_boundary(self):
-        """Two paragraph-aligned chunks with overlap_start=0 must remain
-        distinct paragraphs after combine_chunks (regression for the
-        ``among-the-farmyard-people/chapter_04`` 'Día tras día' boundary
-        where the inter-chunk \\n\\n was being silently dropped).
+        """Two paragraph-aligned chunks must remain distinct paragraphs after
+        combine_chunks (regression for the ``among-the-farmyard-people/chapter_04``
+        'Día tras día' boundary where the inter-chunk \\n\\n was being silently
+        dropped).
         """
         chunks = [
             create_test_chunk(
@@ -397,8 +361,6 @@ class TestIntegration:
                     "Párrafo A.\n\n"
                     "Párrafo B que es el último del primer trozo."
                 ),
-                overlap_start=0,
-                overlap_end=0,
             ),
             create_test_chunk(
                 1,
@@ -406,8 +368,6 @@ class TestIntegration:
                     "Párrafo C que abre el segundo trozo.\n\n"
                     "Párrafo D."
                 ),
-                overlap_start=0,
-                overlap_end=0,
             ),
         ]
 
@@ -428,43 +388,21 @@ class TestIntegration:
         at the chunk boundary, not three newlines.
         """
         chunks = [
-            create_test_chunk(
-                0,
-                translated_text="Final del primer trozo.\n",
-                overlap_start=0,
-                overlap_end=0,
-            ),
-            create_test_chunk(
-                1,
-                translated_text="Inicio del segundo trozo.",
-                overlap_start=0,
-                overlap_end=0,
-            ),
+            create_test_chunk(0, translated_text="Final del primer trozo.\n"),
+            create_test_chunk(1, translated_text="Inicio del segundo trozo."),
         ]
 
         result = combine_chunks(chunks)
 
-        assert result == (
-            "Final del primer trozo.\n\nInicio del segundo trozo."
-        )
+        assert result == "Final del primer trozo.\n\nInicio del segundo trozo."
 
     def test_paragraph_break_preserved_when_both_sides_dirty(self):
-        """A trailing \\n on chunk_0 AND a leading \\n on chunk_1's non-overlap
-        text must still produce exactly one \\n\\n paragraph break.
+        """A trailing \\n on chunk_0 AND a leading \\n on chunk_1 must still
+        produce exactly one \\n\\n paragraph break.
         """
         chunks = [
-            create_test_chunk(
-                0,
-                translated_text="Párrafo uno.\n",
-                overlap_start=0,
-                overlap_end=0,
-            ),
-            create_test_chunk(
-                1,
-                translated_text="\nPárrafo dos.",
-                overlap_start=0,
-                overlap_end=0,
-            ),
+            create_test_chunk(0, translated_text="Párrafo uno.\n"),
+            create_test_chunk(1, translated_text="\nPárrafo dos."),
         ]
 
         result = combine_chunks(chunks)
@@ -476,18 +414,8 @@ class TestIntegration:
         paragraph break, not a stray \\r before the blank line.
         """
         chunks = [
-            create_test_chunk(
-                0,
-                translated_text="Primer párrafo.\r\n",
-                overlap_start=0,
-                overlap_end=0,
-            ),
-            create_test_chunk(
-                1,
-                translated_text="Segundo párrafo.",
-                overlap_start=0,
-                overlap_end=0,
-            ),
+            create_test_chunk(0, translated_text="Primer párrafo.\r\n"),
+            create_test_chunk(1, translated_text="Segundo párrafo."),
         ]
 
         result = combine_chunks(chunks)
@@ -495,89 +423,31 @@ class TestIntegration:
         assert "\r" not in result
         assert result == "Primer párrafo.\n\nSegundo párrafo."
 
-    def test_empty_non_overlap_does_not_append_separator(self):
-        """When overlap removal consumes the entire chunk text, no spurious
-        \\n\\n should be appended to chapter_text.
-        """
-        chunks = [
-            create_test_chunk(
-                0,
-                translated_text="Only chunk text.",
-                overlap_start=0,
-                overlap_end=16,  # entire text is 'overlap'
-            ),
-            create_test_chunk(
-                1,
-                translated_text="Only chunk text.",
-                overlap_start=16,  # overlap_start >= len(text) → empty non-overlap
-                overlap_end=0,
-            ),
-        ]
-
-        result = combine_chunks(chunks)
-
-        assert not result.endswith("\n\n"), "spurious \\n\\n appended after empty non-overlap"
-        assert result == "Only chunk text."
-
 
 class TestEdgeCases:
-    """Additional edge case tests."""
+    """Additional edge case tests (all zero-overlap)."""
 
-    def test_very_small_overlap(self):
-        """Test with 1 character overlap."""
+    def test_many_chunks_concatenate_in_order(self):
+        """Many uniformly sized chunks concatenate in position order."""
         chunks = [
-            create_test_chunk(0, translated_text="Firstx", overlap_end=1),
-            create_test_chunk(1, translated_text="x Second", overlap_start=1),
-        ]
-
-        result = combine_chunks(chunks)
-        assert result == "Firstx\n\n Second"
-        # "x" should appear only once
-
-    def test_large_overlap(self):
-        """Test with overlap larger than half of chunk."""
-        chunks = [
-            create_test_chunk(
-                0,
-                translated_text="First chunk with long overlap text here",
-                overlap_end=25  # 25 chars
-            ),
-            create_test_chunk(
-                1,
-                translated_text="long overlap text here and more",
-                overlap_start=25
-            )
-        ]
-
-        result = combine_chunks(chunks)
-        assert "long overlap text here" in result
-        # Should appear once, not twice
-
-    def test_all_chunks_same_size(self):
-        """Test with uniformly sized chunks."""
-        chunks = [
-            create_test_chunk(i, translated_text=f"Chunk {i} text", overlap_start=5 if i > 0 else 0)
+            create_test_chunk(i, translated_text=f"Chunk {i} text")
             for i in range(5)
         ]
 
         result = combine_chunks(chunks)
-        # Chunk 0 keeps full text; for i>0 the first 5 chars ("Chunk") are stripped as overlap
-        assert "Chunk 0 text" in result
-        assert all(f"{i} text" in result for i in range(1, 5))
 
-    def test_mixed_overlap_sizes(self):
-        """Test with varying overlap sizes between chunks."""
+        assert result == "\n\n".join(f"Chunk {i} text" for i in range(5))
+
+    def test_any_overlap_in_a_long_set_blocks_combine(self):
+        """A single overlapping chunk anywhere in the set blocks the whole combine."""
         chunks = [
-            create_test_chunk(0, translated_text="First AB", overlap_start=0, overlap_end=2),
-            create_test_chunk(1, translated_text="AB Second ABCD", overlap_start=2, overlap_end=4),
-            create_test_chunk(2, translated_text="ABCD Third ABCDEF", overlap_start=4, overlap_end=6),
-            create_test_chunk(3, translated_text="ABCDEF Fourth", overlap_start=6, overlap_end=0),
+            create_test_chunk(0, translated_text="A"),
+            create_test_chunk(1, translated_text="B"),
+            create_test_chunk(2, translated_text="C", overlap_start=1),  # the offender
+            create_test_chunk(3, translated_text="D"),
         ]
 
-        result = combine_chunks(chunks)
+        with pytest.raises(ValueError) as exc_info:
+            combine_chunks(chunks)
 
-        # Check all chunks are represented
-        assert "First" in result
-        assert "Second" in result
-        assert "Third" in result
-        assert "Fourth" in result
+        assert "chapter_01_chunk_002" in str(exc_info.value)

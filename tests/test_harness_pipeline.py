@@ -92,7 +92,7 @@ def _args() -> SimpleNamespace:
     # Mirrors the non-interactive approved args the SKILL.md must pass after its own
     # AskUserQuestion approval gate (T2 — no agent deadlock).
     return SimpleNamespace(
-        chunk_size=2000, overlap_paragraphs=1, min_overlap_words=50,
+        chunk_size=2000, overlap_paragraphs=0, min_overlap_words=0,
         provider="anthropic", model="claude-sonnet-4-6",
         chapters=None, cost_only=False, yes=True,
         project_name="Test Book", author="Tester",
@@ -167,8 +167,8 @@ def test_stage_chunk_applies_per_chapter_sizes(tmp_path: Path):
     sizes_path = tmp_path / "chunk_sizes.json"
     sizes_path.write_text(_json.dumps({"chapter_01": 400}), encoding="utf-8")  # ch2 omitted
 
-    args = SimpleNamespace(chunk_size=2000, overlap_paragraphs=1,
-                           min_overlap_words=50, chunk_sizes=str(sizes_path))
+    args = SimpleNamespace(chunk_size=2000, overlap_paragraphs=0,
+                           min_overlap_words=0, chunk_sizes=str(sizes_path))
     tb.STAGE_FUNCTIONS["chunk"](args, tmp_path, {})
 
     ch1 = list((tmp_path / "chunks").glob("chapter_01_chunk_*.json"))

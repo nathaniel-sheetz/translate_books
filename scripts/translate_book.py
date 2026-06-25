@@ -219,8 +219,12 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
         raise FileNotFoundError(f"No chapter files in {chapters_dir}")
 
     default_target = getattr(args, "chunk_size", 2000) or 2000
-    overlap_paragraphs = getattr(args, "overlap_paragraphs", 1) or 1
-    min_overlap_words = getattr(args, "min_overlap_words", 50) or 50
+    # Chunk overlap is disabled: the overlap/combine de-dup path is known-broken
+    # (see docs/design/TRANSLATE_HARNESS_FRICTION_LOG_4.md #20). Honor an explicit
+    # 0 — note `x or 0` maps both 0 and None to 0; never coerce back to a nonzero
+    # default the way the old `or 1`/`or 50` did.
+    overlap_paragraphs = getattr(args, "overlap_paragraphs", 0) or 0
+    min_overlap_words = getattr(args, "min_overlap_words", 0) or 0
 
     # Optional per-chapter target sizes (e.g. from difficulty scoring). Chapters
     # absent from the map fall back to default_target. Bounds scale with each
@@ -634,10 +638,12 @@ def main():
                         help="Path to a JSON map {chapter_id: target_size} for per-chapter "
                              "chunk sizing; chapters absent from the map fall back to "
                              "--chunk-size (default: none, uniform sizing)")
-    parser.add_argument("--overlap-paragraphs", type=int, default=1,
-                        help="Paragraphs of overlap between chunks (default: 1)")
-    parser.add_argument("--min-overlap-words", type=int, default=50,
-                        help="Minimum overlap words (default: 50)")
+    parser.add_argument("--overlap-paragraphs", type=int, default=0,
+                        help="Paragraphs of overlap between chunks (default: 0; overlap is "
+                             "disabled — the overlap/combine de-dup path is known-broken, see "
+                             "TRANSLATE_HARNESS_FRICTION_LOG_4 #20)")
+    parser.add_argument("--min-overlap-words", type=int, default=0,
+                        help="Minimum overlap words (default: 0; overlap disabled)")
 
     # Setup (style guide + glossary)
     parser.add_argument("--generate-style-guide", action="store_true",

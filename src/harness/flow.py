@@ -1096,6 +1096,11 @@ def chunk(
         "--start-stage", "chunk",
         "--cost-only",
         "--chunk-size", str(int(size)),
+        # The overlap/combine de-dup path is known-broken (FRICTION_LOG_4 #20); the
+        # harness never creates overlapping chunks. Pass 0 explicitly so this holds
+        # even if the CLI default ever changes.
+        "--overlap-paragraphs", "0",
+        "--min-overlap-words", "0",
     ]
 
     if per_chapter:
