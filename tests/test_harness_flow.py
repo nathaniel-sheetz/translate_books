@@ -88,6 +88,35 @@ def test_setup_returns_heading_hint_keys_null_on_no_url_path(tmp_path: Path):
     assert "chapter_report" in result and result["chapter_report"] is None
 
 
+def test_setup_derives_folder_from_title_when_project_omitted(tmp_path: Path, monkeypatch):
+    """With no --project, the folder is named from the (slugified) title (#22)."""
+    monkeypatch.setattr(state, "REPO_ROOT", tmp_path)
+    # Stand in for the dir the URL path would create; available_project_dir hands it
+    # back so the no-URL ingest branch finds source.txt and the run completes.
+    proj = tmp_path / "projects" / "understood-betsy"
+    proj.mkdir(parents=True)
+    (proj / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
+    captured = {}
+
+    def fake_available_project_dir(slug: str) -> Path:
+        captured["slug"] = slug
+        return proj
+
+    monkeypatch.setattr(state, "available_project_dir", fake_available_project_dir)
+
+    result = flow.setup(url="", title="Understood Betsy", target_language="Spanish")
+
+    assert captured["slug"] == "understood-betsy"  # real slugify ran on the title
+    assert Path(result["project_dir"]).name == "understood-betsy"
+    assert result["chapter_count"] == 2
+
+
+def test_setup_requires_project_or_title():
+    """Neither --project nor --title is an actionable error, not a cryptic folder."""
+    with pytest.raises(ValueError, match="--title"):
+        flow.setup(url="")
+
+
 # ── split review beat ───────────────────────────────────────────────────────
 
 def _front_back_source() -> str:

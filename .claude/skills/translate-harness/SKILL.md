@@ -155,11 +155,20 @@ ingest + split (NOT chunk — chunking is deferred to Step 3 so it can use the g
 difficulty score). `setup` also persists `target-lang` / `locale` / `model` / `title` /
 `author` so later steps stop repeating them.
 
+**Identify the book first, then let `setup` name the folder from its title.** Omit `--project`
+and `setup` derives the project slug from `--title` (e.g. `"Understood Betsy"` →
+`projects/understood-betsy`), so the folder, reader URLs (`/read/<slug>/chapter_01`), and EPUB
+path all say what the book is — don't fall back to a cryptic Gutenberg id like `g5347`. If that
+title-slug already exists, the new project gets a `-2`, `-3`, … suffix. Pass `--project <slug>`
+explicitly only to **re-run on an existing project** (it's used verbatim and reuses that folder;
+relying on `--title` would mint a new numbered folder instead).
+
 ```bash
-python scripts/harness.py setup --project projects/<slug> \
+python scripts/harness.py setup \
   --target-lang Spanish --locale mx --model claude-sonnet-4-6 \
   --title "<Title>" --author "<Author>"
 # add --url <gutenberg-url> if there is no local source.txt yet.
+# add --project <slug> only to re-run on / target a specific existing project folder.
 ```
 
 Pick the chapter pattern that matches the book: `--chapter-pattern roman` (Chapter I, II …),

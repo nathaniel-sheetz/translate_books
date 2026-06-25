@@ -56,7 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # setup -----------------------------------------------------------------
     sp = sub.add_parser("setup", help="Create project, persist config, run ingest + split")
-    add_project(sp)
+    sp.add_argument("--project", default=None,
+                    help="Project id (under projects/) or path; omit to name the "
+                         "folder from --title (collisions get a -2, -3, ... suffix)")
     sp.add_argument("--url", default="", help="Gutenberg URL (omit if source.txt is in place)")
     sp.add_argument("--chapter-pattern", default="roman", choices=["roman", "numeric", "custom"])
     sp.add_argument("--custom-regex", default=None)

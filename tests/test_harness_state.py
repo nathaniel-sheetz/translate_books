@@ -134,3 +134,39 @@ def test_iter_nested_match_skips_non_dir_files(repo):
     (grouping / "readme.txt").write_text("not a dir")
     proj = _make_project(grouping, "real-book")
     assert state.resolve_project_dir("real-book") == proj
+
+
+# ── title -> project slug (friction #22) ─────────────────────────────────────
+
+@pytest.mark.parametrize("title,expected", [
+    ("Understood Betsy", "understood-betsy"),
+    ("  The Wind in the Willows!  ", "the-wind-in-the-willows"),
+    ("Alice's Adventures in Wonderland", "alice-s-adventures-in-wonderland"),
+    ("20,000 Leagues Under the Sea", "20-000-leagues-under-the-sea"),
+])
+def test_slugify_basic(title, expected):
+    assert state.slugify(title) == expected
+
+
+@pytest.mark.parametrize("title", ["", "   ", "***", "!!!---"])
+def test_slugify_empty_or_symbol_only_falls_back(title):
+    assert state.slugify(title) == "project"
+
+
+def test_available_project_dir_free(repo):
+    """No collision -> the bare slug under projects/."""
+    assert state.available_project_dir("understood-betsy") == (
+        repo / "projects" / "understood-betsy"
+    )
+
+
+def test_available_project_dir_collision_suffixes_from_2(repo):
+    """An existing slug bumps to -2, then -3, ... (matches the web UI)."""
+    (repo / "projects" / "understood-betsy").mkdir()
+    assert state.available_project_dir("understood-betsy") == (
+        repo / "projects" / "understood-betsy-2"
+    )
+    (repo / "projects" / "understood-betsy-2").mkdir()
+    assert state.available_project_dir("understood-betsy") == (
+        repo / "projects" / "understood-betsy-3"
+    )

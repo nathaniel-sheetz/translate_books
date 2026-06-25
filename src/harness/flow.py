@@ -120,7 +120,7 @@ def _read(path: Path) -> str:
 # ── setup ──────────────────────────────────────────────────────────────────
 
 def setup(
-    project: str,
+    project: str | None = None,
     *,
     url: str = "",
     chapter_pattern: str = "roman",
@@ -142,7 +142,18 @@ def setup(
     Chunking is deferred to ``chunk`` so it can use the glossary-informed
     difficulty score. Wipes any prior ``.harness/`` working state for a clean run.
     """
-    project_dir = state.resolve_project_dir(project, must_exist=False)
+    # Name the project folder. An explicit --project is honored verbatim (and may
+    # reuse an existing dir — the re-run-on-the-same-project path). Otherwise the
+    # folder is named from the book title, suffixing on collision so a second copy
+    # of the same book lands beside the first instead of clobbering it (#22).
+    if project:
+        project_dir = state.resolve_project_dir(project, must_exist=False)
+    elif title:
+        project_dir = state.available_project_dir(state.slugify(title))
+    else:
+        raise ValueError(
+            "provide --title (the folder is named from it) or --project <slug>"
+        )
     project_dir.mkdir(parents=True, exist_ok=True)
 
     # Preserve prior config, override only the keys explicitly provided this run.
