@@ -191,8 +191,8 @@ class TestStageChunk:
 
         args = MagicMock()
         args.chunk_size = 2000
-        args.overlap_paragraphs = 1
-        args.min_overlap_words = 50
+        args.overlap_paragraphs = 0
+        args.min_overlap_words = 0
 
         from scripts.translate_book import stage_chunk
         with pytest.raises(FileNotFoundError):

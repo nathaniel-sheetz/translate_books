@@ -113,6 +113,102 @@ class TestFrontBackMatterDetection:
         assert all(s.kind == "chapter" for s in sections)
         assert [s.number for s in sections] == [1, 2]
 
+    def test_roman_chapter_title_after_header_image(self):
+        """Regression (#16): CHAPTER I / [IMAGE] / title on separate line."""
+        text = (
+            "CHAPTER I\n\n"
+            "[IMAGE:images/illus01.jpg]\n\n"
+            "The First Signpost\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "CHAPTER II\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        assert len(sections) == 2
+        ch1 = sections[0]
+        assert ch1.chapter_title == "Chapter I\nThe First Signpost"
+        assert "[IMAGE:images/illus01.jpg]" in ch1.content
+        assert "The First Signpost" not in ch1.content
+
+    def test_roman_chapter_title_with_header_image_before_heading(self):
+        """Gaudenzia layout: [IMAGE] / CHAPTER I / title on separate line."""
+        text = (
+            "[IMAGE:images/illus7.jpg]\n\n"
+            "CHAPTER I\n\n"
+            "The First Signpost\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "CHAPTER II\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        ch1 = sections[0]
+        assert ch1.chapter_title == "Chapter I\nThe First Signpost"
+        assert "[IMAGE:images/illus7.jpg]" in ch1.content
+        assert ch1.content.count("[IMAGE:images/illus7.jpg]") == 1
+        assert "The First Signpost" not in ch1.content
+
+    def test_does_not_promote_paragraph_after_header_image(self):
+        """A long prose line after the image must not become a subtitle."""
+        long_para = (
+            "This is the opening paragraph of the chapter and it continues "
+            "on the same block without a blank line break after the image."
+        )
+        text = (
+            "CHAPTER I\n\n"
+            "[IMAGE:images/illus01.jpg]\n\n"
+            f"{long_para}\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        ch1 = sections[0]
+        assert ch1.chapter_title == "Chapter I"
+        assert long_para in ch1.content
+
+    def test_plain_roman_does_not_promote_body_paragraph(self):
+        """No image at all: a normal long opening paragraph stays in the body."""
+        text = (
+            "CHAPTER I\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "CHAPTER II\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        ch1 = sections[0]
+        assert ch1.chapter_title == "Chapter I"
+        assert "\n" not in ch1.chapter_title
+        assert ch1.content.startswith(CHAPTER_BODY[:20])
+
+    def test_numeric_chapter_title_on_separate_line(self):
+        """#16 extends to numeric chapters: Chapter 1 / title on next line."""
+        text = (
+            "Chapter 1\n\n"
+            "The Beginning\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "Chapter 2\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="numeric")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert chapters[0].chapter_title == "Chapter 1\nThe Beginning"
+        assert [c.number for c in chapters] == [1, 2]
+        assert "The Beginning" not in chapters[0].content
+
+    def test_bare_roman_chapter_title_on_separate_line(self):
+        """Bare-roman headings (numbering='roman') also capture a next-line title."""
+        text = (
+            "I\n\n"
+            "Una and the Lion\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "II\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="bare_roman")
+        chapters = [s for s in sections if s.kind == "chapter"]
+        assert chapters[0].chapter_title == "Chapter I\nUna and the Lion"
+        assert [c.number for c in chapters] == [1, 2]
+        # The second chapter has no separate title line and must stay clean.
+        assert chapters[1].chapter_title == "Chapter II"
+
     def test_disable_auto_front_matter(self):
         text = "Preface\n\n" + CHAPTER_BODY + "\n\n" + "Chapter I\n\n" + CHAPTER_BODY
         sections = split_book_into_chapters(
@@ -168,6 +264,73 @@ class TestFrontBackMatterDetection:
         assert [s.kind for s in sections] == ["chapter", "chapter", "back_matter"]
         assert sections[-1].label == "ABOUT THE AUTHOR"
         assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
+
+    def test_declared_boilerplate_is_stripped_not_kept(self):
+        """Regression (#13): force-tagging CONTENTS as front matter must NOT
+        keep it. Boilerplate is auto-stripped (never written/numbered) and the
+        real chapters renumber from 1 with no offset."""
+        text = (
+            "Contents\n\n"
+            + "Foreword .... 1\nChapter I .... 5\n\n"
+            + "Foreword\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter I\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter II\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="roman",
+            front_matter_titles=["Contents"],  # the friction-log mistake
+            collect_dropped=dropped,
+        )
+        assert [s.kind for s in sections] == ["front_matter", "chapter", "chapter"]
+        assert sections[0].label == "Foreword"  # real front matter kept
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
+        assert dropped == [{"label": "Contents", "reason": "boilerplate"}]
+
+    def test_auto_strip_off_keeps_boilerplate(self):
+        """The --no-auto-strip escape hatch keeps a declared 'Contents'."""
+        text = (
+            "Contents\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter I\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="roman",
+            front_matter_titles=["Contents"],
+            auto_strip_boilerplate=False,
+            collect_dropped=dropped,
+        )
+        assert [s.kind for s in sections] == ["front_matter", "chapter"]
+        assert sections[0].label == "Contents"
+        assert dropped == []
+
+    def test_boilerplate_matched_as_chapter_is_dropped(self):
+        """An all-caps 'CONTENTS' the chapter regex grabs is still stripped."""
+        text = (
+            "\n\nCONTENTS\n\n"
+            + "Early Days\nLater Days\n\n"
+            + "EARLY DAYS\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "LATER DAYS\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="allcaps_heading",
+            collect_dropped=dropped,
+        )
+        assert [s.kind for s in sections] == ["chapter", "chapter"]
+        assert [s.chapter_title for s in sections] == ["EARLY DAYS", "LATER DAYS"]
+        assert [s.number for s in sections] == [1, 2]
+        assert dropped == [{"label": "Contents", "reason": "boilerplate"}]
 
 
 # ---------------------------------------------------------------------------

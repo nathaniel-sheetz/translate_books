@@ -88,6 +88,35 @@ def test_setup_returns_heading_hint_keys_null_on_no_url_path(tmp_path: Path):
     assert "chapter_report" in result and result["chapter_report"] is None
 
 
+def test_setup_derives_folder_from_title_when_project_omitted(tmp_path: Path, monkeypatch):
+    """With no --project, the folder is named from the (slugified) title (#22)."""
+    monkeypatch.setattr(state, "REPO_ROOT", tmp_path)
+    # Stand in for the dir the URL path would create; available_project_dir hands it
+    # back so the no-URL ingest branch finds source.txt and the run completes.
+    proj = tmp_path / "projects" / "understood-betsy"
+    proj.mkdir(parents=True)
+    (proj / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
+    captured = {}
+
+    def fake_available_project_dir(slug: str) -> Path:
+        captured["slug"] = slug
+        return proj
+
+    monkeypatch.setattr(state, "available_project_dir", fake_available_project_dir)
+
+    result = flow.setup(url="", title="Understood Betsy", target_language="Spanish")
+
+    assert captured["slug"] == "understood-betsy"  # real slugify ran on the title
+    assert Path(result["project_dir"]).name == "understood-betsy"
+    assert result["chapter_count"] == 2
+
+
+def test_setup_requires_project_or_title():
+    """Neither --project nor --title is an actionable error, not a cryptic folder."""
+    with pytest.raises(ValueError, match="--title"):
+        flow.setup(url="")
+
+
 # ── split review beat ───────────────────────────────────────────────────────
 
 def _front_back_source() -> str:
@@ -117,6 +146,25 @@ def test_split_preview_tags_matter_and_writes_nothing(tmp_path: Path):
     assert result["counts"] == {"front_matter": 1, "chapter": 2, "back_matter": 1}
     assert result["files_written"] is False
     assert not (proj / "chapters").exists()  # dry run writes nothing
+    assert "dropped" in result  # boilerplate-stripping report always present
+    assert isinstance(result["dropped"], list)
+
+
+def test_split_preview_boilerplate_reported_in_dropped(tmp_path: Path):
+    """Boilerplate sections detected by auto-strip appear in result['dropped']."""
+    proj = tmp_path / "book"
+    proj.mkdir()
+    boilerplate = (
+        "Contents\n\n" + "A " * 200 + "\n\n"  # short ToC-like section
+        "CHAPTER I\n\n" + _chapter_body("Old Thomas") + "\n"
+    )
+    (proj / "source.txt").write_text(boilerplate, encoding="utf-8")
+
+    result = flow.split_preview(str(proj), pattern_type="roman")
+
+    assert "dropped" in result
+    # Whether or not "Contents" is stripped, the key must be a list of dicts
+    assert all(isinstance(d, dict) for d in result["dropped"])
 
 
 def test_split_apply_writes_files_and_clears_stale(tmp_path: Path):
@@ -138,6 +186,8 @@ def test_split_apply_writes_files_and_clears_stale(tmp_path: Path):
     written = sorted(p.name for p in chapters_dir.glob("chapter_*.txt"))
     assert written == [f"chapter_0{i}.txt" for i in range(1, 5)]
     assert not (chapters_dir / "chapter_99.txt").exists()  # stale orphan cleared
+    assert "dropped" in result  # boilerplate-stripping report always present
+    assert isinstance(result["dropped"], list)
 
 
 def test_split_apply_min_chapter_size_filters_short_sections(tmp_path: Path):
@@ -267,9 +317,26 @@ def test_glossary_commit_writes_valid_glossary(project: Path):
     out = flow.glossary_commit(str(project))
     assert out["term_count"] == 2
     assert {t["english"] for t in out["terms"]} == {"Thomas", "oak tree"}
+    # A correct draft (carries "Tomás") raises no accent-stripping warning (#21).
+    assert out["warnings"] == []
     # File validates against the model (belt-and-suspenders the flow already ran).
     from src.harness_guard import validate_glossary_file
     assert len(validate_glossary_file(project / "glossary.json").terms) == 2
+
+
+def test_glossary_commit_warns_on_ascii_folded_spanish(project: Path):
+    # An all-ASCII Spanish glossary commits, but surfaces a non-blocking accent-stripping
+    # warning the approval gate shows the user (#21).
+    state.ensure_harness_dir(project)
+    draft = project / ".harness" / "glossary_draft.json"
+    draft.write_text(json.dumps([
+        {"english": f"e{i}", "translation": w}
+        for i, w in enumerate(["senor", "lenera", "manana", "Tia", "Dia", "nino", "arbol", "cancion"])
+    ]), encoding="utf-8")
+
+    out = flow.glossary_commit(str(project))
+    assert out["term_count"] == 8
+    assert out["warnings"] and "accent" in out["warnings"][0].lower()
 
 
 def test_glossary_commit_rejects_malformed_draft(project: Path):
@@ -317,12 +384,13 @@ def test_chunk_per_chapter_writes_sizes_map(project: Path, monkeypatch):
 
     def _fake_run(cmd):
         captured["cmd"] = cmd
-        return 0
+        return 0, None  # (returncode, captured HARNESS_RESULT summary)
 
     monkeypatch.setattr(flow, "_run_script", _fake_run)
 
-    rc = flow.chunk(str(project), size=1800, per_chapter=True)
-    assert rc == 0
+    result = flow.chunk(str(project), size=1800, per_chapter=True)
+    # Streaming commands now return a fresh dict carrying the exit code (friction-log #18).
+    assert result["command"] == "chunk" and result["exit_code"] == 0
 
     sizes_path = project / ".harness" / "chunk_sizes.json"
     assert sizes_path.exists()
@@ -338,11 +406,91 @@ def test_chunk_per_chapter_writes_sizes_map(project: Path, monkeypatch):
 def test_chunk_without_per_chapter_omits_sizes_map(project: Path, monkeypatch):
     """The uniform path passes no --chunk-sizes and writes no map."""
     captured: dict = {}
-    monkeypatch.setattr(flow, "_run_script", lambda cmd: captured.update(cmd=cmd) or 0)
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: (captured.update(cmd=cmd), (0, None))[1])
 
     flow.chunk(str(project), size=1800)
     assert "--chunk-sizes" not in captured["cmd"]
     assert not (project / ".harness" / "chunk_sizes.json").exists()
+
+
+# ── fresh, self-documenting last_output.json (friction-log #18, #19) ─────────
+
+def test_streaming_command_refreshes_last_output(project: Path, monkeypatch):
+    """Friction-log #18: a streaming command (chunk/cost/translate/epub) must overwrite
+    last_output.json with ITS OWN fresh result — never leave the previous command's behind."""
+    import scripts.harness as harness
+
+    artifact = project / ".harness" / "last_output.json"
+    # Plant a STALE prior result, as a preceding `difficulty` run would have left it.
+    artifact.write_text(
+        json.dumps({"book_difficulty": 0.42, "suggested_target_size": 1800, "chapters": []}),
+        encoding="utf-8",
+    )
+
+    # Stub the wrapped subprocess: no spend, a fresh chunk summary via the sentinel.
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: (0, {
+        "stage": "cost-estimate", "total_chunks_in_scope": 7, "chunks_needing_translation": 7,
+    }))
+    monkeypatch.setattr(
+        sys, "argv", ["harness.py", "chunk", "--project", str(project), "--size", "1500"])
+
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 0  # the wrapped exit code is propagated (cost gate intact)
+
+    fresh = json.loads(artifact.read_text(encoding="utf-8"))
+    assert fresh["command"] == "chunk" and fresh["exit_code"] == 0
+    assert fresh["total_chunks_in_scope"] == 7
+    assert "book_difficulty" not in fresh, "the stale difficulty result must be gone"
+    assert "total_chunks_in_scope" in fresh["_schema"]  # self-documents its keys (#19)
+
+
+def test_streaming_refusal_still_refreshes_artifact(project: Path, monkeypatch):
+    """Even a pre-flight refusal (translate without --yes -> bare int 2) leaves a fresh
+    minimal artifact, so a prior result can't be mistaken for this command (friction-log #18)."""
+    import scripts.harness as harness
+
+    artifact = project / ".harness" / "last_output.json"
+    artifact.write_text(json.dumps({"book_difficulty": 0.42}), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["harness.py", "translate", "--project", str(project)])
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 2
+
+    fresh = json.loads(artifact.read_text(encoding="utf-8"))
+    assert fresh["command"] == "translate" and fresh["exit_code"] == 2
+    assert "book_difficulty" not in fresh
+
+
+def test_dict_command_artifact_carries_schema(project: Path, monkeypatch):
+    """Friction-log #19: every artifact self-documents its keys under _schema, so the agent
+    reads the schema instead of guessing field names."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(sys, "argv", ["harness.py", "difficulty", "--project", str(project)])
+    harness.main()  # a dict command returns normally (no SystemExit)
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"]
+    for key in ("book_difficulty", "suggested_target_size", "chapters"):
+        assert key in out and key in out["_schema"]
+
+
+def test_stream_result_keeps_harness_authoritative_keys():
+    """A wrapped script's HARNESS_RESULT sentinel must never overwrite the harness's
+    own command name or the real process exit code recorded in last_output.json."""
+    rogue = {"command": "spoofed", "exit_code": 99, "stage": "done"}
+    result = flow._stream_result("translate", rc=0, summary=rogue)
+    assert result["command"] == "translate"  # harness command wins, not "spoofed"
+    assert result["exit_code"] == 0           # real exit code wins, not the sentinel's 99
+    assert result["stage"] == "done"          # non-conflicting summary keys pass through
+
+
+def test_stream_result_without_summary_is_minimal_dict():
+    """No sentinel -> still a fresh dict carrying command + exit_code (never a bare int)."""
+    assert flow._stream_result("epub", rc=1, summary=None) == {
+        "command": "epub", "exit_code": 1}
 
 
 # ── cost gate (the one paid step) ──────────────────────────────────────────

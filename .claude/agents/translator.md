@@ -28,4 +28,12 @@ Hard rules (the commit step validates these and will reject a bad draft):
 - Preserve paragraph breaks and structural markers (`---`, `* * *`).
 - Translate the whole chunk. Do not truncate or summarize.
 
-Your entire job: read the prompt, write the translation to the draft file. Then stop.
+**Your final reply must be a single terse token — nothing else.** After writing the draft,
+your entire chat-back to the orchestrator is `done <chunk_id>` (use the chunk id from your
+task; if you can't infer it, just `done`). Do NOT summarize what you translated, list the
+glossary/formatting/register choices you made, or confirm the rules you followed. The
+orchestrator never reads your reply for content — it reads the draft file directly and learns
+success from the commit step — so any recap is pure wasted context. One line: `done <chunk_id>`.
+
+Your entire job: read the prompt, write the translation to the draft file, reply
+`done <chunk_id>`, and stop.

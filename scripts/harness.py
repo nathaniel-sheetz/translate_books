@@ -8,9 +8,12 @@ drafts. Every command is non-interactive — it never calls ``input()`` and so n
 deadlocks an agent.
 
 Each command maps to one ``src/harness/flow.py`` function. Commands that produce data the
-agent should relay print a JSON object to stdout; commands that wrap a deterministic /
-paid stage (``chunk``/``cost``/``translate``/``epub``) inherit the wrapped CLI's output
-and exit with its code.
+agent should relay print a JSON object to stdout. Commands that wrap a deterministic /
+paid stage (``chunk``/``cost``/``translate``/``epub``) stream the wrapped CLI's live
+output and exit with its code, but ALSO mirror a fresh structured result to
+``last_output.json`` (friction-log #18 — they used to leave the previous command's result
+in place). Every artifact additionally carries a ``_schema`` block documenting its keys
+(friction-log #19), so the agent never has to guess field names.
 
 Cost-gate safety (unchanged from the wrapped CLI):
   * ``chunk`` and ``cost`` always pass ``--cost-only`` — they physically cannot spend.
@@ -53,7 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # setup -----------------------------------------------------------------
     sp = sub.add_parser("setup", help="Create project, persist config, run ingest + split")
-    add_project(sp)
+    sp.add_argument("--project", default=None,
+                    help="Project id (under projects/) or path; omit to name the "
+                         "folder from --title (collisions get a -2, -3, ... suffix)")
     sp.add_argument("--url", default="", help="Gutenberg URL (omit if source.txt is in place)")
     sp.add_argument("--chapter-pattern", default="roman", choices=["roman", "numeric", "custom"])
     sp.add_argument("--custom-regex", default=None)
@@ -71,6 +76,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-chapter-size", dest="min_chapter_size", type=int, default=None,
                     help="Min chars for a real chapter; filters short false matches "
                          "(default 100; raise to ~500 to drop stray front-matter lines)")
+    sp.add_argument("--no-auto-strip", dest="auto_strip_boilerplate",
+                    action="store_false",
+                    help="Keep navigation/boilerplate (Contents, Title Page, ...) "
+                         "instead of stripping it (default: strip)")
 
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
@@ -88,6 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        action="store_false", help="Disable built-in front-matter keyword detection")
         p.add_argument("--no-auto-back-matter", dest="auto_detect_back_matter",
                        action="store_false", help="Disable built-in back-matter keyword detection")
+        p.add_argument("--no-auto-strip", dest="auto_strip_boilerplate",
+                       action="store_false",
+                       help="Keep navigation/boilerplate (Contents, Title Page, ...) "
+                            "instead of stripping it (default: strip)")
 
     # split-preview / split (chapter-split review beat) ---------------------
     spp = sub.add_parser("split-preview",
@@ -171,6 +184,12 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Validate worker drafts and stamp the chunks (idempotent)")
     add_project(tcp)
     tcp.add_argument("--worker-model", dest="worker_model", default=None)
+    tcp.add_argument("--allow-problem", dest="allow_problems", action="append", default=None,
+                     metavar="SUBSTRING",
+                     help="Waive a known guard false-positive: drop any guard problem whose message "
+                          "contains SUBSTRING (case-insensitive) so the chunk commits if no other "
+                          "problem remains. Repeatable. Other guards stay enforced; waives are "
+                          "reported under `waived` and logged in provenance.")
 
     ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
     add_project(ep)
@@ -242,6 +261,7 @@ def _dispatch(args: argparse.Namespace):
             front_matter_titles=args.front_matter_titles,
             back_matter_titles=args.back_matter_titles,
             min_chapter_size=args.min_chapter_size,
+            auto_strip_boilerplate=args.auto_strip_boilerplate,
         )
     if cmd in ("split-preview", "split"):
         fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
@@ -252,6 +272,7 @@ def _dispatch(args: argparse.Namespace):
             back_matter_titles=args.back_matter_titles,
             auto_detect_front_matter=args.auto_detect_front_matter,
             auto_detect_back_matter=args.auto_detect_back_matter,
+            auto_strip_boilerplate=args.auto_strip_boilerplate,
         )
     if cmd == "style-guide":
         if args.action == "prepare-questions":
@@ -285,7 +306,8 @@ def _dispatch(args: argparse.Namespace):
                                       parallelism=args.parallelism, window=args.window,
                                       batch_size=args.batch_size)
     if cmd == "translate-commit":
-        return flow.translate_commit(args.project, worker_model=args.worker_model)
+        return flow.translate_commit(args.project, worker_model=args.worker_model,
+                                     allow_problems=args.allow_problems)
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
     if cmd == "align":
@@ -306,18 +328,49 @@ def _dispatch(args: argparse.Namespace):
     raise SystemExit(f"unknown command: {cmd}")
 
 
+# Commands that wrap a subprocess: they stream the wrapped CLI's output live and return
+# a dict carrying ``exit_code`` (via ``flow._stream_result``), or a bare int on a pre-flight
+# refusal (``epub`` missing metadata, ``translate`` without ``--yes``). Either way ``main()``
+# leaves a FRESH ``last_output.json`` and propagates the wrapped exit code (friction-log #18).
+_STREAMING_COMMANDS = ("chunk", "cost", "translate", "epub")
+
+
+def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
+    """Stamp the command's documented output schema into ``result`` under ``_schema``.
+
+    Friction-log #19: the agent reads ``last_output.json`` but had to guess key names and
+    burn round-trips introspecting them. The registry lives in ``flow.OUTPUT_SCHEMAS``; this
+    mutates the result in place so both the printed JSON and the mirrored artifact carry it.
+    No-op when the command has no registered schema.
+    """
+    if not isinstance(result, dict):
+        return
+    cmd = getattr(args, "command", None)
+    if not cmd:
+        return
+    schema = flow.schema_for(cmd, getattr(args, "action", None))
+    if schema:
+        result["_schema"] = schema
+
+
 def _write_output_artifact(args: argparse.Namespace, result: dict) -> None:
     """Mirror a command's JSON result to ``.harness/last_output.json`` (UTF-8).
 
     The agent reads this file instead of capturing stdout, sidestepping Windows console
-    encoding entirely (friction-log #4). Best-effort: the artifact must never break a command,
-    so any resolution/write failure is swallowed.
+    encoding entirely (friction-log #4); it carries a ``_schema`` block documenting its keys
+    (friction-log #19). Best-effort: the artifact must never break a command, so any
+    resolution/write failure is swallowed.
     """
-    project = getattr(args, "project", None)
-    if not project:
-        return
     try:
-        project_dir = state.resolve_project_dir(project)
+        project = getattr(args, "project", None)
+        if not project:
+            # setup --title (no --project) resolves the dir itself; carry it in result.
+            project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
+            if not project_dir_str:
+                return
+            project_dir = Path(project_dir_str)
+        else:
+            project_dir = state.resolve_project_dir(project)
         state.ensure_harness_dir(project_dir)
         out = state.harness_dir(project_dir) / "last_output.json"
         out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -357,6 +410,7 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
         project = getattr(args, "project", None)
         run_id = None
         slug = None
+        project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
         if project:
             try:
                 project_dir = state.resolve_project_dir(project)
@@ -364,6 +418,13 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
                 run_id = state.ensure_run_id(project_dir)
             except Exception:  # noqa: BLE001 - never let resolution break logging
                 slug = project
+        elif project_dir_str:
+            try:
+                project_dir = Path(project_dir_str)
+                slug = project_dir.name
+                run_id = state.ensure_run_id(project_dir)
+            except Exception:  # noqa: BLE001
+                slug = project_dir_str
 
         fields = {"cmd": label, "status": status, "dur_s": round(duration, 3)}
         if isinstance(result, dict):
@@ -404,11 +465,27 @@ def main() -> None:
         raise
 
     elapsed = time.monotonic() - started
+
+    if args.command in _STREAMING_COMMANDS:
+        # The wrapped CLI's progress/cost already streamed live. Still leave a FRESH
+        # structured last_output.json (friction-log #18 — never the previous command's
+        # result) and propagate the wrapped exit code so the cost gate keeps its teeth.
+        # `result` is a dict carrying exit_code, or a bare int on a pre-flight refusal.
+        rc = result["exit_code"] if isinstance(result, dict) else result
+        payload = result if isinstance(result, dict) else {"command": args.command, "exit_code": rc}
+        _stamp_schema(args, payload)
+        _log_command(args, status=("ok" if rc == 0 else f"exit_{rc}"), duration=elapsed,
+                     result=payload)
+        _write_output_artifact(args, payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        sys.exit(rc)
+
     if isinstance(result, int):
-        # chunk/cost/translate/epub wrap a subprocess and return its exit code; the
-        # dollar/progress detail is the wrapped CLI's own stdout, so log only the outcome.
+        # A non-streaming command returning a bare exit code (defensive; none today).
         _log_command(args, status=("ok" if result == 0 else f"exit_{result}"), duration=elapsed)
         sys.exit(result)
+
+    _stamp_schema(args, result)
     _log_command(args, status="ok", duration=elapsed, result=result)
     _write_output_artifact(args, result)
     print(json.dumps(result, indent=2, ensure_ascii=False))

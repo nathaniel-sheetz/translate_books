@@ -14,7 +14,7 @@ builder can render them with proper labels.
 import json
 import re
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -123,6 +123,118 @@ def _find_preceding_header_image(text: str, pos: int) -> Optional[tuple[int, str
     if not _HEADER_IMAGE_LINE_RE.fullmatch(candidate):
         return None
     return (line_start, candidate)
+
+
+def _looks_like_subtitle(candidate: str) -> bool:
+    """
+    True if a stripped line reads like a short, standalone chapter subtitle
+    rather than prose or an image placeholder.
+
+    A subtitle is non-empty, not itself an ``[IMAGE:...]`` line, short in both
+    characters (<=100) and words (<=12), and contains at least one letter.
+    """
+    return bool(
+        candidate
+        and not _HEADER_IMAGE_LINE_RE.fullmatch(candidate)
+        and len(candidate) <= 100
+        and len(candidate.split()) <= 12
+        and re.search(r'[A-Za-z]', candidate)
+    )
+
+
+def _take_standalone_subtitle(
+    lines: List[str], i: int,
+) -> Optional[Tuple[str, str]]:
+    """
+    Treat ``lines[i]`` as a subtitle candidate. If it looks like a subtitle
+    and stands alone (the next non-blank content is a blank-line break, not
+    more prose on the very next line), return ``(title, cleaned_body)`` with
+    that one line removed. Otherwise return ``None``.
+    """
+    candidate = lines[i].strip()
+    if not _looks_like_subtitle(candidate):
+        return None
+    # Title must be a standalone line; a following non-blank line means prose.
+    if i + 1 < len(lines) and lines[i + 1].strip():
+        return None
+    cleaned_body = '\n'.join(lines[:i] + lines[i + 1:]).strip()
+    return (candidate, cleaned_body)
+
+
+def _extract_header_image_title(body: str) -> Optional[Tuple[str, str]]:
+    """
+    If ``body`` begins with a standalone ``[IMAGE:...]`` line followed by a
+    short title on its own line, return ``(title, cleaned_body)`` with the
+    title line removed. The image and remaining body are preserved.
+
+    Returns ``None`` when the pattern does not match (e.g. no image, or the
+    line after the image is a paragraph rather than a standalone title).
+    """
+    if not body:
+        return None
+
+    lines = body.split('\n')
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return None
+
+    if not _HEADER_IMAGE_LINE_RE.fullmatch(lines[i].strip()):
+        return None
+    i += 1
+
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return None
+
+    return _take_standalone_subtitle(lines, i)
+
+
+def _extract_leading_subtitle(body: str) -> Optional[Tuple[str, str]]:
+    """
+    If ``body`` begins with a short standalone title line (no image), return
+    ``(title, cleaned_body)`` with the title removed.
+    """
+    if not body:
+        return None
+
+    lines = body.split('\n')
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return None
+
+    return _take_standalone_subtitle(lines, i)
+
+
+def _extract_chapter_subtitle(
+    body: str,
+    header_image: Optional[str] = None,
+) -> Optional[Tuple[str, str]]:
+    """
+    Find a chapter subtitle after the heading line.
+
+    Handles both layouts:
+    - Image before heading in source (``header_image`` set; title follows heading)
+    - Image between heading and title in the body slice
+    - Title immediately after heading with no image
+    """
+    if header_image:
+        effective = f"{header_image}\n\n{body}"
+        result = _extract_header_image_title(effective)
+        if result:
+            title, cleaned = result
+            if cleaned.startswith(header_image):
+                cleaned = cleaned[len(header_image):].lstrip('\n')
+            return (title, cleaned)
+
+    result = _extract_header_image_title(body)
+    if result:
+        return result
+    return _extract_leading_subtitle(body)
 
 
 def load_split_patterns() -> dict:
@@ -411,6 +523,8 @@ def split_book_into_chapters(
     back_matter_titles: Optional[List[str]] = None,
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
+    auto_strip_boilerplate: bool = True,
+    collect_dropped: Optional[List[dict]] = None,
 ) -> List[DetectedChapter]:
     """
     Split a full book text into individual chapters and front/back matter.
@@ -432,6 +546,15 @@ def split_book_into_chapters(
             keyword list (preface, foreword, prologue, ...).
         auto_detect_back_matter: If True (default), also match the built-in
             back-matter keyword list (epilogue, afterword, appendix, ...).
+        auto_strip_boilerplate: If True (default), drop navigation/boilerplate
+            sections (Contents, Title Page, List of Illustrations, Copyright,
+            ...) entirely so they are never written, numbered, or translated —
+            even when a chapter pattern matched them or the user declared them
+            as front matter. Set False to keep a section whose heading happens
+            to be one of those words.
+        collect_dropped: Optional list the caller supplies to receive a record
+            of each stripped section ({"label": <heading>, "reason":
+            "boilerplate"}) for transparency. Left untouched when None.
 
     Returns:
         List of DetectedChapter objects in reading order. position_index is
@@ -471,6 +594,7 @@ def split_book_into_chapters(
     # Compile matter patterns
     front_patterns = _compile_matter_patterns("front_matter_patterns") if auto_detect_front_matter else []
     back_patterns = _compile_matter_patterns("back_matter_patterns") if auto_detect_back_matter else []
+    drop_patterns = _compile_matter_patterns("drop_matter_patterns") if auto_strip_boilerplate else []
 
     # Determine numbering strategy from pattern definition
     if pattern_type == "custom":
@@ -588,9 +712,29 @@ def split_book_into_chapters(
     def _add_section(*, section_start: int, content_start: int, content_end: int,
                      kind: SectionKind, raw_heading: str, label: str,
                      number: Optional[int],
-                     header_image: Optional[str] = None) -> None:
+                     header_image: Optional[str] = None,
+                     body_override: Optional[str] = None) -> None:
         nonlocal detected
-        content = book_text[content_start:content_end].strip()
+        # Drop navigation/boilerplate (Contents, Title Page, ...) outright so it
+        # is never written, numbered, or translated — whether it arrived as a
+        # matched "chapter", an auto-detected matter heading, or a user-declared
+        # title. Match against the section's first heading line and its label.
+        if drop_patterns:
+            heading_line = (raw_heading or label or "").splitlines()[0:1]
+            drop_hit = (
+                _matches_builtin_pattern(heading_line[0], drop_patterns)
+                if heading_line else None
+            )
+            if drop_hit is None and label:
+                drop_hit = _matches_builtin_pattern(label, drop_patterns)
+            if drop_hit is not None:
+                if collect_dropped is not None:
+                    collect_dropped.append({"label": drop_hit, "reason": "boilerplate"})
+                return
+        if body_override is not None:
+            content = body_override.strip()
+        else:
+            content = book_text[content_start:content_end].strip()
         # Prepend the chapter-header image (if any) so it appears at the
         # start of the chapter body in the saved file, where every
         # downstream consumer (chunker, translator, EPUB builder) already
@@ -654,6 +798,16 @@ def split_book_into_chapters(
             num = chapter_seq + 1
             heading = cs["raw_heading"]
 
+        body_override: Optional[str] = None
+        if numbering in ("roman", "numeric") and not subtitle:
+            extracted = _extract_chapter_subtitle(
+                book_text[cs["start_pos"]:cs["end_pos"]],
+                header_image=cs.get("header_image"),
+            )
+            if extracted:
+                subtitle, body_override = extracted
+                heading = f"{heading}\n{subtitle}"
+
         # Try to add; only bump display sequence if the section was actually added
         before = len(detected)
         chapter_seq += 1
@@ -666,6 +820,7 @@ def split_book_into_chapters(
             label="",
             number=chapter_seq,
             header_image=cs.get("header_image"),
+            body_override=body_override,
         )
         if len(detected) == before:
             # Section was filtered (too short); roll back the display counter.

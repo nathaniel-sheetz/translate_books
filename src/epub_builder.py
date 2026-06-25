@@ -108,6 +108,21 @@ def synthesize_chapter_heading(
     return numeral
 
 
+def _first_nonempty_line(text: str) -> str:
+    """Return the first non-blank, non-image line of ``text`` (stripped), or ''.
+
+    For front/back matter the splitter prepends the section heading to the body,
+    so after translation this line *is* the translated heading (e.g. 'Prólogo').
+    Skip ``[IMAGE:...]`` placeholder lines, which the splitter may prepend ahead
+    of the heading: an image token is never a valid section label.
+    """
+    for line in (text or '').split('\n'):
+        stripped = line.strip()
+        if stripped and not _IMAGE_RE.match(stripped):
+            return stripped
+    return ''
+
+
 def _normalize_heading(matched_line: str) -> str:
     """Render a detected heading in canonical form.
 
@@ -785,11 +800,21 @@ def build_epub(
                 toc_label = f'{toc_label}: {subtitle}'
         else:
             # Front- or back-matter section: never synthesize "Chapter N".
+            # Prefer the section's own first line (the heading the splitter
+            # prepended — already translated in a translated build) over the
+            # manifest ``label``, which is captured at split time in the source
+            # language. This stops an English "Foreword" being stacked on top of
+            # a Spanish "Prólogo" body. Guard against promoting a body paragraph
+            # by only trusting a short, heading-like first line.
             label = (manifest_entry.get('label') or '').strip()
             heading, subtitle, _ = detect_chapter_heading(
                 text, chapter_number=None, heading_config=chapter_heading_config,
             )
-            display_label = heading or label or chapter_id.replace('_', ' ').title()
+            first_line = _first_nonempty_line(text)
+            if len(first_line) > 80:
+                first_line = ''
+            display_label = heading or first_line or label \
+                or chapter_id.replace('_', ' ').title()
             xhtml_content = matter_text_to_xhtml(text, display_label)
             toc_label = display_label
             section_heading = display_label

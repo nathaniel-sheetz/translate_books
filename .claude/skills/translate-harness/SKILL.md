@@ -48,15 +48,23 @@ deterministic/paid stage (`chunk`/`cost`/`translate`/`epub`) stream the underlyi
 output through. Per-project working state lives in `projects/<slug>/.harness/`; `setup`
 wipes it for a clean run, so there is no global `.tmp/` to manage.
 
-**Reading harness output — Read the artifact, NEVER parse stdout.** Every JSON-returning command
-also mirrors its full result to `projects/<slug>/.harness/last_output.json` (UTF-8) and prints
-`OUTPUT_JSON: <path>` to stderr. **Always `Read` that file** to consume a result — it is the only
-clean machine-readable surface. Stdout is a *mixed human+JSON stream*: `translate-commit` /
-`chunk` / `epub` print progress lines and the full `terms`/counts dump *around* the JSON, so
-piping stdout into a JSON parser (`... | python -c "json.load(sys.stdin)"`) fails immediately with
+**Reading harness output — Read the artifact, NEVER parse stdout.** **Every** command — including
+the streaming ones (`chunk`/`cost`/`translate`/`epub`) — mirrors a **fresh** structured result to
+`projects/<slug>/.harness/last_output.json` (UTF-8) and prints `OUTPUT_JSON: <path>` to stderr.
+**Always `Read` that file** to consume a result — it is the only clean machine-readable surface,
+and it is always the *current* command's result (the streaming commands used to leave the previous
+command's payload here; they no longer do). Stdout is a *mixed human+JSON stream*: `translate-commit`
+/ `chunk` / `epub` print progress lines and the full `terms`/counts dump *around* the JSON, so piping
+stdout into a JSON parser (`... | python -c "json.load(sys.stdin)"`) fails immediately with
 `Expecting value: line 1 column 1 (char 0)` on the leading non-JSON text. Don't learn this the hard
 way — read `last_output.json`. (Same reason **never pipe harness output through `grep`**: on
 Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.)
+
+**Don't guess field names — read the `_schema`.** Every `last_output.json` carries a `_schema`
+block mapping each result key (and nested shapes) to a one-line description. Read it to learn the
+exact keys instead of probing with `python -c` (e.g. `status` chapters use `chunks`/`translated`/
+`complete` under a top-level `totals`, *not* `total_chunks`/`pending_chunks`). The `_schema` is the
+contract; the sibling keys are the data.
 
 **Resuming a project? Run `status` first.** `python scripts/harness.py status --project <slug>`
 reports, in one call, each chapter's translated-vs-pending chunk counts, the saved `spawn_plan`
@@ -147,11 +155,20 @@ ingest + split (NOT chunk — chunking is deferred to Step 3 so it can use the g
 difficulty score). `setup` also persists `target-lang` / `locale` / `model` / `title` /
 `author` so later steps stop repeating them.
 
+**Identify the book first, then let `setup` name the folder from its title.** Omit `--project`
+and `setup` derives the project slug from `--title` (e.g. `"Understood Betsy"` →
+`projects/understood-betsy`), so the folder, reader URLs (`/read/<slug>/chapter_01`), and EPUB
+path all say what the book is — don't fall back to a cryptic Gutenberg id like `g5347`. If that
+title-slug already exists, the new project gets a `-2`, `-3`, … suffix. Pass `--project <slug>`
+explicitly only to **re-run on an existing project** (it's used verbatim and reuses that folder;
+relying on `--title` would mint a new numbered folder instead).
+
 ```bash
-python scripts/harness.py setup --project projects/<slug> \
+python scripts/harness.py setup \
   --target-lang Spanish --locale mx --model claude-sonnet-4-6 \
   --title "<Title>" --author "<Author>"
 # add --url <gutenberg-url> if there is no local source.txt yet.
+# add --project <slug> only to re-run on / target a specific existing project folder.
 ```
 
 Pick the chapter pattern that matches the book: `--chapter-pattern roman` (Chapter I, II …),
@@ -161,27 +178,40 @@ relay them and prefer the suggestion when it differs from your guess. Confirm th
 `chapter_count` looks right and `chunks_dir_exists` is `false`. (The lang/locale/model defaults
 are Spanish/mx/sonnet 4.6 — surface them to the user rather than assuming silently.)
 
+Navigation/boilerplate (the title page, a `CONTENTS`/table-of-contents listing, a list of
+illustrations, a copyright/transcriber's note) is **auto-stripped** — never written, numbered, or
+translated — and each stripped heading is reported back under `dropped` in the `setup` /
+`split-preview` / `split` output. Confirm `dropped` matches what you expected. Real front matter
+(foreword, preface, prologue, dedication, author's note …) is auto-detected and **kept**, and it
+renders its *translated* heading in the EPUB automatically — no manual relabel.
+
 **Refine the split if it looks wrong** — the `setup` split misfires, reports "No chapters
-detected," or Gutenberg front/back matter (title page, copyright, the CONTENTS listing, a
-teacher's note) leaked in as spurious chapters. Don't hand-edit `source.txt`; use the review
-beat, which mirrors the web GUI's Stage 2:
+detected," or a *real* section is mis-numbered as a chapter (or vice-versa). Don't hand-edit
+`source.txt`; use the review beat, which mirrors the web GUI's Stage 2:
 
 ```bash
-# Dry-run: prints each section tagged front_matter / chapter / back_matter; writes nothing.
+# Dry-run: prints each section tagged front_matter / chapter / back_matter,
+# plus a `dropped` list of stripped boilerplate. Writes nothing.
 python scripts/harness.py split-preview --project projects/<slug> \
   --chapter-pattern custom --custom-regex '(?<=\n---\n\n)[A-Z][^\n]*' \
   --min-chapter-size 500 \
-  --front-matter-title "Contents" --back-matter-title "A Word to the Teacher"
+  --front-matter-title "To the Teacher" --back-matter-title "A Word to the Children"
 
 # Happy with the preview? Commit it (rewrites chapters/, clearing any stale files).
 python scripts/harness.py split --project projects/<slug>  # + the same split flags
 ```
 
-`--front-matter-title` / `--back-matter-title` are repeatable and force-tag a heading so it
-isn't mis-numbered as a chapter; built-in keyword auto-detect (preface, dedication, epilogue …)
-stays on unless you pass `--no-auto-front-matter` / `--no-auto-back-matter`. Raising
-`--min-chapter-size` (~500) drops short stray front-matter lines a loose pattern would otherwise
-capture. The same three controls also work directly on `setup` for a one-shot run.
+**Force-tagging KEEPS a section, it never removes one.** `--front-matter-title` /
+`--back-matter-title` are repeatable and force a *real* heading the keyword auto-detect missed
+(e.g. "To the Teacher") to be tagged matter so it isn't mis-numbered as a chapter — the section is
+still written, translated, and included. **Do not** declare the title page / `CONTENTS` /
+boilerplate here: that would un-strip them and push the junk through the whole pipeline. They drop
+on their own; leave them alone. Built-in keyword auto-detect (preface, dedication, epilogue …)
+stays on unless you pass `--no-auto-front-matter` / `--no-auto-back-matter`; boilerplate
+auto-strip stays on unless you pass `--no-auto-strip` (only needed for the rare book with a genuine
+chapter literally titled "Contents"). Raising `--min-chapter-size` (~500) drops short stray
+front-matter lines a loose pattern would otherwise capture. All of these controls also work
+directly on `setup` for a one-shot run.
 
 ## Step 1 — STYLE GUIDE beat (two question gates, then draft + approval)
 
@@ -271,7 +301,10 @@ a `prompt_path`, and a `draft_path`.
 
 **Read the printed `prompt_path`** and draft the glossary proposals yourself — the thinking-mode
 step. Produce a JSON array of `{english, translation, type, context}` objects and **Write** it to
-the printed `draft_path`. As you draft, **track every term whose translation you were unsure about**
+the printed `draft_path`. **Write the target language WITH its diacritics** (Spanish: á é í ó ú ñ
+¿ ¡). The `Write` tool is UTF-8 — do **not** ASCII-fold "to be safe"; stripped accents (`Tia` for
+`Tía`, `senor` for `señor`) become the canonical forms fed verbatim to every translator worker.
+As you draft, **track every term whose translation you were unsure about**
 (ambiguous sense, multiple valid renderings, dialect/register judgement calls) and why — keep that
 running list for the approval beat. Then:
 ```bash
@@ -286,6 +319,9 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
   collapse it to "N terms drafted."
 - **Call out the uncertain translations** you tracked: name each term, its chosen rendering, the
   alternative(s) you considered, and why you hesitated, so the user can adjudicate the close calls.
+- **Surface any `warnings`** — if `commit`'s result carries a non-empty `warnings` array (e.g. an
+  accent-stripping smell when the target language carries diacritics), re-read `glossary.json`, fix
+  any ASCII-folded terms, re-run `commit`, **then** present the gate.
 - **AskUserQuestion with exactly two predefined options** — **"Approve all"** (accept the list as-is
   and continue) and **"Reject & talk it through"** (open-ended: END the turn, discuss, then re-draft /
   re-run `commit` and re-present this gate). **In the question text, remind the user that to approve
@@ -430,15 +466,29 @@ abort. **End your turn and wait.** Do not spawn workers in the same turn that pr
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
 Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
 `model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt:
-*"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Nothing
-else."* The worker writes its file — **do not** have it return the prose to you (that floods your
-context). After a wave's drafts are written, commit:
+*"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Then
+reply with exactly `done <chunk_id>` and nothing else — no summary, no list of choices."* The worker
+writes its file and reports back only that token — **do not** have it return the prose *or a recap of
+its choices* to you (either one floods your context). You learn each worker's success from
+`translate-commit`'s `committed`/`failed`/`missing` lists, not from its chat-back. After a wave's
+drafts are written, commit:
 ```bash
 python scripts/harness.py translate-commit --project projects/<slug>
 ```
 which guards each draft (length / completeness / image-token parity / echo), writes provenance, stamps
 the chunks, and prints `committed` / `failed` / `missing` / `skipped` (idempotent — done chunks are
 skipped).
+
+> **Waiving a confirmed guard false-positive (`--allow-problem`).** Rarely a guard flags a chunk that is
+> actually fine — e.g. the placeholder check trips on a legitimate Roman numeral heading. When you have
+> *confirmed* the `failed` problem is spurious (read the named problem and the draft), re-commit with
+> `--allow-problem <substring>` (repeatable) to drop only that problem:
+> ```bash
+> python scripts/harness.py translate-commit --project projects/<slug> --allow-problem XXX
+> ```
+> Every other guard stays enforced (a real defect still lands the chunk in `failed`), and the waive is
+> reported under `waived` and recorded in the chunk's provenance log. Use this instead of hand-writing a
+> stamping script. Do **not** blanket-waive — match the smallest substring of the specific false-positive.
 
 > **Spawning into a flaky API — probe, throttle, commit-then-check.** Worker spawns can fail when the
 > API is degraded. Handle it deterministically instead of hammering:
@@ -512,6 +562,15 @@ The API `translate` run chains through combine, epub, and align, building the EP
 chunks only and reporting exactly which chapters shipped. On the **subagent** path you already aligned
 each set in Step 4B-e (the reader reads `alignments/`, not the EPUB), so here you only (re)build the
 EPUB — the downloadable deliverable — from whatever chapters are translated so far:
+
+> **Stitching contract.** Chunks are created with **zero overlap**, so `combine` is a plain
+> concatenation of each chunk's translation (one blank line at every boundary) — there is no
+> overlap de-dup, on either backend. The prompt's "previous section" block is **continuity context
+> only and is never re-combined.** Overlap/combine de-dup is disabled (known-broken): `combine`
+> hard-fails if a chunk ever carries overlap. So a worker must translate its **whole** chunk and
+> never drop content that also appears in the previous-section block. See
+> `docs/design/TRANSLATE_HARNESS_FRICTION_LOG_4.md` #20.
+
 ```bash
 python scripts/harness.py epub --project projects/<slug>
 # --title / --author / --language default to what you set at setup; pass them to override.

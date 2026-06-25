@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,27 @@ DEFAULTS: dict[str, str] = {
 
 # Config keys a command may override (CLI flag -> config key); used by setup.
 CONFIG_KEYS = tuple(DEFAULTS.keys())
+
+
+# ── machine-readable result sentinel (streaming wrapped scripts) ──────────────
+#
+# The streaming harness commands (chunk/cost/translate/epub) wrap a subprocess
+# whose human-facing progress goes to stdout. To ALSO give the agent a fresh,
+# structured last_output.json (friction-log #18 — those commands used to leave the
+# previous command's result in place), the wrapped script prints exactly one line
+# ``HARNESS_RESULT: {...json...}``; ``flow._run_script`` tees the child's stdout,
+# strips that one line, and returns the parsed dict as the command's result.
+HARNESS_RESULT_PREFIX = "HARNESS_RESULT:"
+
+
+def emit_harness_result(data: dict) -> None:
+    """Print the structured-result sentinel a streaming harness wrapper exposes.
+
+    One line, machine-only. ``flow._run_script`` captures it (and keeps it out of
+    the human stream) so the streaming command can mirror a fresh structured result
+    to ``last_output.json`` instead of leaving a stale one behind (friction-log #18).
+    """
+    print(f"{HARNESS_RESULT_PREFIX} {json.dumps(data, ensure_ascii=False)}", flush=True)
 
 
 def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
@@ -100,6 +122,34 @@ def resolve_project_dir(project: str, *, must_exist: bool = True) -> Path:
     raise FileNotFoundError(
         f"project not found: {project!r} (looked for a path and projects/{project})"
     )
+
+
+def slugify(text: str) -> str:
+    """Turn a book title into a filesystem-safe project slug.
+
+    Mirrors the web UI's create-project slug (``web_ui/app.py``) so both entry
+    points name projects identically: lowercase, runs of non-alphanumerics
+    collapse to a single ``-``, trimmed; empty/symbol-only input -> ``"project"``.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "project"
+
+
+def available_project_dir(slug: str) -> Path:
+    """Return a not-yet-existing ``projects/<slug>`` dir, suffixing on collision.
+
+    ``projects/<slug>`` if free, else the first free ``projects/<slug>-N`` with
+    ``N`` starting at 2 (so a second *Understood Betsy* becomes
+    ``understood-betsy-2``). Matches the web UI's collision loop. Used by
+    ``setup`` when the slug is auto-derived from the title; an explicit
+    ``--project`` is honored verbatim instead and may reuse an existing dir.
+    """
+    projects_root = REPO_ROOT / "projects"
+    candidate = slug
+    suffix = 2
+    while (projects_root / candidate).exists():
+        candidate = f"{slug}-{suffix}"
+        suffix += 1
+    return projects_root / candidate
 
 
 def harness_dir(project_dir: Path) -> Path:

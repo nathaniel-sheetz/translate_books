@@ -6,6 +6,7 @@ grouping subfolders so ``translate-harness --project <id>`` keeps working after
 a book is moved into a group.
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -134,3 +135,66 @@ def test_iter_nested_match_skips_non_dir_files(repo):
     (grouping / "readme.txt").write_text("not a dir")
     proj = _make_project(grouping, "real-book")
     assert state.resolve_project_dir("real-book") == proj
+
+
+# ── title -> project slug (friction #22) ─────────────────────────────────────
+
+@pytest.mark.parametrize("title,expected", [
+    ("Understood Betsy", "understood-betsy"),
+    ("  The Wind in the Willows!  ", "the-wind-in-the-willows"),
+    ("Alice's Adventures in Wonderland", "alice-s-adventures-in-wonderland"),
+    ("20,000 Leagues Under the Sea", "20-000-leagues-under-the-sea"),
+])
+def test_slugify_basic(title, expected):
+    assert state.slugify(title) == expected
+
+
+@pytest.mark.parametrize("title", ["", "   ", "***", "!!!---"])
+def test_slugify_empty_or_symbol_only_falls_back(title):
+    assert state.slugify(title) == "project"
+
+
+def test_available_project_dir_free(repo):
+    """No collision -> the bare slug under projects/."""
+    assert state.available_project_dir("understood-betsy") == (
+        repo / "projects" / "understood-betsy"
+    )
+
+
+def test_available_project_dir_collision_suffixes_from_2(repo):
+    """An existing slug bumps to -2, then -3, ... (matches the web UI)."""
+    (repo / "projects" / "understood-betsy").mkdir()
+    assert state.available_project_dir("understood-betsy") == (
+        repo / "projects" / "understood-betsy-2"
+    )
+    (repo / "projects" / "understood-betsy-2").mkdir()
+    assert state.available_project_dir("understood-betsy") == (
+        repo / "projects" / "understood-betsy-3"
+    )
+
+
+# ── emit_harness_result sentinel ─────────────────────────────────────────────
+
+def test_emit_harness_result_format(capsys):
+    """The sentinel line is 'HARNESS_RESULT: {json}' on stdout."""
+    state.emit_harness_result({"command": "chunk", "total_chunks": 10})
+    line = capsys.readouterr().out.rstrip("\n")
+    assert line.startswith(state.HARNESS_RESULT_PREFIX + " ")
+    payload = json.loads(line[len(state.HARNESS_RESULT_PREFIX):].strip())
+    assert payload == {"command": "chunk", "total_chunks": 10}
+
+
+def test_emit_harness_result_non_ascii_not_escaped(capsys):
+    """ensure_ascii=False: Spanish characters are emitted literally, not as \\uXXXX."""
+    state.emit_harness_result({"title": "Comprendida Betsy"})
+    out = capsys.readouterr().out
+    assert "Comprendida Betsy" in out
+    assert "\\u" not in out
+
+
+def test_emit_harness_result_prefix_matches_constant(capsys):
+    """The prefix in the emitted line matches HARNESS_RESULT_PREFIX exactly."""
+    state.emit_harness_result({})
+    line = capsys.readouterr().out.rstrip("\n")
+    prefix_part = line.split(" ", 1)[0]  # "HARNESS_RESULT:" (already includes the colon)
+    assert prefix_part == state.HARNESS_RESULT_PREFIX

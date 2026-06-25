@@ -34,6 +34,7 @@ from src.book_splitter import split_book_into_chapters, save_chapters_to_files
 from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
+from src.harness.state import emit_harness_result
 from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
@@ -178,6 +179,7 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
     custom_regex = getattr(args, "custom_regex", None)
     min_size = getattr(args, "min_chapter_size", 100) or 100
 
+    dropped: list = []
     chapters = split_book_into_chapters(
         book_text=book_text,
         pattern_type=pattern_type,
@@ -187,6 +189,8 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
         back_matter_titles=getattr(args, "back_matter_titles", None) or None,
         auto_detect_front_matter=getattr(args, "auto_detect_front_matter", True),
         auto_detect_back_matter=getattr(args, "auto_detect_back_matter", True),
+        auto_strip_boilerplate=getattr(args, "auto_strip_boilerplate", True),
+        collect_dropped=dropped,
     )
 
     chapters_dir = project_dir / "chapters"
@@ -196,9 +200,12 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
     for ch in chapters:
         words = len(ch.content.split())
         print(f"    {ch.chapter_title}: {words:,} words")
+    for d in dropped:
+        print(f"    [stripped boilerplate] {d.get('label')}")
 
     state["stage_completed"] = "split"
     state["chapter_count"] = len(chapters)
+    state["dropped"] = dropped
     return state
 
 
@@ -213,8 +220,12 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
         raise FileNotFoundError(f"No chapter files in {chapters_dir}")
 
     default_target = getattr(args, "chunk_size", 2000) or 2000
-    overlap_paragraphs = getattr(args, "overlap_paragraphs", 1) or 1
-    min_overlap_words = getattr(args, "min_overlap_words", 50) or 50
+    # Chunk overlap is disabled: the overlap/combine de-dup path is known-broken
+    # (see docs/design/TRANSLATE_HARNESS_FRICTION_LOG_4.md #20). Honor an explicit
+    # 0 — note `x or 0` maps both 0 and None to 0; never coerce back to a nonzero
+    # default the way the old `or 1`/`or 50` did.
+    overlap_paragraphs = getattr(args, "overlap_paragraphs", 0) or 0
+    min_overlap_words = getattr(args, "min_overlap_words", 0) or 0
 
     # Optional per-chapter target sizes (e.g. from difficulty scoring). Chapters
     # absent from the map fall back to default_target. Bounds scale with each
@@ -266,6 +277,11 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         if not chapters:
             print(f"  No matching chapters found for --chapters {args.chapters}")
             print(f"  Available: {', '.join(sorted(discover_chapters(chunks_dir).keys()))}")
+            emit_harness_result({
+                "stage": "translate",
+                "translated": 0,
+                "note": f"no matching chapters for --chapters {args.chapters}",
+            })
             state["stage_completed"] = "translate"
             return state
 
@@ -291,12 +307,19 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             if not chunk.has_translation:
                 untranslated.append((cp, chunk))
 
+    total = sum(len(paths) for paths in chapters.values())
+
     if not untranslated:
         print("  All chunks already translated!")
+        emit_harness_result({
+            "stage": "translate",
+            "translated": 0,
+            "total_chunks_in_scope": total,
+            "note": "all chunks already translated",
+        })
         state["stage_completed"] = "translate"
         return state
 
-    total = sum(len(paths) for paths in chapters.values())
     print(f"  {len(untranslated)} of {total} chunks need translation")
 
     # Cost estimation
@@ -313,6 +336,16 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         print(f"  If translated via the metered API: ~${cost_info['cost_usd']:.2f} ({provider}/{model})")
         print("  Subagent backend uses your subscription (no API $)")
         print("  --cost-only: stopping after estimate")
+        emit_harness_result({
+            "stage": "cost-estimate",
+            "chunks_needing_translation": len(untranslated),
+            "total_chunks_in_scope": total,
+            "input_tokens": cost_info["input_tokens"],
+            "api_cost_usd": round(cost_info["cost_usd"], 2),
+            "provider": provider,
+            "model": model,
+            "cost_only": True,
+        })
         sys.exit(0)
 
     # Real (paid) API translate run: the dollar figure IS the spend.
@@ -384,6 +417,14 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
                 remaining += 1
     if remaining > 0:
         print(f"  Remaining: {remaining} untranslated chunks (~${remaining * cost_per_chunk:.2f})")
+
+    emit_harness_result({
+        "stage": "translate",
+        "translated": len(untranslated),
+        "chapters_done": chapter_ids_done,
+        "estimated_cost_usd": round(actual_cost, 2),
+        "remaining_untranslated": remaining,
+    })
 
     state["stage_completed"] = "translate"
     return state
@@ -594,10 +635,12 @@ def main():
                         help="Path to a JSON map {chapter_id: target_size} for per-chapter "
                              "chunk sizing; chapters absent from the map fall back to "
                              "--chunk-size (default: none, uniform sizing)")
-    parser.add_argument("--overlap-paragraphs", type=int, default=1,
-                        help="Paragraphs of overlap between chunks (default: 1)")
-    parser.add_argument("--min-overlap-words", type=int, default=50,
-                        help="Minimum overlap words (default: 50)")
+    parser.add_argument("--overlap-paragraphs", type=int, default=0,
+                        help="Paragraphs of overlap between chunks (default: 0; overlap is "
+                             "disabled — the overlap/combine de-dup path is known-broken, see "
+                             "TRANSLATE_HARNESS_FRICTION_LOG_4 #20)")
+    parser.add_argument("--min-overlap-words", type=int, default=0,
+                        help="Minimum overlap words (default: 0; overlap disabled)")
 
     # Setup (style guide + glossary)
     parser.add_argument("--generate-style-guide", action="store_true",

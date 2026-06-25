@@ -92,7 +92,7 @@ def _args() -> SimpleNamespace:
     # Mirrors the non-interactive approved args the SKILL.md must pass after its own
     # AskUserQuestion approval gate (T2 — no agent deadlock).
     return SimpleNamespace(
-        chunk_size=2000, overlap_paragraphs=1, min_overlap_words=50,
+        chunk_size=2000, overlap_paragraphs=0, min_overlap_words=0,
         provider="anthropic", model="claude-sonnet-4-6",
         chapters=None, cost_only=False, yes=True,
         project_name="Test Book", author="Tester",
@@ -167,8 +167,8 @@ def test_stage_chunk_applies_per_chapter_sizes(tmp_path: Path):
     sizes_path = tmp_path / "chunk_sizes.json"
     sizes_path.write_text(_json.dumps({"chapter_01": 400}), encoding="utf-8")  # ch2 omitted
 
-    args = SimpleNamespace(chunk_size=2000, overlap_paragraphs=1,
-                           min_overlap_words=50, chunk_sizes=str(sizes_path))
+    args = SimpleNamespace(chunk_size=2000, overlap_paragraphs=0,
+                           min_overlap_words=0, chunk_sizes=str(sizes_path))
     tb.STAGE_FUNCTIONS["chunk"](args, tmp_path, {})
 
     ch1 = list((tmp_path / "chunks").glob("chapter_01_chunk_*.json"))
@@ -375,15 +375,22 @@ def test_run_script_forces_utf8_in_child_env(monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, **kwargs):
+    class FakeProc:
+        stdout = iter(())  # no output to stream
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
-        return SimpleNamespace(returncode=0)
+        return FakeProc()
 
-    monkeypatch.setattr(flow.subprocess, "run", fake_run)
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
 
-    rc = flow._run_script(["scripts/translate_book.py", "chunk"])
+    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
     assert rc == 0
+    assert summary is None  # no HARNESS_RESULT sentinel was emitted
 
     env = captured["env"]
     assert env is not None, "_run_script must pass an explicit env to the child"
@@ -391,6 +398,61 @@ def test_run_script_forces_utf8_in_child_env(monkeypatch):
     assert env["PYTHONIOENCODING"] == "utf-8"
     # The forced vars are layered on top of the inherited environment, not a bare dict.
     assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_run_script_captures_and_hides_harness_result_sentinel(monkeypatch, capsys):
+    """Friction-log #18: _run_script tees the child's stdout — passing human output
+    through live — but lifts the single HARNESS_RESULT: line out as the parsed summary
+    and never echoes that machine-only line to the human stream."""
+    from src.harness import flow, state
+
+    sentinel = (
+        f'{state.HARNESS_RESULT_PREFIX} '
+        '{"stage": "cost-estimate", "total_chunks_in_scope": 7}\n'
+    )
+
+    class FakeProc:
+        stdout = iter(("Chunking the book...\n", sentinel, "Estimate ready.\n"))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
+
+    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    assert rc == 0
+    assert summary == {"stage": "cost-estimate", "total_chunks_in_scope": 7}
+
+    out = capsys.readouterr().out
+    assert "Chunking the book..." in out and "Estimate ready." in out
+    assert state.HARNESS_RESULT_PREFIX not in out  # machine-only line stays hidden
+
+
+def test_run_script_malformed_sentinel_falls_back_to_none(monkeypatch, capsys):
+    """A HARNESS_RESULT: line with invalid JSON is silently swallowed (summary=None).
+
+    The malformed line must still be hidden from the human stream; the returncode
+    and any surrounding human-readable output must pass through normally.
+    """
+    from src.harness import flow, state
+
+    bad_sentinel = f"{state.HARNESS_RESULT_PREFIX} {{not valid json\n"
+
+    class FakeProc:
+        stdout = iter(("Progress line.\n", bad_sentinel, "Done.\n"))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
+
+    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    assert rc == 0
+    assert summary is None  # malformed JSON -> graceful fallback, not a crash
+
+    out = capsys.readouterr().out
+    assert "Progress line." in out and "Done." in out
+    assert state.HARNESS_RESULT_PREFIX not in out  # still hidden even when malformed
 
 
 # ===========================================================================
@@ -512,6 +574,44 @@ def test_translate_commit_flags_bad_worker_output(project: Path):
     # Nothing was stamped.
     for entry in prep["manifest"]:
         assert not validate_chunk_file(Path(entry["chunk_path"])).has_translation
+
+
+def test_translate_commit_allow_problem_waives_false_positive(project: Path):
+    """--allow-problem waives a named guard problem; other guards stay enforced (friction #15)."""
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project))
+    assert prep["manifest"], "need at least one chunk"
+    entry = prep["manifest"][0]
+    cid = entry["chunk_id"]
+    draft_path = Path(entry["draft_path"])
+    chunk_path = Path(entry["chunk_path"])
+    source = validate_chunk_file(chunk_path).source_text
+
+    # Selectivity: a real defect (echo) is NOT waived by an unrelated substring.
+    draft_path.write_text(source, encoding="utf-8")  # verbatim echo
+    res_echo = flow.translate_commit(str(project), allow_problems=["XXX"])
+    assert cid in {f["chunk_id"] for f in res_echo["failed"]}
+    assert res_echo["waived"] == {}
+    assert not validate_chunk_file(chunk_path).has_translation
+
+    # Now the draft trips ONLY the placeholder guard (XXX followed by prose).
+    draft_path.write_text(_fake_draft(source) + " XXX pendiente.", encoding="utf-8")
+
+    res = flow.translate_commit(str(project))  # no waive -> placeholder blocks
+    fails = {f["chunk_id"]: f["problems"] for f in res["failed"]}
+    assert cid in fails and any("XXX" in p for p in fails[cid])
+
+    res_nomatch = flow.translate_commit(str(project), allow_problems=["NOPE"])
+    assert cid in {f["chunk_id"] for f in res_nomatch["failed"]}
+    assert res_nomatch["waived"] == {}
+
+    res_waive = flow.translate_commit(str(project), allow_problems=["XXX"])
+    assert cid in res_waive["waived"] and any("XXX" in p for p in res_waive["waived"][cid])
+    assert cid in res_waive["committed"]
+    stamped = validate_chunk_file(chunk_path)
+    assert stamped.has_translation and stamped.last_llm_log
 
 
 def test_translate_prepare_chapter_scope(project: Path):
