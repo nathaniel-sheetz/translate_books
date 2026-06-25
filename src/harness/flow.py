@@ -107,9 +107,11 @@ def _stream_result(command: str, rc: int, summary: dict | None) -> dict:
     (friction-log #18) even when the wrapped script emitted no sentinel. ``main()``
     propagates ``exit_code`` as the process exit status.
     """
-    result = {"command": command, "exit_code": rc}
-    if summary:
-        result.update(summary)
+    result = dict(summary) if summary else {}
+    # Harness-authoritative keys win: a wrapped script's sentinel must never
+    # overwrite the command name or the real process exit code we recorded.
+    result["command"] = command
+    result["exit_code"] = rc
     return result
 
 

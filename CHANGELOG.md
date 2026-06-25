@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.0.0] - 2026-06-25
+
+### Added
+- **Project folders are named from the book title, not a generic slug (#22).** `setup` derives a readable `projects/<title-slug>/` from the book's title, with a new `harness_guard` collision-resolution path that picks a free slug when the name is already taken.
+- **The splitter auto-strips boilerplate front matter and translates front-matter headings (#13, #17).** Navigation/boilerplate sections (Contents, Title Page, …) are dropped before numbering/translation, and a front/back-matter section's own first line is preferred over the source-language manifest label so a Spanish `Prólogo` is no longer stacked under an English `Foreword`.
+- **Chapter subtitles are lifted onto the heading line (#16).** An inline or standalone subtitle following a `Capítulo XXX` heading is detected and folded into the heading, with the remaining body carried through as a `body_override`.
+- **Streaming commands always write a fresh, self-documenting `last_output.json` (#18, #19).** `_stream_result` returns a dict (never a bare int) so each command refreshes the artifact even when the wrapped script emits no sentinel, closing the stale-artifact trap.
+
+### Changed
+- **Chunk overlap is disabled and combine de-duplication is hard-blocked (#20).** Chunks are paragraph-aligned by construction and stitched by plain concatenation; the obsolete start-overlap removal helper and its tests were deleted.
+- **Translator workers are silenced down to a single `done <chunk_id>` token (#14).** Worker agents no longer recap their glossary/formatting choices, saving orchestrator context; the orchestrator reads the draft file directly.
+- **The glossary draft warns when accents were stripped (#21).** A draft missing expected accented characters is surfaced rather than silently committed.
+
+### Fixed
+- **`_first_nonempty_line` no longer promotes an `[IMAGE:...]` placeholder to a front-matter heading.** A front/back-matter body beginning with a prepended image line now skips the image token when choosing the section label/TOC entry.
+- **A wrapped script's `HARNESS_RESULT` sentinel can no longer overwrite the harness-authoritative `command`/`exit_code`** recorded for a streaming run.
+- **The `XXX` placeholder guard no longer false-positives on the Roman numeral for chapter 30.** A bare/trailing `XXX` (or one preceded by a chapter keyword) is treated as a heading numeral, not an incomplete-translation marker.
+
 ## [0.22.7.0] - 2026-06-23
 
 ### Added

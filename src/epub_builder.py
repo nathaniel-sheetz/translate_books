@@ -109,14 +109,16 @@ def synthesize_chapter_heading(
 
 
 def _first_nonempty_line(text: str) -> str:
-    """Return the first non-blank line of ``text`` (stripped), or ''.
+    """Return the first non-blank, non-image line of ``text`` (stripped), or ''.
 
     For front/back matter the splitter prepends the section heading to the body,
     so after translation this line *is* the translated heading (e.g. 'Prólogo').
+    Skip ``[IMAGE:...]`` placeholder lines, which the splitter may prepend ahead
+    of the heading: an image token is never a valid section label.
     """
     for line in (text or '').split('\n'):
         stripped = line.strip()
-        if stripped:
+        if stripped and not _IMAGE_RE.match(stripped):
             return stripped
     return ''
 
