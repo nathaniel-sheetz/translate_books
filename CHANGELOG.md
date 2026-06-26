@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1.1] - 2026-06-26
+
+### Changed
+- **Browsing guidance: read a fact off a static public page with a one-shot `WebFetch`, not the `/browse` skill.** `CLAUDE.md`'s "use `/browse` for all web browsing" rule is scoped to interactive/QA browsing of the app under development; the translate-harness skill now tells the book-identification beat to `WebFetch` the source URL rather than loading the ~600-line browser skill to read one fact.
+
 ## [0.23.1.0] - 2026-06-26
 
 ### Fixed
