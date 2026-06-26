@@ -619,12 +619,17 @@ def split_book_into_chapters(
         first_chapter_start = len(book_text)
         last_chapter_end = len(book_text)
 
+    # Detect drop_matter_patterns (Contents, Title Page, ...) alongside real
+    # front matter so standalone boilerplate headings that sit before the first
+    # chapter become sections _add_section can record + strip. Without this they
+    # were discarded silently by position and never reached collect_dropped, so
+    # `setup` reported `dropped: []` despite the strip (friction log #28).
     front_sections = _find_matter_sections(
         book_text,
         region_start=0,
         region_end=first_chapter_start,
         user_titles=front_matter_titles,
-        builtin_patterns=front_patterns,
+        builtin_patterns=front_patterns + drop_patterns,
         kind="front_matter",
     )
 
@@ -678,7 +683,7 @@ def split_book_into_chapters(
             region_start=last["start_pos"],
             region_end=len(book_text),
             user_titles=back_matter_titles,
-            builtin_patterns=back_patterns,
+            builtin_patterns=back_patterns + drop_patterns,
             kind="back_matter",
         )
         if candidate_back:
@@ -692,7 +697,7 @@ def split_book_into_chapters(
             region_start=0,
             region_end=len(book_text),
             user_titles=back_matter_titles,
-            builtin_patterns=back_patterns,
+            builtin_patterns=back_patterns + drop_patterns,
             kind="back_matter",
         )
 

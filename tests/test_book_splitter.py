@@ -332,6 +332,43 @@ class TestFrontBackMatterDetection:
         assert [s.number for s in sections] == [1, 2]
         assert dropped == [{"label": "Contents", "reason": "boilerplate"}]
 
+    def test_undeclared_front_matter_boilerplate_is_recorded(self):
+        """Regression (friction log #28): standalone Contents / List of
+        Illustrations / Copyright headings before the first chapter — not
+        declared as front_matter_titles and not grabbed by the roman pattern —
+        must still be recorded in `dropped`, not discarded silently by position.
+        Before the fix `dropped` came back empty even though the strip happened,
+        so SKILL.md's 'confirm `dropped`' step was impossible to perform."""
+        text = (
+            "The Red Mustang\n\n"
+            + "by William O. Stoddard\n\n"
+            + "Contents\n\n"
+            + "Chapter I. The Horse .... 5\nChapter II. The Rider .... 20\n\n"
+            + "List of Illustrations\n\n"
+            + "The Red Mustang ... frontispiece\n\n"
+            + "Copyright\n\n"
+            + "Copyright 1890 by Harper & Brothers\n\n"
+            + "Chapter I\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Chapter II\n\n"
+            + CHAPTER_BODY
+        )
+        dropped = []
+        sections = split_book_into_chapters(
+            text,
+            pattern_type="roman",
+            collect_dropped=dropped,
+        )
+        # The two real chapters survive and renumber from 1; nothing kept as matter.
+        assert [s.kind for s in sections] == ["chapter", "chapter"]
+        assert [s.number for s in sections] == [1, 2]
+        # Every boilerplate heading is accounted for, in document order.
+        assert dropped == [
+            {"label": "Contents", "reason": "boilerplate"},
+            {"label": "List Of Illustrations", "reason": "boilerplate"},
+            {"label": "Copyright", "reason": "boilerplate"},
+        ]
+
 
 # ---------------------------------------------------------------------------
 # save_chapters_to_files writes manifest

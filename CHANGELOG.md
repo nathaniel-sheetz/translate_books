@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1.2] - 2026-06-26
+
+### Fixed
+- **`setup` now reports stripped boilerplate in `dropped` instead of silently discarding it (#28).** Standalone front/back-matter headings (Contents, List of Illustrations, Copyright) that sit before the first chapter and aren't declared as `front_matter_titles` were dropped by position and never reached `collect_dropped`, so `setup` returned `dropped: []` despite the strip — making the harness's "confirm `dropped`" step impossible. The drop-matter patterns are now scanned alongside real front/back matter so these headings become recorded, strippable sections.
+
+### Changed
+- **`show-translation` output schema is documented concretely.** The harness `OUTPUT_SCHEMAS` entry and SKILL.md now spell out the nested `chapters[] → chunks[] → translated_text` shape (with `source_text` sibling), steering readers away from writing a `python` probe that guesses a top-level `chunks`/`items` list.
+
 ## [0.23.1.1] - 2026-06-26
 
 ### Changed

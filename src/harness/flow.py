@@ -1789,7 +1789,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "error": "present only on a per-chapter aligner failure",
     },
     "show-translation": {
-        "chapters": "list of {chapter_id, total_chunks, translated_chunks, chunks:[...]}",
+        "chapters": "list of {chapter_id, total_chunks, translated_chunks, chunks:[{id, position, status, has_translation, source_words, translation_words, translated_text, source_text}]}",
         "available_chapters": "all chapter ids discovered",
         "chunks_dir": "path to chunks/",
         "shown_chunks": "number of chunk rows returned (capped by --max-chunks)",
