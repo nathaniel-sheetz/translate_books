@@ -551,9 +551,12 @@ chunk files:
 ```bash
 python scripts/harness.py show-translation --project projects/<slug> --chapters <set> --max-chunks 4
 ```
-Read the result from `OUTPUT_JSON` (`.harness/last_output.json`). Committed translations live in
-`projects/<slug>/chunks/*.json` — **`translated_text`** holds the target-language prose, **`source_text`**
-the original. `--max-chunks` caps the sample; add `--no-source` for translation-only.
+Read the result from `OUTPUT_JSON` (`.harness/last_output.json`) — do **not** write a `python` probe that
+guesses the shape (it is **not** a top-level `chunks`/`items`/`samples` list). The structure nests
+`chapters[] → chunks[] → translated_text`: the first chunk's prose is
+`result["chapters"][0]["chunks"][0]["translated_text"]`, and its English is the sibling `["source_text"]`.
+Committed translations also live in `projects/<slug>/chunks/*.json`. `--max-chunks` caps the sample; add
+`--no-source` for translation-only.
 
 **4B-f. Translate the rest (if a subset was done).** If you only did a review batch, prompt the user to
 translate the **remaining** chapters now, noting the **same spawn mode/window as before** will be used
