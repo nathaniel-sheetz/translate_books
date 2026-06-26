@@ -30,17 +30,15 @@ def format_candidates_for_prompt(candidates: list[dict]) -> str:
         lines = []
         for c in candidates:
             term = c.get("term", c.get("english", ""))
-            term_type = c.get("type_guess", c.get("type", "unknown"))
             freq = c.get("frequency", "?")
-            lines.append(f"- {term} (type guess: {term_type}, frequency: {freq})")
+            lines.append(f"- {term} (frequency: {freq})")
         return "\n".join(lines)
 
     lines: list[str] = []
     for i, c in enumerate(candidates, 1):
         term = c.get("term", c.get("english", ""))
-        term_type = c.get("type_guess", c.get("type", "unknown"))
         freq = c.get("frequency", "?")
-        lines.append(f"{i}. {term}  [{term_type} | freq={freq}]")
+        lines.append(f"{i}. {term}  [freq={freq}]")
         contexts = c.get("contexts") or []
         if not contexts:
             lines.append("   (no in-text context found)")

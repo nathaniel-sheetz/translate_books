@@ -772,8 +772,8 @@ class TestBootstrapPromptFullTextMode:
         assert "SOURCE TEXT SAMPLE" in prompt
         assert "SAMPLE_SOURCE_TEXT" in prompt
         # legacy single-line candidate format
-        assert "- Nelson (type guess: character, frequency: 5)" in prompt
-        assert "- Copenhagen (type guess: place, frequency: 12)" in prompt
+        assert "- Nelson (frequency: 5)" in prompt
+        assert "- Copenhagen (frequency: 12)" in prompt
         # word-mode markers should be absent
         assert "IN ORDER OF FIRST APPEARANCE" not in prompt
 
@@ -827,9 +827,9 @@ class TestBootstrapPromptWordMode:
         )
         # Numbered headers in appearance order
         assert "1. Nelson" in prompt
-        assert "[character | freq=5]" in prompt
+        assert "[freq=5]" in prompt
         assert "2. Copenhagen" in prompt
-        assert "[place | freq=3]" in prompt
+        assert "[freq=3]" in prompt
         # Each context rendered as `   {label}: "..."`
         assert 'source: "Lord Nelson stood on the deck."' in prompt
         assert 'source: "Then Nelson signalled the fleet."' in prompt
