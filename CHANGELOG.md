@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1.0] - 2026-06-26
+
+### Fixed
+- **Glossary extraction no longer emits underscore-twin junk candidates (#27).** Project Gutenberg's paired-underscore italic markers (`_Gaudenzia_`) are stripped before tokenizing, so an italicized name no longer becomes a separate candidate from its plain spelling. The fix lives in the shared extractor, covering both the GUI and harness paths.
+
+### Changed
+- **The harness glossary beat extracts from the cleanest available text (chunks/ → chapters/), not raw `source.txt` (#27).** Front matter (TOC, copyright, chapter-title fragments) is excluded from candidate extraction, mirroring the GUI route; `glossary_prepare` reports the chosen `source_kind` and falls back to `source.txt` only when neither chunks nor chapters exist.
+
 ## [0.23.0.0] - 2026-06-25
 
 ### Added

@@ -324,6 +324,28 @@ def test_glossary_commit_writes_valid_glossary(project: Path):
     assert len(validate_glossary_file(project / "glossary.json").terms) == 2
 
 
+def test_glossary_prepare_reads_clean_chapters_not_front_matter(project: Path):
+    # A front-matter-only sentinel (fake publisher) repeated enough to clear
+    # min_frequency, planted ONLY in source.txt. Because glossary_prepare now
+    # extracts from the clean chapters/ text, the sentinel must NOT surface in
+    # the prompt — proving front matter (TOC/copyright) is excluded (#27).
+    front_matter = (
+        "Published by Zorblatt and Zorblatt Press. "
+        "Copyright Zorblatt. All rights reserved by Zorblatt. "
+        "Printed for Zorblatt by Zorblatt House.\n\n"
+    )
+    (project / "source.txt").write_text(front_matter + FIXTURE_SOURCE, encoding="utf-8")
+
+    prep = flow.glossary_prepare(str(project))
+
+    # The fixture has chapters/ but no chunks/, so the clean loader uses chapters/.
+    assert prep["source_kind"] == "chapters"
+    prompt = Path(prep["prompt_path"]).read_text(encoding="utf-8")
+    assert "Zorblatt" not in prompt
+    # Control: a real character from the chapter body is still extracted.
+    assert "Thomas" in prompt
+
+
 def test_glossary_commit_warns_on_ascii_folded_spanish(project: Path):
     # An all-ASCII Spanish glossary commits, but surfaces a non-blocking accent-stripping
     # warning the approval gate shows the user (#21).

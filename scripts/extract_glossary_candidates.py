@@ -1266,6 +1266,12 @@ def extract_candidates(
     # Normalize curly/modifier apostrophes to straight so contractions like
     # `doesn’t` tokenize as one word and dict checks succeed.
     text = text.translate(_APOSTROPHE_NORMALIZE)
+    # Project Gutenberg marks italics with paired underscores (_Gaudenzia_).
+    # `_` is part of \w, so without this the tokenizer keeps it and `_Gaudenzia_`
+    # becomes a junk twin of `Gaudenzia`. Gutenberg uses `_` only as an italic
+    # delimiter around already-spaced runs, so removing every `_` is safe and
+    # rejoins italic possessives (`_Misty_'s` -> `Misty's`).
+    text = text.replace("_", "")
     sentences = split_into_sentences(text)
     total_words = count_words(text)
     unique_words = len(set(t.lower() for t in tokenize(text)))
