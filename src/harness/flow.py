@@ -622,8 +622,13 @@ def glossary_prepare(project: str, *, max_candidates: int = 200) -> dict:
     from scripts.extract_glossary_candidates import extract_candidates
     from src.glossary_bootstrap import build_glossary_prompt
     from src.style_guide_wizard import load_source_sample
+    from src.utils.source_text import load_clean_source_text
 
-    source = _read(project_dir / "source.txt")
+    # Extract from the cleanest available text (chunks/ -> chapters/), so front
+    # matter (TOC, copyright, chapter-title fragments) isn't fed to the
+    # extractor. Mirrors the GUI route; falls back to raw source.txt only if
+    # neither exists. See FRICTION_LOG_5 #27 (151-vs-200 candidate gap).
+    source, _, source_kind = load_clean_source_text(project_dir)
     with _quiet_stdout():
         report = extract_candidates(source, verbose=False)
     candidates = [c.model_dump() for c in report.candidates[:max_candidates]]
@@ -637,6 +642,7 @@ def glossary_prepare(project: str, *, max_candidates: int = 200) -> dict:
     return {
         "prompt_path": str(prompt_path),
         "candidate_count": len(candidates),
+        "source_kind": source_kind,  # "chunks"/"chapters" => front matter excluded; "source" => not
         "style_guide_loaded": bool(style_guide),
         "draft_path": str(hdir / "glossary_draft.json"),
         "instructions": (

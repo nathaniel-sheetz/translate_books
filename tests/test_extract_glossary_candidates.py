@@ -1467,6 +1467,37 @@ class TestCurlyApostropheHandling:
             )
 
 
+class TestGutenbergItalicUnderscores:
+    """Project Gutenberg marks italics with paired underscores (``_word_``).
+    Those must be stripped before tokenizing so ``_Gaudenzia_`` doesn't become a
+    junk twin of ``Gaudenzia`` (FRICTION_LOG_5 #27). The fix lives in the shared
+    extractor, so it covers both the GUI and harness paths."""
+
+    def test_italic_name_collapses_to_single_candidate(self):
+        text = (
+            "The filly _Gaudenzia_ ran fast. "
+            "Everyone cheered for _Gaudenzia_ at the gate. "
+            "Then Gaudenzia crossed the line first. "
+            "Gaudenzia was the pride of the stable."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        # No candidate key carries an underscore (no `_Gaudenzia_` twin).
+        assert all("_" not in c.term for c in report.candidates)
+        # The bare and italic spellings merge into one `Gaudenzia` candidate.
+        gaudenzia = [c for c in report.candidates if c.term.lower() == "gaudenzia"]
+        assert len(gaudenzia) == 1
+
+    def test_italic_phrase_no_underscore_terms(self):
+        text = (
+            "He admired _the Black Stallion_ from afar. "
+            "The Black Stallion galloped past. "
+            "Again the Black Stallion thundered by. "
+            "People talked about _the Black Stallion_ for days."
+        )
+        report = extract_candidates(text, min_frequency=2, max_candidates=200)
+        assert all("_" not in c.term for c in report.candidates)
+
+
 class TestTitlePeriodsInCandidates:
 
     def test_proper_noun_keeps_mrs_period(self):
