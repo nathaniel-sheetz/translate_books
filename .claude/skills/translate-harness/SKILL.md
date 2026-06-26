@@ -163,6 +163,12 @@ title-slug already exists, the new project gets a `-2`, `-3`, … suffix. Pass `
 explicitly only to **re-run on an existing project** (it's used verbatim and reuses that folder;
 relying on `--title` would mint a new numbered folder instead).
 
+**Don't launch a browser to identify the book.** To get the title/author for the slug, make a
+single `WebFetch` on the source URL. Never invoke the `/browse` (or any browser) skill here: it
+loads its whole ~600-line skill body into context just to read one fact off a static page.
+`CLAUDE.md`'s "use `/browse` for all web browsing" rule is about interactive/QA browsing of the app
+under development — reading a public page is the carve-out.
+
 ```bash
 python scripts/harness.py setup \
   --target-lang Spanish --locale mx --model claude-sonnet-4-6 \
