@@ -649,8 +649,8 @@ class TestFormatCandidatesForPrompt:
             {"term": "Cadiz", "type_guess": "place", "frequency": 3},
         ]
         result = format_candidates_for_prompt(candidates)
-        assert "- Nelson (type guess: character, frequency: 5)" in result
-        assert "- Cadiz (type guess: place, frequency: 3)" in result
+        assert "- Nelson (frequency: 5)" in result
+        assert "- Cadiz (frequency: 3)" in result
 
     def test_word_mode_path_when_some_contexts_empty(self):
         """When ANY candidate has a non-empty 'contexts' list, word-mode layout

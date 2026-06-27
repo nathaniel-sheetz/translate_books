@@ -606,7 +606,7 @@ def setup_extract_candidates(project_id):
         max_zipf_mixed=3.0 + zipf_offset,
     )
     candidates = [
-        {"term": c.term, "type_guess": c.type_guess.value, "frequency": c.frequency,
+        {"term": c.term, "frequency": c.frequency,
          "context_sentence": c.context_sentence}
         for c in report.candidates
     ]

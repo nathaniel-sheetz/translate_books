@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1.3] - 2026-06-26
+
+### Changed
+- **Glossary creation no longer surfaces unreliable candidate `type_guess` labels.** The heuristic type guess (character/place/concept/technical/other) was a noisy signal that leaked into the bootstrap prompts, the `/extract-candidates` API response, and the CLI extraction summary, where it risked anchoring the LLM on a wrong guess. The guess is now kept purely as an internal ranking/dedup signal and dropped from all surfaced output; the bootstrap prompts instead instruct the model to infer `type` from how each term is used in the excerpts.
+
 ## [0.23.1.2] - 2026-06-26
 
 ### Fixed

@@ -14,7 +14,7 @@ SOURCE TEXT SAMPLE (for context):
 For each candidate, return a JSON object with:
 - "english": the original English term (exactly as given)
 - "spanish": your proposed translation
-- "type": one of "character", "place", "concept", "technical", "other"
+- "type": one of "character", "place", "concept", "technical", "other" — infer from how the term is used in the excerpts/source (person → character, location → place, abstract idea → concept, domain/technical word → technical, else other)
 - "context": a brief note (1 sentence) on usage or disambiguation
 - "alternatives": array of 0-2 alternative translations (empty array if none)
 

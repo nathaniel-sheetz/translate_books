@@ -408,7 +408,7 @@ The prompt is built by `build_glossary_prompt()` in `src/glossary_bootstrap.py`.
 The legacy shape. One line per candidate, plus the first 10 KB of source text appended for context. Each candidate line is:
 
 ```
-- King Alfred (type guess: character, frequency: 7)
+- King Alfred (frequency: 7)
 ```
 
 Use when you want the LLM to see a representative chunk of the book's prose. Cheaper to build (no per-term scan).
@@ -418,11 +418,11 @@ Use when you want the LLM to see a representative chunk of the book's prose. Che
 Per-term context fragments, sorted by first appearance in the book. Each candidate is rendered as a numbered header plus 1–2 short fragments showing the term in situ:
 
 ```
-1. King Alfred  [character | freq=7]
+1. King Alfred  [freq=7]
    source: "KING ALFRED AND THE CAKES. [IMAGE:images/image_005 ..."
    source: "KING ALFRED AND THE CAKES. [IMAGE:images/image_005.jpg:KING ALFRED AND THE CAKES.] Many years ago ..."
 
-2. Alfred  [other | freq=10]
+2. Alfred  [freq=10]
    source: "KING ALFRED AND THE CAKES. [IMAGE:images/image_005 ..."
    ...
 ```
@@ -455,7 +455,7 @@ Both prompts ask for a JSON array of objects, parsed by `parse_glossary_response
 
 Dashboard wires the same pipeline into two endpoints:
 
-- `POST /api/setup/<project_id>/extract-candidates` — accepts `{ zipf_offset: -1.0..+1.0 }`. The offset is added to both `max_zipf_capitalized` (default 4.0) and `max_zipf_mixed` (default 3.0). Clamped to `[-1, +1]` server-side. Returns the post-rank, post-cap candidate list (each item includes `term`, `type_guess`, `frequency`, and `context_sentence`).
+- `POST /api/setup/<project_id>/extract-candidates` — accepts `{ zipf_offset: -1.0..+1.0 }`. The offset is added to both `max_zipf_capitalized` (default 4.0) and `max_zipf_mixed` (default 3.0). Clamped to `[-1, +1]` server-side. Returns the post-rank, post-cap candidate list (each item includes `term`, `frequency`, and `context_sentence`).
 - `POST /api/setup/<project_id>/prompts/glossary` and `POST /api/setup/<project_id>/.../generate` — accept `{ candidates, target_lang, glossary_guidance, context_mode }` and delegate to `_build_glossary_prompt_for_request()`. Word-mode requests scan the full project text on the server and enrich each candidate with fragments before building the prompt.
 
 UI controls:
@@ -475,7 +475,6 @@ Web defaults (`words_before=10`, `words_after=6`, `fragments_per_term=2`) curren
   "candidates": [
     {
       "term": "Uncle Paul",
-      "type_guess": "character",
       "frequency": 96,
       "score": 0.935,
       "context_sentence": "The children gathered around Uncle Paul in the garden.",

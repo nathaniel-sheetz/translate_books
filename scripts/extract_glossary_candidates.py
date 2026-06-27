@@ -1490,10 +1490,6 @@ Examples:
 
 def print_summary(report: CandidateReport, source_path: Path, output_path: Optional[Path]):
     """Print extraction summary to stdout."""
-    type_counts: Counter = Counter()
-    for c in report.candidates:
-        type_counts[c.type_guess.value] += 1
-
     print("=" * 70)
     print("Glossary Candidate Extraction")
     print("=" * 70)
@@ -1503,10 +1499,6 @@ def print_summary(report: CandidateReport, source_path: Path, output_path: Optio
     print(f"Unique words: {report.total_unique_words:,}")
     print()
     print(f"Candidates found: {len(report.candidates)}")
-    for type_name in ["character", "place", "technical", "concept", "other"]:
-        count = type_counts.get(type_name, 0)
-        if count > 0:
-            print(f"  {type_name.upper():12s}: {count}")
     print()
     if report.excluded_glossary_terms > 0:
         print(f"Excluded (already in glossary): {report.excluded_glossary_terms}")
@@ -1624,7 +1616,7 @@ def main():
 
         # Build candidate list for prompt
         candidates = [
-            {"term": c.term, "type_guess": c.type_guess.value, "frequency": c.frequency}
+            {"term": c.term, "frequency": c.frequency}
             for c in report.candidates
         ]
 
