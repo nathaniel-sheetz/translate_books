@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1.4] - 2026-06-27
+
+### Fixed
+- **The concordance search field no longer clips the ES|EN toggle on narrow phones.** The `.search-input` flex item kept its default `min-width: auto`, so it refused to shrink below its content width and pushed the `flex: 0 0 auto` language toggle off-screen on small viewports. Adding `min-width: 0` lets the field shrink and keeps the toggle visible.
+
 ## [0.23.1.3] - 2026-06-26
 
 ### Changed

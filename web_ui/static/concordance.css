@@ -52,6 +52,7 @@
 
 .search-input {
     flex: 1;
+    min-width: 0;            /* allow the field to shrink so the ES|EN toggle stays visible on narrow phones */
     min-height: 44px;
     padding: 8px 12px;
     font-size: 18px;
