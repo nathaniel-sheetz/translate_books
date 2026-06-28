@@ -236,7 +236,16 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         <a href="/read/" class="back-link" style="margin-bottom:0">&larr; {{ t.projects_back }}</a>
         <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode">🌙</button>
     </div>
-    <h1>{{ project_title or project_id }}</h1>
+    <div style="display:flex;align-items:center;gap:8px;">
+        <h1 style="margin:0;">{% if lang == 'es' and project_spanish_title %}{{ project_spanish_title }}{% else %}{{ project_title or project_id }}{% endif %}</h1>
+        <a href="/project/{{ project_id }}" class="topbar-icon-btn" title="{{ t.dashboard_btn }}" aria-label="{{ t.dashboard_btn }}">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+        </a>
+    </div>
     {% if has_corrections %}
     <div class="chapter-banner banner-warn" id="corrections-banner">
         <span>{{ t.pending_corrections }}</span>
@@ -284,15 +293,12 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                     {%- if ch.footnote_count > 0 -%}
                         <span class="badge badge-footnote">{{ ch.footnote_count }} {{ t.badge_fn }}</span>
                     {%- endif -%}
-                    {%- if ch.flag_count > 0 -%}
-                        <span class="badge badge-flag">{{ ch.flag_count }} {{ t.badge_flag }}</span>
-                    {%- endif -%}
                     {%- if ch.low_confidence -%}
                         <span class="badge badge-warn">{{ ch.confidence }}% {{ t.badge_aligned }}</span>
                     {%- endif -%}
-                    {%- if ch.reviewed and ch.total_ann == 0 and not ch.low_confidence -%}
+                    {%- if ch.reviewed -%}
                         <span class="badge badge-clean">{{ t.badge_reviewed }}</span>
-                    {%- elif not ch.reviewed and ch.total_ann == 0 and not ch.low_confidence -%}
+                    {%- elif ch.total_ann == 0 and not ch.low_confidence -%}
                         <span class="badge badge-unread">{{ t.badge_unread }}</span>
                     {%- endif -%}
                 </span>
