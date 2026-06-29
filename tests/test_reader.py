@@ -51,6 +51,25 @@ def project_with_alignment(tmp_path, monkeypatch):
     return proj_dir
 
 
+def _write_annotations(proj_dir, records):
+    with open(proj_dir / "annotations.jsonl", "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def _write_reviewed(proj_dir, chapter_ids):
+    (proj_dir / "reviewed.json").write_text(
+        json.dumps({ch: "2026-06-27T00:00:00Z" for ch in chapter_ids}),
+        encoding="utf-8",
+    )
+
+
+def _write_config(proj_dir, **config):
+    (proj_dir / "project.json").write_text(
+        json.dumps(config, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 class TestReaderProjectList:
     def test_projects_page_renders(self, client, project_with_alignment):
         rv = client.get("/read/")
@@ -73,6 +92,45 @@ class TestReaderChapterList:
     def test_project_not_found(self, client, project_with_alignment):
         rv = client.get("/read/nonexistent")
         assert rv.status_code == 404
+
+    def test_flag_annotations_folded_into_review_count(self, client, project_with_alignment):
+        # word_choice + inconsistency + flag all count toward the single "to
+        # review" badge; the standalone flag badge is no longer rendered.
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice"},
+            {"chapter_id": "chapter_01", "es_idx": 1, "type": "inconsistency"},
+            {"chapter_id": "chapter_01", "es_idx": 2, "type": "flag"},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "badge-flag" not in html
+        assert "3 to review" in html
+
+    def test_reviewed_chapter_always_shows_reviewed_badge(self, client, project_with_alignment):
+        # A reviewed chapter shows the "reviewed" badge even with outstanding
+        # annotations (previously gated on total_ann == 0).
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice"},
+        ])
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "badge-clean" in html
+        assert ">reviewed<" in html
+        assert "badge-unread" not in html
+
+    def test_spanish_title_shown_when_lang_es(self, client, project_with_alignment):
+        # With the UI language set to Spanish, the chapters header uses the
+        # project's spanish_title rather than the English title.
+        _write_config(project_with_alignment, title="English Title", spanish_title="Titulo Espanol")
+        client.set_cookie("reader_lang", "es")
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "Titulo Espanol" in html
+        assert "<h1" in html and "English Title" not in html
 
 
 class TestReaderView:

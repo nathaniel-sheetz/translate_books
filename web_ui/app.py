@@ -1027,9 +1027,11 @@ def reader_chapters(project_id):
             ch_id = f.stem
             confidence = data.get("high_confidence_pct", 0)
             ann = all_annotations.get(ch_id, {})
-            review_count = ann.get("word_choice", 0) + ann.get("inconsistency", 0)
+            # Fold the three review-type annotations (word choice, inconsistency,
+            # and "Other"/flag) into one "to review" count; footnotes stay separate
+            # because they feed endnotes.
+            review_count = ann.get("word_choice", 0) + ann.get("inconsistency", 0) + ann.get("flag", 0)
             footnote_count = ann.get("footnote", 0)
-            flag_count = ann.get("flag", 0)
             total_ann = sum(ann.values())
 
             entry = manifest.get(ch_id) or {}
@@ -1041,7 +1043,6 @@ def reader_chapters(project_id):
                 "low_confidence": confidence < 90,
                 "review_count": review_count,
                 "footnote_count": footnote_count,
-                "flag_count": flag_count,
                 "total_ann": total_ann,
                 "reviewed": ch_id in reviewed,
             })
@@ -1051,6 +1052,7 @@ def reader_chapters(project_id):
     return render_template(
         "reader.html", mode="chapters",
         project_id=project_id, project_title=_project_title(project_id),
+        project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
         chapters=chapters,
         has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
     )
