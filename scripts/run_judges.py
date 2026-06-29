@@ -176,10 +176,16 @@ def main(argv: list[str] | None = None) -> int:
         for result, payload in zip(results, serialized):
             # Only chunk-keyed results map to an evaluations/<chunk>.json file.
             if result.target_type == "chunk":
-                path = merge_judge_result(
-                    project_dir, result.target_id, result.eval_name, payload
-                )
-                persisted.append(str(path))
+                try:
+                    path = merge_judge_result(
+                        project_dir, result.target_id, result.eval_name, payload
+                    )
+                    persisted.append(str(path))
+                except Exception as exc:  # noqa: BLE001 - persist errors must not corrupt stdout JSON
+                    import logging
+                    logging.getLogger(__name__).error(
+                        "Failed to persist %s/%s: %s", result.target_id, result.eval_name, exc
+                    )
 
     _emit(
         {

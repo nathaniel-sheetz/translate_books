@@ -95,12 +95,9 @@ def extract_json(text: str) -> str:
             if idx == -1:
                 continue
             try:
-                decoder.raw_decode(candidate[idx:])
+                _, end = decoder.raw_decode(candidate[idx:])
             except json.JSONDecodeError:
                 continue
-            # raw_decode succeeded — return from the opener to the end of the
-            # decoded value.
-            obj, end = decoder.raw_decode(candidate[idx:])
             return candidate[idx: idx + end]
 
     return stripped
