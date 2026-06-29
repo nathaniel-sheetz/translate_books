@@ -125,9 +125,14 @@ python scripts/batch_pipeline.py projects/my-book --stages evaluate,combine
 
 # Build EPUB
 python scripts/build_epub.py projects/my-book
+
+# Run LLM judges (dialogue compliance, etc.) — dry-run by default
+python scripts/run_judges.py --project my-book --judge dialogue --scope chapter:chapter_03
+python scripts/run_judges.py --project my-book --suite default --scope chunk:chapter_03_chunk_000 --persist --confirm
 ```
 
 See [`docs/BATCH_PIPELINE.md`](docs/BATCH_PIPELINE.md) for the batch CLI reference.
+See [`docs/JUDGES_FRAMEWORK.md`](docs/JUDGES_FRAMEWORK.md) for LLM judge usage and how to add new judges.
 
 ---
 
@@ -183,6 +188,7 @@ book_translation/
 │   ├── harness_guard.py        # Validation guards for translate-harness skill artifacts
 │   ├── edit_review_constants.py # EDIT_TAGS vocabulary (shared by report generator + web UI)
 │   ├── evaluators/             # Pluggable quality evaluators
+│   ├── judges/                 # Tailored LLM judges (verdict / corrector framework)
 │   └── utils/                  # File I/O, text utilities, source loaders, glossary context helpers
 │
 ├── scripts/                    # CLI entry points
@@ -233,6 +239,7 @@ pytest --cov=src tests/            # With coverage
 | [`docs/CHUNKING_GUIDE.md`](docs/CHUNKING_GUIDE.md) | Chunking algorithm, configuration, and per-chapter overrides |
 | [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md) | Reader remove-text gesture |
 | [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md) | Reader sentence retranslate flow |
+| [`docs/JUDGES_FRAMEWORK.md`](docs/JUDGES_FRAMEWORK.md) | Tailored LLM judges framework: run named judges, add new judges, configure suites |
 | [`docs/LLM_JUDGE_EVALUATOR.md`](docs/LLM_JUDGE_EVALUATOR.md) | LLM-judge evaluator + model comparison harness |
 | [`docs/BATCH_PIPELINE.md`](docs/BATCH_PIPELINE.md) | CLI batch evaluate + combine |
 | [`docs/INGEST_GUTENBERG.md`](docs/INGEST_GUTENBERG.md) | Gutenberg HTML → source.txt |

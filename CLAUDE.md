@@ -2,7 +2,7 @@
 
 Use the `/browse` skill from gstack for **interactive/QA browsing of the app under development** (clicking through pages, verifying UI, dogfooding a flow). Never use `mcp__claude-in-chrome__*` tools. To read a single fact off a static public page (e.g. a book's title/author from its source URL), use a one-shot `WebFetch` — do **not** launch a browser skill for that.
 
-Available gstack skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /retro, /investigate, /document-release, /codex, /cso, /autoplan, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn.
+Available gstack skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /retro, /investigate, /document-release, /codex, /cso, /autoplan, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn, /judge-review.
 
 ## Skill routing
 
@@ -24,3 +24,4 @@ Key routing rules:
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
 - Translate a book conversationally, draft style guide/glossary in-chat → invoke translate-harness
+- Run LLM judges, check dialogue compliance, evaluate translation quality → invoke judge-review
