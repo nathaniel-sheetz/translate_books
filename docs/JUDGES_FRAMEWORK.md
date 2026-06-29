@@ -3,7 +3,8 @@
 A framework for small, single-purpose LLM evaluators ("judges") that you can run
 independently, as a suite, or from the **judge-review** skill. The first judge
 is a **dialogue-compliance checker** that verifies a Spanish translation follows
-the house dialogue rules in `prompts/dialogue.txt`.
+the house dialogue rules in `prompts/dialogue.txt` (the rules document) via
+the judge prompt template `prompts/judge_dialogue.txt`.
 
 This is distinct from the model-comparison **LLM judge** documented in
 [LLM_JUDGE_EVALUATOR.md](LLM_JUDGE_EVALUATOR.md): that one answers "is model A
@@ -65,6 +66,7 @@ The command prints one JSON object with a `_schema` block. `status` is `"ok"`,
 | `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
 | `--confirm` | false | Proceed past the cost gate |
 | `--persist` | false | Write findings into `evaluations/<chunk>.json` |
+| `--verbose` | false | Enable debug logging |
 
 ## Scopes
 
