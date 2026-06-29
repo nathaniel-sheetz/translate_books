@@ -96,11 +96,13 @@ def save_chunk_evaluation(
     *,
     enabled_evals: Optional[list[str]] = None,
     llm_judge: Optional[dict[str, Any]] = None,
+    judges: Optional[dict[str, Any]] = None,
 ) -> Path:
     """Persist a full evaluation run for ``chunk_id``.
 
     Overwrites any previous file — callers use :func:`merge_llm_judge_result`
-    to tack on the LLM judge section without losing the coded results.
+    and :func:`merge_judge_result` to tack on the LLM judge / tailored-judge
+    sections without losing the coded results.
 
     Args:
         project_dir: ``projects/<id>/`` directory.
@@ -112,6 +114,8 @@ def save_chunk_evaluation(
             ``None``, inferred from the ``results`` list in order.
         llm_judge: Optional existing llm_judge section to preserve when the
             caller is replacing the coded evaluation.
+        judges: Optional existing tailored-judge section (``{name: result}``)
+            to preserve when the caller is replacing the coded evaluation.
 
     Returns:
         Path to the written JSON file.
@@ -130,6 +134,7 @@ def save_chunk_evaluation(
         "results": serialized_results,
         "normalized_issues": [_serialize_issue(i) for i in normalized_issues],
         "llm_judge": llm_judge,
+        "judges": judges,
     }
 
     path = _eval_file(project_dir, chunk_id)
@@ -176,6 +181,44 @@ def merge_llm_judge_result(
         }
     payload["llm_judge"] = result
     payload["llm_judge_at"] = datetime.now().isoformat()
+
+    path = _eval_file(project_dir, chunk_id)
+    _atomic_write_json(path, payload)
+    return path
+
+
+def merge_judge_result(
+    project_dir: Path,
+    chunk_id: str,
+    judge_name: str,
+    result: dict[str, Any],
+) -> Path:
+    """Patch one tailored judge's entry in a chunk's ``judges`` section.
+
+    Stores ``result`` (a serialized :class:`EvalResult`) under
+    ``payload["judges"][judge_name]`` without disturbing coded results or the
+    quality ``llm_judge`` block. Creates a minimal shell file if no evaluation
+    exists yet, so a judge can run before the coded evaluators have.
+    """
+    payload = load_chunk_evaluation(project_dir, chunk_id)
+    if payload is None:
+        payload = {
+            "chunk_id": chunk_id,
+            "evaluated_at": datetime.now().isoformat(),
+            "enabled_evals": [],
+            "aggregated": None,
+            "results": [],
+            "normalized_issues": [],
+            "llm_judge": None,
+            "judges": None,
+        }
+
+    judges = payload.get("judges")
+    if not isinstance(judges, dict):
+        judges = {}
+    judges[judge_name] = result
+    payload["judges"] = judges
+    payload["judges_at"] = datetime.now().isoformat()
 
     path = _eval_file(project_dir, chunk_id)
     _atomic_write_json(path, payload)
@@ -284,11 +327,33 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
         chunk_id = data.get("chunk_id") or path.stem
         aggregated = data.get("aggregated") or {}
         severity = aggregated.get("issues_by_severity") or {}
+        errors = int(severity.get("error", 0) or 0)
+        warnings = int(severity.get("warning", 0) or 0)
+        info = int(severity.get("info", 0) or 0)
+        total = int(aggregated.get("total_issues", 0) or 0)
+
+        # Fold tailored-judge findings into the same badge counts so a chunk
+        # judged but not coded-evaluated still lights up (and vice versa).
+        judges = data.get("judges")
+        if isinstance(judges, dict):
+            for judge_result in judges.values():
+                if not isinstance(judge_result, dict):
+                    continue
+                for issue in judge_result.get("issues") or []:
+                    sev = (issue or {}).get("severity")
+                    if sev == "error":
+                        errors += 1
+                    elif sev == "warning":
+                        warnings += 1
+                    elif sev == "info":
+                        info += 1
+                    total += 1
+
         out[chunk_id] = {
-            "errors": int(severity.get("error", 0) or 0),
-            "warnings": int(severity.get("warning", 0) or 0),
-            "info": int(severity.get("info", 0) or 0),
-            "total": int(aggregated.get("total_issues", 0) or 0),
+            "errors": errors,
+            "warnings": warnings,
+            "info": info,
+            "total": total,
         }
 
     return out
@@ -422,10 +487,12 @@ def evaluate_and_persist_chunk(
     actually_ran = [r.eval_name for r in results]
 
     existing_llm = None
+    existing_judges = None
     if preserve_llm_judge:
         previous = load_chunk_evaluation(project_dir, chunk.id)
         if previous is not None:
             existing_llm = previous.get("llm_judge")
+            existing_judges = previous.get("judges")
 
     save_chunk_evaluation(
         project_dir,
@@ -435,6 +502,7 @@ def evaluate_and_persist_chunk(
         normalized,
         enabled_evals=actually_ran,
         llm_judge=existing_llm,
+        judges=existing_judges,
     )
 
     return {
@@ -449,6 +517,7 @@ __all__ = [
     "save_chunk_evaluation",
     "load_chunk_evaluation",
     "merge_llm_judge_result",
+    "merge_judge_result",
     "append_feedback",
     "load_feedback_for_chunk",
     "load_project_summary",
