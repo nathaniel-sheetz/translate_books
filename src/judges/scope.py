@@ -20,6 +20,7 @@ chunk_id.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from src.judges.base import JudgeTarget
@@ -51,7 +52,14 @@ def _target_from_chunk_path(path: Path) -> JudgeTarget | None:
     )
 
 
+_ID_RE = re.compile(r'^[A-Za-z0-9_\-]+$')
+
+
 def _build_chunk_targets(project_dir: Path, chunk_id: str) -> list[JudgeTarget]:
+    if not _ID_RE.match(chunk_id):
+        raise ScopeError(
+            f"Invalid chunk_id {chunk_id!r}: only letters, digits, underscores, and hyphens allowed."
+        )
     path = _chunks_dir(project_dir) / f"{chunk_id}.json"
     if not path.exists():
         raise ScopeError(f"Chunk file not found: {path}")
@@ -62,6 +70,10 @@ def _build_chunk_targets(project_dir: Path, chunk_id: str) -> list[JudgeTarget]:
 
 
 def _build_chapter_targets(project_dir: Path, chapter_id: str) -> list[JudgeTarget]:
+    if not _ID_RE.match(chapter_id):
+        raise ScopeError(
+            f"Invalid chapter_id {chapter_id!r}: only letters, digits, underscores, and hyphens allowed."
+        )
     chunks_dir = _chunks_dir(project_dir)
     if not chunks_dir.exists():
         raise ScopeError(f"No chunks/ directory in {project_dir}")

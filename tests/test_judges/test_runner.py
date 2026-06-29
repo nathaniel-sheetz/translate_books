@@ -67,3 +67,70 @@ def test_no_cost_limit_runs(monkeypatch):
     monkeypatch.setattr(runner, "run_judge", lambda jn, t, c: _ok_result(jn))
     out = runner.run_judge_suite(["dialogue"], [_target()], {}, cost_limit=None)
     assert out["status"] == "ok"
+
+
+def test_estimate_suite_cost_direct(monkeypatch):
+    """estimate_suite_cost returns a float without crashing on real (mocked) calls."""
+    monkeypatch.setattr(runner.llm_io, "estimate_call_cost", lambda *a, **k: 0.001)
+    cost = runner.estimate_suite_cost(["dialogue"], [_target()], {})
+    assert isinstance(cost, float)
+    assert cost >= 0.0
+
+
+def test_estimate_suite_cost_unknown_judge_skips(monkeypatch):
+    """estimate_suite_cost tolerates an unknown judge name (ValueError) gracefully."""
+    monkeypatch.setattr(runner.llm_io, "estimate_call_cost", lambda *a, **k: 0.01)
+    # 'bogus' is not in the registry; the template load will raise ValueError.
+    cost = runner.estimate_suite_cost(["bogus"], [_target()], {})
+    # Still runs but with empty template — should produce some cost from the target text.
+    assert isinstance(cost, float)
+
+
+def test_run_judge_suite_header_skips_bad_judge(monkeypatch):
+    """run_judge_suite header-build continues past a judge that raises ValueError."""
+    monkeypatch.setattr(runner, "estimate_suite_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr(runner, "run_judge", lambda jn, t, c: _ok_result(jn))
+    # 'bogus' will raise ValueError in get_judge inside the header-build loop.
+    out = runner.run_judge_suite(["bogus"], [_target()], {}, cost_limit=None)
+    assert out["status"] == "ok"
+    # The header judges dict should be empty (the bad judge was skipped).
+    assert out["run_header"]["judges"] == {}
+
+
+def test_run_judge_success_path(monkeypatch):
+    """run_judge returns the judge's EvalResult on the happy path (line 50)."""
+    from src.judges import registry
+    monkeypatch.setattr(registry, "get_judge", lambda name: _make_judge())
+    result = runner.run_judge("dialogue", _target(), {})
+    assert result.passed is True
+    assert result.eval_name == "dialogue"
+
+
+def _make_judge():
+    """Return a minimal Judge whose run() immediately returns an ok EvalResult."""
+    from src.judges.base import Judge, JudgeSpec, JudgeTarget
+    from src.models import EvalResult
+    from datetime import datetime
+
+    class _FixedJudge(Judge):
+        spec = JudgeSpec(
+            name="dialogue",
+            version="1.0.0",
+            kind="verdict",
+            template="judge_dialogue.txt",
+        )
+
+        def run(self, target: JudgeTarget, context):
+            return EvalResult(
+                eval_name="dialogue",
+                eval_version="1.0.0",
+                target_id=target.id,
+                target_type=target.target_type,
+                passed=True,
+                score=1.0,
+                issues=[],
+                metadata={},
+                executed_at=datetime.now(),
+            )
+
+    return _FixedJudge()

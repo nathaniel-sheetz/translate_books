@@ -51,8 +51,7 @@ _NONISSUE_RE = re.compile(
     r"|\bnot a (?:strict )?(?:rule )?violation\b"
     r"|\bthis is fine\b"
     r"|\bacceptable as (?:written|is)\b"
-    r"|\bno strict rule\b"
-    r"|\bborderline\b",
+    r"|\bno strict rule\b",
     re.I,
 )
 

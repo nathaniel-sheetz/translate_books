@@ -50,6 +50,7 @@ _SCHEMA = {
     "summary": "aggregate_results() rollup across all (judge x target) results",
     "results": "per (target, judge): target_id, judge, passed, score, issues[], metadata",
     "persisted": "evaluations/*.json paths written when --persist is set, else null",
+    "persist_errors": "list of '<chunk>/<judge>: <error>' strings for any failed persists, else null",
 }
 
 
@@ -169,10 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     serialized = [r.model_dump(mode="json") for r in results]
 
     persisted: list[str] | None = None
+    persist_errors: list[str] | None = None
     if args.persist:
         from web_ui.evaluations import merge_judge_result
 
         persisted = []
+        persist_errors = []
         for result, payload in zip(results, serialized):
             # Only chunk-keyed results map to an evaluations/<chunk>.json file.
             if result.target_type == "chunk":
@@ -186,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                     logging.getLogger(__name__).error(
                         "Failed to persist %s/%s: %s", result.target_id, result.eval_name, exc
                     )
+                    persist_errors.append(f"{result.target_id}/{result.eval_name}: {exc}")
 
     _emit(
         {
@@ -198,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
             "summary": outcome["aggregated"],
             "results": serialized,
             "persisted": persisted,
+            "persist_errors": persist_errors,
         }
     )
     return 0

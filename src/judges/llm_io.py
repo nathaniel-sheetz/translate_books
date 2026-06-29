@@ -47,7 +47,10 @@ class JudgeParseError(Exception):
 
 def load_template(name: str) -> str:
     """Load a prompt template by filename from the ``prompts/`` directory."""
-    return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+    resolved = (_PROMPTS_DIR / name).resolve()
+    if not resolved.is_relative_to(_PROMPTS_DIR.resolve()):
+        raise ValueError(f"Template path escapes prompts directory: {name!r}")
+    return resolved.read_text(encoding="utf-8")
 
 
 def prompt_version(name: str) -> str:

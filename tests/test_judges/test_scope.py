@@ -88,3 +88,32 @@ def test_designed_for_scopes_not_implemented(tmp_path):
         build_targets(tmp_path, "sentences:chapter_01:1,2")
     with pytest.raises(NotImplementedError):
         build_targets(tmp_path, "flags:chapter_01")
+
+
+def test_chapter_scope_no_chunks_dir_raises(tmp_path):
+    """chapter: scope raises ScopeError when there is no chunks/ directory at all."""
+    # tmp_path exists but has no chunks/ subdir
+    with pytest.raises(ScopeError, match="No chunks/ directory"):
+        build_targets(tmp_path, "chapter:chapter_01")
+
+
+def test_chapter_scope_all_untranslated_raises(tmp_path):
+    """chapter: scope raises ScopeError when all matching chunks lack translations."""
+    _write(tmp_path, _chunk("chapter_01_chunk_000", "chapter_01", 0, translated=None))
+    _write(tmp_path, _chunk("chapter_01_chunk_001", "chapter_01", 1, translated=None))
+    with pytest.raises(ScopeError, match="none are translated"):
+        build_targets(tmp_path, "chapter:chapter_01")
+
+
+@pytest.mark.parametrize("bad_id", ["../etc", "../../passwd", "x y", "a:b", "a/b"])
+def test_chunk_scope_rejects_invalid_ids(tmp_path, bad_id):
+    (tmp_path / "chunks").mkdir()
+    with pytest.raises(ScopeError, match="Invalid chunk_id"):
+        build_targets(tmp_path, f"chunk:{bad_id}")
+
+
+@pytest.mark.parametrize("bad_id", ["../etc", "../../passwd", "x y", "a:b", "a/b"])
+def test_chapter_scope_rejects_invalid_ids(tmp_path, bad_id):
+    (tmp_path / "chunks").mkdir()
+    with pytest.raises(ScopeError, match="Invalid chapter_id"):
+        build_targets(tmp_path, f"chapter:{bad_id}")

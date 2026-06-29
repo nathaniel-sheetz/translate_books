@@ -172,3 +172,85 @@ def test_unparseable_twice_returns_error_issue(monkeypatch):
     assert res.issues[0].severity == IssueLevel.ERROR
     assert res.score is None
     assert "error" in res.metadata
+
+
+# ---------------------------------------------------------------------------
+# coerce_severity
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_severity_already_issue_level():
+    from src.judges.base import coerce_severity
+    assert coerce_severity(IssueLevel.ERROR) == IssueLevel.ERROR
+
+
+def test_coerce_severity_string():
+    from src.judges.base import coerce_severity
+    assert coerce_severity("warning") == IssueLevel.WARNING
+
+
+def test_coerce_severity_invalid_falls_back_to_default():
+    from src.judges.base import coerce_severity
+    assert coerce_severity("bogus_level") == IssueLevel.WARNING
+
+
+def test_coerce_severity_custom_default():
+    from src.judges.base import coerce_severity
+    assert coerce_severity("not_real", IssueLevel.INFO) == IssueLevel.INFO
+
+
+# ---------------------------------------------------------------------------
+# Judge.name and Judge.version properties
+# ---------------------------------------------------------------------------
+
+
+def test_judge_name_and_version_properties():
+    judge = DialogueComplianceJudge()
+    assert judge.name == "dialogue"
+    assert judge.version == "1.1.0"
+
+
+# ---------------------------------------------------------------------------
+# VerdictJudge.make_result optional metadata fields
+# ---------------------------------------------------------------------------
+
+
+def test_make_result_without_optional_fields():
+    """make_result works when prompt_version, model, and provider are all None."""
+    judge = DialogueComplianceJudge()
+    result = judge.make_result(_target(), [], score=1.0)
+    assert result.metadata.get("judge_version") == "1.1.0"
+    assert result.metadata.get("judge_kind") == "verdict"
+    assert "prompt_version" not in result.metadata
+    assert "model" not in result.metadata
+    assert "provider" not in result.metadata
+
+
+def test_make_result_extra_metadata_merged():
+    """metadata kwarg entries are merged into the base metadata dict."""
+    judge = DialogueComplianceJudge()
+    result = judge.make_result(_target(), [], score=0.8, metadata={"custom": "x"})
+    assert result.metadata["custom"] == "x"
+    assert result.metadata["judge_version"] == "1.1.0"
+
+
+def test_make_result_model_and_provider_stamped():
+    """make_result stamps model and provider into metadata when they are provided."""
+    judge = DialogueComplianceJudge()
+    result = judge.make_result(
+        _target(), [], score=1.0, model="claude-3-5-haiku-20241022", provider="anthropic"
+    )
+    assert result.metadata["model"] == "claude-3-5-haiku-20241022"
+    assert result.metadata["provider"] == "anthropic"
+
+
+def test_dialogue_judge_uses_default_rules_when_ctx_empty(monkeypatch):
+    """When context has no dialogue_rules, the judge loads from prompts/dialogue.txt."""
+    monkeypatch.setattr(
+        llm_io,
+        "call_judge",
+        lambda *a, **k: '{"findings": [], "summary": "ok"}',
+    )
+    # Pass empty context — _load_default_rules() should be invoked (line 131).
+    res = DialogueComplianceJudge().run(_target(), {})
+    assert res.passed is True

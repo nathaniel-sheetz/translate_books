@@ -14,7 +14,10 @@ from __future__ import annotations
 import logging
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 from src.evaluators import aggregate_results
 from src.judges import llm_io
@@ -33,6 +36,7 @@ def _git_commit() -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=5,
+            cwd=_REPO_ROOT,
         )
         if out.returncode == 0:
             return out.stdout.strip()
