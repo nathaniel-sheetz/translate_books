@@ -43,6 +43,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Windows captured stdout defaults to the locale codec (cp1252), which mangles
+# every raya/guillemet/accent in the JSON we print (harness friction #5). Force
+# UTF-8 so dialogue excerpts survive on every platform. The hasattr guard keeps
+# this safe under pytest's captured streams, which lack ``reconfigure``.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 # Silence the urllib3/chardet version-mismatch warning ``requests`` emits at
 # import time so it can't corrupt the JSON an agent parses (harness friction #4).
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
@@ -100,19 +108,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def add_select(p: argparse.ArgumentParser) -> None:
-        """Project + judge/suite + scope + model/provider — shared by run & prepare."""
+    def add_select(p: argparse.ArgumentParser, *, multi_scope: bool = False) -> None:
+        """Project + judge/suite + scope + model/provider — shared by run & prepare.
+
+        ``multi_scope`` (prepare only) lets ``--scope`` repeat, so several chapters
+        render into one manifest and a single ``commit`` collects them all.
+        """
         p.add_argument("--project", required=True, help="Project id (under projects/) or path")
         group = p.add_mutually_exclusive_group(required=True)
         group.add_argument(
             "--judge", help=f"Single judge to run (one of: {', '.join(available_judges())})"
         )
         group.add_argument("--suite", help="Named suite of judges (e.g. 'default')")
-        p.add_argument(
-            "--scope",
-            required=True,
-            help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'",
-        )
+        if multi_scope:
+            p.add_argument(
+                "--scope",
+                required=True,
+                action="append",
+                metavar="SCOPE",
+                help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'. "
+                "Repeatable — pass --scope multiple times to stage several chapters "
+                "in one manifest for a single commit.",
+            )
+        else:
+            p.add_argument(
+                "--scope",
+                required=True,
+                help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'",
+            )
         p.add_argument("--model", default=None, help="Judge model id override")
         p.add_argument("--provider", default=None, help="Judge provider override")
 
@@ -142,7 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "prepare",
         help="Subagent backend: render per-(target,judge) prompts + manifest (no spend)",
     )
-    add_select(pp)
+    add_select(pp, multi_scope=True)
     pp.add_argument(
         "--worker-model",
         dest="worker_model",
@@ -155,6 +178,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Recommended workers to spawn per wave (default 5)",
+    )
+    pp.add_argument(
+        "--keep-drafts",
+        dest="keep_drafts",
+        action="store_true",
+        help="Don't clear existing worker drafts (re-prepare is otherwise destructive). "
+        "Use when re-preparing to recover a manifest without re-spawning workers.",
     )
     pp.add_argument("--verbose", action="store_true", help="Debug logging")
 
@@ -287,9 +317,10 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
             context=context,
             worker_model=args.worker_model,
             batch_size=args.batch_size,
+            keep_drafts=args.keep_drafts,
         )
     except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
-        _emit({"status": "error", "error": str(exc), "scope": args.scope})
+        _emit({"status": "error", "error": str(exc), "scopes": args.scope})
         return 1
 
     payload["project"] = str(project_dir)

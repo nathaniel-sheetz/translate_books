@@ -53,8 +53,12 @@ Shared flags (`run`, `prepare`):
 - `--persist` — write findings into `evaluations/<chunk>.json` (dashboard badges).
 
 `prepare` (subagent backend) adds:
+- `--scope` is **repeatable** here — pass it multiple times to stage several
+  chapters into one manifest for a single `commit` (see the multi-chapter note in B).
 - `--worker-model <tier>` (default `sonnet`) — pins each spawned `judge-worker`.
 - `--batch-size <n>` (default 5) — recommended workers per spawn wave.
+- `--keep-drafts` — don't clear existing worker drafts. Re-`prepare` is otherwise
+  destructive (it wipes the drafts for the pairs it re-renders).
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
 
@@ -91,15 +95,25 @@ python scripts/run_judges.py run --project understood-betsy \
 
 ### B. Subagent backend
 
-3b. **Prepare.** Render the prompts + manifest (no spend):
+3b. **Prepare.** Render the prompts + manifest (no spend). For a multi-chapter
+request, stage **every** chapter in one `prepare` by repeating `--scope` — they
+land in one manifest, one `commit` collects them all, and `usage_summary` is a
+single rollup (no manual summing across calls):
 ```bash
-python scripts/run_judges.py prepare --project understood-betsy \
-    --judge dialogue --scope chapter:chapter_03 [--worker-model sonnet] [--batch-size 5]
+python scripts/run_judges.py prepare --project understood-betsy --judge dialogue \
+    --scope chapter:chapter_05 --scope chapter:chapter_06 [--worker-model sonnet] [--batch-size 5]
 ```
 Relay `usage_summary` (pairs to judge, worker_model, batch_size; `estimated_api_cost`
 is the API-equivalent price, shown for context — nothing is spent). The **usage gate**
 is the subagent analog of the cost gate: no dollars, but spawning N workers consumes
 real session/rate usage. Get approval in a separate turn before spawning.
+
+**Re-`prepare` is destructive.** It clears the drafts for the pairs it re-renders,
+so it must never run while you have **uncommitted** worker drafts in flight — that
+throws away completed work and forces a re-spawn. Prepare the whole request once
+(all `--scope`s together); if you truly must re-prepare with good drafts present,
+pass `--keep-drafts`. Don't re-prepare just to "recover" a manifest — stage
+everything up front so you never need to.
 
 4b. **Spawn workers.** For each manifest entry, spawn one worker with the **Task** tool:
 `subagent_type: judge-worker`, `model:` = the manifest's `worker_model`, in bounded

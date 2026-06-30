@@ -119,11 +119,12 @@ def test_prepare_writes_prompt_and_manifest(tmp_path):
     )
     assert "—Hola." in prompt_text
 
-    # Manifest persisted with the scope so commit is self-contained.
+    # Manifest persisted with the scope(s) so commit is self-contained.
     manifest = json.loads(
         (tmp_path / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["scope"] == f"chunk:{cid}"
+    assert manifest["scopes"] == [f"chunk:{cid}"]
+    assert out["scopes"] == [f"chunk:{cid}"]
     assert manifest["worker_model"] == "sonnet"
     assert out["usage_summary"]["pairs"] == 1
 
@@ -137,6 +138,53 @@ def test_prepare_clears_stale_draft(tmp_path):
     # A second prepare must wipe the orphaned draft so commit can't read it.
     subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
     assert not draft.exists()
+
+
+def test_prepare_multiple_scopes_single_manifest(tmp_path):
+    """Repeated scopes render into one manifest a single commit can collect."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir(exist_ok=True)
+    save_chunk(_chunk("chapter_05_chunk_000", "chapter_05", 0), chunks_dir / "chapter_05_chunk_000.json")
+    save_chunk(_chunk("chapter_06_chunk_000", "chapter_06", 0), chunks_dir / "chapter_06_chunk_000.json")
+
+    out = subagent.prepare(
+        tmp_path, ["dialogue"], ["chapter:chapter_05", "chapter:chapter_06"]
+    )
+
+    assert out["scopes"] == ["chapter:chapter_05", "chapter:chapter_06"]
+    target_ids = {e["target_id"] for e in out["manifest"]}
+    assert target_ids == {"chapter_05_chunk_000", "chapter_06_chunk_000"}
+    assert out["usage_summary"]["pairs"] == 2
+
+    manifest = json.loads(
+        (tmp_path / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["scopes"] == ["chapter:chapter_05", "chapter:chapter_06"]
+    assert {e["target_id"] for e in manifest["entries"]} == target_ids
+
+
+def test_prepare_overlapping_scopes_dedup(tmp_path):
+    """An overlapping chapter:/chunk: pair must render the shared chunk only once."""
+    project, cid = _project_with_chunk(tmp_path)  # chapter_01 / chapter_01_chunk_000
+
+    out = subagent.prepare(
+        project, ["dialogue"], ["chapter:chapter_01", f"chunk:{cid}"]
+    )
+
+    assert len(out["manifest"]) == 1
+    assert out["usage_summary"]["pairs"] == 1
+
+
+def test_prepare_keep_drafts_preserves_existing(tmp_path):
+    """--keep-drafts lets a recovery re-prepare retain already-written worker output."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    draft = tmp_path / ".harness" / "judges" / f"{cid}.dialogue.draft.json"
+    draft.write_text(_GOOD_VERDICT, encoding="utf-8")
+
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}", keep_drafts=True)
+    assert draft.exists()
+    assert draft.read_text(encoding="utf-8") == _GOOD_VERDICT
 
 
 # ---------------------------------------------------------------------------

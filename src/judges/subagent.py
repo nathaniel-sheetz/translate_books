@@ -44,7 +44,7 @@ _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
     "manifest": "list of work entries: {target_id, target_type, judge, prompt_path, draft_path, source_word_count}",
     "manifest_path": "path to the written manifest.json (commit reads this)",
-    "scope": "the --scope that was resolved",
+    "scopes": "the list of --scope values resolved into this one manifest",
     "judges": "judge names rendered",
     "worker_model": "model tier to pin each spawned judge-worker to (default sonnet)",
     "batch_size": "recommended workers to spawn per wave",
@@ -74,19 +74,27 @@ def _judges_dir(project_dir: Path) -> Path:
 def prepare(
     project_dir: Path,
     judge_names: list[str],
-    scope: str,
+    scopes: str | list[str],
     *,
     context: Optional[dict[str, Any]] = None,
     worker_model: Optional[str] = None,
     batch_size: Optional[int] = None,
+    keep_drafts: bool = False,
 ) -> dict[str, Any]:
     """Render one prompt file per ``(target, judge)`` plus a manifest (no spend).
 
-    For every target in ``scope`` and every judge in ``judge_names``, call
-    ``judge.build_prompt`` — the *same* prompt the API path would send — and write
-    it to ``.harness/judges/<target_id>.<judge>.prompt.txt``; assign a
-    ``draft_path`` the worker writes its JSON verdict to. Stale drafts from a prior
-    run are cleared so ``commit`` never reads an orphan.
+    ``scopes`` may be a single scope string or a list of them; all are resolved
+    into **one** manifest so a multi-chapter request is a single ``prepare`` ->
+    spawn -> ``commit`` (no manifest clobbering). For every target across all
+    scopes and every judge in ``judge_names``, call ``judge.build_prompt`` — the
+    *same* prompt the API path would send — and write it to
+    ``.harness/judges/<target_id>.<judge>.prompt.txt``; assign a ``draft_path`` the
+    worker writes its JSON verdict to. ``(target_id, judge)`` pairs are deduped, so
+    overlapping scopes (e.g. ``chapter:X`` + ``chunk:X_chunk_000``) render once.
+
+    By default stale drafts from a prior run are cleared so ``commit`` never reads
+    an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
+    during a recovery re-prepare (re-prepare is otherwise destructive).
 
     ``worker_model`` (default ``sonnet``) is the tier the orchestrator pins each
     spawned ``judge-worker`` to; ``batch_size`` (default 5) is the recommended
@@ -97,8 +105,22 @@ def prepare(
     context = dict(context or {})
     worker_model = worker_model or _DEFAULT_WORKER_MODEL
     batch_size = int(batch_size or _DEFAULT_BATCH_SIZE)
+    scope_list = [scopes] if isinstance(scopes, str) else list(scopes)
 
-    targets = build_targets(project_dir, scope)
+    # Resolve every scope into one ordered target list, deduped by target_id so an
+    # overlapping chapter:/chunk: pair doesn't render (or get cost-estimated) twice.
+    targets = []
+    seen_targets: set[str] = set()
+    for scope in scope_list:
+        try:
+            scope_targets = build_targets(project_dir, scope)
+        except (NotImplementedError, FileNotFoundError, ValueError) as exc:
+            # ScopeError subclasses ValueError; surface which scope failed.
+            raise type(exc)(f"scope {scope!r}: {exc}") from exc
+        for target in scope_targets:
+            if target.id not in seen_targets:
+                seen_targets.add(target.id)
+                targets.append(target)
 
     jdir = _judges_dir(project_dir)
     jdir.mkdir(parents=True, exist_ok=True)
@@ -113,7 +135,8 @@ def prepare(
             prompt_path = jdir / f"{target.id}.{judge_name}.prompt.txt"
             draft_path = jdir / f"{target.id}.{judge_name}.draft.json"
             prompt_path.write_text(prompt, encoding="utf-8")
-            draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
+            if not keep_drafts:
+                draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
             total_words += words
             entries.append(
                 {
@@ -129,7 +152,7 @@ def prepare(
     estimated_api_cost = estimate_suite_cost(judge_names, targets, context)
 
     manifest_doc = {
-        "scope": scope,
+        "scopes": scope_list,
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
@@ -146,7 +169,7 @@ def prepare(
         "status": "ok",
         "manifest": entries,
         "manifest_path": str(manifest_path),
-        "scope": scope,
+        "scopes": scope_list,
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
