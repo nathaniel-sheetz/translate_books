@@ -13,6 +13,14 @@ All notable changes to this project will be documented in this file.
 - **`run_judges.py` is now subcommand-based** (`run` / `prepare` / `commit`) instead of a single flat command. `run` preserves the previous API-backend behavior verbatim; `prepare`/`commit` drive the subagent backend.
 - **The `Judge` interface split into a shared seam.** Every judge now implements `build_prompt(target, context)` and `parse_response(target, raw, context)`; `run()` composes them (build → call LLM → parse) for the API path while the subagent backend reuses the same two methods. Any judge that implements both gets both backends for free. The dialogue judge was refactored onto this seam with no change to its API-path behavior. `parse_response` raises `JudgeParseError` on unparseable output so the API path can retry while the subagent `commit` marks the draft failed for re-spawn.
 
+### Fixed
+- **`commit` no longer crashes on a tampered or corrupt manifest.** Non-list `entries`, missing keys in an individual entry, and UnicodeDecodeError from a draft file are all caught and reported as `failed` entries rather than aborting the entire commit with an unhandled exception.
+- **Path traversal guard on `draft_path` in `commit`.** Draft file paths from the manifest are now resolved and validated to stay inside `.harness/judges/` before being read, matching the existing guard on `load_template`. Similarly, `target.id` is validated against the safe-id regex in `prepare` before it is used as a filename component.
+- **`_PREPARE_SCHEMA` not imported in `run_judges.py`.** The prepare error paths referenced `_PREPARE_SCHEMA` but it was never imported, causing a `NameError` crash whenever `prepare` encountered an invalid scope or suite. The symbol is now imported from `src.judges.subagent`.
+- **`commit` exit code.** `run_judges.py commit` now exits with code 1 when the payload status is `"error"` (manifest absent, unreadable, etc.) rather than always exiting 0.
+- **`run_header` judge list.** When all entries fail to parse, `judge_names` for the run header is now taken from the stored `judges` key in the manifest rather than being derived from the empty committed list.
+- **Performance: judge instances and templates cached.** `get_judge()` is called once per judge name (not once per `target × judge`) in `prepare`, and `load_template()` is memoised with `functools.lru_cache` so the template file is read from disk once per session.
+
 ## [0.24.0.0] - 2026-06-29
 
 ### Added
