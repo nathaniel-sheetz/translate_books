@@ -71,6 +71,24 @@ def get_blacklist_path() -> Optional[Path]:
     return None
 
 
+def get_judge_suites() -> dict[str, list[str]]:
+    """Return user-defined judge suites from the ``judge_suites`` section.
+
+    A suite is a named list of judge names runnable together via the judges
+    CLI/runner. Returns ``{}`` when the section is absent or malformed; built-in
+    suites are layered on top by ``src.judges.registry``.
+    """
+    cfg = load_app_config()
+    val = cfg.get("judge_suites")
+    if not isinstance(val, dict):
+        return {}
+    suites: dict[str, list[str]] = {}
+    for name, members in val.items():
+        if isinstance(members, list) and all(isinstance(m, str) for m in members):
+            suites[str(name)] = list(members)
+    return suites
+
+
 def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
     """Return raw forced-term entries from ``forced_glossary_terms.json``.
 

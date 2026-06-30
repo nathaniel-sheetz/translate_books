@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.24.0.0] - 2026-06-29
+
+### Added
+- **Tailored LLM judges framework (`src/judges/`).** A new `run_judges` CLI lets you run named LLM evaluators over a single chunk or an entire chapter, estimate cost before spending, and optionally persist results into `evaluations/<chunk>.json` so the web dashboard badges pick them up. The first built-in judge — `dialogue` — checks Spanish dialogue formatting against the house rules in `prompts/dialogue.txt` (raya usage, one-turn-one-paragraph, incisos, guillemets for thoughts), assigns a 0–1 compliance score, and returns per-finding issues with severity and suggested fixes. A `.claude/skills/judge-review/SKILL.md` entrypoint exposes the framework as a gstack skill.
+- **Dashboard badges now fold in tailored-judge findings.** A chunk judged by a tailored judge (but not yet coded-evaluated) lights up the error/warning/info badge counts alongside coded-evaluator results; the same counts appear for chunks that have both.
+- **`judge_suites` in `app_config.json`** lets projects declare named groups of judges for one-shot runs (e.g. `"default": ["dialogue"]`).
+
+### Fixed
+- **`extract_json` called `json.JSONDecoder.raw_decode` twice per candidate** — once to probe validity (discarding the result) and again to retrieve it. The second call could theoretically hit a different code path under concurrent modification; collapsed to a single `_, end = decoder.raw_decode(...)` call.
+- **`run_judges --persist` loop now surfaces partial failures in the output JSON** instead of only logging them. Individual persist errors appear in a `persist_errors` list alongside the `persisted` paths, so a machine parser can tell "some chunks were not saved" without digging through logs.
+- **Glob injection and path traversal guards in the judges layer.** `chapter_id` and `chunk_id` from the CLI are now validated against an alphanumeric+underscore+hyphen regex before being used in filesystem globs or paths, and `load_template()` verifies the resolved path stays inside `prompts/` before reading.
+
 ## [0.23.2.0] - 2026-06-27
 
 ### Changed
