@@ -305,7 +305,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     try:
         judge_names = [args.judge] if args.judge else resolve_suite(args.suite)
     except ValueError as exc:
-        _emit({"status": "error", "error": str(exc)})
+        _emit({"status": "error", "error": str(exc)}, _PREPARE_SCHEMA)
         return 1
 
     context = {"judge_model": args.model, "judge_provider": args.provider}
@@ -320,7 +320,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
             keep_drafts=args.keep_drafts,
         )
     except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
-        _emit({"status": "error", "error": str(exc), "scopes": args.scope})
+        _emit({"status": "error", "error": str(exc), "scopes": args.scope}, _PREPARE_SCHEMA)
         return 1
 
     payload["project"] = str(project_dir)
@@ -334,7 +334,7 @@ def _cmd_commit(args: argparse.Namespace) -> int:
     payload = subagent.commit(project_dir, persist=args.persist)
     payload["project"] = str(project_dir)
     _emit(payload)
-    return 0
+    return 1 if payload.get("status") == "error" else 0
 
 
 _DISPATCH = {

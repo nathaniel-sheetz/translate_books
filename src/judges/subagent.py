@@ -33,7 +33,7 @@ from src.judges.base import JudgeTarget
 from src.judges.llm_io import JudgeParseError
 from src.judges.registry import get_judge
 from src.judges.runner import build_run_header, estimate_suite_cost
-from src.judges.scope import build_targets
+from src.judges.scope import _ID_RE, build_targets
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +122,21 @@ def prepare(
                 seen_targets.add(target.id)
                 targets.append(target)
 
+    for target in targets:
+        if not _ID_RE.match(target.id):
+            raise ValueError(f"target id contains unsafe characters: {target.id!r}")
+
     jdir = _judges_dir(project_dir)
     jdir.mkdir(parents=True, exist_ok=True)
+
+    judge_instances = {name: get_judge(name) for name in judge_names}
 
     entries: list[dict[str, Any]] = []
     total_words = 0
     for target in targets:
         words = len((target.source_text or "").split())
         for judge_name in judge_names:
-            judge = get_judge(judge_name)
+            judge = judge_instances[judge_name]
             prompt = judge.build_prompt(target, context)
             prompt_path = jdir / f"{target.id}.{judge_name}.prompt.txt"
             draft_path = jdir / f"{target.id}.{judge_name}.draft.json"
@@ -231,6 +237,15 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
         }
 
     entries = doc.get("entries", [])
+    if not isinstance(entries, list):
+        return {
+            "status": "error",
+            "error": f"manifest 'entries' is not a list: {type(entries).__name__}",
+            "committed": [],
+            "failed": [],
+            "missing": [],
+            "_schema": _COMMIT_SCHEMA,
+        }
     worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
     context = {
         "judge_model": doc.get("model"),
@@ -243,25 +258,36 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     results = []
     persisted: Optional[list[str]] = [] if persist else None
     persist_errors: Optional[list[str]] = [] if persist else None
+    judge_cache: dict[str, Any] = {}
 
     for entry in entries:
+        try:
+            target_id = entry["target_id"]
+            judge_name = entry["judge"]
+            draft_path = Path(entry["draft_path"])
+        except (KeyError, TypeError) as exc:
+            failed.append({"target_id": "?", "judge": "?", "problem": f"malformed manifest entry: {exc}"})
+            continue
+
         target = JudgeTarget(
-            id=entry["target_id"],
+            id=target_id,
             target_type=entry.get("target_type", "chunk"),
             source_text="",
             translated_text="",
             context={},
         )
-        judge_name = entry["judge"]
-        draft_path = Path(entry["draft_path"])
+
+        if not draft_path.resolve().is_relative_to(_judges_dir(project_dir).resolve()):
+            failed.append({"target_id": target_id, "judge": judge_name, "problem": f"draft_path escapes judges dir: {draft_path}"})
+            continue
 
         if not draft_path.exists():
             missing.append({"target_id": target.id, "judge": judge_name})
             continue
 
-        raw = draft_path.read_text(encoding="utf-8")
         try:
-            judge = get_judge(judge_name)
+            raw = draft_path.read_text(encoding="utf-8")
+            judge = judge_cache.setdefault(judge_name, get_judge(judge_name))
             result = judge.parse_response(target, raw, context)
         except JudgeParseError as exc:
             failed.append(
@@ -307,10 +333,10 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
                 )
                 persist_errors.append(f"{target.id}/{judge_name}: {exc}")
 
-    judge_names = list(dict.fromkeys(e["judge"] for e in entries))
+    judge_names = doc.get("judges") or list(dict.fromkeys(e["judge"] for e in entries if "judge" in e))
     run_header = build_run_header(
         judge_names,
-        target_count=len({e["target_id"] for e in entries}),
+        target_count=len({e["target_id"] for e in entries if "target_id" in e}),
         model=context["judge_model"],
         provider=context["judge_provider"],
         backend="subagent",

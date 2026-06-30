@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.judges import llm_io
 from src.judges.base import JudgeTarget
 from src.judges.dialogue_judge import DialogueComplianceJudge
@@ -254,3 +256,54 @@ def test_dialogue_judge_uses_default_rules_when_ctx_empty(monkeypatch):
     # Pass empty context — _load_default_rules() should be invoked (line 131).
     res = DialogueComplianceJudge().run(_target(), {})
     assert res.passed is True
+
+
+# ---------------------------------------------------------------------------
+# Judge base-class: build_prompt default and parse_response default
+# ---------------------------------------------------------------------------
+
+
+def test_judge_base_build_prompt_default(monkeypatch):
+    """Judge.build_prompt on a subclass that does NOT override prompt_variables uses
+    the base default (source_text + translation_text) and produces a non-empty string."""
+    from src.judges.base import Judge, JudgeSpec, JudgeTarget
+
+    class _MinimalJudge(Judge):
+        spec = JudgeSpec(
+            name="dialogue",
+            version="1.0.0",
+            kind="verdict",
+            template="judge_dialogue.txt",
+        )
+
+        def run(self, target, context):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(llm_io, "load_template", lambda t: "{source_text}|{translation_text}")
+    monkeypatch.setattr(llm_io, "render", lambda tmpl, vars: tmpl.format(**vars))
+
+    judge = _MinimalJudge()
+    target = JudgeTarget("c0", "chunk", "HELLO", "HOLA", {})
+    result = judge.build_prompt(target, {})
+    assert "HELLO" in result
+    assert "HOLA" in result
+
+
+def test_judge_base_parse_response_raises_not_implemented():
+    """Judge.parse_response default raises NotImplementedError (not silently returns)."""
+    from src.judges.base import Judge, JudgeSpec, JudgeTarget
+
+    class _NoParseJudge(Judge):
+        spec = JudgeSpec(
+            name="dialogue",
+            version="1.0.0",
+            kind="verdict",
+            template="judge_dialogue.txt",
+        )
+
+        def run(self, target, context):  # pragma: no cover
+            pass
+
+    judge = _NoParseJudge()
+    with pytest.raises(NotImplementedError, match="parse_response"):
+        judge.parse_response(JudgeTarget("c0", "chunk", "", "", {}), "{}", {})
