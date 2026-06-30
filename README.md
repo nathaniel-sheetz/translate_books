@@ -126,9 +126,13 @@ python scripts/batch_pipeline.py projects/my-book --stages evaluate,combine
 # Build EPUB
 python scripts/build_epub.py projects/my-book
 
-# Run LLM judges (dialogue compliance, etc.) — dry-run by default
-python scripts/run_judges.py --project my-book --judge dialogue --scope chapter:chapter_03
-python scripts/run_judges.py --project my-book --suite default --scope chunk:chapter_03_chunk_000 --persist --confirm
+# Run LLM judges (dialogue compliance, etc.) — API backend, dry-run by default
+python scripts/run_judges.py run --project my-book --judge dialogue --scope chapter:chapter_03
+python scripts/run_judges.py run --project my-book --suite default --scope chunk:chapter_03_chunk_000 --persist --confirm
+
+# ...or the subagent backend (no API spend): prepare, spawn judge-workers, commit
+python scripts/run_judges.py prepare --project my-book --judge dialogue --scope chapter:chapter_03
+python scripts/run_judges.py commit  --project my-book --persist
 ```
 
 See [`docs/BATCH_PIPELINE.md`](docs/BATCH_PIPELINE.md) for the batch CLI reference.

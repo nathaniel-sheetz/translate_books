@@ -27,6 +27,31 @@ Judges call the LLM, are cost-gated and reproducibility-locked, and live in
 their own registry, but they emit the same `EvalResult` so persistence, badges,
 and feedback work unchanged.
 
+## Two backends
+
+A judge runs one of two interchangeable ways (the same split as translate-harness):
+
+- **API backend** — `runner.run_judge_suite`, exposed by `run_judges.py run`.
+  Calls the LLM directly behind a dollar cost gate. Metered, needs an API key.
+- **Subagent backend** — `subagent.prepare` → spawn `judge-worker` subagents →
+  `subagent.commit`, exposed by `run_judges.py prepare` / `commit`. Renders each
+  judge's prompt to a file for a spawned worker, then collects + parses the JSON
+  verdict. **Zero API spend**; runs on the session. The gate is a usage check
+  before spawning N workers, not dollars.
+
+The two share one seam: every judge implements `build_prompt(target, context)` and
+`parse_response(target, raw, context)` on the `Judge` base. The API `run()` does
+*build → call LLM → parse*; the subagent path renders the same `build_prompt` output
+to a file and runs the same `parse_response` on the worker's draft. So the prompt is
+byte-identical and the persisted `EvalResult` is the same whichever backend ran — the
+run header records `backend` (`"api"` | `"subagent"`) and, for the subagent path,
+`worker_model`. `parse_response` raises `JudgeParseError` on unparseable output so the
+API path can retry while the subagent `commit` marks the draft failed for re-spawn.
+
+Subagent files live under `<project>/.harness/judges/` (`<target>.<judge>.prompt.txt`,
+`.draft.json`, `manifest.json`). The `judge-worker` agent is
+`.claude/agents/judge-worker.md` (Read+Write only, `model: sonnet`).
+
 ## Layout
 
 ```
@@ -36,37 +61,48 @@ src/judges/
   scope.py           build_targets(project_dir, scope) -> [JudgeTarget]
   registry.py        _JUDGE_REGISTRY + suite resolution
   runner.py          run_judge (isolated) + run_judge_suite (cost gate + header)
+  subagent.py        prepare() / commit() — the subagent backend
   dialogue_judge.py  DialogueComplianceJudge
 prompts/judge_dialogue.txt
 scripts/run_judges.py
+.claude/agents/judge-worker.md
 .claude/skills/judge-review/SKILL.md
 ```
 
 ## CLI
 
+Three subcommands: `run` (API backend), `prepare` + `commit` (subagent backend).
+Each prints one JSON object with a `_schema` block.
+
 ```bash
-# Single judge over a whole chapter (cost dry-run; refuses to spend over $0.50)
-python scripts/run_judges.py --project understood-betsy \
+# API backend — single judge over a chapter (cost dry-run; refuses to spend over $0.50)
+python scripts/run_judges.py run --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03
 
-# A suite over one chunk, persisting findings to evaluations/<chunk>.json
-python scripts/run_judges.py --project understood-betsy \
+# API backend — a suite over one chunk, persisting findings to evaluations/<chunk>.json
+python scripts/run_judges.py run --project understood-betsy \
     --suite default --scope chunk:chapter_03_chunk_000 --persist --confirm
+
+# Subagent backend — render prompts + manifest (no spend), then commit the workers' drafts
+python scripts/run_judges.py prepare --project understood-betsy \
+    --judge dialogue --scope chapter:chapter_03 [--worker-model sonnet] [--batch-size 5]
+python scripts/run_judges.py commit  --project understood-betsy --persist
 ```
 
-The command prints one JSON object with a `_schema` block. `status` is `"ok"`,
-`"cost_exceeded"` (re-run with `--confirm`), or `"error"`.
+`run` `status` is `"ok"`, `"cost_exceeded"` (re-run with `--confirm`), or `"error"`.
 
-| Flag | Default | Description |
-|---|---|---|
-| `--project` | — | Project id (under `projects/`) or path |
-| `--judge` / `--suite` | — | One required; a judge name or a suite name |
-| `--scope` | — | `chunk:<chunk_id>` or `chapter:<chapter_id>` |
-| `--model` / `--provider` | config | Judge LLM overrides |
-| `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
-| `--confirm` | false | Proceed past the cost gate |
-| `--persist` | false | Write findings into `evaluations/<chunk>.json` |
-| `--verbose` | false | Enable debug logging |
+| Subcommand | Flag | Default | Description |
+|---|---|---|---|
+| all | `--project` | — | Project id (under `projects/`) or path |
+| `run`, `prepare` | `--judge` / `--suite` | — | One required; a judge name or suite name |
+| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>` or `chapter:<chapter_id>` |
+| `run`, `prepare` | `--model` / `--provider` | config | Judge LLM overrides |
+| `run` | `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
+| `run` | `--confirm` | false | Proceed past the cost gate |
+| `prepare` | `--worker-model` | `sonnet` | Tier to pin spawned `judge-worker`s to |
+| `prepare` | `--batch-size` | `5` | Recommended workers to spawn per wave |
+| `run`, `commit` | `--persist` | false | Write findings into `evaluations/<chunk>.json` |
+| all | `--verbose` | false | Enable debug logging |
 
 ## Scopes
 
@@ -102,22 +138,29 @@ the same loop the coded evaluators use — useful for tuning a judge's prompt.
 
 ## Reproducibility & cost
 
-Every suite run is cost-estimated up front and gated by `--cost-limit`. Judge
-calls run at `temperature=0`. The run header records each judge's version, the
-prompt-template SHA-256, the resolved model/provider, and the git commit — so a
-persisted judge result is self-describing and runs are repeatable.
+The API backend cost-estimates every suite run up front and gates it by
+`--cost-limit`. Judge calls run at `temperature=0`. The run header records each
+judge's version, the prompt-template SHA-256, the resolved model/provider, the
+`backend`, and the git commit — so a persisted judge result is self-describing and
+runs are repeatable. The subagent backend spends no dollars; its gate is the
+conversational usage check the skill makes before spawning workers.
 
 ## Adding a judge
 
-1. Write a prompt template in `prompts/judge_<name>.txt` (XML-fence the inputs
-   and instruct the model to treat tagged content as data).
+1. Write a prompt template in `prompts/judge_<name>.txt` (XML-fence the inputs and
+   instruct the model to treat tagged content as data, and to return JSON only).
 2. Subclass `VerdictJudge` in `src/judges/<name>_judge.py`, set a `JudgeSpec`
-   (name, version, kind, template, `output_fields`), and implement `run()`:
-   render the prompt with `llm_io`, call `llm_io.call_judge`, parse with
-   `llm_io.parse_judge_json`, map findings to `Issue`s, return
-   `self.make_result(...)`.
+   (name, version, kind, template, `output_fields`), and implement the two seam
+   methods — this is what gives you **both** backends for free:
+   - `prompt_variables()` (or override `build_prompt()`) — the template variables.
+   - `parse_response(target, raw, context)` — parse `raw` with
+     `llm_io.parse_judge_json` (raising `JudgeParseError` on bad output), map
+     findings to `Issue`s, and return `self.make_result(...)`.
+   Then `run()` is just *build_prompt → llm_io.call_judge → parse_response* (plus
+   any retry); see the dialogue judge.
 3. Register it in `src/judges/registry.py` (`_JUDGE_REGISTRY`), and add it to a
    suite if desired.
-4. Add a test under `tests/test_judges/` that mocks `llm_io.call_judge`.
+4. Add a test under `tests/test_judges/` that mocks `llm_io.call_judge` for the API
+   path, and (optionally) drives `parse_response` directly for the subagent path.
 
 See `src/judges/dialogue_judge.py` as the reference implementation.

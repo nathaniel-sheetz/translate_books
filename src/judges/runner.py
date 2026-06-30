@@ -45,6 +45,50 @@ def _git_commit() -> Optional[str]:
     return None
 
 
+def build_run_header(
+    judge_names: list[str],
+    *,
+    target_count: int,
+    model: Optional[str],
+    provider: Optional[str],
+    backend: str = "api",
+    worker_model: Optional[str] = None,
+    started_at: Optional[str] = None,
+) -> dict[str, Any]:
+    """Build the reproducibility run header shared by both backends.
+
+    Records each judge's version, the prompt-template SHA-256, the resolved
+    model/provider, the ``backend`` that produced the run (``"api"`` or
+    ``"subagent"``), and the git commit — so a persisted judge result is
+    self-describing and runs are repeatable regardless of backend.
+    """
+    prompt_versions: dict[str, str] = {}
+    judge_versions: dict[str, str] = {}
+    for judge_name in judge_names:
+        try:
+            judge = get_judge(judge_name)
+            judge_versions[judge_name] = judge.spec.version
+            prompt_versions[judge_name] = llm_io.prompt_version(judge.spec.template)
+        except (ValueError, OSError):
+            continue
+
+    header: dict[str, Any] = {
+        "judges": judge_versions,
+        "prompt_versions": prompt_versions,
+        "model": model,
+        "provider": provider,
+        "temperature": 0.0,
+        "backend": backend,
+        "git_commit": _git_commit(),
+        "started_at": started_at or datetime.now().isoformat(),
+        "target_count": target_count,
+        "judge_count": len(judge_names),
+    }
+    if worker_model is not None:
+        header["worker_model"] = worker_model
+    return header
+
+
 def run_judge(
     judge_name: str, target: JudgeTarget, context: dict[str, Any]
 ) -> EvalResult:
@@ -139,27 +183,14 @@ def run_judge_suite(
 
     aggregated = aggregate_results(results)
 
-    prompt_versions: dict[str, str] = {}
-    judge_versions: dict[str, str] = {}
-    for judge_name in judge_names:
-        try:
-            judge = get_judge(judge_name)
-            judge_versions[judge_name] = judge.spec.version
-            prompt_versions[judge_name] = llm_io.prompt_version(judge.spec.template)
-        except (ValueError, OSError):
-            continue
-
-    run_header = {
-        "judges": judge_versions,
-        "prompt_versions": prompt_versions,
-        "model": context.get("judge_model"),
-        "provider": context.get("judge_provider"),
-        "temperature": 0.0,
-        "git_commit": _git_commit(),
-        "started_at": started_at,
-        "target_count": len(targets),
-        "judge_count": len(judge_names),
-    }
+    run_header = build_run_header(
+        judge_names,
+        target_count=len(targets),
+        model=context.get("judge_model"),
+        provider=context.get("judge_provider"),
+        backend="api",
+        started_at=started_at,
+    )
 
     return {
         "status": "ok",
