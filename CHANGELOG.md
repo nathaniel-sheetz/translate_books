@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.23.3.0] - 2026-06-29
+## [0.24.0.0] - 2026-06-29
 
 ### Added
 - **Tailored LLM judges framework (`src/judges/`).** A new `run_judges` CLI lets you run named LLM evaluators over a single chunk or an entire chapter, estimate cost before spending, and optionally persist results into `evaluations/<chunk>.json` so the web dashboard badges pick them up. The first built-in judge — `dialogue` — checks Spanish dialogue formatting against the house rules in `prompts/dialogue.txt` (raya usage, one-turn-one-paragraph, incisos, guillemets for thoughts), assigns a 0–1 compliance score, and returns per-finding issues with severity and suggested fixes. A `.claude/skills/judge-review/SKILL.md` entrypoint exposes the framework as a gstack skill.
