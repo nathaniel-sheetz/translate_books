@@ -63,6 +63,7 @@ from src.judges import (  # noqa: E402
 )
 from src.judges import subagent  # noqa: E402
 from src.judges.registry import available_judges  # noqa: E402
+from src.judges.subagent import _PREPARE_SCHEMA  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
