@@ -259,3 +259,114 @@ def test_commit_idempotent_recommit(tmp_path):
     first = subagent.commit(project, persist=True)
     second = subagent.commit(project, persist=True)
     assert first["counts"] == second["counts"] == {"committed": 1, "failed": 0, "missing": 0}
+
+
+# ---------------------------------------------------------------------------
+# Gap tests: paths not covered by the above
+# ---------------------------------------------------------------------------
+
+
+def test_commit_corrupt_manifest_errors(tmp_path):
+    """A corrupt manifest (invalid JSON) returns status='error' gracefully."""
+    jdir = tmp_path / ".harness" / "judges"
+    jdir.mkdir(parents=True)
+    (jdir / "manifest.json").write_text("not valid json }{", encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["status"] == "error"
+    assert "unreadable" in out["error"] or "manifest" in out["error"]
+    assert out["committed"] == []
+    assert out["failed"] == []
+    assert out["missing"] == []
+
+
+def test_commit_bare_exception_parse_crash_is_failed(tmp_path, monkeypatch):
+    """A non-JudgeParseError exception during parse_response is caught and failed."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    _write_draft(tmp_path, cid, "dialogue", _GOOD_VERDICT)
+
+    # Patch parse_response on the class so every get_judge() instance crashes.
+    monkeypatch.setattr(
+        DialogueComplianceJudge,
+        "parse_response",
+        lambda self, target, raw, ctx: (_ for _ in ()).throw(RuntimeError("unexpected crash")),
+    )
+    out = subagent.commit(project, persist=False)
+
+    assert out["counts"] == {"committed": 0, "failed": 1, "missing": 0}
+    assert "RuntimeError" in out["failed"][0]["problem"]
+
+
+def test_commit_non_chunk_target_not_persisted(tmp_path, monkeypatch):
+    """A chapter-scoped target is committed but not written to evaluations/ even with --persist."""
+    from src.models import Chunk, ChunkMetadata, ChunkStatus
+    from src.utils.file_io import save_chunk
+
+    # Build a chapter-level target by directly writing a manifest with target_type='chapter'.
+    jdir = tmp_path / ".harness" / "judges"
+    jdir.mkdir(parents=True)
+    cid = "chapter_01_chunk_000"
+    draft_path = jdir / f"{cid}.dialogue.draft.json"
+    manifest_doc = {
+        "scopes": ["chapter:chapter_01"],
+        "judges": ["dialogue"],
+        "worker_model": "sonnet",
+        "batch_size": 5,
+        "model": None,
+        "provider": None,
+        "entries": [
+            {
+                "target_id": cid,
+                "target_type": "chapter",  # <-- not 'chunk', so persist must be skipped
+                "judge": "dialogue",
+                "prompt_path": str(jdir / f"{cid}.dialogue.prompt.txt"),
+                "draft_path": str(draft_path),
+                "source_word_count": 2,
+            }
+        ],
+    }
+    (jdir / "manifest.json").write_text(json.dumps(manifest_doc), encoding="utf-8")
+    draft_path.write_text(_GOOD_VERDICT, encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=True)
+
+    assert out["counts"]["committed"] == 1
+    # Nothing persisted because target_type != 'chunk'
+    assert out["persisted"] == []
+
+
+def test_commit_persist_failure_logged_in_persist_errors(tmp_path, monkeypatch):
+    """A persist-layer exception is caught and listed in persist_errors (not re-raised)."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    _write_draft(tmp_path, cid, "dialogue", _GOOD_VERDICT)
+
+    import web_ui.evaluations as ev_mod
+
+    monkeypatch.setattr(ev_mod, "merge_judge_result", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+
+    out = subagent.commit(project, persist=True)
+
+    assert out["counts"]["committed"] == 1  # parse succeeded
+    assert out["persist_errors"] and cid in out["persist_errors"][0]
+    assert out["persisted"] == []
+
+
+def test_prepare_scope_error_propagates(tmp_path):
+    """A bad scope string causes prepare to raise ValueError (not silently return ok)."""
+    with pytest.raises((ValueError, FileNotFoundError, NotImplementedError)):
+        subagent.prepare(tmp_path, ["dialogue"], "chunk:no_such_chunk")
+
+
+def test_prepare_empty_scope_returns_nothing_to_judge_message(tmp_path, monkeypatch):
+    """When a scope resolves to zero targets, instructions say 'Nothing to judge'."""
+    # subagent imports build_targets directly so patch it in the subagent module.
+    monkeypatch.setattr(subagent, "build_targets", lambda *a, **k: [])
+
+    out = subagent.prepare(tmp_path, ["dialogue"], "chapter:empty")
+
+    assert out["status"] == "ok"
+    assert out["manifest"] == []
+    assert "Nothing to judge" in out["instructions"]
