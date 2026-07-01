@@ -94,7 +94,7 @@ def main():
             continue
 
         chunk = load_chunk(chunk_path)
-        updated_chunk, applied = apply_to_chunk(chunk, chunk_corrections, dry_run=args.dry_run)
+        updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_corrections, dry_run=args.dry_run)
 
         chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
         affected_chapters.add(chapter_id)

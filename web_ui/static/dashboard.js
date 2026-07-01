@@ -1803,23 +1803,37 @@
         var container = document.getElementById('eval-card-container-' + chunkId);
         if (!container) return;
 
+        var isStale = !!evaluation.stale;
         var agg = evaluation.aggregated || {};
         var bySeverity = agg.issues_by_severity || {};
-        var errors = bySeverity.error || 0;
-        var warnings = bySeverity.warning || 0;
-        var info = bySeverity.info || 0;
-        var score = agg.average_score;
+        var errors = isStale ? 0 : (bySeverity.error || 0);
+        var warnings = isStale ? 0 : (bySeverity.warning || 0);
+        var info = isStale ? 0 : (bySeverity.info || 0);
+        var score = isStale ? null : agg.average_score;
         var issues = evaluation.normalized_issues || evaluation.issues || [];
         var feedbackMap = buildFeedbackMap(evaluation.feedback);
 
         var html = '<article class="eval-card">';
+        if (isStale) {
+            html += '<div class="eval-stale-banner" role="status">';
+            html += 'Evaluation stale — translation changed';
+            if (evaluation.stale_reason) {
+                html += ': ' + escapeHtml(evaluation.stale_reason);
+            }
+            html += '. Re-run evaluators or the judge before trusting these findings.';
+            html += '</div>';
+        }
         html += '<header class="eval-card-header">';
         html += '<div class="eval-summary-chips">';
-        if (errors > 0) html += '<span class="eval-chip errors">✗ ' + errors + '</span>';
-        if (warnings > 0) html += '<span class="eval-chip warnings">⚠ ' + warnings + '</span>';
-        if (info > 0) html += '<span class="eval-chip info">ℹ ' + info + '</span>';
-        if (errors === 0 && warnings === 0 && info === 0) {
-            html += '<span class="eval-chip pass">✓ all passed</span>';
+        if (isStale) {
+            html += '<span class="eval-chip warnings">stale</span>';
+        } else {
+            if (errors > 0) html += '<span class="eval-chip errors">✗ ' + errors + '</span>';
+            if (warnings > 0) html += '<span class="eval-chip warnings">⚠ ' + warnings + '</span>';
+            if (info > 0) html += '<span class="eval-chip info">ℹ ' + info + '</span>';
+            if (errors === 0 && warnings === 0 && info === 0) {
+                html += '<span class="eval-chip pass">✓ all passed</span>';
+            }
         }
         if (score !== null && score !== undefined) {
             html += '<span class="eval-chip score">score ' + score.toFixed(2) + '</span>';
@@ -2116,12 +2130,13 @@
             var sum = evalChapterCache[cid];
             var existing = tr.querySelector('.eval-badge-container');
             if (existing) existing.remove();
-            if (!sum || (sum.errors === 0 && sum.warnings === 0)) return;
+            if (!sum || (sum.errors === 0 && sum.warnings === 0 && !sum.stale)) return;
             var nameCell = tr.children[1];
             if (!nameCell) return;
             var span = document.createElement('span');
             span.className = 'eval-badge-container';
             var h = '';
+            if (sum.stale > 0) h += '<span class="eval-badge warnings">stale</span>';
             if (sum.errors > 0) h += '<span class="eval-badge errors">✗ ' + sum.errors + '</span>';
             if (sum.warnings > 0) h += '<span class="eval-badge warnings">⚠ ' + sum.warnings + '</span>';
             span.innerHTML = h;

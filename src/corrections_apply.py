@@ -18,6 +18,7 @@ first textual match.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -25,6 +26,8 @@ from pathlib import Path
 from src.combiner import combine_chunks
 from src.models import Chunk
 from src.utils.file_io import load_chunk, save_chunk
+
+logger = logging.getLogger(__name__)
 
 CORRECTIONS_FILENAME = "corrections.jsonl"
 CORRECTIONS_APPLIED_FILENAME = "corrections_applied.jsonl"
@@ -126,7 +129,7 @@ def _resolve_correction_span(
     return idx, idx + len(original)
 
 
-def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False) -> tuple[Chunk, int]:
+def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False) -> tuple[Chunk, int, list[int]]:
     """Apply corrections to a chunk's translated_text.
 
     Each correction is resolved via :func:`_resolve_correction_span` so that
@@ -141,10 +144,12 @@ def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False)
     later corrections' offsets out from under them. Legacy corrections without
     offsets are applied last, in their original queue order.
 
-    Returns the updated chunk and the number of corrections applied.
+    Returns the updated chunk, the number of corrections applied, and the
+    indices into ``corrections`` that succeeded (for audit / reporting).
     """
     text = chunk.translated_text or ""
     applied = 0
+    applied_indices: list[int] = []
 
     def _sort_key(indexed):
         i, corr = indexed
@@ -153,9 +158,9 @@ def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False)
             return (0, -start, i)
         return (1, 0, i)
 
-    ordered = [c for _, c in sorted(enumerate(corrections), key=_sort_key)]
+    ordered = sorted(enumerate(corrections), key=_sort_key)
 
-    for corr in ordered:
+    for orig_idx, corr in ordered:
         original = corr["original_es"]
         corrected = corr["corrected_es"]
         hint_start = corr.get("chunk_offset_start")
@@ -171,21 +176,26 @@ def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False)
                 text, corrected, hint_start, hint_end,
             ) is not None:
                 applied += 1
+                applied_indices.append(orig_idx)
                 continue
-            print(f"    WARNING: Could not find original text in chunk {chunk.id}:")
-            print(f"      Looking for: {original[:60]}...")
+            logger.warning(
+                "Could not find original text in chunk %s: looking for %r",
+                chunk.id,
+                original[:60],
+            )
             continue
 
         start, end = span
         text = text[:start] + corrected + text[end:]
         applied += 1
+        applied_indices.append(orig_idx)
 
     if not dry_run and applied > 0:
         chunk_data = chunk.model_dump()
         chunk_data["translated_text"] = text
         chunk = Chunk(**chunk_data)
 
-    return chunk, applied
+    return chunk, applied, applied_indices
 
 
 def recombine_chapter(project_dir: Path, chapter_id: str) -> Path:

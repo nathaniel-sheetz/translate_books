@@ -879,6 +879,17 @@
 
 /* ── Evaluator card ── */
 
+.eval-stale-banner {
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    background: #fff8e6;
+    border: 1px solid #e6c200;
+    border-radius: 4px;
+    color: #6b5500;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
 .eval-card {
     margin-top: 12px;
     padding: 12px 14px;

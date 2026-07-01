@@ -1982,7 +1982,7 @@ def apply_corrections(project_id):
                 continue
 
             chunk = load_chunk(chunk_path)
-            updated_chunk, applied = apply_to_chunk(chunk, chunk_corrections)
+            updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_corrections)
 
             chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
             affected_chapters.add(chapter_id)
@@ -4358,7 +4358,7 @@ def _apply_pending_corrections_for_chapter(
             )
             continue
         try:
-            updated_chunk, applied = apply_to_chunk(chunk, chunk_rows)
+            updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_rows)
         except Exception as e:
             app.logger.warning(
                 "apply_to_chunk failed for chunk %s: %s", chunk_id, e,
@@ -5027,10 +5027,11 @@ def project_evaluations_summary(project_id):
         chapter_id = _chapter_id_from_chunk_id(chunk_id)
         if not chapter_id:
             continue
-        bucket = by_chapter.setdefault(chapter_id, {"errors": 0, "warnings": 0, "info": 0})
+        bucket = by_chapter.setdefault(chapter_id, {"errors": 0, "warnings": 0, "info": 0, "stale": 0})
         bucket["errors"] += counts.get("errors", 0) or 0
         bucket["warnings"] += counts.get("warnings", 0) or 0
         bucket["info"] += counts.get("info", 0) or 0
+        bucket["stale"] += counts.get("stale", 0) or 0
 
     return jsonify({"ok": True, "summary": summary, "by_chapter": by_chapter})
 

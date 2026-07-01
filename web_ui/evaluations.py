@@ -97,6 +97,7 @@ def save_chunk_evaluation(
     enabled_evals: Optional[list[str]] = None,
     llm_judge: Optional[dict[str, Any]] = None,
     judges: Optional[dict[str, Any]] = None,
+    stale_mark: Optional[dict[str, str]] = None,
 ) -> Path:
     """Persist a full evaluation run for ``chunk_id``.
 
@@ -116,6 +117,9 @@ def save_chunk_evaluation(
             caller is replacing the coded evaluation.
         judges: Optional existing tailored-judge section (``{name: result}``)
             to preserve when the caller is replacing the coded evaluation.
+        stale_mark: When preserving outdated judge findings after a text edit,
+            pass ``{"stale_since": ..., "stale_reason": ...}`` to re-stamp the
+            evaluation as stale (see :func:`mark_evaluation_stale`).
 
     Returns:
         Path to the written JSON file.
@@ -136,6 +140,12 @@ def save_chunk_evaluation(
         "llm_judge": llm_judge,
         "judges": judges,
     }
+    if stale_mark:
+        payload["stale"] = True
+        payload["stale_since"] = stale_mark.get("stale_since") or datetime.now().isoformat()
+        payload["stale_reason"] = stale_mark.get("stale_reason") or (
+            "Persisted judge findings may not match the current translation."
+        )
 
     path = _eval_file(project_dir, chunk_id)
     _atomic_write_json(path, payload)
@@ -336,10 +346,13 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
 
     The shape matches what the chapter-table badge renderer expects:
 
-    ``{chunk_id: {"errors": int, "warnings": int, "info": int, "total": int}}``.
+    ``{chunk_id: {"errors": int, "warnings": int, "info": int, "total": int,
+    "stale": int (optional, 1 when findings are invalidated)}}``.
 
     Missing or malformed files are skipped with a debug log — the summary is
-    best-effort.
+    best-effort. Stale evaluations (text edited after the run) contribute
+    ``stale: 1`` and zero severity counts so chapter badges do not show
+    outdated judge/coded findings as current.
     """
     out: dict[str, dict[str, int]] = {}
     eval_dir = _eval_results_dir(project_dir)
@@ -357,6 +370,16 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
             continue
 
         chunk_id = data.get("chunk_id") or path.stem
+        if data.get("stale"):
+            out[chunk_id] = {
+                "errors": 0,
+                "warnings": 0,
+                "info": 0,
+                "total": 0,
+                "stale": 1,
+            }
+            continue
+
         aggregated = data.get("aggregated") or {}
         severity = aggregated.get("issues_by_severity") or {}
         errors = int(severity.get("error", 0) or 0)
@@ -520,11 +543,17 @@ def evaluate_and_persist_chunk(
 
     existing_llm = None
     existing_judges = None
+    stale_mark = None
     if preserve_llm_judge:
         previous = load_chunk_evaluation(project_dir, chunk.id)
         if previous is not None:
             existing_llm = previous.get("llm_judge")
             existing_judges = previous.get("judges")
+            if previous.get("stale") and existing_judges:
+                stale_mark = {
+                    "stale_since": previous.get("stale_since"),
+                    "stale_reason": previous.get("stale_reason"),
+                }
 
     save_chunk_evaluation(
         project_dir,
@@ -535,6 +564,7 @@ def evaluate_and_persist_chunk(
         enabled_evals=actually_ran,
         llm_judge=existing_llm,
         judges=existing_judges,
+        stale_mark=stale_mark,
     )
 
     return {

@@ -83,7 +83,7 @@ _RUN_SCHEMA = {
 }
 
 _APPLY_SCHEMA = {
-    "status": "'ok' | 'error'",
+    "status": "'ok' | 'error' | 'partial'",
     "mode": "'plan' (nothing changed) | 'applied'",
     "project": "resolved project directory",
     "judge": "judge whose persisted findings were considered",
@@ -94,7 +94,8 @@ _APPLY_SCHEMA = {
     "for findings withheld from auto-apply (reason: no_suggestion | no_excerpt | "
     "suggestion_equals_excerpt | suggestion_not_literal | excerpt_not_found | excerpt_ambiguous)",
     "chunks_without_findings": "target chunks with no persisted findings for this judge",
-    "applied": "applied mode: fix ids that were applied",
+    "applied": "applied mode: fix ids that were actually applied",
+    "failed": "applied mode: selected fix ids that did not locate (omitted when empty)",
     "chapters_realigned": "applied mode: chapters recombined + realigned",
     "epub": "applied mode: rebuilt EPUB path, or null if not requested / nothing changed",
     "stale_marked": "applied mode: chunks whose persisted evaluation was stale-stamped",
@@ -457,6 +458,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     for chunk_id in order:
         target = targets[chunk_id]
         chapter_id = target.context.get("chapter_id") or chunk_id.rsplit("_chunk_", 1)[0]
+        chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+        chunk = load_chunk(chunk_path)
+        translated_text = chunk.translated_text or ""
         payload = load_chunk_evaluation(project_dir, chunk_id)
         judges = payload.get("judges") if isinstance(payload, dict) else None
         judge_entry = judges.get(judge) if isinstance(judges, dict) else None
@@ -467,7 +471,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         any_findings = True
         for i, issue in enumerate(issues):
             fid = f"{chunk_id}#{i}"
-            result = classify_fix(issue, target.translated_text)
+            result = classify_fix(issue, translated_text)
             if isinstance(result, ProposedFix):
                 applicable[fid] = (chunk_id, chapter_id, result)
                 applicable_list.append(
@@ -539,6 +543,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 
     ts = time.strftime("%Y%m%dT%H%M%S")
     applied_ids: list[str] = []
+    failed_ids: list[str] = []
     edited_chunks: list[str] = []
     affected_chapters: list[str] = []
     all_records: list[dict] = []
@@ -550,32 +555,41 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
         chunk = load_chunk(chunk_path)
 
-        # Pre-edit backup (reuse the web-UI editor convention; keep last 10).
-        backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
-        backup_root.mkdir(parents=True, exist_ok=True)
-        backup_path = backup_root / f"{ts}.json"
-        backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
-        for old_backup in sorted(backup_root.glob("*.json"))[:-10]:
-            try:
-                old_backup.unlink()
-            except OSError:
-                pass
-        backups.append(str(backup_path))
-
+        items: list[tuple[str, ProposedFix]] = entry["items"]
         records = [
             to_correction_record(
                 fix, chunk_id=chunk_id, chapter_id=chapter_id,
                 project_id=project_dir.name, judge_name=judge,
             )
-            for _fid, fix in entry["items"]
+            for _fid, fix in items
         ]
-        updated, applied = apply_to_chunk(chunk, records)
-        if applied < len(records):
-            warnings_out.append(f"{chunk_id}: {applied}/{len(records)} selected fixes located")
-        if applied > 0:
+        updated, applied_count, applied_indices = apply_to_chunk(chunk, records)
+        applied_set = set(applied_indices)
+
+        chunk_failed = [items[i][0] for i in range(len(items)) if i not in applied_set]
+        chunk_applied = [items[i][0] for i in applied_indices]
+        if chunk_failed:
+            failed_ids.extend(chunk_failed)
+            warnings_out.append(
+                f"{chunk_id}: {applied_count}/{len(records)} selected fixes located"
+            )
+
+        if applied_count > 0:
+            # Pre-edit backup (reuse the web-UI editor convention; keep last 10).
+            backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
+            backup_root.mkdir(parents=True, exist_ok=True)
+            backup_path = backup_root / f"{ts}.json"
+            backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
+            for old_backup in sorted(backup_root.glob("*.json"))[:-10]:
+                try:
+                    old_backup.unlink()
+                except OSError:
+                    pass
+            backups.append(str(backup_path))
+
             save_chunk(updated, chunk_path)
-            all_records.extend(records)
-            applied_ids.extend(fid for fid, _fix in entry["items"])
+            all_records.extend(records[i] for i in applied_indices)
+            applied_ids.extend(chunk_applied)
             edited_chunks.append(chunk_id)
             if chapter_id not in affected_chapters:
                 affected_chapters.append(chapter_id)
@@ -600,11 +614,35 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     if args.rebuild_epub and affected_chapters:
         epub_path = rebuild_epub(project_dir)
 
+    if not applied_ids:
+        _emit(
+            {
+                "status": "error",
+                "mode": "applied",
+                "error": "None of the selected fixes could be located in the current chunk text.",
+                "project": str(project_dir),
+                "judge": judge,
+                "scopes": args.scope,
+                "applied": [],
+                "failed": failed_ids,
+                "chapters_realigned": [],
+                "epub": None,
+                "stale_marked": [],
+                "archived_to": None,
+                "backups": [],
+                "warnings": warnings_out or None,
+            },
+            _APPLY_SCHEMA,
+        )
+        return 1
+
+    apply_status = "partial" if failed_ids else "ok"
     _emit(
         {
-            "status": "ok", "mode": "applied", "project": str(project_dir),
+            "status": apply_status, "mode": "applied", "project": str(project_dir),
             "judge": judge, "scopes": args.scope,
             "applied": applied_ids,
+            "failed": failed_ids or None,
             "chapters_realigned": affected_chapters,
             "epub": str(epub_path) if epub_path else None,
             "stale_marked": stale_marked,

@@ -155,6 +155,59 @@ def test_selecting_a_manual_id_is_rejected(project, capsys):
     assert not (project / "corrections_applied.jsonl").exists()
 
 
+def test_apply_rejects_selected_id_when_text_changed_before_apply(project, capsys):
+    """If chunk text changed since the plan, a previously-applicable id is rejected."""
+    chunk_path = project / "chunks" / f"{CHUNK_ID}.json"
+    chunk = load_chunk(chunk_path)
+    chunk.translated_text = chunk.translated_text.replace("— Hola", "XXX")
+    save_chunk(chunk, chunk_path)
+
+    rc, payload = _run(
+        capsys,
+        ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}", "--select", f"{CHUNK_ID}#0"],
+    )
+    assert rc == 1
+    assert payload["status"] == "error"
+    assert f"{CHUNK_ID}#0" in payload["unknown_ids"]
+    assert not (project / "corrections_applied.jsonl").exists()
+
+
+def test_apply_partial_success_archives_only_located_fixes(project, capsys, monkeypatch):
+    """When one of two applicable fixes on a chunk cannot locate, report partial apply."""
+    monkeypatch.setattr("src.corrections_apply.realign_chapter", lambda *a, **k: None)
+    merge_judge_result(
+        project,
+        CHUNK_ID,
+        "dialogue",
+        {
+            "eval_name": "dialogue",
+            "issues": [
+                {"severity": "error", "message": "[a] raya", "location": "— Hola", "suggestion": "—Hola"},
+                {
+                    "severity": "error",
+                    "message": "[b] comma",
+                    "location": " Hola,",
+                    "suggestion": " X,",
+                },
+            ],
+        },
+    )
+    rc, payload = _run(
+        capsys,
+        [
+            "apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}",
+            "--select", f"{CHUNK_ID}#0,{CHUNK_ID}#1",
+        ],
+    )
+    assert rc == 0
+    assert payload["status"] == "partial"
+    assert payload["applied"] == [f"{CHUNK_ID}#1"]
+    assert payload["failed"] == [f"{CHUNK_ID}#0"]
+    lines = (project / "corrections_applied.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["source"] == "judge:dialogue"
+
+
 def test_apply_errors_without_persisted_findings(tmp_path, capsys):
     proj = tmp_path / "bare"
     (proj / "chunks").mkdir(parents=True)
