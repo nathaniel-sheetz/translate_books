@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.25.5.0] - 2026-07-01
+## [0.26.0.0] - 2026-07-01
 
 ### Added
 - **`run_judges.py apply` verb** turns persisted judge findings into chunk edits with a plan-first dry-run, user-selected fix ids, pre-edit backups under `.chunk_edits/`, and audit logging to `corrections_applied.jsonl`.
