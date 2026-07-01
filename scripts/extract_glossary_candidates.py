@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pydantic import BaseModel, Field
 
 from src.app_config import load_forced_glossary_terms
+from src.api_translator import DEFAULT_MODEL
 from src.models import Glossary, GlossaryTermType
 from src.utils.file_io import load_glossary
 from src.utils.text_utils import count_words, normalize_newlines, strip_image_placeholders
@@ -1450,8 +1451,8 @@ Examples:
         help="API provider for bootstrap (default: anthropic)"
     )
     parser.add_argument(
-        "--model", default="claude-sonnet-4-6",
-        help="Model for bootstrap (default: claude-sonnet-4-6)"
+        "--model", default=DEFAULT_MODEL,
+        help=f"Model for bootstrap (default: {DEFAULT_MODEL})"
     )
     parser.add_argument(
         "--max-literary-zipf-capitalized", type=float, default=4.0,

@@ -33,6 +33,7 @@ from src.api_translator import (
     APIKeyError,
     RateLimitError,
     CostLimitError,
+    DEFAULT_MODEL,
 )
 
 console = Console()
@@ -592,7 +593,7 @@ def main():
         epilog="""
 Examples:
   # Real-time translation with Claude
-  python translate_api.py chunks/*.json --provider anthropic --model claude-sonnet-4-6
+  python translate_api.py chunks/*.json --provider anthropic --model claude-sonnet-5
 
   # Batch translation (50% discount, ~24h processing)
   python translate_api.py chunks/*.json --provider openai --model gpt-4o --batch
@@ -646,8 +647,8 @@ Examples:
 
     parser.add_argument(
         '--model',
-        default='claude-sonnet-4-6',
-        help='Model to use (default: claude-sonnet-4-6)'
+        default=DEFAULT_MODEL,
+        help=f'Model to use (default: {DEFAULT_MODEL})'
     )
 
     parser.add_argument(

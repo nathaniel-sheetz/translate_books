@@ -33,13 +33,13 @@ Usage:
     python scripts/compare_models.py \\
         --source projects/fabre2/chapters/chapter_01.txt \\
         --models sonnet,haiku \\
-        --judge claude-sonnet-4-6 \\
+        --judge claude-sonnet-5 \\
         --project projects/fabre2
 
     python scripts/compare_models.py \\
         --source projects/fabre2/chapters/chapter_01.txt \\
         --models claude-sonnet-4-6,claude-haiku-4-5-20251001 \\
-        --judge claude-sonnet-4-6 \\
+        --judge claude-sonnet-5 \\
         --style projects/fabre2/style.json \\
         --cost-limit 10 --confirm
 """
@@ -67,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.api_translator import (
     APIError,
     await_translation_job,
+    DEFAULT_MODEL,
     estimate_cost,
     get_default_provider,
     get_model_pricing,
@@ -107,7 +108,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODEL_ALIASES: dict[str, str] = {
-    "sonnet": "claude-sonnet-4-6",
+    "sonnet": DEFAULT_MODEL,
     "haiku": "claude-haiku-4-5-20251001",
     "opus": "claude-opus-4-0-20250514",
     "gpt4o": "gpt-4o",
@@ -1027,8 +1028,8 @@ def main() -> None:
         help="Comma-separated model IDs or aliases (e.g. sonnet,haiku or claude-sonnet-4-6,claude-haiku-4-5-20251001)",
     )
     parser.add_argument(
-        "--judge", default="claude-sonnet-4-6",
-        help="Model to use as the judge (default: claude-sonnet-4-6)",
+        "--judge", default=DEFAULT_MODEL,
+        help=f"Model to use as the judge (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--project", required=True,

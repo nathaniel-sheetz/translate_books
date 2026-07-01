@@ -35,7 +35,7 @@ _LLM_CONFIG_CACHE: dict | None = None
 
 _FALLBACK_CONFIG = {
     "default_provider": "anthropic",
-    "default_model": "claude-sonnet-4-6",
+    "default_model": "claude-sonnet-5",
     "providers": [
         {
             "id": "anthropic",
@@ -87,7 +87,7 @@ def get_provider_config(provider_id: str) -> dict:
 
 
 def get_default_model() -> str:
-    return load_llm_config().get("default_model", "claude-sonnet-4-6")
+    return load_llm_config().get("default_model", "claude-sonnet-5")
 
 
 def get_default_provider() -> str:
@@ -130,7 +130,7 @@ def get_pricing_table() -> dict:
 
 
 # Keep module-level constant for backward compat in scripts that import it
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 
 # Anthropic models from the Opus 4.7+ generation (incl. Sonnet 5 and Fable 5)
 # removed the sampling params (temperature/top_p/top_k) and return HTTP 400 if any

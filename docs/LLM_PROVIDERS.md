@@ -29,7 +29,7 @@ The file lives at the project root. It defines which providers and models are av
 ```json
 {
   "default_provider": "anthropic",
-  "default_model": "claude-sonnet-4-6",
+  "default_model": "claude-sonnet-5",
   "providers": [
     {
       "id": "anthropic",

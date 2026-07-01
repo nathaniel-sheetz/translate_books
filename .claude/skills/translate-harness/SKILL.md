@@ -171,7 +171,7 @@ under development — reading a public page is the carve-out.
 
 ```bash
 python scripts/harness.py setup \
-  --target-lang Spanish --locale mx --model claude-sonnet-4-6 \
+  --target-lang Spanish --locale mx \
   --title "<Title>" --author "<Author>"
 # add --url <gutenberg-url> if there is no local source.txt yet.
 # add --project <slug> only to re-run on / target a specific existing project folder.
@@ -187,8 +187,9 @@ source text itself — you rarely need to set it. The named patterns are still s
 (what the text/HTML implies), and a `chapter_report`. If `pattern_used` ≠ `suggested_pattern`,
 or `warnings` is non-empty (e.g. "1 chapter for an 87 KB source"), the split is probably wrong —
 re-run with the suggestion. Confirm the printed `chapter_count` looks right and `chunks_dir_exists`
-is `false`. (The lang/locale/model defaults are Spanish/mx/sonnet 4.6 — surface them to the user
-rather than assuming silently.)
+is `false`. (The lang/locale defaults are Spanish/mx — surface them to the user rather than
+assuming silently. The model is **not** chosen here; on the API path it is confirmed at the
+Step 4 cost gate, and on the subagent path the worker tier is chosen at Step 4B.)
 
 Navigation/boilerplate (the title page, a `CONTENTS`/table-of-contents listing, a list of
 illustrations, a copyright/transcriber's note) is **auto-stripped** — never written, numbered, or
@@ -398,15 +399,16 @@ the Step 4 gate **only if** the user picks the API backend; on the subagent path
 2. **STOP — approval beat. END THE TURN HERE.** Show the estimate, then ask via AskUserQuestion:
    proceed / abort — and stop. Do not call any further tool in this response. Resume ONLY after the
    user has, in a *later* turn, explicitly chosen to proceed. If unsure whether they approved, treat
-   it as NOT approved and ask again. Confirm the model with them here too (it determines the price).
+   it as NOT approved and ask again. **Confirm the model with them here** — this is the only
+   place on the API path where the model is chosen; it determines the price shown in the estimate.
    > Cost note (eng review 2026-06-05): the API path does not use prompt caching today, so input
    > tokens are not discounted across chunks. The estimate is the honest figure.
 3. **Only once the user has affirmatively approved in a separate turn**, translate:
    ```bash
-   python scripts/harness.py translate --project projects/<slug> --yes --model claude-sonnet-4-6
+   python scripts/harness.py translate --project projects/<slug> --yes
    ```
-   `translate` refuses to run without `--yes`. The model defaults to the one set at `setup`; pass
-   `--model` to override, and surface the choice rather than assuming.
+   `translate` refuses to run without `--yes`. The model defaults to Sonnet 5 (or whatever was
+   persisted in config); pass `--model` to override, and surface the choice rather than assuming.
 
 ## Step 4B — Subagent backend (zero-API-key, model-pinned) — ALTERNATIVE to Step 4
 

@@ -1208,11 +1208,14 @@ def chunk(
     the manifest. Requires a prior ``difficulty`` run — fails loudly otherwise.
     """
     project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
     cmd = [
         "scripts/translate_book.py",
         "--project-dir", str(project_dir),
         "--start-stage", "chunk",
         "--cost-only",
+        "--provider", cfg["provider"],
+        "--model", cfg["model"],
         "--chunk-size", str(int(size)),
         # The overlap/combine de-dup path is known-broken (FRICTION_LOG_4 #20); the
         # harness never creates overlapping chunks. Pass 0 explicitly so this holds
@@ -1249,11 +1252,14 @@ def chunk(
 def cost(project: str, *, chapters: str | None = None) -> dict:
     """Re-print the translation cost estimate WITHOUT spending (pure estimator)."""
     project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
     cmd = [
         "scripts/translate_book.py",
         "--project-dir", str(project_dir),
         "--start-stage", "translate",
         "--cost-only",
+        "--provider", cfg["provider"],
+        "--model", cfg["model"],
     ]
     if chapters:
         cmd += ["--chapters", chapters]

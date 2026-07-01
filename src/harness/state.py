@@ -32,7 +32,7 @@ DEFAULTS: dict[str, str] = {
     "target_language": "Spanish",
     "locale": "mx",
     "provider": "anthropic",
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "language_code": "es",
     "title": "",
     "author": "",

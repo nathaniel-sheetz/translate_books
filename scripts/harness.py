@@ -25,7 +25,7 @@ Examples:
     python scripts/harness.py style-guide prepare-questions --project understood-betsy
     python scripts/harness.py glossary commit --project understood-betsy
     python scripts/harness.py chunk --project understood-betsy --size 1500
-    python scripts/harness.py translate --project understood-betsy --yes --model claude-sonnet-4-6
+    python scripts/harness.py translate --project understood-betsy --yes --model claude-sonnet-5
 """
 
 import argparse

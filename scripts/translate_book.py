@@ -35,6 +35,7 @@ from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
 from src.harness.state import emit_harness_result
+from src.api_translator import DEFAULT_MODEL
 from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
@@ -613,8 +614,8 @@ def main():
     # Translation API
     parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"],
                         help="API provider (default: anthropic)")
-    parser.add_argument("--model", default="claude-sonnet-4-6",
-                        help="Model identifier (default: claude-sonnet-4-6)")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Model identifier (default: {DEFAULT_MODEL})")
     parser.add_argument("--cost-only", action="store_true",
                         help="Estimate cost and exit without translating (never spends, never prompts)")
     parser.add_argument("--yes", action="store_true",
