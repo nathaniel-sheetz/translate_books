@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.5.0] - 2026-07-01
+
+### Added
+- **`run_judges.py apply` verb** turns persisted judge findings into chunk edits with a plan-first dry-run, user-selected fix ids, pre-edit backups under `.chunk_edits/`, and audit logging to `corrections_applied.jsonl`.
+- **`src/judges/fixes.py`** classifies findings as mechanically applicable text swaps vs manual-only (instruction-type suggestions, missing/ambiguous excerpts).
+- **`src/corrections_apply.py`** extracts the shared edit/recombine/realign/archive pipeline from `apply_corrections.py` so judge apply and the reader reuse the same path.
+- **Stale evaluation markers** on edited chunks (`mark_evaluation_stale` in `web_ui/evaluations.py`); a fresh judge run with `--persist` clears the flag.
+
+### Changed
+- **Judge-review skill** documents the optional apply-fixes workflow (dry-run plan, explicit selection, rebuild EPUB, re-run judge).
+
 ## [0.25.4.0] - 2026-07-01
 
 ### Fixed
