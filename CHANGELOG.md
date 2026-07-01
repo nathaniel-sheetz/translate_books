@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.2.0] - 2026-07-01
+
+### Added
+- **`--chapter-pattern auto` is the new default.** The harness detects the best-fit chapter pattern from the source text itself (`detect_pattern_from_text`) — the local `source.txt` analog of the URL path's HTML-heading detection — so a pattern rarely has to be set by hand. Falls back to `roman` when nothing matches confidently.
+- **`chapter_numeric_titled` pattern** ("Chapter 1 Some Title" / "Chapter 1"), and `chapter_roman_titled`'s title is now optional so it also matches numeral-only headings ("CHAPTER I"). All named patterns in `split_patterns.json` (`roman`, `numeric`, the titled variants, `allcaps_heading`, `bare_roman`) are now selectable from the CLI, derived from the JSON so a defined pattern is never unreachable.
+- **Post-split sanity warnings** (`split_sanity_warnings`). `setup`/`split`/`split-preview` now return `pattern_used`, `suggested_pattern`, a `chapter_report`, and `warnings` on the local `source.txt` path too — flagging a likely mis-split (e.g. one chapter for a large source) instead of silently carrying it to EPUB.
+
+### Changed
+- **`detection_order` omits the plain `roman`/`numeric` patterns.** The optional-title variants subsume them and always match first, so they were unreachable during auto-detection; they remain selectable as explicit `--chapter-pattern` choices.
+
 ## [0.25.1.0] - 2026-06-30
 
 ### Added

@@ -411,14 +411,18 @@ def detect_pattern_from_text(book_text: str) -> Optional[str]:
     """Detect the best-fit chapter pattern for raw book text.
 
     The URL ingest path derives a ``suggested_pattern`` from the HTML headings;
-    this is the local ``source.txt`` analog. Each named pattern's *real*
+    this is the local ``source.txt`` analog. Each candidate pattern's *real*
     splitting regex is run over the text in ``detection_order`` priority, and
-    the first pattern that matches confidently wins. Specific patterns
-    (the ``chapter …`` / roman / numeric family) need >= 2 hits; the greedy
-    fallbacks that declare ``detect_min_ratio`` (``allcaps_heading``,
-    ``bare_roman``) need a higher floor so they don't win on stray all-caps or
-    lone-numeral lines. Returns ``None`` when nothing matches confidently, so
-    the caller can fall back to a default.
+    the first pattern that matches confidently wins. Note ``detection_order``
+    deliberately omits the plain ``roman`` / ``numeric`` patterns: the titled
+    variants (``chapter_roman_titled`` / ``chapter_numeric_titled``) make their
+    title optional, so they subsume the plain ones and always match first — the
+    plain patterns stay selectable only as explicit user choices. The specific
+    ``chapter …`` patterns need >= 2 hits; the greedy fallbacks that declare
+    ``detect_min_ratio`` (``allcaps_heading``, ``bare_roman``) need a higher
+    floor so they don't win on stray all-caps or lone-numeral lines. Returns
+    ``None`` when nothing matches confidently, so the caller can fall back to a
+    default.
     """
     if not book_text or not book_text.strip():
         return None
@@ -463,18 +467,21 @@ def split_sanity_warnings(
     n = len(chapter_sections)
     size = len(book_text or "")
 
-    if n <= 1 and size > 20_000:
+    if pattern_used == "roman" and detected is None and size > 20_000:
+        # auto found no confident pattern and fell back to 'roman'. This is the
+        # more actionable message, so it wins over the generic under-split warning
+        # below (they'd otherwise both fire for this one situation).
+        warnings.append(
+            "No chapter pattern matched the text confidently; fell back to "
+            "'roman'. Try --chapter-pattern auto or a --custom-regex."
+        )
+    elif n <= 1 and size > 20_000:
         suffix = ""
         if detected and detected != pattern_used:
             suffix = f" — text detection suggests '{detected}'"
         warnings.append(
             f"Only {n} chapter detected for a {size:,}-char source; the "
             f"'{pattern_used}' pattern may be wrong{suffix}."
-        )
-    if pattern_used == "roman" and detected is None and size > 20_000:
-        warnings.append(
-            "No chapter pattern matched the text confidently; fell back to "
-            "'roman'. Try --chapter-pattern auto or a --custom-regex."
         )
     return warnings
 

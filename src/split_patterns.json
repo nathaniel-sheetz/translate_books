@@ -52,8 +52,6 @@
   "detection_order": [
     "chapter_roman_titled",
     "chapter_numeric_titled",
-    "roman",
-    "numeric",
     "bare_roman",
     "allcaps_heading"
   ],
