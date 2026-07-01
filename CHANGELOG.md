@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.1.0] - 2026-06-30
+
+### Added
+- **Claude Sonnet 5 support (`claude-sonnet-5`).** Added to the Anthropic provider model list (GUI dropdown + default config) with introductory pricing ($2/$10 per MTok).
+
+### Fixed
+- **Sampling params (`temperature`/`top_p`/`top_k`) no longer sent to Opus 4.7+ generation models.** Sonnet 5 and other models in that generation return HTTP 400 if any sampling params are included. A new `_rejects_sampling_params()` check gates `temperature` out of both the realtime and Anthropic batch call sites for those models.
+
 ## [0.25.0.0] - 2026-06-30
 
 ### Added

@@ -43,6 +43,7 @@ _FALLBACK_CONFIG = {
             "type": "anthropic",
             "api_key_env_var": "ANTHROPIC_API_KEY",
             "models": [
+                {"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "pricing": {"input": 2.00, "output": 10.00}},
                 {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "pricing": {"input": 3.00, "output": 15.00}},
                 {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "pricing": {"input": 1.00, "output": 5.00}},
             ],
@@ -130,6 +131,21 @@ def get_pricing_table() -> dict:
 
 # Keep module-level constant for backward compat in scripts that import it
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# Anthropic models from the Opus 4.7+ generation (incl. Sonnet 5 and Fable 5)
+# removed the sampling params (temperature/top_p/top_k) and return HTTP 400 if any
+# are sent. Match by prefix so date-suffixed snapshots are covered too.
+_NO_SAMPLING_PARAM_MODELS = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-fable-5",
+)
+
+
+def _rejects_sampling_params(model: str) -> bool:
+    """True if *model* is an Anthropic model that 400s on temperature/top_p/top_k."""
+    return model.startswith(_NO_SAMPLING_PARAM_MODELS)
 
 
 class APIError(Exception):
@@ -355,15 +371,18 @@ def call_anthropic_api(
         api_key = get_api_key("anthropic")
     client = anthropic.Anthropic(api_key=api_key)
 
+    create_kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+    }
+    if not _rejects_sampling_params(model):
+        create_kwargs["temperature"] = temperature
+
     try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
+        response = client.messages.create(**create_kwargs)
 
         # Extract text from response
         if response.content and len(response.content) > 0:
@@ -667,16 +686,18 @@ def _submit_anthropic_batch(
         )
 
         # Create batch request
+        params: dict = {
+            "model": model,
+            "max_tokens": 4096,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ]
+        }
+        if not _rejects_sampling_params(model):
+            params["temperature"] = 0.3
         requests.append({
             "custom_id": chunk.id,
-            "params": {
-                "model": model,
-                "max_tokens": 4096,
-                "temperature": 0.3,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ]
-            }
+            "params": params,
         })
 
     # Map chunk_id -> the prompt that was submitted (used only locally here)
