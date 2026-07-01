@@ -8,9 +8,13 @@ import pytest
 from src.book_splitter import (
     DetectedChapter,
     build_chapter_manifest,
+    detect_pattern_from_text,
     save_chapters_to_files,
     split_book_into_chapters,
+    split_sanity_warnings,
 )
+
+_BODY_WORDS = "lorem ipsum dolor sit amet " * 40  # ~200-word body
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +441,72 @@ class TestBuildChapterManifest:
             {"id": "chapter_01", "kind": "front_matter", "label": "Preface"},
             {"id": "chapter_02", "kind": "chapter", "number": 1},
         ]
+
+
+# ---------------------------------------------------------------------------
+# Text-based pattern detection (local source.txt path — friction #1)
+# ---------------------------------------------------------------------------
+
+def _two_sections(h1: str, h2: str) -> str:
+    return f"{h1}\n\n{_BODY_WORDS}\n\n{h2}\n\n{_BODY_WORDS}"
+
+
+class TestDetectPatternFromText:
+    def test_same_line_titled_roman_headings(self):
+        # The exact Photogen shape that mis-split under the 'roman' pattern.
+        text = _two_sections("CHAPTER I. WATHO.", "CHAPTER II. AURORA.")
+        assert detect_pattern_from_text(text) == "chapter_roman_titled"
+
+    def test_bare_numeral_roman_headings(self):
+        text = _two_sections("CHAPTER I", "CHAPTER II")
+        # The titled pattern's title is optional, so it subsumes numeral-only.
+        assert detect_pattern_from_text(text) == "chapter_roman_titled"
+
+    def test_numeric_titled_headings(self):
+        text = _two_sections("Chapter 1 The Start", "Chapter 2 The End")
+        assert detect_pattern_from_text(text) == "chapter_numeric_titled"
+
+    def test_no_headings_returns_none(self):
+        assert detect_pattern_from_text("Just prose, no headings at all. " * 50) is None
+
+    def test_empty_returns_none(self):
+        assert detect_pattern_from_text("") is None
+        assert detect_pattern_from_text("   \n\n  ") is None
+
+
+class TestAutoSplit:
+    def test_auto_resolves_titled_and_keeps_all_chapters(self):
+        # Mixed: one heading carries its title inline, one is numeral-only with
+        # the title on the next line — auto must catch both (20-vs-19 bug).
+        text = (
+            "CHAPTER I. WATHO.\n\n" + _BODY_WORDS + "\n\n"
+            "CHAPTER II\nAURORA.\n\n" + _BODY_WORDS
+        )
+        chapters = split_book_into_chapters(text, pattern_type="auto")
+        chaps = [c for c in chapters if c.kind == "chapter"]
+        assert len(chaps) == 2
+        assert "WATHO" in chaps[0].chapter_title
+        assert "AURORA" in chaps[1].chapter_title  # pulled from the next line
+
+    def test_auto_falls_back_to_roman_when_unconfident(self):
+        # No recognizable headings: auto falls back to 'roman' rather than raising.
+        text = "CHAPTER I\n\n" + _BODY_WORDS  # single heading, below the >=2 floor
+        chapters = split_book_into_chapters(text, pattern_type="auto")
+        assert [c for c in chapters if c.kind == "chapter"]
+
+
+class TestSplitSanityWarnings:
+    def test_flags_single_chapter_large_source(self):
+        text = "x" * 30_000
+        chapters = [DetectedChapter(position_index=1, chapter_title="Chapter XVII",
+                                    content=text, start_line=0, end_line=1,
+                                    kind="chapter", number=17)]
+        warns = split_sanity_warnings(chapters, text, pattern_used="roman",
+                                      detected="chapter_roman_titled")
+        assert warns and "chapter_roman_titled" in warns[0]
+
+    def test_clean_when_multiple_chapters(self):
+        text = _two_sections("CHAPTER I. A", "CHAPTER II. B")
+        chapters = split_book_into_chapters(text, pattern_type="auto")
+        assert split_sanity_warnings(chapters, text, pattern_used="chapter_roman_titled",
+                                     detected="chapter_roman_titled") == []

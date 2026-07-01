@@ -46,6 +46,24 @@ from src.harness import flow, state
 from src.harness_guard import HarnessValidationError
 
 
+def _chapter_pattern_choices() -> list[str]:
+    """All selectable ``--chapter-pattern`` values: ``auto`` (detect from the
+    text), every named pattern in ``split_patterns.json``, and ``custom`` (with
+    ``--custom-regex``). Derived from the JSON so a pattern that exists there is
+    never unreachable from the CLI (friction-log #1 — ``chapter_roman_titled``
+    was defined but not exposed)."""
+    from src.book_splitter import get_pattern_names
+    return ["auto", *get_pattern_names(), "custom"]
+
+
+_CHAPTER_PATTERN_HELP = (
+    "How to detect chapter headings (default: auto). 'auto' picks the best-fit "
+    "pattern from the source text; named patterns include roman / numeric and "
+    "the titled variants chapter_roman_titled / chapter_numeric_titled "
+    "(e.g. 'CHAPTER I. WATHO.'); 'custom' uses --custom-regex."
+)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="harness", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -60,7 +78,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Project id (under projects/) or path; omit to name the "
                          "folder from --title (collisions get a -2, -3, ... suffix)")
     sp.add_argument("--url", default="", help="Gutenberg URL (omit if source.txt is in place)")
-    sp.add_argument("--chapter-pattern", default="roman", choices=["roman", "numeric", "custom"])
+    sp.add_argument("--chapter-pattern", default="auto",
+                    choices=_chapter_pattern_choices(), help=_CHAPTER_PATTERN_HELP)
     sp.add_argument("--custom-regex", default=None)
     sp.add_argument("--target-lang", dest="target_language", default=None)
     sp.add_argument("--locale", default=None)
@@ -83,8 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
-        p.add_argument("--chapter-pattern", default="roman",
-                       choices=["roman", "numeric", "custom"])
+        p.add_argument("--chapter-pattern", default="auto",
+                       choices=_chapter_pattern_choices(), help=_CHAPTER_PATTERN_HELP)
         p.add_argument("--custom-regex", default=None)
         p.add_argument("--min-chapter-size", dest="min_chapter_size", type=int, default=None,
                        help="Min chars for a real chapter (default 100; raise to ~500 to "

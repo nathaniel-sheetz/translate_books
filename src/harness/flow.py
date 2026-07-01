@@ -125,7 +125,7 @@ def setup(
     project: str | None = None,
     *,
     url: str = "",
-    chapter_pattern: str = "roman",
+    chapter_pattern: str = "auto",
     custom_regex: str | None = None,
     target_language: str | None = None,
     locale: str | None = None,
@@ -202,18 +202,30 @@ def setup(
         save_pipeline_state(project_dir, pstate)
 
     chapters = sorted((project_dir / "chapters").glob("chapter_*.txt"))
+    # Heading-derived hints. On the URL path ingest fills suggested_pattern /
+    # chapter_report from the HTML; on the local source.txt path we derive them
+    # here (parity) so setup can flag a wrong pattern or an under-split instead
+    # of returning nulls and silently carrying a 1-chapter book to EPUB (#1/#2).
+    hints = _pattern_hints(
+        project_dir,
+        requested=args.chapter_pattern,
+        custom_regex=args.custom_regex,
+        min_chapter_size=args.min_chapter_size,
+        front_matter_titles=args.front_matter_titles,
+        back_matter_titles=args.back_matter_titles,
+        auto_strip_boilerplate=args.auto_strip_boilerplate,
+    )
     return {
         "project_dir": str(project_dir),
         "config": state.load_config(project_dir),
         "chapters": [c.stem for c in chapters],
         "chapter_count": len(chapters),
+        "pattern_used": hints["pattern_used"],  # the pattern actually split on
         "dropped": pstate.get("dropped", []),  # boilerplate stripped at split
         "source_words": pstate.get("source_words"),
-        # Heading-derived hints from ingest (null on the no-URL path, where there
-        # is no HTML to read headings from). Relay these so the agent can spot a
-        # wrong pattern or stray front/back matter and refine via split-preview.
-        "suggested_pattern": pstate.get("suggested_pattern"),
-        "chapter_report": pstate.get("chapter_report"),
+        "suggested_pattern": pstate.get("suggested_pattern") or hints["detected"],
+        "chapter_report": pstate.get("chapter_report") or _local_chapter_report(hints["sections"]),
+        "warnings": hints["warnings"],  # e.g. "1 chapter for an 87KB source"
         "chunks_dir_exists": (project_dir / "chunks").exists(),  # expected False
         "next": "style-guide prepare-questions",
     }
@@ -272,10 +284,78 @@ def _kind_counts(chapters) -> dict:
     return counts
 
 
+# Keep in step with scripts/ingest_gutenberg.py's WORDS_PER_CHUNK, which drives
+# the URL-path chapter_report so the two paths report comparable chunk counts.
+_WORDS_PER_CHUNK = 2000
+
+
+def _local_chapter_report(chapters) -> list[dict]:
+    """Per-chapter report derived from detected sections — the local-source
+    analog of ``ingest_gutenberg.build_chapter_report`` (which needs HTML
+    heading offsets we don't have off ``source.txt``). Same shape:
+    ``{number, heading, words, chunks}``, chapters only."""
+    report = []
+    for ch in chapters:
+        if ch.kind != "chapter":
+            continue
+        words = len(ch.content.split())
+        report.append({
+            "number": ch.number,
+            "heading": _section_display_name(ch),
+            "words": words,
+            "chunks": max(1, round(words / _WORDS_PER_CHUNK)),
+        })
+    return report
+
+
+def _pattern_hints(
+    project_dir: Path,
+    *,
+    requested: str | None,
+    custom_regex: str | None,
+    min_chapter_size: int | None,
+    front_matter_titles: list[str] | None,
+    back_matter_titles: list[str] | None,
+    auto_detect_front_matter: bool = True,
+    auto_detect_back_matter: bool = True,
+    auto_strip_boilerplate: bool = True,
+) -> dict:
+    """Detect the best-fit pattern from ``source.txt`` and re-derive the
+    committed split as objects, so any split beat can report ``pattern_used`` /
+    ``suggested_pattern`` and run the sanity check on the local path — parity
+    with the URL path's HTML-derived hints. Returns
+    ``{detected, pattern_used, sections, warnings}``."""
+    from src import book_splitter
+
+    source_text = _read_source(project_dir)
+    detected = book_splitter.detect_pattern_from_text(source_text)
+    pattern_used = (detected or "roman") if requested in (None, "auto") else requested
+    with _quiet_stdout():
+        sections = _detect_sections(
+            source_text,
+            pattern_type=pattern_used,
+            custom_regex=custom_regex,
+            min_chapter_size=min_chapter_size,
+            front_matter_titles=front_matter_titles,
+            back_matter_titles=back_matter_titles,
+            auto_detect_front_matter=auto_detect_front_matter,
+            auto_detect_back_matter=auto_detect_back_matter,
+            auto_strip_boilerplate=auto_strip_boilerplate,
+        )
+    warnings = book_splitter.split_sanity_warnings(
+        sections, source_text, pattern_used=pattern_used, detected=detected)
+    return {
+        "detected": detected,
+        "pattern_used": pattern_used,
+        "sections": sections,
+        "warnings": warnings,
+    }
+
+
 def split_preview(
     project: str,
     *,
-    pattern_type: str = "roman",
+    pattern_type: str = "auto",
     custom_regex: str | None = None,
     min_chapter_size: int | None = None,
     front_matter_titles: list[str] | None = None,
@@ -319,12 +399,19 @@ def split_preview(
         }
         for ch in chapters
     ]
+    from src import book_splitter
+    detected = book_splitter.detect_pattern_from_text(book_text)
+    pattern_used = (detected or "roman") if pattern_type in (None, "auto") else pattern_type
     return {
         "project_dir": str(project_dir),
         "section_count": len(sections),
         "counts": _kind_counts(chapters),
+        "pattern_used": pattern_used,
+        "suggested_pattern": detected,
         "sections": sections,
         "dropped": dropped,
+        "warnings": book_splitter.split_sanity_warnings(
+            chapters, book_text, pattern_used=pattern_used, detected=detected),
         "files_written": False,
     }
 
@@ -332,7 +419,7 @@ def split_preview(
 def split_apply(
     project: str,
     *,
-    pattern_type: str = "roman",
+    pattern_type: str = "auto",
     custom_regex: str | None = None,
     min_chapter_size: int | None = None,
     front_matter_titles: list[str] | None = None,
@@ -374,12 +461,19 @@ def split_apply(
         save_chapters_to_files(chapters, str(chapters_dir))
 
     written = sorted(chapters_dir.glob("chapter_*.txt"))
+    from src import book_splitter
+    detected = book_splitter.detect_pattern_from_text(book_text)
+    pattern_used = (detected or "roman") if pattern_type in (None, "auto") else pattern_type
     return {
         "project_dir": str(project_dir),
         "chapter_count": len(chapters),
         "counts": _kind_counts(chapters),
+        "pattern_used": pattern_used,
+        "suggested_pattern": detected,
         "chapters": [p.stem for p in written],
         "dropped": dropped,
+        "warnings": book_splitter.split_sanity_warnings(
+            chapters, book_text, pattern_used=pattern_used, detected=detected),
         "files_written": True,
         "sections": [
             {
@@ -1638,10 +1732,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code)",
         "chapters": "list of written chapter file stems (e.g. 'chapter_01')",
         "chapter_count": "number of sections written to chapters/",
+        "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved to a concrete pattern here)",
         "dropped": "list of {label, reason} for boilerplate stripped at split (Contents, Title Page, ...)",
         "source_words": "word count of the ingested source (null on the no-URL path)",
-        "suggested_pattern": "heading-derived chapter-pattern hint, or null",
-        "chapter_report": "heading-structure report from ingest, or null",
+        "suggested_pattern": "best-fit chapter pattern detected from the text (or the HTML on the URL path); compare to pattern_used to catch a wrong pick",
+        "chapter_report": "per-chapter {number, heading, words, chunks} report; now populated on the local source.txt path too",
+        "warnings": "advisory strings when the split looks wrong (e.g. 1 chapter for a large source); empty when clean",
         "chunks_dir_exists": "whether chunks/ exists yet (expected False right after setup)",
         "next": "the next command to run",
     },
@@ -1649,16 +1745,22 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "project_dir": "absolute path to the project directory",
         "section_count": "number of detected sections",
         "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
+        "pattern_used": "the chapter pattern resolved for this preview (an 'auto' request becomes a concrete pattern)",
+        "suggested_pattern": "best-fit chapter pattern detected from the text, or null",
         "sections": "list of {name, kind, label, number, words, preview}",
         "dropped": "list of {label, reason} for boilerplate stripped (Contents, Title Page, ...)",
+        "warnings": "advisory strings when the split looks wrong; empty when clean",
         "files_written": "always False for the dry-run preview",
     },
     "split": {
         "project_dir": "absolute path to the project directory",
         "chapter_count": "number of sections written",
         "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
+        "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved here)",
+        "suggested_pattern": "best-fit chapter pattern detected from the text, or null",
         "chapters": "list of written chapter file stems",
         "dropped": "list of {label, reason} for boilerplate stripped (Contents, Title Page, ...)",
+        "warnings": "advisory strings when the split looks wrong; empty when clean",
         "files_written": "always True for the apply",
         "sections": "list of {name, kind, label, number, words}",
     },
