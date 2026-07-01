@@ -35,6 +35,13 @@ import time
 import warnings
 from pathlib import Path
 
+# Force UTF-8 so accented/curly-quote JSON survives a cp1252/cp437 Windows console
+# (friction-log #4). Module-top so import-time output is covered too. Guarded because
+# pytest replaces stdout/stderr with non-reconfigurable captures.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # urllib3/chardet version-mismatch noise that ``requests`` emits at import time. It forced the
@@ -457,12 +464,6 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
 
 
 def main() -> None:
-    # Force UTF-8 so accented/curly-quote JSON survives a cp1252 Windows console (friction-log
-    # #4). Guarded because pytest replaces stdout/stderr with non-reconfigurable captures.
-    for _stream in (sys.stdout, sys.stderr):
-        if hasattr(_stream, "reconfigure"):
-            _stream.reconfigure(encoding="utf-8")
-
     args = _build_parser().parse_args()
     started = time.monotonic()
     try:

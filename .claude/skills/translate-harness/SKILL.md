@@ -60,6 +60,14 @@ stdout into a JSON parser (`... | python -c "json.load(sys.stdin)"`) fails immed
 way — read `last_output.json`. (Same reason **never pipe harness output through `grep`**: on
 Windows, accented/curly-quote bytes make `grep` treat the stream as binary and truncate it.)
 
+**Windows / UTF-8 — force it on every Python you run.** The harness CLI and its wrapped
+subprocesses already emit UTF-8, but **your own** ad-hoc `python -c` probes and one-off fix
+scripts default to the Windows console codepage (cp437/cp1252) and mojibake every
+raya (—), guillemet («»), and accent — exactly the characters dialogue judging cares about.
+Always run diagnostics with `python -X utf8 -c "..."` (or set `PYTHONUTF8=1` for the session).
+When reading project files in a probe, open them with `encoding="utf-8"` explicitly. Prefer
+`Read` on `last_output.json` and chunk JSON over parsing harness stdout.
+
 **Don't guess field names — read the `_schema`.** Every `last_output.json` carries a `_schema`
 block mapping each result key (and nested shapes) to a one-line description. Read it to learn the
 exact keys instead of probing with `python -c` (e.g. `status` chapters use `chunks`/`translated`/
