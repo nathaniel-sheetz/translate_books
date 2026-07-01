@@ -297,3 +297,37 @@ def test_evaluate_and_persist_preserves_stale_when_judges_kept(tmp_path):
     assert payload["stale"] is True
     assert payload["stale_reason"] == "edited by apply"
     assert "dialogue" in payload["judges"]
+
+
+def test_evaluate_and_persist_return_includes_stale_fields(tmp_path):
+    from src.models import Chunk, ChunkMetadata, ChunkStatus
+    from web_ui.evaluations import evaluate_and_persist_chunk, mark_evaluation_stale, merge_judge_result
+
+    chunk = Chunk(
+        id="ch01_chunk_001",
+        chapter_id="ch01",
+        position=0,
+        source_text="Hello",
+        translated_text="Hola",
+        metadata=ChunkMetadata(
+            char_start=0,
+            char_end=5,
+            overlap_start=0,
+            overlap_end=0,
+            paragraph_count=1,
+            word_count=1,
+        ),
+        status=ChunkStatus.TRANSLATED,
+    )
+    merge_judge_result(
+        tmp_path,
+        chunk.id,
+        "dialogue",
+        {"eval_name": "dialogue", "issues": [{"severity": "error", "message": "m"}]},
+    )
+    mark_evaluation_stale(tmp_path, chunk.id, "edited by apply")
+
+    result = evaluate_and_persist_chunk(tmp_path, chunk, glossary=None, blacklist=None)
+
+    assert result["stale"] is True
+    assert result["stale_reason"] == "edited by apply"

@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -52,6 +53,7 @@ __all__ = [
 
 
 def main():
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
     parser = argparse.ArgumentParser(description="Apply reader corrections to chunk files")
     parser.add_argument("project_dir", type=Path, help="Path to project directory")
     parser.add_argument("--dry-run", action="store_true", help="Show what would change without modifying files")

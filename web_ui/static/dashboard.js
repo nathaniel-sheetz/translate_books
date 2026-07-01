@@ -1846,7 +1846,9 @@
         html += '</header>';
 
         html += '<div class="eval-card-body">';
-        if (issues.length === 0) {
+        if (isStale) {
+            html += '<div class="eval-empty">Findings hidden — translation changed since last evaluation. Rerun evaluators or the judge.</div>';
+        } else if (issues.length === 0) {
             html += '<div class="eval-empty">All evaluators passed.</div>';
         } else {
             html += renderEvalSections(chunkId, issues, feedbackMap);

@@ -567,11 +567,16 @@ def evaluate_and_persist_chunk(
         stale_mark=stale_mark,
     )
 
-    return {
+    result: dict = {
         "aggregated": aggregated,
         "issues": [issue.to_dict() for issue in normalized],
         "enabled_evals": actually_ran,
     }
+    if stale_mark:
+        result["stale"] = True
+        result["stale_since"] = stale_mark.get("stale_since")
+        result["stale_reason"] = stale_mark.get("stale_reason")
+    return result
 
 
 __all__ = [

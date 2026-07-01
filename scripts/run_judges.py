@@ -454,12 +454,21 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     manual_list: list[dict] = []
     chunks_without: list[str] = []
     any_findings = False
+    warnings_out: list[str] = []
 
     for chunk_id in order:
         target = targets[chunk_id]
         chapter_id = target.context.get("chapter_id") or chunk_id.rsplit("_chunk_", 1)[0]
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
-        chunk = load_chunk(chunk_path)
+        if not chunk_path.exists():
+            chunks_without.append(chunk_id)
+            continue
+        try:
+            chunk = load_chunk(chunk_path)
+        except Exception as exc:
+            warnings_out.append(f"{chunk_id}: failed to load chunk ({exc})")
+            chunks_without.append(chunk_id)
+            continue
         translated_text = chunk.translated_text or ""
         payload = load_chunk_evaluation(project_dir, chunk_id)
         judges = payload.get("judges") if isinstance(payload, dict) else None
@@ -548,12 +557,20 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     affected_chapters: list[str] = []
     all_records: list[dict] = []
     backups: list[str] = []
-    warnings_out: list[str] = []
 
     for chunk_id, entry in by_chunk.items():
         chapter_id = entry["chapter_id"]
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
-        chunk = load_chunk(chunk_path)
+        if not chunk_path.exists():
+            failed_ids.extend(fid for fid, _ in entry["items"])
+            warnings_out.append(f"{chunk_id}: chunk file missing")
+            continue
+        try:
+            chunk = load_chunk(chunk_path)
+        except Exception as exc:
+            failed_ids.extend(fid for fid, _ in entry["items"])
+            warnings_out.append(f"{chunk_id}: failed to load chunk ({exc})")
+            continue
 
         items: list[tuple[str, ProposedFix]] = entry["items"]
         records = [

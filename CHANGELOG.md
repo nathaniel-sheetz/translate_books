@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.26.0.1] - 2026-07-01
+
+### Fixed
+- **Stale evaluation UI after rerun** — `evaluate_and_persist_chunk` now returns `stale` fields in the API payload so the dashboard keeps the stale banner after coded-evaluator reruns.
+- **Stale eval cards** no longer show outdated issue lists under the stale banner.
+- **Chapter apply archive accuracy** — `_apply_pending_corrections_for_chapter` archives per-record using `applied_indices`, not whole-chunk success.
+- **`run_judges apply` resilience** — missing or unreadable chunk files surface as structured warnings/failures instead of crashing mid-apply.
+- **CLI apply warnings** — `apply_corrections.py` configures logging so locate failures are visible again after the `corrections_apply` extraction.
+
 ## [0.26.0.0] - 2026-07-01
 
 ### Added

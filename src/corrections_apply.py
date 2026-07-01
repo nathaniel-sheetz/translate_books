@@ -25,7 +25,7 @@ from pathlib import Path
 
 from src.combiner import combine_chunks
 from src.models import Chunk
-from src.utils.file_io import load_chunk, save_chunk
+from src.utils.file_io import load_chunk
 
 logger = logging.getLogger(__name__)
 

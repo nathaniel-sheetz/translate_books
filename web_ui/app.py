@@ -4340,9 +4340,18 @@ def _apply_pending_corrections_for_chapter(
     for record in target_rows:
         by_chunk[record["chunk_id"]].append(record)
 
+    def _correction_record_key(record: dict) -> tuple:
+        return (
+            record.get("chunk_id"),
+            record.get("original_es"),
+            record.get("corrected_es"),
+            record.get("chunk_offset_start"),
+            record.get("chunk_offset_end"),
+        )
+
     chunks_dir = project_dir / "chunks"
     applied_total = 0
-    applied_chunk_ids: set[str] = set()
+    applied_record_keys: set[tuple] = set()
     for chunk_id, chunk_rows in by_chunk.items():
         if not _safe_id(chunk_id):
             continue
@@ -4358,7 +4367,7 @@ def _apply_pending_corrections_for_chapter(
             )
             continue
         try:
-            updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_rows)
+            updated_chunk, applied, applied_indices = apply_to_chunk(chunk, chunk_rows)
         except Exception as e:
             app.logger.warning(
                 "apply_to_chunk failed for chunk %s: %s", chunk_id, e,
@@ -4367,7 +4376,8 @@ def _apply_pending_corrections_for_chapter(
         if applied > 0:
             save_chunk(updated_chunk, chunk_path)
             applied_total += applied
-            applied_chunk_ids.add(chunk_id)
+            for idx in applied_indices:
+                applied_record_keys.add(_correction_record_key(chunk_rows[idx]))
 
     archive_path = project_dir / "corrections_applied.jsonl"
     applied_at = datetime.now().isoformat()
@@ -4376,7 +4386,9 @@ def _apply_pending_corrections_for_chapter(
             archived = dict(record)
             archived["applied_at"] = applied_at
             archived["status"] = (
-                "applied" if record.get("chunk_id") in applied_chunk_ids else "skipped"
+                "applied"
+                if _correction_record_key(record) in applied_record_keys
+                else "skipped"
             )
             f.write(json.dumps(archived, ensure_ascii=False) + "\n")
 
