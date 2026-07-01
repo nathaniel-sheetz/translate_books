@@ -110,7 +110,7 @@ class TestApplyToChunkOffsets:
             "chunk_offset_end": body_end,
         }
 
-        updated, applied = apply_to_chunk(chunk, [correction])
+        updated, applied, _ = apply_to_chunk(chunk, [correction])
 
         assert applied == 1
         # Caption alt text MUST stay exactly as written.
@@ -138,7 +138,7 @@ class TestApplyToChunkOffsets:
             "chunk_offset_end": body_end,
         }
 
-        updated, applied = apply_to_chunk(chunk, [correction])
+        updated, applied, _ = apply_to_chunk(chunk, [correction])
 
         assert applied == 1
         # The earlier quoted version is untouched — no «« »» nesting.
@@ -162,7 +162,7 @@ class TestApplyToChunkOffsets:
             "chunk_offset_end": third_start + 3,
         }
 
-        updated, _ = apply_to_chunk(chunk, [correction])
+        updated, _, _ = apply_to_chunk(chunk, [correction])
 
         assert updated.translated_text == "Sí. Sí. ¡Claro!"
 
@@ -177,7 +177,7 @@ class TestApplyToChunkOffsets:
             "corrected_es": "El felino se sentó.",
         }
 
-        updated, applied = apply_to_chunk(chunk, [correction])
+        updated, applied, _ = apply_to_chunk(chunk, [correction])
 
         assert applied == 1
         assert updated.translated_text == "El felino se sentó."
@@ -208,7 +208,7 @@ class TestApplyToChunkOffsets:
             },
         ]
 
-        updated, applied = apply_to_chunk(chunk, corrections)
+        updated, applied, _ = apply_to_chunk(chunk, corrections)
 
         assert applied == 2
         # First "Hola." → "Buenos días.", second "Hola." → "Buenas noches."
@@ -233,7 +233,7 @@ class TestApplyToChunkOffsets:
             "chunk_offset_end": stale_hint + len("Target."),
         }
 
-        updated, _ = apply_to_chunk(chunk, [correction])
+        updated, _, _ = apply_to_chunk(chunk, [correction])
 
         # Second Target gets replaced, first preserved.
         assert updated.translated_text == "AAA. Target. BBB. Hit."
@@ -248,7 +248,7 @@ class TestApplyToChunkOffsets:
             "chunk_offset_end": 7,
         }
 
-        updated, applied = apply_to_chunk(chunk, [correction], dry_run=True)
+        updated, applied, _ = apply_to_chunk(chunk, [correction], dry_run=True)
 
         assert applied == 1
         # Returned chunk is the original (no mutation in dry-run).
@@ -469,7 +469,7 @@ class TestDuplicateAndIdempotent:
             "original_es": "La hormiga se rompió la pierna.",
             "corrected_es": "La hormiga se rompió la pata.",
         }
-        updated, applied = apply_to_chunk(chunk, [correction])
+        updated, applied, _ = apply_to_chunk(chunk, [correction])
         assert applied == 1
         # Text unchanged — it was already correct.
         assert updated.translated_text == text
@@ -484,7 +484,7 @@ class TestDuplicateAndIdempotent:
             "original_es": "Nada de esto está aquí.",
             "corrected_es": "Tampoco esto.",
         }
-        _, applied = apply_to_chunk(chunk, [correction])
+        _, applied, _ = apply_to_chunk(chunk, [correction])
         assert applied == 0
 
     def test_duplicate_correction_clears_file_after_apply(
@@ -549,7 +549,7 @@ class TestDuplicateAndIdempotent:
         # corrected_es="" — falsy, so the idempotent guard is skipped and
         # the missing original triggers the WARNING path (applied stays 0).
         correction = {"original_es": "Not here.", "corrected_es": ""}
-        _, applied = apply_to_chunk(chunk, [correction])
+        _, applied, _ = apply_to_chunk(chunk, [correction])
         assert applied == 0
 
     def test_partial_apply_leaves_corrections_file_intact(

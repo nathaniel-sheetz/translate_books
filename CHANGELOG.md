@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.26.0.1] - 2026-07-01
+
+### Fixed
+- **Stale evaluation UI after rerun** — `evaluate_and_persist_chunk` now returns `stale` fields in the API payload so the dashboard keeps the stale banner after coded-evaluator reruns.
+- **Stale eval cards** no longer show outdated issue lists under the stale banner.
+- **Chapter apply archive accuracy** — `_apply_pending_corrections_for_chapter` archives per-record using `applied_indices`, not whole-chunk success.
+- **`run_judges apply` resilience** — missing or unreadable chunk files surface as structured warnings/failures instead of crashing mid-apply.
+- **CLI apply warnings** — `apply_corrections.py` configures logging so locate failures are visible again after the `corrections_apply` extraction.
+
+## [0.26.0.0] - 2026-07-01
+
+### Added
+- **`run_judges.py apply` verb** turns persisted judge findings into chunk edits with a plan-first dry-run, user-selected fix ids, pre-edit backups under `.chunk_edits/`, and audit logging to `corrections_applied.jsonl`.
+- **`src/judges/fixes.py`** classifies findings as mechanically applicable text swaps vs manual-only (instruction-type suggestions, missing/ambiguous excerpts).
+- **`src/corrections_apply.py`** extracts the shared edit/recombine/realign/archive pipeline from `apply_corrections.py` so judge apply and the reader reuse the same path.
+- **Stale evaluation markers** on edited chunks (`mark_evaluation_stale` in `web_ui/evaluations.py`); a fresh judge run with `--persist` clears the flag.
+
+### Changed
+- **Judge-review skill** documents the optional apply-fixes workflow (dry-run plan, explicit selection, rebuild EPUB, re-run judge).
+
 ## [0.25.4.0] - 2026-07-01
 
 ### Fixed
