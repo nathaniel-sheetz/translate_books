@@ -584,7 +584,12 @@ class ChapterDetectionConfig(BaseModel):
     """
     pattern_type: str = Field(
         default="roman",
-        description="Chapter pattern type: 'roman', 'numeric', or 'custom'"
+        description=(
+            "Chapter pattern type: 'auto' (detect the best fit from the text), "
+            "any named pattern in split_patterns.json ('roman', 'numeric', "
+            "'chapter_roman_titled', 'chapter_numeric_titled', 'allcaps_heading', "
+            "'bare_roman'), or 'custom' (with custom_pattern)"
+        )
     )
     custom_pattern: Optional[str] = Field(
         default=None,

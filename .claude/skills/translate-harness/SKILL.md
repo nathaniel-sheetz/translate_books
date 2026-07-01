@@ -177,12 +177,18 @@ python scripts/harness.py setup \
 # add --project <slug> only to re-run on / target a specific existing project folder.
 ```
 
-Pick the chapter pattern that matches the book: `--chapter-pattern roman` (Chapter I, II …),
-`numeric` (Chapter 1, 2 …), or `custom` (with `--custom-regex`). For a Gutenberg `--url`, the
-returned `suggested_pattern` and `chapter_report` are read from the book's HTML headings —
-relay them and prefer the suggestion when it differs from your guess. Confirm the printed
-`chapter_count` looks right and `chunks_dir_exists` is `false`. (The lang/locale/model defaults
-are Spanish/mx/sonnet 4.6 — surface them to the user rather than assuming silently.)
+`--chapter-pattern` now **defaults to `auto`**, which detects the best-fit pattern from the
+source text itself — you rarely need to set it. The named patterns are still selectable:
+`roman` (Chapter I, II …), `numeric` (Chapter 1, 2 …), the titled variants
+`chapter_roman_titled` / `chapter_numeric_titled` (a title on the *same* line, e.g.
+`CHAPTER I. WATHO.` — the common Gutenberg shape), `allcaps_heading`, `bare_roman`, or
+`custom` (with `--custom-regex`). On **both** the `--url` and the local `source.txt` path,
+`setup`/`split`/`split-preview` now return `pattern_used` (what it split on), `suggested_pattern`
+(what the text/HTML implies), and a `chapter_report`. If `pattern_used` ≠ `suggested_pattern`,
+or `warnings` is non-empty (e.g. "1 chapter for an 87 KB source"), the split is probably wrong —
+re-run with the suggestion. Confirm the printed `chapter_count` looks right and `chunks_dir_exists`
+is `false`. (The lang/locale/model defaults are Spanish/mx/sonnet 4.6 — surface them to the user
+rather than assuming silently.)
 
 Navigation/boilerplate (the title page, a `CONTENTS`/table-of-contents listing, a list of
 illustrations, a copyright/transcriber's note) is **auto-stripped** — never written, numbered, or

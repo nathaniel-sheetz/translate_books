@@ -407,6 +407,85 @@ def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str]
         raise ValueError(f"Invalid regex in pattern '{pattern_type}': {e}")
 
 
+def detect_pattern_from_text(book_text: str) -> Optional[str]:
+    """Detect the best-fit chapter pattern for raw book text.
+
+    The URL ingest path derives a ``suggested_pattern`` from the HTML headings;
+    this is the local ``source.txt`` analog. Each candidate pattern's *real*
+    splitting regex is run over the text in ``detection_order`` priority, and
+    the first pattern that matches confidently wins. Note ``detection_order``
+    deliberately omits the plain ``roman`` / ``numeric`` patterns: the titled
+    variants (``chapter_roman_titled`` / ``chapter_numeric_titled``) make their
+    title optional, so they subsume the plain ones and always match first — the
+    plain patterns stay selectable only as explicit user choices. The specific
+    ``chapter …`` patterns need >= 2 hits; the greedy fallbacks that declare
+    ``detect_min_ratio`` (``allcaps_heading``, ``bare_roman``) need a higher
+    floor so they don't win on stray all-caps or lone-numeral lines. Returns
+    ``None`` when nothing matches confidently, so the caller can fall back to a
+    default.
+    """
+    if not book_text or not book_text.strip():
+        return None
+
+    data = load_split_patterns()
+    patterns = data.get("patterns", {})
+    detection_order = data.get("detection_order", list(patterns.keys()))
+
+    for name in detection_order:
+        defn = patterns.get(name)
+        if not defn:
+            continue
+        try:
+            compiled = get_chapter_pattern(name)
+        except ValueError:
+            continue
+        hits = len(compiled.findall(book_text))
+        # Greedy patterns (those carrying detect_min_ratio) are prone to false
+        # positives on raw text, so demand a higher floor; they sit last in
+        # detection_order and are only reached when the specific patterns miss.
+        floor = 3 if defn.get("detect_min_ratio") is not None else 2
+        if hits >= floor:
+            return name
+    return None
+
+
+def split_sanity_warnings(
+    chapters: List["DetectedChapter"],
+    book_text: str,
+    *,
+    pattern_used: str,
+    detected: Optional[str] = None,
+) -> List[str]:
+    """Cheap post-split guardrail: flag results that look mis-split.
+
+    Returns human-readable advisories (empty when the split looks fine) so the
+    setup/split beats can surface a "this split looks wrong" signal instead of
+    silently carrying a 1-chapter book all the way to EPUB.
+    """
+    warnings: List[str] = []
+    chapter_sections = [c for c in chapters if c.kind == "chapter"]
+    n = len(chapter_sections)
+    size = len(book_text or "")
+
+    if pattern_used == "roman" and detected is None and size > 20_000:
+        # auto found no confident pattern and fell back to 'roman'. This is the
+        # more actionable message, so it wins over the generic under-split warning
+        # below (they'd otherwise both fire for this one situation).
+        warnings.append(
+            "No chapter pattern matched the text confidently; fell back to "
+            "'roman'. Try --chapter-pattern auto or a --custom-regex."
+        )
+    elif n <= 1 and size > 20_000:
+        suffix = ""
+        if detected and detected != pattern_used:
+            suffix = f" — text detection suggests '{detected}'"
+        warnings.append(
+            f"Only {n} chapter detected for a {size:,}-char source; the "
+            f"'{pattern_used}' pattern may be wrong{suffix}."
+        )
+    return warnings
+
+
 # ---------------------------------------------------------------------------
 # Front / back matter detection
 # ---------------------------------------------------------------------------
@@ -535,7 +614,11 @@ def split_book_into_chapters(
 
     Args:
         book_text: Full text of the book to split
-        pattern_type: Type of chapter pattern - "roman", "numeric", or "custom"
+        pattern_type: Type of chapter pattern. Any named pattern from
+            split_patterns.json ("roman", "numeric", "chapter_roman_titled",
+            "chapter_numeric_titled", "allcaps_heading", "bare_roman"),
+            "custom" (with custom_regex), or "auto"/None to detect the best
+            fit from the text (see detect_pattern_from_text).
         custom_regex: Custom regex pattern (required if pattern_type is "custom")
         min_chapter_size: Minimum characters for valid chapter (filters false matches)
         front_matter_titles: Literal heading strings the user has declared as
@@ -569,6 +652,12 @@ def split_book_into_chapters(
 
     front_matter_titles = list(front_matter_titles or [])
     back_matter_titles = list(back_matter_titles or [])
+
+    # Resolve "auto" by detecting the best-fit pattern from the text itself
+    # (the local-source analog of the URL path's suggested_pattern). Fall back
+    # to "roman" when nothing matches confidently so behavior stays defined.
+    if pattern_type in (None, "auto"):
+        pattern_type = detect_pattern_from_text(book_text) or "roman"
 
     # Get chapter detection pattern
     pattern = get_chapter_pattern(pattern_type, custom_regex)

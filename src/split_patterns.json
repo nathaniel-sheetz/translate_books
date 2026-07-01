@@ -17,11 +17,19 @@
       "detect_min_ratio": null
     },
     "chapter_roman_titled": {
-      "label": "Roman + title (CHAPTER I SOME TITLE)",
-      "regex": "^[ \\t]*chapter[ \\t]+([IVXLCDM]+)[ \\t\\.:,\\-\\u2014]+(.+?)[ \\t]*$",
+      "label": "Roman + optional title (CHAPTER I SOME TITLE / CHAPTER I)",
+      "regex": "^[ \\t]*chapter[ \\t]+([IVXLCDM]+)(?:[ \\t\\.:,\\-\\u2014]+(.+?))?[ \\t]*$",
       "flags": ["IGNORECASE", "MULTILINE"],
       "numbering": "roman",
       "detect_regex": "\\bchapter\\s+[IVXLCDM]+\\s+[A-Za-z]",
+      "detect_min_ratio": null
+    },
+    "chapter_numeric_titled": {
+      "label": "Numeric + optional title (CHAPTER 1 SOME TITLE / CHAPTER 1)",
+      "regex": "^[ \\t]*chapter[ \\t]+(\\d+)(?:[ \\t\\.:,\\-\\u2014]+(.+?))?[ \\t]*$",
+      "flags": ["IGNORECASE", "MULTILINE"],
+      "numbering": "numeric",
+      "detect_regex": "\\bchapter\\s+\\d+\\s+[A-Za-z]",
       "detect_min_ratio": null
     },
     "allcaps_heading": {
@@ -43,8 +51,7 @@
   },
   "detection_order": [
     "chapter_roman_titled",
-    "roman",
-    "numeric",
+    "chapter_numeric_titled",
     "bare_roman",
     "allcaps_heading"
   ],

@@ -75,17 +75,43 @@ def test_setup_runs_ingest_split_and_persists_config(tmp_path: Path):
     assert (proj / ".harness" / "config.json").exists()
 
 
-def test_setup_returns_heading_hint_keys_null_on_no_url_path(tmp_path: Path):
-    """The hint keys must always be present; on the no-URL path there is no HTML
-    to read headings from, so they come back null."""
+def test_setup_derives_heading_hints_on_no_url_path(tmp_path: Path):
+    """On the local source.txt path the hints are now derived from the text
+    (friction #1/#2): suggested_pattern + a per-chapter report + pattern_used,
+    instead of the old nulls that gave the agent no under-split signal."""
     proj = tmp_path / "newbook"
     proj.mkdir()
     (proj / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
 
     result = flow.setup(str(proj), url="", target_language="Spanish", locale="mx")
 
-    assert "suggested_pattern" in result and result["suggested_pattern"] is None
-    assert "chapter_report" in result and result["chapter_report"] is None
+    assert result["suggested_pattern"] is not None
+    assert result["pattern_used"] == result["suggested_pattern"]  # auto honored the detection
+    assert isinstance(result["chapter_report"], list) and len(result["chapter_report"]) == 2
+    assert set(result["chapter_report"][0]) == {"number", "heading", "words", "chunks"}
+    assert result["warnings"] == []  # 2 chapters, small source: nothing to flag
+
+
+def test_setup_warns_when_forced_pattern_under_splits(tmp_path: Path):
+    """A forced pattern that collapses a large source to one chapter must emit a
+    warning AND still surface the pattern the text actually suggests."""
+    proj = tmp_path / "bigbook"
+    proj.mkdir()
+    # ~32 KB source. One bare 'CHAPTER I' (which 'roman' matches) and one
+    # same-line titled heading (which it does NOT — the numeral must end the
+    # line), so 'roman' collapses everything into a single chapter. This is the
+    # Photogen shape that under-split silently.
+    body = "Lorem ipsum dolor sit amet consectetur. " * 400  # ~16 KB
+    source = f"CHAPTER I\n\n{body}\n\nCHAPTER II. THE SECOND\n\n{body}"
+    (proj / "source.txt").write_text(source, encoding="utf-8")
+
+    result = flow.setup(str(proj), url="", chapter_pattern="roman",
+                        target_language="Spanish", locale="mx")
+
+    assert result["chapter_count"] == 1
+    assert result["pattern_used"] == "roman"
+    assert result["suggested_pattern"] == "chapter_roman_titled"
+    assert result["warnings"] and "may be wrong" in result["warnings"][0]
 
 
 def test_setup_derives_folder_from_title_when_project_omitted(tmp_path: Path, monkeypatch):
