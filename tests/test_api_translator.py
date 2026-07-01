@@ -31,6 +31,7 @@ from src.api_translator import (
     APIError,
     APIKeyError,
     RateLimitError,
+    _rejects_sampling_params,
 )
 
 
@@ -231,6 +232,36 @@ def test_call_anthropic_api_auth_error():
         with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'invalid-key'}):
             with pytest.raises(APIKeyError, match="Invalid Anthropic API key"):
                 call_anthropic_api("Test prompt")
+
+
+def test_rejects_sampling_params():
+    """Opus 4.7+ generation models (incl. Sonnet 5) reject sampling params; older ones don't."""
+    assert _rejects_sampling_params("claude-sonnet-5") is True
+    assert _rejects_sampling_params("claude-sonnet-5-20260615") is True
+    assert _rejects_sampling_params("claude-opus-4-7") is True
+    assert _rejects_sampling_params("claude-opus-4-8") is True
+    assert _rejects_sampling_params("claude-fable-5") is True
+    assert _rejects_sampling_params("claude-3-5-sonnet-20241022") is False
+    assert _rejects_sampling_params("claude-sonnet-4-6") is False
+
+
+def test_call_anthropic_api_omits_temperature_for_sonnet_5():
+    """call_anthropic_api must not send temperature for a model that 400s on it."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            call_anthropic_api("Translate this text", model="claude-sonnet-5")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert "temperature" not in kwargs
+        assert kwargs["model"] == "claude-sonnet-5"
 
 
 # ============================================================================
@@ -469,6 +500,34 @@ def test_submit_anthropic_batch(sample_chunk, tmp_path):
         assert job_info["chunk_count"] == 1
         assert job_info["status"] == "in_progress"
         mock_client.messages.batches.create.assert_called_once()
+
+
+def test_submit_anthropic_batch_omits_temperature_for_sonnet_5(sample_chunk, tmp_path):
+    """Batch requests for a model that 400s on sampling params must omit temperature."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_abc123"
+        mock_batch.processing_status = "in_progress"
+        mock_client.messages.batches.create.return_value = mock_batch
+        mock_anthropic_class.return_value = mock_client
+
+        output_dir = tmp_path / "translated"
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            submit_batch(
+                chunks=[sample_chunk],
+                provider='anthropic',
+                model='claude-sonnet-5',
+                output_dir=output_dir
+            )
+
+        _, kwargs = mock_client.messages.batches.create.call_args
+        request_params = kwargs["requests"][0]["params"]
+        assert "temperature" not in request_params
+        assert request_params["model"] == "claude-sonnet-5"
 
 
 def test_submit_openai_batch(sample_chunk, tmp_path):
