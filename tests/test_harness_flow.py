@@ -461,6 +461,37 @@ def test_chunk_without_per_chapter_omits_sizes_map(project: Path, monkeypatch):
     assert not (project / ".harness" / "chunk_sizes.json").exists()
 
 
+def test_chunk_and_cost_pass_configured_model_and_provider(project: Path, monkeypatch):
+    """chunk/cost must pass the persisted config model+provider to translate_book.py
+    so the cost estimate reflects the configured model, not the CLI default."""
+    state.save_config(project, {"model": "claude-sonnet-4-6", "provider": "anthropic"})
+    captured: dict = {}
+
+    def _capture(cmd):
+        captured["cmd"] = cmd
+        return 0, None
+
+    monkeypatch.setattr(flow, "_run_script", _capture)
+
+    flow.chunk(str(project), size=1500)
+    cmd = captured["cmd"]
+    assert "--model" in cmd and "claude-sonnet-4-6" in cmd
+    assert "--provider" in cmd and "anthropic" in cmd
+
+    flow.cost(str(project))
+    cmd = captured["cmd"]
+    assert "--model" in cmd and "claude-sonnet-4-6" in cmd
+    assert "--provider" in cmd and "anthropic" in cmd
+
+
+def test_harness_default_model_is_sonnet_5(tmp_path: Path):
+    """Empty config.json inherits the Sonnet 5 default."""
+    proj = tmp_path / "defaults"
+    proj.mkdir()
+    state.save_config(proj, {})
+    assert state.load_config(proj)["model"] == "claude-sonnet-5"
+
+
 # ── fresh, self-documenting last_output.json (friction-log #18, #19) ─────────
 
 def test_streaming_command_refreshes_last_output(project: Path, monkeypatch):
