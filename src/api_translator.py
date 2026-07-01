@@ -132,7 +132,7 @@ def get_pricing_table() -> dict:
 # Keep module-level constant for backward compat in scripts that import it
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
-# Anthropic models from the Opus 4.7+ generation (incl. Sonnet 5 and Fable/Mythos 5)
+# Anthropic models from the Opus 4.7+ generation (incl. Sonnet 5 and Fable 5)
 # removed the sampling params (temperature/top_p/top_k) and return HTTP 400 if any
 # are sent. Match by prefix so date-suffixed snapshots are covered too.
 _NO_SAMPLING_PARAM_MODELS = (
@@ -140,7 +140,6 @@ _NO_SAMPLING_PARAM_MODELS = (
     "claude-opus-4-8",
     "claude-sonnet-5",
     "claude-fable-5",
-    "claude-mythos-5",
 )
 
 
