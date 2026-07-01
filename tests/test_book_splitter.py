@@ -510,3 +510,17 @@ class TestSplitSanityWarnings:
         chapters = split_book_into_chapters(text, pattern_type="auto")
         assert split_sanity_warnings(chapters, text, pattern_used="chapter_roman_titled",
                                      detected="chapter_roman_titled") == []
+
+    def test_pure_fallback_emits_only_the_fallback_message(self):
+        # auto found nothing (detected is None) -> resolved to 'roman' on a large
+        # source that under-splits. Exactly one advisory fires: the actionable
+        # "fell back to roman" message, not the generic under-split one too.
+        text = "x" * 30_000
+        chapters = [DetectedChapter(position_index=1, chapter_title="",
+                                    content=text, start_line=0, end_line=1,
+                                    kind="chapter", number=1)]
+        warns = split_sanity_warnings(chapters, text, pattern_used="roman",
+                                      detected=None)
+        assert len(warns) == 1
+        assert "fell back to" in warns[0]
+        assert "may be wrong" not in warns[0]
