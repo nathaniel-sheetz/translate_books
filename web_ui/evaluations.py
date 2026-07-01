@@ -219,6 +219,38 @@ def merge_judge_result(
     judges[judge_name] = result
     payload["judges"] = judges
     payload["judges_at"] = datetime.now().isoformat()
+    # A fresh judge result supersedes any stale marker a prior apply-fix edit
+    # left behind — the badge now reflects the current translated_text again.
+    for key in ("stale", "stale_since", "stale_reason"):
+        payload.pop(key, None)
+
+    path = _eval_file(project_dir, chunk_id)
+    _atomic_write_json(path, payload)
+    return path
+
+
+def mark_evaluation_stale(
+    project_dir: Path, chunk_id: str, reason: str,
+) -> Optional[Path]:
+    """Flag a chunk's persisted evaluation as stale after its text changed.
+
+    Applying a judge fix rewrites ``translated_text``, so the findings persisted
+    in ``evaluations/<chunk>.json`` no longer describe the current translation.
+    We stamp ``stale``/``stale_since``/``stale_reason`` rather than delete the
+    file so a green (or failing) badge never silently outlives the edit that
+    invalidated it. Re-running the judge (:func:`merge_judge_result`) clears the
+    marker.
+
+    Returns the written path, or ``None`` if no evaluation exists yet (nothing
+    to invalidate).
+    """
+    payload = load_chunk_evaluation(project_dir, chunk_id)
+    if payload is None:
+        return None
+    now = datetime.now().isoformat()
+    payload["stale"] = True
+    payload["stale_since"] = now
+    payload["stale_reason"] = reason
 
     path = _eval_file(project_dir, chunk_id)
     _atomic_write_json(path, payload)
@@ -518,6 +550,7 @@ __all__ = [
     "load_chunk_evaluation",
     "merge_llm_judge_result",
     "merge_judge_result",
+    "mark_evaluation_stale",
     "append_feedback",
     "load_feedback_for_chunk",
     "load_project_summary",

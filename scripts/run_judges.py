@@ -38,6 +38,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -79,6 +80,27 @@ _RUN_SCHEMA = {
     "results": "per (target, judge): target_id, judge, passed, score, issues[], metadata",
     "persisted": "evaluations/*.json paths written when --persist is set, else null",
     "persist_errors": "list of '<chunk>/<judge>: <error>' strings for any failed persists, else null",
+}
+
+_APPLY_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "mode": "'plan' (nothing changed) | 'applied'",
+    "project": "resolved project directory",
+    "judge": "judge whose persisted findings were considered",
+    "scopes": "the --scope args resolved",
+    "applicable": "plan mode: {id, chunk_id, chapter_id, rule, severity, old, new, char_start, char_end} "
+    "for each finding that is a clean, uniquely-locatable text swap",
+    "manual": "plan mode: {id, chunk_id, chapter_id, rule, severity, reason, excerpt, suggestion, message} "
+    "for findings withheld from auto-apply (reason: no_suggestion | no_excerpt | "
+    "suggestion_equals_excerpt | suggestion_not_literal | excerpt_not_found | excerpt_ambiguous)",
+    "chunks_without_findings": "target chunks with no persisted findings for this judge",
+    "applied": "applied mode: fix ids that were applied",
+    "chapters_realigned": "applied mode: chapters recombined + realigned",
+    "epub": "applied mode: rebuilt EPUB path, or null if not requested / nothing changed",
+    "stale_marked": "applied mode: chunks whose persisted evaluation was stale-stamped",
+    "archived_to": "applied mode: corrections_applied.jsonl path (shared reader/judge audit log)",
+    "backups": "applied mode: pre-edit chunk backup paths under .chunk_edits/",
+    "warnings": "applied mode: non-fatal notes (e.g. a fix that no longer located), else null",
 }
 
 
@@ -201,6 +223,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write findings into evaluations/<chunk>.json (dashboard badges)",
     )
     cp.add_argument("--verbose", action="store_true", help="Debug logging")
+
+    # apply — turn approved findings into chunk edits -----------------------
+    ap = sub.add_parser(
+        "apply",
+        help="Apply user-approved judge findings to chunk text (careful, plan-first)",
+    )
+    ap.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    ap.add_argument(
+        "--judge",
+        default="dialogue",
+        help="Judge whose persisted findings to apply (default: dialogue)",
+    )
+    ap.add_argument(
+        "--scope",
+        required=True,
+        action="append",
+        metavar="SCOPE",
+        help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'. Repeatable.",
+    )
+    ap.add_argument(
+        "--select",
+        default=None,
+        help="Comma-separated fix ids (from the plan's applicable[].id) to apply. "
+        "Omit to preview the plan without changing anything.",
+    )
+    ap.add_argument(
+        "--rebuild-epub",
+        dest="rebuild_epub",
+        action="store_true",
+        help="Rebuild the EPUB after applying (recombine + realign always run)",
+    )
+    ap.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Preview the plan and change nothing, even if --select is given",
+    )
+    ap.add_argument(
+        "--source-lang", dest="source_lang", default="en",
+        help="Source language code for realignment (default: en)",
+    )
+    ap.add_argument(
+        "--target-lang", dest="target_lang", default="es",
+        help="Target language code for realignment (default: es)",
+    )
+    ap.add_argument("--verbose", action="store_true", help="Debug logging")
 
     return parser
 
@@ -338,10 +406,222 @@ def _cmd_commit(args: argparse.Namespace) -> int:
     return 1 if payload.get("status") == "error" else 0
 
 
+def _cmd_apply(args: argparse.Namespace) -> int:
+    """Apply user-approved judge findings to chunk text (careful, plan-first).
+
+    Plan-first: without ``--select`` (or with ``--dry-run``) it only *reports*
+    which persisted findings are a clean, uniquely-locatable text swap
+    (``applicable``) and which are withheld (``manual``) — nothing is written.
+    With ``--select`` it applies only the chosen ids, reusing the reader-
+    corrections pipeline (backup -> edit -> recombine -> realign -> archive) so
+    the edit is logged exactly like other chunk edits, then stale-marks the
+    edited chunks' evaluations. The reader's ``corrections.jsonl`` queue is never
+    touched.
+    """
+    project_dir = _resolve_project(args.project)
+
+    from src.corrections_apply import (
+        apply_to_chunk,
+        archive_applied_records,
+        realign_chapter,
+        rebuild_epub,
+        recombine_chapter,
+    )
+    from src.judges.fixes import ProposedFix, classify_fix, to_correction_record
+    from src.utils.file_io import load_chunk, save_chunk
+    from web_ui.evaluations import load_chunk_evaluation, mark_evaluation_stale
+
+    judge = args.judge
+
+    # 1. Resolve scopes -> unique, translated chunk targets (preserve order).
+    targets: dict[str, object] = {}
+    order: list[str] = []
+    try:
+        for scope in args.scope:
+            for target in build_targets(project_dir, scope):
+                if target.target_type != "chunk" or target.id in targets:
+                    continue
+                targets[target.id] = target
+                order.append(target.id)
+    except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
+        _emit({"status": "error", "error": str(exc), "scopes": args.scope}, _APPLY_SCHEMA)
+        return 1
+
+    # 2. Classify each chunk's persisted findings against its current text.
+    applicable: dict[str, tuple[str, str, ProposedFix]] = {}
+    applicable_list: list[dict] = []
+    manual_list: list[dict] = []
+    chunks_without: list[str] = []
+    any_findings = False
+
+    for chunk_id in order:
+        target = targets[chunk_id]
+        chapter_id = target.context.get("chapter_id") or chunk_id.rsplit("_chunk_", 1)[0]
+        payload = load_chunk_evaluation(project_dir, chunk_id)
+        judges = payload.get("judges") if isinstance(payload, dict) else None
+        judge_entry = judges.get(judge) if isinstance(judges, dict) else None
+        issues = judge_entry.get("issues") if isinstance(judge_entry, dict) else None
+        if not issues:
+            chunks_without.append(chunk_id)
+            continue
+        any_findings = True
+        for i, issue in enumerate(issues):
+            fid = f"{chunk_id}#{i}"
+            result = classify_fix(issue, target.translated_text)
+            if isinstance(result, ProposedFix):
+                applicable[fid] = (chunk_id, chapter_id, result)
+                applicable_list.append(
+                    {
+                        "id": fid, "chunk_id": chunk_id, "chapter_id": chapter_id,
+                        "rule": result.rule, "severity": result.severity,
+                        "old": result.excerpt, "new": result.suggestion,
+                        "char_start": result.char_start, "char_end": result.char_end,
+                    }
+                )
+            else:
+                manual_list.append(
+                    {
+                        "id": fid, "chunk_id": chunk_id, "chapter_id": chapter_id,
+                        "rule": result.rule, "severity": result.severity,
+                        "reason": result.reason, "excerpt": result.excerpt,
+                        "suggestion": result.suggestion, "message": result.message,
+                    }
+                )
+
+    if not any_findings:
+        _emit(
+            {
+                "status": "error",
+                "error": f"No persisted '{judge}' findings for the given scope. Run the "
+                "judge with --persist first (run/commit) before applying.",
+                "scopes": args.scope,
+                "chunks_without_findings": chunks_without,
+            },
+            _APPLY_SCHEMA,
+        )
+        return 1
+
+    # 3. Plan mode — report, change nothing.
+    if args.dry_run or not args.select:
+        _emit(
+            {
+                "status": "ok", "mode": "plan", "project": str(project_dir),
+                "judge": judge, "scopes": args.scope,
+                "applicable": applicable_list, "manual": manual_list,
+                "chunks_without_findings": chunks_without,
+            },
+            _APPLY_SCHEMA,
+        )
+        return 0
+
+    # 4. Apply mode — only the explicitly-selected, applicable ids.
+    selected_ids = [s.strip() for s in args.select.split(",") if s.strip()]
+    unknown = [s for s in selected_ids if s not in applicable]
+    if unknown:
+        _emit(
+            {
+                "status": "error",
+                "error": "Selected id(s) are not in the applicable set (unknown, or "
+                "classified as manual). Re-check the plan's applicable[].id.",
+                "unknown_ids": unknown,
+                "applicable_ids": list(applicable.keys()),
+            },
+            _APPLY_SCHEMA,
+        )
+        return 1
+
+    # Group selected fixes by chunk (keep their ids for reporting).
+    by_chunk: dict[str, dict] = {}
+    for fid in dict.fromkeys(selected_ids):
+        chunk_id, chapter_id, fix = applicable[fid]
+        entry = by_chunk.setdefault(chunk_id, {"chapter_id": chapter_id, "items": []})
+        entry["items"].append((fid, fix))
+
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    applied_ids: list[str] = []
+    edited_chunks: list[str] = []
+    affected_chapters: list[str] = []
+    all_records: list[dict] = []
+    backups: list[str] = []
+    warnings_out: list[str] = []
+
+    for chunk_id, entry in by_chunk.items():
+        chapter_id = entry["chapter_id"]
+        chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+        chunk = load_chunk(chunk_path)
+
+        # Pre-edit backup (reuse the web-UI editor convention; keep last 10).
+        backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_root / f"{ts}.json"
+        backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
+        for old_backup in sorted(backup_root.glob("*.json"))[:-10]:
+            try:
+                old_backup.unlink()
+            except OSError:
+                pass
+        backups.append(str(backup_path))
+
+        records = [
+            to_correction_record(
+                fix, chunk_id=chunk_id, chapter_id=chapter_id,
+                project_id=project_dir.name, judge_name=judge,
+            )
+            for _fid, fix in entry["items"]
+        ]
+        updated, applied = apply_to_chunk(chunk, records)
+        if applied < len(records):
+            warnings_out.append(f"{chunk_id}: {applied}/{len(records)} selected fixes located")
+        if applied > 0:
+            save_chunk(updated, chunk_path)
+            all_records.extend(records)
+            applied_ids.extend(fid for fid, _fix in entry["items"])
+            edited_chunks.append(chunk_id)
+            if chapter_id not in affected_chapters:
+                affected_chapters.append(chapter_id)
+
+    # 5. Recombine + realign the touched chapters (always).
+    for chapter_id in affected_chapters:
+        recombine_chapter(project_dir, chapter_id)
+        realign_chapter(project_dir, chapter_id, args.source_lang, args.target_lang)
+
+    # 6. Archive (shared audit log) + stale-guard the edited evaluations.
+    archive_path = archive_applied_records(project_dir, all_records) if all_records else None
+    stale_marked: list[str] = []
+    for chunk_id in edited_chunks:
+        if mark_evaluation_stale(
+            project_dir, chunk_id,
+            f"translated_text edited by judge-review apply ({judge})",
+        ) is not None:
+            stale_marked.append(chunk_id)
+
+    # 7. Optional EPUB rebuild.
+    epub_path = None
+    if args.rebuild_epub and affected_chapters:
+        epub_path = rebuild_epub(project_dir)
+
+    _emit(
+        {
+            "status": "ok", "mode": "applied", "project": str(project_dir),
+            "judge": judge, "scopes": args.scope,
+            "applied": applied_ids,
+            "chapters_realigned": affected_chapters,
+            "epub": str(epub_path) if epub_path else None,
+            "stale_marked": stale_marked,
+            "archived_to": str(archive_path) if archive_path else None,
+            "backups": backups,
+            "warnings": warnings_out or None,
+        },
+        _APPLY_SCHEMA,
+    )
+    return 0
+
+
 _DISPATCH = {
     "run": _cmd_run,
     "prepare": _cmd_prepare,
     "commit": _cmd_commit,
+    "apply": _cmd_apply,
 }
 
 

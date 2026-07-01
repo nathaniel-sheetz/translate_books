@@ -38,7 +38,7 @@ findings — and the persisted `evaluations/<chunk>.json` — are identical eith
 
 ## The CLI (read first)
 
-`python scripts/run_judges.py <run|prepare|commit>` is non-interactive and prints
+`python scripts/run_judges.py <run|prepare|commit|apply>` is non-interactive and prints
 one JSON object with a `_schema` block documenting every key.
 
 **Windows / UTF-8 — force it on every Python you run.** `run_judges.py` reconfigures stdout
@@ -68,6 +68,15 @@ Shared flags (`run`, `prepare`):
   destructive (it wipes the drafts for the pairs it re-renders).
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
+
+`apply` (turn approved findings into chunk edits) adds:
+- `--judge <name>` (default `dialogue`) — whose **persisted** findings to consider.
+- `--scope chunk:<id>` / `--scope chapter:<id>` — **repeatable**.
+- `--select <id,id,...>` — the `applicable[].id`s to apply. **Omit for a plan-only dry-run.**
+- `--rebuild-epub` — rebuild the EPUB after applying (recombine + realign always run).
+- `--dry-run` — force plan mode even when `--select` is given.
+
+`apply` reads the findings you already persisted, so run/commit with `--persist` **first**.
 
 `run` returns `status`:
 - `"cost_exceeded"` — it refused to spend. Relay the estimate and **stop**; only
@@ -137,6 +146,40 @@ Relay `committed` / `failed` / `missing`. **Re-spawn** any `failed` (bad/no JSON
 re-spawns at ~3 per entry, then surface for manual review. Then relay findings the same
 way the API branch does.
 
+### C. Apply fixes (optional — after relaying findings)
+
+Offer this only **after** findings are relayed and **persisted** (`--persist`). It rewrites
+`translated_text` in place, so it is careful and user-gated: it only ever proposes clean,
+uniquely-locatable text swaps, and it never applies anything you didn't explicitly select.
+
+6c. **Dry-run the plan.** Run `apply` with `--dry-run` (or just omit `--select`). Relay the
+`applicable[]` fixes as `old → new` previews and list the `manual[]` findings with their
+`reason` — those can't be auto-applied (instruction-type suggestion, or an absent/ambiguous
+excerpt); point the user to the reader / web chunk editor for them.
+```bash
+python scripts/run_judges.py apply --project understood-betsy \
+    --judge dialogue --scope chapter:chapter_03 --dry-run
+```
+7c. **Get an explicit selection.** The user picks which `applicable[].id`s to apply — **never
+apply without an explicit pick.** Use `AskUserQuestion` (multiSelect, **≤4 options**) when there
+are ≤4; for more, present a numbered list and have the user reply with the ids. If a listed
+suggestion still reads to you as an *instruction* rather than literal replacement text, flag it
+and leave it for manual editing even though the CLI classified it applicable.
+
+8c. **Apply the picked ids.** Pass them comma-separated; add `--rebuild-epub` if the user wants
+the book rebuilt now (recombine + realign always run either way):
+```bash
+python scripts/run_judges.py apply --project understood-betsy --judge dialogue \
+    --scope chapter:chapter_03 --select chapter_03_chunk_000#0,chapter_03_chunk_001#2 [--rebuild-epub]
+```
+Relay the summary (`applied`, `chapters_realigned`, `archived_to`, `backups`). Every edit is
+logged to `corrections_applied.jsonl` (the same audit log as reader corrections) and a pre-edit
+chunk snapshot is kept under `.chunk_edits/` — so an apply is recoverable and traceable.
+
+9c. **Refresh the badges.** Applying stale-marks each edited chunk's `evaluations/<chunk>.json`
+(a fixed finding must not keep asserting a failure). Offer to **re-run the judge** on the
+affected chunks; a fresh run clears the stale flag.
+
 ### Feedback (optional, either backend)
 
 If the user says a finding is a false positive, record it so the judge can be tuned
@@ -155,3 +198,7 @@ later: `append_feedback(project_dir, chunk_id, "dialogue", issue_index,
 - Adding a judge later: write a prompt template + a `JudgeSpec`, implement
   `build_prompt` + `parse_response` (you get both backends for free), and register it
   in `src/judges/registry.py`. See `docs/JUDGES_FRAMEWORK.md`.
+- `apply` reuses the reader-corrections pipeline (`src/corrections_apply.py`) but never touches
+  the reader's own `corrections.jsonl` queue — it applies only the ids you selected, archives to
+  `corrections_applied.jsonl`, and stale-marks the edited evaluations. Re-running the judge with
+  `--persist` clears that stale marker.
