@@ -10,7 +10,7 @@ Compare two models on a chapter:
 python scripts/compare_models.py \
     --source projects/fabre2/chapters/chapter_01.txt \
     --models sonnet,haiku \
-    --judge claude-sonnet-4-6 \
+    --judge claude-sonnet-5 \
     --project projects/fabre2
 ```
 
@@ -111,7 +111,7 @@ python scripts/compare_models.py [OPTIONS]
 | `--source` | ✓ | — | One or more paths to source chapter text files. Pass multiple to bundle all chapters into a single batch per model (see [Multi-chapter runs](#multi-chapter-runs)). |
 | `--models` | ✓ | — | Comma-separated model IDs or aliases (e.g. `sonnet,haiku,opus`) |
 | `--project` | ✓ | — | Path to the project directory |
-| `--judge` | | `claude-sonnet-4-6` | Model used as the judge |
+| `--judge` | | `claude-sonnet-5` | Model used as the judge |
 | `--provider` | | from `llm_config.json` | LLM provider |
 | `--style` | | auto-detected from project | Path to `style.json` for voice context |
 | `--output` | | `comparisons/<project>/<run_id>/` | Output directory |
@@ -160,7 +160,7 @@ Short aliases are resolved to full model IDs:
 
 | Alias | Model ID |
 |---|---|
-| `sonnet` | `claude-sonnet-4-6` |
+| `sonnet` | `claude-sonnet-5` |
 | `haiku` | `claude-haiku-4-5-20251001` |
 | `opus` | `claude-opus-4-0-20250514` |
 | `gpt4o` | `gpt-4o` |
@@ -214,7 +214,7 @@ The first line of `raw.jsonl` is a run header capturing reproducibility metadata
 {
   "type": "run_header",
   "run_id": "...",
-  "judge_model": "claude-sonnet-4-6",
+  "judge_model": "claude-sonnet-5",
   "judge_temperature": 0.0,
   "judge_prompt_version": "sha256...",
   "git_commit": "abc123...",
@@ -305,7 +305,7 @@ evaluator = LLMJudgeEvaluator()
 result = evaluator.evaluate(chunk, context={
     "style_json_path": Path("projects/fabre2/style.json"),
     "coded_eval_results": prior_results,  # optional: coded evaluator output
-    "judge_model": "claude-sonnet-4-6",   # optional: override default
+    "judge_model": "claude-sonnet-5",   # optional: override default
 })
 
 print(result.score)            # 0.0–1.0 normalized
@@ -325,7 +325,7 @@ verdict = judge_pairwise(
     coded_eval_results_b=evals_b,
     judge_context_mode="full_prompt",     # note: underscore in the Python API
     translator_context=rendered_prompt,   # the full prompt the translator saw
-    judge_model="claude-sonnet-4-6",
+    judge_model="claude-sonnet-5",
 )
 ```
 
@@ -365,7 +365,7 @@ Compare three models with a custom style guide and higher cost limit:
 python scripts/compare_models.py \
     --source projects/fabre2/chapters/chapter_01.txt \
     --models sonnet,haiku,opus \
-    --judge claude-sonnet-4-6 \
+    --judge claude-sonnet-5 \
     --project projects/fabre2 \
     --style projects/fabre2/style_v2.json \
     --cost-limit 10 --confirm

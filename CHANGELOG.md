@@ -5,8 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [0.25.3.0] - 2026-07-01
 
 ### Changed
-- **Default Anthropic model is now `claude-sonnet-5`** (was `claude-sonnet-4-6`) across harness state, `translate_book.py`, and `api_translator` fallbacks so persisted config, cost estimates, and the legacy CLI agree.
+- **Default Anthropic model is now `claude-sonnet-5`** (was `claude-sonnet-4-6`) across harness state, `api_translator` fallbacks, `llm_config.example.json`, and all CLI entry points (`translate_book.py`, `translate_api.py`, `extract_glossary_candidates.py`, `generate_style_guide.py`, `compare_models.py` `sonnet` alias and `--judge` default). Scripts import `DEFAULT_MODEL` from `api_translator` so defaults stay in sync.
 - **Translate-harness setup no longer asks for a model.** Model choice is deferred to the API cost gate (Step 4); on the subagent path the worker tier is chosen at Step 4B.
+- **Docs refreshed** (`LLM_PROVIDERS.md`, `GLOSSARY_CANDIDATES.md`, `LLM_JUDGE_EVALUATOR.md`, `READER_RETRANSLATE.md`) to show Sonnet 5 as the system default in examples and tables.
 
 ### Fixed
 - **Cost estimates (`chunk`/`cost`) now use the project's configured model and provider** instead of falling back to `translate_book.py`'s CLI default — fixing under-quoted spend authorization when setup persisted a different model than the estimate showed.

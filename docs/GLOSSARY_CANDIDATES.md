@@ -43,7 +43,7 @@ python scripts/extract_glossary_candidates.py projects/mybook/source.txt \
     -o candidates.json \
     --bootstrap \
     --style-guide projects/mybook/style.json \
-    --provider anthropic --model claude-sonnet-4-6
+    --provider anthropic --model claude-sonnet-5
 ```
 
 ## The pipeline
@@ -382,7 +382,7 @@ python scripts/extract_glossary_candidates.py SOURCE -o OUTPUT [options]
 | `--prompt-out` | none | Build the bootstrap prompt and write it to this file, then exit (no LLM call). Works with or without `--bootstrap`. Useful for piping into another tool or pasting into a chat. |
 | `--style-guide` | none | Style guide JSON whose `content` is interpolated into the prompt. |
 | `--provider` | `anthropic` | LLM provider (`anthropic` or `openai`). |
-| `--model` | `claude-sonnet-4-6` | Model name for the bootstrap call. |
+| `--model` | `claude-sonnet-5` | Model name for the bootstrap call. |
 | `--bootstrap-context-mode` | `full-text` | Prompt shape: `full-text` (flat list + first 10 KB of source) or `word` (per-term fragments, sorted by first appearance). See [Bootstrap prompts](#bootstrap-prompts). |
 | `--bootstrap-fragments-per-term` | `2` | **Word-mode only.** Number of in-text fragments to attach to each candidate. |
 | `--bootstrap-words-before` | `10` | **Word-mode only.** Word tokens to include before each match. |

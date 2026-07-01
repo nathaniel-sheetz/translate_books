@@ -34,7 +34,7 @@ modal can host `[Score]` buttons in a future phase.
    `Calling LLM…`. On return, a **New translation** textarea appears,
    pre-filled with the LLM's output, plus a `Reset to LLM output`
    button and a cost label
-   (`claude-sonnet-4-6 · 234→48 tokens · $0.0014`).
+   (`claude-sonnet-5 · 234→48 tokens · $0.0014`).
 7. Hand-edit the new translation if desired. Click **Reset to LLM
    output** to restore the unedited model response (the front-end keeps
    it in JS state).
@@ -165,14 +165,21 @@ open. Per-call:
 
 ```json
 {
-  "default_model": "claude-sonnet-4-6",
+  "default_model": "claude-sonnet-5",
   "models": [
+    {
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "provider": "anthropic",
+      "pricing": {"input": 2.00, "output": 10.00},
+      "is_default": true
+    },
     {
       "id": "claude-sonnet-4-6",
       "name": "Claude Sonnet 4.6",
       "provider": "anthropic",
       "pricing": {"input": 3.00, "output": 15.00},
-      "is_default": true
+      "is_default": false
     },
     {
       "id": "claude-haiku-4-5-20251001",
@@ -194,7 +201,7 @@ open. Per-call:
   "chunk_id": "chapter_01_chunk_002",
   "es_idx": 7,
   "source_text": "The cake was burnt and the king was scolded.",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "provider": "anthropic",
   "context_text": "Before:\nIt was a quiet morning in the castle.\n\nAfter:\nThe queen would later deny everything.",
   "expected_chunk_mtime": 1730000000.123
@@ -210,7 +217,7 @@ Response on success:
 {
   "ok": true,
   "new_translation": "La torta se quemó y la campesina regañó al rey.",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "provider": "anthropic",
   "prompt_tokens": 234,
   "completion_tokens": 48,
