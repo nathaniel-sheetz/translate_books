@@ -13,6 +13,7 @@ logging, and provider abstraction for free.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -45,6 +46,7 @@ class JudgeParseError(Exception):
 # Prompt templates
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=None)
 def load_template(name: str) -> str:
     """Load a prompt template by filename from the ``prompts/`` directory."""
     resolved = (_PROMPTS_DIR / name).resolve()

@@ -117,67 +117,37 @@ class DialogueComplianceJudge(VerdictJudge):
         description="Checks Spanish dialogue formatting against prompts/dialogue.txt",
     )
 
-    def run(self, target: JudgeTarget, context: dict[str, Any]) -> EvalResult:
-        """Score one target's dialogue compliance.
+    def prompt_variables(
+        self, target: JudgeTarget, context: dict[str, Any]
+    ) -> dict[str, str]:
+        """Template variables: the house rules plus the source + translation.
 
         Context keys consumed (all optional):
             ``dialogue_rules`` (str): rules text override; defaults to
                 ``prompts/dialogue.txt``.
-            ``judge_model`` / ``judge_provider``: LLM overrides.
         """
         rules: Optional[str] = context.get("dialogue_rules")
         if not rules:
             rules = _load_default_rules()
+        return {
+            "dialogue_rules": rules,
+            "source_text": target.source_text,
+            "translation_text": target.translated_text,
+        }
+
+    def parse_response(
+        self, target: JudgeTarget, raw: str, context: dict[str, Any]
+    ) -> EvalResult:
+        """Map one raw judge response to an :class:`EvalResult`.
+
+        Shared by both backends (API ``run`` and subagent ``commit``). Raises
+        :class:`JudgeParseError` on unparseable output so each backend decides
+        retry-vs-re-spawn; the success path mirrors the old ``run`` body exactly.
+        """
         model: Optional[str] = context.get("judge_model")
         provider: Optional[str] = context.get("judge_provider")
 
-        template = llm_io.load_template(self.spec.template)
-        prompt = llm_io.render(
-            template,
-            {
-                "dialogue_rules": rules,
-                "source_text": target.source_text,
-                "translation_text": target.translated_text,
-            },
-        )
-
-        raw = llm_io.call_judge(
-            prompt, provider=provider, model=model, call_type="judge_dialogue"
-        )
-        try:
-            data = llm_io.parse_judge_json(raw, self.spec.output_fields)
-        except JudgeParseError:
-            logger.warning("Dialogue judge parse failed; retrying with stricter suffix.")
-            retry_prompt = prompt + (
-                "\n\nYour previous response was not valid JSON. "
-                "Respond with ONLY the JSON object described above."
-            )
-            raw = llm_io.call_judge(
-                retry_prompt,
-                provider=provider,
-                model=model,
-                call_type="judge_dialogue",
-                max_retries=1,
-            )
-            try:
-                data = llm_io.parse_judge_json(raw, self.spec.output_fields)
-            except JudgeParseError as exc:
-                logger.error("Dialogue judge unparseable on %s: %s", target.id, exc)
-                return self.make_result(
-                    target,
-                    issues=[
-                        Issue(
-                            severity=IssueLevel.ERROR,
-                            message=f"Dialogue judge returned unparseable response: {exc}",
-                            location=target.id,
-                        )
-                    ],
-                    score=None,
-                    metadata={"error": str(exc), "raw_response": raw[:2000]},
-                    prompt_version=llm_io.prompt_version(self.spec.template),
-                    model=model,
-                    provider=provider,
-                )
+        data = llm_io.parse_judge_json(raw, self.spec.output_fields)
 
         raw_findings = [f for f in (data.get("findings") or []) if isinstance(f, dict)]
         findings = [f for f in raw_findings if not _is_nonissue(f)]
@@ -205,3 +175,54 @@ class DialogueComplianceJudge(VerdictJudge):
             model=model,
             provider=provider,
         )
+
+    def run(self, target: JudgeTarget, context: dict[str, Any]) -> EvalResult:
+        """API backend: build the prompt, call the LLM, parse the response.
+
+        Context keys consumed (all optional): ``dialogue_rules`` (rules override),
+        ``judge_model`` / ``judge_provider`` (LLM overrides). On an unparseable
+        response it retries once with a stricter JSON-only suffix, then returns a
+        single error issue if it still cannot parse.
+        """
+        model: Optional[str] = context.get("judge_model")
+        provider: Optional[str] = context.get("judge_provider")
+
+        prompt = self.build_prompt(target, context)
+
+        raw = llm_io.call_judge(
+            prompt, provider=provider, model=model, call_type="judge_dialogue"
+        )
+        try:
+            return self.parse_response(target, raw, context)
+        except JudgeParseError:
+            logger.warning("Dialogue judge parse failed; retrying with stricter suffix.")
+            retry_prompt = prompt + (
+                "\n\nYour previous response was not valid JSON. "
+                "Respond with ONLY the JSON object described above."
+            )
+            raw = llm_io.call_judge(
+                retry_prompt,
+                provider=provider,
+                model=model,
+                call_type="judge_dialogue",
+                max_retries=1,
+            )
+            try:
+                return self.parse_response(target, raw, context)
+            except JudgeParseError as exc:
+                logger.error("Dialogue judge unparseable on %s: %s", target.id, exc)
+                return self.make_result(
+                    target,
+                    issues=[
+                        Issue(
+                            severity=IssueLevel.ERROR,
+                            message=f"Dialogue judge returned unparseable response: {exc}",
+                            location=target.id,
+                        )
+                    ],
+                    score=None,
+                    metadata={"error": str(exc), "raw_response": raw[:2000]},
+                    prompt_version=llm_io.prompt_version(self.spec.template),
+                    model=model,
+                    provider=provider,
+                )

@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.0.0] - 2026-06-30
+
+### Added
+- **Subagent backend for the tailored-judge framework.** Judges now run one of two interchangeable ways: the existing **API backend** (`run_judges.py run`, metered, behind the dollar cost gate) or a new **subagent backend** (`run_judges.py prepare` → spawn `judge-worker` subagents → `run_judges.py commit`) that renders each judge's prompt to a file, has cheap spawned workers answer it, and collects the JSON verdicts — **zero API spend**, runs on the session. Both backends build the same prompt and run the same parser, so the findings and the persisted `evaluations/<chunk>.json` are identical whichever ran; the run header records the `backend` (and `worker_model` for the subagent path). Mirrors the dual-backend pattern translate-harness already uses for translation.
+- **`judge-worker` agent (`.claude/agents/judge-worker.md`).** A minimal Read+Write worker (default `model: sonnet`) spawned one-per-`(target × judge)`: it reads a rendered judge prompt and writes only the JSON verdict to a draft file. The orchestrator pins the model via the spawn's `model:` arg.
+- **`judge-review` skill backend selection.** The skill now asks API vs subagent (default API), runs the matching flow, and gates the subagent path on a conversational usage check before spawning N workers (the no-dollars analog of the cost gate).
+
+### Changed
+- **`run_judges.py` is now subcommand-based** (`run` / `prepare` / `commit`) instead of a single flat command. `run` preserves the previous API-backend behavior verbatim; `prepare`/`commit` drive the subagent backend.
+- **The `Judge` interface split into a shared seam.** Every judge now implements `build_prompt(target, context)` and `parse_response(target, raw, context)`; `run()` composes them (build → call LLM → parse) for the API path while the subagent backend reuses the same two methods. Any judge that implements both gets both backends for free. The dialogue judge was refactored onto this seam with no change to its API-path behavior. `parse_response` raises `JudgeParseError` on unparseable output so the API path can retry while the subagent `commit` marks the draft failed for re-spawn.
+
+### Fixed
+- **`commit` no longer crashes on a tampered or corrupt manifest.** Non-list `entries`, missing keys in an individual entry, and UnicodeDecodeError from a draft file are all caught and reported as `failed` entries rather than aborting the entire commit with an unhandled exception.
+- **Path traversal guard on `draft_path` in `commit`.** Draft file paths from the manifest are now resolved and validated to stay inside `.harness/judges/` before being read, matching the existing guard on `load_template`. Similarly, `target.id` is validated against the safe-id regex in `prepare` before it is used as a filename component.
+- **`_PREPARE_SCHEMA` not imported in `run_judges.py`.** The prepare error paths referenced `_PREPARE_SCHEMA` but it was never imported, causing a `NameError` crash whenever `prepare` encountered an invalid scope or suite. The symbol is now imported from `src.judges.subagent`.
+- **`commit` exit code.** `run_judges.py commit` now exits with code 1 when the payload status is `"error"` (manifest absent, unreadable, etc.) rather than always exiting 0.
+- **`run_header` judge list.** When all entries fail to parse, `judge_names` for the run header is now taken from the stored `judges` key in the manifest rather than being derived from the empty committed list.
+- **Performance: judge instances and templates cached.** `get_judge()` is called once per judge name (not once per `target × judge`) in `prepare`, and `load_template()` is memoised with `functools.lru_cache` so the template file is read from disk once per session.
+
 ## [0.24.0.0] - 2026-06-29
 
 ### Added

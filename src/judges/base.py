@@ -73,13 +73,72 @@ def coerce_severity(value: Any, default: IssueLevel = IssueLevel.WARNING) -> Iss
 
 
 class Judge(ABC):
-    """Abstract judge. Concrete judges set ``spec`` and implement ``run``."""
+    """Abstract judge. Concrete judges set ``spec`` and implement ``run``.
+
+    A judge is split across three methods so the same judge can run via two
+    interchangeable backends — the metered **API** path and the zero-spend
+    **subagent** path — without duplicating prompt-building or response-parsing:
+
+    - :meth:`build_prompt` renders the exact prompt string. The API path
+      (:meth:`run`) sends it to the LLM; the subagent backend writes it to a
+      file for a spawned ``judge-worker`` to answer. The prompt is *identical*
+      either way, so the two backends are comparable (the judge analog of
+      translate-harness's byte-identical translation prompt).
+    - :meth:`parse_response` maps a raw judge response to an
+      :class:`EvalResult`. Both backends call it, so a persisted result looks
+      the same regardless of who produced the raw text.
+    - :meth:`run` is the API backend: build → call → parse, plus any retry.
+
+    A judge that implements :meth:`build_prompt` + :meth:`parse_response` gets
+    the subagent backend for free (see ``src/judges/subagent.py``).
+    """
 
     spec: JudgeSpec
 
     @abstractmethod
     def run(self, target: JudgeTarget, context: dict[str, Any]) -> EvalResult:
-        """Evaluate ``target`` and return an :class:`EvalResult`."""
+        """Evaluate ``target`` via the API backend and return an :class:`EvalResult`."""
+
+    def prompt_variables(self, target: JudgeTarget, context: dict[str, Any]) -> dict[str, str]:
+        """Template variables for :meth:`build_prompt`.
+
+        Default maps the source and translation; override to inject
+        judge-specific inputs (e.g. the dialogue judge adds ``dialogue_rules``).
+        """
+        return {
+            "source_text": target.source_text,
+            "translation_text": target.translated_text,
+        }
+
+    def build_prompt(self, target: JudgeTarget, context: dict[str, Any]) -> str:
+        """Render the judge's prompt.
+
+        Shared by the API path (:meth:`run`) and the subagent backend (which
+        writes the result to a file for a worker), so both send byte-identical
+        prompts. Override only if a judge needs non-template prompt assembly.
+        """
+        from src.judges import llm_io  # local import avoids any import-order coupling
+
+        template = llm_io.load_template(self.spec.template)
+        return llm_io.render(template, self.prompt_variables(target, context))
+
+    def parse_response(
+        self, target: JudgeTarget, raw: str, context: dict[str, Any]
+    ) -> EvalResult:
+        """Map a raw judge response to an :class:`EvalResult`.
+
+        Both backends call this. It must raise
+        :class:`~src.judges.llm_io.JudgeParseError` on unparseable output so each
+        backend can decide what to do: the API path retries with a stricter
+        suffix; the subagent ``commit`` marks the draft failed for re-spawn.
+
+        Override per judge. The default raises so a judge that has not yet
+        implemented it fails loudly rather than silently producing empty results.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement parse_response(); implement "
+            "it (and build_prompt()) to support both the API and subagent backends."
+        )
 
     @property
     def name(self) -> str:

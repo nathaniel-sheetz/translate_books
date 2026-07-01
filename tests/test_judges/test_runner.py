@@ -134,3 +134,58 @@ def _make_judge():
             )
 
     return _FixedJudge()
+
+
+# ---------------------------------------------------------------------------
+# build_run_header — extracted in this branch, previously inlined in run_judge_suite
+# ---------------------------------------------------------------------------
+
+
+def test_build_run_header_api_backend_no_worker_model():
+    """API backend header has no worker_model key when worker_model is not passed."""
+    header = runner.build_run_header(
+        ["dialogue"],
+        target_count=3,
+        model=None,
+        provider=None,
+        backend="api",
+    )
+    assert header["backend"] == "api"
+    assert header["target_count"] == 3
+    assert header["judge_count"] == 1
+    assert "worker_model" not in header
+
+
+def test_build_run_header_subagent_backend_stamps_worker_model():
+    """Subagent backend header includes worker_model when passed."""
+    header = runner.build_run_header(
+        ["dialogue"],
+        target_count=2,
+        model="claude-3-5-haiku-20241022",
+        provider="anthropic",
+        backend="subagent",
+        worker_model="haiku",
+    )
+    assert header["backend"] == "subagent"
+    assert header["worker_model"] == "haiku"
+    assert header["model"] == "claude-3-5-haiku-20241022"
+    assert header["provider"] == "anthropic"
+
+
+def test_build_run_header_skips_bad_judge():
+    """build_run_header continues when a judge name is not in the registry."""
+    header = runner.build_run_header(
+        ["bogus_judge_xyz"],
+        target_count=1,
+        model=None,
+        provider=None,
+    )
+    # bad judge skipped — judges/prompt_versions dicts are empty, no crash
+    assert header["judges"] == {}
+    assert header["prompt_versions"] == {}
+
+
+def test_build_run_header_started_at_defaulted_when_none():
+    """started_at is auto-populated when not supplied."""
+    header = runner.build_run_header([], target_count=0, model=None, provider=None)
+    assert header["started_at"] is not None
