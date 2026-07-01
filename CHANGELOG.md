@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.4.0] - 2026-07-01
+
+### Fixed
+- **Harness stdout/stderr UTF-8 reconfigure runs at import time** so import-time output (warnings, early errors) survives a cp1252/cp437 Windows console — not only after `main()` starts.
+
+### Changed
+- **Translate-harness and judge-review skills** document Windows UTF-8 requirements for ad-hoc `python -c` probes (`PYTHONUTF8=1` / `-X utf8`, explicit `encoding="utf-8"` when reading JSON).
+
 ## [0.25.3.0] - 2026-07-01
 
 ### Changed

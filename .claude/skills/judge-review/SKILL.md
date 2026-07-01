@@ -41,6 +41,13 @@ findings — and the persisted `evaluations/<chunk>.json` — are identical eith
 `python scripts/run_judges.py <run|prepare|commit>` is non-interactive and prints
 one JSON object with a `_schema` block documenting every key.
 
+**Windows / UTF-8 — force it on every Python you run.** `run_judges.py` reconfigures stdout
+to UTF-8, but **your own** ad-hoc `python -c` probes default to the Windows console codepage
+and will mojibake every raya (—), guillemet («»), and accent — the exact bytes dialogue
+findings quote. Always run diagnostics with `python -X utf8 -c "..."` (or set `PYTHONUTF8=1`
+for the session). When reading chunk JSON or `evaluations/*.json` in a probe, open with
+`encoding="utf-8"` explicitly; prefer the `Read` tool over piping judge stdout into Python.
+
 Shared flags (`run`, `prepare`):
 - `--project <id|path>` — required.
 - `--judge <name>` **or** `--suite <name>` (`--judge dialogue`, `--suite default`).
