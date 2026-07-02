@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.0.0] - 2026-07-02
+
+### Added
+- **Reader Review Mode** — opt-in overlay on the chapter reader that highlights evaluator findings (blacklist, grammar, dictionary, completeness, dialogue) on aligned sentences, with a top-bar toggle and per-type filters saved in `localStorage`.
+- **Review errors sheet** — tap a flagged sentence to open an Errors tab listing findings with severity, excerpt, suggestion, and one-click feedback (resolved, false positive, bad message, missing context).
+- **`GET /api/project/<id>/review/<chapter>`** — assembles chapter-scoped findings from persisted evaluations and alignment rows, skipping stale chunks and dismissed feedback.
+- **`resolved` feedback type** — dismiss a finding from the reader without leaving a qualitative label.
+- **i18n strings** for review UI in English and Spanish.
+
+### Changed
+- **Review mode controls** moved from inline chapter chrome to a top-bar icon and popup panel (chapter list + reader).
+- **Line-break suggestions** render as a visible marker in the review suggestion panel.
+
+### Fixed
+- **Review fetch failures** now surface a toast instead of silently showing zero errors.
+- **Feedback dismiss** no longer removes findings from the UI when the POST fails (queues offline retry instead).
+- **Stale chunk count** from the review API is shown when evaluations were invalidated after edits.
+- **Review endpoint performance** — feedback JSONL is read once per request instead of per chunk; chunk text is cached for judge anchoring.
+
 ## [0.26.0.1] - 2026-07-01
 
 ### Fixed
