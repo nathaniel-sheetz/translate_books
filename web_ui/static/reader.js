@@ -566,7 +566,13 @@
             const remaining = reviewMap[esIdx] || [];
             renderErrorsList(esIdx, remaining);
             updateErrorsTabCount(remaining.length);
-            if (!remaining.length) setSheetTab('annotate');
+            if (!remaining.length) {
+                if (feedbackType === 'resolved') {
+                    setSheetTab('annotate');
+                } else {
+                    closeSheet(esIdx);
+                }
+            }
         };
 
         fetch(url, {
