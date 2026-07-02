@@ -128,6 +128,9 @@ STRINGS = {
             "review_fb_false_positive": "False positive",
             "review_fb_bad_message": "Bad message",
             "review_fb_missing_context_gap": "Missing context",
+            "review_load_failed": "Could not load review findings.",
+            "review_stale_chunks": "{n} chunk(s) skipped (stale after edit)",
+            "review_fb_failed": "Feedback not saved; queued for retry.",
             "review_types": {
                 "blacklist": "Blacklist",
                 "grammar": "Grammar",
@@ -313,6 +316,9 @@ STRINGS = {
             "review_fb_false_positive": "Falso positivo",
             "review_fb_bad_message": "Mensaje incorrecto",
             "review_fb_missing_context_gap": "Falta contexto",
+            "review_load_failed": "No se pudieron cargar los hallazgos de revisi\u00f3n.",
+            "review_stale_chunks": "{n} fragmento(s) omitido(s) (obsoleto tras edici\u00f3n)",
+            "review_fb_failed": "Comentario no guardado; en cola para reintentar.",
             "review_types": {
                 "blacklist": "Lista negra",
                 "grammar": "Gram\u00e1tica",

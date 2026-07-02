@@ -44,6 +44,7 @@ from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
     append_feedback,
     evaluate_and_persist_chunk,
+    load_all_feedback_by_chunk,
     load_chunk_evaluation,
     load_feedback_for_chunk,
     load_project_summary,
@@ -5161,6 +5162,9 @@ def project_chapter_review(project_id, chapter):
 
     from src.utils.text_utils import normalize_newlines
 
+    feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    chunk_text_cache: dict[str, str] = {}
+
     for chunk_id, crows in rows_by_chunk.items():
         payload = load_chunk_evaluation(project_dir, chunk_id)
         if not payload:
@@ -5169,7 +5173,7 @@ def project_chapter_review(project_id, chapter):
             stale_chunks += 1
             continue
 
-        feedback = load_feedback_for_chunk(project_dir, chunk_id)
+        feedback = feedback_by_chunk.get(chunk_id, [])
         dismissed = {
             (fb.get("eval_name"), fb.get("issue_index")) for fb in feedback
         }
@@ -5216,14 +5220,19 @@ def project_chapter_review(project_id, chapter):
         # Judges → issues carry only a raw excerpt string; anchor by text.
         judges = payload.get("judges")
         if isinstance(judges, dict) and judges:
-            translated_text = ""
-            chunk_path = chunks_dir / f"{chunk_id}.json"
-            if chunk_path.exists():
-                try:
-                    cdata = json.loads(chunk_path.read_text(encoding="utf-8"))
-                    translated_text = normalize_newlines(cdata.get("translated_text") or "")
-                except (json.JSONDecodeError, OSError):
-                    translated_text = ""
+            if chunk_id not in chunk_text_cache:
+                translated_text = ""
+                chunk_path = chunks_dir / f"{chunk_id}.json"
+                if chunk_path.exists():
+                    try:
+                        cdata = json.loads(chunk_path.read_text(encoding="utf-8"))
+                        translated_text = normalize_newlines(
+                            cdata.get("translated_text") or ""
+                        )
+                    except (json.JSONDecodeError, OSError):
+                        translated_text = ""
+                chunk_text_cache[chunk_id] = translated_text
+            translated_text = chunk_text_cache[chunk_id]
             for judge_name, jres in judges.items():
                 if judge_name not in _REVIEW_JUDGE_TYPES or not isinstance(jres, dict):
                     continue

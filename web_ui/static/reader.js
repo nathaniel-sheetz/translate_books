@@ -122,8 +122,11 @@
         if (reviewConfig.on) {
             fetches.push(
                 fetch(`/api/project/${projectId}/review/${chapter}`)
-                    .then(r => (r.ok ? r.json() : { by_es_idx: {} }))
-                    .catch(() => ({ by_es_idx: {} }))
+                    .then(r => {
+                        if (!r.ok) return { _reviewFailed: true, by_es_idx: {}, stale_chunks: 0 };
+                        return r.json();
+                    })
+                    .catch(() => ({ _reviewFailed: true, by_es_idx: {}, stale_chunks: 0 }))
             );
         }
         return Promise.all(fetches)
@@ -138,7 +141,17 @@
                     annotationsMap[ann.es_idx] = ann;
                 }
 
-                buildReviewMap(reviewConfig.on ? results[2] : null);
+                const reviewData = reviewConfig.on ? results[2] : null;
+                if (reviewData && reviewData._reviewFailed) {
+                    showToast(i.review_load_failed || 'Could not load review findings.');
+                    buildReviewMap(null);
+                } else {
+                    buildReviewMap(reviewData);
+                    if (reviewData && reviewData.stale_chunks > 0) {
+                        const tmpl = i.review_stale_chunks || '{n} chunk(s) skipped (stale after edit)';
+                        showToast(tmpl.replace('{n}', String(reviewData.stale_chunks)));
+                    }
+                }
 
                 renderSentences(data.alignments);
                 addReviewButton();
@@ -582,7 +595,15 @@
         })
             .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
             .then(finish)
-            .catch(() => { enqueue(url, 'POST', payload); finish(); });
+            .catch(() => {
+                if (itemEl) {
+                    itemEl.querySelectorAll('button').forEach(b => { b.disabled = false; });
+                }
+                try {
+                    enqueue(url, 'POST', payload);
+                } catch (e) { /* localStorage full — queue unavailable */ }
+                showToast(i.review_fb_failed || 'Feedback not saved; queued for retry.');
+            });
     }
 
     if (sheetTabAnnotate) {
