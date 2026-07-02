@@ -183,6 +183,16 @@ def test_append_feedback_rejects_unknown_type(tmp_path):
         append_feedback(tmp_path, "ch01_chunk_001", "length", 0, "bogus")
 
 
+def test_append_feedback_accepts_resolved(tmp_path):
+    # The reader's Review Mode adds a "resolved" ("real error, handled") label
+    # alongside the three quality labels.
+    path = append_feedback(tmp_path, "ch01_chunk_001", "blacklist", 2, "resolved")
+    record = json.loads(path.read_text(encoding="utf-8").strip())
+    assert record["feedback_type"] == "resolved"
+    assert record["eval_name"] == "blacklist"
+    assert record["issue_index"] == 2
+
+
 def test_load_project_summary_empty(tmp_path):
     assert load_project_summary(tmp_path) == {}
 

@@ -74,23 +74,62 @@
     const annTypeLabel = document.getElementById('ann-type-label');
     const annExisting = document.getElementById('ann-existing');
 
+    // Review-mode elements (bottom-sheet tab strip + findings list)
+    const sheetTabs = document.getElementById('sheet-tabs');
+    const sheetTabAnnotate = document.getElementById('sheet-tab-annotate');
+    const sheetTabErrors = document.getElementById('sheet-tab-errors');
+    const sheetErrors = document.getElementById('sheet-errors');
+    const sheetAnnotation = document.getElementById('sheet-annotation');
+    const sheetEditArea = document.getElementById('sheet-edit-area');
+
     let alignmentData = null;
     let annotationsMap = {};   // es_idx -> annotation record
     let activeIdx = null;
     let selectedAnnType = null;
 
+    // --- Review mode (opt-in overlay of evaluator findings) ---
+    // Selection is chosen on the chapter-list page and persisted per project;
+    // the reader only reads it. When off, the reader behaves exactly as before.
+    const REVIEW_TYPES = ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue'];
+
+    function loadReviewConfig() {
+        try {
+            const raw = localStorage.getItem('reader_review:' + projectId);
+            if (!raw) return { on: false, types: [] };
+            const c = JSON.parse(raw) || {};
+            return { on: !!c.on, types: Array.isArray(c.types) ? c.types : [] };
+        } catch (e) {
+            return { on: false, types: [] };
+        }
+    }
+
+    const reviewConfig = loadReviewConfig();
+    let reviewMap = {};   // es_idx (string) -> [finding, ...] filtered to enabled types
+
     // Load alignment data and annotations in parallel.
     // Exposed as a function so the removal flow can re-bootstrap after a
     // synchronous recombine + realign on the server.
     function loadAndRender(scrollPrefix) {
-        return Promise.all([
+        const fetches = [
             fetch(`/api/alignment/${projectId}/${chapter}`).then(r => {
                 if (!r.ok) throw new Error(i.error_alignment || 'Alignment not found');
                 return r.json();
             }),
             fetch(`/api/annotations/${projectId}/${chapter}`).then(r => r.json()),
-        ])
-            .then(([data, annData]) => {
+        ];
+        // Only pay for the review fetch when review mode is enabled — when off,
+        // the reader load is byte-for-byte identical to before.
+        if (reviewConfig.on) {
+            fetches.push(
+                fetch(`/api/project/${projectId}/review/${chapter}`)
+                    .then(r => (r.ok ? r.json() : { by_es_idx: {} }))
+                    .catch(() => ({ by_es_idx: {} }))
+            );
+        }
+        return Promise.all(fetches)
+            .then(results => {
+                const data = results[0];
+                const annData = results[1];
                 alignmentData = data;
 
                 // Build annotations map
@@ -98,6 +137,8 @@
                 for (const ann of (annData.annotations || [])) {
                     annotationsMap[ann.es_idx] = ann;
                 }
+
+                buildReviewMap(reviewConfig.on ? results[2] : null);
 
                 renderSentences(data.alignments);
                 addReviewButton();
@@ -162,8 +203,16 @@
 
             const span = document.createElement('span');
             span.className = 'sentence';
-            span.textContent = a.es + ' ';
             span.dataset.esIdx = a.es_idx;
+
+            // Review mode: paint evaluator findings onto the sentence; otherwise
+            // render plain text exactly as before.
+            const findings = reviewConfig.on ? reviewMap[a.es_idx] : null;
+            if (findings && findings.length) {
+                paintSentence(span, a.es, findings);
+            } else {
+                span.textContent = a.es + ' ';
+            }
 
             if (a.confidence === 'low') {
                 span.classList.add('low-confidence');
@@ -225,11 +274,31 @@
             annNoteInput.value = ann.content || '';
         }
 
-        // Show sheet — auto-expand on desktop, collapsed on mobile (avoids keyboard popup)
+        // Review mode: populate the Errors tab and default to it when this
+        // sentence carries findings (otherwise land on Annotate/Edit).
+        let defaultErrors = false;
+        if (reviewConfig.on) {
+            const findings = reviewMap[alignment.es_idx] || [];
+            renderErrorsList(alignment.es_idx, findings);
+            updateErrorsTabCount(findings.length);
+            sheetTabs.style.display = 'flex';
+            defaultErrors = findings.length > 0;
+            setSheetTab(defaultErrors ? 'errors' : 'annotate');
+        } else {
+            sheetTabs.style.display = 'none';
+            setSheetTab('annotate');
+        }
+
+        // Show sheet — auto-expand on desktop, collapsed on mobile (avoids keyboard
+        // popup). When landing on the Errors tab there is no input to focus, so
+        // expand it (both platforms) without stealing focus to the textarea.
         bottomSheet.classList.add('visible');
         sheetOverlay.classList.add('visible');
         if (isDesktop) {
-            expandSheet();
+            bottomSheet.classList.add('expanded');
+            if (!defaultErrors) sheetTextarea.focus();
+        } else if (defaultErrors) {
+            bottomSheet.classList.add('expanded');
         } else {
             bottomSheet.classList.remove('expanded');
         }
@@ -262,6 +331,7 @@
 
         activeIdx = null;
         resetAnnotationUI();
+        resetReviewSheet();
 
         // Scroll the sentence to the top of the viewport so the reader
         // can continue from where they left off.
@@ -277,6 +347,250 @@
     function expandSheet() {
         bottomSheet.classList.add('expanded');
         sheetTextarea.focus();
+    }
+
+    // ── Review mode: findings map, highlight painting, and the Errors tab ──────
+
+    function buildReviewMap(reviewData) {
+        reviewMap = {};
+        if (!reviewData || !reviewData.by_es_idx) return;
+        const enabled = reviewConfig.types;
+        for (const esIdx in reviewData.by_es_idx) {
+            const list = (reviewData.by_es_idx[esIdx] || [])
+                .filter(f => enabled.indexOf(f.eval_name) !== -1);
+            if (list.length) reviewMap[esIdx] = list;
+        }
+    }
+
+    // Paint a sentence: wrap each locatable finding's offending text in a
+    // per-type highlight span; fall back to a whole-sentence tint for findings
+    // whose span can't be located (e.g. multi-sentence dialogue excerpts).
+    function paintSentence(span, esText, findings) {
+        const ranges = [];                 // {start, end, type}
+        const sentenceLevelTypes = new Set();
+
+        const wordFindings = findings
+            .filter(f => f.match_start !== null && f.match)
+            .sort((a, b) => (a.match_start || 0) - (b.match_start || 0));
+
+        let cursor = 0;
+        for (const f of wordFindings) {
+            let idx = esText.indexOf(f.match, cursor);
+            if (idx === -1) idx = esText.indexOf(f.match);
+            if (idx === -1) {
+                // Located in the chunk but not in the rendered sentence text —
+                // tint the whole sentence rather than dropping the signal.
+                sentenceLevelTypes.add(f.eval_name);
+                continue;
+            }
+            ranges.push({ start: idx, end: idx + f.match.length, type: f.eval_name });
+            cursor = idx + f.match.length;
+        }
+        for (const f of findings) {
+            if (f.match_start === null || !f.match) sentenceLevelTypes.add(f.eval_name);
+        }
+
+        // Drop overlapping ranges (first-in-order wins) so slicing stays valid.
+        ranges.sort((a, b) => a.start - b.start);
+        const clean = [];
+        let lastEnd = 0;
+        for (const r of ranges) {
+            if (r.start < lastEnd) continue;
+            clean.push(r);
+            lastEnd = r.end;
+        }
+
+        if (clean.length) {
+            let html = '';
+            let pos = 0;
+            for (const r of clean) {
+                html += escapeHtml(esText.slice(pos, r.start));
+                html += '<span class="review-hl review-' + r.type + '">' +
+                        escapeHtml(esText.slice(r.start, r.end)) + '</span>';
+                pos = r.end;
+            }
+            html += escapeHtml(esText.slice(pos)) + ' ';
+            span.innerHTML = html;
+        } else {
+            span.textContent = esText + ' ';
+        }
+
+        if (sentenceLevelTypes.size) {
+            span.classList.add('review-flagged');
+            sentenceLevelTypes.forEach(t => span.classList.add('review-' + t));
+        }
+    }
+
+    // Re-render one sentence's review visuals after its findings change.
+    function refreshSentenceReview(esIdx) {
+        const el = content.querySelector(`[data-es-idx="${esIdx}"]`);
+        if (!el) return;
+        const a = alignmentData &&
+            alignmentData.alignments.find(x => x.es_idx === Number(esIdx));
+        const esText = a ? a.es : (el.textContent || '').replace(/\s+$/, '');
+        el.classList.remove('review-flagged');
+        REVIEW_TYPES.forEach(t => el.classList.remove('review-' + t));
+        const findings = reviewMap[esIdx];
+        if (findings && findings.length) {
+            paintSentence(el, esText, findings);
+        } else {
+            el.textContent = esText + ' ';
+        }
+    }
+
+    function updateErrorsTabCount(n) {
+        if (!sheetTabErrors) return;
+        sheetTabErrors.textContent = (i.review_tab_errors || 'Errors') + ' (' + n + ')';
+        sheetTabErrors.disabled = n === 0;
+    }
+
+    function setSheetTab(tab) {
+        const errors = tab === 'errors';
+        if (sheetErrors) sheetErrors.style.display = errors ? 'block' : 'none';
+        if (sheetAnnotation) sheetAnnotation.style.display = errors ? 'none' : '';
+        if (sheetEditArea) sheetEditArea.style.display = errors ? 'none' : '';
+        if (sheetTabAnnotate) sheetTabAnnotate.classList.toggle('active', !errors);
+        if (sheetTabErrors) sheetTabErrors.classList.toggle('active', errors);
+    }
+
+    function resetReviewSheet() {
+        if (sheetTabs) sheetTabs.style.display = 'none';
+        if (sheetErrors) {
+            sheetErrors.innerHTML = '';
+            sheetErrors.style.display = 'none';
+        }
+        // Restore the annotate/edit panels the errors tab may have hidden.
+        if (sheetAnnotation) sheetAnnotation.style.display = '';
+        if (sheetEditArea) sheetEditArea.style.display = '';
+    }
+
+    function renderErrorsList(esIdx, findings) {
+        if (!sheetErrors) return;
+        sheetErrors.innerHTML = '';
+        if (!findings || !findings.length) {
+            const empty = document.createElement('div');
+            empty.className = 'review-empty';
+            empty.textContent = i.review_no_errors || 'No findings.';
+            sheetErrors.appendChild(empty);
+            return;
+        }
+        const typeLabels = i.review_types || {};
+        findings.forEach(f => {
+            const item = document.createElement('div');
+            item.className = 'review-item review-item-' + f.eval_name;
+
+            const head = document.createElement('div');
+            head.className = 'review-item-head';
+            const typeEl = document.createElement('span');
+            typeEl.className = 'review-item-type review-' + f.eval_name;
+            typeEl.textContent = typeLabels[f.eval_name] || f.eval_name;
+            head.appendChild(typeEl);
+            const sevKey = 'review_sev_' + (f.severity || 'info');
+            const sevEl = document.createElement('span');
+            sevEl.className = 'review-item-sev sev-' + (f.severity || 'info');
+            sevEl.textContent = i[sevKey] || f.severity || '';
+            head.appendChild(sevEl);
+            item.appendChild(head);
+
+            if (f.message) {
+                const msg = document.createElement('div');
+                msg.className = 'review-item-msg';
+                msg.textContent = f.message;
+                item.appendChild(msg);
+            }
+            if (f.excerpt) {
+                const ex = document.createElement('div');
+                ex.className = 'review-item-excerpt';
+                ex.textContent = f.excerpt;
+                item.appendChild(ex);
+            }
+            if (f.suggestion) {
+                const sug = document.createElement('div');
+                sug.className = 'review-item-suggestion';
+                const lbl = document.createElement('span');
+                lbl.className = 'review-sug-label';
+                lbl.textContent = (i.review_suggestion_label || 'Suggestion:') + ' ';
+                sug.appendChild(lbl);
+                sug.appendChild(document.createTextNode(f.suggestion));
+                item.appendChild(sug);
+            }
+
+            const fb = document.createElement('div');
+            fb.className = 'review-item-fb';
+            ['resolved', 'false_positive', 'bad_message', 'missing_context_gap']
+                .forEach(ftype => {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'review-fb-btn review-fb-' + ftype;
+                    b.textContent = i['review_fb_' + ftype] || ftype;
+                    b.addEventListener('click', () => submitFeedback(esIdx, f, ftype, item));
+                    fb.appendChild(b);
+                });
+            item.appendChild(fb);
+
+            sheetErrors.appendChild(item);
+        });
+    }
+
+    // Record feedback on a finding, then drop it (and any sibling locations of
+    // the same underlying issue) from the map + highlights. Mirrors the offline
+    // enqueue fallback used elsewhere so it still works without a network.
+    function submitFeedback(esIdx, finding, feedbackType, itemEl) {
+        const payload = {
+            eval_name: finding.eval_name,
+            issue_index: finding.issue_index,
+            feedback_type: feedbackType,
+        };
+        const url = `/api/project/${projectId}/evaluations/${finding.chunk_id}/feedback`;
+
+        if (itemEl) {
+            itemEl.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        }
+
+        const finish = () => {
+            // Server dismisses by (eval_name, issue_index) for the chunk, so a
+            // fanned-out issue with multiple locations clears everywhere at once.
+            const affected = [];
+            for (const key in reviewMap) {
+                const before = reviewMap[key].length;
+                reviewMap[key] = reviewMap[key].filter(x => !(
+                    x.eval_name === finding.eval_name &&
+                    x.issue_index === finding.issue_index &&
+                    x.chunk_id === finding.chunk_id
+                ));
+                if (reviewMap[key].length !== before) affected.push(key);
+                if (!reviewMap[key].length) delete reviewMap[key];
+            }
+            affected.forEach(k => refreshSentenceReview(k));
+
+            const remaining = reviewMap[esIdx] || [];
+            renderErrorsList(esIdx, remaining);
+            updateErrorsTabCount(remaining.length);
+            if (!remaining.length) setSheetTab('annotate');
+        };
+
+        fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+            .then(finish)
+            .catch(() => { enqueue(url, 'POST', payload); finish(); });
+    }
+
+    if (sheetTabAnnotate) {
+        sheetTabAnnotate.addEventListener('click', () => setSheetTab('annotate'));
+    }
+    if (sheetTabErrors) {
+        sheetTabErrors.addEventListener('click', () => {
+            if (!sheetTabErrors.disabled) setSheetTab('errors');
+        });
+        // Static half of the label; the count is appended per sentence.
+        updateErrorsTabCount(0);
+    }
+    if (sheetTabAnnotate) {
+        sheetTabAnnotate.textContent = i.review_tab_annotate || 'Annotate';
     }
 
     // After the initial load (or after returning from the chunk editor),

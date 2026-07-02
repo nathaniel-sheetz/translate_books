@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _FEEDBACK_FILENAME = "_feedback.jsonl"
 _ALLOWED_FEEDBACK_TYPES = frozenset(
-    {"false_positive", "bad_message", "missing_context_gap"}
+    {"false_positive", "bad_message", "missing_context_gap", "resolved"}
 )
 
 

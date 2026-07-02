@@ -281,6 +281,20 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     });
     </script>
     {% endif %}
+    <div class="review-mode-bar" id="review-mode-bar">
+        <label class="review-mode-switch">
+            <input type="checkbox" id="review-mode-on">
+            <span class="review-mode-title">{{ t.review_mode_label }}</span>
+        </label>
+        <div class="review-type-checks" id="review-type-checks">
+            {% for tkey in ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue'] %}
+            <label class="review-type-check review-type-{{ tkey }}">
+                <input type="checkbox" class="review-type-cb" value="{{ tkey }}" checked>
+                <span>{{ t.review_types[tkey] }}</span>
+            </label>
+            {% endfor %}
+        </div>
+    </div>
     <ul class="nav-list">
         {% for ch in chapters %}
         <li>
@@ -319,6 +333,33 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         localStorage.setItem('reader_theme', dark ? 'dark' : 'light');
         btn.textContent = dark ? '☀️' : '🌙';
     });
+})();
+
+/* ── Review mode selection (persisted per project; applied by the reader) ── */
+(function(){
+    var KEY = 'reader_review:{{ project_id }}';
+    var bar = document.getElementById('review-mode-bar');
+    var onCb = document.getElementById('review-mode-on');
+    if (!bar || !onCb) return;
+    var typeCbs = Array.prototype.slice.call(bar.querySelectorAll('.review-type-cb'));
+
+    function persist() {
+        var types = typeCbs.filter(function(cb){ return cb.checked; })
+                           .map(function(cb){ return cb.value; });
+        localStorage.setItem(KEY, JSON.stringify({ on: onCb.checked, types: types }));
+        bar.classList.toggle('review-on', onCb.checked);
+    }
+
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { saved = {}; }
+    onCb.checked = !!saved.on;
+    if (Array.isArray(saved.types)) {
+        typeCbs.forEach(function(cb){ cb.checked = saved.types.indexOf(cb.value) !== -1; });
+    }
+    bar.classList.toggle('review-on', onCb.checked);
+
+    onCb.addEventListener('change', persist);
+    typeCbs.forEach(function(cb){ cb.addEventListener('change', persist); });
 })();
 </script>
 
@@ -388,6 +429,12 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         </div>
         <div class="sheet-en" id="sheet-en"></div>
 
+        <!-- Review-mode tab strip (only shown when review mode is on) -->
+        <div class="sheet-tabs" id="sheet-tabs" style="display:none">
+            <button type="button" class="sheet-tab" id="sheet-tab-annotate" data-tab="annotate"></button>
+            <button type="button" class="sheet-tab" id="sheet-tab-errors" data-tab="errors"></button>
+        </div>
+
         <!-- Annotation controls -->
         <div class="sheet-annotation" id="sheet-annotation">
             <div class="ann-type-row">
@@ -432,6 +479,9 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <button class="btn-save" id="btn-save">{{ t.btn_save }}</button>
             </div>
         </div>
+
+        <!-- Review-mode findings list (only populated when review mode is on) -->
+        <div class="sheet-errors" id="sheet-errors" style="display:none"></div>
     </div>
 
     <!-- Overlay for dismissing bottom sheet -->
@@ -601,7 +651,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=21"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=22"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 
 {% elif mode == "not_found" %}

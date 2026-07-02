@@ -47,6 +47,16 @@ STRINGS = {
         "badge_reviewed": "reviewed",
         "badge_unread": "unread",
 
+        # Review mode (chapter-list controls; type labels shared with the reader)
+        "review_mode_label": "Review mode",
+        "review_types": {
+            "blacklist": "Blacklist",
+            "grammar": "Grammar",
+            "dictionary": "Dictionary",
+            "completeness": "Completeness",
+            "dialogue": "Dialogue",
+        },
+
         # Reader view
         "sheet_label": "Original",
         "note_placeholder": "Optional note...",
@@ -104,6 +114,24 @@ STRINGS = {
             "ann_inconsistency": "Inconsistency",
             "ann_footnote": "Footnote",
             "ann_flag": "Other",
+            "review_tab_annotate": "Annotate",
+            "review_tab_errors": "Errors",
+            "review_no_errors": "No findings on this sentence.",
+            "review_suggestion_label": "Suggestion:",
+            "review_sev_error": "error",
+            "review_sev_warning": "warning",
+            "review_sev_info": "info",
+            "review_fb_resolved": "Resolved",
+            "review_fb_false_positive": "False positive",
+            "review_fb_bad_message": "Bad message",
+            "review_fb_missing_context_gap": "Missing context",
+            "review_types": {
+                "blacklist": "Blacklist",
+                "grammar": "Grammar",
+                "dictionary": "Dictionary",
+                "completeness": "Completeness",
+                "dialogue": "Dialogue",
+            },
             "remove_chars": "{n} char selected",
             "remove_empty": "Select text to remove",
             "remove_image_overlap": "Selection overlaps an [IMAGE:\u2026] token \u2014 adjust the highlight.",
@@ -201,6 +229,16 @@ STRINGS = {
         "badge_reviewed": "revisado",
         "badge_unread": "sin leer",
 
+        # Review mode (chapter-list controls; type labels shared with the reader)
+        "review_mode_label": "Modo revisión",
+        "review_types": {
+            "blacklist": "Lista negra",
+            "grammar": "Gramática",
+            "dictionary": "Diccionario",
+            "completeness": "Completitud",
+            "dialogue": "Diálogo",
+        },
+
         # Reader view
         "sheet_label": "Original",
         "note_placeholder": "Nota opcional...",
@@ -258,6 +296,24 @@ STRINGS = {
             "ann_inconsistency": "Inconsistencia",
             "ann_footnote": "Nota al pie",
             "ann_flag": "Otro",
+            "review_tab_annotate": "Anotar",
+            "review_tab_errors": "Errores",
+            "review_no_errors": "Sin hallazgos en esta oraci\u00f3n.",
+            "review_suggestion_label": "Sugerencia:",
+            "review_sev_error": "error",
+            "review_sev_warning": "advertencia",
+            "review_sev_info": "info",
+            "review_fb_resolved": "Resuelto",
+            "review_fb_false_positive": "Falso positivo",
+            "review_fb_bad_message": "Mensaje incorrecto",
+            "review_fb_missing_context_gap": "Falta contexto",
+            "review_types": {
+                "blacklist": "Lista negra",
+                "grammar": "Gram\u00e1tica",
+                "dictionary": "Diccionario",
+                "completeness": "Completitud",
+                "dialogue": "Di\u00e1logo",
+            },
             "remove_chars": "{n} caracteres selec.",
             "remove_empty": "Seleccione texto a eliminar",
             "remove_image_overlap": "La selecci\u00f3n incluye un token [IMAGE:\u2026] \u2014 ajuste el resaltado.",
