@@ -1930,6 +1930,16 @@ body {
     color: var(--text-muted3);
 }
 
+.review-break-mark {
+    display: inline;
+    color: var(--text-muted3);
+    font-size: 0.9em;
+    opacity: 0.8;
+    margin: 0 1px;
+    vertical-align: baseline;
+    cursor: help;
+}
+
 .review-item-fb {
     display: flex;
     flex-wrap: wrap;

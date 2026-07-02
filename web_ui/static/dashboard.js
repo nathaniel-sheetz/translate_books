@@ -187,6 +187,24 @@
         return div.innerHTML.replace(/"/g, '&quot;');
     }
 
+    // Inline ↵ markers for \n in suggestions (avoids pre-wrap growing the card).
+    function formatSuggestionHtml(text) {
+        if (!text) return '';
+        var normalized = text.replace(/\r\n?/g, '\n');
+        if (normalized.indexOf('\n') === -1) return escapeHtml(normalized);
+        var breakTitle = 'Suggested line break';
+        var parts = normalized.split('\n');
+        var html = '';
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i]) html += escapeHtml(parts[i]);
+            if (i < parts.length - 1) {
+                html += '<span class="eval-break-mark" title="' + escapeHtml(breakTitle) +
+                    '" aria-label="' + escapeHtml(breakTitle) + '">\u21B5</span>';
+            }
+        }
+        return html;
+    }
+
     function truncate(str, len) {
         if (!str) return '';
         return str.length > len ? str.substring(0, len) + '...' : str;
@@ -1941,7 +1959,7 @@
         }
 
         if (issue.suggestion) {
-            html += '<div class="eval-issue-suggestion">💡 ' + escapeHtml(issue.suggestion) + '</div>';
+            html += '<div class="eval-issue-suggestion">\uD83D\uDCA1 ' + formatSuggestionHtml(issue.suggestion) + '</div>';
         }
 
         html += '<div class="eval-issue-actions">';
@@ -1997,7 +2015,7 @@
                 html += renderIssueRow('', 'llm_judge', issue, idx);
             });
         } else if (judge.notes) {
-            html += '<div class="eval-issue-suggestion">' + escapeHtml(judge.notes) + '</div>';
+            html += '<div class="eval-issue-suggestion">' + formatSuggestionHtml(judge.notes) + '</div>';
         } else {
             html += '<div class="eval-empty">No notes from LLM judge.</div>';
         }

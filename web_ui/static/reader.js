@@ -511,7 +511,7 @@
                 lbl.className = 'review-sug-label';
                 lbl.textContent = (i.review_suggestion_label || 'Suggestion:') + ' ';
                 sug.appendChild(lbl);
-                sug.appendChild(document.createTextNode(f.suggestion));
+                appendSuggestionText(sug, f.suggestion);
                 item.appendChild(sug);
             }
 
@@ -1128,6 +1128,28 @@
         return (s || '').replace(/[&<>"']/g, c => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
         }[c]));
+    }
+
+    // Render suggestion text inline, marking \n with ↵ so paragraph breaks stay
+    // visible without expanding the card (white-space: pre-wrap would grow it).
+    function appendSuggestionText(container, text) {
+        const normalized = (text || '').replace(/\r\n?/g, '\n');
+        if (!normalized.includes('\n')) {
+            container.appendChild(document.createTextNode(normalized));
+            return;
+        }
+        const breakTitle = i.review_break_mark || 'Suggested line break';
+        normalized.split('\n').forEach((part, i, parts) => {
+            if (part) container.appendChild(document.createTextNode(part));
+            if (i < parts.length - 1) {
+                const mark = document.createElement('span');
+                mark.className = 'review-break-mark';
+                mark.textContent = '\u21B5';
+                mark.title = breakTitle;
+                mark.setAttribute('aria-label', breakTitle);
+                container.appendChild(mark);
+            }
+        });
     }
 
     function rangesIntersect(aStart, aEnd, ranges) {
