@@ -234,7 +234,51 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
 <div class="nav-page">
     <div style="display:flex;justify-content:space-between;align-items:center;">
         <a href="/read/" class="back-link" style="margin-bottom:0">&larr; {{ t.projects_back }}</a>
-        <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode">🌙</button>
+        <div class="topbar-actions">
+            <div class="review-topbar-group" id="review-topbar-group">
+                <button class="theme-toggle review-mode-toggle" id="review-mode-toggle"
+                        type="button"
+                        title="{{ t.review_mode_label }}"
+                        aria-label="{{ t.review_mode_label }}"
+                        aria-pressed="false"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-controls="review-types-popup">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                         stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true">
+                        <path d="M9 11l3 3L22 4"/>
+                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                    </svg>
+                </button>
+                <button class="theme-toggle review-options-btn" id="review-options-btn"
+                        type="button"
+                        hidden
+                        title="{{ t.review_options_label }}"
+                        aria-label="{{ t.review_options_label }}"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-controls="review-types-popup">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                         stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="review-types-popup" id="review-types-popup" hidden>
+                    <div class="review-types-popup-title">{{ t.review_types_label }}</div>
+                    <div class="review-type-checks" id="review-type-checks">
+                        {% for tkey in ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue'] %}
+                        <label class="review-type-check review-type-{{ tkey }}">
+                            <input type="checkbox" class="review-type-cb" value="{{ tkey }}" checked>
+                            <span>{{ t.review_types[tkey] }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode">🌙</button>
+        </div>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
         <h1 style="margin:0;">{% if lang == 'es' and project_spanish_title %}{{ project_spanish_title }}{% else %}{{ project_title or project_id }}{% endif %}</h1>
@@ -281,20 +325,6 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     });
     </script>
     {% endif %}
-    <div class="review-mode-bar" id="review-mode-bar">
-        <label class="review-mode-switch">
-            <input type="checkbox" id="review-mode-on">
-            <span class="review-mode-title">{{ t.review_mode_label }}</span>
-        </label>
-        <div class="review-type-checks" id="review-type-checks">
-            {% for tkey in ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue'] %}
-            <label class="review-type-check review-type-{{ tkey }}">
-                <input type="checkbox" class="review-type-cb" value="{{ tkey }}" checked>
-                <span>{{ t.review_types[tkey] }}</span>
-            </label>
-            {% endfor %}
-        </div>
-    </div>
     <ul class="nav-list">
         {% for ch in chapters %}
         <li>
@@ -338,28 +368,79 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
 /* ── Review mode selection (persisted per project; applied by the reader) ── */
 (function(){
     var KEY = 'reader_review:{{ project_id }}';
-    var bar = document.getElementById('review-mode-bar');
-    var onCb = document.getElementById('review-mode-on');
-    if (!bar || !onCb) return;
-    var typeCbs = Array.prototype.slice.call(bar.querySelectorAll('.review-type-cb'));
+    var group = document.getElementById('review-topbar-group');
+    var toggleBtn = document.getElementById('review-mode-toggle');
+    var optionsBtn = document.getElementById('review-options-btn');
+    var popup = document.getElementById('review-types-popup');
+    if (!group || !toggleBtn || !optionsBtn || !popup) return;
+
+    var typeCbs = Array.prototype.slice.call(popup.querySelectorAll('.review-type-cb'));
+    var reviewOn = false;
+    var popupOpen = false;
+
+    function setPopupOpen(open) {
+        popupOpen = open;
+        popup.hidden = !open;
+        toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        optionsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        optionsBtn.classList.toggle('popup-open', open);
+    }
+
+    function setReviewOn(on, opts) {
+        opts = opts || {};
+        reviewOn = on;
+        toggleBtn.classList.toggle('review-on', on);
+        toggleBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        optionsBtn.hidden = !on;
+        if (!on) setPopupOpen(false);
+        else if (opts.showPopup) setPopupOpen(true);
+    }
 
     function persist() {
         var types = typeCbs.filter(function(cb){ return cb.checked; })
                            .map(function(cb){ return cb.value; });
-        localStorage.setItem(KEY, JSON.stringify({ on: onCb.checked, types: types }));
-        bar.classList.toggle('review-on', onCb.checked);
+        localStorage.setItem(KEY, JSON.stringify({ on: reviewOn, types: types }));
     }
 
-    var saved = {};
-    try { saved = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { saved = {}; }
-    onCb.checked = !!saved.on;
-    if (Array.isArray(saved.types)) {
-        typeCbs.forEach(function(cb){ cb.checked = saved.types.indexOf(cb.value) !== -1; });
+    function loadSaved() {
+        var saved = {};
+        try { saved = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { saved = {}; }
+        if (Array.isArray(saved.types)) {
+            typeCbs.forEach(function(cb){ cb.checked = saved.types.indexOf(cb.value) !== -1; });
+        }
+        setReviewOn(!!saved.on, { showPopup: false });
     }
-    bar.classList.toggle('review-on', onCb.checked);
 
-    onCb.addEventListener('change', persist);
-    typeCbs.forEach(function(cb){ cb.addEventListener('change', persist); });
+    toggleBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (reviewOn) {
+            setReviewOn(false);
+        } else {
+            setReviewOn(true, { showPopup: true });
+        }
+        persist();
+    });
+
+    optionsBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        setPopupOpen(!popupOpen);
+    });
+
+    typeCbs.forEach(function(cb){
+        cb.addEventListener('change', persist);
+    });
+
+    document.addEventListener('click', function(e) {
+        if (!popupOpen) return;
+        if (!group.contains(e.target)) setPopupOpen(false);
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && popupOpen) setPopupOpen(false);
+    });
+
+    loadSaved();
+    persist();
 })();
 </script>
 

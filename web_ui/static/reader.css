@@ -1466,6 +1466,47 @@ body {
     font-size: 16px;
     cursor: pointer;
     line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted2);
+}
+
+/* `display: inline-flex` above otherwise wins over the UA `[hidden]` rule. */
+.theme-toggle[hidden] {
+    display: none;
+}
+
+.theme-toggle.review-mode-toggle.review-on {
+    color: var(--accent);
+    border-color: var(--accent-border, var(--accent));
+    background: var(--accent-bg, rgba(59, 130, 246, 0.08));
+}
+
+.topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.review-topbar-group {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.theme-toggle.review-options-btn {
+    padding: 5px 6px;
+    min-width: 0;
+}
+
+.theme-toggle.review-options-btn.popup-open svg {
+    transform: rotate(180deg);
+}
+
+.theme-toggle.review-options-btn svg {
+    transition: transform 0.15s ease;
 }
 
 /* Tablet responsiveness */
@@ -1669,48 +1710,37 @@ body {
     --review-dialogue: #d07fe6;       --review-dialogue-bg: rgba(208, 127, 230, 0.22);
 }
 
-/* Chapter-list controls */
-.review-mode-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px 18px;
-    margin: 4px 0 16px;
-    padding: 10px 14px;
+[data-theme="dark"] .review-types-popup {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Chapter-list controls (top-bar toggle + popup) */
+.review-types-popup {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 50;
+    min-width: 200px;
+    padding: 10px 12px;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
-.review-mode-switch {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
+.review-types-popup-title {
+    font-size: 12px;
     font-weight: 600;
-    color: var(--text-heading);
-    user-select: none;
-}
-
-.review-mode-switch input {
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-    accent-color: var(--accent);
+    color: var(--text-muted3);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
 }
 
 .review-type-checks {
     display: flex;
-    flex-wrap: wrap;
-    gap: 8px 14px;
-    opacity: 0.4;
-    pointer-events: none;
-    transition: opacity 0.15s;
-}
-
-.review-mode-bar.review-on .review-type-checks {
-    opacity: 1;
-    pointer-events: auto;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .review-type-check {

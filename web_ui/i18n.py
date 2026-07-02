@@ -49,6 +49,8 @@ STRINGS = {
 
         # Review mode (chapter-list controls; type labels shared with the reader)
         "review_mode_label": "Review mode",
+        "review_options_label": "Review error types",
+        "review_types_label": "Show errors",
         "review_types": {
             "blacklist": "Blacklist",
             "grammar": "Grammar",
@@ -231,6 +233,8 @@ STRINGS = {
 
         # Review mode (chapter-list controls; type labels shared with the reader)
         "review_mode_label": "Modo revisión",
+        "review_options_label": "Tipos de error",
+        "review_types_label": "Mostrar errores",
         "review_types": {
             "blacklist": "Lista negra",
             "grammar": "Gramática",
