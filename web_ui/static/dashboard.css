@@ -1056,6 +1056,17 @@
     font-style: italic;
 }
 
+.eval-break-mark {
+    display: inline;
+    color: #999;
+    font-size: 0.9em;
+    opacity: 0.85;
+    margin: 0 1px;
+    vertical-align: baseline;
+    cursor: help;
+    font-style: normal;
+}
+
 .eval-issue-actions {
     margin-top: 6px;
     display: flex;

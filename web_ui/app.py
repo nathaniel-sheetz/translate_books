@@ -44,6 +44,7 @@ from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
     append_feedback,
     evaluate_and_persist_chunk,
+    load_all_feedback_by_chunk,
     load_chunk_evaluation,
     load_feedback_for_chunk,
     load_project_summary,
@@ -5013,6 +5014,257 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"ok": True})
+
+
+# ── Reader "Review Mode" — overlay evaluator findings on the reader ───────────
+
+# Coded evaluators whose target-side issues carry a highlightable char span.
+_REVIEW_CODED_TYPES = frozenset(
+    {"blacklist", "grammar", "dictionary", "completeness"}
+)
+# Tailored judges whose issues can be anchored to a sentence by text search.
+_REVIEW_JUDGE_TYPES = frozenset({"dialogue"})
+
+
+def _row_containing_offset(rows_sorted: list[dict], offset: int) -> Optional[dict]:
+    """Return the alignment row whose chunk char span contains ``offset``.
+
+    ``rows_sorted`` must be sorted by ``chunk_offset_start``. Uses a half-open
+    ``[start, end)`` test — the same coordinate space as the coded evaluators'
+    ``char_start`` (both index into the chunk's ``translated_text``).
+    """
+    for row in rows_sorted:
+        start = row.get("chunk_offset_start")
+        end = row.get("chunk_offset_end")
+        if start is None or end is None:
+            continue
+        if start <= offset < end:
+            return row
+    return None
+
+
+def _locate_match(text_in_chunk: str, match_text: str) -> tuple[Optional[int], Optional[int]]:
+    """Find ``match_text`` inside ``text_in_chunk`` → sentence-relative span.
+
+    Returns ``(None, None)`` when the match is empty, not found, or spans the
+    whole sentence (in which case the caller falls back to a sentence-level
+    tint rather than wrapping the entire sentence as a word highlight).
+    """
+    if not match_text:
+        return None, None
+    idx = text_in_chunk.find(match_text)
+    if idx == -1:
+        return None, None
+    # A span covering (essentially) the whole sentence reads better as a
+    # sentence tint than as a word highlight around everything.
+    if idx == 0 and len(match_text) >= len(text_in_chunk.strip()):
+        return None, None
+    return idx, idx + len(match_text)
+
+
+def _anchor_judge_excerpt(
+    excerpt: Optional[str], translated_text: str, rows_sorted: list[dict]
+) -> Optional[int]:
+    """Anchor a judge issue (raw excerpt, no offsets) to an ``es_idx``.
+
+    Judges only report an excerpt string, so we locate it inside the chunk's
+    ``translated_text`` by searching a short probe (its first non-empty line),
+    then map that char offset to the alignment row that contains it. Returns
+    ``None`` when the excerpt can't be located (finding is dropped, not
+    force-attached — see the v1 known limits).
+    """
+    if not excerpt or not isinstance(excerpt, str) or not translated_text:
+        return None
+    probe = ""
+    for line in excerpt.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if stripped:
+            probe = stripped[:60]
+            break
+    if not probe:
+        return None
+    idx = translated_text.find(probe)
+    if idx == -1:
+        short = probe[:25]
+        idx = translated_text.find(short) if len(short) >= 8 else -1
+        if idx == -1:
+            return None
+    row = _row_containing_offset(rows_sorted, idx)
+    return row["es_idx"] if row else None
+
+
+@app.route(
+    "/api/project/<project_id>/review/<chapter>",
+    methods=["GET"],
+)
+def project_chapter_review(project_id, chapter):
+    """Return evaluator findings for a chapter, anchored to reader sentences.
+
+    Powers the reader's opt-in Review Mode. Reuses the alignment builder and
+    the persisted per-chunk evaluations — no new persistence format. Findings
+    that already have feedback are treated as dismissed and omitted; chunks
+    marked ``stale`` (edited after the run) are skipped and only counted.
+
+    Response::
+
+        { ok, by_es_idx: { "<es_idx>": [finding, ...] },
+          type_counts: { blacklist: N, ... }, stale_chunks: N }
+
+    Each finding: ``{eval_name, issue_index, chunk_id, severity, message,
+    suggestion, excerpt, match, match_start, match_end}`` where
+    ``match_start is None`` ⇒ paint a whole-sentence tint.
+    """
+    from collections import defaultdict
+
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    align_path = project_dir / "alignments" / f"{chapter}.json"
+    if not align_path.exists():
+        return jsonify({"error": f"Alignment not found: {project_id}/{chapter}"}), 404
+
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": str(e)}), 500
+
+    # Enrich rows with chunk_id + char offsets + text_in_chunk (same builder
+    # /api/alignment uses). No paragraph/image enrichment needed here.
+    chunks_dir = project_dir / "chunks"
+    if chunks_dir.exists():
+        _attach_text_in_chunk(data, chunks_dir)
+
+    rows_by_chunk: dict[str, list[dict]] = defaultdict(list)
+    for row in data.get("alignments", []):
+        if not isinstance(row, dict) or "es_idx" not in row:
+            continue
+        cid = row.get("chunk_id")
+        if not cid:
+            continue
+        if row.get("chunk_offset_start") is None or row.get("text_in_chunk") is None:
+            continue
+        # Skip [IMAGE:...] placeholder sentences — the reader filters these out
+        # (see _enrich_alignment), so a finding anchored to one would have no
+        # sentence to highlight. Their char span is left uncovered, so any
+        # coded finding that lands inside the token is dropped, not misattached.
+        if _IMAGE_PLACEHOLDER_RE.fullmatch((row.get("es") or "").strip()):
+            continue
+        rows_by_chunk[cid].append(row)
+
+    by_es_idx: dict[str, list[dict]] = defaultdict(list)
+    type_counts: dict[str, int] = defaultdict(int)
+    stale_chunks = 0
+
+    from src.utils.text_utils import normalize_newlines
+
+    feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    chunk_text_cache: dict[str, str] = {}
+
+    for chunk_id, crows in rows_by_chunk.items():
+        payload = load_chunk_evaluation(project_dir, chunk_id)
+        if not payload:
+            continue
+        if payload.get("stale"):
+            stale_chunks += 1
+            continue
+
+        feedback = feedback_by_chunk.get(chunk_id, [])
+        dismissed = {
+            (fb.get("eval_name"), fb.get("issue_index")) for fb in feedback
+        }
+        crows_sorted = sorted(crows, key=lambda r: r["chunk_offset_start"])
+
+        # Coded evaluators → target-side normalized_issues with a char span.
+        for ni in payload.get("normalized_issues") or []:
+            eval_name = ni.get("eval_name")
+            if eval_name not in _REVIEW_CODED_TYPES:
+                continue
+            loc = ni.get("location") or {}
+            if loc.get("side") != "target":
+                continue
+            char_start = loc.get("char_start")
+            if char_start is None:
+                continue
+            issue_index = ni.get("issue_index")
+            if (eval_name, issue_index) in dismissed:
+                continue
+            row = _row_containing_offset(crows_sorted, char_start)
+            if row is None:
+                continue
+            match_text = loc.get("match") or ""
+            match_start, match_end = _locate_match(row["text_in_chunk"], match_text)
+            excerpt = match_text or (
+                (loc.get("snippet_before") or "")
+                + (loc.get("match") or "")
+                + (loc.get("snippet_after") or "")
+            )
+            by_es_idx[str(row["es_idx"])].append({
+                "eval_name": eval_name,
+                "issue_index": issue_index,
+                "chunk_id": chunk_id,
+                "severity": ni.get("severity"),
+                "message": ni.get("message"),
+                "suggestion": ni.get("suggestion"),
+                "excerpt": excerpt,
+                "match": match_text,
+                "match_start": match_start,
+                "match_end": match_end,
+            })
+            type_counts[eval_name] += 1
+
+        # Judges → issues carry only a raw excerpt string; anchor by text.
+        judges = payload.get("judges")
+        if isinstance(judges, dict) and judges:
+            if chunk_id not in chunk_text_cache:
+                translated_text = ""
+                chunk_path = chunks_dir / f"{chunk_id}.json"
+                if chunk_path.exists():
+                    try:
+                        cdata = json.loads(chunk_path.read_text(encoding="utf-8"))
+                        translated_text = normalize_newlines(
+                            cdata.get("translated_text") or ""
+                        )
+                    except (json.JSONDecodeError, OSError):
+                        translated_text = ""
+                chunk_text_cache[chunk_id] = translated_text
+            translated_text = chunk_text_cache[chunk_id]
+            for judge_name, jres in judges.items():
+                if judge_name not in _REVIEW_JUDGE_TYPES or not isinstance(jres, dict):
+                    continue
+                for issue_index, issue in enumerate(jres.get("issues") or []):
+                    if not isinstance(issue, dict):
+                        continue
+                    if (judge_name, issue_index) in dismissed:
+                        continue
+                    excerpt = issue.get("location")
+                    es_idx = _anchor_judge_excerpt(excerpt, translated_text, crows_sorted)
+                    if es_idx is None:
+                        continue
+                    by_es_idx[str(es_idx)].append({
+                        "eval_name": judge_name,
+                        "issue_index": issue_index,
+                        "chunk_id": chunk_id,
+                        "severity": issue.get("severity"),
+                        "message": issue.get("message"),
+                        "suggestion": issue.get("suggestion"),
+                        "excerpt": excerpt or "",
+                        "match": "",
+                        "match_start": None,
+                        "match_end": None,
+                    })
+                    type_counts[judge_name] += 1
+
+    return jsonify({
+        "ok": True,
+        "by_es_idx": dict(by_es_idx),
+        "type_counts": dict(type_counts),
+        "stale_chunks": stale_chunks,
+    })
 
 
 @app.route(

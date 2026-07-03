@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _FEEDBACK_FILENAME = "_feedback.jsonl"
 _ALLOWED_FEEDBACK_TYPES = frozenset(
-    {"false_positive", "bad_message", "missing_context_gap"}
+    {"false_positive", "bad_message", "missing_context_gap", "resolved"}
 )
 
 
@@ -336,6 +336,40 @@ def load_feedback_for_chunk(
                     continue
                 if record.get("chunk_id") == chunk_id:
                     out.append(record)
+    except OSError as e:
+        logger.warning("Failed to read feedback file %s: %s", path, e)
+    return out
+
+
+def load_all_feedback_by_chunk(
+    project_dir: Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return all feedback records grouped by ``chunk_id``.
+
+    Reads ``_feedback.jsonl`` once — use for chapter-wide review assembly
+    instead of calling :func:`load_feedback_for_chunk` per chunk.
+    """
+    path = _feedback_file(project_dir)
+    if not path.exists():
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as e:
+                    logger.debug(
+                        "Skipping malformed feedback line in %s: %s", path, e
+                    )
+                    continue
+                chunk_id = record.get("chunk_id")
+                if not chunk_id:
+                    continue
+                out.setdefault(chunk_id, []).append(record)
     except OSError as e:
         logger.warning("Failed to read feedback file %s: %s", path, e)
     return out
