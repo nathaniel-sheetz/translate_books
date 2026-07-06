@@ -204,6 +204,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Recommended workers to spawn per wave (default 5)",
     )
     pp.add_argument(
+        "--targets-per-worker",
+        dest="targets_per_worker",
+        type=int,
+        default=1,
+        help="Group up to N low-dialogue-density targets into one worker prompt to "
+        "amortize per-worker overhead (default 1 = one target per worker). "
+        "Dialogue-dense targets are always judged solo. Recovery re-prepares should "
+        "leave this at 1 so a bad chunk never drags its group-mates.",
+    )
+    pp.add_argument(
         "--keep-drafts",
         dest="keep_drafts",
         action="store_true",
@@ -387,6 +397,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
             context=context,
             worker_model=args.worker_model,
             batch_size=args.batch_size,
+            targets_per_worker=args.targets_per_worker,
             keep_drafts=args.keep_drafts,
         )
     except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:

@@ -117,10 +117,15 @@ class DialogueComplianceJudge(VerdictJudge):
         description="Checks Spanish dialogue formatting against prompts/dialogue.txt",
     )
 
-    def prompt_variables(
-        self, target: JudgeTarget, context: dict[str, Any]
-    ) -> dict[str, str]:
-        """Template variables: the house rules plus the source + translation.
+    # The house rules are target-independent, so several targets can share one
+    # rendered rules block — this judge supports density-gated target grouping in
+    # the subagent backend. The per-item source/translation come from the base
+    # ``item_prompt_variables``; ``parse_response`` is reused per member unchanged.
+    batch_template = "judge_dialogue_batch.txt"
+
+    def shared_prompt_variables(self, context: dict[str, Any]) -> dict[str, str]:
+        """The house dialogue rules — identical for every target, so they render
+        once at the top of a batched prompt.
 
         Context keys consumed (all optional):
             ``dialogue_rules`` (str): rules text override; defaults to
@@ -129,11 +134,7 @@ class DialogueComplianceJudge(VerdictJudge):
         rules: Optional[str] = context.get("dialogue_rules")
         if not rules:
             rules = _load_default_rules()
-        return {
-            "dialogue_rules": rules,
-            "source_text": target.source_text,
-            "translation_text": target.translated_text,
-        }
+        return {"dialogue_rules": rules}
 
     def parse_response(
         self, target: JudgeTarget, raw: str, context: dict[str, Any]

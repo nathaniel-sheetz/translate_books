@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.1.0] - 2026-07-06
+
+### Added
+- **Density-gated target grouping** for the judge-review subagent backend — low-dialogue-density targets pack into one batched worker prompt (`Judge.build_batch_prompt` + `judge_dialogue_batch.txt`) while dialogue-dense targets stay solo, cutting worker spawns without changing per-target results.
+
+### Fixed
+- **Batched commit accounting** — an explicit `null` verdict is now recorded as failed (a bad answer) rather than missing (an omission), and a corrupt batch member (no `target_id`) is recorded as failed instead of being silently dropped.
+- **Batched item rendering** — `_batch_item_block` now renders any judge-specific extra per-item variables into their own tags, so a judge's batched prompt can't diverge from its solo prompt.
+
 ## [0.27.0.0] - 2026-07-02
 
 ### Added
