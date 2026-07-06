@@ -64,8 +64,15 @@ Shared flags (`run`, `prepare`):
   chapters into one manifest for a single `commit` (see the multi-chapter note in B).
 - `--worker-model <tier>` (default `sonnet`) — pins each spawned `judge-worker`.
 - `--batch-size <n>` (default 5) — recommended workers per spawn wave.
+- `--targets-per-worker <n>` (default 1) — group up to N **low-dialogue-density**
+  targets into one worker prompt to amortize per-worker overhead (fewer, cheaper
+  spawns). Dialogue-dense chunks are always judged solo. A grouped manifest entry
+  has a `batch_id` + `members[]` instead of a top-level `target_id`; `commit`
+  splits the one draft back out per member. Leave at 1 for recovery re-prepares
+  (see 5b) so a bad chunk never drags its group-mates. `usage_summary` reports
+  `workers` (spawns) alongside `pairs` (target×judge units).
 - `--keep-drafts` — don't clear existing worker drafts. Re-`prepare` is otherwise
-  destructive (it wipes the drafts for the pairs it re-renders).
+  destructive (it wipes the drafts for the entries it re-renders).
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
 
@@ -114,15 +121,33 @@ python scripts/run_judges.py run --project understood-betsy \
 3b. **Prepare.** Render the prompts + manifest (no spend). For a multi-chapter
 request, stage **every** chapter in one `prepare` by repeating `--scope` — they
 land in one manifest, one `commit` collects them all, and `usage_summary` is a
-single rollup (no manual summing across calls):
+single rollup (no manual summing across calls).
+
+**First, pick a worker-grouping mode** (subagent-only — the API path always judges
+one target per call). Offer the choice with `AskUserQuestion` unless the user already
+said which they want:
+- **Conservative — one chunk per worker** (`--targets-per-worker 1`, the default).
+  Every chunk is judged in full isolation — the known-good path. Most spawns, so the
+  highest session/rate usage. Recommend this when in doubt.
+- **Grouped — up to 3 chunks per worker** (`--targets-per-worker 3`, cheaper). Packs
+  up to three *low-dialogue-density* chunks into one worker prompt (dialogue-dense
+  chunks are always judged solo), amortizing per-worker overhead → **fewer, cheaper
+  spawns**. In testing the findings track the solo path closely, but the full A/B
+  quality gate isn't cleared yet — present it as the cheaper option with a small,
+  bounded quality risk, not a free win.
+
+Then run `prepare`, passing the chosen `--targets-per-worker` (omit it for conservative):
 ```bash
 python scripts/run_judges.py prepare --project understood-betsy --judge dialogue \
-    --scope chapter:chapter_05 --scope chapter:chapter_06 [--worker-model sonnet] [--batch-size 5]
+    --scope chapter:chapter_05 --scope chapter:chapter_06 \
+    [--targets-per-worker 3] [--worker-model sonnet] [--batch-size 5]
 ```
 Relay `usage_summary` (pairs to judge, worker_model, batch_size; `estimated_api_cost`
-is the API-equivalent price, shown for context — nothing is spent). The **usage gate**
-is the subagent analog of the cost gate: no dollars, but spawning N workers consumes
-real session/rate usage. Get approval in a separate turn before spawning.
+is the API-equivalent price, shown for context — nothing is spent). Under grouping,
+`usage_summary.workers` (actual spawns) is fewer than `pairs` (target×judge units) —
+relay both so the saving is visible. The **usage gate** is the subagent analog of the
+cost gate: no dollars, but spawning N workers consumes real session/rate usage. Get
+approval in a separate turn before spawning.
 
 **Re-`prepare` is destructive.** It clears the drafts for the pairs it re-renders,
 so it must never run while you have **uncommitted** worker drafts in flight — that
@@ -131,20 +156,24 @@ throws away completed work and forces a re-spawn. Prepare the whole request once
 pass `--keep-drafts`. Don't re-prepare just to "recover" a manifest — stage
 everything up front so you never need to.
 
-4b. **Spawn workers.** For each manifest entry, spawn one worker with the **Task** tool:
-`subagent_type: judge-worker`, `model:` = the manifest's `worker_model`, in bounded
-batches of `batch_size`. Tell each worker its `prompt_path` and `draft_path`: read the
-prompt, write ONLY the JSON verdict to the draft, reply `done <target_id>`. On a 529
-(overloaded) throttle the batch toward ~1 and continue.
+4b. **Spawn workers.** For each manifest entry (one target, or — with
+`--targets-per-worker` — a group of low-density targets sharing one prompt), spawn one
+worker with the **Task** tool: `subagent_type: judge-worker`, `model:` = the manifest's
+`worker_model`, in bounded batches of `batch_size`. Tell each worker its `prompt_path`
+and `draft_path`: read the prompt, write ONLY the JSON verdict to the draft, reply
+`done <id>`. On a 529 (overloaded) throttle the batch toward ~1 and continue.
 
 5b. **Commit.** Collect + parse the drafts (and `--persist` if saving):
 ```bash
 python scripts/run_judges.py commit --project understood-betsy --persist
 ```
 Relay `committed` / `failed` / `missing`. **Re-spawn** any `failed` (bad/no JSON) or
-`missing` (no draft) entries — same prompt_path/draft_path — then re-run `commit`. Cap
-re-spawns at ~3 per entry, then surface for manual review. Then relay findings the same
-way the API branch does.
+`missing` (no draft) entries — same prompt_path/draft_path — then re-run `commit`.
+`failed`/`missing` are keyed **per target** even inside a group, so recovery is per
+target: re-prepare just the affected chunk(s) as a **solo** scope (default
+`--targets-per-worker 1`, with `--keep-drafts` to protect good drafts still in flight)
+so one bad chunk never drags its group-mates. Cap re-spawns at ~3 per entry, then
+surface for manual review. Then relay findings the same way the API branch does.
 
 ### C. Apply fixes (optional — after relaying findings)
 

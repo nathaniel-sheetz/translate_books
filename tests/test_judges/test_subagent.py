@@ -8,6 +8,7 @@ drive the deterministic prepare/commit functions directly — no LLM, no Task to
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -370,3 +371,263 @@ def test_prepare_empty_scope_returns_nothing_to_judge_message(tmp_path, monkeypa
     assert out["status"] == "ok"
     assert out["manifest"] == []
     assert "Nothing to judge" in out["instructions"]
+
+
+# ---------------------------------------------------------------------------
+# Density-gated target grouping (targets_per_worker > 1)
+# ---------------------------------------------------------------------------
+
+
+def test_dialogue_marker_count_includes_rayas_and_guillemets():
+    """The density signal counts the raya (—) AND the guillemets (« »)."""
+    assert subagent._dialogue_marker_count("—Hola. —Adiós.") == 2
+    assert subagent._dialogue_marker_count("Paul pensó: «Hoy nacerá».") == 2  # « + »
+    assert subagent._dialogue_marker_count("—«»—") == 4
+    assert subagent._dialogue_marker_count("plain narration, no markers") == 0
+
+
+def _three_chunk_chapter(tmp_path, dense_markers: int = 61):
+    """Two low-density chunks + one dialogue-dense chunk in chapter_01."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir(exist_ok=True)
+    save_chunk(_chunk("chapter_01_chunk_000", "chapter_01", 0, "—Hola."), chunks_dir / "chapter_01_chunk_000.json")
+    save_chunk(_chunk("chapter_01_chunk_001", "chapter_01", 1, "—Adiós."), chunks_dir / "chapter_01_chunk_001.json")
+    dense = "—x " * dense_markers  # > _DENSITY_SOLO_THRESHOLD -> judged solo
+    save_chunk(_chunk("chapter_01_chunk_002", "chapter_01", 2, dense), chunks_dir / "chapter_01_chunk_002.json")
+    return tmp_path
+
+
+def test_prepare_default_is_solo_no_members(tmp_path):
+    """targets_per_worker=1 (default) reproduces today's one-target-per-entry shape."""
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    assert all("members" not in e for e in out["manifest"])
+    assert out["usage_summary"]["workers"] == 1
+    assert out["usage_summary"]["targets_per_worker"] == 1
+
+
+def test_prepare_groups_low_density_targets_keeps_dense_solo(tmp_path):
+    """Low-density targets pack into one batch entry; a dense one stays solo."""
+    _three_chunk_chapter(tmp_path)
+
+    out = subagent.prepare(tmp_path, ["dialogue"], "chapter:chapter_01", targets_per_worker=2)
+
+    entries = out["manifest"]
+    batch = [e for e in entries if "members" in e]
+    solo = [e for e in entries if "members" not in e]
+    assert len(batch) == 1
+    assert {m["target_id"] for m in batch[0]["members"]} == {
+        "chapter_01_chunk_000",
+        "chapter_01_chunk_001",
+    }
+    assert len(solo) == 1
+    assert solo[0]["target_id"] == "chapter_01_chunk_002"
+
+    # 3 (target×judge) pairs spread across 2 workers.
+    assert out["usage_summary"]["pairs"] == 3
+    assert out["usage_summary"]["workers"] == 2
+    assert out["usage_summary"]["targets"] == 3
+    assert out["usage_summary"]["targets_per_worker"] == 2
+
+    # The batch prompt renders the shared rules block once and one <item> per
+    # member. (The rules data block is delimited by a single closing tag; the
+    # opening tag also appears in the instruction prose, so count the close tag.)
+    batch_prompt = (
+        tmp_path / ".harness" / "judges" / f"{batch[0]['batch_id']}.dialogue.prompt.txt"
+    ).read_text(encoding="utf-8")
+    assert batch_prompt.count("</dialogue_rules>") == 1
+    assert batch_prompt.count('<item id="') == 2
+    assert 'id="chapter_01_chunk_000"' in batch_prompt
+    assert 'id="chapter_01_chunk_001"' in batch_prompt
+
+
+def test_build_batch_prompt_renders_rules_once_and_all_items():
+    """build_batch_prompt reuses the solo tags per item and the rules block once."""
+    judge = DialogueComplianceJudge()
+    t0 = JudgeTarget("chapter_01_chunk_000", "chunk", '"Hi."', "—Hola.", {})
+    t1 = JudgeTarget("chapter_01_chunk_001", "chunk", '"Bye."', "—Adiós.", {})
+
+    prompt = judge.build_batch_prompt([t0, t1], {"dialogue_rules": "Use the raya."})
+
+    assert prompt.count("Use the raya.") == 1  # shared rules block rendered once
+    assert prompt.count('<item id="') == 2
+    assert "—Hola." in prompt and "—Adiós." in prompt
+
+
+def _batch_entry(tmp_path):
+    """Prepare a two-member batch entry (both chunks low-density) and return it."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir(exist_ok=True)
+    save_chunk(_chunk("chapter_01_chunk_000", "chapter_01", 0, "—Hola."), chunks_dir / "chapter_01_chunk_000.json")
+    save_chunk(_chunk("chapter_01_chunk_001", "chapter_01", 1, "—Adiós."), chunks_dir / "chapter_01_chunk_001.json")
+    out = subagent.prepare(tmp_path, ["dialogue"], "chapter:chapter_01", targets_per_worker=2)
+    return next(e for e in out["manifest"] if "members" in e)
+
+
+def test_commit_batch_splits_and_attributes_verdicts(tmp_path):
+    """A batch draft's verdicts are split per member and persisted separately."""
+    batch = _batch_entry(tmp_path)
+    verdicts = {
+        "verdicts": {
+            "chapter_01_chunk_000": {
+                "compliant": False,
+                "findings": [
+                    {
+                        "rule": "raya-spacing",
+                        "severity": "error",
+                        "excerpt": "— Hola",
+                        "message": "space after the opening raya",
+                        "suggestion": "—Hola",
+                    }
+                ],
+                "summary": "one issue",
+            },
+            "chapter_01_chunk_001": {"compliant": True, "findings": [], "summary": "ok"},
+        }
+    }
+    Path(batch["draft_path"]).write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=True)
+
+    assert out["counts"] == {"committed": 2, "failed": 0, "missing": 0}
+    assert {c["target_id"] for c in out["committed"]} == {
+        "chapter_01_chunk_000",
+        "chapter_01_chunk_001",
+    }
+    # Each verdict attributed to and persisted under its own chunk.
+    ev0 = load_chunk_evaluation(tmp_path, "chapter_01_chunk_000")
+    ev1 = load_chunk_evaluation(tmp_path, "chapter_01_chunk_001")
+    assert ev0["judges"]["dialogue"]["issues"][0]["message"].startswith("[raya-spacing]")
+    assert ev1["judges"]["dialogue"]["issues"] == []
+
+
+def test_commit_batch_missing_member_is_missing_not_dropped(tmp_path):
+    """A member id absent from verdicts is reported missing, never silently dropped."""
+    batch = _batch_entry(tmp_path)
+    verdicts = {"verdicts": {"chapter_01_chunk_000": {"compliant": True, "findings": [], "summary": "ok"}}}
+    Path(batch["draft_path"]).write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"] == {"committed": 1, "failed": 0, "missing": 1}
+    assert out["missing"][0]["target_id"] == "chapter_01_chunk_001"
+
+
+def test_commit_batch_malformed_member_verdict_is_failed(tmp_path):
+    """A per-item verdict that fails the parser is failed; its batch-mate still commits."""
+    batch = _batch_entry(tmp_path)
+    verdicts = {
+        "verdicts": {
+            "chapter_01_chunk_000": {"compliant": True, "findings": [], "summary": "ok"},
+            "chapter_01_chunk_001": {"compliant": True, "summary": "missing findings key"},
+        }
+    }
+    Path(batch["draft_path"]).write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"] == {"committed": 1, "failed": 1, "missing": 0}
+    assert out["failed"][0]["target_id"] == "chapter_01_chunk_001"
+
+
+def test_commit_batch_unparseable_draft_fails_all_members(tmp_path):
+    """An unparseable batch draft fails every member (all re-spawnable per target)."""
+    batch = _batch_entry(tmp_path)
+    Path(batch["draft_path"]).write_text("sorry, no json here", encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"] == {"committed": 0, "failed": 2, "missing": 0}
+    assert {f["target_id"] for f in out["failed"]} == {
+        "chapter_01_chunk_000",
+        "chapter_01_chunk_001",
+    }
+
+
+def test_commit_batch_missing_draft_marks_all_members_missing(tmp_path):
+    """No draft for a batch entry marks each member missing (per-target recovery)."""
+    _batch_entry(tmp_path)  # prepare only; write no draft
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"] == {"committed": 0, "failed": 0, "missing": 2}
+    assert {m["target_id"] for m in out["missing"]} == {
+        "chapter_01_chunk_000",
+        "chapter_01_chunk_001",
+    }
+
+
+def test_commit_batch_null_verdict_is_failed_not_missing(tmp_path):
+    """An explicit null verdict is failed (a bad answer), not missing (an omission)."""
+    batch = _batch_entry(tmp_path)
+    verdicts = {
+        "verdicts": {
+            "chapter_01_chunk_000": {"compliant": True, "findings": [], "summary": "ok"},
+            "chapter_01_chunk_001": None,
+        }
+    }
+    Path(batch["draft_path"]).write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"] == {"committed": 1, "failed": 1, "missing": 0}
+    assert out["failed"][0]["target_id"] == "chapter_01_chunk_001"
+    assert "null" in out["failed"][0]["problem"]
+
+
+def test_commit_batch_malformed_member_is_failed_not_dropped(tmp_path):
+    """A corrupt member (no target_id) is recorded failed, never silently dropped."""
+    jdir = tmp_path / ".harness" / "judges"
+    jdir.mkdir(parents=True)
+    draft_path = jdir / "batch_x.dialogue.draft.json"
+    manifest_doc = {
+        "scopes": ["chapter:chapter_01"],
+        "judges": ["dialogue"],
+        "worker_model": "sonnet",
+        "model": None,
+        "provider": None,
+        "entries": [
+            {
+                "batch_id": "batch_x",
+                "judge": "dialogue",
+                "draft_path": str(draft_path),
+                "members": [
+                    {"target_id": "chapter_01_chunk_000", "target_type": "chunk"},
+                    {"target_type": "chunk"},  # <-- malformed: no target_id
+                ],
+            }
+        ],
+    }
+    (jdir / "manifest.json").write_text(json.dumps(manifest_doc), encoding="utf-8")
+    verdicts = {"verdicts": {"chapter_01_chunk_000": {"compliant": True, "findings": [], "summary": "ok"}}}
+    draft_path.write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"]["committed"] == 1
+    assert out["counts"]["failed"] == 1
+    assert out["failed"][0]["target_id"] == "?"
+    assert "malformed batch member" in out["failed"][0]["problem"]
+
+
+def test_batch_item_block_renders_extra_item_vars(tmp_path):
+    """_batch_item_block keeps judge-specific extra per-item vars (no silent drop)."""
+    from src.judges.base import _batch_item_block
+
+    block = _batch_item_block(
+        "c0",
+        {"source_text": "src", "translation_text": "tr", "notes": "extra"},
+    )
+    assert "<source>\nsrc\n</source>" in block
+    assert "<translation>\ntr\n</translation>" in block
+    assert "<notes>\nextra\n</notes>" in block
+
+    # With only the two standard vars, output is unchanged from the old shape.
+    plain = _batch_item_block("c0", {"source_text": "src", "translation_text": "tr"})
+    assert plain == (
+        '<item id="c0">\n'
+        "<source>\nsrc\n</source>\n"
+        "<translation>\ntr\n</translation>\n"
+        "</item>"
+    )
