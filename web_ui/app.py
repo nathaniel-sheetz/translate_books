@@ -386,12 +386,14 @@ def api_llm_config():
     flag per provider indicating whether the API key is set.
     """
     import os, copy
-    from src.api_translator import load_llm_config
+    from src.api_translator import load_llm_config, model_supports_thinking
 
     config = copy.deepcopy(load_llm_config())
     for provider in config.get("providers", []):
         env_var = provider.pop("api_key_env_var", None)
         provider["available"] = bool(os.getenv(env_var)) if env_var else False
+        for m in provider.get("models", []):
+            m["supports_thinking"] = model_supports_thinking(m["id"])
     return jsonify(config)
 
 
@@ -3702,6 +3704,7 @@ def project_translate_batch(project_id):
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")
     model = data.get("model", None)
+    enable_thinking = bool(data.get("enable_thinking", False))
 
     if not all(_safe_id(ch_id) for ch_id in chapter_ids):
         return jsonify({"error": "Invalid chapter ID"}), 400
@@ -3763,6 +3766,7 @@ def project_translate_batch(project_id):
                     target_language="Spanish",
                     previous_chapter_context=prev_context,
                     project_slug=project_id,
+                    enable_thinking=enable_thinking,
                 )
                 save_chunk(translated, cp)
                 affected_chapters.add(chunk.chapter_id)
@@ -3889,6 +3893,7 @@ def batch_api_submit(project_id):
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")
     model = data.get("model", None)
+    enable_thinking = bool(data.get("enable_thinking", False))
 
     include_translated = data.get("include_translated", False)
 
@@ -3949,6 +3954,7 @@ def batch_api_submit(project_id):
             target_language="Spanish",
             context_map=context_map,
             project_slug=project_id,
+            enable_thinking=enable_thinking,
         )
 
         # Store chunk file map for retrieval. chunk_log_map (set by submit_batch)

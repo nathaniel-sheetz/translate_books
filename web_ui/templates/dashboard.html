@@ -676,6 +676,12 @@
             <label>Model</label>
             <select id="batch-model"></select>
         </div>
+        <div class="dash-field" id="batch-thinking-wrap" style="display:none;">
+            <label style="font-weight:normal; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="checkbox" id="batch-thinking">
+                Extended thinking (slower, higher cost)
+            </label>
+        </div>
 
         <div id="batch-cost-estimate" style="margin:12px 0; font-size:14px;"></div>
 
@@ -710,6 +716,12 @@
         <div class="dash-field">
             <label>Model</label>
             <select id="batch-api-model"></select>
+        </div>
+        <div class="dash-field" id="batch-api-thinking-wrap" style="display:none;">
+            <label style="font-weight:normal; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="checkbox" id="batch-api-thinking">
+                Extended thinking (slower, higher cost)
+            </label>
         </div>
 
         <div id="batch-api-cost-estimate" style="margin:12px 0; font-size:14px;"></div>
