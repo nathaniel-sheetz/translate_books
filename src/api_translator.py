@@ -39,7 +39,7 @@ def _extract_text_from_content(content) -> str:
     """
     parts = [
         block.text
-        for block in content
+        for block in (content or [])
         if getattr(block, "type", None) == "text" and hasattr(block, "text")
     ]
     return "".join(parts)
@@ -180,10 +180,13 @@ def _thinking_enabled() -> bool:
 def _thinking_param(model: str, enabled: bool) -> dict | None:
     """Return the ``thinking`` request param for *model*, or None to omit it.
 
-    New-generation Anthropic models (Sonnet 5, Opus 4.7/4.8, Fable 5) default to
-    *adaptive* thinking whenever ``thinking`` is omitted — so to keep thinking off
-    we must send ``{"type": "disabled"}`` explicitly. Older models default thinking
-    off already and may reject the param, so we leave it unset for them.
+    Sonnet 5 defaults to *adaptive* thinking whenever ``thinking`` is omitted, so
+    to keep thinking off we must send ``{"type": "disabled"}`` explicitly. Opus
+    4.7/4.8 default thinking off when omitted but still accept ``{"type":
+    "disabled"}`` as a harmless no-op, so we send it uniformly across the
+    toggleable set. Fable 5 is always-on and rejects ``{"type": "disabled"}`` with
+    a 400, so we omit the param for it. Older models default thinking off already
+    and may reject the param, so we leave it unset for them.
     """
     if not _rejects_sampling_params(model):
         return None  # older model: thinking already off by default; don't send it
@@ -199,10 +202,11 @@ def _thinking_param(model: str, enabled: bool) -> dict | None:
 def model_supports_thinking(model: str) -> bool:
     """True if *model* exposes a user-toggleable thinking mode.
 
-    That's the new-generation set that defaults thinking on (Sonnet 5, Opus
-    4.7/4.8) — where a checkbox can switch between adaptive and disabled. Fable 5
-    is excluded (always-on; can't be disabled) and older models are excluded
-    (always-off; the param isn't accepted).
+    That's the new-generation set where a checkbox can switch between adaptive and
+    disabled (Sonnet 5, Opus 4.7/4.8). Sonnet 5 defaults thinking on and Opus
+    4.7/4.8 default it off, but all three accept both ``adaptive`` and
+    ``disabled``. Fable 5 is excluded (always-on; can't be disabled) and older
+    models are excluded (always-off; the param isn't accepted).
     """
     return _rejects_sampling_params(model) and not model.startswith("claude-fable-5")
 
@@ -215,6 +219,23 @@ def _resolve_thinking(model: str, enable_thinking: bool | None) -> dict | None:
     """
     enabled = _thinking_enabled() if enable_thinking is None else enable_thinking
     return _thinking_param(model, enabled)
+
+
+# When thinking is active its tokens count against ``max_tokens`` (the cap covers
+# thinking + response text together), so the 4096 default can truncate the
+# translation or leave a response that is only thinking blocks. Raise the cap to
+# this floor whenever the request will actually think.
+_THINKING_MAX_TOKENS_FLOOR = 8192
+
+
+def _max_tokens_with_thinking(model: str, max_tokens: int, thinking: dict | None) -> int:
+    """Raise ``max_tokens`` to a floor when the request will actually think.
+
+    Applies when adaptive thinking is requested, or on Fable 5 (always-on
+    regardless of the param). Leaves ``max_tokens`` untouched otherwise.
+    """
+    thinks = (thinking or {}).get("type") == "adaptive" or model.startswith("claude-fable-5")
+    return max(max_tokens, _THINKING_MAX_TOKENS_FLOOR) if thinks else max_tokens
 
 
 class APIError(Exception):
@@ -453,6 +474,7 @@ def call_anthropic_api(
     thinking = _resolve_thinking(model, enable_thinking)
     if thinking is not None:
         create_kwargs["thinking"] = thinking
+    create_kwargs["max_tokens"] = _max_tokens_with_thinking(model, max_tokens, thinking)
 
     try:
         response = client.messages.create(**create_kwargs)
@@ -783,6 +805,7 @@ def _submit_anthropic_batch(
         thinking = _resolve_thinking(model, enable_thinking)
         if thinking is not None:
             params["thinking"] = thinking
+        params["max_tokens"] = _max_tokens_with_thinking(model, params["max_tokens"], thinking)
         requests.append({
             "custom_id": chunk.id,
             "params": params,

@@ -377,6 +377,74 @@ def test_submit_anthropic_batch_enable_thinking_flag(sample_chunk, tmp_path):
         _, kwargs = mock_client.messages.batches.create.call_args
         params = kwargs["requests"][0]["params"]
         assert params["thinking"] == {"type": "adaptive"}
+        # Thinking tokens count against max_tokens, so the batch cap is raised too.
+        assert params["max_tokens"] >= 8192
+
+
+def test_max_tokens_with_thinking_floor():
+    """When thinking is active max_tokens is raised to the floor; otherwise untouched."""
+    from src.api_translator import _max_tokens_with_thinking, _THINKING_MAX_TOKENS_FLOOR
+
+    # Adaptive thinking → raised to the floor.
+    assert _max_tokens_with_thinking(
+        "claude-sonnet-5", 4096, {"type": "adaptive"}
+    ) == _THINKING_MAX_TOKENS_FLOOR
+    # A caller cap already above the floor is preserved.
+    assert _max_tokens_with_thinking("claude-sonnet-5", 20000, {"type": "adaptive"}) == 20000
+    # Disabled / omitted thinking → left alone.
+    assert _max_tokens_with_thinking("claude-sonnet-5", 4096, {"type": "disabled"}) == 4096
+    assert _max_tokens_with_thinking("claude-opus-4-8", 4096, None) == 4096
+    # Fable 5 always thinks, even when the param is omitted.
+    assert _max_tokens_with_thinking(
+        "claude-fable-5", 4096, None
+    ) == _THINKING_MAX_TOKENS_FLOOR
+
+
+def test_call_anthropic_api_raises_max_tokens_when_thinking_enabled():
+    """Enabling thinking bumps the 4096 default so thinking tokens don't truncate output."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            call_anthropic_api("Translate", model="claude-sonnet-5", enable_thinking=True)
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["max_tokens"] >= 8192
+
+
+def test_call_anthropic_api_keeps_max_tokens_without_thinking():
+    """Without thinking, the caller-provided max_tokens is left as-is."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            call_anthropic_api(
+                "Translate", model="claude-sonnet-5", max_tokens=4096, enable_thinking=False
+            )
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["max_tokens"] == 4096
+
+
+def test_extract_text_from_content_handles_none():
+    """A None/empty content array yields '' rather than raising TypeError."""
+    from src.api_translator import _extract_text_from_content
+    assert _extract_text_from_content(None) == ""
+    assert _extract_text_from_content([]) == ""
 
 
 def test_call_anthropic_api_omits_thinking_for_older_model():

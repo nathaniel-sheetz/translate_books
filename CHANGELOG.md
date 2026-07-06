@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.2.0] - 2026-07-06
+
+### Added
+- **Sonnet 5 thinking-block handling** — API responses are parsed by content-block type (`_extract_text_from_content`), concatenating only `text` blocks so `ThinkingBlock`/`RedactedThinkingBlock` entries can't crash extraction or leak reasoning into the translation.
+- **Per-request "Extended thinking" toggle** — a web-UI checkbox threads `enable_thinking` end-to-end through the realtime and Anthropic batch paths; the checkbox hides and unchecks itself for models that don't support a toggleable thinking mode.
+
+### Fixed
+- **Truncated output with thinking enabled** — thinking tokens count against `max_tokens`, so the 4096 default could truncate a translation or return only thinking blocks. `_max_tokens_with_thinking` now raises the cap to an 8192 floor on the realtime and Anthropic batch paths whenever thinking is active (adaptive, or always-on Fable 5).
+- **`None` response content** — `_extract_text_from_content` tolerates a `None`/empty content array (returns `""`) instead of raising `TypeError`.
+- **Thinking-defaults docstrings** — corrected the stated per-model defaults: only Sonnet 5 runs adaptive when `thinking` is omitted; Opus 4.7/4.8 default off (but accept an explicit `disabled`), and Fable 5 is always-on.
+
 ## [0.27.1.0] - 2026-07-06
 
 ### Added
