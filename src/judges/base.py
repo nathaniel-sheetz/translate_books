@@ -75,17 +75,27 @@ def coerce_severity(value: Any, default: IssueLevel = IssueLevel.WARNING) -> Iss
 def _batch_item_block(item_id: str, item_vars: dict[str, str]) -> str:
     """Render one ``<item>`` block for a batched judge prompt.
 
-    Uses the same ``<source>`` / ``<translation>`` tags as the solo templates so
-    a judge's rules read identically whether it judges one target or several.
+    ``source_text`` / ``translation_text`` render into the same ``<source>`` /
+    ``<translation>`` tags the solo templates use, so a judge's rules read
+    identically whether it judges one target or several. Any *additional*
+    per-target variable a judge returns from :meth:`Judge.item_prompt_variables`
+    is rendered into its own ``<name>`` tag rather than silently dropped, so a
+    judge with extra per-item inputs can't have its batched prompt diverge from
+    its solo prompt.
     Values are interpolated directly (not ``str.format``-substituted) so literal
     braces in the source/translation text can never break rendering.
     """
-    return (
-        f'<item id="{item_id}">\n'
-        f"<source>\n{item_vars.get('source_text', '')}\n</source>\n"
-        f"<translation>\n{item_vars.get('translation_text', '')}\n</translation>\n"
-        "</item>"
-    )
+    parts = [
+        f'<item id="{item_id}">',
+        f"<source>\n{item_vars.get('source_text', '')}\n</source>",
+        f"<translation>\n{item_vars.get('translation_text', '')}\n</translation>",
+    ]
+    for key, value in item_vars.items():
+        if key in ("source_text", "translation_text"):
+            continue
+        parts.append(f"<{key}>\n{value}\n</{key}>")
+    parts.append("</item>")
+    return "\n".join(parts)
 
 
 class Judge(ABC):

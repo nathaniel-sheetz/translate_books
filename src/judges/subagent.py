@@ -130,6 +130,20 @@ def _entry_members(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _entry_malformed_members(entry: dict[str, Any]) -> list[Any]:
+    """Raw ``members`` items a batch entry carries that :func:`_entry_members`
+    drops (not a dict, or no ``target_id``).
+
+    Surfaced so the commit loop can record each as a failure instead of
+    silently discarding it — a corrupt member must still be accounted for.
+    """
+    if not _is_batch_entry(entry):
+        return []
+    return [
+        m for m in entry["members"] if not (isinstance(m, dict) and m.get("target_id"))
+    ]
+
+
 def _parse_batch_verdicts(raw: str) -> dict[str, Any]:
     """Extract the ``verdicts`` object from a batched worker draft.
 
@@ -144,6 +158,7 @@ def _parse_batch_verdicts(raw: str) -> dict[str, Any]:
             f"batch 'verdicts' is not an object: {type(verdicts).__name__}"
         )
     return verdicts
+
 
 _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
@@ -488,6 +503,13 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
                 {"target_id": "?", "judge": judge_name or "?", "problem": "malformed manifest entry: missing judge, draft_path, or target(s)"}
             )
             continue
+
+        # A batch entry may carry a corrupt member alongside valid ones; record
+        # each so it's accounted for rather than silently dropped by _entry_members.
+        for bad in _entry_malformed_members(entry):
+            failed.append(
+                {"target_id": "?", "judge": judge_name, "problem": f"malformed batch member (no target_id): {bad!r}"}
+            )
         draft_path = Path(draft_path_raw)
 
         if not draft_path.resolve().is_relative_to(_judges_dir(project_dir).resolve()):
@@ -515,12 +537,20 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
                     failed.append({"target_id": member["target_id"], "judge": judge_name, "problem": f"batch draft: {exc}"})
                 continue
             for member in members:
-                verdict = verdicts.get(member["target_id"])
+                target_id = member["target_id"]
+                if target_id not in verdicts:
+                    missing.append({"target_id": target_id, "judge": judge_name})
+                    continue
+                verdict = verdicts[target_id]
                 if verdict is None:
-                    missing.append({"target_id": member["target_id"], "judge": judge_name})
+                    # An explicit null verdict is a bad answer, not an omission —
+                    # fail it (don't route to re-spawn as if it were absent).
+                    failed.append(
+                        {"target_id": target_id, "judge": judge_name, "problem": "batch verdict is null"}
+                    )
                     continue
                 _commit_member(
-                    member["target_id"],
+                    target_id,
                     member.get("target_type", "chunk"),
                     judge_name,
                     json.dumps(verdict, ensure_ascii=False),

@@ -556,3 +556,78 @@ def test_commit_batch_missing_draft_marks_all_members_missing(tmp_path):
         "chapter_01_chunk_000",
         "chapter_01_chunk_001",
     }
+
+
+def test_commit_batch_null_verdict_is_failed_not_missing(tmp_path):
+    """An explicit null verdict is failed (a bad answer), not missing (an omission)."""
+    batch = _batch_entry(tmp_path)
+    verdicts = {
+        "verdicts": {
+            "chapter_01_chunk_000": {"compliant": True, "findings": [], "summary": "ok"},
+            "chapter_01_chunk_001": None,
+        }
+    }
+    Path(batch["draft_path"]).write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"] == {"committed": 1, "failed": 1, "missing": 0}
+    assert out["failed"][0]["target_id"] == "chapter_01_chunk_001"
+    assert "null" in out["failed"][0]["problem"]
+
+
+def test_commit_batch_malformed_member_is_failed_not_dropped(tmp_path):
+    """A corrupt member (no target_id) is recorded failed, never silently dropped."""
+    jdir = tmp_path / ".harness" / "judges"
+    jdir.mkdir(parents=True)
+    draft_path = jdir / "batch_x.dialogue.draft.json"
+    manifest_doc = {
+        "scopes": ["chapter:chapter_01"],
+        "judges": ["dialogue"],
+        "worker_model": "sonnet",
+        "model": None,
+        "provider": None,
+        "entries": [
+            {
+                "batch_id": "batch_x",
+                "judge": "dialogue",
+                "draft_path": str(draft_path),
+                "members": [
+                    {"target_id": "chapter_01_chunk_000", "target_type": "chunk"},
+                    {"target_type": "chunk"},  # <-- malformed: no target_id
+                ],
+            }
+        ],
+    }
+    (jdir / "manifest.json").write_text(json.dumps(manifest_doc), encoding="utf-8")
+    verdicts = {"verdicts": {"chapter_01_chunk_000": {"compliant": True, "findings": [], "summary": "ok"}}}
+    draft_path.write_text(json.dumps(verdicts), encoding="utf-8")
+
+    out = subagent.commit(tmp_path, persist=False)
+
+    assert out["counts"]["committed"] == 1
+    assert out["counts"]["failed"] == 1
+    assert out["failed"][0]["target_id"] == "?"
+    assert "malformed batch member" in out["failed"][0]["problem"]
+
+
+def test_batch_item_block_renders_extra_item_vars(tmp_path):
+    """_batch_item_block keeps judge-specific extra per-item vars (no silent drop)."""
+    from src.judges.base import _batch_item_block
+
+    block = _batch_item_block(
+        "c0",
+        {"source_text": "src", "translation_text": "tr", "notes": "extra"},
+    )
+    assert "<source>\nsrc\n</source>" in block
+    assert "<translation>\ntr\n</translation>" in block
+    assert "<notes>\nextra\n</notes>" in block
+
+    # With only the two standard vars, output is unchanged from the old shape.
+    plain = _batch_item_block("c0", {"source_text": "src", "translation_text": "tr"})
+    assert plain == (
+        '<item id="c0">\n'
+        "<source>\nsrc\n</source>\n"
+        "<translation>\ntr\n</translation>\n"
+        "</item>"
+    )
