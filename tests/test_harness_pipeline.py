@@ -538,6 +538,53 @@ def test_stage_evaluate_persists_dashboard_json(project: Path):
         assert "length" in doc["enabled_evals"]
 
 
+def test_translate_commit_reports_evaluated_count(project: Path):
+    """A fresh commit evaluates + persists every committed chunk and reports the count."""
+    from src.harness import flow
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project), worker_model="sonnet")
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        Path(entry["draft_path"]).write_text(_fake_draft(chunk.source_text), encoding="utf-8")
+
+    res = flow.translate_commit(str(project), worker_model="sonnet")
+    assert res["counts"]["committed"] == len(prep["manifest"])
+    assert res["counts"]["evaluated"] == len(prep["manifest"])
+    assert res["evaluated"] == len(prep["manifest"])
+
+
+def test_translate_commit_survives_evaluation_failure(project: Path, monkeypatch):
+    """Evaluator persistence is best-effort: a raising evaluate_and_persist_chunk
+    must not fail the commit, and the chunk is still stamped even though no
+    evaluations/*.json is written and the evaluated count stays 0."""
+    from src.harness import flow
+    import web_ui.evaluations as evaluations
+
+    tb.STAGE_FUNCTIONS["chunk"](_args(), project, {})
+    prep = flow.translate_prepare(str(project), worker_model="sonnet")
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        Path(entry["draft_path"]).write_text(_fake_draft(chunk.source_text), encoding="utf-8")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("evaluator exploded")
+
+    monkeypatch.setattr(evaluations, "evaluate_and_persist_chunk", _boom)
+
+    res = flow.translate_commit(str(project), worker_model="sonnet")
+
+    # Commit succeeds despite the evaluator blowing up ...
+    assert res["counts"]["committed"] == len(prep["manifest"])
+    assert res["counts"]["failed"] == 0
+    # ... but nothing was evaluated or persisted.
+    assert res["counts"]["evaluated"] == 0
+    for entry in prep["manifest"]:
+        chunk = validate_chunk_file(Path(entry["chunk_path"]))
+        assert chunk.has_translation, "chunk must still be committed despite eval failure"
+        assert not (project / "evaluations" / f"{entry['chunk_id']}.json").exists()
+
+
 def test_show_translation_returns_committed_text(project: Path):
     """Read-back surface for review (friction-log #7): show-translation returns the
     committed translated_text/source_text from chunks/*.json, not the consumed drafts."""
