@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.evaluators import aggregate_results
-from src.judges.base import JudgeTarget
-from src.judges.llm_io import JudgeParseError
+from src.judges.base import Judge, JudgeTarget
+from src.judges.llm_io import JudgeParseError, parse_judge_json
 from src.judges.registry import get_judge
 from src.judges.runner import build_run_header, estimate_suite_cost
 from src.judges.scope import _ID_RE, build_targets
@@ -40,15 +40,123 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WORKER_MODEL = "sonnet"
 _DEFAULT_BATCH_SIZE = 5
 
+# --- Dialogue-density gating for target grouping ----------------------------
+# A target's dialogue-marker count decides whether it is judged solo or packed
+# with others into one worker prompt. The raya (— U+2014) marks every spoken
+# turn and inciso; the guillemets (« U+00AB, » U+00BB) mark nested speech and
+# internal thoughts. Both drive the per-target reasoning a dialogue judge does,
+# and the token log found raya count correlates ~0.76 with a worker's tokens —
+# so this count is the signal for what is cheap enough to batch.
+_DIALOGUE_MARKERS = ("—", "«", "»")  # — « »
+
+# A target above this many markers is judged SOLO (never grouped) so its
+# reasoning-heavy work is never compressed. (The token log's two priciest chunks
+# had 74 and 89 rayas.) Guillemets now add to the count, so re-validate this
+# threshold against a book's marker distribution before leaning on it.
+_DENSITY_SOLO_THRESHOLD = 60
+
+# A group's combined marker count stays at/under this, bounding the worker's
+# output tokens so a dense batch can't truncate mid-verdict and lose members.
+_GROUP_MARKER_CAP = 120
+
+
+def _dialogue_marker_count(text: str) -> int:
+    """Count dialogue-density markers — the raya (—) plus guillemets (« »)."""
+    return sum(text.count(marker) for marker in _DIALOGUE_MARKERS)
+
+
+def _group_targets(
+    targets: list[JudgeTarget], judge: Judge, targets_per_worker: int
+) -> list[list[JudgeTarget]]:
+    """Partition targets into per-worker groups by dialogue-marker density.
+
+    ``targets_per_worker <= 1`` (or a judge with no ``batch_template``) yields one
+    target per group — today's behavior exactly. Otherwise dense targets are
+    emitted solo and the rest are packed up to ``targets_per_worker`` members and
+    under :data:`_GROUP_MARKER_CAP` combined markers, preserving input order.
+    """
+    if targets_per_worker <= 1 or not getattr(judge, "batch_template", None):
+        return [[target] for target in targets]
+
+    groups: list[list[JudgeTarget]] = []
+    pack: list[JudgeTarget] = []
+    pack_markers = 0
+
+    def _flush() -> None:
+        nonlocal pack, pack_markers
+        if pack:
+            groups.append(pack)
+            pack = []
+            pack_markers = 0
+
+    for target in targets:
+        markers = _dialogue_marker_count(target.translated_text or "")
+        if markers > _DENSITY_SOLO_THRESHOLD:
+            _flush()  # dense chunk breaks the current pack and goes solo
+            groups.append([target])
+            continue
+        if pack and (
+            len(pack) >= targets_per_worker
+            or pack_markers + markers > _GROUP_MARKER_CAP
+        ):
+            _flush()
+        pack.append(target)
+        pack_markers += markers
+    _flush()
+    return groups
+
+
+def _is_batch_entry(entry: dict[str, Any]) -> bool:
+    """True if a manifest entry carries several targets in one worker prompt."""
+    return isinstance(entry.get("members"), list)
+
+
+def _entry_members(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize an entry to a list of members so solo and grouped entries share
+    one downstream shape.
+
+    A grouped entry carries a ``members`` list; a solo entry carries a top-level
+    ``target_id`` (the pre-grouping manifest shape, still emitted for size-1
+    groups and by any older manifest).
+    """
+    if _is_batch_entry(entry):
+        return [
+            m for m in entry["members"] if isinstance(m, dict) and m.get("target_id")
+        ]
+    if entry.get("target_id"):
+        return [
+            {"target_id": entry["target_id"], "target_type": entry.get("target_type", "chunk")}
+        ]
+    return []
+
+
+def _parse_batch_verdicts(raw: str) -> dict[str, Any]:
+    """Extract the ``verdicts`` object from a batched worker draft.
+
+    Raises :class:`JudgeParseError` if the draft is not JSON or lacks a
+    ``verdicts`` object — the same error type the solo path raises, so a whole
+    unparseable batch fails all its members for re-spawn.
+    """
+    data = parse_judge_json(raw, ("verdicts",))
+    verdicts = data.get("verdicts")
+    if not isinstance(verdicts, dict):
+        raise JudgeParseError(
+            f"batch 'verdicts' is not an object: {type(verdicts).__name__}"
+        )
+    return verdicts
+
 _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
-    "manifest": "list of work entries: {target_id, target_type, judge, prompt_path, draft_path, source_word_count}",
+    "manifest": "list of work entries (one worker each). Solo: {target_id, target_type, judge, "
+    "prompt_path, draft_path, source_word_count}. Grouped (targets-per-worker > 1): "
+    "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count}]}",
     "manifest_path": "path to the written manifest.json (commit reads this)",
     "scopes": "the list of --scope values resolved into this one manifest",
     "judges": "judge names rendered",
     "worker_model": "model tier to pin each spawned judge-worker to (default sonnet)",
     "batch_size": "recommended workers to spawn per wave",
-    "usage_summary": "{pairs, targets, source_words, worker_model, batch_size, estimated_api_cost}",
+    "usage_summary": "{pairs, targets, workers, targets_per_worker, source_words, worker_model, "
+    "batch_size, estimated_api_cost}",
     "instructions": "what to do with the manifest (spawn workers, then commit)",
 }
 
@@ -79,18 +187,26 @@ def prepare(
     context: Optional[dict[str, Any]] = None,
     worker_model: Optional[str] = None,
     batch_size: Optional[int] = None,
+    targets_per_worker: int = 1,
     keep_drafts: bool = False,
 ) -> dict[str, Any]:
-    """Render one prompt file per ``(target, judge)`` plus a manifest (no spend).
+    """Render judge prompts plus a manifest for spawned workers (no spend).
 
     ``scopes`` may be a single scope string or a list of them; all are resolved
     into **one** manifest so a multi-chapter request is a single ``prepare`` ->
-    spawn -> ``commit`` (no manifest clobbering). For every target across all
-    scopes and every judge in ``judge_names``, call ``judge.build_prompt`` — the
-    *same* prompt the API path would send — and write it to
-    ``.harness/judges/<target_id>.<judge>.prompt.txt``; assign a ``draft_path`` the
-    worker writes its JSON verdict to. ``(target_id, judge)`` pairs are deduped, so
-    overlapping scopes (e.g. ``chapter:X`` + ``chunk:X_chunk_000``) render once.
+    spawn -> ``commit`` (no manifest clobbering). ``(target_id, judge)`` pairs are
+    deduped, so overlapping scopes (e.g. ``chapter:X`` + ``chunk:X_chunk_000``)
+    render once.
+
+    ``targets_per_worker`` (default 1) enables **density-gated target grouping**:
+    with the default, each ``(target, judge)`` renders its own solo prompt via
+    ``judge.build_prompt`` — byte-identical to the API path — written to
+    ``.harness/judges/<target_id>.<judge>.prompt.txt``. With a value > 1, several
+    *low-dialogue-density* targets for a judge share one combined prompt (the rule
+    block once + one ``<item>`` per target) written to ``<batch_id>.<judge>.prompt.txt``,
+    amortizing per-worker overhead. Dialogue-dense targets (see
+    :data:`_DENSITY_SOLO_THRESHOLD`) always stay solo. Each entry gets a
+    ``draft_path`` the worker writes its JSON verdict to.
 
     By default stale drafts from a prior run are cleared so ``commit`` never reads
     an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
@@ -105,6 +221,7 @@ def prepare(
     context = dict(context or {})
     worker_model = worker_model or _DEFAULT_WORKER_MODEL
     batch_size = int(batch_size or _DEFAULT_BATCH_SIZE)
+    targets_per_worker = max(1, int(targets_per_worker or 1))
     scope_list = [scopes] if isinstance(scopes, str) else list(scopes)
 
     # Resolve every scope into one ordered target list, deduped by target_id so an
@@ -131,29 +248,64 @@ def prepare(
 
     judge_instances = {name: get_judge(name) for name in judge_names}
 
+    def _write_prompt(prompt: str, prompt_path: Path, draft_path: Path) -> None:
+        prompt_path.write_text(prompt, encoding="utf-8")
+        if not keep_drafts:
+            draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
+
     entries: list[dict[str, Any]] = []
     total_words = 0
-    for target in targets:
-        words = len((target.source_text or "").split())
-        for judge_name in judge_names:
-            judge = judge_instances[judge_name]
-            prompt = judge.build_prompt(target, context)
-            prompt_path = jdir / f"{target.id}.{judge_name}.prompt.txt"
-            draft_path = jdir / f"{target.id}.{judge_name}.draft.json"
-            prompt_path.write_text(prompt, encoding="utf-8")
-            if not keep_drafts:
-                draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
-            total_words += words
-            entries.append(
-                {
-                    "target_id": target.id,
-                    "target_type": target.target_type,
-                    "judge": judge_name,
-                    "prompt_path": str(prompt_path),
-                    "draft_path": str(draft_path),
-                    "source_word_count": words,
-                }
-            )
+    total_pairs = 0  # (target, judge) pairs — the batch-invariant unit of work
+    batch_seq = 0
+    # Grouping is per judge: a batched prompt combines targets for ONE judge,
+    # since the shared rule block + item schema are judge-specific.
+    for judge_name in judge_names:
+        judge = judge_instances[judge_name]
+        for group in _group_targets(targets, judge, targets_per_worker):
+            total_pairs += len(group)
+            if len(group) == 1:
+                target = group[0]
+                words = len((target.source_text or "").split())
+                total_words += words
+                prompt_path = jdir / f"{target.id}.{judge_name}.prompt.txt"
+                draft_path = jdir / f"{target.id}.{judge_name}.draft.json"
+                _write_prompt(judge.build_prompt(target, context), prompt_path, draft_path)
+                entries.append(
+                    {
+                        "target_id": target.id,
+                        "target_type": target.target_type,
+                        "judge": judge_name,
+                        "prompt_path": str(prompt_path),
+                        "draft_path": str(draft_path),
+                        "source_word_count": words,
+                    }
+                )
+            else:
+                batch_id = f"batch_{batch_seq:03d}"
+                batch_seq += 1
+                prompt_path = jdir / f"{batch_id}.{judge_name}.prompt.txt"
+                draft_path = jdir / f"{batch_id}.{judge_name}.draft.json"
+                _write_prompt(judge.build_batch_prompt(group, context), prompt_path, draft_path)
+                members = []
+                for target in group:
+                    words = len((target.source_text or "").split())
+                    total_words += words
+                    members.append(
+                        {
+                            "target_id": target.id,
+                            "target_type": target.target_type,
+                            "source_word_count": words,
+                        }
+                    )
+                entries.append(
+                    {
+                        "batch_id": batch_id,
+                        "judge": judge_name,
+                        "prompt_path": str(prompt_path),
+                        "draft_path": str(draft_path),
+                        "members": members,
+                    }
+                )
 
     estimated_api_cost = estimate_suite_cost(judge_names, targets, context)
 
@@ -162,6 +314,7 @@ def prepare(
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
+        "targets_per_worker": targets_per_worker,
         "model": context.get("judge_model"),
         "provider": context.get("judge_provider"),
         "entries": entries,
@@ -180,19 +333,21 @@ def prepare(
         "worker_model": worker_model,
         "batch_size": batch_size,
         "usage_summary": {
-            "pairs": len(entries),
+            "pairs": total_pairs,
             "targets": len(targets),
+            "workers": len(entries),
+            "targets_per_worker": targets_per_worker,
             "source_words": total_words,
             "worker_model": worker_model,
             "batch_size": batch_size,
             "estimated_api_cost": estimated_api_cost,
         },
         "instructions": (
-            "For each manifest entry spawn one `judge-worker` subagent pinned to "
-            "worker_model (Task tool, subagent_type=judge-worker, model=worker_model) "
-            "that reads prompt_path and writes ONLY the JSON verdict to draft_path, in "
-            "bounded batches of batch_size. Then run `commit`. Nothing here spends or "
-            "calls an API."
+            "For each manifest entry (one target, or a small group of low-density "
+            "targets) spawn one `judge-worker` subagent pinned to worker_model (Task "
+            "tool, subagent_type=judge-worker, model=worker_model) that reads prompt_path "
+            "and writes ONLY the JSON verdict to draft_path, in bounded batches of "
+            "batch_size. Then run `commit`. Nothing here spends or calls an API."
             if entries
             else "Nothing to judge — scope resolved to no targets."
         ),
@@ -210,6 +365,14 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     API ``--persist`` path). A draft that does not parse is ``failed``; an absent
     draft is ``missing``. Re-spawn ``failed`` + ``missing`` and re-run commit
     (idempotent: re-parsing a draft just re-persists the same result).
+
+    A **grouped** entry (from ``prepare(targets_per_worker > 1)``) holds one draft
+    with a ``verdicts`` object keyed by target id; it is split per member and each
+    verdict fed through the same ``parse_response`` seam, attributed to its own
+    target. A member id absent from ``verdicts`` is ``missing`` (never silently
+    dropped); a malformed per-item verdict is ``failed``; and an unparseable batch
+    draft fails every member — so re-spawn/recovery is per target, and everything
+    is accounted for exactly as in the solo path.
     """
     project_dir = Path(project_dir)
     jdir = _judges_dir(project_dir)
@@ -260,52 +423,34 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     persist_errors: Optional[list[str]] = [] if persist else None
     judge_cache: dict[str, Any] = {}
 
-    for entry in entries:
-        try:
-            target_id = entry["target_id"]
-            judge_name = entry["judge"]
-            draft_path = Path(entry["draft_path"])
-        except (KeyError, TypeError) as exc:
-            failed.append({"target_id": "?", "judge": "?", "problem": f"malformed manifest entry: {exc}"})
-            continue
+    def _commit_member(
+        target_id: str, target_type: str, judge_name: str, verdict_raw: str
+    ) -> None:
+        """Parse one member's verdict, stamp it, record it, and optionally persist.
 
+        Shared by the solo path (whole draft = one verdict) and the batch path
+        (one verdict split from the ``verdicts`` object) so both go through the
+        same ``parse_response`` seam the API path uses.
+        """
         target = JudgeTarget(
             id=target_id,
-            target_type=entry.get("target_type", "chunk"),
+            target_type=target_type,
             source_text="",
             translated_text="",
             context={},
         )
-
-        if not draft_path.resolve().is_relative_to(_judges_dir(project_dir).resolve()):
-            failed.append({"target_id": target_id, "judge": judge_name, "problem": f"draft_path escapes judges dir: {draft_path}"})
-            continue
-
-        if not draft_path.exists():
-            missing.append({"target_id": target.id, "judge": judge_name})
-            continue
-
         try:
-            raw = draft_path.read_text(encoding="utf-8")
             judge = judge_cache.setdefault(judge_name, get_judge(judge_name))
-            result = judge.parse_response(target, raw, context)
+            result = judge.parse_response(target, verdict_raw, context)
         except JudgeParseError as exc:
+            failed.append({"target_id": target_id, "judge": judge_name, "problem": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001 - one bad verdict must not sink the batch
+            logger.error("judge-commit: %s/%s parse crashed: %s", target_id, judge_name, exc)
             failed.append(
-                {"target_id": target.id, "judge": judge_name, "problem": str(exc)}
+                {"target_id": target_id, "judge": judge_name, "problem": f"{type(exc).__name__}: {exc}"}
             )
-            continue
-        except Exception as exc:  # noqa: BLE001 - one bad draft must not sink the batch
-            logger.error(
-                "judge-commit: %s/%s parse crashed: %s", target.id, judge_name, exc
-            )
-            failed.append(
-                {
-                    "target_id": target.id,
-                    "judge": judge_name,
-                    "problem": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            continue
+            return
 
         # Stamp how this result was produced so a persisted judge entry is
         # self-describing (the API path records model/provider; here we record
@@ -314,29 +459,87 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
         result.metadata["worker_model"] = worker_model
 
         results.append(result)
-        committed.append({"target_id": target.id, "judge": judge_name})
+        committed.append({"target_id": target_id, "judge": judge_name})
 
-        if persist and target.target_type == "chunk":
+        if persist and target_type == "chunk":
             from web_ui.evaluations import merge_judge_result
 
             try:
                 path = merge_judge_result(
-                    project_dir, target.id, judge_name, result.model_dump(mode="json")
+                    project_dir, target_id, judge_name, result.model_dump(mode="json")
                 )
                 persisted.append(str(path))
             except Exception as exc:  # noqa: BLE001 - persist errors must not corrupt output
                 logger.error(
-                    "judge-commit: failed to persist %s/%s: %s",
-                    target.id,
-                    judge_name,
-                    exc,
+                    "judge-commit: failed to persist %s/%s: %s", target_id, judge_name, exc
                 )
-                persist_errors.append(f"{target.id}/{judge_name}: {exc}")
+                persist_errors.append(f"{target_id}/{judge_name}: {exc}")
 
-    judge_names = doc.get("judges") or list(dict.fromkeys(e["judge"] for e in entries if "judge" in e))
+    for entry in entries:
+        if not isinstance(entry, dict):
+            failed.append({"target_id": "?", "judge": "?", "problem": f"manifest entry not an object: {type(entry).__name__}"})
+            continue
+
+        judge_name = entry.get("judge")
+        draft_path_raw = entry.get("draft_path")
+        members = _entry_members(entry)
+        if not judge_name or not draft_path_raw or not members:
+            failed.append(
+                {"target_id": "?", "judge": judge_name or "?", "problem": "malformed manifest entry: missing judge, draft_path, or target(s)"}
+            )
+            continue
+        draft_path = Path(draft_path_raw)
+
+        if not draft_path.resolve().is_relative_to(_judges_dir(project_dir).resolve()):
+            for member in members:
+                failed.append({"target_id": member["target_id"], "judge": judge_name, "problem": f"draft_path escapes judges dir: {draft_path}"})
+            continue
+
+        if not draft_path.exists():
+            for member in members:
+                missing.append({"target_id": member["target_id"], "judge": judge_name})
+            continue
+
+        try:
+            raw = draft_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            for member in members:
+                failed.append({"target_id": member["target_id"], "judge": judge_name, "problem": f"unreadable draft {draft_path}: {exc}"})
+            continue
+
+        if _is_batch_entry(entry):
+            try:
+                verdicts = _parse_batch_verdicts(raw)
+            except JudgeParseError as exc:
+                for member in members:
+                    failed.append({"target_id": member["target_id"], "judge": judge_name, "problem": f"batch draft: {exc}"})
+                continue
+            for member in members:
+                verdict = verdicts.get(member["target_id"])
+                if verdict is None:
+                    missing.append({"target_id": member["target_id"], "judge": judge_name})
+                    continue
+                _commit_member(
+                    member["target_id"],
+                    member.get("target_type", "chunk"),
+                    judge_name,
+                    json.dumps(verdict, ensure_ascii=False),
+                )
+        else:
+            member = members[0]
+            _commit_member(member["target_id"], member.get("target_type", "chunk"), judge_name, raw)
+
+    judge_names = doc.get("judges") or list(
+        dict.fromkeys(e.get("judge") for e in entries if isinstance(e, dict) and e.get("judge"))
+    )
+    all_target_ids: set[str] = set()
+    for e in entries:
+        if isinstance(e, dict):
+            for member in _entry_members(e):
+                all_target_ids.add(member["target_id"])
     run_header = build_run_header(
         judge_names,
-        target_count=len({e["target_id"] for e in entries if "target_id" in e}),
+        target_count=len(all_target_ids),
         model=context["judge_model"],
         provider=context["judge_provider"],
         backend="subagent",
