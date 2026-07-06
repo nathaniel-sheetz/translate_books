@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.3.0] - 2026-07-06
+
+### Changed
+- **Coded evaluators auto-persist on every commit path** — `translate_commit` (subagent/harness spine) now runs the full coded suite (`length, paragraph, dictionary, glossary, completeness, blacklist, grammar`) and persists per-chunk `evaluations/*.json` for each newly-committed chunk, so Review-tab badges update without a separate evaluate step. Loading of glossary/blacklist is hoisted out of the commit loop. Persistence is best-effort — an evaluation error can't fail the commit — and skipped (already-translated) chunks are not re-evaluated. `translate_commit` now reports an `evaluated` count.
+- **Stage 5 (`evaluate`) uses the shared persisted path** — `stage_evaluate` in the legacy CLI now delegates to `web_ui.evaluations.evaluate_and_persist_chunk`, replacing its narrower ad-hoc `["length", "paragraph", "completeness"]` run so CLI and dashboard evaluations stay in sync.
+
 ## [0.27.2.0] - 2026-07-06
 
 ### Added

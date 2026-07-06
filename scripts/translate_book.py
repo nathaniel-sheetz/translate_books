@@ -36,7 +36,7 @@ from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
 from src.harness.state import emit_harness_result
 from src.api_translator import DEFAULT_MODEL
-from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
+from src.models import Chunk, ChunkStatus, ChunkingConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
 
