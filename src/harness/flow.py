@@ -793,12 +793,17 @@ def difficulty(project: str) -> dict:
         "book_difficulty": round(b.difficulty, 3),
         "length_score": round(b.length_score, 3),
         "rarity_score": round(b.rarity_score, 3),
+        "dialect_score": round(b.dialect_score, 3),
+        "dialogue_score": round(b.dialogue_score, 3),
+        "verse_score": round(b.verse_score, 3),
         "suggested_target_size": b.suggested_target_size,
         "wordfreq_available": WORDFREQ_AVAILABLE,
         "chapters": [
             {
                 "chapter_id": cd.chapter_id,
                 "difficulty": round(cd.metrics.difficulty, 3),
+                "dialogue_score": round(cd.metrics.dialogue_score, 3),
+                "verse_score": round(cd.metrics.verse_score, 3),
                 "suggested_target_size": cd.metrics.suggested_target_size,
             }
             for cd in manifest.chapters
@@ -1833,9 +1838,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "book_difficulty": "overall difficulty score (0-1, rounded)",
         "length_score": "length component of difficulty (rounded)",
         "rarity_score": "rare-word component of difficulty (rounded)",
+        "dialect_score": "dialect component of difficulty (rounded)",
+        "dialogue_score": "nested-dialogue component of difficulty (rounded)",
+        "verse_score": "verse/poetry component of difficulty (rounded)",
         "suggested_target_size": "recommended whole-book chunk size in words",
         "wordfreq_available": "whether the wordfreq rarity model was available",
-        "chapters": "list of {chapter_id, difficulty, suggested_target_size}",
+        "chapters": "list of {chapter_id, difficulty, dialogue_score, verse_score, suggested_target_size}",
         "next": "the next command to run",
     },
     "translate-prepare": {

@@ -49,18 +49,23 @@ def test_calibration_returns_all_expected_keys():
         "length_easy", "length_hard", "rare_zipf",
         "rarity_easy", "rarity_hard",
         "dialect_easy", "dialect_hard",
+        "dialogue_easy", "dialogue_hard", "dq_coef", "nested_coef",
+        "verse_easy", "verse_hard",
         "weight_length", "weight_rarity", "weight_dialect",
+        "weight_dialogue", "weight_verse", "aggregation_p",
         "target_easy", "target_hard",
         "wordfreq_available",
     ):
         assert key in cal, f"missing key: {key}"
 
 
-def test_calibration_weights_are_positive():
+def test_calibration_weights_sum_to_one():
     cal = calibration()
-    assert 0 < cal["weight_length"] <= 1
-    assert 0 < cal["weight_rarity"] <= 1
-    assert 0 < cal["weight_dialect"]
+    total = (
+        cal["weight_length"] + cal["weight_rarity"] + cal["weight_dialect"]
+        + cal["weight_dialogue"] + cal["weight_verse"]
+    )
+    assert total == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
