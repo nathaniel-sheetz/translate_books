@@ -27,6 +27,23 @@ load_dotenv()
 # Provider is now a plain string (validated against llm_config.json)
 Provider = str
 
+
+def _extract_text_from_content(content) -> str:
+    """Extract the assistant's text from an Anthropic message's content blocks.
+
+    A response may contain non-text blocks (e.g. ``ThinkingBlock`` /
+    ``RedactedThinkingBlock`` when extended thinking is enabled) before the
+    ``TextBlock``.  Naively reading ``content[0].text`` raises
+    ``'ThinkingBlock' object has no attribute 'text'``.  Concatenate the text
+    from every text block instead, ignoring the rest.
+    """
+    parts = [
+        block.text
+        for block in content
+        if getattr(block, "type", None) == "text" and hasattr(block, "text")
+    ]
+    return "".join(parts)
+
 # ---------------------------------------------------------------------------
 # LLM config loading
 # ---------------------------------------------------------------------------
@@ -146,6 +163,58 @@ _NO_SAMPLING_PARAM_MODELS = (
 def _rejects_sampling_params(model: str) -> bool:
     """True if *model* is an Anthropic model that 400s on temperature/top_p/top_k."""
     return model.startswith(_NO_SAMPLING_PARAM_MODELS)
+
+
+def _thinking_enabled() -> bool:
+    """Whether extended (adaptive) thinking should be requested for translations.
+
+    Off by default: translation doesn't need a visible reasoning trace, and
+    thinking adds output-token cost plus ThinkingBlocks to unwrap. Opt in by
+    setting ``TRANSLATE_THINKING`` to a truthy value (e.g. ``1``/``adaptive``).
+    """
+    return os.getenv("TRANSLATE_THINKING", "").strip().lower() in {
+        "1", "true", "yes", "on", "adaptive",
+    }
+
+
+def _thinking_param(model: str, enabled: bool) -> dict | None:
+    """Return the ``thinking`` request param for *model*, or None to omit it.
+
+    New-generation Anthropic models (Sonnet 5, Opus 4.7/4.8, Fable 5) default to
+    *adaptive* thinking whenever ``thinking`` is omitted — so to keep thinking off
+    we must send ``{"type": "disabled"}`` explicitly. Older models default thinking
+    off already and may reject the param, so we leave it unset for them.
+    """
+    if not _rejects_sampling_params(model):
+        return None  # older model: thinking already off by default; don't send it
+    if enabled:
+        return {"type": "adaptive"}
+    if model.startswith("claude-fable-5"):
+        # Fable 5 is always-on: {"type": "disabled"} returns 400. It can't be
+        # turned off, so omit the param and accept adaptive thinking.
+        return None
+    return {"type": "disabled"}
+
+
+def model_supports_thinking(model: str) -> bool:
+    """True if *model* exposes a user-toggleable thinking mode.
+
+    That's the new-generation set that defaults thinking on (Sonnet 5, Opus
+    4.7/4.8) — where a checkbox can switch between adaptive and disabled. Fable 5
+    is excluded (always-on; can't be disabled) and older models are excluded
+    (always-off; the param isn't accepted).
+    """
+    return _rejects_sampling_params(model) and not model.startswith("claude-fable-5")
+
+
+def _resolve_thinking(model: str, enable_thinking: bool | None) -> dict | None:
+    """Resolve the ``thinking`` request param from an optional caller override.
+
+    ``enable_thinking`` (e.g. a UI checkbox) wins when set; otherwise fall back
+    to the ``TRANSLATE_THINKING`` env-var default (off).
+    """
+    enabled = _thinking_enabled() if enable_thinking is None else enable_thinking
+    return _thinking_param(model, enabled)
 
 
 class APIError(Exception):
@@ -357,6 +426,7 @@ def call_anthropic_api(
     max_tokens: int = 4096,
     temperature: float = 0.3,
     api_key: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> str:
     """Call the Anthropic Claude API and return the text response."""
     try:
@@ -380,13 +450,17 @@ def call_anthropic_api(
     }
     if not _rejects_sampling_params(model):
         create_kwargs["temperature"] = temperature
+    thinking = _resolve_thinking(model, enable_thinking)
+    if thinking is not None:
+        create_kwargs["thinking"] = thinking
 
     try:
         response = client.messages.create(**create_kwargs)
 
-        # Extract text from response
-        if response.content and len(response.content) > 0:
-            return response.content[0].text
+        # Extract text from response (skipping any thinking blocks)
+        text = _extract_text_from_content(response.content)
+        if text:
+            return text
         else:
             raise APIError("Empty response from Claude API")
 
@@ -456,6 +530,7 @@ def _dispatch_llm_call(
     call_type: str = "unknown",
     chunk_id: str | None = None,
     project_slug: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> str:
     """Low-level dispatcher — routes a single LLM call to the right SDK."""
     pconfig = get_provider_config(provider)
@@ -464,7 +539,10 @@ def _dispatch_llm_call(
 
     t0 = time.time()
     if ptype == "anthropic":
-        response = call_anthropic_api(prompt, model, max_tokens, temperature, api_key=api_key)
+        response = call_anthropic_api(
+            prompt, model, max_tokens, temperature,
+            api_key=api_key, enable_thinking=enable_thinking,
+        )
     elif ptype == "openai-compatible":
         response = call_openai_api(
             prompt, model, max_tokens, temperature,
@@ -500,6 +578,7 @@ def call_llm(
     call_type: str = "unknown",
     chunk_id: str | None = None,
     project_slug: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> str:
     """Call an LLM and return the text response.
 
@@ -515,6 +594,7 @@ def call_llm(
             return _dispatch_llm_call(
                 prompt, provider, model, max_tokens, temperature,
                 call_type=call_type, chunk_id=chunk_id, project_slug=project_slug,
+                enable_thinking=enable_thinking,
             )
         except RateLimitError as e:
             last_error = e
@@ -543,6 +623,7 @@ def translate_chunk_realtime(
     max_retries: int = 3,
     previous_chapter_context: str = "",
     project_slug: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> Chunk:
     """
     Translate a single chunk using real-time API.
@@ -583,6 +664,7 @@ def translate_chunk_realtime(
         call_type="translation",
         chunk_id=chunk.id,
         project_slug=project_slug,
+        enable_thinking=enable_thinking,
     )
 
     return apply_translation(chunk, translation, log_path=last_log_path())
@@ -605,6 +687,7 @@ def submit_batch(
     target_language: str = "Spanish",
     context_map: Optional[dict[str, str]] = None,
     project_slug: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> dict:
     """
     Submit a batch translation job to the API.
@@ -635,6 +718,7 @@ def submit_batch(
             chunks, model, output_dir, glossary, style_guide,
             project_name, source_language, target_language, context_map,
             project_slug=project_slug,
+            enable_thinking=enable_thinking,
         )
     elif provider == "openai":
         return _submit_openai_batch(
@@ -658,6 +742,7 @@ def _submit_anthropic_batch(
     context_map: dict[str, str] | None = None,
     *,
     project_slug: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Submit batch to Anthropic Message Batches API."""
     try:
@@ -695,6 +780,9 @@ def _submit_anthropic_batch(
         }
         if not _rejects_sampling_params(model):
             params["temperature"] = 0.3
+        thinking = _resolve_thinking(model, enable_thinking)
+        if thinking is not None:
+            params["thinking"] = thinking
         requests.append({
             "custom_id": chunk.id,
             "params": params,
@@ -1110,8 +1198,8 @@ def _retrieve_anthropic_results(
             # Check if successful
             if result.result.type == "succeeded":
                 message = result.result.message
-                if message.content and len(message.content) > 0:
-                    translation = message.content[0].text
+                translation = _extract_text_from_content(message.content)
+                if translation:
                     chunk.translated_text = translation.strip()
                     chunk.status = ChunkStatus.TRANSLATED
                     chunk.translated_at = datetime.now()

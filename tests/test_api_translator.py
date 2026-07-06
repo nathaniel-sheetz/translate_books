@@ -5,6 +5,7 @@ Uses mocked API responses to avoid calling real APIs.
 """
 
 import json
+import os
 import pytest
 from datetime import datetime
 from pathlib import Path
@@ -185,7 +186,7 @@ def test_call_anthropic_api_success():
     with patch('anthropic.Anthropic') as mock_anthropic_class:
         mock_client = Mock()
         mock_response = Mock()
-        mock_response.content = [Mock(text="Es una verdad universalmente reconocida...")]
+        mock_response.content = [Mock(type="text", text="Es una verdad universalmente reconocida...")]
         mock_client.messages.create.return_value = mock_response
         mock_anthropic_class.return_value = mock_client
 
@@ -252,7 +253,7 @@ def test_call_anthropic_api_omits_temperature_for_sonnet_5():
     with patch('anthropic.Anthropic') as mock_anthropic_class:
         mock_client = Mock()
         mock_response = Mock()
-        mock_response.content = [Mock(text="Translated text")]
+        mock_response.content = [Mock(type="text", text="Translated text")]
         mock_client.messages.create.return_value = mock_response
         mock_anthropic_class.return_value = mock_client
 
@@ -262,6 +263,139 @@ def test_call_anthropic_api_omits_temperature_for_sonnet_5():
         _, kwargs = mock_client.messages.create.call_args
         assert "temperature" not in kwargs
         assert kwargs["model"] == "claude-sonnet-5"
+
+
+def test_call_anthropic_api_disables_thinking_by_default_for_sonnet_5():
+    """Sonnet 5 defaults thinking ON when omitted; we must send disabled."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            call_anthropic_api("Translate this text", model="claude-sonnet-5")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["thinking"] == {"type": "disabled"}
+
+
+def test_call_anthropic_api_enables_adaptive_thinking_when_opted_in():
+    """TRANSLATE_THINKING=1 opts back into adaptive thinking on Sonnet 5."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ',
+                        {'ANTHROPIC_API_KEY': 'test-key', 'TRANSLATE_THINKING': '1'}):
+            call_anthropic_api("Translate this text", model="claude-sonnet-5")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["thinking"] == {"type": "adaptive"}
+
+
+def test_model_supports_thinking():
+    """Only new-gen togglable models report thinking support."""
+    from src.api_translator import model_supports_thinking
+    assert model_supports_thinking("claude-sonnet-5") is True
+    assert model_supports_thinking("claude-opus-4-8") is True
+    assert model_supports_thinking("claude-opus-4-7") is True
+    assert model_supports_thinking("claude-fable-5") is False       # always-on
+    assert model_supports_thinking("claude-sonnet-4-6") is False    # always-off
+    assert model_supports_thinking("claude-3-5-sonnet-20241022") is False
+
+
+def test_call_anthropic_api_enable_thinking_flag_overrides_env():
+    """An explicit enable_thinking=True wins even when the env var is unset/off."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            call_anthropic_api("Translate", model="claude-sonnet-5", enable_thinking=True)
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["thinking"] == {"type": "adaptive"}
+
+
+def test_call_anthropic_api_enable_thinking_false_overrides_env_on():
+    """An explicit enable_thinking=False disables thinking even if the env var is on."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ',
+                        {'ANTHROPIC_API_KEY': 'test-key', 'TRANSLATE_THINKING': '1'}):
+            call_anthropic_api("Translate", model="claude-sonnet-5", enable_thinking=False)
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["thinking"] == {"type": "disabled"}
+
+
+def test_submit_anthropic_batch_enable_thinking_flag(sample_chunk, tmp_path):
+    """submit_batch threads enable_thinking into the batch request params."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_abc123"
+        mock_batch.processing_status = "in_progress"
+        mock_client.messages.batches.create.return_value = mock_batch
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            submit_batch(
+                chunks=[sample_chunk],
+                provider='anthropic',
+                model='claude-sonnet-5',
+                output_dir=tmp_path / "translated",
+                enable_thinking=True,
+            )
+
+        _, kwargs = mock_client.messages.batches.create.call_args
+        params = kwargs["requests"][0]["params"]
+        assert params["thinking"] == {"type": "adaptive"}
+
+
+def test_call_anthropic_api_omits_thinking_for_older_model():
+    """Older models default thinking off and may reject the param — omit it."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="Translated text")]
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            call_anthropic_api("Translate this text", model="claude-3-5-sonnet-20241022")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert "thinking" not in kwargs
 
 
 # ============================================================================
@@ -516,7 +650,8 @@ def test_submit_anthropic_batch_omits_temperature_for_sonnet_5(sample_chunk, tmp
 
         output_dir = tmp_path / "translated"
 
-        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
             submit_batch(
                 chunks=[sample_chunk],
                 provider='anthropic',
@@ -528,6 +663,8 @@ def test_submit_anthropic_batch_omits_temperature_for_sonnet_5(sample_chunk, tmp
         request_params = kwargs["requests"][0]["params"]
         assert "temperature" not in request_params
         assert request_params["model"] == "claude-sonnet-5"
+        # Sonnet 5 defaults thinking ON when omitted — batch must disable it.
+        assert request_params["thinking"] == {"type": "disabled"}
 
 
 def test_submit_openai_batch(sample_chunk, tmp_path):
@@ -629,6 +766,7 @@ def test_retrieve_anthropic_batch_results(sample_chunk, tmp_path):
     mock_result.result.type = "succeeded"
     mock_message = Mock()
     mock_content_block = Mock()
+    mock_content_block.type = "text"
     mock_content_block.text = "Es una verdad universalmente reconocida..."
     mock_message.content = [mock_content_block]
     mock_result.result.message = mock_message
@@ -659,6 +797,52 @@ def test_retrieve_anthropic_batch_results(sample_chunk, tmp_path):
     assert chunks[0].translated_text == "Es una verdad universalmente reconocida..."
     assert chunks[0].status == ChunkStatus.TRANSLATED
     assert chunks[0].translated_at is not None
+
+
+def test_retrieve_anthropic_batch_results_with_thinking_block(sample_chunk, tmp_path):
+    """Sonnet 5 with extended thinking returns a ThinkingBlock before the
+    TextBlock. Retrieval must skip it, not crash on
+    'ThinkingBlock' object has no attribute 'text'."""
+    pytest.importorskip("anthropic")
+
+    # First block is a thinking block with no `.text`; second is the answer.
+    thinking_block = Mock(spec=["type", "thinking"])
+    thinking_block.type = "thinking"
+    thinking_block.thinking = "Let me consider the register and dialogue..."
+    text_block = Mock()
+    text_block.type = "text"
+    text_block.text = "Es una verdad universalmente reconocida..."
+
+    mock_message = Mock()
+    mock_message.content = [thinking_block, text_block]
+    mock_result = Mock()
+    mock_result.custom_id = sample_chunk.id
+    mock_result.result.type = "succeeded"
+    mock_result.result.message = mock_message
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_batch = Mock()
+        mock_batch.id = "batch_thinking"
+        mock_batch.processing_status = "ended"
+        mock_batch.request_counts = Mock(processing=0, succeeded=1, errored=0)
+        mock_client.messages.batches.retrieve.return_value = mock_batch
+        mock_client.messages.batches.results.return_value = [mock_result]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            with patch('src.api_translator.log_prompt'):
+                chunks = retrieve_batch_results(
+                    job_id="batch_thinking",
+                    provider="anthropic",
+                    original_chunks=[sample_chunk],
+                    output_dir=tmp_path,
+                    model="claude-sonnet-5",
+                )
+
+    assert len(chunks) == 1
+    assert chunks[0].translated_text == "Es una verdad universalmente reconocida..."
+    assert chunks[0].status == ChunkStatus.TRANSLATED
 
 
 def test_retrieve_openai_batch_results(sample_chunk, tmp_path):
@@ -761,6 +945,7 @@ def test_retrieve_mutates_submission_log(sample_chunk, tmp_path):
     mock_result.custom_id = sample_chunk.id
     mock_result.result.type = "succeeded"
     mock_content_block = Mock()
+    mock_content_block.type = "text"
     mock_content_block.text = "Translated text here"
     mock_result.result.message = Mock(content=[mock_content_block])
 
@@ -1019,6 +1204,7 @@ def test_retrieve_anthropic_batch_stamps_last_llm_log(sample_chunk, tmp_path):
     )
 
     mock_content_block = Mock()
+    mock_content_block.type = "text"
     mock_content_block.text = "Translated text via Anthropic batch."
     mock_result = Mock()
     mock_result.custom_id = sample_chunk.id

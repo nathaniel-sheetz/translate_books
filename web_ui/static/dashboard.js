@@ -19,7 +19,7 @@
             MODELS = {};
             config.providers.forEach(function(p) {
                 MODELS[p.id] = p.models.map(function(m) {
-                    return { id: m.id, name: m.name };
+                    return { id: m.id, name: m.name, supports_thinking: !!m.supports_thinking };
                 });
             });
             return config;
@@ -58,6 +58,28 @@
         }
     }
 
+    // True when a thinking checkbox exists, is visible, and is checked.
+    function thinkingChecked(checkboxId) {
+        var cb = document.getElementById(checkboxId);
+        return !!(cb && cb.offsetParent !== null && cb.checked);
+    }
+
+    // Show a "thinking" checkbox only for models that expose a toggleable
+    // thinking mode (Sonnet 5 / Opus 4.7-4.8). Hidden + reset otherwise.
+    function updateThinkingVisibility(providerSelectId, modelSelectId, wrapId) {
+        var wrap = document.getElementById(wrapId);
+        if (!wrap) return;
+        var provider = (document.getElementById(providerSelectId) || {}).value;
+        var modelId = (document.getElementById(modelSelectId) || {}).value;
+        var entry = (MODELS[provider] || []).find(function(m) { return m.id === modelId; });
+        var supported = !!(entry && entry.supports_thinking);
+        wrap.style.display = supported ? '' : 'none';
+        if (!supported) {
+            var cb = wrap.querySelector('input[type="checkbox"]');
+            if (cb) cb.checked = false;
+        }
+    }
+
     function bindProviderModelPair(providerSelectId, modelSelectId, onChange) {
         var providerSelect = document.getElementById(providerSelectId);
         if (!providerSelect) return;
@@ -85,12 +107,20 @@
         // Batch translate (sequential realtime)
         populateProviderSelect('batch-provider');
         populateModelSelect('batch-provider', 'batch-model');
-        bindProviderModelPair('batch-provider', 'batch-model', updateBatchCostEstimate);
+        bindProviderModelPair('batch-provider', 'batch-model', function() {
+            updateBatchCostEstimate();
+            updateThinkingVisibility('batch-provider', 'batch-model', 'batch-thinking-wrap');
+        });
+        updateThinkingVisibility('batch-provider', 'batch-model', 'batch-thinking-wrap');
 
         // Batch API (async, 50% off)
         populateProviderSelect('batch-api-provider');
         populateModelSelect('batch-api-provider', 'batch-api-model');
-        bindProviderModelPair('batch-api-provider', 'batch-api-model', updateBatchApiCostEstimate);
+        bindProviderModelPair('batch-api-provider', 'batch-api-model', function() {
+            updateBatchApiCostEstimate();
+            updateThinkingVisibility('batch-api-provider', 'batch-api-model', 'batch-api-thinking-wrap');
+        });
+        updateThinkingVisibility('batch-api-provider', 'batch-api-model', 'batch-api-thinking-wrap');
     }
 
     // ========================================================================
@@ -2576,6 +2606,7 @@
             provider: provider,
             model: model,
             include_translated: true,
+            enable_thinking: thinkingChecked('batch-thinking'),
         }).then(function(data) {
             if (data.error) {
                 setStatus('translate-batch-status', data.error, 'error');
@@ -2699,6 +2730,7 @@
             provider: provider,
             model: model,
             include_translated: true,
+            enable_thinking: thinkingChecked('batch-api-thinking'),
         }).then(function(data) {
             btn.disabled = false;
             if (data.error) {
