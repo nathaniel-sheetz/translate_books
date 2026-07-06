@@ -489,11 +489,22 @@ def test_subagent_spine_prepare_commit_produces_valid_epub(project: Path):
         chunk = validate_chunk_file(Path(entry["chunk_path"]))
         assert chunk.has_translation, f"{entry['chunk_id']} not stamped"
         assert chunk.last_llm_log, "subagent commit must stamp provenance (last_llm_log)"
+        eval_path = project / "evaluations" / f"{entry['chunk_id']}.json"
+        assert eval_path.exists(), f"missing evaluation JSON for {entry['chunk_id']}"
+        doc = json.loads(eval_path.read_text(encoding="utf-8"))
+        assert "aggregated" in doc and isinstance(doc["aggregated"], dict)
 
     # Idempotent: re-commit touches nothing (resume safety).
+    eval_mtimes = {
+        entry["chunk_id"]: (project / "evaluations" / f"{entry['chunk_id']}.json").stat().st_mtime
+        for entry in prep["manifest"]
+    }
     res2 = flow.translate_commit(str(project), worker_model="sonnet")
     assert res2["counts"]["committed"] == 0
     assert res2["counts"]["skipped"] == len(prep["manifest"])
+    for cid, before in eval_mtimes.items():
+        after = (project / "evaluations" / f"{cid}.json").stat().st_mtime
+        assert after == before, f"skipped chunk {cid} should not rewrite its evaluation JSON"
 
     # combine + epub build from the subagent-translated chunks.
     state: dict = {}
@@ -504,6 +515,27 @@ def test_subagent_spine_prepare_commit_produces_valid_epub(project: Path):
     with zipfile.ZipFile(epubs[0]) as z:
         assert z.testzip() is None
         assert any(n.endswith((".xhtml", ".html")) for n in z.namelist())
+
+
+def test_stage_evaluate_persists_dashboard_json(project: Path):
+    """Stage evaluate should run the full coded suite and persist Review-tab JSON."""
+    args = _args()
+    state: dict = {}
+    state = tb.STAGE_FUNCTIONS["chunk"](args, project, state)
+    state = tb.STAGE_FUNCTIONS["translate"](args, project, state)
+    state = tb.STAGE_FUNCTIONS["evaluate"](args, project, state)
+
+    chunk_files = list((project / "chunks").glob("*_chunk_*.json"))
+    assert chunk_files, "no chunks to evaluate"
+    for cf in chunk_files:
+        chunk = validate_chunk_file(cf)
+        assert chunk.has_translation
+        eval_path = project / "evaluations" / f"{chunk.id}.json"
+        assert eval_path.exists(), f"missing evaluation JSON for {chunk.id}"
+        doc = json.loads(eval_path.read_text(encoding="utf-8"))
+        assert "aggregated" in doc and isinstance(doc["aggregated"], dict)
+        assert "enabled_evals" in doc and isinstance(doc["enabled_evals"], list)
+        assert "length" in doc["enabled_evals"]
 
 
 def test_show_translation_returns_committed_text(project: Path):

@@ -501,6 +501,8 @@ which guards each draft (length / completeness / image-token parity / echo), wri
 the chunks, and prints `committed` / `failed` / `missing` / `skipped` (idempotent — done chunks are
 skipped).
 
+`translate-commit` also **auto-runs and persists the coded evaluators** (`length, paragraph, dictionary, glossary, completeness, blacklist, grammar`) for each newly-committed chunk, so Review-tab badges update without any separate evaluate step.
+
 > **Waiving a confirmed guard false-positive (`--allow-problem`).** Rarely a guard flags a chunk that is
 > actually fine — e.g. the placeholder check trips on a legitimate Roman numeral heading. When you have
 > *confirmed* the `failed` problem is spurious (read the named problem and the draft), re-commit with

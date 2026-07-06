@@ -1121,7 +1121,17 @@ def translate_commit(
     missing: list[str] = []
     skipped: list[str] = []
     waived: dict[str, list[str]] = {}
+    evaluated = 0
     project_slug = project_dir.name
+
+    from web_ui.evaluations import (
+        _load_project_blacklist,
+        _load_project_glossary,
+        evaluate_and_persist_chunk,
+    )
+
+    glossary = _load_project_glossary(project_dir)
+    blacklist = _load_project_blacklist(project_dir)
 
     for entry in entries:
         cp = Path(entry["chunk_path"])
@@ -1162,6 +1172,13 @@ def translate_commit(
         )
         apply_translation(chunk, prose, log_path=log_path)
         save_chunk(chunk, cp)
+        try:
+            evaluate_and_persist_chunk(
+                project_dir, chunk, glossary=glossary, blacklist=blacklist
+            )
+            evaluated += 1
+        except Exception:
+            pass
         committed.append(entry["chunk_id"])
 
     return {
@@ -1170,11 +1187,13 @@ def translate_commit(
         "missing": missing,
         "skipped_already_translated": skipped,
         "waived": waived,
+        "evaluated": evaluated,
         "counts": {
             "committed": len(committed),
             "failed": len(failed),
             "missing": len(missing),
             "skipped": len(skipped),
+            "evaluated": evaluated,
         },
         "instructions": (
             "Re-spawn workers for any `failed` (fix per the named problems) and `missing` "
