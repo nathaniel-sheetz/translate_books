@@ -36,7 +36,7 @@ from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
 from src.harness.state import emit_harness_result
 from src.api_translator import DEFAULT_MODEL
-from src.models import Chunk, ChunkStatus, ChunkingConfig, EvaluationConfig
+from src.models import Chunk, ChunkStatus, ChunkingConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
 
@@ -441,20 +441,17 @@ def _filter_chapters(args, chapters: dict) -> dict:
 
 def stage_evaluate(args, project_dir: Path, state: dict) -> dict:
     """Stage 5: Evaluate all translated chunks."""
-    from src.evaluators import run_all_evaluators, aggregate_results
+    from web_ui.evaluations import (
+        _load_project_blacklist,
+        _load_project_glossary,
+        evaluate_and_persist_chunk,
+    )
 
     chunks_dir = project_dir / "chunks"
     chapters = _filter_chapters(args, discover_chapters(chunks_dir))
 
-    glossary = None
-    glossary_path = project_dir / "glossary.json"
-    if glossary_path.exists():
-        glossary = load_glossary(glossary_path)
-
-    config = EvaluationConfig(
-        enabled_evals=["length", "paragraph", "completeness"],
-        fail_on_errors=False,
-    )
+    glossary = _load_project_glossary(project_dir)
+    blacklist = _load_project_blacklist(project_dir)
 
     total_chunks = 0
     total_passed = 0
@@ -466,8 +463,13 @@ def stage_evaluate(args, project_dir: Path, state: dict) -> dict:
             if not chunk.has_translation:
                 continue
 
-            results = run_all_evaluators(chunk, config, glossary)
-            summary = aggregate_results(results)
+            persisted = evaluate_and_persist_chunk(
+                project_dir,
+                chunk,
+                glossary=glossary,
+                blacklist=blacklist,
+            )
+            summary = persisted["aggregated"]
 
             total_chunks += 1
             if summary["overall_passed"]:
