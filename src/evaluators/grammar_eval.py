@@ -126,7 +126,8 @@ class GrammarEvaluator(BaseEvaluator):
                 - ignore_rules: list[str] (specific rule IDs to skip)
                 - ignore_categories: list[str] (categories to skip, e.g. ['TYPOS'])
                 - skip_spelling: bool (suppress only the unknown-word spell rules
-                  MORFOLOGIK_RULE_*; accent/real-word TYPOS are still reported)
+                  MORFOLOGIK_RULE_*/HUNSPELL_*; accent/real-word TYPOS are still
+                  reported)
                 - max_issues: int (default 50)
 
         Returns:
@@ -307,9 +308,10 @@ class GrammarEvaluator(BaseEvaluator):
             True if match should be ignored, False otherwise
         """
         # skip_spelling suppresses only LanguageTool's unknown-word spell checker
-        # (MORFOLOGIK_RULE_*), which the dictionary evaluator already owns.
-        # Real-word / diacritic TYPOS rules (tu/tú, más/mas, él/el, ...) are kept —
-        # the dictionary can't catch those, so there's no double-reporting.
+        # (the SPELLING_RULE_ID_PREFIXES: MORFOLOGIK_RULE_*/HUNSPELL_*), which the
+        # dictionary evaluator already owns. Real-word / diacritic TYPOS rules
+        # (tu/tú, más/mas, él/el, ...) are kept — the dictionary can't catch those,
+        # so there's no double-reporting.
         if context.get('skip_spelling', False):
             rule_id = getattr(match, 'rule_id', '') or ''
             if any(rule_id.startswith(p) for p in self.SPELLING_RULE_ID_PREFIXES):

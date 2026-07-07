@@ -357,11 +357,14 @@ class Glossary(BaseModel):
         def _plural_variants(candidate: str) -> set[str]:
             """Folded candidate plus its Spanish plural form(s).
 
-            Mirrors ``_term_pattern`` in ``utils/glossary_context.py``: generate
-            plurals by appending to the (curated) term rather than stripping the
-            word under test. Uses the Spanish rule (vowel-final -> +s,
-            consonant-final -> +es) and skips proper nouns already ending in 's'
-            (Atlas, Pericles) so they don't match a genuinely different word.
+            Shares the core strategy of ``_term_pattern`` in
+            ``utils/glossary_context.py``: generate plurals by appending to the
+            (curated) term rather than stripping the word under test, using the
+            Spanish rule (vowel-final -> +s, consonant-final -> +es) and skipping
+            proper nouns already ending in 's' (Atlas, Pericles) so they don't
+            match a genuinely different word. It intentionally diverges in that
+            the caller also applies this per-token to multi-word terms, and here
+            a ``len(folded) <= 3`` guard keeps short terms/articles exact.
             """
             folded = _fold(candidate)
             variants = {folded}

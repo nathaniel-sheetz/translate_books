@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **Fewer false-positive spelling findings on glossary terms** — words matching a glossary term are excluded from spelling checks across both evaluators.
+- **Accent-folding preserves ñ** — the dictionary evaluator's morphological fallback folds vowel accents/diaeresis (á→a, ü→u) but keeps ñ as a distinct letter, so a genuine misspelling like "moño" no longer folds to and validates against the different real word "mono".
 
 ### Removed
 - **Dead `GrammarEvaluator._convert_match_to_issue`** — superseded by the deduplicating `_convert_match_group_to_issue`; removed along with two stale/undocumented docstrings.

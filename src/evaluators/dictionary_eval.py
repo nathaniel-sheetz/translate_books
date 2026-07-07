@@ -281,8 +281,19 @@ class DictionaryEvaluator(BaseEvaluator):
             )
 
         def _normalize_accents(s: str) -> str:
-            nfd = unicodedata.normalize("NFD", s)
-            return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+            # Fold vowel accents/diaeresis (á→a, ü→u) but preserve ñ. ñ is a
+            # distinct Spanish letter, not an accented n; stripping its tilde
+            # (ñ→n) would let genuine misspellings validate against a different
+            # real word (e.g. "moño" → "mono"). Decompose per-character so ñ can
+            # be passed through untouched.
+            out = []
+            for ch in s:
+                if ch in "ñÑ":
+                    out.append(ch)
+                    continue
+                nfd = unicodedata.normalize("NFD", ch)
+                out.append("".join(c for c in nfd if unicodedata.category(c) != "Mn"))
+            return "".join(out)
 
         # Pass A — Diminutive suffix stripping (longest first)
         diminutive_suffixes = [

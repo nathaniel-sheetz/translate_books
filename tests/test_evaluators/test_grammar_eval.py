@@ -1006,3 +1006,49 @@ class TestGrammarDedup:
 
         assert len(result.issues) == 2
         assert all("found" not in issue.message for issue in result.issues)
+
+
+@skip_if_no_lt
+class TestExtractWordFromMatch:
+    """Directly exercise the three extraction branches of _extract_word_from_match."""
+
+    @patch('language_tool_python.LanguageTool')
+    def _make_evaluator(self, mock_lt_class):
+        return GrammarEvaluator()
+
+    def test_extract_from_full_text_by_offset(self):
+        """Primary path: slice the flagged word out of the full checked text."""
+        evaluator = self._make_evaluator()
+        text = "El Sr. Darcy era rico."
+        match = make_mock_match(
+            "Unknown word", "TYPOS", "MORFOLOGIK_RULE_ES",
+            offset=text.index("Darcy"), length=5, context=text,
+        )
+        assert evaluator._extract_word_from_match(match, text) == "Darcy"
+
+    def test_extract_from_context_window_when_offset_differs(self):
+        """Fallback path: no full text, and offset_in_context != document offset.
+
+        Real LanguageTool truncates ``context`` to a window, so the document
+        ``offset`` (relative to the whole chunk) does not index into ``context``.
+        Extraction must use ``offset_in_context``, not ``offset``.
+        """
+        evaluator = self._make_evaluator()
+        match = Mock()
+        match.offset = 512  # document offset — out of range for the context window
+        match.error_length = 5
+        match.context = "...la palabra Darcy en el texto..."
+        match.offset_in_context = match.context.index("Darcy")
+        match.matched_text = "WRONG"  # must be ignored while context slicing works
+        # No text arg -> full-text branch is skipped, context branch is exercised.
+        assert evaluator._extract_word_from_match(match) == "Darcy"
+
+    def test_extract_strips_surrounding_punctuation(self):
+        """Punctuation bounding the flagged span is trimmed off the returned word."""
+        evaluator = self._make_evaluator()
+        text = "dijo Darcy, y luego calló."
+        match = make_mock_match(
+            "x", "TYPOS", "MORFOLOGIK_RULE_ES",
+            offset=text.index("Darcy"), length=6, context=text,  # spans "Darcy,"
+        )
+        assert evaluator._extract_word_from_match(match, text) == "Darcy"

@@ -239,8 +239,8 @@ def _build_context(
 
     # Unknown-word spelling is owned by the dictionary evaluator (deduped,
     # glossary-aware). skip_spelling drops only LanguageTool's spell-checker
-    # rules (MORFOLOGIK_RULE_*); the grammar evaluator still reports grammar,
-    # punctuation, style, and accent/real-word errors (tu/tú, más/mas, ...).
+    # rules (MORFOLOGIK_RULE_*/HUNSPELL_*); the grammar evaluator still reports
+    # grammar, punctuation, style, and accent/real-word errors (tu/tú, más/mas, ...).
     if "skip_spelling" not in context:
         context["skip_spelling"] = True
 
