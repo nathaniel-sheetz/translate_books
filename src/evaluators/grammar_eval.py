@@ -159,7 +159,7 @@ class GrammarEvaluator(BaseEvaluator):
         matches = self._check_grammar(text_to_check)
 
         # Process matches (deduplicated by rule + flagged word)
-        grouped_matches: dict[tuple[str, str], list] = defaultdict(list)
+        grouped_matches: dict[tuple, list] = defaultdict(list)
 
         for match in matches:
             # Skip matches whose offset falls inside a replaced placeholder
@@ -173,7 +173,15 @@ class GrammarEvaluator(BaseEvaluator):
 
             rule_id = getattr(match, "rule_id", "") or ""
             flagged_word = self._extract_word_from_match(match, text_to_check) or ""
-            grouped_matches[(rule_id, flagged_word)].append(match)
+            if rule_id or flagged_word:
+                key = (rule_id, flagged_word)
+            else:
+                # Neither the rule id nor the flagged word is known; keying on
+                # ("", "") would merge unrelated findings into one bogus
+                # "(found N time(s))", so disambiguate by offset to keep each
+                # match a separate reported issue.
+                key = ("", "", match.offset)
+            grouped_matches[key].append(match)
 
         issues: list[Issue] = []
         for match_group in grouped_matches.values():

@@ -960,3 +960,49 @@ class TestGrammarDedup:
 
         assert len(result.issues) == 1
         assert "found 3 time(s)" in result.issues[0].message
+
+    @patch('language_tool_python.LanguageTool')
+    def test_empty_key_matches_not_merged(self, mock_lt_class):
+        """Distinct matches with no rule id and no extractable word stay separate."""
+        pytest.importorskip("language_tool_python")
+
+        text = "Una frase con dos problemas distintos aqui."
+        mock_tool = Mock()
+        # Both matches force empty key components: no rule_id, and length=0 +
+        # empty context makes _extract_word_from_match return None (so
+        # flagged_word == ""). They differ only by offset.
+        matches = [
+            make_mock_match(
+                "Some grammar issue",
+                "GRAMMAR",
+                "",
+                offset=4,
+                length=0,
+                context="",
+            ),
+            make_mock_match(
+                "A different grammar issue",
+                "GRAMMAR",
+                "",
+                offset=20,
+                length=0,
+                context="",
+            ),
+        ]
+        mock_tool.check.return_value = matches
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": False})
+
+        assert len(result.issues) == 2
+        assert all("found" not in issue.message for issue in result.issues)
