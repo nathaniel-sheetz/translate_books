@@ -6,6 +6,7 @@ English words or unknown words that may be misspellings.
 """
 
 import re
+import unicodedata
 from typing import Any, Optional
 
 try:
@@ -280,7 +281,8 @@ class DictionaryEvaluator(BaseEvaluator):
             )
 
         def _normalize_accents(s: str) -> str:
-            return s.translate(str.maketrans("áéíóúü", "aeiouu"))
+            nfd = unicodedata.normalize("NFD", s)
+            return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
         # Pass A — Diminutive suffix stripping (longest first)
         diminutive_suffixes = [
@@ -305,6 +307,9 @@ class DictionaryEvaluator(BaseEvaluator):
                     candidates.append(stem[:-1] + "a")
                 for candidate in candidates:
                     if _is_valid(candidate):
+                        return True
+                    folded = _normalize_accents(candidate)
+                    if folded != candidate and _is_valid(folded):
                         return True
 
         # Pass B — Verb clitic stripping (longest first)
@@ -360,18 +365,7 @@ class DictionaryEvaluator(BaseEvaluator):
         Returns:
             True if word matches a glossary term
         """
-        word_lower = word.lower()
-        for term in glossary.terms:
-            # Exact match on the full term (single-word terms, or exact multi-word match)
-            if term.spanish.lower() == word_lower or term.english.lower() == word_lower:
-                return True
-            # Token match: word is one component of a multi-word term
-            # e.g. "Paul" matches when "Uncle Paul" is in the glossary
-            spanish_tokens = {t.lower() for t in term.spanish.split()}
-            english_tokens = {t.lower() for t in term.english.split()}
-            if word_lower in spanish_tokens or word_lower in english_tokens:
-                return True
-        return False
+        return glossary.matches_word(word)
 
     def _get_suggestions(self, word: str) -> list[str]:
         """

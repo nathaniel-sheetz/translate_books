@@ -237,6 +237,11 @@ def _build_context(
     if glossary is not None:
         context["glossary"] = glossary
 
+    # Spelling is owned by the dictionary evaluator (deduped, glossary-aware).
+    # Grammar checks grammar, punctuation, and style only unless re-enabled.
+    if "skip_spelling" not in context:
+        context["skip_spelling"] = True
+
     # Add length evaluator config from app_config.json (if present)
     length_cfg = get_length_config()
     if length_cfg:

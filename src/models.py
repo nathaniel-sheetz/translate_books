@@ -6,6 +6,7 @@ used throughout the translation pipeline.
 """
 
 import math
+import unicodedata
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -334,6 +335,43 @@ class Glossary(BaseModel):
                 if alternative.lower() == spanish_lower:
                     return term
         return None
+
+    def matches_word(self, word: str) -> bool:
+        """
+        Check if a word corresponds to any glossary term.
+
+        Matching is case- and accent-insensitive, supports multi-word term tokens,
+        and tolerates common plural suffixes (-s, -es).
+        """
+        if not word:
+            return False
+
+        def _fold(s: str) -> str:
+            nfd = unicodedata.normalize("NFD", s)
+            return "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
+
+        def _word_variants(w: str) -> set[str]:
+            folded = _fold(w)
+            variants = {folded}
+            if len(folded) > 3 and folded.endswith("es"):
+                variants.add(folded[:-2])
+            if len(folded) > 3 and folded.endswith("s"):
+                variants.add(folded[:-1])
+            return variants
+
+        word_variants = _word_variants(word)
+
+        for term in self.terms:
+            candidates = [term.spanish, term.english, *term.alternatives]
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                if _fold(candidate) in word_variants:
+                    return True
+                for token in candidate.split():
+                    if _fold(token) in word_variants:
+                        return True
+        return False
 
     def get_translation(self, english: str) -> Optional[str]:
         """Get the Spanish translation for an English term."""

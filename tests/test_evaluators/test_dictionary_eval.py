@@ -409,3 +409,48 @@ def test_image_placeholder_with_description_not_flagged(evaluator, base_chunk):
         assert not any(fragment.lower() in msg.lower() for msg in flagged_words), (
             f"Placeholder/description fragment '{fragment}' was flagged: {flagged_words}"
         )
+
+
+def test_glossary_plural_inflection(evaluator, base_chunk):
+    """Plural forms should match singular glossary entries."""
+    glossary = Glossary(
+        terms=[
+            GlossaryTerm(english="spider", spanish="épeira"),
+        ]
+    )
+    base_chunk.translated_text = "Las épeiras tejen sus telas."
+
+    result = evaluator.evaluate(base_chunk, {"glossary": glossary})
+
+    assert result.metadata["glossary_words"] >= 1
+    assert result.metadata["unknown_words"] == 0
+
+
+def test_glossary_multi_word_token(evaluator, base_chunk):
+    """A word that is part of a multi-word glossary term should be excluded."""
+    glossary = Glossary(
+        terms=[
+            GlossaryTerm(english="Mother Ambroisine", spanish="la madre Ambroisine"),
+        ]
+    )
+    base_chunk.translated_text = "Ambroisine cuidaba a los niños."
+
+    result = evaluator.evaluate(base_chunk, {"glossary": glossary})
+
+    assert result.metadata["glossary_words"] == 1
+    assert result.metadata["unknown_words"] == 0
+
+
+def test_glossary_accent_insensitive(evaluator, base_chunk):
+    """Accent-folded variants should match glossary terms."""
+    glossary = Glossary(
+        terms=[
+            GlossaryTerm(english="spider", spanish="épeira"),
+        ]
+    )
+    base_chunk.translated_text = "La epeira es un arácnido."
+
+    result = evaluator.evaluate(base_chunk, {"glossary": glossary})
+
+    assert result.metadata["glossary_words"] == 1
+    assert result.metadata["unknown_words"] == 0

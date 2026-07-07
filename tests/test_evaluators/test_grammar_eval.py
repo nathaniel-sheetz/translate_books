@@ -8,8 +8,9 @@ issues using LanguageTool, with proper glossary integration and filtering.
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
-from src.models import Chunk, ChunkMetadata, Glossary, GlossaryTerm, GlossaryTermType, IssueLevel
+from src.models import Chunk, ChunkMetadata, Glossary, GlossaryTerm, GlossaryTermType, IssueLevel, EvaluationConfig
 from src.evaluators.grammar_eval import GrammarEvaluator, LANGUAGETOOL_AVAILABLE
+from src.evaluators import _build_context
 
 # Skip tests that use patching if LanguageTool not available
 # (patching fails when module doesn't exist)
@@ -42,7 +43,13 @@ def make_mock_match(message, category, rule_id, offset=0, length=5, replacements
     match.error_length = length
     match.replacements = replacements or []
     match.context = context
-    match.matched_text = context
+    # language_tool_python 3.3: matched_text is a slice of context at offset_in_context
+    match.offset_in_context = offset
+    if context and length:
+        end = min(offset + length, len(context))
+        match.matched_text = context[offset:end]
+    else:
+        match.matched_text = ""
     return match
 
 
@@ -192,14 +199,17 @@ class TestGlossaryIntegration:
         pytest.importorskip("language_tool_python")
 
         # Create match for "Darcy" as spelling error
+        text = "El Sr. Darcy era rico."
+        darcy_offset = text.index("Darcy")
         mock_tool = Mock()
         mock_match = make_mock_match(
             message="Unknown word: Darcy",
             category="TYPOS",
             rule_id="MORFOLOGIK_RULE_ES",
-            context="Darcy"
+            offset=darcy_offset,
+            length=5,
+            context=text,
         )
-        mock_match.matched_text = "Darcy"
         mock_tool.check.return_value = [mock_match]
         mock_lt_class.return_value = mock_tool
 
@@ -218,7 +228,7 @@ class TestGlossaryIntegration:
             GlossaryTerm(english="Darcy", spanish="Darcy", type=GlossaryTermType.CHARACTER)
         ])
 
-        result = evaluator.evaluate(chunk, {"glossary": glossary})
+        result = evaluator.evaluate(chunk, {"glossary": glossary, "skip_spelling": False})
 
         # Should be ignored because Darcy is in glossary
         assert result.passed
@@ -230,14 +240,17 @@ class TestGlossaryIntegration:
         pytest.importorskip("language_tool_python")
 
         # Create match for "magia" as spelling error
+        text = "La magia era poderosa."
+        magia_offset = text.index("magia")
         mock_tool = Mock()
         mock_match = make_mock_match(
             message="Unknown word: magia",
             category="TYPOS",
             rule_id="MORFOLOGIK_RULE_ES",
-            context="magia"
+            offset=magia_offset,
+            length=5,
+            context=text,
         )
-        mock_match.matched_text = "magia"
         mock_tool.check.return_value = [mock_match]
         mock_lt_class.return_value = mock_tool
 
@@ -256,7 +269,7 @@ class TestGlossaryIntegration:
             GlossaryTerm(english="magic", spanish="magia", type=GlossaryTermType.CONCEPT)
         ])
 
-        result = evaluator.evaluate(chunk, {"glossary": glossary})
+        result = evaluator.evaluate(chunk, {"glossary": glossary, "skip_spelling": False})
 
         # Should be ignored because "magia" is the Spanish translation in glossary
         assert result.passed
@@ -292,7 +305,7 @@ class TestGlossaryIntegration:
             GlossaryTerm(english="Darcy", spanish="Darcy", type=GlossaryTermType.CHARACTER)
         ])
 
-        result = evaluator.evaluate(chunk, {"glossary": glossary})
+        result = evaluator.evaluate(chunk, {"glossary": glossary, "skip_spelling": False})
 
         # Grammar error should still be detected
         assert not result.passed
@@ -774,3 +787,75 @@ class TestImagePlaceholderFiltering:
         # No placeholders, so no suppression — error is reported as normal
         assert len(result.issues) == 1
         assert result.issues[0].severity == IssueLevel.ERROR
+
+
+class TestBuildContextDefaults:
+    """Tests for evaluator context defaults."""
+
+    def test_skip_spelling_default_true(self):
+        """Spelling checks are disabled by default; dictionary evaluator owns spelling."""
+        context = _build_context(EvaluationConfig())
+        assert context["skip_spelling"] is True
+
+    def test_skip_spelling_overridable(self):
+        """Callers can re-enable spelling by setting skip_spelling explicitly."""
+        context = _build_context(EvaluationConfig())
+        context["skip_spelling"] = False
+        assert context["skip_spelling"] is False
+
+
+@skip_if_no_lt
+class TestGrammarDedup:
+    """Tests for deduplication of repeated grammar findings."""
+
+    @patch('language_tool_python.LanguageTool')
+    def test_identical_matches_deduplicated(self, mock_lt_class):
+        """Repeated matches for the same rule and word collapse into one issue."""
+        pytest.importorskip("language_tool_python")
+
+        text = "Balder vio a Balder y a Balder otra vez."
+        balder_offset = text.index("Balder")
+        mock_tool = Mock()
+        matches = [
+            make_mock_match(
+                "Possible spelling mistake",
+                "TYPOS",
+                "MORFOLOGIK_RULE_ES",
+                offset=balder_offset,
+                length=6,
+                context=text,
+            ),
+            make_mock_match(
+                "Possible spelling mistake",
+                "TYPOS",
+                "MORFOLOGIK_RULE_ES",
+                offset=text.index("Balder", balder_offset + 1),
+                length=6,
+                context=text,
+            ),
+            make_mock_match(
+                "Possible spelling mistake",
+                "TYPOS",
+                "MORFOLOGIK_RULE_ES",
+                offset=text.rindex("Balder"),
+                length=6,
+                context=text,
+            ),
+        ]
+        mock_tool.check.return_value = matches
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": False})
+
+        assert len(result.issues) == 1
+        assert "found 3 time(s)" in result.issues[0].message
