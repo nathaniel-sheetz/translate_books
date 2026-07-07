@@ -21,6 +21,24 @@ from ..utils.text_utils import strip_image_placeholders
 from .base import BaseEvaluator
 
 
+def _fold_accents_preserving_enye(s: str) -> str:
+    """Fold Spanish vowel accents/diaeresis while preserving ñ.
+
+    á→a, é→e, í→i, ó→o, ú→u, ü→u — but ñ/Ñ are kept intact. ñ is a distinct
+    Spanish letter, not an accented n; stripping its tilde (ñ→n) would let a
+    genuine misspelling validate against a different real word (e.g. "moño" →
+    "mono"). Decomposes per character so ñ can be passed through untouched.
+    """
+    out = []
+    for ch in s:
+        if ch in "ñÑ":
+            out.append(ch)
+            continue
+        nfd = unicodedata.normalize("NFD", ch)
+        out.append("".join(c for c in nfd if unicodedata.category(c) != "Mn"))
+    return "".join(out)
+
+
 class DictionaryEvaluator(BaseEvaluator):
     """
     Evaluates words in translation against Spanish and English dictionaries.
@@ -280,21 +298,6 @@ class DictionaryEvaluator(BaseEvaluator):
                 or self.spanish_dict_mx.check(candidate)
             )
 
-        def _normalize_accents(s: str) -> str:
-            # Fold vowel accents/diaeresis (á→a, ü→u) but preserve ñ. ñ is a
-            # distinct Spanish letter, not an accented n; stripping its tilde
-            # (ñ→n) would let genuine misspellings validate against a different
-            # real word (e.g. "moño" → "mono"). Decompose per-character so ñ can
-            # be passed through untouched.
-            out = []
-            for ch in s:
-                if ch in "ñÑ":
-                    out.append(ch)
-                    continue
-                nfd = unicodedata.normalize("NFD", ch)
-                out.append("".join(c for c in nfd if unicodedata.category(c) != "Mn"))
-            return "".join(out)
-
         # Pass A — Diminutive suffix stripping (longest first)
         diminutive_suffixes = [
             "citos", "citas", "cito", "cita",
@@ -319,7 +322,7 @@ class DictionaryEvaluator(BaseEvaluator):
                 for candidate in candidates:
                     if _is_valid(candidate):
                         return True
-                    folded = _normalize_accents(candidate)
+                    folded = _fold_accents_preserving_enye(candidate)
                     if folded != candidate and _is_valid(folded):
                         return True
 
@@ -334,7 +337,7 @@ class DictionaryEvaluator(BaseEvaluator):
                 stem = word_lower[: -len(suffix)]
                 if len(stem) < 3:
                     continue
-                for candidate in (stem, _normalize_accents(stem)):
+                for candidate in (stem, _fold_accents_preserving_enye(stem)):
                     if _is_valid(candidate):
                         return True
 
