@@ -22,7 +22,7 @@ thresholds and combined with a **weighted power-mean** (Hölder mean):
 5. **Verse / poetry density** — short non-terminal line runs detected by the
    existing ``detect_verse`` heuristic, normalized by non-blank line count.
 
-The power-mean knob ``AGGREGATION_P`` (default ≈2) lets a single extreme hazard
+The power-mean knob ``AGGREGATION_P`` (default 3) lets a single extreme hazard
 pull difficulty up without inflating its weight; ``p=1`` reduces to a plain
 weighted mean. The combined ``difficulty`` maps to a suggested chunk
 ``target_size`` (harder ⇒ smaller). Scores are produced at the book and
@@ -109,8 +109,8 @@ VERSE_HARD = 0.25
 
 # difficulty → suggested chunk target_size (words). difficulty 0.0 yields
 # TARGET_EASY (bigger chunks), 1.0 yields TARGET_HARD (smaller chunks).
-# Widened from 2000→1200 so the scale still spreads once all five signals
-# participate as peers rather than additive boosts.
+# Widened to 2200→900 (from the old 2000→1200 range) so the scale still spreads
+# once all five signals participate as peers rather than additive boosts.
 TARGET_EASY = 2200
 TARGET_HARD = 900
 
@@ -328,7 +328,21 @@ def _is_double_quote_open(text: str, pos: int) -> bool:
 
 
 def _is_nested_quote_open(text: str, pos: int) -> bool:
-    """True when ``text[pos]`` is an opening nested single-quote."""
+    """True when ``text[pos]`` is an opening nested single-quote.
+
+    Calibration tradeoffs for the American children's-book corpus this targets,
+    where nested single-quotes are almost always quotations *inside* double-quote
+    speech:
+      * British-style primary dialogue (``'Hello,' she said.``) is counted as a
+        nested opening \u2014 acceptable since such texts still carry real ``\u00ab \u00bb``
+        translation work; it just credits it to this signal rather than the
+        double-quote one.
+      * Only U+0027 and left-curly U+2018 are treated as openings; a source that
+        uses right-curly U+2019 as an *opening* single-quote is under-counted.
+      * A ``'89``-style year elision (digit after the apostrophe) slips past the
+        ``[A-Za-z]+`` elision filter in :func:`dialogue_marker_counts` and adds a
+        spurious count \u2014 rare enough in this corpus to ignore.
+    """
     if pos == 0:
         return True
     prev = text[pos - 1]
@@ -610,6 +624,10 @@ def score_text(text: str, glossary_skip: Optional[set] = None) -> DifficultyMetr
         DQ_COEF * double_open + NESTED_COEF * nested_open
     ) / max(word_count, 1)
 
+    # detect_verse ignores its first arg and re-derives lines from the full
+    # text, so extract_paragraphs here is nominal — kept to match the detector's
+    # signature in case it starts consuming paragraphs. non_blank_lines is
+    # computed independently for the density denominator.
     paragraphs = extract_paragraphs(text)
     non_blank_lines = sum(
         1 for line in normalize_newlines(text).split("\n") if line.strip()

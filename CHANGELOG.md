@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.4.0] - 2026-07-06
+
+### Changed
+- **Unified difficulty scoring over five peer signals** — `difficulty_scorer` now combines length, lexical rarity, dialect density, nested-dialogue density, and verse/poetry density as co-equal sub-scores via a weighted power-mean (Hölder mean, `AGGREGATION_P = 3`), replacing the old length+rarity base with an additive dialect boost. Weights sum to 1.0 and the exponent lets a single extreme hazard pull difficulty up without inflating its weight. Suggested chunk-target range widened to 2200→900w so the scale still spreads with five participating signals.
+
+### Added
+- **Nested-dialogue sub-score** — `dialogue_marker_counts` counts opening double-quotes and (more heavily weighted) nested single-quote openings inside speech, with elision filtering so tokens like `'twas`/`'em`/`o'clock` aren't miscounted.
+- **Verse/poetry sub-score** — verse-line density via the existing `detect_verse` heuristic, normalized by non-blank line count.
+- **New score fields surfaced** — `dialect_score`, `dialogue_score`, and `verse_score` (plus raw counts/densities) flow through `score_difficulty.py`, the `flow.difficulty` output, and `OUTPUT_SCHEMAS`; `from_dict` filters unknown keys so older cached `difficulty.json` files remain loadable.
+
 ## [0.27.3.0] - 2026-07-06
 
 ### Changed
