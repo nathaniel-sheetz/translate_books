@@ -352,9 +352,11 @@ class TestCategoryFiltering:
         pytest.importorskip("language_tool_python")
 
         mock_tool = Mock()
-        # Create both grammar and spelling errors
+        # Create both grammar and spelling errors. The spelling error uses the
+        # real unknown-word spell rule id (MORFOLOGIK_RULE_ES) — skip_spelling
+        # suppresses that rule, not the whole TYPOS category.
         grammar_match = make_mock_match("Grammar error", "GRAMMAR", "GRAMMAR_RULE")
-        typos_match = make_mock_match("Spelling error", "TYPOS", "MORFOLOGIK")
+        typos_match = make_mock_match("Spelling error", "TYPOS", "MORFOLOGIK_RULE_ES")
         mock_tool.check.return_value = [grammar_match, typos_match]
         mock_lt_class.return_value = mock_tool
 
@@ -370,9 +372,73 @@ class TestCategoryFiltering:
 
         result = evaluator.evaluate(chunk, {"skip_spelling": True})
 
-        # Only grammar error should be reported
+        # Only grammar error should be reported (spell rule suppressed)
         assert len(result.issues) == 1
         assert result.issues[0].severity == IssueLevel.ERROR
+        assert "Grammar error" in result.issues[0].message
+
+    @patch('language_tool_python.LanguageTool')
+    def test_skip_spelling_keeps_diacritic_real_word_rules(self, mock_lt_class):
+        """skip_spelling keeps accent/real-word findings (tu/tú, más/mas).
+
+        LanguageTool files these under the DIACRITICS category (rule ids like
+        TU_TILDE), which the dictionary evaluator cannot catch — both forms are
+        valid words — so grammar must keep reporting them.
+        """
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        spelling = make_mock_match("Spelling error", "TYPOS", "MORFOLOGIK_RULE_ES")
+        tilde = make_mock_match(
+            "El pronombre personal «tú» lleva tilde.", "DIACRITICS", "TU_TILDE"
+        )
+        mock_tool.check.return_value = [spelling, tilde]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text="Tu eres mi amigo.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata()
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": True})
+
+        # Unknown-word spelling dropped; diacritic real-word finding kept.
+        assert len(result.issues) == 1
+        assert "tilde" in result.issues[0].message
+
+    @patch('language_tool_python.LanguageTool')
+    def test_skip_spelling_is_rule_scoped_not_category_scoped(self, mock_lt_class):
+        """A real-word rule filed under TYPOS (not the MORFOLOGIK spell checker)
+        survives skip_spelling — suppression keys off the rule id, not the whole
+        TYPOS category."""
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        spelling = make_mock_match("Unknown word", "TYPOS", "MORFOLOGIK_RULE_ES")
+        confusion = make_mock_match("Confusable word", "TYPOS", "ES_CONFUSION_RULE")
+        mock_tool.check.return_value = [spelling, confusion]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text="Texto de prueba.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata()
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": True})
+
+        # MORFOLOGIK dropped; the non-spell TYPOS rule survives.
+        assert len(result.issues) == 1
+        assert "Confusable" in result.issues[0].message
 
 
 @skip_if_no_lt
@@ -405,6 +471,41 @@ class TestRuleFiltering:
         # Only match2 should be reported
         assert len(result.issues) == 1
         assert "Error 2" in result.issues[0].message
+
+
+@skip_if_no_lt
+class TestSkipSpellingRealWord:
+    """Real LanguageTool: skip_spelling keeps accent/real-word errors while
+    deduping plain misspellings (owned by the dictionary evaluator)."""
+
+    def test_diacritic_kept_and_spelling_dropped(self):
+        pytest.importorskip("language_tool_python")
+
+        evaluator = GrammarEvaluator()
+        # "Tu" should carry an accent ("Tú" = you); "kasa" is a plain misspelling.
+        chunk = Chunk(
+            id="test",
+            source_text="You are my friend and the house is pretty.",
+            translated_text="Tu eres mi amigo y la kasa es bonita.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        kept = evaluator.evaluate(chunk, {"skip_spelling": True})
+        full = evaluator.evaluate(chunk, {"skip_spelling": False})
+
+        def has_tilde(res):
+            return any("tilde" in iss.message.lower() for iss in res.issues)
+
+        def has_spelling(res):
+            return any("ortogr" in iss.message.lower() for iss in res.issues)
+
+        # Accent/real-word error surfaces regardless of skip_spelling.
+        assert has_tilde(kept)
+        # Plain misspelling is deduped away by skip_spelling, present without it.
+        assert not has_spelling(kept)
+        assert has_spelling(full)
 
 
 @skip_if_no_lt

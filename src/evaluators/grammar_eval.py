@@ -73,6 +73,18 @@ class GrammarEvaluator(BaseEvaluator):
         'MISC': IssueLevel.WARNING,
     }
 
+    # LanguageTool spell-checker rules whose findings overlap the dictionary
+    # evaluator (they flag unknown/misspelled words). skip_spelling suppresses
+    # only these — not the whole TYPOS category — so accent/real-word TYPOS rules
+    # (tu/tú, más/mas, él/el, ...) still surface. Those fire on valid dictionary
+    # words, which the dictionary evaluator cannot catch, so keeping them adds no
+    # double-reporting.
+    SPELLING_RULE_ID_PREFIXES = (
+        "MORFOLOGIK_RULE",
+        "HUNSPELL_RULE",
+        "HUNSPELL_NO_SUGGEST_RULE",
+    )
+
     def __init__(self, dialect: str = 'es'):
         """
         Initialize Grammar Evaluator with LanguageTool.
@@ -113,7 +125,8 @@ class GrammarEvaluator(BaseEvaluator):
                 - glossary: Glossary (exclude terms from TYPOS)
                 - ignore_rules: list[str] (specific rule IDs to skip)
                 - ignore_categories: list[str] (categories to skip, e.g. ['TYPOS'])
-                - skip_spelling: bool (convenience for ignore_categories=['TYPOS'])
+                - skip_spelling: bool (suppress only the unknown-word spell rules
+                  MORFOLOGIK_RULE_*; accent/real-word TYPOS are still reported)
                 - max_issues: int (default 50)
 
         Returns:
@@ -285,12 +298,14 @@ class GrammarEvaluator(BaseEvaluator):
         Returns:
             True if match should be ignored, False otherwise
         """
-        # Check skip_spelling convenience flag
+        # skip_spelling suppresses only LanguageTool's unknown-word spell checker
+        # (MORFOLOGIK_RULE_*), which the dictionary evaluator already owns.
+        # Real-word / diacritic TYPOS rules (tu/tú, más/mas, él/el, ...) are kept —
+        # the dictionary can't catch those, so there's no double-reporting.
         if context.get('skip_spelling', False):
-            if 'ignore_categories' not in context:
-                context['ignore_categories'] = []
-            if 'TYPOS' not in context['ignore_categories']:
-                context['ignore_categories'].append('TYPOS')
+            rule_id = getattr(match, 'rule_id', '') or ''
+            if any(rule_id.startswith(p) for p in self.SPELLING_RULE_ID_PREFIXES):
+                return True
 
         # Check ignore_categories
         ignore_categories = context.get('ignore_categories', [])

@@ -237,8 +237,10 @@ def _build_context(
     if glossary is not None:
         context["glossary"] = glossary
 
-    # Spelling is owned by the dictionary evaluator (deduped, glossary-aware).
-    # Grammar checks grammar, punctuation, and style only unless re-enabled.
+    # Unknown-word spelling is owned by the dictionary evaluator (deduped,
+    # glossary-aware). skip_spelling drops only LanguageTool's spell-checker
+    # rules (MORFOLOGIK_RULE_*); the grammar evaluator still reports grammar,
+    # punctuation, style, and accent/real-word errors (tu/tú, más/mas, ...).
     if "skip_spelling" not in context:
         context["skip_spelling"] = True
 
