@@ -340,8 +340,12 @@ class Glossary(BaseModel):
         """
         Check if a word corresponds to any glossary term.
 
-        Matching is case- and accent-insensitive, supports multi-word term tokens,
-        and tolerates common plural suffixes (-s, -es).
+        Matching is case- and accent-insensitive, supports multi-word term
+        tokens, and tolerates Spanish plurals by expanding each glossary term
+        into its plural form (vowel-final -> +s, consonant-final -> +es) rather
+        than stripping the word under test. Proper nouns already ending in 's'
+        (Atlas, Pericles) are not pluralized, so they don't match a genuinely
+        different word (atlases).
         """
         if not word:
             return False
@@ -350,26 +354,35 @@ class Glossary(BaseModel):
             nfd = unicodedata.normalize("NFD", s)
             return "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
 
-        def _word_variants(w: str) -> set[str]:
-            folded = _fold(w)
+        def _plural_variants(candidate: str) -> set[str]:
+            """Folded candidate plus its Spanish plural form(s).
+
+            Mirrors ``_term_pattern`` in ``utils/glossary_context.py``: generate
+            plurals by appending to the (curated) term rather than stripping the
+            word under test. Uses the Spanish rule (vowel-final -> +s,
+            consonant-final -> +es) and skips proper nouns already ending in 's'
+            (Atlas, Pericles) so they don't match a genuinely different word.
+            """
+            folded = _fold(candidate)
             variants = {folded}
-            if len(folded) > 3 and folded.endswith("es"):
-                variants.add(folded[:-2])
-            if len(folded) > 3 and folded.endswith("s"):
-                variants.add(folded[:-1])
+            if len(folded) <= 3:  # keep articles la/el/los/una exact
+                return variants
+            if folded.endswith("s") and candidate[:1].isupper():
+                return variants  # Atlas, Pericles: no plural suffix
+            variants.add(folded + ("s" if folded[-1] in "aeiou" else "es"))
             return variants
 
-        word_variants = _word_variants(word)
+        word_folded = _fold(word)
 
         for term in self.terms:
             candidates = [term.spanish, term.english, *term.alternatives]
             for candidate in candidates:
                 if not candidate:
                     continue
-                if _fold(candidate) in word_variants:
+                if word_folded in _plural_variants(candidate):
                     return True
                 for token in candidate.split():
-                    if _fold(token) in word_variants:
+                    if word_folded in _plural_variants(token):
                         return True
         return False
 
