@@ -5,11 +5,15 @@ import json
 import pytest
 
 from src.difficulty_scorer import (
+    AGGREGATION_P,
     WEIGHT_LENGTH,
     WEIGHT_RARITY,
+    WEIGHTS,
     WORDFREQ_AVAILABLE,
     DifficultyMetrics,
+    _aggregate_difficulty,
     build_glossary_skip,
+    dialogue_marker_counts,
     dialect_marker_count,
     score_book,
     score_text,
@@ -222,9 +226,24 @@ def test_dialect_score_in_unit_interval():
     assert 0.0 <= md.difficulty <= 1.0
 
 
-def test_additive_boost_leaves_nondialect_at_base():
-    # With zero dialect markers, difficulty must equal the pre-change
-    # length+rarity base — the additive boost only ever raises difficulty.
+def test_power_mean_p1_is_weighted_mean():
+    scores = {"length": 0.2, "rarity": 0.4, "dialect": 0.6, "dialogue": 0.8, "verse": 1.0}
+    expected = sum(WEIGHTS[k] * scores[k] for k in scores)
+    assert _aggregate_difficulty(scores, WEIGHTS, 1.0) == pytest.approx(expected)
+
+
+def test_power_mean_raises_difficulty_for_single_high_signal():
+    equal = {"length": 0.5, "rarity": 0.5, "dialect": 0.5, "dialogue": 0.5, "verse": 0.5}
+    skewed = {"length": 1.0, "rarity": 0.0, "dialect": 0.0, "dialogue": 0.0, "verse": 0.0}
+    d_equal = _aggregate_difficulty(equal, WEIGHTS, AGGREGATION_P)
+    d_skewed = _aggregate_difficulty(skewed, WEIGHTS, AGGREGATION_P)
+    d_skewed_p1 = _aggregate_difficulty(skewed, WEIGHTS, 1.0)
+    assert d_equal == pytest.approx(0.5)
+    assert d_skewed > d_skewed_p1
+
+
+def test_zero_hazard_scores_leave_other_signals_unchanged():
+    # With zero dialect/dialogue/verse markers, only length+rarity contribute.
     text = (
         "The narrator described the wide green valley and the slow river that "
         "wound between the hills under a pale and quiet morning sky."
@@ -232,16 +251,115 @@ def test_additive_boost_leaves_nondialect_at_base():
     m = score_text(text)
     assert m.dialect_marker_count == 0
     assert m.dialect_score == 0.0
-    base = (WEIGHT_LENGTH * m.length_score + WEIGHT_RARITY * m.rarity_score) / (
-        WEIGHT_LENGTH + WEIGHT_RARITY
-    )
-    assert m.difficulty == pytest.approx(base, abs=1e-4)
+    assert m.nested_quote_count == 0
+    assert m.dialogue_score == 0.0
+    assert m.verse_score == 0.0
+    scores = {
+        "length": m.length_score,
+        "rarity": m.rarity_score,
+        "dialect": 0.0,
+        "dialogue": 0.0,
+        "verse": 0.0,
+    }
+    expected = _aggregate_difficulty(scores, WEIGHTS, AGGREGATION_P)
+    assert m.difficulty == pytest.approx(expected, abs=1e-4)
 
 
 def test_dialect_metrics_roundtrip():
     m = score_text("He were a-comin' back, jes' like he reckoned, young'un.")
     assert DifficultyMetrics.from_dict(m.to_dict()) == m
     assert m.dialect_marker_count > 0
+
+
+# ---------------------------------------------------------------------------
+# Dialogue density (nested quotes)
+# ---------------------------------------------------------------------------
+
+
+def test_nested_quotes_raise_dialogue_score_more_than_plain_double_quotes():
+    plain = '"Hello there," she said. "How are you today?"'
+    nested = '"He said \'hello\' to her," she replied.'
+    mp = score_text(plain)
+    mn = score_text(nested)
+    assert mn.nested_quote_count > mp.nested_quote_count
+    assert mn.dialogue_density > mp.dialogue_density
+    assert mn.dialogue_score >= mp.dialogue_score
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "don't stop",
+        "John's book",
+        "o'clock",
+        "'twas the night",
+        "'em went ahead",
+    ],
+)
+def test_apostrophes_and_elisions_do_not_inflate_nested_quote_count(text):
+    _, nested = dialogue_marker_counts(text)
+    assert nested == 0
+
+
+def test_dialogue_score_in_unit_interval():
+    text = '"She cried \'help me\' loudly," he whispered.'
+    m = score_text(text)
+    assert 0.0 <= m.dialogue_score <= 1.0
+
+
+def test_double_quote_count_counts_openings_only():
+    # One opening straight quote before "hi"; the trailing quote is at end of
+    # string (no following char) so _is_double_quote_open rejects it, and a
+    # quote glued to the end of a preceding word is a closing quote, not an
+    # opening.
+    double_open, _ = dialogue_marker_counts('She said "hi" and left"')
+    assert double_open == 1
+
+
+def test_double_quote_count_counts_left_curly_not_right_curly():
+    # Left curly “ (U+201C) is an opening; right curly ” (U+201D) is a closing
+    # and must not be counted, so a balanced curly-quoted line scores exactly 1.
+    double_open, _ = dialogue_marker_counts("“Hello,” she said.")
+    assert double_open == 1
+
+
+def test_british_primary_dialogue_counts_as_nested():
+    # Documented calibration tradeoff: British-style single-quote primary
+    # dialogue is credited to the nested signal rather than the double-quote
+    # one. This pins that behavior so a future change can't silently drop it.
+    _, nested = dialogue_marker_counts("'Hello,' she said.")
+    assert nested == 1
+
+
+# ---------------------------------------------------------------------------
+# Verse density
+# ---------------------------------------------------------------------------
+
+
+def _verse_block() -> str:
+    lines = [
+        "The wind was a torrent of darkness among the gusty trees,",
+        "The moon was a ghostly galleon tossed upon cloudy seas,",
+        "The road was a ribbon of moonlight over the purple moor,",
+        "And the highwayman came riding—",
+        "Riding—riding—",
+        "The highwayman came riding, up to the old inn-door.",
+    ]
+    return "\n".join(lines)
+
+
+def test_verse_heavy_text_raises_verse_score_and_lowers_target():
+    prose = (
+        "The narrator walked along the quiet lane. "
+        "Birds sang in the trees overhead. "
+        "It was a pleasant afternoon."
+    )
+    verse = _verse_block()
+    mp = score_text(prose)
+    mv = score_text(verse)
+    assert mv.verse_line_count > 0
+    assert mv.verse_score > mp.verse_score
+    assert mv.suggested_target_size < mp.suggested_target_size
 
 
 # ---------------------------------------------------------------------------

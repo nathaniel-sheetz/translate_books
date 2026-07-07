@@ -2,10 +2,11 @@
 """
 CLI for translation-difficulty scoring of a project.
 
-Scores English source text on two deterministic signals — long-tail-weighted
-sentence length and lexical rarity (wordfreq, glossary terms excluded) — at the
-book and per-chapter level, and prints the suggested chunk target sizes. Results
-are cached to ``projects/<id>/difficulty.json``.
+Scores English source text on five deterministic signals — long-tail-weighted
+sentence length, lexical rarity (wordfreq, glossary terms excluded), dialect
+density, nested dialogue density, and verse/poetry density — at the book and
+per-chapter level, and prints the suggested chunk target sizes. Results are
+cached to ``projects/<id>/difficulty.json``.
 
 Usage:
     python scripts/score_difficulty.py understood-betsy
@@ -58,7 +59,9 @@ def main() -> None:
     b = manifest.book
     print(
         f"Book difficulty: {b.difficulty:.2f}  "
-        f"(length {b.length_score:.2f}, rarity {b.rarity_score:.2f})  "
+        f"(length {b.length_score:.2f}, rarity {b.rarity_score:.2f}, "
+        f"dialect {b.dialect_score:.2f}, dialogue {b.dialogue_score:.2f}, "
+        f"verse {b.verse_score:.2f})  "
         f"-> suggested target {b.suggested_target_size}w"
     )
     print(
@@ -69,8 +72,8 @@ def main() -> None:
     print()
 
     header = (
-        f"{'chapter':<18}{'diff':>6}{'len':>6}{'rar':>6}"
-        f"{'w/sent':>8}{'%rare':>7}{'target':>8}"
+        f"{'chapter':<18}{'diff':>6}{'len':>6}{'rar':>6}{'dial':>6}"
+        f"{'dlg':>6}{'vrs':>6}{'w/sent':>8}{'%rare':>7}{'target':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -78,7 +81,9 @@ def main() -> None:
         m = cd.metrics
         print(
             f"{cd.chapter_id:<18}{m.difficulty:>6.2f}{m.length_score:>6.2f}"
-            f"{m.rarity_score:>6.2f}{m.sentence_length_weighted:>8.1f}"
+            f"{m.rarity_score:>6.2f}{m.dialect_score:>6.2f}"
+            f"{m.dialogue_score:>6.2f}{m.verse_score:>6.2f}"
+            f"{m.sentence_length_weighted:>8.1f}"
             f"{m.rare_word_fraction * 100:>7.1f}{m.suggested_target_size:>8}"
         )
 

@@ -2,39 +2,34 @@
 Deterministic translation-difficulty scoring for English source text.
 
 Rates how hard a block of English text will be to translate into Spanish using
-three orthogonal, deterministic signals:
+five peer sub-scores, each mapped to ``[0, 1]`` via fixed calibration
+thresholds and combined with a **weighted power-mean** (Hölder mean):
 
 1. **Sentence length (long-tail-weighted)** — long sentences carry more
    subordinate clauses; EN→ES translation often reorders clauses / triggers the
-   subjunctive, so long sentences are where an LLM is most likely to drop or
-   mangle content. We use a word-weighted mean ``Σ(len²)/Σ(len)`` so the long
-   tail dominates, and also record the plain mean and p90 for transparency.
+   subjunctive. We use a word-weighted mean ``Σ(len²)/Σ(len)`` so the long
+   tail dominates.
 2. **Lexical rarity (wordfreq Zipf)** — rare / archaic / technical words are
-   where the LLM is least certain of the Spanish equivalent. We aggregate the
-   fraction of scored tokens whose Zipf frequency falls below ``RARE_ZIPF``.
-   **Glossary terms are excluded** so recurring proper names (Betsy,
-   Aunt Harriet) — which are handled deterministically by the glossary and would
-   otherwise look "rare" — don't inflate the stat.
+   where the LLM is least certain of the Spanish equivalent. **Glossary terms
+   are excluded** so recurring proper names don't inflate the stat.
 3. **Dialect density (eye-dialect markers)** — non-standard / dialect speech
-   (``jes'``, ``comin'``, ``a-thinkin'``, ``'twas``, ``reckon``) is a real
-   translation hazard that tracks neither sentence length nor vocabulary rarity:
-   the LLM must reorder and re-register dialogue-heavy passages. We count
-   deterministic eye-dialect markers (apostrophe-elisions outside the standard
-   contraction set, ``a-``prefixed progressives, and a small curated lexicon)
-   and normalize by word count. Unlike length+rarity this signal is an *additive
-   boost* — it can only ever raise difficulty, leaving non-dialect books exactly
-   unchanged.
+   (``jes'``, ``comin'``, ``a-thinkin'``, ``'twas``, ``reckon``) tracked via
+   deterministic eye-dialect markers normalized by word count.
+4. **Nested dialogue density** — opening double-quote speech plus nested
+   single-quote quotations inside speech (``"He said 'hello' to her."``) that
+   become ``« »`` in Spanish. Nested openings are weighted far more heavily
+   than plain double-quote dialogue.
+5. **Verse / poetry density** — short non-terminal line runs detected by the
+   existing ``detect_verse`` heuristic, normalized by non-blank line count.
 
-Sentence length and rarity are mapped to ``[0, 1]`` via fixed (absolute)
-calibration thresholds and combined into a ``base`` difficulty; the dialect
-sub-score is then added on top. The combined ``difficulty`` score maps to a
-suggested chunk ``target_size`` (harder ⇒ smaller). Scores are produced at the
-book and per-chapter level and cached to ``{project_dir}/difficulty.json``
-(re-run when the source mtime is newer or the calibration changes), mirroring
-``text_feature_detector``.
+The power-mean knob ``AGGREGATION_P`` (default 3) lets a single extreme hazard
+pull difficulty up without inflating its weight; ``p=1`` reduces to a plain
+weighted mean. The combined ``difficulty`` maps to a suggested chunk
+``target_size`` (harder ⇒ smaller). Scores are produced at the book and
+per-chapter level and cached to ``{project_dir}/difficulty.json`` (re-run when
+the source mtime is newer or the calibration changes).
 
-Phase 1: book + chapter suggestions only. The suggestions populate the existing
-dashboard target inputs; nothing is auto-applied. Per-paragraph weights
+Phase 1: book + chapter suggestions only. Per-paragraph weights
 (``para_weights`` fed to the chunker DP) are a deferred phase.
 
 The calibration constants below are deliberate, tunable starting points — run
@@ -54,9 +49,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.sentence_aligner import split_sentences
+from src.text_feature_detector import detect_verse
 from src.utils.file_io import load_glossary
 from src.utils.source_text import load_chapter_source_text, load_clean_source_text
-from src.utils.text_utils import count_words
+from src.utils.text_utils import count_words, extract_paragraphs, normalize_newlines
 
 logger = logging.getLogger(__name__)
 
@@ -84,40 +80,59 @@ RARE_ZIPF = 3.0
 RARITY_EASY = 0.015
 RARITY_HARD = 0.10
 
-# Relative weights of the two base sub-scores (length + rarity). Length is the
-# stronger signal (it tracks human difficulty ordering best); rarity is a
-# lighter tiebreaker that pushes rare-vocabulary books down further.
-WEIGHT_LENGTH = 0.85
-WEIGHT_RARITY = 0.15
+# Relative weights of the five peer sub-scores (sum to 1.0). Length is the
+# strongest signal; rarity is a lighter tiebreaker; dialect, dialogue, and verse
+# capture orthogonal translation hazards.
+WEIGHT_LENGTH = 0.35
+WEIGHT_RARITY = 0.10
+WEIGHT_DIALECT = 0.25
+WEIGHT_DIALOGUE = 0.15
+WEIGHT_VERSE = 0.15
 
-# Dialect-density sub-score: fraction of word-tokens that are eye-dialect
-# markers. At or below DIALECT_EASY scores 0.0; at or above DIALECT_HARD scores
-# 1.0; linear between. Calibrated on stormy-misty-s-foal, whose dialect chapters
-# run ~2–5% markers: 0.035 spreads that band so the densest chapters (ch7/11/23,
-# ~4–5%) separate from the merely heavy ones (ch3, ~2.2%) instead of all pinning
-# at 1.0 — keeping ch3 in the ~1300–1400 band while the worst reach the floor.
-DIALECT_EASY = 0.0
-DIALECT_HARD = 0.035
+# Power-mean exponent for aggregating sub-scores. p=1 is a plain weighted mean;
+# p>1 lets a single extreme hazard pull difficulty up without inflating weight.
+AGGREGATION_P = 3.0
 
-# How much a fully dialect-saturated block adds on top of the length+rarity
-# base. Applied additively (see score_text), so dialect can only raise
-# difficulty — non-dialect text (dialect_score == 0) is byte-for-byte unchanged.
-# Pulled strongly (0.9) per the calibration goal that dialect-heavy chapters
-# push well below 1400w; pure-dialect max (no length/rarity signal) yields
-# difficulty 0.9 → ~1280w, reaching TARGET_HARD (1200w) only when combined
-# with a non-trivial length+rarity base.
-WEIGHT_DIALECT = 0.9
+# Dialogue-density sub-score: weighted count of opening double-quotes and nested
+# single-quotes per word. At or below DIALOGUE_EASY scores 0.0; at or above
+# DIALOGUE_HARD scores 1.0; linear between.
+DIALOGUE_EASY = 0.01
+DIALOGUE_HARD = 0.08
+DQ_COEF = 1.0
+NESTED_COEF = 6.0
+
+# Verse-density sub-score: fraction of non-blank lines that look like verse
+# (via detect_verse). At or below VERSE_EASY scores 0.0; at or above VERSE_HARD
+# scores 1.0; linear between.
+VERSE_EASY = 0.0
+VERSE_HARD = 0.25
 
 # difficulty → suggested chunk target_size (words). difficulty 0.0 yields
 # TARGET_EASY (bigger chunks), 1.0 yields TARGET_HARD (smaller chunks).
-# Calibrated so an easy book lands on the standard 2000-word default and the
-# hardest (dialect-saturated) text falls toward ~1200.
-TARGET_EASY = 2000
-TARGET_HARD = 1200
+# Widened to 2200→900 (from the old 2000→1200 range) so the scale still spreads
+# once all five signals participate as peers rather than additive boosts.
+TARGET_EASY = 2200
+TARGET_HARD = 900
 
 # Token pattern for rarity: alphabetic runs with optional internal apostrophe
 # (don't, O'Hara). Lowercased before lookup. Digits/punctuation are ignored.
 _WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+
+# Dialect-density sub-score: fraction of word-tokens that are eye-dialect
+# markers. At or below DIALECT_EASY scores 0.0; at or above DIALECT_HARD scores
+# 1.0; linear between. Calibrated on stormy-misty-s-foal, whose dialect chapters
+# run ~2–5% markers.
+DIALECT_EASY = 0.0
+DIALECT_HARD = 0.035
+
+# Normalized weight vector for the five peer sub-scores (entries sum to 1.0).
+WEIGHTS = {
+    "length": WEIGHT_LENGTH,
+    "rarity": WEIGHT_RARITY,
+    "dialect": WEIGHT_DIALECT,
+    "dialogue": WEIGHT_DIALOGUE,
+    "verse": WEIGHT_VERSE,
+}
 
 # ---------------------------------------------------------------------------
 # Dialect detection (eye-dialect markers)
@@ -287,6 +302,73 @@ def dialect_marker_count(text: str) -> int:
     return count
 
 
+# ---------------------------------------------------------------------------
+# Dialogue detection (nested-quote openings)
+# ---------------------------------------------------------------------------
+
+# Opening double-quote: straight " (U+0022) or left curly " (U+201C).
+_DOUBLE_QUOTE_RE = re.compile(r'["\u201c]')
+
+# Opening nested single-quote inside speech: straight ' (U+0027) or left curly '
+# (U+2018), followed by a word character.
+_NESTED_OPEN_RE = re.compile(r"['\u2018](?=\w)")
+
+# Token after a nested opening quote (for elision filtering).
+_NESTED_TOKEN_RE = re.compile(r"['\u2018][A-Za-z]+")
+
+_DOUBLE_OPEN_BEFORE = frozenset(" \t\n\r(-\u2014\u2013")
+
+
+def _is_double_quote_open(text: str, pos: int) -> bool:
+    """True when ``text[pos]`` is an opening double-quote."""
+    if pos > 0 and text[pos - 1] not in _DOUBLE_OPEN_BEFORE:
+        return False
+    nxt = pos + 1
+    return nxt < len(text) and not text[nxt].isspace()
+
+
+def _is_nested_quote_open(text: str, pos: int) -> bool:
+    """True when ``text[pos]`` is an opening nested single-quote.
+
+    Calibration tradeoffs for the American children's-book corpus this targets,
+    where nested single-quotes are almost always quotations *inside* double-quote
+    speech:
+      * British-style primary dialogue (``'Hello,' she said.``) is counted as a
+        nested opening \u2014 acceptable since such texts still carry real ``\u00ab \u00bb``
+        translation work; it just credits it to this signal rather than the
+        double-quote one.
+      * Only U+0027 and left-curly U+2018 are treated as openings; a source that
+        uses right-curly U+2019 as an *opening* single-quote is under-counted.
+      * A ``'89``-style year elision (digit after the apostrophe) slips past the
+        ``[A-Za-z]+`` elision filter in :func:`dialogue_marker_counts` and adds a
+        spurious count \u2014 rare enough in this corpus to ignore.
+    """
+    if pos == 0:
+        return True
+    prev = text[pos - 1]
+    return prev in _DOUBLE_OPEN_BEFORE or prev in '"\u201c\u201d'
+
+
+def dialogue_marker_counts(text: str) -> tuple[int, int]:
+    """Count opening double-quotes and nested single-quote openings.
+
+    Returns ``(double_open, nested_open)``. Nested openings skip tokens in
+    :data:`_LEADING_ELISIONS` so they don't overlap the dialect signal.
+    """
+    double_open = sum(
+        1 for m in _DOUBLE_QUOTE_RE.finditer(text) if _is_double_quote_open(text, m.start())
+    )
+    nested_open = 0
+    for m in _NESTED_OPEN_RE.finditer(text):
+        if not _is_nested_quote_open(text, m.start()):
+            continue
+        token_m = _NESTED_TOKEN_RE.match(text, m.start())
+        if token_m and _norm_apos(token_m.group().lower()) in _LEADING_ELISIONS:
+            continue
+        nested_open += 1
+    return double_open, nested_open
+
+
 def calibration() -> dict:
     """Return the calibration constants used to produce a score.
 
@@ -301,9 +383,18 @@ def calibration() -> dict:
         "rarity_hard": RARITY_HARD,
         "dialect_easy": DIALECT_EASY,
         "dialect_hard": DIALECT_HARD,
+        "dialogue_easy": DIALOGUE_EASY,
+        "dialogue_hard": DIALOGUE_HARD,
+        "dq_coef": DQ_COEF,
+        "nested_coef": NESTED_COEF,
+        "verse_easy": VERSE_EASY,
+        "verse_hard": VERSE_HARD,
         "weight_length": WEIGHT_LENGTH,
         "weight_rarity": WEIGHT_RARITY,
         "weight_dialect": WEIGHT_DIALECT,
+        "weight_dialogue": WEIGHT_DIALOGUE,
+        "weight_verse": WEIGHT_VERSE,
+        "aggregation_p": AGGREGATION_P,
         "target_easy": TARGET_EASY,
         "target_hard": TARGET_HARD,
         "wordfreq_available": WORDFREQ_AVAILABLE,
@@ -328,9 +419,16 @@ class DifficultyMetrics:
     rare_word_fraction: float = 0.0
     dialect_marker_count: int = 0
     dialect_density: float = 0.0
+    double_quote_count: int = 0
+    nested_quote_count: int = 0
+    dialogue_density: float = 0.0
+    verse_line_count: int = 0
+    verse_density: float = 0.0
     length_score: float = 0.0
     rarity_score: float = 0.0
     dialect_score: float = 0.0
+    dialogue_score: float = 0.0
+    verse_score: float = 0.0
     difficulty: float = 0.0
     suggested_target_size: int = TARGET_EASY
 
@@ -407,6 +505,18 @@ def _linear_score(value: float, easy: float, hard: float) -> float:
     if hard <= easy:
         return 0.0
     return _clamp01((value - easy) / (hard - easy))
+
+
+def _aggregate_difficulty(
+    scores: dict[str, float],
+    weights: dict[str, float],
+    p: float,
+) -> float:
+    """Weighted power-mean (Hölder mean) of sub-scores in ``[0, 1]``."""
+    if abs(p - 1.0) < 1e-9:
+        return sum(weights[k] * scores[k] for k in scores)
+    total = sum(weights[k] * (scores[k] ** p) for k in scores)
+    return total ** (1.0 / p)
 
 
 def _zipf(word: str) -> float:
@@ -509,17 +619,36 @@ def score_text(text: str, glossary_skip: Optional[set] = None) -> DifficultyMetr
     marker_count = dialect_marker_count(text)
     dialect_density = marker_count / max(word_count, 1)
 
+    double_open, nested_open = dialogue_marker_counts(text)
+    dialogue_density = (
+        DQ_COEF * double_open + NESTED_COEF * nested_open
+    ) / max(word_count, 1)
+
+    # detect_verse ignores its first arg and re-derives lines from the full
+    # text, so extract_paragraphs here is nominal — kept to match the detector's
+    # signature in case it starts consuming paragraphs. non_blank_lines is
+    # computed independently for the density denominator.
+    paragraphs = extract_paragraphs(text)
+    non_blank_lines = sum(
+        1 for line in normalize_newlines(text).split("\n") if line.strip()
+    )
+    verse_result = detect_verse(paragraphs, text)
+    verse_density = verse_result.count / max(non_blank_lines, 1)
+
     length_score = _linear_score(weighted, LENGTH_EASY, LENGTH_HARD)
     rarity_score = _linear_score(rare_fraction, RARITY_EASY, RARITY_HARD)
     dialect_score = _linear_score(dialect_density, DIALECT_EASY, DIALECT_HARD)
+    dialogue_score = _linear_score(dialogue_density, DIALOGUE_EASY, DIALOGUE_HARD)
+    verse_score = _linear_score(verse_density, VERSE_EASY, VERSE_HARD)
 
-    # Length+rarity form the base; dialect is an additive boost so non-dialect
-    # text (dialect_score == 0) yields difficulty == base, byte-for-byte
-    # unchanged, and dialect can only ever raise difficulty.
-    base = (WEIGHT_LENGTH * length_score + WEIGHT_RARITY * rarity_score) / (
-        WEIGHT_LENGTH + WEIGHT_RARITY
-    )
-    difficulty = _clamp01(base + WEIGHT_DIALECT * dialect_score)
+    scores = {
+        "length": length_score,
+        "rarity": rarity_score,
+        "dialect": dialect_score,
+        "dialogue": dialogue_score,
+        "verse": verse_score,
+    }
+    difficulty = _clamp01(_aggregate_difficulty(scores, WEIGHTS, AGGREGATION_P))
 
     return DifficultyMetrics(
         sentence_count=len(counts),
@@ -531,9 +660,16 @@ def score_text(text: str, glossary_skip: Optional[set] = None) -> DifficultyMetr
         rare_word_fraction=round(rare_fraction, 4),
         dialect_marker_count=marker_count,
         dialect_density=round(dialect_density, 4),
+        double_quote_count=double_open,
+        nested_quote_count=nested_open,
+        dialogue_density=round(dialogue_density, 4),
+        verse_line_count=verse_result.count,
+        verse_density=round(verse_density, 4),
         length_score=round(length_score, 4),
         rarity_score=round(rarity_score, 4),
         dialect_score=round(dialect_score, 4),
+        dialogue_score=round(dialogue_score, 4),
+        verse_score=round(verse_score, 4),
         difficulty=round(difficulty, 4),
         suggested_target_size=suggest_target_size(difficulty),
     )
