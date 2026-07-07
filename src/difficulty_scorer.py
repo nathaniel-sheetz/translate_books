@@ -85,13 +85,13 @@ RARITY_HARD = 0.10
 # capture orthogonal translation hazards.
 WEIGHT_LENGTH = 0.35
 WEIGHT_RARITY = 0.10
-WEIGHT_DIALECT = 0.20
+WEIGHT_DIALECT = 0.25
 WEIGHT_DIALOGUE = 0.15
-WEIGHT_VERSE = 0.20
+WEIGHT_VERSE = 0.15
 
 # Power-mean exponent for aggregating sub-scores. p=1 is a plain weighted mean;
 # p>1 lets a single extreme hazard pull difficulty up without inflating weight.
-AGGREGATION_P = 2.0
+AGGREGATION_P = 3.0
 
 # Dialogue-density sub-score: weighted count of opening double-quotes and nested
 # single-quotes per word. At or below DIALOGUE_EASY scores 0.0; at or above
@@ -111,7 +111,7 @@ VERSE_HARD = 0.25
 # TARGET_EASY (bigger chunks), 1.0 yields TARGET_HARD (smaller chunks).
 # Widened from 2000→1200 so the scale still spreads once all five signals
 # participate as peers rather than additive boosts.
-TARGET_EASY = 2400
+TARGET_EASY = 2200
 TARGET_HARD = 900
 
 # Token pattern for rarity: alphabetic runs with optional internal apostrophe
