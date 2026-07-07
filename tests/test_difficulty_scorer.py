@@ -307,6 +307,30 @@ def test_dialogue_score_in_unit_interval():
     assert 0.0 <= m.dialogue_score <= 1.0
 
 
+def test_double_quote_count_counts_openings_only():
+    # One opening straight quote before "hi"; the trailing quote is at end of
+    # string (no following char) so _is_double_quote_open rejects it, and a
+    # quote glued to the end of a preceding word is a closing quote, not an
+    # opening.
+    double_open, _ = dialogue_marker_counts('She said "hi" and left"')
+    assert double_open == 1
+
+
+def test_double_quote_count_counts_left_curly_not_right_curly():
+    # Left curly “ (U+201C) is an opening; right curly ” (U+201D) is a closing
+    # and must not be counted, so a balanced curly-quoted line scores exactly 1.
+    double_open, _ = dialogue_marker_counts("“Hello,” she said.")
+    assert double_open == 1
+
+
+def test_british_primary_dialogue_counts_as_nested():
+    # Documented calibration tradeoff: British-style single-quote primary
+    # dialogue is credited to the nested signal rather than the double-quote
+    # one. This pins that behavior so a future change can't silently drop it.
+    _, nested = dialogue_marker_counts("'Hello,' she said.")
+    assert nested == 1
+
+
 # ---------------------------------------------------------------------------
 # Verse density
 # ---------------------------------------------------------------------------
