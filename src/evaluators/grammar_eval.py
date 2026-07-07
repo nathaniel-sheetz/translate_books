@@ -217,7 +217,6 @@ class GrammarEvaluator(BaseEvaluator):
 
         Args:
             matches: Group of LanguageTool Match objects
-            text: Full text that was checked (for position aggregation)
 
         Returns:
             Issue instance
@@ -256,44 +255,6 @@ class GrammarEvaluator(BaseEvaluator):
             suggestion=suggestion,
         )
 
-    def _convert_match_to_issue(self, match) -> Issue:
-        """
-        Convert LanguageTool Match to our Issue format.
-
-        Args:
-            match: LanguageTool Match object
-
-        Returns:
-            Issue instance
-        """
-        # Determine severity
-        severity = self._determine_severity(match)
-
-        # Build message
-        message = match.message
-        if hasattr(match, 'context') and match.context:
-            # Include context if available
-            message = f"{message} Context: '{match.context}'"
-
-        # Build suggestion from replacements
-        suggestion = None
-        if match.replacements:
-            # Take top 3 suggestions
-            suggestions_list = match.replacements[:3]
-            suggestion = f"Consider: {', '.join(suggestions_list)}"
-
-        # Build location
-        location = f"char {match.offset}"
-        if match.error_length:
-            location += f"-{match.offset + match.error_length}"
-
-        return self.create_issue(
-            severity=severity,
-            message=message,
-            location=location,
-            suggestion=suggestion
-        )
-
     def _determine_severity(self, match) -> IssueLevel:
         """
         Determine severity level for a LanguageTool match.
@@ -319,6 +280,7 @@ class GrammarEvaluator(BaseEvaluator):
         Args:
             match: LanguageTool Match object
             context: Evaluation context
+            text: Full checked text (offsets are relative to this string)
 
         Returns:
             True if match should be ignored, False otherwise

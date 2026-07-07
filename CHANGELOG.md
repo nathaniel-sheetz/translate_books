@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.5.0] - 2026-07-07
+
+### Changed
+- **Grammar evaluator no longer double-reports spelling** — `_build_context` now defaults `skip_spelling=True`, so spelling is owned solely by the dictionary evaluator (deduped, glossary-aware) while the grammar evaluator handles grammar, punctuation, and style. Callers can re-enable LanguageTool `TYPOS` by passing `skip_spelling=False`.
+- **Glossary matching is now case- and accent-insensitive** — new `Glossary.matches_word()` folds accents/case, splits multi-word term tokens, and tolerates common `-s`/`-es` plural suffixes, so glossary terms (and their plural/accented variants) stop being flagged as misspellings by the dictionary and grammar evaluators.
+
+### Fixed
+- **Fewer false-positive spelling findings on glossary terms** — words matching a glossary term are excluded from spelling checks across both evaluators.
+
+### Removed
+- **Dead `GrammarEvaluator._convert_match_to_issue`** — superseded by the deduplicating `_convert_match_group_to_issue`; removed along with two stale/undocumented docstrings.
+
 ## [0.27.4.0] - 2026-07-06
 
 ### Changed
