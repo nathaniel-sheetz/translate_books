@@ -6,6 +6,7 @@ English words or unknown words that may be misspellings.
 """
 
 import re
+import unicodedata
 from typing import Any, Optional
 
 try:
@@ -18,6 +19,24 @@ except ImportError:
 from ..models import Chunk, EvalResult, Issue, IssueLevel, Glossary
 from ..utils.text_utils import strip_image_placeholders
 from .base import BaseEvaluator
+
+
+def _fold_accents_preserving_enye(s: str) -> str:
+    """Fold Spanish vowel accents/diaeresis while preserving ñ.
+
+    á→a, é→e, í→i, ó→o, ú→u, ü→u — but ñ/Ñ are kept intact. ñ is a distinct
+    Spanish letter, not an accented n; stripping its tilde (ñ→n) would let a
+    genuine misspelling validate against a different real word (e.g. "moño" →
+    "mono"). Decomposes per character so ñ can be passed through untouched.
+    """
+    out = []
+    for ch in s:
+        if ch in "ñÑ":
+            out.append(ch)
+            continue
+        nfd = unicodedata.normalize("NFD", ch)
+        out.append("".join(c for c in nfd if unicodedata.category(c) != "Mn"))
+    return "".join(out)
 
 
 class DictionaryEvaluator(BaseEvaluator):
@@ -279,9 +298,6 @@ class DictionaryEvaluator(BaseEvaluator):
                 or self.spanish_dict_mx.check(candidate)
             )
 
-        def _normalize_accents(s: str) -> str:
-            return s.translate(str.maketrans("áéíóúü", "aeiouu"))
-
         # Pass A — Diminutive suffix stripping (longest first)
         diminutive_suffixes = [
             "citos", "citas", "cito", "cita",
@@ -306,6 +322,9 @@ class DictionaryEvaluator(BaseEvaluator):
                 for candidate in candidates:
                     if _is_valid(candidate):
                         return True
+                    folded = _fold_accents_preserving_enye(candidate)
+                    if folded != candidate and _is_valid(folded):
+                        return True
 
         # Pass B — Verb clitic stripping (longest first)
         clitic_suffixes = [
@@ -318,7 +337,7 @@ class DictionaryEvaluator(BaseEvaluator):
                 stem = word_lower[: -len(suffix)]
                 if len(stem) < 3:
                     continue
-                for candidate in (stem, _normalize_accents(stem)):
+                for candidate in (stem, _fold_accents_preserving_enye(stem)):
                     if _is_valid(candidate):
                         return True
 
@@ -360,18 +379,7 @@ class DictionaryEvaluator(BaseEvaluator):
         Returns:
             True if word matches a glossary term
         """
-        word_lower = word.lower()
-        for term in glossary.terms:
-            # Exact match on the full term (single-word terms, or exact multi-word match)
-            if term.spanish.lower() == word_lower or term.english.lower() == word_lower:
-                return True
-            # Token match: word is one component of a multi-word term
-            # e.g. "Paul" matches when "Uncle Paul" is in the glossary
-            spanish_tokens = {t.lower() for t in term.spanish.split()}
-            english_tokens = {t.lower() for t in term.english.split()}
-            if word_lower in spanish_tokens or word_lower in english_tokens:
-                return True
-        return False
+        return glossary.matches_word(word)
 
     def _get_suggestions(self, word: str) -> list[str]:
         """

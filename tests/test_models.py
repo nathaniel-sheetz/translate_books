@@ -119,6 +119,87 @@ class TestGlossaryFindTermBySpanish:
         assert result.spanish == "Darcy"
 
 
+class TestGlossaryMatchesWord:
+    """Tests for Glossary.matches_word() tolerant matching."""
+
+    def test_plural_spanish_term(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="spider", spanish="épeira", type=GlossaryTermType.OTHER),
+        ])
+        assert glossary.matches_word("épeiras")
+        assert glossary.matches_word("epeiras")
+
+    def test_multi_word_token(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(
+                english="Mother Ambroisine",
+                spanish="la madre Ambroisine",
+                type=GlossaryTermType.CHARACTER,
+            ),
+        ])
+        assert glossary.matches_word("Ambroisine")
+        assert glossary.matches_word("ambroisine")
+
+    def test_accent_insensitive(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="spider", spanish="épeira", type=GlossaryTermType.OTHER),
+        ])
+        assert glossary.matches_word("epeira")
+
+    def test_alternative_translation(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(
+                english="magic",
+                spanish="magia",
+                alternatives=["hechicería"],
+                type=GlossaryTermType.CONCEPT,
+            ),
+        ])
+        assert glossary.matches_word("hechicería")
+        assert glossary.matches_word("HECHICERIA")
+
+    def test_no_match_for_unrelated_word(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="magic", spanish="magia", type=GlossaryTermType.CONCEPT),
+        ])
+        assert not glossary.matches_word("abracadabra")
+
+    def test_proper_noun_ending_in_s_not_pluralized(self):
+        """Title-case terms ending in 's' must not match a different word.
+
+        A glossary "Atlas" should still match itself but must not suppress the
+        genuinely different word "atlases".
+        """
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="Atlas", spanish="Atlas", type=GlossaryTermType.CHARACTER),
+        ])
+        assert glossary.matches_word("Atlas")
+        assert glossary.matches_word("atlas")
+        assert not glossary.matches_word("atlases")
+
+    def test_short_token_not_pluralized_into_article(self):
+        """Pluralizing a short multi-word token must not match a bare article."""
+        glossary = Glossary(terms=[
+            GlossaryTerm(
+                english="a witch",
+                spanish="una bruja",
+                type=GlossaryTermType.CHARACTER,
+            ),
+        ])
+        assert not glossary.matches_word("unas")
+        assert not glossary.matches_word("las")
+        # The meaningful token still matches its plural.
+        assert glossary.matches_word("brujas")
+
+    def test_consonant_final_plural(self):
+        """Consonant-final Spanish terms pluralize with -es."""
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="paper", spanish="papel", type=GlossaryTermType.OTHER),
+        ])
+        assert glossary.matches_word("papel")
+        assert glossary.matches_word("papeles")
+
+
 class TestGlossaryFindTerm:
     """Tests for original Glossary.find_term() method to ensure it still works."""
 

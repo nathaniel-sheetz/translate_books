@@ -6,6 +6,7 @@ used throughout the translation pipeline.
 """
 
 import math
+import unicodedata
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -334,6 +335,59 @@ class Glossary(BaseModel):
                 if alternative.lower() == spanish_lower:
                     return term
         return None
+
+    def matches_word(self, word: str) -> bool:
+        """
+        Check if a word corresponds to any glossary term.
+
+        Matching is case- and accent-insensitive, supports multi-word term
+        tokens, and tolerates Spanish plurals by expanding each glossary term
+        into its plural form (vowel-final -> +s, consonant-final -> +es) rather
+        than stripping the word under test. Proper nouns already ending in 's'
+        (Atlas, Pericles) are not pluralized, so they don't match a genuinely
+        different word (atlases).
+        """
+        if not word:
+            return False
+
+        def _fold(s: str) -> str:
+            nfd = unicodedata.normalize("NFD", s)
+            return "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
+
+        def _plural_variants(candidate: str) -> set[str]:
+            """Folded candidate plus its Spanish plural form(s).
+
+            Shares the core strategy of ``_term_pattern`` in
+            ``utils/glossary_context.py``: generate plurals by appending to the
+            (curated) term rather than stripping the word under test, using the
+            Spanish rule (vowel-final -> +s, consonant-final -> +es) and skipping
+            proper nouns already ending in 's' (Atlas, Pericles) so they don't
+            match a genuinely different word. It intentionally diverges in that
+            the caller also applies this per-token to multi-word terms, and here
+            a ``len(folded) <= 3`` guard keeps short terms/articles exact.
+            """
+            folded = _fold(candidate)
+            variants = {folded}
+            if len(folded) <= 3:  # keep articles la/el/los/una exact
+                return variants
+            if folded.endswith("s") and candidate[:1].isupper():
+                return variants  # Atlas, Pericles: no plural suffix
+            variants.add(folded + ("s" if folded[-1] in "aeiou" else "es"))
+            return variants
+
+        word_folded = _fold(word)
+
+        for term in self.terms:
+            candidates = [term.spanish, term.english, *term.alternatives]
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                if word_folded in _plural_variants(candidate):
+                    return True
+                for token in candidate.split():
+                    if word_folded in _plural_variants(token):
+                        return True
+        return False
 
     def get_translation(self, english: str) -> Optional[str]:
         """Get the Spanish translation for an English term."""

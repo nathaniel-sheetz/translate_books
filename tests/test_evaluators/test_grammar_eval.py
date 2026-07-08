@@ -8,8 +8,9 @@ issues using LanguageTool, with proper glossary integration and filtering.
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
-from src.models import Chunk, ChunkMetadata, Glossary, GlossaryTerm, GlossaryTermType, IssueLevel
+from src.models import Chunk, ChunkMetadata, Glossary, GlossaryTerm, GlossaryTermType, IssueLevel, EvaluationConfig
 from src.evaluators.grammar_eval import GrammarEvaluator, LANGUAGETOOL_AVAILABLE
+from src.evaluators import _build_context
 
 # Skip tests that use patching if LanguageTool not available
 # (patching fails when module doesn't exist)
@@ -42,7 +43,13 @@ def make_mock_match(message, category, rule_id, offset=0, length=5, replacements
     match.error_length = length
     match.replacements = replacements or []
     match.context = context
-    match.matched_text = context
+    # language_tool_python 3.3: matched_text is a slice of context at offset_in_context
+    match.offset_in_context = offset
+    if context and length:
+        end = min(offset + length, len(context))
+        match.matched_text = context[offset:end]
+    else:
+        match.matched_text = ""
     return match
 
 
@@ -192,14 +199,17 @@ class TestGlossaryIntegration:
         pytest.importorskip("language_tool_python")
 
         # Create match for "Darcy" as spelling error
+        text = "El Sr. Darcy era rico."
+        darcy_offset = text.index("Darcy")
         mock_tool = Mock()
         mock_match = make_mock_match(
             message="Unknown word: Darcy",
             category="TYPOS",
             rule_id="MORFOLOGIK_RULE_ES",
-            context="Darcy"
+            offset=darcy_offset,
+            length=5,
+            context=text,
         )
-        mock_match.matched_text = "Darcy"
         mock_tool.check.return_value = [mock_match]
         mock_lt_class.return_value = mock_tool
 
@@ -218,7 +228,7 @@ class TestGlossaryIntegration:
             GlossaryTerm(english="Darcy", spanish="Darcy", type=GlossaryTermType.CHARACTER)
         ])
 
-        result = evaluator.evaluate(chunk, {"glossary": glossary})
+        result = evaluator.evaluate(chunk, {"glossary": glossary, "skip_spelling": False})
 
         # Should be ignored because Darcy is in glossary
         assert result.passed
@@ -230,14 +240,17 @@ class TestGlossaryIntegration:
         pytest.importorskip("language_tool_python")
 
         # Create match for "magia" as spelling error
+        text = "La magia era poderosa."
+        magia_offset = text.index("magia")
         mock_tool = Mock()
         mock_match = make_mock_match(
             message="Unknown word: magia",
             category="TYPOS",
             rule_id="MORFOLOGIK_RULE_ES",
-            context="magia"
+            offset=magia_offset,
+            length=5,
+            context=text,
         )
-        mock_match.matched_text = "magia"
         mock_tool.check.return_value = [mock_match]
         mock_lt_class.return_value = mock_tool
 
@@ -256,7 +269,7 @@ class TestGlossaryIntegration:
             GlossaryTerm(english="magic", spanish="magia", type=GlossaryTermType.CONCEPT)
         ])
 
-        result = evaluator.evaluate(chunk, {"glossary": glossary})
+        result = evaluator.evaluate(chunk, {"glossary": glossary, "skip_spelling": False})
 
         # Should be ignored because "magia" is the Spanish translation in glossary
         assert result.passed
@@ -292,7 +305,7 @@ class TestGlossaryIntegration:
             GlossaryTerm(english="Darcy", spanish="Darcy", type=GlossaryTermType.CHARACTER)
         ])
 
-        result = evaluator.evaluate(chunk, {"glossary": glossary})
+        result = evaluator.evaluate(chunk, {"glossary": glossary, "skip_spelling": False})
 
         # Grammar error should still be detected
         assert not result.passed
@@ -339,9 +352,11 @@ class TestCategoryFiltering:
         pytest.importorskip("language_tool_python")
 
         mock_tool = Mock()
-        # Create both grammar and spelling errors
+        # Create both grammar and spelling errors. The spelling error uses the
+        # real unknown-word spell rule id (MORFOLOGIK_RULE_ES) — skip_spelling
+        # suppresses that rule, not the whole TYPOS category.
         grammar_match = make_mock_match("Grammar error", "GRAMMAR", "GRAMMAR_RULE")
-        typos_match = make_mock_match("Spelling error", "TYPOS", "MORFOLOGIK")
+        typos_match = make_mock_match("Spelling error", "TYPOS", "MORFOLOGIK_RULE_ES")
         mock_tool.check.return_value = [grammar_match, typos_match]
         mock_lt_class.return_value = mock_tool
 
@@ -357,9 +372,73 @@ class TestCategoryFiltering:
 
         result = evaluator.evaluate(chunk, {"skip_spelling": True})
 
-        # Only grammar error should be reported
+        # Only grammar error should be reported (spell rule suppressed)
         assert len(result.issues) == 1
         assert result.issues[0].severity == IssueLevel.ERROR
+        assert "Grammar error" in result.issues[0].message
+
+    @patch('language_tool_python.LanguageTool')
+    def test_skip_spelling_keeps_diacritic_real_word_rules(self, mock_lt_class):
+        """skip_spelling keeps accent/real-word findings (tu/tú, más/mas).
+
+        LanguageTool files these under the DIACRITICS category (rule ids like
+        TU_TILDE), which the dictionary evaluator cannot catch — both forms are
+        valid words — so grammar must keep reporting them.
+        """
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        spelling = make_mock_match("Spelling error", "TYPOS", "MORFOLOGIK_RULE_ES")
+        tilde = make_mock_match(
+            "El pronombre personal «tú» lleva tilde.", "DIACRITICS", "TU_TILDE"
+        )
+        mock_tool.check.return_value = [spelling, tilde]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text="Tu eres mi amigo.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata()
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": True})
+
+        # Unknown-word spelling dropped; diacritic real-word finding kept.
+        assert len(result.issues) == 1
+        assert "tilde" in result.issues[0].message
+
+    @patch('language_tool_python.LanguageTool')
+    def test_skip_spelling_is_rule_scoped_not_category_scoped(self, mock_lt_class):
+        """A real-word rule filed under TYPOS (not the MORFOLOGIK spell checker)
+        survives skip_spelling — suppression keys off the rule id, not the whole
+        TYPOS category."""
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        spelling = make_mock_match("Unknown word", "TYPOS", "MORFOLOGIK_RULE_ES")
+        confusion = make_mock_match("Confusable word", "TYPOS", "ES_CONFUSION_RULE")
+        mock_tool.check.return_value = [spelling, confusion]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text="Texto de prueba.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata()
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": True})
+
+        # MORFOLOGIK dropped; the non-spell TYPOS rule survives.
+        assert len(result.issues) == 1
+        assert "Confusable" in result.issues[0].message
 
 
 @skip_if_no_lt
@@ -392,6 +471,41 @@ class TestRuleFiltering:
         # Only match2 should be reported
         assert len(result.issues) == 1
         assert "Error 2" in result.issues[0].message
+
+
+@skip_if_no_lt
+class TestSkipSpellingRealWord:
+    """Real LanguageTool: skip_spelling keeps accent/real-word errors while
+    deduping plain misspellings (owned by the dictionary evaluator)."""
+
+    def test_diacritic_kept_and_spelling_dropped(self):
+        pytest.importorskip("language_tool_python")
+
+        evaluator = GrammarEvaluator()
+        # "Tu" should carry an accent ("Tú" = you); "kasa" is a plain misspelling.
+        chunk = Chunk(
+            id="test",
+            source_text="You are my friend and the house is pretty.",
+            translated_text="Tu eres mi amigo y la kasa es bonita.",
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        kept = evaluator.evaluate(chunk, {"skip_spelling": True})
+        full = evaluator.evaluate(chunk, {"skip_spelling": False})
+
+        def has_tilde(res):
+            return any("tilde" in iss.message.lower() for iss in res.issues)
+
+        def has_spelling(res):
+            return any("ortogr" in iss.message.lower() for iss in res.issues)
+
+        # Accent/real-word error surfaces regardless of skip_spelling.
+        assert has_tilde(kept)
+        # Plain misspelling is deduped away by skip_spelling, present without it.
+        assert not has_spelling(kept)
+        assert has_spelling(full)
 
 
 @skip_if_no_lt
@@ -774,3 +888,167 @@ class TestImagePlaceholderFiltering:
         # No placeholders, so no suppression — error is reported as normal
         assert len(result.issues) == 1
         assert result.issues[0].severity == IssueLevel.ERROR
+
+
+class TestBuildContextDefaults:
+    """Tests for evaluator context defaults."""
+
+    def test_skip_spelling_default_true(self):
+        """Spelling checks are disabled by default; dictionary evaluator owns spelling."""
+        context = _build_context(EvaluationConfig())
+        assert context["skip_spelling"] is True
+
+    def test_skip_spelling_overridable(self):
+        """Callers can re-enable spelling by setting skip_spelling explicitly."""
+        context = _build_context(EvaluationConfig())
+        context["skip_spelling"] = False
+        assert context["skip_spelling"] is False
+
+
+@skip_if_no_lt
+class TestGrammarDedup:
+    """Tests for deduplication of repeated grammar findings."""
+
+    @patch('language_tool_python.LanguageTool')
+    def test_identical_matches_deduplicated(self, mock_lt_class):
+        """Repeated matches for the same rule and word collapse into one issue."""
+        pytest.importorskip("language_tool_python")
+
+        text = "Balder vio a Balder y a Balder otra vez."
+        balder_offset = text.index("Balder")
+        mock_tool = Mock()
+        matches = [
+            make_mock_match(
+                "Possible spelling mistake",
+                "TYPOS",
+                "MORFOLOGIK_RULE_ES",
+                offset=balder_offset,
+                length=6,
+                context=text,
+            ),
+            make_mock_match(
+                "Possible spelling mistake",
+                "TYPOS",
+                "MORFOLOGIK_RULE_ES",
+                offset=text.index("Balder", balder_offset + 1),
+                length=6,
+                context=text,
+            ),
+            make_mock_match(
+                "Possible spelling mistake",
+                "TYPOS",
+                "MORFOLOGIK_RULE_ES",
+                offset=text.rindex("Balder"),
+                length=6,
+                context=text,
+            ),
+        ]
+        mock_tool.check.return_value = matches
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": False})
+
+        assert len(result.issues) == 1
+        assert "found 3 time(s)" in result.issues[0].message
+
+    @patch('language_tool_python.LanguageTool')
+    def test_empty_key_matches_not_merged(self, mock_lt_class):
+        """Distinct matches with no rule id and no extractable word stay separate."""
+        pytest.importorskip("language_tool_python")
+
+        text = "Una frase con dos problemas distintos aqui."
+        mock_tool = Mock()
+        # Both matches force empty key components: no rule_id, and length=0 +
+        # empty context makes _extract_word_from_match return None (so
+        # flagged_word == ""). They differ only by offset.
+        matches = [
+            make_mock_match(
+                "Some grammar issue",
+                "GRAMMAR",
+                "",
+                offset=4,
+                length=0,
+                context="",
+            ),
+            make_mock_match(
+                "A different grammar issue",
+                "GRAMMAR",
+                "",
+                offset=20,
+                length=0,
+                context="",
+            ),
+        ]
+        mock_tool.check.return_value = matches
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="Test",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {"skip_spelling": False})
+
+        assert len(result.issues) == 2
+        assert all("found" not in issue.message for issue in result.issues)
+
+
+@skip_if_no_lt
+class TestExtractWordFromMatch:
+    """Directly exercise the three extraction branches of _extract_word_from_match."""
+
+    @patch('language_tool_python.LanguageTool')
+    def _make_evaluator(self, mock_lt_class):
+        return GrammarEvaluator()
+
+    def test_extract_from_full_text_by_offset(self):
+        """Primary path: slice the flagged word out of the full checked text."""
+        evaluator = self._make_evaluator()
+        text = "El Sr. Darcy era rico."
+        match = make_mock_match(
+            "Unknown word", "TYPOS", "MORFOLOGIK_RULE_ES",
+            offset=text.index("Darcy"), length=5, context=text,
+        )
+        assert evaluator._extract_word_from_match(match, text) == "Darcy"
+
+    def test_extract_from_context_window_when_offset_differs(self):
+        """Fallback path: no full text, and offset_in_context != document offset.
+
+        Real LanguageTool truncates ``context`` to a window, so the document
+        ``offset`` (relative to the whole chunk) does not index into ``context``.
+        Extraction must use ``offset_in_context``, not ``offset``.
+        """
+        evaluator = self._make_evaluator()
+        match = Mock()
+        match.offset = 512  # document offset — out of range for the context window
+        match.error_length = 5
+        match.context = "...la palabra Darcy en el texto..."
+        match.offset_in_context = match.context.index("Darcy")
+        match.matched_text = "WRONG"  # must be ignored while context slicing works
+        # No text arg -> full-text branch is skipped, context branch is exercised.
+        assert evaluator._extract_word_from_match(match) == "Darcy"
+
+    def test_extract_strips_surrounding_punctuation(self):
+        """Punctuation bounding the flagged span is trimmed off the returned word."""
+        evaluator = self._make_evaluator()
+        text = "dijo Darcy, y luego calló."
+        match = make_mock_match(
+            "x", "TYPOS", "MORFOLOGIK_RULE_ES",
+            offset=text.index("Darcy"), length=6, context=text,  # spans "Darcy,"
+        )
+        assert evaluator._extract_word_from_match(match, text) == "Darcy"

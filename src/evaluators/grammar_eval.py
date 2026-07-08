@@ -17,6 +17,8 @@ Key features:
 
 from typing import Any, Optional
 from pathlib import Path
+import re
+from collections import defaultdict
 
 try:
     import language_tool_python
@@ -71,6 +73,18 @@ class GrammarEvaluator(BaseEvaluator):
         'MISC': IssueLevel.WARNING,
     }
 
+    # LanguageTool spell-checker rules whose findings overlap the dictionary
+    # evaluator (they flag unknown/misspelled words). skip_spelling suppresses
+    # only these — not the whole TYPOS category — so accent/real-word TYPOS rules
+    # (tu/tú, más/mas, él/el, ...) still surface. Those fire on valid dictionary
+    # words, which the dictionary evaluator cannot catch, so keeping them adds no
+    # double-reporting.
+    SPELLING_RULE_ID_PREFIXES = (
+        "MORFOLOGIK_RULE",
+        "HUNSPELL_RULE",
+        "HUNSPELL_NO_SUGGEST_RULE",
+    )
+
     def __init__(self, dialect: str = 'es'):
         """
         Initialize Grammar Evaluator with LanguageTool.
@@ -111,14 +125,14 @@ class GrammarEvaluator(BaseEvaluator):
                 - glossary: Glossary (exclude terms from TYPOS)
                 - ignore_rules: list[str] (specific rule IDs to skip)
                 - ignore_categories: list[str] (categories to skip, e.g. ['TYPOS'])
-                - skip_spelling: bool (convenience for ignore_categories=['TYPOS'])
+                - skip_spelling: bool (suppress only the unknown-word spell rules
+                  MORFOLOGIK_RULE_*/HUNSPELL_*; accent/real-word TYPOS are still
+                  reported)
                 - max_issues: int (default 50)
 
         Returns:
             EvalResult with issues found
         """
-        issues: list[Issue] = []
-
         # Check if translation exists
         if not chunk.translated_text or not chunk.translated_text.strip():
             # No translation to check
@@ -145,7 +159,9 @@ class GrammarEvaluator(BaseEvaluator):
         # Run LanguageTool check
         matches = self._check_grammar(text_to_check)
 
-        # Process matches
+        # Process matches (deduplicated by rule + flagged word)
+        grouped_matches: dict[tuple, list] = defaultdict(list)
+
         for match in matches:
             # Skip matches whose offset falls inside a replaced placeholder
             # (the whitespace run we substituted triggers a spurious spaces warning)
@@ -153,11 +169,24 @@ class GrammarEvaluator(BaseEvaluator):
                 continue
 
             # Check if this match should be ignored
-            if self._should_ignore_match(match, context):
+            if self._should_ignore_match(match, context, text_to_check):
                 continue
 
-            # Convert to Issue
-            issue = self._convert_match_to_issue(match)
+            rule_id = getattr(match, "rule_id", "") or ""
+            flagged_word = self._extract_word_from_match(match, text_to_check) or ""
+            if rule_id or flagged_word:
+                key = (rule_id, flagged_word)
+            else:
+                # Neither the rule id nor the flagged word is known; keying on
+                # ("", "") would merge unrelated findings into one bogus
+                # "(found N time(s))", so disambiguate by offset to keep each
+                # match a separate reported issue.
+                key = ("", "", match.offset)
+            grouped_matches[key].append(match)
+
+        issues: list[Issue] = []
+        for match_group in grouped_matches.values():
+            issue = self._convert_match_group_to_issue(match_group)
             issues.append(issue)
 
         # Apply max_issues limit
@@ -204,42 +233,48 @@ class GrammarEvaluator(BaseEvaluator):
             logging.warning(f"LanguageTool check failed: {e}")
             return []
 
-    def _convert_match_to_issue(self, match) -> Issue:
+    def _convert_match_group_to_issue(self, matches: list) -> Issue:
         """
-        Convert LanguageTool Match to our Issue format.
+        Convert one or more LanguageTool matches (same rule + word) to a single Issue.
 
         Args:
-            match: LanguageTool Match object
+            matches: Group of LanguageTool Match objects
 
         Returns:
             Issue instance
         """
-        # Determine severity
+        match = matches[0]
         severity = self._determine_severity(match)
 
-        # Build message
         message = match.message
-        if hasattr(match, 'context') and match.context:
-            # Include context if available
+        if hasattr(match, "context") and match.context:
             message = f"{message} Context: '{match.context}'"
+        if len(matches) > 1:
+            message = f"{message} (found {len(matches)} time(s))"
 
-        # Build suggestion from replacements
         suggestion = None
         if match.replacements:
-            # Take top 3 suggestions
             suggestions_list = match.replacements[:3]
             suggestion = f"Consider: {', '.join(suggestions_list)}"
 
-        # Build location
-        location = f"char {match.offset}"
-        if match.error_length:
-            location += f"-{match.offset + match.error_length}"
+        offsets = sorted(m.offset for m in matches)
+        if len(offsets) == 1:
+            location = f"char {offsets[0]}"
+            if match.error_length:
+                location += f"-{offsets[0] + match.error_length}"
+        elif len(offsets) <= 3:
+            location = f"char positions: {', '.join(str(o) for o in offsets)}"
+        else:
+            location = (
+                f"char positions: {', '.join(str(o) for o in offsets[:3])}, "
+                f"... ({len(offsets)} total)"
+            )
 
         return self.create_issue(
             severity=severity,
             message=message,
             location=location,
-            suggestion=suggestion
+            suggestion=suggestion,
         )
 
     def _determine_severity(self, match) -> IssueLevel:
@@ -258,23 +293,29 @@ class GrammarEvaluator(BaseEvaluator):
         # Map category to severity
         return self.CATEGORY_SEVERITY.get(category, IssueLevel.WARNING)
 
-    def _should_ignore_match(self, match, context: dict) -> bool:
+    def _should_ignore_match(
+        self, match, context: dict, text: str = ""
+    ) -> bool:
         """
         Determine if a match should be ignored based on context.
 
         Args:
             match: LanguageTool Match object
             context: Evaluation context
+            text: Full checked text (offsets are relative to this string)
 
         Returns:
             True if match should be ignored, False otherwise
         """
-        # Check skip_spelling convenience flag
+        # skip_spelling suppresses only LanguageTool's unknown-word spell checker
+        # (the SPELLING_RULE_ID_PREFIXES: MORFOLOGIK_RULE_*/HUNSPELL_*), which the
+        # dictionary evaluator already owns. Real-word / diacritic TYPOS rules
+        # (tu/tú, más/mas, él/el, ...) are kept — the dictionary can't catch those,
+        # so there's no double-reporting.
         if context.get('skip_spelling', False):
-            if 'ignore_categories' not in context:
-                context['ignore_categories'] = []
-            if 'TYPOS' not in context['ignore_categories']:
-                context['ignore_categories'].append('TYPOS')
+            rule_id = getattr(match, 'rule_id', '') or ''
+            if any(rule_id.startswith(p) for p in self.SPELLING_RULE_ID_PREFIXES):
+                return True
 
         # Check ignore_categories
         ignore_categories = context.get('ignore_categories', [])
@@ -292,36 +333,49 @@ class GrammarEvaluator(BaseEvaluator):
         if match_category == 'TYPOS':
             glossary = context.get('glossary')
             if glossary:
-                # Extract the word being flagged (will be in Spanish)
-                word = self._extract_word_from_match(match)
-                if word and glossary.find_term_by_spanish(word):
+                word = self._extract_word_from_match(match, text)
+                if word and glossary.matches_word(word):
                     return True  # Ignore - it's in glossary
 
         return False  # Don't ignore
 
-    def _extract_word_from_match(self, match) -> Optional[str]:
+    def _extract_word_from_match(self, match, text: str = "") -> Optional[str]:
         """
         Extract the flagged word from a LanguageTool match.
 
         Args:
             match: LanguageTool Match object
+            text: Full checked text (offsets are relative to this string)
 
         Returns:
             The flagged word, or None if can't extract
         """
         try:
-            # The matched text is in the context or can be extracted
-            if hasattr(match, 'matched_text') and match.matched_text:
-                return match.matched_text.strip()
+            word = None
+            if text and hasattr(match, "offset") and match.error_length:
+                start = match.offset
+                end = start + match.error_length
+                word = text[start:end]
+            elif hasattr(match, "context") and match.context:
+                offset_in_context = getattr(match, "offset_in_context", match.offset)
+                if match.error_length:
+                    start = offset_in_context
+                    end = start + match.error_length
+                    word = match.context[start:end]
+            elif hasattr(match, "matched_text") and match.matched_text:
+                word = match.matched_text
 
-            # Try to extract from context
-            if hasattr(match, 'context') and match.context:
-                # Context usually shows the error in a snippet
-                # Extract word at match position
-                return match.context.strip()
+            if not word:
+                return None
 
-            return None
-        except (AttributeError, TypeError):
+            # Strip surrounding punctuation
+            word = re.sub(
+                r"^[^\w'áéíóúüñÁÉÍÓÚÜÑ]+|[^\w'áéíóúüñÁÉÍÓÚÜÑ]+$",
+                "",
+                word,
+            )
+            return word.strip() or None
+        except (AttributeError, TypeError, IndexError):
             return None
 
     def _calculate_score(self, issues: list[Issue]) -> float:

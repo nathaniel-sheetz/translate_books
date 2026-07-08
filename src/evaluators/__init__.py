@@ -237,6 +237,13 @@ def _build_context(
     if glossary is not None:
         context["glossary"] = glossary
 
+    # Unknown-word spelling is owned by the dictionary evaluator (deduped,
+    # glossary-aware). skip_spelling drops only LanguageTool's spell-checker
+    # rules (MORFOLOGIK_RULE_*/HUNSPELL_*); the grammar evaluator still reports
+    # grammar, punctuation, style, and accent/real-word errors (tu/tú, más/mas, ...).
+    if "skip_spelling" not in context:
+        context["skip_spelling"] = True
+
     # Add length evaluator config from app_config.json (if present)
     length_cfg = get_length_config()
     if length_cfg:

@@ -13,7 +13,10 @@ from src.models import (
     Glossary,
     GlossaryTerm,
 )
-from src.evaluators.dictionary_eval import DictionaryEvaluator
+from src.evaluators.dictionary_eval import (
+    DictionaryEvaluator,
+    _fold_accents_preserving_enye,
+)
 
 
 @pytest.fixture
@@ -409,3 +412,101 @@ def test_image_placeholder_with_description_not_flagged(evaluator, base_chunk):
         assert not any(fragment.lower() in msg.lower() for msg in flagged_words), (
             f"Placeholder/description fragment '{fragment}' was flagged: {flagged_words}"
         )
+
+
+def test_glossary_plural_inflection(evaluator, base_chunk):
+    """Plural forms should match singular glossary entries."""
+    glossary = Glossary(
+        terms=[
+            GlossaryTerm(english="spider", spanish="épeira"),
+        ]
+    )
+    base_chunk.translated_text = "Las épeiras tejen sus telas."
+
+    result = evaluator.evaluate(base_chunk, {"glossary": glossary})
+
+    assert result.metadata["glossary_words"] >= 1
+    assert result.metadata["unknown_words"] == 0
+
+
+def test_glossary_multi_word_token(evaluator, base_chunk):
+    """A word that is part of a multi-word glossary term should be excluded."""
+    glossary = Glossary(
+        terms=[
+            GlossaryTerm(english="Mother Ambroisine", spanish="la madre Ambroisine"),
+        ]
+    )
+    base_chunk.translated_text = "Ambroisine cuidaba a los niños."
+
+    result = evaluator.evaluate(base_chunk, {"glossary": glossary})
+
+    assert result.metadata["glossary_words"] == 1
+    assert result.metadata["unknown_words"] == 0
+
+
+def test_glossary_accent_insensitive(evaluator, base_chunk):
+    """Accent-folded variants should match glossary terms."""
+    glossary = Glossary(
+        terms=[
+            GlossaryTerm(english="spider", spanish="épeira"),
+        ]
+    )
+    base_chunk.translated_text = "La epeira es un arácnido."
+
+    result = evaluator.evaluate(base_chunk, {"glossary": glossary})
+
+    assert result.metadata["glossary_words"] == 1
+    assert result.metadata["unknown_words"] == 0
+
+
+class TestFoldAccentsPreservingEnye:
+    """Regression tests for accent folding that must not strip ñ."""
+
+    @pytest.mark.parametrize(
+        "word, expected",
+        [
+            # ñ / Ñ must survive untouched — they are distinct letters, not
+            # accented n's. This is the core regression guard: folding ñ→n would
+            # let "moño" validate against the different real word "mono".
+            ("moño", "moño"),
+            ("niños", "niños"),
+            ("Ñandú", "Ñandu"),
+            ("año", "año"),
+            # Vowel accents and the u-diaeresis are folded.
+            ("época", "epoca"),
+            ("épeira", "epeira"),
+            ("pingüino", "pinguino"),
+            ("corazón", "corazon"),
+            ("áéíóúü", "aeiouu"),
+            # No accents -> unchanged.
+            ("casa", "casa"),
+            ("", ""),
+        ],
+    )
+    def test_folds_vowel_accents_but_keeps_enye(self, word, expected):
+        assert _fold_accents_preserving_enye(word) == expected
+
+    def test_enye_word_is_not_folded_to_a_different_word(self):
+        """The specific regression: "moño" must NOT fold to "mono"."""
+        folded = _fold_accents_preserving_enye("moño")
+        assert "ñ" in folded
+        assert folded != "mono"
+
+    def test_differs_from_naive_nfd_strip_all(self):
+        """Guard against reverting to the old NFD-strip-all fold that dropped ñ.
+
+        The previous implementation stripped every combining mark, folding ñ→n
+        and letting an ñ word validate against a different real word in the
+        morphological fallback. This pins the divergence so a regression is loud.
+        """
+        import unicodedata
+
+        def naive_strip_all(s: str) -> str:
+            nfd = unicodedata.normalize("NFD", s)
+            return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+        # Old behavior collapsed the distinction; the fix preserves it.
+        assert naive_strip_all("moño") == "mono"
+        assert _fold_accents_preserving_enye("moño") == "moño"
+        # Vowel-accent folding is identical between the two.
+        assert naive_strip_all("época") == _fold_accents_preserving_enye("época")
