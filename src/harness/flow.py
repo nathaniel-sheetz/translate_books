@@ -891,6 +891,12 @@ def translate_prepare(
     ``spawn_mode_moot`` is ``True`` when every in-scope chapter is a single chunk: the
     continuity modes are then equivalent to all-parallel, so the agent can skip the
     spawn-mode question entirely.
+
+    Prepare is **non-destructive**: a non-empty ``.draft.txt`` from a prior prepare is
+    kept (only empty drafts are cleared), and every uncommitted draft on disk — even one
+    whose chunk is outside this call's ``--chapters`` scope — is rescued into the new
+    manifest and counted in ``rescued_prior_drafts``. A narrower re-prepare therefore
+    can never strand (or wipe) a just-finished wave before ``translate-commit`` lands it.
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
@@ -941,11 +947,13 @@ def translate_prepare(
     worker_thinking = bool(cfg.get("worker_thinking")) and _worker_supports_thinking(worker_model)
     spawn_plan = {
         "parallelism": cfg.get("parallelism") or "chapter",
-        "window": int(cfg.get("parallel_window") or 8),
+        "window": int(cfg.get("parallel_window") or 3),
         # Recommended fan-out width for one spawn wave. Saved so the agent has an
         # explicit number to ramp from (and to throttle back to on a 529); see the
-        # 500-vs-529 backoff guidance in SKILL.md Step 4B.
-        "batch_size": int(cfg.get("batch_size") or 5),
+        # 500-vs-529 backoff guidance in SKILL.md Step 4B. Keep window <= batch_size
+        # so a chapter-parallel first-position wave (one worker per chapter in the
+        # window) never exceeds this throttle; the defaults (3 and 3) match.
+        "batch_size": int(cfg.get("batch_size") or 3),
     }
 
     if str(state.REPO_ROOT) not in sys.path:
@@ -1026,7 +1034,12 @@ def translate_prepare(
             draft_path = translate_dir / f"{chunk.id}.draft.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
             total_words += chunk.word_count
-            draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare run
+            # Non-destructive: keep any non-empty draft from a prior prepare run — a
+            # re-spawned worker overwrites it, and translate-commit lands it as-is if
+            # not. Only clear an empty/whitespace draft so a stale zero-byte file can't
+            # masquerade as work. (Fixes the Pollyanna hiccup #1 draft wipe.)
+            if draft_path.exists() and not draft_path.read_text(encoding="utf-8").strip():
+                draft_path.unlink(missing_ok=True)
             entries.append({
                 "chunk_id": chunk.id,
                 "chapter_id": chunk.chapter_id,
@@ -1041,28 +1054,67 @@ def translate_prepare(
             prev_source = chunk.source_text
             prev_translated = None
 
-    # Rescue uncommitted-but-drafted entries from a prior prepare run so they are
-    # not silently orphaned when prepare is called again before translate-commit.
+    # Rescue uncommitted-but-drafted chunks so a finished wave is never orphaned when
+    # prepare is called again before translate-commit — even if that draft's chunk fell
+    # outside this prepare's --chapters scope. We scan the drafts *on disk* (not just the
+    # last manifest's entries), so a narrower re-prepare can't strand a wider wave.
+    # (Fixes the Pollyanna hiccup #1 draft wipe alongside the non-destructive unlink.)
+    from src.utils.file_io import load_chunk as _lc
+    existing_ids = {e["chunk_id"] for e in entries}
+    # Pre-computed entry metadata from the last manifest, if any — used only to resolve a
+    # draft's chunk_path cheaply before falling back to a full-project scan.
+    prior_by_id: dict[str, dict] = {}
     prior_manifest_path = translate_dir / "manifest.json"
-    rescued: list[dict] = []
     if prior_manifest_path.exists():
         try:
             prior_doc = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
-            for prior_entry in prior_doc.get("entries", []):
-                draft = Path(prior_entry["draft_path"])
-                chunk_cp = Path(prior_entry["chunk_path"])
-                from src.utils.file_io import load_chunk as _lc
-                try:
-                    prior_chunk = _lc(chunk_cp)
-                except Exception:
-                    continue
-                if draft.exists() and not prior_chunk.has_translation:
-                    # Worker already wrote a draft for this chunk and it has not been
-                    # committed. Keep it in the new manifest so translate-commit sees it.
-                    if not any(e["chunk_id"] == prior_entry["chunk_id"] for e in entries):
-                        rescued.append(prior_entry)
-        except (json.JSONDecodeError, OSError, KeyError, TypeError):
-            pass  # corrupt or schema-changed prior manifest — ignore and proceed
+            prior_by_id = {e["chunk_id"]: e for e in prior_doc.get("entries", [])
+                           if isinstance(e, dict) and "chunk_id" in e}
+        except (json.JSONDecodeError, OSError, TypeError):
+            prior_by_id = {}
+    # chunk_id -> chunk path across the *whole* project (not just in scope). Built lazily
+    # and only when a stray draft can't be resolved from the prior manifest.
+    id_to_path: dict[str, Path] | None = None
+    rescued: list[dict] = []
+    for draft in sorted(translate_dir.glob("*.draft.txt")):
+        cid = draft.name[: -len(".draft.txt")]
+        if cid in existing_ids or any(e["chunk_id"] == cid for e in rescued):
+            continue  # already represented in the new manifest
+        try:
+            if not draft.read_text(encoding="utf-8").strip():
+                continue  # empty/whitespace draft is not work
+        except OSError:
+            continue
+        chunk_cp: Path | None = None
+        prior_entry = prior_by_id.get(cid)
+        if prior_entry and prior_entry.get("chunk_path"):
+            chunk_cp = Path(prior_entry["chunk_path"])
+        if chunk_cp is None or not chunk_cp.exists():
+            if id_to_path is None:
+                id_to_path = {}
+                for cps in all_discovered.values():
+                    for cp2 in cps:
+                        try:
+                            id_to_path[_lc(cp2).id] = cp2
+                        except Exception:
+                            continue
+            chunk_cp = id_to_path.get(cid)
+        if chunk_cp is None:
+            continue  # can't map this draft to a current chunk — leave it on disk
+        try:
+            rescue_chunk = _lc(chunk_cp)
+        except Exception:
+            continue
+        if rescue_chunk.has_translation:
+            continue  # already committed; the leftover draft is harmless
+        rescued.append({
+            "chunk_id": cid,
+            "chapter_id": rescue_chunk.chapter_id,
+            "chunk_path": str(chunk_cp),
+            "prompt_path": str(translate_dir / f"{cid}.prompt.txt"),
+            "draft_path": str(draft),
+            "source_word_count": rescue_chunk.word_count,
+        })
 
     if rescued:
         total_words += sum(e.get("source_word_count", 0) for e in rescued)
@@ -1622,8 +1674,8 @@ def status(project: str) -> dict:
     epubs = sorted(p.name for p in project_dir.glob("*.epub"))
     spawn_plan = {
         "parallelism": cfg.get("parallelism") or "chapter",
-        "window": int(cfg.get("parallel_window") or 8),
-        "batch_size": int(cfg.get("batch_size") or 5),
+        "window": int(cfg.get("parallel_window") or 3),
+        "batch_size": int(cfg.get("batch_size") or 3),
     }
     base = {
         "project": project_dir.name,
@@ -1897,7 +1949,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "spawn_plan": "dict {parallelism, window, batch_size}",
         "spawn_mode_moot": "True when every in-scope chapter is a single chunk (skip the spawn-mode question)",
         "usage_summary": "dict {chunks, source_words, worker_model, parallelism, window, batch_size, spawn_mode_moot}",
-        "rescued_prior_drafts": "count of uncommitted drafts carried over from a prior prepare",
+        "rescued_prior_drafts": "count of uncommitted drafts carried over from a prior prepare or discovered on disk (even out of the current --chapters scope)",
         "chapters": "the --chapters scope echoed back ('all' when omitted)",
         "instructions": "what to do next (spawn workers, then translate-commit)",
         "error": "present only on failure (e.g. no chunks, bad --chapters)",

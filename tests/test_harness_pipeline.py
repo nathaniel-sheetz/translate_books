@@ -895,17 +895,17 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
 
     prep = flow.translate_prepare(str(tmp_path), parallelism="all", window=3)
-    assert prep["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 5}
+    assert prep["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 3}
     assert prep["usage_summary"]["parallelism"] == "all"
 
     # Persisted: a later prepare with no spawn args reuses the saved choice.
     prep2 = flow.translate_prepare(str(tmp_path))
-    assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 5}
+    assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 3}
 
     # window persists in isolation (no parallelism passed) without disturbing the
     # previously-saved parallelism.
     prep3 = flow.translate_prepare(str(tmp_path), window=5)
-    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 5, "batch_size": 5}
+    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 5, "batch_size": 3}
 
     # batch_size persists in isolation too, and is echoed in the usage summary.
     prep4 = flow.translate_prepare(str(tmp_path), batch_size=3)
@@ -926,6 +926,64 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     bad = flow.translate_prepare(str(tmp_path), parallelism="bogus")
     assert "error" in bad and bad["manifest"] == []
     assert state.load_config(state.resolve_project_dir(str(tmp_path)))["parallelism"] == "all"
+
+
+def test_translate_prepare_never_wipes_or_strands_uncommitted_drafts(tmp_path: Path):
+    """A narrower re-prepare must not wipe (or orphan) a finished wave's drafts.
+
+    Regression for the Pollyanna hiccup #1 draft wipe: a wave's drafts were written for
+    chunks outside the *last* prepare manifest, then a re-prepare whose scope re-covered
+    them destroyed the drafts (unconditional unlink) while the manifest-only rescue never
+    saw them. The fix is two-fold — prepare keeps non-empty drafts, and rescue scans the
+    drafts on disk — so both an in-scope draft (protected from the unlink) and an
+    out-of-scope draft (rescued into the manifest) survive and stay committable.
+    """
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    sources = {
+        "chapter_01": "First chapter opening line here.",
+        "chapter_02": "Second chapter body text here.",
+        "chapter_03": "Third chapter body text here.",
+        "chapter_04": "Fourth chapter body text here.",
+    }
+    for chap, src in sources.items():
+        _save_chunks(chunks_dir, chap, sources=[src])
+
+    # Prior manifest is narrow (ch01 only) — it does NOT list ch02/03/04, exactly like
+    # the friction-log state when the stranded drafts were written off a stale manifest.
+    prep_a = flow.translate_prepare(str(tmp_path), chapters="1", parallelism="chapter")
+    translate_dir = Path(prep_a["manifest"][0]["draft_path"]).parent
+
+    def _draft_path(chap: str) -> Path:
+        return translate_dir / f"{chap}_chunk_000.draft.txt"
+
+    # A finished wave lands drafts for chunks absent from the prior (ch01) manifest.
+    for chap in ("chapter_02", "chapter_03", "chapter_04"):
+        _draft_path(chap).write_text(_fake_draft(sources[chap]), encoding="utf-8")
+
+    # Re-prepare a scope that re-covers ch02/03 (in scope) but not ch04 (out of scope).
+    prep_b = flow.translate_prepare(str(tmp_path), chapters="1-3", parallelism="chapter")
+
+    # Fix A: in-scope non-empty drafts are kept, not unlinked.
+    for chap in ("chapter_02", "chapter_03"):
+        assert _draft_path(chap).exists(), f"{chap} draft was wiped"
+        assert _draft_path(chap).read_text(encoding="utf-8").strip()
+    # Fix B: the out-of-scope draft survives on disk and is rescued into the manifest.
+    assert _draft_path("chapter_04").exists(), "out-of-scope ch04 draft was lost"
+    assert prep_b["rescued_prior_drafts"] == 1  # only ch04 (ch02/03 are in-scope)
+
+    manifest_ids = {e["chunk_id"] for e in prep_b["manifest"]}
+    assert {"chapter_02_chunk_000", "chapter_03_chunk_000",
+            "chapter_04_chunk_000"} <= manifest_ids
+
+    # All three drafted chunks commit — none are lost or reported missing.
+    _draft_path("chapter_01").write_text(_fake_draft(sources["chapter_01"]), encoding="utf-8")
+    res = flow.translate_commit(str(tmp_path), worker_model="sonnet")
+    assert res["counts"]["missing"] == 0
+    assert {"chapter_02_chunk_000", "chapter_03_chunk_000",
+            "chapter_04_chunk_000"} <= set(res["committed"])
 
 
 def test_translate_prepare_persists_worker_thinking(tmp_path: Path):
@@ -1067,7 +1125,7 @@ def test_status_reports_progress_artifacts_and_spawn_plan(tmp_path: Path):
     assert st["pending_chapters"] == ["chapter_02", "chapter_03"]
     # ch2 has two chunks, so the continuity spawn modes are NOT moot here.
     assert st["spawn_mode_moot"] is False
-    assert st["spawn_plan"] == {"parallelism": "chapter", "window": 8, "batch_size": 5}
+    assert st["spawn_plan"] == {"parallelism": "chapter", "window": 3, "batch_size": 3}
     assert "translate-prepare" in st["next"]
 
     # Finishing every chunk flips the stage to fully-translated and points at epub.

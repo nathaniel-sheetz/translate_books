@@ -455,17 +455,19 @@ Otherwise, three options; **bias toward #2 (the default)**:
 
   1. **Sequential** — one chunk at a time, in order. Slowest, but every chunk after the first sees the
      previous chunk's **English + Spanish** (max continuity). Pick if continuity beats speed.
-  2. **Chapter-parallel (recommended, default)** — run a **window of X chapters (default 8)** at once
+  2. **Chapter-parallel (recommended, default)** — run a **window of X chapters (default 3)** at once
      and **finish that window before moving on**. Within a window, spawn **wave by wave on chunk
      position**: first the opening chunk of every chapter in parallel, then each chapter's second
      chunk, etc. First chunks across chapters run concurrently; later chunks within a chapter wait for
-     that chapter's previous chunk, so within-chapter EN+Spanish continuity is preserved.
+     that chapter's previous chunk, so within-chapter EN+Spanish continuity is preserved. Keep
+     **`window ≤ batch_size`** so a first-position wave (one worker per chapter in the window) never
+     exceeds the fan-out throttle; the defaults (window 3, batch_size 3) match.
   3. **All-parallel** — every chunk at once (in bounded batches). Fastest; **no** cross-chunk Spanish
      context (nothing is committed when prompts render). Pick only when speed clearly wins.
 
 END your turn and wait. When answered, **save it** by passing it on the next `translate-prepare`
 (`--parallelism sequential|chapter|all`, plus `--window <X>` for #2) — it is persisted to the project
-config so the "translate the rest" batch reuses it without re-asking. Confirm X for mode 2 (default 8).
+config so the "translate the rest" batch reuses it without re-asking. Confirm X for mode 2 (default 3).
 **Log the choice:** `log-event --event spawn_mode --data '{"mode":"sequential"|"chapter"|"all",
 "window":<X>}'`.
 
@@ -560,6 +562,11 @@ Spawn according to the saved mode (each wave is `batch_size` workers wide unless
      into its chapter's next chunk, and repeat from step 1 until every chunk in the window is committed.
   4. Only then advance to the next window of X chapters. Complete chapters, **not** "all first chunks
      first" — each window is fully finished before the next starts.
+
+  Re-preparing a **narrower** scope no longer strands a just-finished wave: `translate-prepare`
+  keeps any non-empty `.draft.txt` on disk and **rescues** every uncommitted draft into the new
+  manifest (reported as `rescued_prior_drafts`), so `translate-commit` can still land it. Prefer
+  committing a wave before re-preparing, but a mistimed re-prepare is now recoverable, not a wipe.
 - **All-parallel:** spawn workers for **all** manifest entries in bounded batches of `batch_size`
   (the saved fan-out width; rate limits), `translate-commit` after each batch. No re-prepare (this mode
   has no cross-chunk Spanish context). This is also the mode to use whenever `spawn_mode_moot` is true.
