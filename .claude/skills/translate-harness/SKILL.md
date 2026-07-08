@@ -506,8 +506,10 @@ manifest's `worker_thinking` is `true`, add the "think hard" trigger** so the wo
 thinking: *"Translate one chunk. Read `<prompt_path>`. **Think hard** about the tricky passages, then
 write ONLY the translated prose to `<draft_path>`. Then reply with exactly `done <chunk_id>` and nothing
 else — no summary, no list of choices."* When `worker_thinking` is `false` (the default), use the plain
-prompt above (no keyword → no extended thinking). The worker writes its file and reports back only that token — **do not** have it return the prose *or a recap of
-its choices* to you (either one floods your context). You learn each worker's success from
+prompt above (no keyword → no extended thinking).
+
+The worker writes its file and reports back only that token — **do not** have it return the prose *or a
+recap of its choices* to you (either one floods your context). You learn each worker's success from
 `translate-commit`'s `committed`/`failed`/`missing` lists, not from its chat-back. After a wave's
 drafts are written, commit:
 ```bash

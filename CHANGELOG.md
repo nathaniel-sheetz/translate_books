@@ -2,7 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.27.5.0] - 2026-07-07
+## [0.27.6.0] - 2026-07-08
+
+### Added
+- **Opt-in extended thinking for the subagent (worker) backend** — a new `--worker-thinking` / `--no-worker-thinking` flag on `translate-prepare` persists a per-project preference (default off). When on, the harness adds a "think hard" trigger to each translator worker's spawn prompt so it engages extended thinking; the choice is surfaced in `usage_summary`/manifest as `worker_thinking` and reused by the "translate the rest" batch. Gated on model support: a non-thinking worker (e.g. `fable`, always-on) can never be flagged on, mirroring the GUI hiding the checkbox.
+- **Opt-in extended thinking for the API backend** — a `--thinking` / `--no-thinking` flag on `translate` / `translate_book.py` / `translate_api.py` threads through to the Anthropic call. Tri-state: absent falls back to the `TRANSLATE_THINKING` env default (off), explicit `True`/`False` overrides it.
+
+### Changed
+- **Translator subagent instructions** — `translator.md` now documents that extended thinking is off by default and engaged only when the spawn prompt says "think hard".
 
 ### Changed
 - **Grammar evaluator no longer double-reports spelling** — `_build_context` now defaults `skip_spelling=True`, so spelling is owned solely by the dictionary evaluator (deduped, glossary-aware) while the grammar evaluator handles grammar, punctuation, and style. Callers can re-enable LanguageTool `TYPOS` by passing `skip_spelling=False`.

@@ -972,6 +972,58 @@ def test_translate_prepare_persists_worker_thinking(tmp_path: Path):
     assert flow.translate_prepare(str(tmp_path))["usage_summary"]["worker_thinking"] is False
 
 
+@pytest.mark.parametrize("enable_thinking,expected_flag", [
+    (True, "--thinking"),
+    (False, "--no-thinking"),
+    (None, None),
+])
+def test_translate_threads_thinking_flag_to_subprocess(tmp_path: Path, monkeypatch,
+                                                       enable_thinking, expected_flag):
+    """flow.translate emits --thinking/--no-thinking/neither to the wrapped CLI.
+
+    None must leave BOTH flags off so translate_book.py falls back to the
+    TRANSLATE_THINKING env default rather than being forced off — the same
+    tri-state contract the API-path CLI tests assert one layer down.
+    """
+    from src.harness import flow
+
+    captured: dict = {}
+
+    def fake_run_script(cmd):
+        captured["cmd"] = cmd
+        return 0, None
+
+    monkeypatch.setattr(flow, "_run_script", fake_run_script)
+
+    flow.translate(str(tmp_path), yes=True, model="claude-sonnet-5",
+                   provider="anthropic", enable_thinking=enable_thinking)
+
+    cmd = captured["cmd"]
+    if expected_flag is None:
+        assert "--thinking" not in cmd and "--no-thinking" not in cmd
+    else:
+        assert expected_flag in cmd
+        # Exactly one of the mutually exclusive flags is present.
+        other = "--no-thinking" if expected_flag == "--thinking" else "--thinking"
+        assert other not in cmd
+
+
+@pytest.mark.parametrize("worker_model,expected", [
+    # Full model ids (non-aliases) resolve via api_translator.model_supports_thinking,
+    # not the alias set — the fallback branch the persistence test doesn't cover.
+    ("claude-sonnet-5", True),
+    ("claude-opus-4-8", True),
+    ("claude-fable-5-20250101", False),   # full fable id: rejected by the fallback, not the alias short-circuit
+    ("claude-3-5-sonnet-latest", False),  # legacy: no toggleable thinking
+    ("", False),                          # empty guard
+])
+def test_worker_supports_thinking_full_id_fallback(worker_model, expected):
+    """_worker_supports_thinking delegates non-alias ids to model_supports_thinking."""
+    from src.harness import flow
+
+    assert flow._worker_supports_thinking(worker_model) is expected
+
+
 def test_translate_prepare_rejects_nonpositive_window(tmp_path: Path):
     """--window below 1 is reported as an error and not persisted to config."""
     from src.harness import flow, state
