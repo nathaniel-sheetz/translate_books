@@ -990,6 +990,114 @@ def test_translate_prepare_never_wipes_or_strands_uncommitted_drafts(tmp_path: P
             "chapter_04_chunk_000"} <= set(res["committed"])
 
 
+def test_translate_prepare_unlinks_whitespace_only_in_scope_draft(tmp_path: Path):
+    """Whitespace-only in-scope drafts are cleared so they cannot masquerade as work."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
+
+    prep = flow.translate_prepare(str(tmp_path), chapters="1")
+    draft_path = Path(prep["manifest"][0]["draft_path"])
+    draft_path.write_text("   \n\t  ", encoding="utf-8")
+
+    prep2 = flow.translate_prepare(str(tmp_path), chapters="1")
+    assert "error" not in prep2
+    assert not draft_path.exists()
+
+
+def test_translate_prepare_rescues_despite_stale_prior_chunk_path(tmp_path: Path):
+    """A prior-manifest chunk_path that does not match the draft id falls back to id lookup."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    sources = {
+        "chapter_01": "First chapter opening line here.",
+        "chapter_02": "Second chapter body text here.",
+        "chapter_03": "Third chapter body text here.",
+    }
+    paths = {}
+    for chap, src in sources.items():
+        paths[chap] = _save_chunks(chunks_dir, chap, sources=[src])[0]
+
+    prep_a = flow.translate_prepare(str(tmp_path), chapters="1-3")
+    translate_dir = Path(prep_a["manifest"][0]["draft_path"]).parent
+    draft_path = translate_dir / "chapter_03_chunk_000.draft.txt"
+    draft_path.write_text(_fake_draft(sources["chapter_03"]), encoding="utf-8")
+
+    # Corrupt the saved manifest: point ch03's chunk_path at ch01's file.
+    manifest_path = translate_dir / "manifest.json"
+    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in doc["entries"]:
+        if entry["chunk_id"] == "chapter_03_chunk_000":
+            entry["chunk_path"] = str(paths["chapter_01"])
+            break
+    manifest_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    prep_b = flow.translate_prepare(str(tmp_path), chapters="1-2")
+    assert prep_b["rescued_prior_drafts"] == 1
+    manifest_ids = {e["chunk_id"] for e in prep_b["manifest"]}
+    assert "chapter_03_chunk_000" in manifest_ids
+    rescued = next(e for e in prep_b["manifest"] if e["chunk_id"] == "chapter_03_chunk_000")
+    assert Path(rescued["chunk_path"]) == paths["chapter_03"]
+
+
+def test_translate_prepare_skips_unreadable_draft_without_crashing(tmp_path: Path):
+    """Binary/corrupt draft files are skipped; prepare must not raise."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    sources = {
+        "chapter_01": "First chapter opening line here.",
+        "chapter_02": "Second chapter body text here.",
+        "chapter_03": "Third chapter body text here.",
+    }
+    for chap, src in sources.items():
+        _save_chunks(chunks_dir, chap, sources=[src])
+
+    prep_a = flow.translate_prepare(str(tmp_path), chapters="1")
+    translate_dir = Path(prep_a["manifest"][0]["draft_path"]).parent
+    corrupt = translate_dir / "chapter_03_chunk_000.draft.txt"
+    corrupt.write_bytes(b"\xff\xfe\xfd")
+
+    prep_b = flow.translate_prepare(str(tmp_path), chapters="1-2")
+    assert "error" not in prep_b
+    assert corrupt.exists(), "unreadable draft should be left on disk"
+    assert prep_b["rescued_prior_drafts"] == 0
+    assert "chapter_03_chunk_000" not in {e["chunk_id"] for e in prep_b["manifest"]}
+
+
+def test_translate_prepare_rescues_multiple_out_of_scope_drafts(tmp_path: Path):
+    """Several out-of-scope drafts are all rescued and counted."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    sources = {
+        f"chapter_{i:02d}": f"Chapter {i} body text here."
+        for i in range(1, 6)
+    }
+    for chap, src in sources.items():
+        _save_chunks(chunks_dir, chap, sources=[src])
+
+    prep_a = flow.translate_prepare(str(tmp_path), chapters="1")
+    translate_dir = Path(prep_a["manifest"][0]["draft_path"]).parent
+
+    for chap in ("chapter_03", "chapter_04", "chapter_05"):
+        (translate_dir / f"{chap}_chunk_000.draft.txt").write_text(
+            _fake_draft(sources[chap]), encoding="utf-8"
+        )
+
+    prep_b = flow.translate_prepare(str(tmp_path), chapters="1-2")
+    assert prep_b["rescued_prior_drafts"] == 3
+    manifest_ids = {e["chunk_id"] for e in prep_b["manifest"]}
+    assert {"chapter_03_chunk_000", "chapter_04_chunk_000",
+            "chapter_05_chunk_000"} <= manifest_ids
+
+
 def test_translate_prepare_persists_worker_thinking(tmp_path: Path):
     """--worker-thinking round-trips through config; a non-thinking worker forces it off.
 
