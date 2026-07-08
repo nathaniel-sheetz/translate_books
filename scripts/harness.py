@@ -213,9 +213,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      choices=["sequential", "chapter", "all"],
                      help="Spawn mode (persisted): sequential | chapter (default) | all")
     tpp.add_argument("--window", type=int, default=None,
-                     help="Chapter-parallel window width X (default 8); persisted")
+                     help="Chapter-parallel window width X (default 3); persisted")
     tpp.add_argument("--batch-size", dest="batch_size", type=int, default=None,
-                     help="Recommended workers to spawn per wave (default 5); persisted. "
+                     help="Recommended workers to spawn per wave (default 3); persisted. "
                           "Ramp from this; throttle back to ~1 on a 529 (overloaded)")
 
     tcp = sub.add_parser("translate-commit",

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.7.0] - 2026-07-08
+
+### Changed
+- **Harness spawn defaults are now window 3 / batch_size 3** (was 8 / 5) so chapter-parallel first-position waves stay within the fan-out throttle out of the box. `window` is clamped to `batch_size` when it would exceed that cap (and persisted).
+
+### Fixed
+- **`translate-prepare` no longer wipes finished worker drafts on re-prepare** — non-empty `.draft.txt` files are kept (only empty/whitespace drafts are cleared), and mappable uncommitted drafts on disk are rescued into the new manifest even when outside the current `--chapters` scope (`rescued_prior_drafts`). Regression test covers the Pollyanna hiccup #1 draft-wipe case.
+- **Stale `prior_manifest` `chunk_path` entries are validated** against the draft filename's chunk id before reuse; mismatches fall through to a project-wide id lookup.
+- **Unreadable/corrupt draft files no longer crash `translate-prepare`** — `UnicodeDecodeError` and `OSError` on draft reads are skipped like empty drafts.
+
 ## [0.27.6.0] - 2026-07-08
 
 ### Added
