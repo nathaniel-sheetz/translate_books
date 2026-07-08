@@ -188,6 +188,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--yes", action="store_true", help="Confirm the approved spend")
     tp.add_argument("--model", default=None)
     tp.add_argument("--provider", default=None)
+    tp.add_argument("--thinking", dest="enable_thinking",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="Enable/disable extended thinking for this API run "
+                         "(--thinking / --no-thinking). Absent falls back to the "
+                         "TRANSLATE_THINKING env default (off).")
     add_chapters(tp)
 
     # translate-prepare / translate-commit (harness subagent backend) -------
@@ -197,6 +202,13 @@ def _build_parser() -> argparse.ArgumentParser:
     add_chapters(tpp)
     tpp.add_argument("--worker-model", dest="worker_model", default=None,
                      help="Model tier to pin workers to (default: sonnet)")
+    tpp.add_argument("--worker-thinking", dest="worker_thinking",
+                     action=argparse.BooleanOptionalAction, default=None,
+                     help="Enable extended 'think hard' thinking for workers "
+                          "(--worker-thinking / --no-worker-thinking); persisted. "
+                          "Absent leaves the saved value unchanged. Only takes effect "
+                          "on a thinking-capable worker (fable is always-on and is "
+                          "never flagged).")
     tpp.add_argument("--parallelism", default=None,
                      choices=["sequential", "chapter", "all"],
                      help="Spawn mode (persisted): sequential | chapter (default) | all")
@@ -325,10 +337,12 @@ def _dispatch(args: argparse.Namespace):
         return flow.cost(args.project, chapters=args.chapters)
     if cmd == "translate":
         return flow.translate(args.project, yes=args.yes, model=args.model,
-                              provider=args.provider, chapters=args.chapters)
+                              provider=args.provider, chapters=args.chapters,
+                              enable_thinking=args.enable_thinking)
     if cmd == "translate-prepare":
         return flow.translate_prepare(args.project, chapters=args.chapters,
                                       worker_model=args.worker_model,
+                                      worker_thinking=args.worker_thinking,
                                       parallelism=args.parallelism, window=args.window,
                                       batch_size=args.batch_size)
     if cmd == "translate-commit":

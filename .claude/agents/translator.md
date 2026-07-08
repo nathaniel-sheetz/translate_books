@@ -19,6 +19,11 @@ Do exactly this:
 2. Follow it precisely to translate the source text into the target language.
 3. Write **only the translated prose** to `draft_path`.
 
+Extended thinking is **off by default**: engage it **only when your spawn prompt explicitly
+tells you to "think hard"** (the harness adds that phrase when the user opts workers into
+thinking). With no such instruction, translate directly — do not turn on extended thinking on
+your own.
+
 Hard rules (the commit step validates these and will reject a bad draft):
 - Output prose only. No preamble, no "Here's the translation:", no commentary, no
   markdown code fences, no notes. The file must contain the translation and nothing else.

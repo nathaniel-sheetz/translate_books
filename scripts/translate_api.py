@@ -115,6 +115,7 @@ def translate_dry_run(args):
             project_name=args.project_name,
             source_language=args.source_language,
             target_language=args.target_language,
+            enable_thinking=args.thinking,
         )
     except (APIKeyError, APIError) as e:
         console.print(f"[red]Translation failed: {e}[/red]")
@@ -264,6 +265,7 @@ def translate_realtime(args):
                     source_language=args.source_language,
                     target_language=args.target_language,
                     max_retries=3,
+                    enable_thinking=args.thinking,
                 )
 
                 # Save
@@ -373,6 +375,7 @@ def translate_batch(args):
             project_name=args.project_name,
             source_language=args.source_language,
             target_language=args.target_language,
+            enable_thinking=args.thinking,
         )
 
         # Store chunk file paths for later retrieval. chunk_log_map (set by
@@ -708,6 +711,16 @@ Examples:
         type=int,
         default=5,
         help='Maximum concurrent API requests (real-time mode only, default: 5)'
+    )
+
+    parser.add_argument(
+        '--thinking',
+        dest='thinking',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='Enable/disable extended thinking (--thinking / --no-thinking). '
+             'Absent falls back to the TRANSLATE_THINKING env default (off). '
+             'Only thinking-capable models honor it.'
     )
 
     parser.add_argument(
