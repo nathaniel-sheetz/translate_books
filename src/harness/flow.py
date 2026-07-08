@@ -46,6 +46,33 @@ from src.harness import state
 #   all        — every chunk in bounded batches, no cross-chunk ordering (fastest).
 _PARALLELISM_MODES = ("sequential", "chapter", "all")
 
+
+def _spawn_plan_from_cfg(cfg: dict) -> tuple[dict, dict]:
+    """Build ``spawn_plan`` from project config; enforce ``window <= batch_size``.
+
+    Returns ``(spawn_plan, patches)`` where ``patches`` holds any config keys that
+    were clamped (caller may persist them).
+    """
+    window = int(cfg.get("parallel_window") or 3)
+    batch_size = int(cfg.get("batch_size") or 3)
+    patches: dict = {}
+    if window > batch_size:
+        window = batch_size
+        patches["parallel_window"] = window
+    return {
+        "parallelism": cfg.get("parallelism") or "chapter",
+        "window": window,
+        "batch_size": batch_size,
+    }, patches
+
+
+def _read_draft_text(path: Path) -> str | None:
+    """Read a ``.draft.txt`` file; return ``None`` when missing or unreadable."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
 # Claude Code worker aliases whose extended thinking can be toggled ON by a
 # "think hard" keyword in the spawn prompt. ``fable`` is deliberately absent: it
 # is always-on (nothing to toggle), so a worker on it is treated as not
@@ -893,10 +920,14 @@ def translate_prepare(
     spawn-mode question entirely.
 
     Prepare is **non-destructive**: a non-empty ``.draft.txt`` from a prior prepare is
-    kept (only empty drafts are cleared), and every uncommitted draft on disk — even one
-    whose chunk is outside this call's ``--chapters`` scope — is rescued into the new
-    manifest and counted in ``rescued_prior_drafts``. A narrower re-prepare therefore
-    can never strand (or wipe) a just-finished wave before ``translate-commit`` lands it.
+    kept (only empty drafts are cleared), and every mappable uncommitted draft on disk —
+    even one whose chunk is outside this call's ``--chapters`` scope — is rescued into
+    the new manifest and counted in ``rescued_prior_drafts``. A narrower re-prepare
+    therefore recovers (rather than wipes) a just-finished wave before
+    ``translate-commit`` lands it; unmappable or unreadable drafts are left on disk.
+
+    ``window`` is clamped to ``batch_size`` when it would exceed the fan-out throttle
+    (chapter-parallel first-position waves spawn one worker per chapter in the window).
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
@@ -945,16 +976,10 @@ def translate_prepare(
     # non-thinking worker (e.g. `fable`, always-on) can never be flagged on — the
     # analog of the GUI hiding+unchecking the checkbox for such models.
     worker_thinking = bool(cfg.get("worker_thinking")) and _worker_supports_thinking(worker_model)
-    spawn_plan = {
-        "parallelism": cfg.get("parallelism") or "chapter",
-        "window": int(cfg.get("parallel_window") or 3),
-        # Recommended fan-out width for one spawn wave. Saved so the agent has an
-        # explicit number to ramp from (and to throttle back to on a 529); see the
-        # 500-vs-529 backoff guidance in SKILL.md Step 4B. Keep window <= batch_size
-        # so a chapter-parallel first-position wave (one worker per chapter in the
-        # window) never exceeds this throttle; the defaults (3 and 3) match.
-        "batch_size": int(cfg.get("batch_size") or 3),
-    }
+    spawn_plan, spawn_patches = _spawn_plan_from_cfg(cfg)
+    if spawn_patches:
+        cfg.update(spawn_patches)
+        state.save_config(project_dir, cfg)
 
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
@@ -1038,7 +1063,8 @@ def translate_prepare(
             # re-spawned worker overwrites it, and translate-commit lands it as-is if
             # not. Only clear an empty/whitespace draft so a stale zero-byte file can't
             # masquerade as work. (Fixes the Pollyanna hiccup #1 draft wipe.)
-            if draft_path.exists() and not draft_path.read_text(encoding="utf-8").strip():
+            draft_text = _read_draft_text(draft_path) if draft_path.exists() else None
+            if draft_text is not None and not draft_text.strip():
                 draft_path.unlink(missing_ok=True)
             entries.append({
                 "chunk_id": chunk.id,
@@ -1059,7 +1085,6 @@ def translate_prepare(
     # outside this prepare's --chapters scope. We scan the drafts *on disk* (not just the
     # last manifest's entries), so a narrower re-prepare can't strand a wider wave.
     # (Fixes the Pollyanna hiccup #1 draft wipe alongside the non-destructive unlink.)
-    from src.utils.file_io import load_chunk as _lc
     existing_ids = {e["chunk_id"] for e in entries}
     # Pre-computed entry metadata from the last manifest, if any — used only to resolve a
     # draft's chunk_path cheaply before falling back to a full-project scan.
@@ -1076,37 +1101,43 @@ def translate_prepare(
     # and only when a stray draft can't be resolved from the prior manifest.
     id_to_path: dict[str, Path] | None = None
     rescued: list[dict] = []
+    rescued_ids: set[str] = set()
     for draft in sorted(translate_dir.glob("*.draft.txt")):
         cid = draft.name[: -len(".draft.txt")]
-        if cid in existing_ids or any(e["chunk_id"] == cid for e in rescued):
+        if cid in existing_ids or cid in rescued_ids:
             continue  # already represented in the new manifest
-        try:
-            if not draft.read_text(encoding="utf-8").strip():
-                continue  # empty/whitespace draft is not work
-        except OSError:
-            continue
+        draft_text = _read_draft_text(draft)
+        if draft_text is None or not draft_text.strip():
+            continue  # empty, whitespace-only, or unreadable draft is not work
         chunk_cp: Path | None = None
         prior_entry = prior_by_id.get(cid)
         if prior_entry and prior_entry.get("chunk_path"):
-            chunk_cp = Path(prior_entry["chunk_path"])
+            candidate = Path(prior_entry["chunk_path"])
+            if candidate.exists():
+                try:
+                    if load_chunk(candidate).id == cid:
+                        chunk_cp = candidate
+                except Exception:
+                    pass  # stale/corrupt manifest path — fall through to id_to_path
         if chunk_cp is None or not chunk_cp.exists():
             if id_to_path is None:
                 id_to_path = {}
                 for cps in all_discovered.values():
                     for cp2 in cps:
                         try:
-                            id_to_path[_lc(cp2).id] = cp2
+                            id_to_path[load_chunk(cp2).id] = cp2
                         except Exception:
                             continue
             chunk_cp = id_to_path.get(cid)
         if chunk_cp is None:
             continue  # can't map this draft to a current chunk — leave it on disk
         try:
-            rescue_chunk = _lc(chunk_cp)
+            rescue_chunk = load_chunk(chunk_cp)
         except Exception:
             continue
         if rescue_chunk.has_translation:
             continue  # already committed; the leftover draft is harmless
+        rescued_ids.add(cid)
         rescued.append({
             "chunk_id": cid,
             "chapter_id": rescue_chunk.chapter_id,
@@ -1672,11 +1703,7 @@ def status(project: str) -> dict:
         "chunks": (project_dir / "chunks").exists(),
     }
     epubs = sorted(p.name for p in project_dir.glob("*.epub"))
-    spawn_plan = {
-        "parallelism": cfg.get("parallelism") or "chapter",
-        "window": int(cfg.get("parallel_window") or 3),
-        "batch_size": int(cfg.get("batch_size") or 3),
-    }
+    spawn_plan, _ = _spawn_plan_from_cfg(cfg)
     base = {
         "project": project_dir.name,
         "artifacts": artifacts,

@@ -563,10 +563,11 @@ Spawn according to the saved mode (each wave is `batch_size` workers wide unless
   4. Only then advance to the next window of X chapters. Complete chapters, **not** "all first chunks
      first" — each window is fully finished before the next starts.
 
-  Re-preparing a **narrower** scope no longer strands a just-finished wave: `translate-prepare`
-  keeps any non-empty `.draft.txt` on disk and **rescues** every uncommitted draft into the new
-  manifest (reported as `rescued_prior_drafts`), so `translate-commit` can still land it. Prefer
-  committing a wave before re-preparing, but a mistimed re-prepare is now recoverable, not a wipe.
+  Re-preparing a **narrower** scope no longer wipes a just-finished wave: `translate-prepare`
+  keeps any non-empty `.draft.txt` on disk and **rescues** mappable uncommitted drafts into
+  the new manifest (reported as `rescued_prior_drafts`), so `translate-commit` can still land
+  them. Prefer committing a wave before re-preparing; unmappable or unreadable drafts stay on
+  disk untouched. `window` is clamped to `batch_size` when it would exceed the fan-out throttle.
 - **All-parallel:** spawn workers for **all** manifest entries in bounded batches of `batch_size`
   (the saved fan-out width; rate limits), `translate-commit` after each batch. No re-prepare (this mode
   has no cross-chunk Spanish context). This is also the mode to use whenever `spawn_mode_moot` is true.

@@ -888,7 +888,7 @@ def test_translate_prepare_injects_committed_translation_context(tmp_path: Path)
 
 def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     """--parallelism/--window round-trip through project config and echo back."""
-    from src.harness import flow
+    from src.harness import flow, state
 
     chunks_dir = tmp_path / "chunks"
     chunks_dir.mkdir()
@@ -903,13 +903,14 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     assert prep2["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 3}
 
     # window persists in isolation (no parallelism passed) without disturbing the
-    # previously-saved parallelism.
+    # previously-saved parallelism. window > batch_size is clamped to batch_size.
     prep3 = flow.translate_prepare(str(tmp_path), window=5)
-    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 5, "batch_size": 3}
+    assert prep3["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 3}
+    assert state.load_config(state.resolve_project_dir(str(tmp_path)))["parallel_window"] == 3
 
     # batch_size persists in isolation too, and is echoed in the usage summary.
     prep4 = flow.translate_prepare(str(tmp_path), batch_size=3)
-    assert prep4["spawn_plan"] == {"parallelism": "all", "window": 5, "batch_size": 3}
+    assert prep4["spawn_plan"] == {"parallelism": "all", "window": 3, "batch_size": 3}
     assert prep4["usage_summary"]["batch_size"] == 3
 
     # A single-chunk-per-chapter book makes the spawn-mode choice moot.
@@ -960,18 +961,21 @@ def test_translate_prepare_never_wipes_or_strands_uncommitted_drafts(tmp_path: P
         return translate_dir / f"{chap}_chunk_000.draft.txt"
 
     # A finished wave lands drafts for chunks absent from the prior (ch01) manifest.
+    expected_drafts = {}
     for chap in ("chapter_02", "chapter_03", "chapter_04"):
-        _draft_path(chap).write_text(_fake_draft(sources[chap]), encoding="utf-8")
+        expected_drafts[chap] = _fake_draft(sources[chap])
+        _draft_path(chap).write_text(expected_drafts[chap], encoding="utf-8")
 
     # Re-prepare a scope that re-covers ch02/03 (in scope) but not ch04 (out of scope).
     prep_b = flow.translate_prepare(str(tmp_path), chapters="1-3", parallelism="chapter")
 
-    # Fix A: in-scope non-empty drafts are kept, not unlinked.
+    # Fix A: in-scope non-empty drafts are kept, not unlinked, and content is unchanged.
     for chap in ("chapter_02", "chapter_03"):
         assert _draft_path(chap).exists(), f"{chap} draft was wiped"
-        assert _draft_path(chap).read_text(encoding="utf-8").strip()
-    # Fix B: the out-of-scope draft survives on disk and is rescued into the manifest.
+        assert _draft_path(chap).read_text(encoding="utf-8") == expected_drafts[chap]
+    # Fix B: the out-of-scope draft survives on disk, unchanged, and is rescued into the manifest.
     assert _draft_path("chapter_04").exists(), "out-of-scope ch04 draft was lost"
+    assert _draft_path("chapter_04").read_text(encoding="utf-8") == expected_drafts["chapter_04"]
     assert prep_b["rescued_prior_drafts"] == 1  # only ch04 (ch02/03 are in-scope)
 
     manifest_ids = {e["chunk_id"] for e in prep_b["manifest"]}
@@ -1080,6 +1084,22 @@ def test_worker_supports_thinking_full_id_fallback(worker_model, expected):
     from src.harness import flow
 
     assert flow._worker_supports_thinking(worker_model) is expected
+
+
+def test_translate_prepare_clamps_window_to_batch_size(tmp_path: Path):
+    """--window above batch_size is clamped down and persisted."""
+    from src.harness import flow, state
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
+
+    prep = flow.translate_prepare(str(tmp_path), window=8, batch_size=3)
+    assert prep["spawn_plan"]["window"] == 3
+    assert prep["spawn_plan"]["batch_size"] == 3
+    cfg = state.load_config(state.resolve_project_dir(str(tmp_path)))
+    assert cfg["parallel_window"] == 3
+    assert cfg["batch_size"] == 3
 
 
 def test_translate_prepare_rejects_nonpositive_window(tmp_path: Path):
