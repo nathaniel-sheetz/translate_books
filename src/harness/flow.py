@@ -46,6 +46,33 @@ from src.harness import state
 #   all        — every chunk in bounded batches, no cross-chunk ordering (fastest).
 _PARALLELISM_MODES = ("sequential", "chapter", "all")
 
+# Claude Code worker aliases whose extended thinking can be toggled ON by a
+# "think hard" keyword in the spawn prompt. ``fable`` is deliberately absent: it
+# is always-on (nothing to toggle), so a worker on it is treated as not
+# thinking-capable for the opt-in gate (the analog of the GUI hiding the box).
+_THINKING_WORKER_ALIASES = frozenset({"sonnet", "opus", "haiku"})
+
+
+def _worker_supports_thinking(worker_model: str) -> bool:
+    """True if a subagent worker on *worker_model* can be nudged into extended thinking.
+
+    Workers are pinned to a Claude Code **alias** (``sonnet``/``opus``/``haiku``/
+    ``fable``), not a full model id, so ``api_translator.model_supports_thinking``
+    (which matches ``claude-sonnet-5`` etc.) can't be applied to it directly. The
+    keyword-triggerable aliases toggle on via a "think hard" spawn keyword; ``fable``
+    is always-on (nothing to toggle) → ``False``. A full model id (non-alias) falls
+    back to the API-path support check.
+    """
+    if not worker_model:
+        return False
+    alias = worker_model.strip().lower()
+    if alias in _THINKING_WORKER_ALIASES:
+        return True
+    if alias == "fable":
+        return False
+    from src.api_translator import model_supports_thinking
+    return model_supports_thinking(worker_model)
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -830,6 +857,7 @@ def translate_prepare(
     *,
     chapters: str | None = None,
     worker_model: str | None = None,
+    worker_thinking: bool | None = None,
     parallelism: str | None = None,
     window: int | None = None,
     batch_size: int | None = None,
@@ -872,6 +900,8 @@ def translate_prepare(
     persist: dict = {}
     if worker_model is not None:
         persist["worker_model"] = worker_model
+    if worker_thinking is not None:
+        persist["worker_thinking"] = bool(worker_thinking)
     if parallelism is not None:
         if parallelism not in _PARALLELISM_MODES:
             return {
@@ -905,6 +935,10 @@ def translate_prepare(
         state.save_config(project_dir, cfg)
 
     worker_model = cfg.get("worker_model") or "sonnet"
+    # Resolve the worker's thinking choice, then gate it on model support: a
+    # non-thinking worker (e.g. `fable`, always-on) can never be flagged on — the
+    # analog of the GUI hiding+unchecking the checkbox for such models.
+    worker_thinking = bool(cfg.get("worker_thinking")) and _worker_supports_thinking(worker_model)
     spawn_plan = {
         "parallelism": cfg.get("parallelism") or "chapter",
         "window": int(cfg.get("parallel_window") or 8),
@@ -1045,6 +1079,7 @@ def translate_prepare(
 
     manifest_doc = {
         "worker_model": worker_model,
+        "worker_thinking": worker_thinking,
         "chapters": chapters or "all",
         "spawn_plan": spawn_plan,
         "spawn_mode_moot": spawn_mode_moot,
@@ -1058,12 +1093,14 @@ def translate_prepare(
         "manifest": entries,
         "manifest_path": str(translate_dir / "manifest.json"),
         "worker_model": worker_model,
+        "worker_thinking": worker_thinking,
         "spawn_plan": spawn_plan,
         "spawn_mode_moot": spawn_mode_moot,
         "usage_summary": {
             "chunks": len(entries),
             "source_words": total_words,
             "worker_model": worker_model,
+            "worker_thinking": worker_thinking,
             "parallelism": spawn_plan["parallelism"],
             "window": spawn_plan["window"],
             "batch_size": spawn_plan["batch_size"],
@@ -1297,6 +1334,7 @@ def translate(
     model: str | None = None,
     provider: str | None = None,
     chapters: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> int | dict:
     """The one paid step. Fails closed without ``--yes`` (cost gate, defense-in-depth).
 
@@ -1323,6 +1361,12 @@ def translate(
     ]
     if chapters:
         cmd += ["--chapters", chapters]
+    # Absent (None) leaves the TRANSLATE_THINKING env default in force downstream;
+    # only an explicit choice threads a flag through to translate_book.py.
+    if enable_thinking is True:
+        cmd.append("--thinking")
+    elif enable_thinking is False:
+        cmd.append("--no-thinking")
     return _stream_result("translate", *_run_script(cmd))
 
 

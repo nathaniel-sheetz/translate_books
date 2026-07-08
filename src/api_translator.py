@@ -660,6 +660,10 @@ def translate_chunk_realtime(
         source_language: Source language
         target_language: Target language
         max_retries: Maximum retry attempts on failure
+        previous_chapter_context: Optional prior-chapter text for continuity
+        project_slug: Optional project slug for context
+        enable_thinking: Tri-state extended-thinking toggle; None falls back to
+            the TRANSLATE_THINKING env default (off)
 
     Returns:
         Updated chunk with translation
@@ -725,6 +729,9 @@ def submit_batch(
         source_language: Source language
         target_language: Target language
         context_map: Optional mapping of chunk ID to previous chapter context
+        project_slug: Optional project slug for context
+        enable_thinking: Tri-state extended-thinking toggle; None falls back to
+            the TRANSLATE_THINKING env default (off)
 
     Returns:
         Dictionary with batch job info

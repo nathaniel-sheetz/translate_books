@@ -469,11 +469,22 @@ config so the "translate the rest" batch reuses it without re-asking. Confirm X 
 **Log the choice:** `log-event --event spawn_mode --data '{"mode":"sequential"|"chapter"|"all",
 "window":<X>}'`.
 
+**4B-0c. STOP — worker-thinking gate (ask once, then save).** *Only when the chosen `worker_model` is
+thinking-capable* (`sonnet`/`opus`/`haiku` — a full-id worker resolves via `model_supports_thinking`),
+ask via AskUserQuestion whether workers should engage **extended "think hard" thinking** — **default
+No**. Extended thinking gives the worker room to reason through tricky passages, but is slower and burns
+more subscription usage per chunk; leave it off unless the book's difficulty warrants it. **Skip this
+question entirely for a non-thinking worker** (e.g. `fable`, always-on) — mirroring the GUI hiding the
+checkbox — and just proceed with thinking off. Persist the answer by passing `--worker-thinking` (yes)
+or `--no-worker-thinking` (no) on the next `translate-prepare`; it is saved to project config and reused
+by the "translate the rest" batch (4B-f) without re-asking. **Log the choice:** `log-event --event
+thinking --data '{"worker_thinking":true|false}'`.
+
 **4B-a. Prepare (no spend).** Render one prompt per untranslated chunk in the set + a manifest, saving
 the spawn mode:
 ```bash
 python scripts/harness.py translate-prepare --project projects/<slug> --chapters <set> \
-  --parallelism <mode> [--window <X>] [--worker-model sonnet]
+  --parallelism <mode> [--window <X>] [--worker-model sonnet] [--worker-thinking]
 ```
 This prints a `manifest` (each entry: `chunk_id`, `chapter_id`, `prompt_path`, `draft_path`), a
 `usage_summary`, the `worker_model`, and the saved `spawn_plan` (`parallelism` + `window`). It does
@@ -482,16 +493,23 @@ need a translation, so resume is free.
 
 **4B-b. STOP — usage gate. END THE TURN.** The subagent analog of the cost gate: no dollars, but
 spawning N workers consumes real subscription/rate usage. Show the `usage_summary` ("N workers on
-`<model>`, mode `<parallelism>`"), confirm the worker model, and ask via AskUserQuestion: proceed /
+`<model>`, mode `<parallelism>`, **thinking: on/off**" — read the thinking state from
+`usage_summary.worker_thinking`), confirm the worker model, and ask via AskUserQuestion: proceed /
 abort. **End your turn and wait.** Do not spawn workers in the same turn that produced the manifest.
 
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
 Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
 `model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt:
 *"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Then
-reply with exactly `done <chunk_id>` and nothing else — no summary, no list of choices."* The worker
-writes its file and reports back only that token — **do not** have it return the prose *or a recap of
-its choices* to you (either one floods your context). You learn each worker's success from
+reply with exactly `done <chunk_id>` and nothing else — no summary, no list of choices."* **When the
+manifest's `worker_thinking` is `true`, add the "think hard" trigger** so the worker engages extended
+thinking: *"Translate one chunk. Read `<prompt_path>`. **Think hard** about the tricky passages, then
+write ONLY the translated prose to `<draft_path>`. Then reply with exactly `done <chunk_id>` and nothing
+else — no summary, no list of choices."* When `worker_thinking` is `false` (the default), use the plain
+prompt above (no keyword → no extended thinking).
+
+The worker writes its file and reports back only that token — **do not** have it return the prose *or a
+recap of its choices* to you (either one floods your context). You learn each worker's success from
 `translate-commit`'s `committed`/`failed`/`missing` lists, not from its chat-back. After a wave's
 drafts are written, commit:
 ```bash

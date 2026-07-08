@@ -386,6 +386,7 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             source_language=source_lang,
             target_language=target_lang,
             previous_chapter_context=previous_context,
+            enable_thinking=getattr(args, "thinking", None),
         )
 
         save_chunk(translated, chunk_path)
@@ -622,6 +623,12 @@ def main():
                         help="Estimate cost and exit without translating (never spends, never prompts)")
     parser.add_argument("--yes", action="store_true",
                         help="Skip the interactive cost confirmation; use only after you've already reviewed the estimate")
+    parser.add_argument("--thinking", dest="thinking",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Enable/disable extended thinking for the translate stage "
+                             "(--thinking / --no-thinking). Absent falls back to the "
+                             "TRANSLATE_THINKING env default (off). Only thinking-capable "
+                             "models honor it.")
 
     # Chapter detection
     parser.add_argument("--chapter-pattern", default="roman",

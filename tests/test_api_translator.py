@@ -381,6 +381,62 @@ def test_submit_anthropic_batch_enable_thinking_flag(sample_chunk, tmp_path):
         assert params["max_tokens"] >= 8192
 
 
+@pytest.mark.parametrize("argv_flag,expected", [
+    (["--thinking"], True),
+    (["--no-thinking"], False),
+    ([], None),
+])
+def test_translate_api_cli_threads_thinking_realtime(sample_chunk, tmp_path, monkeypatch,
+                                                     argv_flag, expected):
+    """--thinking / --no-thinking / absent reach translate_chunk_realtime as True/False/None.
+
+    "Absent" stays ``None`` so the resolver falls back to the TRANSLATE_THINKING env default.
+    """
+    from scripts import translate_api
+
+    monkeypatch.setattr(translate_api, "load_chunks_from_patterns", lambda _p: [sample_chunk])
+    monkeypatch.setattr(translate_api, "estimate_cost",
+                        lambda *a, **k: {"input_tokens": 1, "output_tokens_estimate": 1,
+                                         "cost_usd": 0.0, "cost_per_chunk_usd": 0.0})
+    monkeypatch.setattr(translate_api, "save_chunk", lambda *a, **k: None)
+    mock_tr = Mock(return_value=sample_chunk)
+    monkeypatch.setattr(translate_api, "translate_chunk_realtime", mock_tr)
+    monkeypatch.setattr("sys.argv",
+                        ["translate_api.py", "chunks/x.json", "--yes",
+                         "--output", str(tmp_path / "out"), *argv_flag])
+
+    assert translate_api.main() == 0
+    _, kwargs = mock_tr.call_args
+    assert kwargs["enable_thinking"] is expected
+
+
+@pytest.mark.parametrize("argv_flag,expected", [
+    (["--thinking"], True),
+    (["--no-thinking"], False),
+    ([], None),
+])
+def test_translate_api_cli_threads_thinking_batch(sample_chunk, tmp_path, monkeypatch,
+                                                  argv_flag, expected):
+    """--thinking / --no-thinking / absent reach submit_batch as True/False/None."""
+    from scripts import translate_api
+
+    monkeypatch.setattr(translate_api, "load_chunks_with_paths",
+                        lambda _p: [(sample_chunk, "chunks/x.json")])
+    monkeypatch.setattr(translate_api, "estimate_cost",
+                        lambda *a, **k: {"input_tokens": 1, "output_tokens_estimate": 1,
+                                         "cost_usd": 0.0, "cost_per_chunk_usd": 0.0})
+    monkeypatch.setattr(translate_api, "save_batch_job", lambda *a, **k: None)
+    mock_sb = Mock(return_value={"job_id": "batch_abc", "status": "in_progress", "chunk_count": 1})
+    monkeypatch.setattr(translate_api, "submit_batch", mock_sb)
+    monkeypatch.setattr("sys.argv",
+                        ["translate_api.py", "chunks/x.json", "--batch", "--yes",
+                         "--output", str(tmp_path / "out"), *argv_flag])
+
+    assert translate_api.main() == 0
+    _, kwargs = mock_sb.call_args
+    assert kwargs["enable_thinking"] is expected
+
+
 def test_max_tokens_with_thinking_floor():
     """When thinking is active max_tokens is raised to the floor; otherwise untouched."""
     from src.api_translator import _max_tokens_with_thinking, _THINKING_MAX_TOKENS_FLOOR

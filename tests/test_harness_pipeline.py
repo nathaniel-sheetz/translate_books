@@ -928,6 +928,102 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     assert state.load_config(state.resolve_project_dir(str(tmp_path)))["parallelism"] == "all"
 
 
+def test_translate_prepare_persists_worker_thinking(tmp_path: Path):
+    """--worker-thinking round-trips through config; a non-thinking worker forces it off.
+
+    The subagent analog of the GUI: extended thinking is OFF by default, an explicit
+    opt-in persists (reused by the "translate the rest" batch), and pinning a
+    non-thinking worker (fable, always-on) can never leave the worker flagged on.
+    """
+    from src.harness import flow, state
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
+
+    # Fresh config, no flag → thinking off (the default; analog of the unchecked box).
+    default = flow.translate_prepare(str(tmp_path))
+    assert default["usage_summary"]["worker_thinking"] is False
+    assert default["worker_thinking"] is False
+
+    # Opt in on a thinking-capable worker → reported on, persisted, and in the manifest.
+    on = flow.translate_prepare(str(tmp_path), worker_model="sonnet", worker_thinking=True)
+    assert on["usage_summary"]["worker_thinking"] is True
+    assert on["worker_thinking"] is True
+    manifest = json.loads(Path(on["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["worker_thinking"] is True
+
+    # Persisted: a later prepare with no thinking arg still reports True.
+    again = flow.translate_prepare(str(tmp_path))
+    assert again["usage_summary"]["worker_thinking"] is True
+
+    # Pinning a non-thinking worker (fable, always-on) forces it back to False even
+    # though the saved preference is still True (gate on model support).
+    fable = flow.translate_prepare(str(tmp_path), worker_model="fable")
+    assert fable["usage_summary"]["worker_thinking"] is False
+    assert state.load_config(state.resolve_project_dir(str(tmp_path)))["worker_thinking"] is True
+    # Flipping back to a thinking worker restores the honored preference.
+    back = flow.translate_prepare(str(tmp_path), worker_model="sonnet")
+    assert back["usage_summary"]["worker_thinking"] is True
+
+    # Explicit opt-out persists too.
+    off = flow.translate_prepare(str(tmp_path), worker_thinking=False)
+    assert off["usage_summary"]["worker_thinking"] is False
+    assert flow.translate_prepare(str(tmp_path))["usage_summary"]["worker_thinking"] is False
+
+
+@pytest.mark.parametrize("enable_thinking,expected_flag", [
+    (True, "--thinking"),
+    (False, "--no-thinking"),
+    (None, None),
+])
+def test_translate_threads_thinking_flag_to_subprocess(tmp_path: Path, monkeypatch,
+                                                       enable_thinking, expected_flag):
+    """flow.translate emits --thinking/--no-thinking/neither to the wrapped CLI.
+
+    None must leave BOTH flags off so translate_book.py falls back to the
+    TRANSLATE_THINKING env default rather than being forced off — the same
+    tri-state contract the API-path CLI tests assert one layer down.
+    """
+    from src.harness import flow
+
+    captured: dict = {}
+
+    def fake_run_script(cmd):
+        captured["cmd"] = cmd
+        return 0, None
+
+    monkeypatch.setattr(flow, "_run_script", fake_run_script)
+
+    flow.translate(str(tmp_path), yes=True, model="claude-sonnet-5",
+                   provider="anthropic", enable_thinking=enable_thinking)
+
+    cmd = captured["cmd"]
+    if expected_flag is None:
+        assert "--thinking" not in cmd and "--no-thinking" not in cmd
+    else:
+        assert expected_flag in cmd
+        # Exactly one of the mutually exclusive flags is present.
+        other = "--no-thinking" if expected_flag == "--thinking" else "--thinking"
+        assert other not in cmd
+
+
+@pytest.mark.parametrize("worker_model,expected", [
+    # Full model ids (non-aliases) resolve via api_translator.model_supports_thinking,
+    # not the alias set — the fallback branch the persistence test doesn't cover.
+    ("claude-sonnet-5", True),
+    ("claude-opus-4-8", True),
+    ("claude-fable-5-20250101", False),   # full fable id: rejected by the fallback, not the alias short-circuit
+    ("claude-3-5-sonnet-latest", False),  # legacy: no toggleable thinking
+    ("", False),                          # empty guard
+])
+def test_worker_supports_thinking_full_id_fallback(worker_model, expected):
+    """_worker_supports_thinking delegates non-alias ids to model_supports_thinking."""
+    from src.harness import flow
+
+    assert flow._worker_supports_thinking(worker_model) is expected
+
+
 def test_translate_prepare_rejects_nonpositive_window(tmp_path: Path):
     """--window below 1 is reported as an error and not persisted to config."""
     from src.harness import flow, state
