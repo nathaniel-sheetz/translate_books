@@ -323,10 +323,11 @@ def build_translation_prompt(
     function is what lets the API and subagent paths stay byte-identical.
 
     Section order is **cache-load-bearing** (see ``prompts/translation.txt``): the
-    fixed sections (task, style guide, instructions, output format, dialogue) form
-    a stable prefix and the per-chunk variable sections (glossary, context, source)
-    come last. The glossary is filtered to terms relevant to this chunk's source
-    text, so it lives in that variable suffix (it is NOT a stable cacheable prefix).
+    fixed sections (task, style guide, instructions, dialogue) form a stable prefix
+    and the per-chunk variable sections (glossary, context, source) come after it
+    (the fixed OUTPUT FORMAT section trails at the very end). The glossary is
+    filtered to terms relevant to this chunk's source text, so it lives in that
+    variable suffix (it is NOT a stable cacheable prefix).
 
     ``always_include_dialogue`` / ``always_include_image_instructions`` are
     book-level opt-ins that force the (conditional) dialogue block and image bullet

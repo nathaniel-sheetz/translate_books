@@ -1634,6 +1634,39 @@ def test_build_translation_prompt_image_bullet_off_fragments_prefix():
     assert prefix(img_chunk) != prefix(plain_chunk)
 
 
+def test_build_translation_prompt_section_order_is_canonical():
+    """Pin the cache-load-bearing section order so the runtime prompts/translation.txt
+    and the committed prompts/translation.example.txt cannot silently diverge again.
+    In particular the fixed OUTPUT FORMAT section must TRAIL after the variable suffix
+    (glossary/context/source), not sit in the fixed prefix — the exact divergence that
+    otherwise slips past the byte-identical prefix checks above. always_include_dialogue
+    is set so the DIALOGUE FORMATTING block is present and its position is pinned too."""
+    chunk = _mk_chunk("ch01_ord", "He walked slowly down the lane.\n\nThe trees were silent.")
+    prompt = build_translation_prompt(
+        chunk, target_language="Spanish", always_include_dialogue=True
+    )
+
+    def sep(name: str) -> str:
+        return "=" * 80 + f"\n{name}\n" + "=" * 80
+
+    order = [
+        "BOOK TRANSLATION TASK",
+        "STYLE GUIDE",
+        "TRANSLATION INSTRUCTIONS",
+        "DIALOGUE FORMATTING",
+        "GLOSSARY TERMS",
+        "BOOK CONTEXT",
+        "SOURCE TEXT TO TRANSLATE",
+        "OUTPUT FORMAT",
+        "TRANSLATION",
+    ]
+    positions = {name: prompt.find(sep(name)) for name in order}
+    assert all(pos != -1 for pos in positions.values()), positions
+    assert list(positions.values()) == sorted(positions.values()), positions
+    # The load-bearing invariant: OUTPUT FORMAT (fixed text) trails the variable source.
+    assert positions["OUTPUT FORMAT"] > positions["SOURCE TEXT TO TRANSLATE"], positions
+
+
 def test_apply_translation_stamps(sample_chunk):
     """apply_translation strips + stamps text/status/timestamp; last_llm_log is
     set only when a log path is given and preserved (not cleared) when None."""

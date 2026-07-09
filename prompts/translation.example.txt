@@ -30,7 +30,7 @@
 # - Use format_glossary_for_prompt() to prepare the glossary variable
 # - StyleGuide.content should be used for the style_guide variable
 # - Section order is cache-load-bearing: the fixed sections (task, style guide,
-#   translation instructions, output format, dialogue) form a stable prefix, and the
+#   translation instructions, dialogue) form a stable prefix, and the
 #   per-chunk variable sections (glossary, book context, source text) MUST stay last
 #   so that prefix stays reusable for prompt caching. Do not move variable content
 #   ahead of the fixed sections.
@@ -55,7 +55,7 @@ TRANSLATION INSTRUCTIONS
 ================================================================================
 
 1. STRUCTURE PRESERVATION:
-   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (see the DIALOGUE FORMATTING section below, present when the source contains dialogue)
+   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (see the DIALOGUE FORMATTING section below, when present)
    - When the source contains verse or poetry (short lines separated by single newlines within a stanza), preserve every line break exactly.  Each verse line in the source must correspond to one verse line in the translation, with the same single-newline structure.  Stanza breaks (blank lines between groups of verse lines) must also be preserved.
 {{image_placeholder_instructions}}
 
@@ -85,20 +85,6 @@ TRANSLATION INSTRUCTIONS
    - {{target_language}} translations are typically 10-30% longer than English
    - This is normal and expected - do not artificially compress the translation
 
-================================================================================
-OUTPUT FORMAT
-================================================================================
-
-Provide ONLY the translated text in {{target_language}}.
-
-Do not include:
-- Explanations or notes
-- The original English text
-- Commentary on translation choices
-- Section headers or labels
-
-Simply provide the clean translated text with proper paragraph breaks.
-
 {{dialogue_instructions}}
 
 ================================================================================
@@ -124,6 +110,20 @@ SOURCE TEXT TO TRANSLATE
 ================================================================================
 
 {{source_text}}
+
+================================================================================
+OUTPUT FORMAT
+================================================================================
+
+Provide ONLY the translated text in {{target_language}}.
+
+Do not include:
+- Explanations or notes
+- The original English text
+- Commentary on translation choices
+- Section headers or labels
+
+Simply provide the clean translated text with proper paragraph breaks.
 
 ================================================================================
 TRANSLATION
