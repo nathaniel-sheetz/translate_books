@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Defaults applied when config.json is absent or a key is missing. These replace
 # the values the old SKILL.md heredocs hardcoded inline.
-DEFAULTS: dict[str, str] = {
+DEFAULTS: dict[str, object] = {
     "target_language": "Spanish",
     "locale": "mx",
     "provider": "anthropic",
@@ -36,6 +36,10 @@ DEFAULTS: dict[str, str] = {
     "language_code": "es",
     "title": "",
     "author": "",
+    # When true, the DIALOGUE FORMATTING block is placed on every chunk's prompt
+    # (not only dialogue-bearing chunks) so it sits in the byte-identical, cacheable
+    # fixed prefix. Per-book opt-in; see build_translation_prompt / prompts/translation.txt.
+    "always_include_dialogue": False,
 }
 
 # Config keys a command may override (CLI flag -> config key); used by setup.

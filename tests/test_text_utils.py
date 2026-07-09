@@ -433,6 +433,20 @@ class TestImagePlaceholderInstruction:
         assert bullet != ""
         assert "translating only" not in bullet
 
+    def test_always_include_returns_superset_for_no_images(self):
+        """Book-level constant: with always_include, a chunk with NO placeholders
+        still gets the (superset) with-description bullet — so the fixed prefix is
+        byte-identical across the book."""
+        bullet = image_placeholder_instruction("Plain prose, no images.", always_include=True)
+        assert bullet.startswith("   - ")
+        assert "[IMAGE:filename.ext:image description]" in bullet
+        assert "translating only the image description" in bullet
+
+    def test_always_include_is_constant_regardless_of_source(self):
+        with_img = image_placeholder_instruction("[IMAGE:a.jpg]", always_include=True)
+        without_img = image_placeholder_instruction("no images here", always_include=True)
+        assert with_img == without_img != ""
+
 
 class TestDialogueInstruction:
     """Tests for dialogue_instruction — the conditional DIALOGUE FORMATTING block."""
@@ -498,6 +512,16 @@ class TestDialogueInstruction:
     def test_source_has_dialogue_true_for_attribution(self):
         attr_src = chr(34) + "Exactly," + chr(34) + " she replied."
         assert _source_has_dialogue(attr_src) is True
+
+    def test_always_include_narration_spanish_returns_block(self):
+        """Book-level opt-in: with always_include, a narration-only Spanish chunk
+        still gets the framed block (so it sits in the cacheable fixed prefix)."""
+        block = dialogue_instruction(self._NARRATION_SRC, "Spanish", always_include=True)
+        assert block.startswith(self._FRAMED_HEADER)
+
+    def test_always_include_non_spanish_still_empty(self):
+        """The Spanish gate wins over always_include: a non-Spanish target stays empty."""
+        assert dialogue_instruction(self._DIALOGUE_SRC, "French", always_include=True) == ""
 
 
 class TestResolveDialoguePath:

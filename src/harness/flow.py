@@ -188,6 +188,7 @@ def setup(
     title: str | None = None,
     author: str | None = None,
     language_code: str | None = None,
+    always_include_dialogue: bool | None = None,
     front_matter_titles: list[str] | None = None,
     back_matter_titles: list[str] | None = None,
     min_chapter_size: int | None = None,
@@ -222,6 +223,7 @@ def setup(
         "title": title,
         "author": author,
         "language_code": language_code,
+        "always_include_dialogue": always_include_dialogue,
     }.items():
         if value is not None:
             cfg[key] = value
@@ -987,6 +989,7 @@ def translate_prepare(
     from src.api_translator import build_translation_prompt
     from src.translator import extract_previous_chapter_context
     from src.utils.file_io import load_chunk, load_glossary, load_style_guide
+    from src.utils.text_utils import image_filenames
 
     chunks_dir = project_dir / "chunks"
     if not chunks_dir.exists():
@@ -1017,6 +1020,18 @@ def translate_prepare(
 
     title = cfg.get("title") or project_dir.name
     target_lang = cfg.get("target_language") or "Spanish"
+
+    # Book-level prompt-prefix opt-ins (see build_translation_prompt): forcing the
+    # dialogue block / image bullet onto every chunk keeps the fixed prompt prefix
+    # byte-identical across the book so it stays cacheable. always_include_dialogue is
+    # a per-book config flag; book_has_images is computed over the WHOLE book (not just
+    # the in-scope --chapters) so the constant is stable regardless of which wave runs.
+    always_include_dialogue = bool(cfg.get("always_include_dialogue", False))
+    book_has_images = any(
+        image_filenames(load_chunk(cp).source_text)
+        for cps in all_discovered.values()
+        for cp in cps
+    )
 
     translate_dir = hdir / "translate"
     translate_dir.mkdir(parents=True, exist_ok=True)
@@ -1054,6 +1069,8 @@ def translate_prepare(
                 source_language="English",
                 target_language=target_lang,
                 previous_chapter_context=prev_context,
+                always_include_dialogue=always_include_dialogue,
+                always_include_image_instructions=book_has_images,
             )
             prompt_path = translate_dir / f"{chunk.id}.prompt.txt"
             draft_path = translate_dir / f"{chunk.id}.draft.txt"
@@ -1882,7 +1899,7 @@ def runs(project: str, *, run_id: str | None = None) -> dict:
 OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "setup": {
         "project_dir": "absolute path to the project directory",
-        "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code)",
+        "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code, always_include_dialogue)",
         "chapters": "list of written chapter file stems (e.g. 'chapter_01')",
         "chapter_count": "number of sections written to chapters/",
         "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved to a concrete pattern here)",
