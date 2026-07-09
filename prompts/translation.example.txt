@@ -1,6 +1,6 @@
 # Translation Prompt Template
-# Version: 1.0
-# Last Updated: 2025-11-02
+# Version: 1.3
+# Last Updated: 2026-07-09
 #
 # This template uses double-brace syntax (e.g., book_title in double braces)
 # for simple string substitution.
@@ -15,17 +15,25 @@
 #   context - Book context (genre, time period, style notes)
 #   chapter_info - Optional chapter information for additional context
 #   previous_chapter_context - Context from end of previous section (Original source language; do not re-translate)
-#   image_placeholder_instructions - Conditional bullet describing how to handle
-#       [IMAGE:...] placeholders, or empty when the source has none. Build with
+#   image_placeholder_instructions - Bullet describing how to handle [IMAGE:...]
+#       placeholders. Empty when the source has none; books that contain image
+#       placeholders pass always_include=True so every chunk carries the same
+#       (superset) bullet, keeping the fixed prefix byte-identical. Build with
 #       src.utils.text_utils.image_placeholder_instruction(source_text).
-#   dialogue_instructions - Conditional DIALOGUE FORMATTING section, injected only
-#       when the chunk contains dialogue (Spanish targets), or empty otherwise.
-#       Build with src.utils.text_utils.dialogue_instruction(source_text, target_language).
+#   dialogue_instructions - DIALOGUE FORMATTING section (Spanish targets). Injected
+#       when the chunk contains dialogue, or on every chunk when the book enables
+#       always_include_dialogue; empty otherwise. Build with
+#       src.utils.text_utils.dialogue_instruction(source_text, target_language).
 #
 # Instructions:
 # - All variables must be provided when rendering this template
 # - Use format_glossary_for_prompt() to prepare the glossary variable
 # - StyleGuide.content should be used for the style_guide variable
+# - Section order is cache-load-bearing: the fixed sections (task, style guide,
+#   translation instructions, dialogue) form a stable prefix, and the
+#   per-chunk variable sections (glossary, book context, source text) MUST stay last
+#   so that prefix stays reusable for prompt caching. Do not move variable content
+#   ahead of the fixed sections.
 
 ================================================================================
 BOOK TRANSLATION TASK
@@ -35,22 +43,6 @@ You are translating the classic book "{{book_title}}" from {{source_language}}
 to {{target_language}}. This is a professional translation for publication.
 
 ================================================================================
-SOURCE TEXT TO TRANSLATE
-================================================================================
-
-{{source_text}}
-
-================================================================================
-GLOSSARY TERMS
-================================================================================
-
-Use these translations for specific terms to ensure consistency throughout
-the book. These terms have been carefully chosen and must be used exactly
-as specified:
-
-{{glossary}}
-
-================================================================================
 STYLE GUIDE
 ================================================================================
 
@@ -58,22 +50,12 @@ Follow these style guidelines for this translation:
 
 {{style_guide}}
 
-{{dialogue_instructions}}
-
-================================================================================
-BOOK CONTEXT
-================================================================================
-
-{{context}}
-
-{{previous_chapter_context}}
-
 ================================================================================
 TRANSLATION INSTRUCTIONS
 ================================================================================
 
 1. STRUCTURE PRESERVATION:
-   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (see the DIALOGUE FORMATTING section above, present when the source contains dialogue)
+   - Preserve all paragraph breaks exactly as they appear in the source, do not merge or split paragraphs, unless required by standard dialogue handling in {{target_language}} (see the DIALOGUE FORMATTING section below, when present)
    - When the source contains verse or poetry (short lines separated by single newlines within a stanza), preserve every line break exactly.  Each verse line in the source must correspond to one verse line in the translation, with the same single-newline structure.  Stanza breaks (blank lines between groups of verse lines) must also be preserved.
 {{image_placeholder_instructions}}
 
@@ -102,6 +84,32 @@ TRANSLATION INSTRUCTIONS
    - Translate the complete text - do not skip or summarize
    - {{target_language}} translations are typically 10-30% longer than English
    - This is normal and expected - do not artificially compress the translation
+
+{{dialogue_instructions}}
+
+================================================================================
+GLOSSARY TERMS
+================================================================================
+
+Use these translations for specific terms to ensure consistency throughout
+the book. These terms have been carefully chosen and must be used exactly
+as specified:
+
+{{glossary}}
+
+================================================================================
+BOOK CONTEXT
+================================================================================
+
+{{context}}
+
+{{previous_chapter_context}}
+
+================================================================================
+SOURCE TEXT TO TRANSLATE
+================================================================================
+
+{{source_text}}
 
 ================================================================================
 OUTPUT FORMAT

@@ -95,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title", default=None)
     sp.add_argument("--author", default=None)
     sp.add_argument("--language-code", dest="language_code", default=None)
+    sp.add_argument("--always-dialogue", dest="always_include_dialogue",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="Put the DIALOGUE FORMATTING block on every chunk (not just "
+                         "dialogue-bearing ones) so it caches in the fixed prompt prefix. "
+                         "Per-book; default off. Use --no-always-dialogue to force off.")
     sp.add_argument("--front-matter-title", dest="front_matter_titles", action="append",
                     help="Heading to force-tag as front matter (repeatable)")
     sp.add_argument("--back-matter-title", dest="back_matter_titles", action="append",
@@ -296,6 +301,7 @@ def _dispatch(args: argparse.Namespace):
             custom_regex=args.custom_regex, target_language=args.target_language,
             locale=args.locale, provider=args.provider, model=args.model,
             title=args.title, author=args.author, language_code=args.language_code,
+            always_include_dialogue=args.always_include_dialogue,
             front_matter_titles=args.front_matter_titles,
             back_matter_titles=args.back_matter_titles,
             min_chapter_size=args.min_chapter_size,

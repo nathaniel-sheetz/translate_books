@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
 from src.utils.prompt_logger import last_log_path, log_prompt, relative_log_path, update_log_response
-from src.utils.text_utils import dialogue_instruction, image_placeholder_instruction
+from src.utils.text_utils import dialogue_instruction, image_filenames, image_placeholder_instruction
 
 # Load environment variables from .env file
 load_dotenv()
@@ -293,6 +293,16 @@ def get_api_key(provider: Provider) -> str:
 # two paths stamped chunk text independently they drifted (two_edit_paths_to_chunk_text).
 
 
+def _book_has_images(chunks: list[Chunk]) -> bool:
+    """True when any chunk in the book/batch contains an ``[IMAGE:...]`` placeholder.
+
+    Used to decide the book-level ``always_include_image_instructions`` value so the
+    image bullet is a constant (byte-identical) across every chunk of an image-bearing
+    book rather than flipping per chunk on image presence.
+    """
+    return any(image_filenames(chunk.source_text) for chunk in chunks)
+
+
 def build_translation_prompt(
     chunk: Chunk,
     glossary: Optional[Glossary] = None,
@@ -301,6 +311,9 @@ def build_translation_prompt(
     source_language: str = "English",
     target_language: str = "Spanish",
     previous_chapter_context: str = "",
+    *,
+    always_include_dialogue: bool = False,
+    always_include_image_instructions: bool = False,
 ) -> str:
     """Render the translation prompt for a single chunk.
 
@@ -309,8 +322,17 @@ def build_translation_prompt(
     backend renders the same string to a file for a worker. Keeping it in one
     function is what lets the API and subagent paths stay byte-identical.
 
-    The glossary is filtered to terms relevant to this chunk's source text, so
-    it lives in the variable suffix (it is NOT a stable cacheable prefix).
+    Section order is **cache-load-bearing** (see ``prompts/translation.txt``): the
+    fixed sections (task, style guide, instructions, dialogue) form a stable prefix
+    and the per-chunk variable sections (glossary, context, source) come after it
+    (the fixed OUTPUT FORMAT section trails at the very end). The glossary is
+    filtered to terms relevant to this chunk's source text, so it lives in that
+    variable suffix (it is NOT a stable cacheable prefix).
+
+    ``always_include_dialogue`` / ``always_include_image_instructions`` are
+    book-level opt-ins that force the (conditional) dialogue block and image bullet
+    into the fixed prefix so it stays byte-identical across every chunk of a book.
+    Both default off, preserving the historical per-chunk behavior.
     """
     chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
     template = load_prompt_template()
@@ -324,8 +346,12 @@ def build_translation_prompt(
         "context": "",
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": previous_chapter_context,
-        "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
-        "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
+        "image_placeholder_instructions": image_placeholder_instruction(
+            chunk.source_text, always_include=always_include_image_instructions
+        ),
+        "dialogue_instructions": dialogue_instruction(
+            chunk.source_text, target_language, always_include=always_include_dialogue
+        ),
     }
 
     prompt = render_prompt(template, variables)
@@ -362,6 +388,7 @@ def estimate_cost(
     batch_mode: bool = False,
     glossary: Optional[Glossary] = None,
     style_guide: Optional[StyleGuide] = None,
+    always_include_dialogue: bool = False,
 ) -> dict:
     """
     Estimate the cost of translating chunks with the specified provider and model.
@@ -373,6 +400,8 @@ def estimate_cost(
         batch_mode: Whether batch API will be used (50% discount)
         glossary: Optional glossary (affects prompt length)
         style_guide: Optional style guide (affects prompt length)
+        always_include_dialogue: Match the book-level dialogue opt-in used at
+            translate time so the estimate reflects what is actually sent.
 
     Returns:
         Dictionary with cost breakdown:
@@ -385,6 +414,9 @@ def estimate_cost(
     """
     # Load template to estimate prompt size
     template = load_prompt_template()
+
+    # Book-level constant so the image bullet matches translate-time rendering.
+    book_has_images = _book_has_images(chunks)
 
     # Estimate tokens per chunk
     total_input_tokens = 0
@@ -405,8 +437,12 @@ def estimate_cost(
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": "",
-            "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
-            "dialogue_instructions": dialogue_instruction(chunk.source_text, "Spanish"),
+            "image_placeholder_instructions": image_placeholder_instruction(
+                chunk.source_text, always_include=book_has_images
+            ),
+            "dialogue_instructions": dialogue_instruction(
+                chunk.source_text, "Spanish", always_include=always_include_dialogue
+            ),
         }
 
         # Render prompt
@@ -646,6 +682,8 @@ def translate_chunk_realtime(
     previous_chapter_context: str = "",
     project_slug: str | None = None,
     enable_thinking: bool | None = None,
+    always_include_dialogue: bool = False,
+    always_include_image_instructions: bool = False,
 ) -> Chunk:
     """
     Translate a single chunk using real-time API.
@@ -664,6 +702,10 @@ def translate_chunk_realtime(
         project_slug: Optional project slug for context
         enable_thinking: Tri-state extended-thinking toggle; None falls back to
             the TRANSLATE_THINKING env default (off)
+        always_include_dialogue: Force the dialogue block into the fixed prefix
+            (book-level opt-in); default off = per-chunk behavior.
+        always_include_image_instructions: Force the constant image bullet into
+            the fixed prefix (set for image-bearing books); default off.
 
     Returns:
         Updated chunk with translation
@@ -679,6 +721,8 @@ def translate_chunk_realtime(
         source_language=source_language,
         target_language=target_language,
         previous_chapter_context=previous_chapter_context,
+        always_include_dialogue=always_include_dialogue,
+        always_include_image_instructions=always_include_image_instructions,
     )
 
     # Use call_llm which handles retry + config-based dispatch
@@ -714,6 +758,7 @@ def submit_batch(
     context_map: Optional[dict[str, str]] = None,
     project_slug: str | None = None,
     enable_thinking: bool | None = None,
+    always_include_dialogue: bool = False,
 ) -> dict:
     """
     Submit a batch translation job to the API.
@@ -732,6 +777,10 @@ def submit_batch(
         project_slug: Optional project slug for context
         enable_thinking: Tri-state extended-thinking toggle; None falls back to
             the TRANSLATE_THINKING env default (off)
+        always_include_dialogue: Force the dialogue block into the fixed prefix on
+            every chunk (book-level opt-in); default off = per-chunk behavior.
+            (``always_include_image_instructions`` is derived automatically from the
+            batch's chunks — see ``_book_has_images``.)
 
     Returns:
         Dictionary with batch job info
@@ -748,12 +797,14 @@ def submit_batch(
             project_name, source_language, target_language, context_map,
             project_slug=project_slug,
             enable_thinking=enable_thinking,
+            always_include_dialogue=always_include_dialogue,
         )
     elif provider == "openai":
         return _submit_openai_batch(
             chunks, model, output_dir, glossary, style_guide,
             project_name, source_language, target_language, context_map,
             project_slug=project_slug,
+            always_include_dialogue=always_include_dialogue,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -772,6 +823,7 @@ def _submit_anthropic_batch(
     *,
     project_slug: str | None = None,
     enable_thinking: bool | None = None,
+    always_include_dialogue: bool = False,
 ) -> dict:
     """Submit batch to Anthropic Message Batches API."""
     try:
@@ -785,6 +837,9 @@ def _submit_anthropic_batch(
     api_key = get_api_key("anthropic")
     client = anthropic.Anthropic(api_key=api_key)
 
+    # Book-level constant so the image bullet is byte-identical across the batch.
+    book_has_images = _book_has_images(chunks)
+
     # Build requests for each chunk
     requests = []
 
@@ -797,6 +852,8 @@ def _submit_anthropic_batch(
             source_language=source_language,
             target_language=target_language,
             previous_chapter_context=context_map.get(chunk.id, ""),
+            always_include_dialogue=always_include_dialogue,
+            always_include_image_instructions=book_has_images,
         )
 
         # Create batch request
@@ -878,6 +935,7 @@ def _submit_openai_batch(
     context_map: dict[str, str] | None = None,
     *,
     project_slug: str | None = None,
+    always_include_dialogue: bool = False,
 ) -> dict:
     """Submit batch to OpenAI Batch API."""
     try:
@@ -891,6 +949,9 @@ def _submit_openai_batch(
     api_key = get_api_key("openai")
     client = openai.OpenAI(api_key=api_key)
 
+    # Book-level constant so the image bullet is byte-identical across the batch.
+    book_has_images = _book_has_images(chunks)
+
     # Build JSONL file with requests
     jsonl_lines = []
 
@@ -903,6 +964,8 @@ def _submit_openai_batch(
             source_language=source_language,
             target_language=target_language,
             previous_chapter_context=context_map.get(chunk.id, ""),
+            always_include_dialogue=always_include_dialogue,
+            always_include_image_instructions=book_has_images,
         )
 
         # Create batch request

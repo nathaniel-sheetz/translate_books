@@ -258,7 +258,23 @@ def strip_image_placeholders(text: str) -> str:
     return _IMAGE_PLACEHOLDER_RE.sub(lambda m: " " * len(m.group()), text)
 
 
-def image_placeholder_instruction(source_text: str) -> str:
+# The with-description bullet is a safe superset of the filename-only wording
+# (it covers both formats), so it is what a book-level "always include" uses.
+_IMAGE_INSTRUCTION_WITH_DESCRIPTION = (
+    "   - If the source contains image placeholders in the format "
+    "[IMAGE:filename.ext:image description], copy\n"
+    "     them into the translation exactly as-is at the same position "
+    "in the text, translating only the image description."
+)
+_IMAGE_INSTRUCTION_FILENAME_ONLY = (
+    "   - If the source contains image placeholders in the format "
+    "[IMAGE:filename.ext], copy\n"
+    "     them into the translation exactly as-is at the same position "
+    "in the text."
+)
+
+
+def image_placeholder_instruction(source_text: str, *, always_include: bool = False) -> str:
     """
     Build the translation-prompt sub-bullet describing how to handle image placeholders.
 
@@ -271,15 +287,28 @@ def image_placeholder_instruction(source_text: str) -> str:
       (``[IMAGE:filename.ext:description]``). Mixed-format chunks also resolve
       here because the with-description wording is a safe superset.
 
+    When ``always_include`` is true, the constant with-description (superset)
+    bullet is returned regardless of this chunk's own placeholders. Books that
+    contain image placeholders anywhere pass ``always_include=True`` for every
+    chunk so this bullet is byte-identical across the book — keeping the fixed
+    prompt prefix cacheable rather than fragmenting it on per-chunk image
+    presence. The bullet's "If the source contains..." wording is a correct
+    no-op on chunks that happen to have no images.
+
     Returned bullets include leading ``   - `` so they slot directly into the
     STRUCTURE PRESERVATION section of the translation prompt.
 
     Args:
         source_text: The chunk's source text.
+        always_include: Emit the constant superset bullet regardless of
+            ``source_text`` (book-level constant for cache stability).
 
     Returns:
         A bullet line (no trailing newline) or an empty string.
     """
+    if always_include:
+        return _IMAGE_INSTRUCTION_WITH_DESCRIPTION
+
     if not source_text:
         return ""
 
@@ -292,19 +321,9 @@ def image_placeholder_instruction(source_text: str) -> str:
     )
 
     if any_with_description:
-        return (
-            "   - If the source contains image placeholders in the format "
-            "[IMAGE:filename.ext:image description], copy\n"
-            "     them into the translation exactly as-is at the same position "
-            "in the text, translating only the image description."
-        )
+        return _IMAGE_INSTRUCTION_WITH_DESCRIPTION
 
-    return (
-        "   - If the source contains image placeholders in the format "
-        "[IMAGE:filename.ext], copy\n"
-        "     them into the translation exactly as-is at the same position "
-        "in the text."
-    )
+    return _IMAGE_INSTRUCTION_FILENAME_ONLY
 
 
 # Dialogue-handling instructions live in a standalone prompt file so the (long)
@@ -361,7 +380,12 @@ def _source_has_dialogue(source_text: str) -> bool:
     return hits >= _DIALOGUE_MIN_PARAGRAPHS
 
 
-def dialogue_instruction(source_text: str, target_language: str = "Spanish") -> str:
+def dialogue_instruction(
+    source_text: str,
+    target_language: str = "Spanish",
+    *,
+    always_include: bool = False,
+) -> str:
     """Build the DIALOGUE FORMATTING prompt section for a single chunk.
 
     Returns the framed instructions block when ``source_text`` contains dialogue
@@ -369,18 +393,29 @@ def dialogue_instruction(source_text: str, target_language: str = "Spanish") -> 
     raya/guillemet house style, so they are gated to Spanish targets to avoid
     injecting Spanish-specific rules into other languages.
 
+    When ``always_include`` is true, the block is returned for every Spanish-target
+    chunk regardless of whether this chunk has dialogue — a per-book opt-in so the
+    block sits in the byte-identical fixed prefix (cacheable across all chunks)
+    instead of appearing only on dialogue-bearing chunks. The Spanish gate still
+    applies: a non-Spanish target stays empty even with ``always_include``.
+
     Args:
         source_text: The chunk's source text.
         target_language: The translation target language.
+        always_include: Emit the block on every Spanish-target chunk, not only
+            chunks that contain dialogue (book-level constant for cache stability).
 
     Returns:
         The framed dialogue section (no trailing newline) or an empty string.
     """
-    if not source_text:
-        return ""
-
     target = target_language.lower() if target_language else ""
     if not any(key in target for key in ("spanish", "español", "espanol")):
+        return ""
+
+    if always_include:
+        return _load_dialogue_block()
+
+    if not source_text:
         return ""
 
     if not _source_has_dialogue(source_text):

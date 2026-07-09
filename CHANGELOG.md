@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.27.8.0] - 2026-07-09
+
+### Changed
+- **Translation prompt reordered for a cache-friendly prefix.** The fixed sections (task, style guide, translation instructions, dialogue) now form a stable prefix; the per-chunk variable sections (glossary, book context, source text) come after it, with the fixed OUTPUT FORMAT section trailing at the very end. This keeps the leading prompt bytes identical across a book's chunks so prompt caching can reuse them. `prompts/translation.example.txt`, the `build_translation_prompt` docstring, and a new order-pinning test now agree on this canonical order so the committed template and the runtime `prompts/translation.txt` cannot silently diverge.
+
+### Added
+- **Per-book `always_include_dialogue` opt-in** (config key + `--always-dialogue` / `--no-always-dialogue` on `translate-prepare`). When on, the DIALOGUE FORMATTING block is placed on every Spanish-target chunk — not just dialogue-bearing ones — so it lives in the byte-identical cacheable prefix. Default off, preserving the historical per-chunk behavior. The Spanish-target gate still applies.
+- **Image-placeholder instructions are emitted as a book-level constant.** Books that contain `[IMAGE:...]` placeholders anywhere now render the same with-description (superset) bullet on every chunk, keeping the fixed prefix byte-identical instead of fragmenting it on per-chunk image presence.
+
 ## [0.27.7.0] - 2026-07-08
 
 ### Changed

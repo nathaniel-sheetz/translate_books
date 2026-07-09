@@ -1549,6 +1549,124 @@ def test_build_translation_prompt_omits_dialogue_block_for_narration():
     )
 
 
+# ----------------------------------------------------------------------------
+# Cache-prefix opt-ins: always_include_dialogue / always_include_image_instructions.
+# The reorder puts the fixed sections up front and per-chunk variable content last;
+# these flags force the (otherwise conditional) dialogue block and image bullet into
+# that fixed prefix so it is byte-identical across a book and stays cacheable.
+# ----------------------------------------------------------------------------
+
+_DIALOGUE_FRAMED_MARKER = "=" * 80 + "\nDIALOGUE FORMATTING\n" + "=" * 80
+# The GLOSSARY TERMS separator marks the boundary between the fixed prefix (A/B)
+# and the per-chunk variable suffix (C) after the reorder.
+_GLOSSARY_MARKER = "=" * 80 + "\nGLOSSARY TERMS\n" + "=" * 80
+
+
+def _mk_chunk(cid: str, source: str) -> Chunk:
+    return Chunk(
+        id=cid,
+        chapter_id="chapter_01",
+        position=1,
+        source_text=source,
+        metadata=ChunkMetadata(
+            char_start=0,
+            char_end=len(source),
+            overlap_start=0,
+            overlap_end=0,
+            paragraph_count=max(1, source.count("\n\n") + 1),
+            word_count=len(source.split()),
+        ),
+        status=ChunkStatus.PENDING,
+        created_at=datetime(2025, 1, 28, 10, 0, 0),
+    )
+
+
+def test_build_translation_prompt_always_include_dialogue_narration():
+    """With always_include_dialogue, a narration-only Spanish chunk carries the
+    framed DIALOGUE FORMATTING block (it moves into the fixed cacheable prefix)."""
+    chunk = _mk_chunk("ch01_nar", "He walked slowly down the lane.\n\nThe trees were silent.")
+    prompt = build_translation_prompt(
+        chunk, target_language="Spanish", always_include_dialogue=True
+    )
+    assert _DIALOGUE_FRAMED_MARKER in prompt
+
+
+def test_build_translation_prompt_always_include_dialogue_non_spanish_still_omits():
+    """The Spanish gate wins: always_include_dialogue does NOT inject the block for
+    a non-Spanish target."""
+    chunk = _mk_chunk("ch01_nar", "He walked slowly down the lane.\n\nThe trees were silent.")
+    prompt = build_translation_prompt(
+        chunk, target_language="French", always_include_dialogue=True
+    )
+    assert _DIALOGUE_FRAMED_MARKER not in prompt
+
+
+def test_build_translation_prompt_image_bullet_makes_prefix_byte_identical():
+    """always_include_image_instructions makes the fixed prefix (everything before
+    the GLOSSARY TERMS section) byte-identical across an image-bearing chunk and a
+    plain chunk of the same book — the whole point of the book-level constant."""
+    img_chunk = _mk_chunk("ch01_img", "Para one.\n\n[IMAGE:images/i01.jpg]\n\nPara two.")
+    plain_chunk = _mk_chunk("ch01_plain", "Para one.\n\nPara two, no images at all.")
+
+    def prefix(chunk):
+        # Both chunks are pure narration → no dialogue block in either; isolate the
+        # image effect. Source text lives in the variable suffix, not the prefix.
+        p = build_translation_prompt(
+            chunk, target_language="Spanish", always_include_image_instructions=True
+        )
+        return p.split(_GLOSSARY_MARKER)[0]
+
+    assert prefix(img_chunk) == prefix(plain_chunk)
+    # And the constant image bullet is actually present in that shared prefix.
+    assert "[IMAGE:filename.ext:image description]" in prefix(img_chunk)
+
+
+def test_build_translation_prompt_image_bullet_off_fragments_prefix():
+    """Contrast: WITHOUT the flag the image bullet is per-chunk, so the fixed prefix
+    differs between an image chunk and a plain chunk — the fragmentation the flag fixes."""
+    img_chunk = _mk_chunk("ch01_img", "Para one.\n\n[IMAGE:images/i01.jpg]\n\nPara two.")
+    plain_chunk = _mk_chunk("ch01_plain", "Para one.\n\nPara two, no images at all.")
+
+    def prefix(chunk):
+        p = build_translation_prompt(chunk, target_language="Spanish")
+        return p.split(_GLOSSARY_MARKER)[0]
+
+    assert prefix(img_chunk) != prefix(plain_chunk)
+
+
+def test_build_translation_prompt_section_order_is_canonical():
+    """Pin the cache-load-bearing section order so the runtime prompts/translation.txt
+    and the committed prompts/translation.example.txt cannot silently diverge again.
+    In particular the fixed OUTPUT FORMAT section must TRAIL after the variable suffix
+    (glossary/context/source), not sit in the fixed prefix — the exact divergence that
+    otherwise slips past the byte-identical prefix checks above. always_include_dialogue
+    is set so the DIALOGUE FORMATTING block is present and its position is pinned too."""
+    chunk = _mk_chunk("ch01_ord", "He walked slowly down the lane.\n\nThe trees were silent.")
+    prompt = build_translation_prompt(
+        chunk, target_language="Spanish", always_include_dialogue=True
+    )
+
+    def sep(name: str) -> str:
+        return "=" * 80 + f"\n{name}\n" + "=" * 80
+
+    order = [
+        "BOOK TRANSLATION TASK",
+        "STYLE GUIDE",
+        "TRANSLATION INSTRUCTIONS",
+        "DIALOGUE FORMATTING",
+        "GLOSSARY TERMS",
+        "BOOK CONTEXT",
+        "SOURCE TEXT TO TRANSLATE",
+        "OUTPUT FORMAT",
+        "TRANSLATION",
+    ]
+    positions = {name: prompt.find(sep(name)) for name in order}
+    assert all(pos != -1 for pos in positions.values()), positions
+    assert list(positions.values()) == sorted(positions.values()), positions
+    # The load-bearing invariant: OUTPUT FORMAT (fixed text) trails the variable source.
+    assert positions["OUTPUT FORMAT"] > positions["SOURCE TEXT TO TRANSLATE"], positions
+
+
 def test_apply_translation_stamps(sample_chunk):
     """apply_translation strips + stamps text/status/timestamp; last_llm_log is
     set only when a log path is given and preserved (not cleared) when None."""
