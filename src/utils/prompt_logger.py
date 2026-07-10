@@ -31,11 +31,37 @@ _LAST_LOG_PATH: contextvars.ContextVar["Path | None"] = contextvars.ContextVar(
     "prompt_logger_last_path", default=None
 )
 
+# Most recent Anthropic prompt-cache usage from a realtime call in this context.
+# Shape: {"cache_read_input_tokens": int, "cache_creation_input_tokens": int}.
+_LAST_CACHE_USAGE: contextvars.ContextVar["dict | None"] = contextvars.ContextVar(
+    "prompt_logger_last_cache_usage", default=None
+)
+
 
 def last_log_path() -> "Path | None":
     """Return the absolute path of the most recent log_prompt() write in
     this context, or None if no log has been written yet here."""
     return _LAST_LOG_PATH.get()
+
+
+def last_cache_usage() -> "dict | None":
+    """Return cache token counts from the most recent Anthropic realtime call.
+
+    Keys: ``cache_read_input_tokens``, ``cache_creation_input_tokens``.
+    None when no call has recorded usage yet in this context.
+    """
+    return _LAST_CACHE_USAGE.get()
+
+
+def set_last_cache_usage(
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+) -> None:
+    """Record Anthropic prompt-cache usage for ``last_cache_usage()`` readers."""
+    _LAST_CACHE_USAGE.set({
+        "cache_read_input_tokens": int(cache_read_input_tokens or 0),
+        "cache_creation_input_tokens": int(cache_creation_input_tokens or 0),
+    })
 
 
 def relative_log_path(path: Path) -> str:
@@ -71,6 +97,8 @@ def log_prompt(
     chunk_id: str | None = None,
     project_slug: str | None = None,
     extra: dict | None = None,
+    cache_read_input_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
 ) -> Path:
     """Write a prompt/response log file and return its path.
 
@@ -101,6 +129,8 @@ def log_prompt(
         attributed to a project even when chunk_id collides across projects.
     extra : dict | None
         Any additional metadata to store.
+    cache_read_input_tokens / cache_creation_input_tokens : int | None
+        Anthropic prompt-cache usage from the response (realtime only).
     """
     now = datetime.now()
     timestamp_str = now.strftime("%Y%m%d_%H%M%S")
@@ -132,6 +162,10 @@ def log_prompt(
         record["metadata"]["chunk_id"] = chunk_id
     if project_slug is not None:
         record["metadata"]["project_slug"] = project_slug
+    if cache_read_input_tokens is not None:
+        record["metadata"]["cache_read_input_tokens"] = int(cache_read_input_tokens)
+    if cache_creation_input_tokens is not None:
+        record["metadata"]["cache_creation_input_tokens"] = int(cache_creation_input_tokens)
     if extra:
         record["metadata"].update(extra)
 

@@ -3561,6 +3561,20 @@ def project_chunk_translate(project_id, chunk_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _load_harness_translate_flags(project_dir: Path) -> dict:
+    """Read per-book always_include_* defaults from ``.harness/config.json``."""
+    try:
+        from src.harness import state as harness_state
+        cfg = harness_state.load_config(project_dir)
+    except Exception:
+        cfg = {}
+    return {
+        "always_include_dialogue": bool(cfg.get("always_include_dialogue", False)),
+        # None means "auto" (derive from selected chunks via _book_has_images).
+        "always_include_image_instructions": cfg.get("always_include_image_instructions"),
+    }
+
+
 @app.route("/api/project/<project_id>/translate/cost-estimate", methods=["POST"])
 def project_translate_cost_estimate(project_id):
     """Estimate translation cost for selected chapters."""
@@ -3576,7 +3590,7 @@ def project_translate_cost_estimate(project_id):
     include_translated = data.get("include_translated", False)
 
     try:
-        from src.api_translator import estimate_cost
+        from src.api_translator import estimate_cost, summarize_chunk_features
 
         chunks_dir = project_dir / "chunks"
         chunks = []
@@ -3591,8 +3605,16 @@ def project_translate_cost_estimate(project_id):
                     chunks.append(chunk)
 
         if not chunks:
-            return jsonify({"chunk_count": 0, "estimated_cost": 0,
-                            "already_translated_count": already_translated_count})
+            return jsonify({
+                "chunk_count": 0,
+                "estimated_cost": 0,
+                "already_translated_count": already_translated_count,
+                "total_chunks": 0,
+                "dialogue_chunk_count": 0,
+                "image_chunk_count": 0,
+                "suggested_always_dialogue": False,
+                "suggested_always_images": False,
+            })
 
         # Load glossary and style guide for accurate estimation
         glossary = None
@@ -3610,14 +3632,35 @@ def project_translate_cost_estimate(project_id):
             except Exception:
                 pass
 
+        flags = _load_harness_translate_flags(project_dir)
+        always_dialogue = flags["always_include_dialogue"]
+        always_images = flags["always_include_image_instructions"]
+
         from src.api_translator import DEFAULT_MODEL
-        result = estimate_cost(chunks, provider=provider, model=model or DEFAULT_MODEL,
-                               glossary=glossary, style_guide=style_guide)
+        result = estimate_cost(
+            chunks,
+            provider=provider,
+            model=model or DEFAULT_MODEL,
+            glossary=glossary,
+            style_guide=style_guide,
+            always_include_dialogue=always_dialogue,
+            always_include_image_instructions=always_images,
+        )
+        features = summarize_chunk_features(chunks)
+        image_count = features["images"]
+        suggested_images = (
+            bool(always_images) if always_images is not None else image_count > 0
+        )
         return jsonify({
             "chunk_count": len(chunks),
             "estimated_cost": result.get("cost_usd", 0),
             "total_tokens": result.get("input_tokens", 0),
             "already_translated_count": already_translated_count,
+            "total_chunks": features["total"],
+            "dialogue_chunk_count": features["dialogue"],
+            "image_chunk_count": image_count,
+            "suggested_always_dialogue": always_dialogue,
+            "suggested_always_images": suggested_images,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3638,7 +3681,7 @@ def project_translate_realtime(project_id):
         return jsonify({"error": "Chunk not found"}), 404
 
     try:
-        from src.api_translator import translate_chunk_realtime
+        from src.api_translator import _book_has_images, translate_chunk_realtime
 
         chunk = load_chunk(chunk_path)
 
@@ -3661,6 +3704,12 @@ def project_translate_realtime(project_id):
         model = data.get("model", None)
         prev_context = _build_previous_context(project_dir, chunk)
 
+        flags = _load_harness_translate_flags(project_dir)
+        always_dialogue = flags["always_include_dialogue"]
+        always_images = flags["always_include_image_instructions"]
+        if always_images is None:
+            always_images = _book_has_images([chunk])
+
         translated = translate_chunk_realtime(
             chunk=chunk,
             provider=provider,
@@ -3672,6 +3721,8 @@ def project_translate_realtime(project_id):
             target_language="Spanish",
             previous_chapter_context=prev_context,
             project_slug=project_id,
+            always_include_dialogue=always_dialogue,
+            always_include_image_instructions=bool(always_images),
         )
 
         new_text = translated.translated_text or ""
@@ -3714,12 +3765,14 @@ def project_translate_batch(project_id):
     # Collect chunks to translate
     chunks_dir = project_dir / "chunks"
     chunk_paths = []
+    selected_chunks = []
     for ch_id in chapter_ids:
         for cf in sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")):
             chunk = load_chunk(cf)
             has_translation = bool(chunk.translated_text and chunk.translated_text.strip())
             if include_translated or not has_translation:
                 chunk_paths.append(cf)
+                selected_chunks.append(chunk)
 
     if not chunk_paths:
         return jsonify({"error": "No chunks to translate"}), 400
@@ -3740,12 +3793,31 @@ def project_translate_batch(project_id):
         except Exception:
             pass
 
+    flags = _load_harness_translate_flags(project_dir)
+    from src.api_translator import _book_has_images
+
+    if "always_include_dialogue" in data:
+        always_dialogue = bool(data.get("always_include_dialogue"))
+    else:
+        always_dialogue = flags["always_include_dialogue"]
+
+    if "always_include_image_instructions" in data:
+        always_images = bool(data.get("always_include_image_instructions"))
+    else:
+        cfg_images = flags["always_include_image_instructions"]
+        always_images = (
+            bool(cfg_images) if cfg_images is not None
+            else _book_has_images(selected_chunks)
+        )
+
     job_id = str(uuid.uuid4())[:8]
     job_queue = queue.Queue()
 
     def run_batch():
-        from src.api_translator import translate_chunk_realtime
+        from src.api_translator import last_cache_usage, translate_chunk_realtime
         affected_chapters: set[str] = set()
+        total_cache_read = 0
+        total_cache_created = 0
         for cp in chunk_paths:
             try:
                 chunk = load_chunk(cp)
@@ -3767,13 +3839,22 @@ def project_translate_batch(project_id):
                     previous_chapter_context=prev_context,
                     project_slug=project_id,
                     enable_thinking=enable_thinking,
+                    always_include_dialogue=always_dialogue,
+                    always_include_image_instructions=always_images,
                 )
                 save_chunk(translated, cp)
                 affected_chapters.add(chunk.chapter_id)
+                usage = last_cache_usage() or {}
+                cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+                cache_created = int(usage.get("cache_creation_input_tokens", 0) or 0)
+                total_cache_read += cache_read
+                total_cache_created += cache_created
                 job_queue.put(json.dumps({
                     "event": "chunk_done",
                     "chunk_id": chunk.id,
                     "chapter_id": chunk.chapter_id,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_created,
                 }))
             except Exception as e:
                 job_queue.put(json.dumps({
@@ -3815,7 +3896,11 @@ def project_translate_batch(project_id):
                 # Non-fatal: alignment can be re-run from the Review stage.
                 pass
 
-        job_queue.put(json.dumps({"event": "batch_complete"}))
+        job_queue.put(json.dumps({
+            "event": "batch_complete",
+            "cache_read_input_tokens": total_cache_read,
+            "cache_creation_input_tokens": total_cache_created,
+        }))
 
     t = threading.Thread(target=run_batch, daemon=True)
     _batch_jobs[job_id] = {"queue": job_queue, "thread": t, "status": "running"}

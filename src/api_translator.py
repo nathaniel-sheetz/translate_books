@@ -18,8 +18,24 @@ from dotenv import load_dotenv
 
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
-from src.utils.prompt_logger import last_log_path, log_prompt, relative_log_path, update_log_response
-from src.utils.text_utils import dialogue_instruction, image_filenames, image_placeholder_instruction
+from src.utils.prompt_logger import (
+    last_cache_usage,
+    last_log_path,
+    log_prompt,
+    relative_log_path,
+    set_last_cache_usage,
+    update_log_response,
+)
+from src.utils.text_utils import (
+    dialogue_instruction,
+    image_filenames,
+    image_placeholder_instruction,
+    source_has_dialogue,
+)
+
+# Boundary between the cacheable fixed prefix and the per-chunk variable suffix
+# in prompts/translation.txt (first line of the GLOSSARY TERMS section).
+_CACHE_PREFIX_SPLIT_MARKER = "=" * 80 + "\nGLOSSARY TERMS"
 
 # Load environment variables from .env file
 load_dotenv()
@@ -303,6 +319,25 @@ def _book_has_images(chunks: list[Chunk]) -> bool:
     return any(image_filenames(chunk.source_text) for chunk in chunks)
 
 
+def summarize_chunk_features(
+    chunks: list[Chunk],
+    target_language: str = "Spanish",
+) -> dict:
+    """Count dialogue- and image-bearing chunks for preflight / GUI visibility.
+
+    Returns ``{"total": N, "dialogue": D, "images": I}`` using the same helpers
+    that decide whether the dialogue block / image bullet appear in a prompt.
+    """
+    dialogue = 0
+    images = 0
+    for chunk in chunks:
+        if source_has_dialogue(chunk.source_text, target_language):
+            dialogue += 1
+        if image_filenames(chunk.source_text):
+            images += 1
+    return {"total": len(chunks), "dialogue": dialogue, "images": images}
+
+
 def build_translation_prompt(
     chunk: Chunk,
     glossary: Optional[Glossary] = None,
@@ -365,6 +400,47 @@ def build_translation_prompt(
     return prompt
 
 
+def build_translation_prompt_parts(
+    chunk: Chunk,
+    glossary: Optional[Glossary] = None,
+    style_guide: Optional[StyleGuide] = None,
+    project_name: str = "Translation Project",
+    source_language: str = "English",
+    target_language: str = "Spanish",
+    previous_chapter_context: str = "",
+    *,
+    always_include_dialogue: bool = False,
+    always_include_image_instructions: bool = False,
+) -> tuple[str, str]:
+    """Render the translation prompt split into ``(prefix, suffix)`` for caching.
+
+    ``prefix + suffix`` is byte-identical to ``build_translation_prompt(...)``.
+    The prefix is everything before ``GLOSSARY TERMS`` (the fixed, cacheable
+    material); the suffix is the rest. If the split marker is missing, returns
+    ``("", full_prompt)`` so callers degrade to no caching.
+
+    Note: Anthropic requires a minimum cacheable prefix (~1024 tokens for
+    Sonnet/Opus). A short style guide with dialogue-off may fall under it and
+    the cache silently no-ops (no error).
+    """
+    prompt = build_translation_prompt(
+        chunk,
+        glossary=glossary,
+        style_guide=style_guide,
+        project_name=project_name,
+        source_language=source_language,
+        target_language=target_language,
+        previous_chapter_context=previous_chapter_context,
+        always_include_dialogue=always_include_dialogue,
+        always_include_image_instructions=always_include_image_instructions,
+    )
+    marker = _CACHE_PREFIX_SPLIT_MARKER
+    idx = prompt.find(marker)
+    if idx < 0:
+        return ("", prompt)
+    return (prompt[:idx], prompt[idx:])
+
+
 def apply_translation(chunk: Chunk, prose: str, log_path: Optional[Path] = None) -> Chunk:
     """Stamp a translated chunk in place: text, status, timestamp, provenance.
 
@@ -389,6 +465,8 @@ def estimate_cost(
     glossary: Optional[Glossary] = None,
     style_guide: Optional[StyleGuide] = None,
     always_include_dialogue: bool = False,
+    always_include_image_instructions: bool | None = None,
+    target_language: str = "Spanish",
 ) -> dict:
     """
     Estimate the cost of translating chunks with the specified provider and model.
@@ -402,21 +480,30 @@ def estimate_cost(
         style_guide: Optional style guide (affects prompt length)
         always_include_dialogue: Match the book-level dialogue opt-in used at
             translate time so the estimate reflects what is actually sent.
+        always_include_image_instructions: Match the book-level image opt-in;
+            ``None`` auto-derives via ``_book_has_images(chunks)``.
+        target_language: Target language for dialogue gating / feature counts.
 
     Returns:
-        Dictionary with cost breakdown:
+        Dictionary with cost breakdown plus feature counts:
         {
             "input_tokens": int,
             "output_tokens_estimate": int,
             "cost_usd": float,
-            "cost_per_chunk_usd": float
+            "cost_per_chunk_usd": float,
+            "total_chunks": int,
+            "dialogue_chunk_count": int,
+            "image_chunk_count": int,
         }
     """
     # Load template to estimate prompt size
     template = load_prompt_template()
 
     # Book-level constant so the image bullet matches translate-time rendering.
-    book_has_images = _book_has_images(chunks)
+    if always_include_image_instructions is None:
+        always_include_image_instructions = _book_has_images(chunks)
+
+    features = summarize_chunk_features(chunks, target_language=target_language)
 
     # Estimate tokens per chunk
     total_input_tokens = 0
@@ -430,7 +517,7 @@ def estimate_cost(
         variables = {
             "book_title": "Sample Book",
             "source_text": chunk.source_text,
-            "target_language": "Spanish",
+            "target_language": target_language,
             "source_language": "English",
             "glossary": format_glossary_for_prompt(chunk_glossary) if chunk_glossary else "No glossary provided.",
             "style_guide": style_guide.content if style_guide else "No style guide provided.",
@@ -438,10 +525,10 @@ def estimate_cost(
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": "",
             "image_placeholder_instructions": image_placeholder_instruction(
-                chunk.source_text, always_include=book_has_images
+                chunk.source_text, always_include=always_include_image_instructions
             ),
             "dialogue_instructions": dialogue_instruction(
-                chunk.source_text, "Spanish", always_include=always_include_dialogue
+                chunk.source_text, target_language, always_include=always_include_dialogue
             ),
         }
 
@@ -473,7 +560,10 @@ def estimate_cost(
         "output_tokens_estimate": total_output_tokens_estimate,
         "cost_usd": round(total_cost, 4),
         "cost_per_chunk_usd": round(total_cost / len(chunks), 4) if chunks else 0,
-        "batch_discount_applied": batch_mode
+        "batch_discount_applied": batch_mode,
+        "total_chunks": features["total"],
+        "dialogue_chunk_count": features["dialogue"],
+        "image_chunk_count": features["images"],
     }
 
 
@@ -484,8 +574,19 @@ def call_anthropic_api(
     temperature: float = 0.3,
     api_key: str | None = None,
     enable_thinking: bool | None = None,
+    cache_prefix: str | None = None,
 ) -> str:
-    """Call the Anthropic Claude API and return the text response."""
+    """Call the Anthropic Claude API and return the text response.
+
+    When ``cache_prefix`` is a non-empty prefix of ``prompt``, the user message
+    is sent as two content blocks with ``cache_control: ephemeral`` on the
+    prefix so subsequent identical prefixes can hit Anthropic's prompt cache.
+    Otherwise the historical single-string content is used (backward compatible).
+
+    Anthropic requires a minimum cacheable prefix (~1024 tokens); shorter
+    prefixes silently no-op with no error. Cache usage is recorded via
+    ``set_last_cache_usage`` / ``last_cache_usage()``.
+    """
     try:
         import anthropic
     except ImportError:
@@ -498,11 +599,23 @@ def call_anthropic_api(
         api_key = get_api_key("anthropic")
     client = anthropic.Anthropic(api_key=api_key)
 
+    if cache_prefix and prompt.startswith(cache_prefix):
+        content: str | list = [
+            {
+                "type": "text",
+                "text": cache_prefix,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": prompt[len(cache_prefix):]},
+        ]
+    else:
+        content = prompt
+
     create_kwargs: dict = {
         "model": model,
         "max_tokens": max_tokens,
         "messages": [
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": content}
         ],
     }
     if not _rejects_sampling_params(model):
@@ -514,6 +627,21 @@ def call_anthropic_api(
 
     try:
         response = client.messages.create(**create_kwargs)
+
+        usage = getattr(response, "usage", None)
+        def _usage_int(name: str) -> int:
+            if usage is None:
+                return 0
+            raw = getattr(usage, name, 0)
+            try:
+                return int(raw or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        set_last_cache_usage(
+            cache_read_input_tokens=_usage_int("cache_read_input_tokens"),
+            cache_creation_input_tokens=_usage_int("cache_creation_input_tokens"),
+        )
 
         # Extract text from response (skipping any thinking blocks)
         text = _extract_text_from_content(response.content)
@@ -537,6 +665,7 @@ def call_openai_api(
     temperature: float = 0.3,
     api_key: str | None = None,
     base_url: str | None = None,
+    cache_prefix: str | None = None,  # ignored; OpenAI path has no prompt cache
 ) -> str:
     """Call an OpenAI-compatible API and return the text response.
 
@@ -589,6 +718,7 @@ def _dispatch_llm_call(
     chunk_id: str | None = None,
     project_slug: str | None = None,
     enable_thinking: bool | None = None,
+    cache_prefix: str | None = None,
 ) -> str:
     """Low-level dispatcher — routes a single LLM call to the right SDK."""
     pconfig = get_provider_config(provider)
@@ -600,16 +730,19 @@ def _dispatch_llm_call(
         response = call_anthropic_api(
             prompt, model, max_tokens, temperature,
             api_key=api_key, enable_thinking=enable_thinking,
+            cache_prefix=cache_prefix,
         )
     elif ptype == "openai-compatible":
         response = call_openai_api(
             prompt, model, max_tokens, temperature,
             api_key=api_key, base_url=pconfig.get("base_url"),
+            cache_prefix=cache_prefix,
         )
     else:
         raise ValueError(f"Unknown provider type '{ptype}' for provider '{provider}'")
 
     duration = time.time() - t0
+    cache_usage = last_cache_usage() if ptype == "anthropic" else None
     log_prompt(
         prompt=prompt,
         response=response,
@@ -622,6 +755,12 @@ def _dispatch_llm_call(
         duration_seconds=duration,
         chunk_id=chunk_id,
         project_slug=project_slug,
+        cache_read_input_tokens=(
+            cache_usage.get("cache_read_input_tokens") if cache_usage else None
+        ),
+        cache_creation_input_tokens=(
+            cache_usage.get("cache_creation_input_tokens") if cache_usage else None
+        ),
     )
     return response
 
@@ -637,11 +776,14 @@ def call_llm(
     chunk_id: str | None = None,
     project_slug: str | None = None,
     enable_thinking: bool | None = None,
+    cache_prefix: str | None = None,
 ) -> str:
     """Call an LLM and return the text response.
 
     Generic wrapper with retry logic.  Dispatches to the correct SDK based
     on the provider's ``type`` field in ``llm_config.json``.
+    ``cache_prefix`` is passed through for Anthropic prompt caching (translation
+    path only); other callers leave it unset.
     """
     if model is None:
         model = get_default_model()
@@ -652,7 +794,7 @@ def call_llm(
             return _dispatch_llm_call(
                 prompt, provider, model, max_tokens, temperature,
                 call_type=call_type, chunk_id=chunk_id, project_slug=project_slug,
-                enable_thinking=enable_thinking,
+                enable_thinking=enable_thinking, cache_prefix=cache_prefix,
             )
         except RateLimitError as e:
             last_error = e
@@ -713,7 +855,7 @@ def translate_chunk_realtime(
     Raises:
         APIError: If translation fails after retries
     """
-    prompt = build_translation_prompt(
+    cache_prefix, suffix = build_translation_prompt_parts(
         chunk,
         glossary=glossary,
         style_guide=style_guide,
@@ -724,6 +866,7 @@ def translate_chunk_realtime(
         always_include_dialogue=always_include_dialogue,
         always_include_image_instructions=always_include_image_instructions,
     )
+    prompt = cache_prefix + suffix
 
     # Use call_llm which handles retry + config-based dispatch
     translation = call_llm(
@@ -735,6 +878,7 @@ def translate_chunk_realtime(
         chunk_id=chunk.id,
         project_slug=project_slug,
         enable_thinking=enable_thinking,
+        cache_prefix=cache_prefix or None,
     )
 
     return apply_translation(chunk, translation, log_path=last_log_path())

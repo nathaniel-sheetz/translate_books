@@ -265,7 +265,13 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
 
 def stage_translate(args, project_dir: Path, state: dict) -> dict:
     """Stage 4: Translate chunks via API."""
-    from src.api_translator import translate_chunk_realtime, estimate_cost
+    from src.api_translator import (
+        _book_has_images,
+        estimate_cost,
+        last_cache_usage,
+        summarize_chunk_features,
+        translate_chunk_realtime,
+    )
 
     chunks_dir = project_dir / "chunks"
     chapters = discover_chapters(chunks_dir)
@@ -323,9 +329,39 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
 
     print(f"  {len(untranslated)} of {total} chunks need translation")
 
-    # Cost estimation
+    # Resolve cache-prefix opt-ins (tri-state CLI args; None = auto).
+    project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
+    target_lang = getattr(args, "target_lang", "Spanish") or "Spanish"
+    source_lang = getattr(args, "source_lang", "English") or "English"
     chunks_for_cost = [chunk for _, chunk in untranslated]
-    cost_info = estimate_cost(chunks_for_cost, provider, model, glossary=glossary, style_guide=style_guide)
+    book_has_images = _book_has_images(chunks_for_cost)
+    features = summarize_chunk_features(chunks_for_cost, target_language=target_lang)
+
+    always_dialogue_arg = getattr(args, "always_dialogue", None)
+    always_images_arg = getattr(args, "always_images", None)
+    always_include_dialogue = bool(always_dialogue_arg) if always_dialogue_arg is not None else False
+    always_include_image_instructions = (
+        bool(always_images_arg) if always_images_arg is not None else book_has_images
+    )
+
+    print(
+        f"  {features['total']} chunks: {features['dialogue']} with dialogue, "
+        f"{features['images']} with images | dialogue-block-all: "
+        f"{'on' if always_include_dialogue else 'off'}, image-instructions: "
+        f"{'on' if always_include_image_instructions else 'off'}"
+    )
+
+    # Cost estimation
+    cost_info = estimate_cost(
+        chunks_for_cost,
+        provider,
+        model,
+        glossary=glossary,
+        style_guide=style_guide,
+        always_include_dialogue=always_include_dialogue,
+        always_include_image_instructions=always_include_image_instructions,
+        target_language=target_lang,
+    )
 
     if getattr(args, "cost_only", False):
         # Estimator path (the harness `chunk` / `cost` commands). The user may
@@ -346,6 +382,10 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             "provider": provider,
             "model": model,
             "cost_only": True,
+            "dialogue_chunk_count": features["dialogue"],
+            "image_chunk_count": features["images"],
+            "always_include_dialogue": always_include_dialogue,
+            "always_include_image_instructions": always_include_image_instructions,
         })
         sys.exit(0)
 
@@ -367,11 +407,9 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             sys.exit(1)
 
     # Translate
-    project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
-    target_lang = getattr(args, "target_lang", "Spanish") or "Spanish"
-    source_lang = getattr(args, "source_lang", "English") or "English"
-
     previous_context = ""
+    total_cache_read = 0
+    total_cache_created = 0
     for i, (chunk_path, chunk) in enumerate(untranslated, 1):
         print(f"  [{i}/{len(untranslated)}] Translating {chunk.id} ...", end=" ", flush=True)
         t0 = time.time()
@@ -387,10 +425,15 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             target_language=target_lang,
             previous_chapter_context=previous_context,
             enable_thinking=getattr(args, "thinking", None),
+            always_include_dialogue=always_include_dialogue,
+            always_include_image_instructions=always_include_image_instructions,
         )
 
         save_chunk(translated, chunk_path)
         elapsed = time.time() - t0
+        usage = last_cache_usage() or {}
+        total_cache_read += int(usage.get("cache_read_input_tokens", 0) or 0)
+        total_cache_created += int(usage.get("cache_creation_input_tokens", 0) or 0)
         print(f"done ({elapsed:.1f}s, {translated.translation_word_count} words)")
 
         # Use tail of this chunk's source as context for the next chunk
@@ -408,6 +451,9 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     chapter_ids_done = sorted({cid for _, c in untranslated for cid in [c.chapter_id]})
     print(f"\n  Batch complete: {len(untranslated)} chunks across {len(chapter_ids_done)} chapter(s)")
     print(f"  Estimated cost: ${actual_cost:.2f}")
+    print(
+        f"  cache: {total_cache_read:,} read / {total_cache_created:,} created input tokens"
+    )
 
     # If there are remaining untranslated chunks beyond this batch, show remaining estimate
     all_chapters = discover_chapters(project_dir / "chunks")
@@ -629,6 +675,16 @@ def main():
                              "(--thinking / --no-thinking). Absent falls back to the "
                              "TRANSLATE_THINKING env default (off). Only thinking-capable "
                              "models honor it.")
+    parser.add_argument("--always-dialogue", dest="always_dialogue",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Put the DIALOGUE FORMATTING block on every chunk so it "
+                             "caches in the fixed prompt prefix (--always-dialogue / "
+                             "--no-always-dialogue). Absent defaults off.")
+    parser.add_argument("--always-images", dest="always_images",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Put the image-placeholder instruction on every chunk "
+                             "(--always-images / --no-always-images). Absent auto-enables "
+                             "when any in-scope chunk has [IMAGE:...] placeholders.")
 
     # Chapter detection
     parser.add_argument("--chapter-pattern", default="roman",
