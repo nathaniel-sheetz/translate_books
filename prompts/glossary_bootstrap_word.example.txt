@@ -16,6 +16,6 @@ For each LEGITIMATE candidate, return a JSON object with:
 - "translation":  your proposed {{target_language}} translation
 - "type":         one of "character", "place", "concept", "technical", "other" — infer from how the term is used in the excerpts/source (person → character, location → place, abstract idea → concept, domain/technical word → technical, else other)
 - "context":      a brief note (1 sentence) on usage or disambiguation
-- "alternatives": array of 0-2 alternative translations (empty array if none)
+- "alternatives": leave this an empty array by default. A personal or character name in particular should typically have exactly ONE translation and NO alternatives. Only add an alternative (max 2) for a title or a term that is genuinely rendered different ways in different contexts.
 
 Return ONLY a JSON array of these objects, no other text. Do not include entries you judge to be extraction artifacts.

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.28.1.0] - 2026-07-09
+
+### Fixed
+- **`glossary_prepare` no longer silently truncates candidates to the extractor's default before applying `--max-candidates`.** `max_candidates` is now passed through to `extract_candidates` so it ranks and truncates against the requested cap directly, instead of extracting a fixed 200 and slicing after the fact. Default cap raised from 200 to 500.
+
+### Changed
+- **Glossary bootstrap prompts steer alternatives toward names having none.** The `alternatives` field guidance now says a personal/character name should typically have exactly one translation and no alternatives; alternates (max 2) are reserved for titles or terms genuinely rendered differently across contexts.
+
 ## [0.28.0.0] - 2026-07-09
 
 ### Added
