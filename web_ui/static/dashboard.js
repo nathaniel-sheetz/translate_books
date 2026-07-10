@@ -2659,6 +2659,8 @@
         var completed = 0;
         var cacheReadTotal = 0;
         var cacheCreatedTotal = 0;
+        var evalsTotal = 0;
+        var evalsDone = 0;
         batchEventSource = new EventSource('/api/project/' + PROJECT + '/translate/sse?job_id=' + jobId);
 
         batchEventSource.addEventListener('chunk_done', function(e) {
@@ -2677,6 +2679,22 @@
         batchEventSource.addEventListener('chunk_error', function(e) {
             var data = JSON.parse(e.data);
             console.error('Chunk error:', data);
+        });
+
+        batchEventSource.addEventListener('evals_started', function(e) {
+            try {
+                var payload = JSON.parse(e.data);
+                evalsTotal = payload.total || 0;
+            } catch (err) { /* ignore */ }
+            evalsDone = 0;
+            document.getElementById('batch-progress-text').textContent =
+                'Running checks ' + evalsDone + '/' + evalsTotal + '…';
+        });
+
+        batchEventSource.addEventListener('chunk_evaluated', function() {
+            evalsDone++;
+            document.getElementById('batch-progress-text').textContent =
+                'Running checks ' + evalsDone + '/' + evalsTotal + '…';
         });
 
         batchEventSource.addEventListener('batch_complete', function(e) {
