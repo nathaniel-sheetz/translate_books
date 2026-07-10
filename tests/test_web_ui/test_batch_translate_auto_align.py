@@ -125,6 +125,14 @@ class TestBatchTranslateAutoAlign:
     """After a successful realtime batch run, ``chapters/<id>.txt`` and
     ``alignments/<id>.json`` must be written automatically."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_evals(self):
+        """These tests exercise the combine/align phase only. Stub out the
+        coded-evaluator phase so they don't pay for (or crash on) the real
+        PyEnchant/LanguageTool stack — eval wiring has its own tests below."""
+        with patch("web_ui.app.evaluate_and_persist_chunk"):
+            yield
+
     def _start_batch(self, client, project_name: str, chapter_ids: list[str]) -> str:
         rv = client.post(
             f"/api/project/{project_name}/translate/batch",
@@ -290,3 +298,115 @@ class TestBatchTranslateAutoAlign:
         )
         aligned = [e for e in queued if e.get("event") == "chapter_aligned"]
         assert aligned[0].get("chapter_id") == "chapter_001"
+
+
+class TestBatchTranslateAutoEval:
+    """After a successful realtime batch run, the coded evaluators must run
+    automatically on every chunk that was just translated (mirroring the async
+    Batch API path), and the SSE stream must report progress."""
+
+    def _start_batch(self, client, project_name: str, chapter_ids: list[str]) -> str:
+        rv = client.post(
+            f"/api/project/{project_name}/translate/batch",
+            json={"chapter_ids": chapter_ids, "provider": "anthropic"},
+        )
+        assert rv.status_code == 200, rv.get_json()
+        return rv.get_json()["job_id"]
+
+    def _wait_for_job(self, client, project_name: str, job_id: str, timeout: float = 5.0) -> None:
+        import web_ui.app as app_module
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = app_module._batch_jobs.get(job_id)
+            if job and not job["thread"].is_alive():
+                return
+            time.sleep(0.05)
+
+    def test_evaluate_and_persist_called_for_each_translated_chunk(self, client, project):
+        """evaluate_and_persist_chunk must be invoked once per successfully
+        translated chunk, so eval badges populate without a manual rerun."""
+
+        def fake_translate(chunk, **kwargs):
+            return chunk.model_copy(
+                update={"translated_text": "Texto.", "status": ChunkStatus.TRANSLATED}
+            )
+
+        with patch("src.api_translator.translate_chunk_realtime", side_effect=fake_translate), \
+             patch("src.sentence_aligner.align_chapter_chunks"), \
+             patch("web_ui.app.evaluate_and_persist_chunk") as mock_eval:
+            job_id = self._start_batch(client, "proj1", ["chapter_001"])
+            self._wait_for_job(client, "proj1", job_id)
+
+        # Two untranslated chunks in chapter_001 -> two eval calls.
+        assert mock_eval.call_count == 2, (
+            f"Expected evaluate_and_persist_chunk called twice; got {mock_eval.call_count}"
+        )
+        # The chunk is passed as the second positional arg.
+        evaluated_ids = {call.args[1].id for call in mock_eval.call_args_list}
+        assert evaluated_ids == {"chapter_001_chunk_000", "chapter_001_chunk_001"}
+
+    def test_eval_progress_events_enqueued_for_sse(self, client, project):
+        """An ``evals_started`` event plus one ``chunk_evaluated`` per chunk
+        must be put on the job queue so the modal can show "Running checks N/M"."""
+
+        def fake_translate(chunk, **kwargs):
+            return chunk.model_copy(
+                update={"translated_text": "Texto.", "status": ChunkStatus.TRANSLATED}
+            )
+
+        with patch("src.api_translator.translate_chunk_realtime", side_effect=fake_translate), \
+             patch("src.sentence_aligner.align_chapter_chunks"), \
+             patch("web_ui.app.evaluate_and_persist_chunk"):
+            job_id = self._start_batch(client, "proj1", ["chapter_001"])
+            self._wait_for_job(client, "proj1", job_id)
+
+        import web_ui.app as app_module
+        job = app_module._batch_jobs.get(job_id)
+        assert job is not None
+
+        queued: list[dict] = []
+        while not job["queue"].empty():
+            queued.append(json.loads(job["queue"].get_nowait()))
+
+        started = [e for e in queued if e.get("event") == "evals_started"]
+        assert len(started) == 1, "Expected exactly one 'evals_started' event"
+        assert started[0].get("total") == 2
+
+        evaluated = [e for e in queued if e.get("event") == "chunk_evaluated"]
+        assert len(evaluated) == 2, (
+            f"Expected two 'chunk_evaluated' events; got {len(evaluated)}"
+        )
+
+        # evals_started must precede the chunk_evaluated events and all of them
+        # must land before batch_complete.
+        types = [e.get("event") for e in queued]
+        assert types.index("evals_started") < types.index("chunk_evaluated")
+        assert types.index("chunk_evaluated") < types.index("batch_complete")
+
+    def test_eval_failure_does_not_prevent_batch_complete(self, client, project):
+        """If an evaluator raises, the batch must still finish (non-fatal)."""
+
+        def fake_translate(chunk, **kwargs):
+            return chunk.model_copy(
+                update={"translated_text": "Texto.", "status": ChunkStatus.TRANSLATED}
+            )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("evaluator exploded")
+
+        with patch("src.api_translator.translate_chunk_realtime", side_effect=fake_translate), \
+             patch("src.sentence_aligner.align_chapter_chunks"), \
+             patch("web_ui.app.evaluate_and_persist_chunk", side_effect=boom):
+            job_id = self._start_batch(client, "proj1", ["chapter_001"])
+            self._wait_for_job(client, "proj1", job_id)
+
+        import web_ui.app as app_module
+        job = app_module._batch_jobs.get(job_id)
+        assert job is not None
+        assert not job["thread"].is_alive(), "Batch thread should survive eval failure"
+
+        queued: list[dict] = []
+        while not job["queue"].empty():
+            queued.append(json.loads(job["queue"].get_nowait()))
+        types = [e.get("event") for e in queued]
+        assert "batch_complete" in types, "batch_complete must still fire after eval failure"

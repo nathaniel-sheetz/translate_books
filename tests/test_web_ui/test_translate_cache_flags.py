@@ -107,7 +107,8 @@ class TestTranslateBatchFlags:
             )
 
         with patch("src.api_translator.translate_chunk_realtime", side_effect=fake_translate), \
-             patch("src.sentence_aligner.align_chapter_chunks"):
+             patch("src.sentence_aligner.align_chapter_chunks"), \
+             patch("web_ui.app.evaluate_and_persist_chunk"):
             rv = client.post(
                 "/api/project/cacheproj/translate/batch",
                 json={

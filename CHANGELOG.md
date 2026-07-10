@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.28.2.0] - 2026-07-10
+
+### Fixed
+- **The realtime batch-translate path now runs the coded evaluators automatically**, matching the async Batch API path. After a batch finishes translating, `evaluate_and_persist_chunk` runs on every chunk that got fresh text, so the Review tab's eval badges populate without a manual per-chunk rerun. Evaluation is non-fatal — a failing evaluator is swallowed and the batch still completes and recombines/realigns as before.
+
+### Added
+- **Batch-translate SSE reports evaluation progress.** The stream emits an `evals_started` event (with the total chunk count) followed by one `chunk_evaluated` per chunk, and `batch_complete` now carries `evaluated_count`. The dashboard shows a "Running checks N/M…" status while the evaluators run.
+
 ## [0.28.1.0] - 2026-07-09
 
 ### Fixed

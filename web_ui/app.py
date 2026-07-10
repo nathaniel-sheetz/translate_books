@@ -3816,6 +3816,7 @@ def project_translate_batch(project_id):
     def run_batch():
         from src.api_translator import last_cache_usage, translate_chunk_realtime
         affected_chapters: set[str] = set()
+        translated_chunks: list = []
         total_cache_read = 0
         total_cache_created = 0
         for cp in chunk_paths:
@@ -3844,6 +3845,7 @@ def project_translate_batch(project_id):
                 )
                 save_chunk(translated, cp)
                 affected_chapters.add(chunk.chapter_id)
+                translated_chunks.append(translated)
                 usage = last_cache_usage() or {}
                 cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
                 cache_created = int(usage.get("cache_creation_input_tokens", 0) or 0)
@@ -3862,6 +3864,33 @@ def project_translate_batch(project_id):
                     "chunk_id": chunk.id if chunk else "",
                     "error": str(e),
                 }))
+
+        # Run coded evaluators on every chunk we just translated so the Review
+        # tab's eval badges are populated without a manual per-chunk rerun.
+        # Mirrors the post-translate evaluation done by the async Batch API
+        # endpoint below. Non-fatal: evals can always be re-run from Review.
+        from web_ui.evaluations import _load_project_blacklist
+        blacklist = _load_project_blacklist(project_dir)
+        job_queue.put(json.dumps({
+            "event": "evals_started",
+            "total": len(translated_chunks),
+        }))
+        evaluated_count = 0
+        for tchunk in translated_chunks:
+            if (tchunk.translated_text or "").strip():
+                try:
+                    evaluate_and_persist_chunk(
+                        project_dir, tchunk,
+                        glossary=glossary, blacklist=blacklist,
+                    )
+                    evaluated_count += 1
+                except Exception:
+                    pass  # Non-fatal: evals can be re-run from Review stage
+            job_queue.put(json.dumps({
+                "event": "chunk_evaluated",
+                "chunk_id": tchunk.id,
+                "chapter_id": tchunk.chapter_id,
+            }))
 
         # Recombine + realign each affected chapter so the Review tab is
         # immediately usable without a manual "Align" click. Mirrors the
@@ -3900,6 +3929,7 @@ def project_translate_batch(project_id):
             "event": "batch_complete",
             "cache_read_input_tokens": total_cache_read,
             "cache_creation_input_tokens": total_cache_created,
+            "evaluated_count": evaluated_count,
         }))
 
     t = threading.Thread(target=run_batch, daemon=True)
