@@ -167,7 +167,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gl_sub = gl.add_subparsers(dest="action", required=True)
     gp = gl_sub.add_parser("prepare")
     add_project(gp)
-    gp.add_argument("--max-candidates", type=int, default=200)
+    gp.add_argument("--max-candidates", type=int, default=500)
     gc = gl_sub.add_parser("commit")
     add_project(gc)
     gc.add_argument("--draft", default=None, help="Proposals JSON (default: .harness/glossary_draft.json)")

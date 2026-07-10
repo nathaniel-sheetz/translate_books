@@ -372,6 +372,33 @@ def test_glossary_prepare_reads_clean_chapters_not_front_matter(project: Path):
     assert "Thomas" in prompt
 
 
+def test_glossary_prepare_threads_max_candidates_through_to_extractor(project: Path):
+    # Regression for the double-truncation bug: glossary_prepare used to extract
+    # at the extractor's own default cap and then re-slice the (already-ranked)
+    # result to max_candidates, so a caller could never see more than that
+    # internal default. It now passes max_candidates straight into
+    # extract_candidates, so the extractor ranks and truncates directly against
+    # the requested cap.
+    def name_body(i: int) -> str:
+        sentence = f"Aldric{i} Thorne{i} walked through the quiet village past the old well. "
+        return (sentence * 3).strip()
+
+    names_text = "\n\n".join(
+        f"CHAPTER {i + 1}\n\n{name_body(i)}" for i in range(210)
+    )
+    (project / "chapters" / "chapter_01.txt").write_text(names_text, encoding="utf-8")
+    (project / "chapters" / "chapter_02.txt").write_text("", encoding="utf-8")
+
+    # Default cap (500) must not silently behave like the old hardcoded 200 —
+    # all 210 qualifying names should survive.
+    prep_default = flow.glossary_prepare(str(project))
+    assert prep_default["candidate_count"] == 210
+
+    # An explicit cap below what's available must still be honored.
+    prep_capped = flow.glossary_prepare(str(project), max_candidates=50)
+    assert prep_capped["candidate_count"] == 50
+
+
 def test_glossary_commit_warns_on_ascii_folded_spanish(project: Path):
     # An all-ASCII Spanish glossary commits, but surfaces a non-blocking accent-stripping
     # warning the approval gate shows the user (#21).

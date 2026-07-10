@@ -763,7 +763,7 @@ def style_guide_commit(project: str, *, draft: str | None = None) -> dict:
 
 # ── glossary beat ──────────────────────────────────────────────────────────
 
-def glossary_prepare(project: str, *, max_candidates: int = 200) -> dict:
+def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     """Extract candidates + build the proposal prompt (feeding in the style guide)."""
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
@@ -782,8 +782,8 @@ def glossary_prepare(project: str, *, max_candidates: int = 200) -> dict:
     # neither exists. See FRICTION_LOG_5 #27 (151-vs-200 candidate gap).
     source, _, source_kind = load_clean_source_text(project_dir)
     with _quiet_stdout():
-        report = extract_candidates(source, verbose=False)
-    candidates = [c.model_dump() for c in report.candidates[:max_candidates]]
+        report = extract_candidates(source, max_candidates=max_candidates, verbose=False)
+    candidates = [c.model_dump() for c in report.candidates]
     sample = load_source_sample(project_dir)
     style_path = project_dir / "style.json"
     style_guide = _read(style_path) if style_path.exists() else ""
