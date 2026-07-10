@@ -1727,6 +1727,63 @@ def test_build_translation_prompt_parts_diverges_without_flags():
     assert p1 != p2
 
 
+def test_build_translation_prompt_parts_missing_marker_degrades():
+    """If the GLOSSARY TERMS split marker is absent, parts returns ('', full_prompt)
+    so the caller sends no cache_prefix (degrade-to-no-cache)."""
+    chunk = _mk_chunk("ch01_nomark", "He walked slowly down the lane.")
+    with patch(
+        "src.api_translator.build_translation_prompt",
+        return_value="A rendered prompt with no split marker.",
+    ):
+        prefix, suffix = build_translation_prompt_parts(chunk)
+    assert prefix == ""
+    assert suffix == "A rendered prompt with no split marker."
+
+
+def test_translate_chunk_realtime_passes_none_cache_prefix_when_empty():
+    """When the prefix is empty (marker missing), translate_chunk_realtime must pass
+    cache_prefix=None to call_llm rather than an empty string."""
+    chunk = _mk_chunk("ch01_none", "He walked slowly down the lane.")
+    captured: dict = {}
+
+    def _fake_call_llm(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured["cache_prefix"] = kwargs.get("cache_prefix")
+        return "una traduccion"
+
+    with patch(
+        "src.api_translator.build_translation_prompt_parts",
+        return_value=("", "FULL_PROMPT_NO_PREFIX"),
+    ), patch("src.api_translator.call_llm", side_effect=_fake_call_llm):
+        result = translate_chunk_realtime(chunk, provider="anthropic", model="claude-sonnet-5")
+
+    assert captured["prompt"] == "FULL_PROMPT_NO_PREFIX"
+    assert captured["cache_prefix"] is None
+    assert result.translated_text == "una traduccion"
+
+
+def test_call_anthropic_api_prefix_not_a_prefix_is_string():
+    """A cache_prefix that isn't an actual prefix of the prompt falls back to the
+    single-string content (never sends a mismatched cached block)."""
+    pytest.importorskip("anthropic")
+
+    with patch("anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="ok")]
+        mock_response.usage = Mock(
+            cache_read_input_tokens=0, cache_creation_input_tokens=0
+        )
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            call_anthropic_api("the real prompt", cache_prefix="UNRELATED_PREFIX")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["messages"][0]["content"] == "the real prompt"
+
+
 def test_call_anthropic_api_cache_prefix_two_blocks():
     """cache_prefix yields two-block content with cache_control on block 0."""
     pytest.importorskip("anthropic")
