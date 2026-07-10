@@ -380,6 +380,18 @@ def _source_has_dialogue(source_text: str) -> bool:
     return hits >= _DIALOGUE_MIN_PARAGRAPHS
 
 
+def source_has_dialogue(source_text: str, target_language: str = "Spanish") -> bool:
+    """Public wrapper: True when ``source_text`` has dialogue for a Spanish target.
+
+    Non-Spanish targets always return False (the dialogue block is Spanish-gated).
+    Prefer this over ``_source_has_dialogue`` from outside ``text_utils``.
+    """
+    target = target_language.lower() if target_language else ""
+    if not any(key in target for key in ("spanish", "español", "espanol")):
+        return False
+    return _source_has_dialogue(source_text)
+
+
 def dialogue_instruction(
     source_text: str,
     target_language: str = "Spanish",

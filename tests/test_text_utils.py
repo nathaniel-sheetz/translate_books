@@ -16,6 +16,7 @@ from src.utils.text_utils import (
     image_filenames,
     image_filename_counts,
     dialogue_instruction,
+    source_has_dialogue,
     _resolve_dialogue_path,
     _load_dialogue_block,
     _source_has_dialogue,
@@ -512,6 +513,12 @@ class TestDialogueInstruction:
     def test_source_has_dialogue_true_for_attribution(self):
         attr_src = chr(34) + "Exactly," + chr(34) + " she replied."
         assert _source_has_dialogue(attr_src) is True
+
+    def test_public_source_has_dialogue_spanish_gate(self):
+        """Public wrapper mirrors private detection and applies the Spanish gate."""
+        assert source_has_dialogue(self._DIALOGUE_SRC, "Spanish") is True
+        assert source_has_dialogue(self._NARRATION_SRC, "Spanish") is False
+        assert source_has_dialogue(self._DIALOGUE_SRC, "French") is False
 
     def test_always_include_narration_spanish_returns_block(self):
         """Book-level opt-in: with always_include, a narration-only Spanish chunk

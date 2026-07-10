@@ -100,6 +100,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Put the DIALOGUE FORMATTING block on every chunk (not just "
                          "dialogue-bearing ones) so it caches in the fixed prompt prefix. "
                          "Per-book; default off. Use --no-always-dialogue to force off.")
+    sp.add_argument("--always-images", dest="always_include_image_instructions",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="Put the image-placeholder instruction on every chunk so it "
+                         "caches in the fixed prompt prefix. Per-book; absent means auto "
+                         "(on when any chunk has [IMAGE:...]). Use --no-always-images to "
+                         "force off.")
     sp.add_argument("--front-matter-title", dest="front_matter_titles", action="append",
                     help="Heading to force-tag as front matter (repeatable)")
     sp.add_argument("--back-matter-title", dest="back_matter_titles", action="append",
@@ -302,6 +308,7 @@ def _dispatch(args: argparse.Namespace):
             locale=args.locale, provider=args.provider, model=args.model,
             title=args.title, author=args.author, language_code=args.language_code,
             always_include_dialogue=args.always_include_dialogue,
+            always_include_image_instructions=args.always_include_image_instructions,
             front_matter_titles=args.front_matter_titles,
             back_matter_titles=args.back_matter_titles,
             min_chapter_size=args.min_chapter_size,

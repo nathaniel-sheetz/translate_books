@@ -189,6 +189,7 @@ def setup(
     author: str | None = None,
     language_code: str | None = None,
     always_include_dialogue: bool | None = None,
+    always_include_image_instructions: bool | None = None,
     front_matter_titles: list[str] | None = None,
     back_matter_titles: list[str] | None = None,
     min_chapter_size: int | None = None,
@@ -224,6 +225,7 @@ def setup(
         "author": author,
         "language_code": language_code,
         "always_include_dialogue": always_include_dialogue,
+        "always_include_image_instructions": always_include_image_instructions,
     }.items():
         if value is not None:
             cfg[key] = value
@@ -1024,14 +1026,19 @@ def translate_prepare(
     # Book-level prompt-prefix opt-ins (see build_translation_prompt): forcing the
     # dialogue block / image bullet onto every chunk keeps the fixed prompt prefix
     # byte-identical across the book so it stays cacheable. always_include_dialogue is
-    # a per-book config flag; book_has_images is computed over the WHOLE book (not just
-    # the in-scope --chapters) so the constant is stable regardless of which wave runs.
+    # a per-book config flag; always_include_image_instructions is optional (None =
+    # auto from whole-book image presence) so the constant is stable regardless of
+    # which wave runs.
     always_include_dialogue = bool(cfg.get("always_include_dialogue", False))
-    book_has_images = any(
-        image_filenames(load_chunk(cp).source_text)
-        for cps in all_discovered.values()
-        for cp in cps
-    )
+    cfg_images = cfg.get("always_include_image_instructions")
+    if cfg_images is None:
+        book_has_images = any(
+            image_filenames(load_chunk(cp).source_text)
+            for cps in all_discovered.values()
+            for cp in cps
+        )
+    else:
+        book_has_images = bool(cfg_images)
 
     translate_dir = hdir / "translate"
     translate_dir.mkdir(parents=True, exist_ok=True)
@@ -1410,6 +1417,22 @@ def chunk(
     return _stream_result("chunk", *_run_script(cmd))
 
 
+def _append_always_include_flags(cmd: list[str], cfg: dict) -> None:
+    """Append --always-dialogue / --always-images flags from harness config."""
+    if cfg.get("always_include_dialogue"):
+        cmd.append("--always-dialogue")
+    else:
+        # Explicit off so translate_book.py does not inherit a stale env/default
+        # and so the preflight summary matches the book's saved preference.
+        cmd.append("--no-always-dialogue")
+    images = cfg.get("always_include_image_instructions")
+    if images is True:
+        cmd.append("--always-images")
+    elif images is False:
+        cmd.append("--no-always-images")
+    # None / absent → leave unset so translate_book.py auto-derives from chunks.
+
+
 def cost(project: str, *, chapters: str | None = None) -> dict:
     """Re-print the translation cost estimate WITHOUT spending (pure estimator)."""
     project_dir = state.resolve_project_dir(project)
@@ -1424,6 +1447,7 @@ def cost(project: str, *, chapters: str | None = None) -> dict:
     ]
     if chapters:
         cmd += ["--chapters", chapters]
+    _append_always_include_flags(cmd, cfg)
     return _stream_result("cost", *_run_script(cmd))
 
 
@@ -1467,6 +1491,7 @@ def translate(
         cmd.append("--thinking")
     elif enable_thinking is False:
         cmd.append("--no-thinking")
+    _append_always_include_flags(cmd, cfg)
     return _stream_result("translate", *_run_script(cmd))
 
 
@@ -1899,7 +1924,7 @@ def runs(project: str, *, run_id: str | None = None) -> dict:
 OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "setup": {
         "project_dir": "absolute path to the project directory",
-        "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code, always_include_dialogue)",
+        "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code, always_include_dialogue, always_include_image_instructions)",
         "chapters": "list of written chapter file stems (e.g. 'chapter_01')",
         "chapter_count": "number of sections written to chapters/",
         "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved to a concrete pattern here)",

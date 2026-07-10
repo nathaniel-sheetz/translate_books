@@ -2560,12 +2560,23 @@
 
     // (provider/model dropdown setup is handled by initAllLLMSelectors)
 
+    // True once a cost-estimate response has populated the always_include_* checkboxes
+    // from the server's suggestions. Until then the Start handler must not send explicit
+    // flag values — an unresolved (or errored) estimate would otherwise ship `false` and
+    // override the saved per-book config / whole-book auto-enable.
+    var batchSuggestionsReady = false;
+
     function updateBatchCostEstimate() {
         var ids = getSelectedChapterIds();
         var provider = document.getElementById('batch-provider').value;
         var model = document.getElementById('batch-model').value;
         var el = document.getElementById('batch-cost-estimate');
+        var featEl = document.getElementById('batch-feature-summary');
+        var startBtn = document.getElementById('btn-start-batch');
         el.textContent = 'Estimating cost...';
+        if (featEl) featEl.textContent = '';
+        batchSuggestionsReady = false;
+        if (startBtn) startBtn.disabled = true;
 
         apiPost('/api/project/' + PROJECT + '/translate/cost-estimate', {
             chapter_ids: ids,
@@ -2573,11 +2584,25 @@
             model: model,
             include_translated: true,
         }).then(function(data) {
+            if (startBtn) startBtn.disabled = false;
             if (data.error) {
                 el.textContent = data.error;
             } else {
                 var cost = (data.estimated_cost || 0);
                 var already = data.already_translated_count || 0;
+                var total = data.total_chunks || data.chunk_count || 0;
+                var dialogueN = data.dialogue_chunk_count || 0;
+                var imageN = data.image_chunk_count || 0;
+                if (featEl) {
+                    featEl.textContent =
+                        dialogueN + ' of ' + total + ' selected chunks contain dialogue · ' +
+                        imageN + ' of ' + total + ' contain image placeholders';
+                }
+                var dialogueCb = document.getElementById('batch-always-dialogue');
+                var imagesCb = document.getElementById('batch-always-images');
+                if (dialogueCb) dialogueCb.checked = !!data.suggested_always_dialogue;
+                if (imagesCb) imagesCb.checked = !!data.suggested_always_images;
+                batchSuggestionsReady = true;
                 var html = '<strong>' + (data.chunk_count || 0) + '</strong> chunks to translate<br>' +
                     'Estimated cost: <strong>$' + cost.toFixed(4) + '</strong>' +
                     '<br><span style="font-size:12px;color:#666">Batch API would be $' +
@@ -2596,18 +2621,29 @@
         var ids = getSelectedChapterIds();
         var provider = document.getElementById('batch-provider').value;
         var model = document.getElementById('batch-model').value;
+        var alwaysDialogue = document.getElementById('batch-always-dialogue');
+        var alwaysImages = document.getElementById('batch-always-images');
 
         this.disabled = true;
         document.getElementById('batch-progress').style.display = '';
         document.getElementById('btn-cancel-batch').style.display = '';
 
-        apiPost('/api/project/' + PROJECT + '/translate/batch', {
+        var payload = {
             chapter_ids: ids,
             provider: provider,
             model: model,
             include_translated: true,
             enable_thinking: thinkingChecked('batch-thinking'),
-        }).then(function(data) {
+        };
+        // Only send explicit flag values once the estimate has populated the
+        // checkboxes from server suggestions; otherwise omit them so the backend
+        // falls back to the saved config / whole-book auto-enable.
+        if (batchSuggestionsReady) {
+            payload.always_include_dialogue = alwaysDialogue ? !!alwaysDialogue.checked : false;
+            payload.always_include_image_instructions = alwaysImages ? !!alwaysImages.checked : false;
+        }
+
+        apiPost('/api/project/' + PROJECT + '/translate/batch', payload).then(function(data) {
             if (data.error) {
                 setStatus('translate-batch-status', data.error, 'error');
                 return;
@@ -2621,11 +2657,18 @@
 
     function startBatchSSE(jobId, totalChunks) {
         var completed = 0;
+        var cacheReadTotal = 0;
+        var cacheCreatedTotal = 0;
         batchEventSource = new EventSource('/api/project/' + PROJECT + '/translate/sse?job_id=' + jobId);
 
         batchEventSource.addEventListener('chunk_done', function(e) {
             completed++;
             var pct = totalChunks > 0 ? Math.round(completed / totalChunks * 100) : 0;
+            try {
+                var payload = JSON.parse(e.data);
+                cacheReadTotal += (payload.cache_read_input_tokens || 0);
+                cacheCreatedTotal += (payload.cache_creation_input_tokens || 0);
+            } catch (err) { /* ignore */ }
             document.getElementById('batch-progress-text').textContent =
                 'Translated ' + completed + '/' + totalChunks;
             document.getElementById('batch-progress-fill').style.width = pct + '%';
@@ -2636,15 +2679,27 @@
             console.error('Chunk error:', data);
         });
 
-        batchEventSource.addEventListener('batch_complete', function() {
+        batchEventSource.addEventListener('batch_complete', function(e) {
             batchEventSource.close();
             batchEventSource = null;
-            document.getElementById('batch-progress-text').textContent = 'Complete!';
+            var msg = 'Complete!';
+            try {
+                var payload = JSON.parse(e.data);
+                var read = payload.cache_read_input_tokens || cacheReadTotal || 0;
+                var created = payload.cache_creation_input_tokens || cacheCreatedTotal || 0;
+                if (read > 0) {
+                    msg += ' Cache saved ~' + read.toLocaleString() + ' input tokens';
+                    if (created > 0) {
+                        msg += ' (' + created.toLocaleString() + ' written)';
+                    }
+                }
+            } catch (err) { /* ignore */ }
+            document.getElementById('batch-progress-text').textContent = msg;
             document.getElementById('btn-start-batch').disabled = false;
             document.getElementById('btn-cancel-batch').style.display = 'none';
             // Schedule the close before loadStatus() so a rebuild error can't strand the modal open.
             setTimeout(closeBatchModal, 1500);
-            try { loadStatus(); } catch (e) { console.error('loadStatus after batch failed:', e); }
+            try { loadStatus(); } catch (err) { console.error('loadStatus after batch failed:', err); }
         });
 
         batchEventSource.onerror = function() {

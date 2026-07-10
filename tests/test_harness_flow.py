@@ -484,6 +484,49 @@ def test_chunk_and_cost_pass_configured_model_and_provider(project: Path, monkey
     assert "--provider" in cmd and "anthropic" in cmd
 
 
+def test_append_always_include_flags_emits_expected_combinations():
+    """_append_always_include_flags maps harness config to explicit translate_book.py
+    flags: dialogue is always forced on/off; images stays unset when config is None."""
+    cmd: list[str] = []
+    flow._append_always_include_flags(
+        cmd, {"always_include_dialogue": True, "always_include_image_instructions": True}
+    )
+    assert cmd == ["--always-dialogue", "--always-images"]
+
+    cmd = []
+    flow._append_always_include_flags(
+        cmd, {"always_include_dialogue": False, "always_include_image_instructions": False}
+    )
+    assert cmd == ["--no-always-dialogue", "--no-always-images"]
+
+    # images None / absent → no image flag emitted (translate_book.py auto-derives);
+    # dialogue absent still forces an explicit off so no stale env/default leaks in.
+    cmd = []
+    flow._append_always_include_flags(cmd, {})
+    assert cmd == ["--no-always-dialogue"]
+
+
+def test_cost_threads_always_include_flags_from_config(project: Path, monkeypatch):
+    """cost() must append the always-include flags so translate_book.py's preflight
+    matches the book's saved caching preference."""
+    state.save_config(
+        project,
+        {"always_include_dialogue": True, "always_include_image_instructions": False},
+    )
+    captured: dict = {}
+
+    def _capture(cmd):
+        captured["cmd"] = cmd
+        return 0, None
+
+    monkeypatch.setattr(flow, "_run_script", _capture)
+
+    flow.cost(str(project))
+    cmd = captured["cmd"]
+    assert "--always-dialogue" in cmd
+    assert "--no-always-images" in cmd
+
+
 def test_harness_default_model_is_sonnet_5(tmp_path: Path):
     """Empty config.json inherits the Sonnet 5 default."""
     proj = tmp_path / "defaults"

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.28.0.0] - 2026-07-09
+
+### Added
+- **Anthropic prompt caching on the realtime translation path.** The translation prompt is now split into a fixed cacheable prefix (everything before `GLOSSARY TERMS`) and a per-chunk variable suffix via `build_translation_prompt_parts`, which round-trips byte-identically to the flat prompt. The prefix is sent as a `cache_control: ephemeral` content block so subsequent chunks with an identical prefix hit Anthropic's prompt cache; a missing split marker or an OpenAI-compatible provider degrades to the historical single-string request. Cache read/creation token usage is recorded per call (`set_last_cache_usage`/`last_cache_usage`, a `ContextVar` safe for the threaded batch workers), logged into each prompt record, and summed into the CLI batch summary.
+- **Per-book `always_include_image_instructions` opt-in** (config key + `--always-images` / `--no-always-images` on `translate-prepare` and `translate_book.py`). Tri-state: unset auto-enables when any in-scope chunk has `[IMAGE:...]` placeholders. Placing the image-placeholder bullet on every chunk keeps the cacheable prefix byte-identical across the book.
+- **Preflight feature counts.** `summarize_chunk_features` reports how many selected chunks contain dialogue vs image placeholders; surfaced in the CLI preflight line, the `estimate_cost` result, and the web dashboard's batch-translate modal (with checkboxes seeded from server-suggested defaults).
+- **Batch-translate cache visibility in the web UI.** The dashboard's batch progress reports the input tokens saved (and written) via prompt caching on completion.
+
+### Changed
+- **`estimate_cost` matches translate-time rendering.** It now accepts `always_include_image_instructions` (`None` auto-derives) and a `target_language`, and returns `total_chunks` / `dialogue_chunk_count` / `image_chunk_count`, so the estimate reflects the prompt that is actually sent.
+- **`source_has_dialogue` public wrapper** added to `text_utils` (Spanish-gated) for feature counting from outside the module.
+
 ## [0.27.8.0] - 2026-07-09
 
 ### Changed

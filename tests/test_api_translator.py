@@ -16,6 +16,7 @@ from src.api_translator import (
     get_api_key,
     estimate_cost,
     build_translation_prompt,
+    build_translation_prompt_parts,
     apply_translation,
     translate_chunk_realtime,
     call_anthropic_api,
@@ -29,11 +30,13 @@ from src.api_translator import (
     load_batch_jobs,
     get_batch_job,
     update_batch_job_status,
+    summarize_chunk_features,
     APIError,
     APIKeyError,
     RateLimitError,
     _rejects_sampling_params,
 )
+from src.utils.prompt_logger import last_cache_usage
 
 
 # ============================================================================
@@ -1665,6 +1668,209 @@ def test_build_translation_prompt_section_order_is_canonical():
     assert list(positions.values()) == sorted(positions.values()), positions
     # The load-bearing invariant: OUTPUT FORMAT (fixed text) trails the variable source.
     assert positions["OUTPUT FORMAT"] > positions["SOURCE TEXT TO TRANSLATE"], positions
+
+
+def test_build_translation_prompt_parts_round_trip():
+    """prefix + suffix must equal the flat prompt; prefix ends right before GLOSSARY TERMS."""
+    chunk = _mk_chunk("ch01_parts", "He walked slowly down the lane.\n\nThe trees were silent.")
+    flat = build_translation_prompt(
+        chunk,
+        target_language="Spanish",
+        always_include_dialogue=True,
+        always_include_image_instructions=True,
+    )
+    prefix, suffix = build_translation_prompt_parts(
+        chunk,
+        target_language="Spanish",
+        always_include_dialogue=True,
+        always_include_image_instructions=True,
+    )
+    assert prefix + suffix == flat
+    assert suffix.startswith("=" * 80 + "\nGLOSSARY TERMS")
+    assert "GLOSSARY TERMS" not in prefix
+
+
+def test_build_translation_prompt_parts_byte_identical_with_flags():
+    """With both always_include flags on, two different chunks share a byte-identical prefix."""
+    dialogue_text = (
+        chr(34) + "We must leave at once," + chr(34) + " she said.\n\n"
+        "He nodded and reached for his coat."
+    )
+    dialogue = _mk_chunk("ch01_dlg", dialogue_text)
+    plain = _mk_chunk("ch01_plain", "He walked slowly down the lane.\n\nThe trees were silent.")
+    p1, _ = build_translation_prompt_parts(
+        dialogue,
+        target_language="Spanish",
+        always_include_dialogue=True,
+        always_include_image_instructions=True,
+    )
+    p2, _ = build_translation_prompt_parts(
+        plain,
+        target_language="Spanish",
+        always_include_dialogue=True,
+        always_include_image_instructions=True,
+    )
+    assert p1 == p2
+    assert p1  # non-empty cacheable prefix
+
+
+def test_build_translation_prompt_parts_diverges_without_flags():
+    """Without always_include_dialogue, a dialogue chunk and a plain chunk diverge in prefix."""
+    dialogue_text = (
+        chr(34) + "We must leave at once," + chr(34) + " she said.\n\n"
+        "He nodded and reached for his coat."
+    )
+    dialogue = _mk_chunk("ch01_dlg", dialogue_text)
+    plain = _mk_chunk("ch01_plain", "He walked slowly down the lane.\n\nThe trees were silent.")
+    p1, _ = build_translation_prompt_parts(dialogue, target_language="Spanish")
+    p2, _ = build_translation_prompt_parts(plain, target_language="Spanish")
+    assert p1 != p2
+
+
+def test_build_translation_prompt_parts_missing_marker_degrades():
+    """If the GLOSSARY TERMS split marker is absent, parts returns ('', full_prompt)
+    so the caller sends no cache_prefix (degrade-to-no-cache)."""
+    chunk = _mk_chunk("ch01_nomark", "He walked slowly down the lane.")
+    with patch(
+        "src.api_translator.build_translation_prompt",
+        return_value="A rendered prompt with no split marker.",
+    ):
+        prefix, suffix = build_translation_prompt_parts(chunk)
+    assert prefix == ""
+    assert suffix == "A rendered prompt with no split marker."
+
+
+def test_translate_chunk_realtime_passes_none_cache_prefix_when_empty():
+    """When the prefix is empty (marker missing), translate_chunk_realtime must pass
+    cache_prefix=None to call_llm rather than an empty string."""
+    chunk = _mk_chunk("ch01_none", "He walked slowly down the lane.")
+    captured: dict = {}
+
+    def _fake_call_llm(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured["cache_prefix"] = kwargs.get("cache_prefix")
+        return "una traduccion"
+
+    with patch(
+        "src.api_translator.build_translation_prompt_parts",
+        return_value=("", "FULL_PROMPT_NO_PREFIX"),
+    ), patch("src.api_translator.call_llm", side_effect=_fake_call_llm):
+        result = translate_chunk_realtime(chunk, provider="anthropic", model="claude-sonnet-5")
+
+    assert captured["prompt"] == "FULL_PROMPT_NO_PREFIX"
+    assert captured["cache_prefix"] is None
+    assert result.translated_text == "una traduccion"
+
+
+def test_call_anthropic_api_prefix_not_a_prefix_is_string():
+    """A cache_prefix that isn't an actual prefix of the prompt falls back to the
+    single-string content (never sends a mismatched cached block)."""
+    pytest.importorskip("anthropic")
+
+    with patch("anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="ok")]
+        mock_response.usage = Mock(
+            cache_read_input_tokens=0, cache_creation_input_tokens=0
+        )
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            call_anthropic_api("the real prompt", cache_prefix="UNRELATED_PREFIX")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["messages"][0]["content"] == "the real prompt"
+
+
+def test_call_anthropic_api_cache_prefix_two_blocks():
+    """cache_prefix yields two-block content with cache_control on block 0."""
+    pytest.importorskip("anthropic")
+
+    full = "PREFIX_STABLE\nVARIABLE_SUFFIX"
+    prefix = "PREFIX_STABLE\n"
+
+    with patch("anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="ok")]
+        mock_usage = Mock()
+        mock_usage.cache_read_input_tokens = 100
+        mock_usage.cache_creation_input_tokens = 50
+        mock_response.usage = mock_usage
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            result = call_anthropic_api(full, cache_prefix=prefix)
+
+        assert result == "ok"
+        _, kwargs = mock_client.messages.create.call_args
+        content = kwargs["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert len(content) == 2
+        assert content[0]["text"] == prefix
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+        assert content[1]["text"] == "VARIABLE_SUFFIX"
+        usage = last_cache_usage()
+        assert usage is not None
+        assert usage["cache_read_input_tokens"] == 100
+        assert usage["cache_creation_input_tokens"] == 50
+
+
+def test_call_anthropic_api_without_cache_prefix_is_string():
+    """No cache_prefix keeps the historical single-string content."""
+    pytest.importorskip("anthropic")
+
+    with patch("anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.content = [Mock(type="text", text="ok")]
+        mock_response.usage = Mock(
+            cache_read_input_tokens=0, cache_creation_input_tokens=0
+        )
+        mock_client.messages.create.return_value = mock_response
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            call_anthropic_api("plain prompt")
+
+        _, kwargs = mock_client.messages.create.call_args
+        assert kwargs["messages"][0]["content"] == "plain prompt"
+
+
+def test_summarize_chunk_features_counts():
+    dialogue_text = (
+        chr(34) + "We must leave at once," + chr(34) + " she said.\n\n"
+        "He nodded and reached for his coat."
+    )
+    dialogue = _mk_chunk("c_dlg", dialogue_text)
+    image = _mk_chunk("c_img", "Para one.\n\n[IMAGE:images/i01.jpg]\n\nPara two.")
+    plain = _mk_chunk("c_plain", "He walked slowly down the lane.\n\nThe trees were silent.")
+    summary = summarize_chunk_features([dialogue, image, plain])
+    assert summary == {"total": 3, "dialogue": 1, "images": 1}
+
+
+def test_estimate_cost_image_auto_and_feature_counts():
+    image = _mk_chunk("c_img", "Para one.\n\n[IMAGE:images/i01.jpg]\n\nPara two.")
+    plain = _mk_chunk("c_plain", "He walked slowly down the lane.\n\nThe trees were silent.")
+    info = estimate_cost(
+        [image, plain],
+        provider="anthropic",
+        model="claude-3-5-sonnet-20241022",
+    )
+    assert info["total_chunks"] == 2
+    assert info["image_chunk_count"] == 1
+    assert info["dialogue_chunk_count"] == 0
+    # Auto image flag enlarges prompts vs forcing images off.
+    info_off = estimate_cost(
+        [image, plain],
+        provider="anthropic",
+        model="claude-3-5-sonnet-20241022",
+        always_include_image_instructions=False,
+    )
+    assert info["input_tokens"] >= info_off["input_tokens"]
 
 
 def test_apply_translation_stamps(sample_chunk):

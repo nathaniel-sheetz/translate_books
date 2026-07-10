@@ -40,6 +40,10 @@ DEFAULTS: dict[str, object] = {
     # (not only dialogue-bearing chunks) so it sits in the byte-identical, cacheable
     # fixed prefix. Per-book opt-in; see build_translation_prompt / prompts/translation.txt.
     "always_include_dialogue": False,
+    # When true, the constant image-placeholder bullet is placed on every chunk.
+    # None / absent means auto (on when any chunk has [IMAGE:...] placeholders).
+    # Stored as bool when the user sets --always-images / --no-always-images at setup.
+    "always_include_image_instructions": None,
 }
 
 # Config keys a command may override (CLI flag -> config key); used by setup.
