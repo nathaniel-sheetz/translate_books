@@ -90,7 +90,7 @@
     // --- Review mode (opt-in overlay of evaluator findings) ---
     // Selection is chosen on the chapter-list page and persisted per project;
     // the reader only reads it. When off, the reader behaves exactly as before.
-    const REVIEW_TYPES = ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue'];
+    const REVIEW_TYPES = ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
 
     function loadReviewConfig() {
         try {

@@ -268,7 +268,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <div class="review-types-popup" id="review-types-popup" hidden>
                     <div class="review-types-popup-title">{{ t.review_types_label }}</div>
                     <div class="review-type-checks" id="review-type-checks">
-                        {% for tkey in ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue'] %}
+                        {% for tkey in ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'] %}
                         <label class="review-type-check review-type-{{ tkey }}">
                             <input type="checkbox" class="review-type-cb" value="{{ tkey }}" checked>
                             <span>{{ t.review_types[tkey] }}</span>

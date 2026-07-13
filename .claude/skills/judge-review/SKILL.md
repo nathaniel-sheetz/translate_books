@@ -2,11 +2,12 @@
 name: judge-review
 description: |
   Run tailored LLM judges over a translated chunk or chapter, relay the findings,
-  and (with approval) persist them so the dashboard badges update. v1 ships the
-  dialogue-compliance judge, which checks Spanish dialogue formatting against the
-  house rules in prompts/dialogue.txt. Two interchangeable backends: an API path
-  (metered) and a subagent path (no API spend). Use when asked to "run the dialogue
-  judge", "check dialogue compliance", "run the judges on chapter N", or "judge-review".
+  and (with approval) persist them so the dashboard badges update. Ships the
+  dialogue-compliance judge (Spanish dialogue formatting vs. prompts/dialogue.txt)
+  and the address judge (usted/tú vs. the per-book address_map.json). Two
+  interchangeable backends: an API path (metered) and a subagent path (no API spend).
+  Use when asked to "run the dialogue judge", "check dialogue compliance", "run the
+  usted/tú judge", "check forms of address", "run the judges on chapter N", or "judge-review".
 allowed-tools:
   - Bash
   - Read
@@ -91,6 +92,36 @@ Shared flags (`run`, `prepare`):
 - `"ok"` — `results[]` carries per-target findings (issues with severity, message,
   location excerpt, suggestion) plus a `summary` rollup.
 - `"error"` — relay the `error` string (bad scope, missing translation, etc.).
+
+## Available judges
+
+- **`dialogue`** — Spanish dialogue formatting vs. the house rules in
+  `prompts/dialogue.txt`. No setup; reads its rules automatically.
+- **`address`** — usted/tú (formal vs. informal address) vs. the **per-book
+  address map**. **Requires setup** (see below). Run it with `--judge address`
+  (or `--suite address`). It is *not* in the `default` suite.
+
+### The `address` judge needs a map first
+
+The correct usted/tú for a line is book-specific, so the address judge checks
+against `projects/<slug>/address_map.json` — a reviewed map of who addresses whom
+with which form, including public/private and story-stage differences. The CLI
+loads it automatically; if it's missing, `run`/`prepare` return
+`status: "error"` telling you to build it.
+
+**Before running the address judge, check for the map** (`Read` or
+`ls projects/<slug>/address_map.json`). If it's absent, build it with the
+translate-harness address-map beat (a short, approval-gated drafting flow) and
+only then run the judge:
+
+```bash
+python scripts/harness.py address-map prepare --project understood-betsy   # samples dialogue-heavy chapters, renders a prompt
+# (draft the map JSON to the printed draft_path, refine with the user)
+python scripts/harness.py address-map commit  --project understood-betsy   # validates + writes address_map.json
+```
+
+Everything else (scope, backends, persistence, apply) works exactly as for the
+dialogue judge — just pass `--judge address`.
 
 ## Flow
 
@@ -219,6 +250,10 @@ later: `append_feedback(project_dir, chunk_id, "dialogue", issue_index,
 ## Notes
 
 - The dialogue judge reads the rules from `prompts/dialogue.txt` automatically.
+- The address judge reads the per-book expectations from `address_map.json` (the
+  CLI injects them) plus the universal detection rubric in
+  `prompts/address_forms.txt`. It needs the address-map setup beat first; the CLI
+  errors clearly if the map is missing. `apply` also works on it (`--judge address`).
 - Only chunk-scoped results persist (one file per chunk). A `chapter:` scope expands
   to one chunk-target per chunk, so persistence + badges work for both backends.
 - Both backends persist via `merge_judge_result`, so the dashboard badge lights up

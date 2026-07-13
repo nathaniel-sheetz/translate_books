@@ -1700,6 +1700,7 @@ body {
     --review-dictionary: #b9790a;     --review-dictionary-bg: rgba(185, 121, 10, 0.20);
     --review-completeness: #12897e;   --review-completeness-bg: rgba(18, 137, 126, 0.18);
     --review-dialogue: #a544bd;       --review-dialogue-bg: rgba(165, 68, 189, 0.16);
+    --review-address: #2f9e44;        --review-address-bg: rgba(47, 158, 68, 0.18);
 }
 
 [data-theme="dark"] {
@@ -1708,6 +1709,7 @@ body {
     --review-dictionary: #e0a233;     --review-dictionary-bg: rgba(224, 162, 51, 0.24);
     --review-completeness: #35c0b2;   --review-completeness-bg: rgba(53, 192, 178, 0.22);
     --review-dialogue: #d07fe6;       --review-dialogue-bg: rgba(208, 127, 230, 0.22);
+    --review-address: #5cc26a;        --review-address-bg: rgba(92, 194, 106, 0.24);
 }
 
 [data-theme="dark"] .review-types-popup {
@@ -1773,6 +1775,7 @@ body {
 .review-type-dictionary span::before { background: var(--review-dictionary); }
 .review-type-completeness span::before { background: var(--review-completeness); }
 .review-type-dialogue span::before { background: var(--review-dialogue); }
+.review-type-address span::before { background: var(--review-address); }
 
 /* In-text highlights: word-level spans + whole-sentence tint fallback */
 .review-hl {
@@ -1801,12 +1804,17 @@ body {
     background: var(--review-dialogue-bg);
     box-shadow: inset 0 -0.13em 0 var(--review-dialogue);
 }
+.review-hl.review-address {
+    background: var(--review-address-bg);
+    box-shadow: inset 0 -0.13em 0 var(--review-address);
+}
 
 .sentence.review-flagged.review-blacklist { background: var(--review-blacklist-bg); }
 .sentence.review-flagged.review-grammar { background: var(--review-grammar-bg); }
 .sentence.review-flagged.review-dictionary { background: var(--review-dictionary-bg); }
 .sentence.review-flagged.review-completeness { background: var(--review-completeness-bg); }
 .sentence.review-flagged.review-dialogue { background: var(--review-dialogue-bg); }
+.sentence.review-flagged.review-address { background: var(--review-address-bg); }
 
 /* Bottom-sheet tab strip */
 .sheet-tabs {
@@ -1867,6 +1875,7 @@ body {
 .review-item-dictionary { border-left-color: var(--review-dictionary); }
 .review-item-completeness { border-left-color: var(--review-completeness); }
 .review-item-dialogue { border-left-color: var(--review-dialogue); }
+.review-item-address { border-left-color: var(--review-address); }
 
 .review-item-head {
     display: flex;
@@ -1889,6 +1898,7 @@ body {
 .review-item-type.review-dictionary { color: var(--review-dictionary); background: var(--review-dictionary-bg); }
 .review-item-type.review-completeness { color: var(--review-completeness); background: var(--review-completeness-bg); }
 .review-item-type.review-dialogue { color: var(--review-dialogue); background: var(--review-dialogue-bg); }
+.review-item-type.review-address { color: var(--review-address); background: var(--review-address-bg); }
 
 .review-item-sev {
     font-size: 11px;

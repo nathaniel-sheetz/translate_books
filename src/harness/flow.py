@@ -836,6 +836,143 @@ def glossary_commit(project: str, *, draft: str | None = None) -> dict:
     }
 
 
+# ── address-map beat (forms-of-address expectations for the address judge) ──
+
+# Per-chapter source cap fed to the drafting prompt, to bound cost/size while
+# still giving the LLM enough dialogue to read the relationships.
+_ADDRESS_SAMPLE_CHAR_CAP = 6000
+
+
+def _format_characters_block(project_dir: Path) -> tuple[str, int]:
+    """Render the glossary's character terms for the address-map prompt."""
+    from src.utils.file_io import load_glossary
+
+    glossary_path = project_dir / "glossary.json"
+    if not glossary_path.exists():
+        return "(no glossary yet — infer the cast from the sample chapters)", 0
+    glossary = load_glossary(glossary_path)
+    chars = [t for t in glossary.terms if getattr(t.type, "value", t.type) == "character"]
+    if not chars:
+        return "(no character terms in the glossary — infer the cast from the sample chapters)", 0
+    lines = []
+    for t in chars:
+        note = f" — {t.context}" if t.context else ""
+        lines.append(f"- {t.spanish} (English: {t.english}){note}")
+    return "\n".join(lines), len(chars)
+
+
+def _format_sample_chapters_block(project_dir: Path, scores: list) -> str:
+    """Render the sampled chapters (source text, capped) for the prompt."""
+    from src.utils.source_text import load_chapter_source_text
+
+    blocks = []
+    for s in scores:
+        text, _mtime, _kind = load_chapter_source_text(project_dir, s.chapter_id)
+        text = text.strip()
+        if len(text) > _ADDRESS_SAMPLE_CHAR_CAP:
+            text = text[:_ADDRESS_SAMPLE_CHAR_CAP] + "\n[... chapter truncated for sampling ...]"
+        blocks.append(f"=== {s.chapter_id} (dialogue density {s.density:.1f}/1k words) ===\n{text}")
+    return "\n\n".join(blocks)
+
+
+def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
+    """Build the address-map drafting prompt (you are the LLM that drafts the map).
+
+    Samples the book's highest interpersonal-dialogue chapters (a spread across
+    beginning/middle/end), plus the glossary's cast and the style guide, and
+    renders the prompt for the agent to draft ``address_map.json``.
+    """
+    project_dir = state.resolve_project_dir(project)
+    hdir = state.ensure_harness_dir(project_dir)
+    cfg = state.load_config(project_dir)
+
+    from src.harness.address_sample import select_address_sample_chapters
+
+    scores = select_address_sample_chapters(project_dir, max_chapters=max_chapters)
+    if not scores:
+        raise FileNotFoundError(
+            "No chapter source text found to sample for the address map. "
+            "Run `setup` + `split` first."
+        )
+
+    characters, char_count = _format_characters_block(project_dir)
+    style_path = project_dir / "style.json"
+    style_guide = ""
+    if style_path.exists():
+        from src.utils.file_io import load_style_guide
+        style_guide = load_style_guide(style_path).content
+    sample_block = _format_sample_chapters_block(project_dir, scores)
+
+    template = _read(state.REPO_ROOT / "prompts" / "address_map_generate.txt")
+    prompt = (
+        template
+        .replace("{{target_language}}", cfg["target_language"])
+        .replace("{{locale}}", cfg["locale"])
+        .replace("{{characters}}", characters)
+        .replace("{{style_guide}}", style_guide or "(no style guide yet)")
+        .replace("{{sample_chapters}}", sample_block)
+    )
+    prompt_path = hdir / "address_map_prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    return {
+        "prompt_path": str(prompt_path),
+        "draft_path": str(hdir / "address_map_draft.json"),
+        "sample_chapters": [s.to_dict() for s in scores],
+        "characters_loaded": char_count,
+        "style_guide_loaded": bool(style_guide),
+        "instructions": (
+            "Read prompt_path, draft the forms-of-address map as a JSON object "
+            "{content, pairs, global_rules} to draft_path (each non-empty direction "
+            "must end with a when='default' rule), refine it with the user, then run "
+            "`address-map commit`."
+        ),
+    }
+
+
+def address_map_commit(project: str, *, draft: str | None = None) -> dict:
+    """Parse, save, and validate the agent-drafted address map -> address_map.json."""
+    project_dir = state.resolve_project_dir(project)
+    hdir = state.harness_dir(project_dir)
+
+    from src.harness_guard import HarnessValidationError, validate_address_map_file
+    from src.models import AddressMap
+    from src.utils.file_io import save_address_map
+
+    draft_path = Path(draft) if draft else hdir / "address_map_draft.json"
+    try:
+        data = json.loads(_read(draft_path))
+    except (json.JSONDecodeError, FileNotFoundError, OSError) as exc:
+        raise HarnessValidationError(
+            f"Address map draft at {draft_path} is not readable JSON: {exc}\n"
+            "Re-draft it as a JSON object {content, pairs, global_rules}."
+        ) from exc
+    try:
+        address_map = AddressMap.model_validate(data)
+    except Exception as exc:  # pydantic ValidationError
+        raise HarnessValidationError(
+            f"Address map draft failed validation: {exc}\n"
+            "Fix the schema (form is 'tú'/'usted'; each non-empty direction needs a "
+            "when='default' rule) and re-draft."
+        ) from exc
+
+    out = project_dir / "address_map.json"
+    save_address_map(address_map, out)
+    validate_address_map_file(out)  # belt-and-suspenders
+    return {
+        "address_map_path": str(out),
+        "pair_count": len(address_map.pairs),
+        "has_content": bool(address_map.content.strip()),
+        "chars": len(address_map.content),
+        "pairs": [
+            {"a": p.a, "b": p.b, "relationship": p.relationship,
+             "directions": {k: [r.model_dump(exclude_none=True) for r in v]
+                            for k, v in p.directions.items()}}
+            for p in address_map.pairs
+        ],
+    }
+
+
 # ── difficulty (in-process; returns structured suggestion) ─────────────────
 
 def difficulty(project: str) -> dict:

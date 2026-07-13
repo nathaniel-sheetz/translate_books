@@ -497,6 +497,107 @@ class StyleGuide(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.now)
 
 
+# ── Forms-of-address (usted/tú) expectations map ────────────────────────────
+#
+# The per-book expectations the `address` LLM judge checks against. Unlike the
+# universal dialogue rules, the *correct* form depends on who addresses whom, the
+# relationship, the public/private situation, and can change as the story
+# progresses. So each pair models address PER DIRECTION as an ordered list of
+# context-conditioned rules (see docs/ADDRESS_JUDGE.md).
+
+# v1 supports tú/usted only (voseo / ustedes-vosotros plural address are out of
+# scope). Aliases fold the common accent-dropped draft into the canonical form.
+ADDRESS_FORMS: frozenset[str] = frozenset({"tú", "usted"})
+_ADDRESS_FORM_ALIASES: dict[str, str] = {"tu": "tú", "tú": "tú", "usted": "usted"}
+
+# The two directions of a pair. ``a_to_b`` is how character ``a`` addresses ``b``.
+ADDRESS_DIRECTIONS: tuple[str, ...] = ("a_to_b", "b_to_a")
+
+
+class AddressRule(BaseModel):
+    """One context-conditioned address expectation within a direction.
+
+    Rules are evaluated in list order: the first whose ``when`` condition and
+    ``since``/``until`` chapter window match the scene wins, falling back to the
+    ``when="default"`` rule that every non-empty direction must carry.
+
+    Example:
+        AddressRule(form="usted", when="public", notes="formal deference before others")
+    """
+    form: str = Field(description="Expected address form: 'tú' or 'usted'")
+    when: str = Field(
+        default="default",
+        description="Scene condition: 'default' | 'public' | 'private' | free-text situation",
+    )
+    since: Optional[str] = Field(default=None, description="Chapter id this rule takes effect from")
+    until: Optional[str] = Field(default=None, description="Chapter id this rule stops applying after")
+    after_event: Optional[str] = Field(default=None, description="Story event that triggers this rule")
+    notes: Optional[str] = Field(default=None, description="Rationale / usage notes")
+
+    @field_validator("form", mode="before")
+    @classmethod
+    def _normalize_form(cls, v: Any) -> str:
+        key = str(v or "").strip().lower()
+        if key not in _ADDRESS_FORM_ALIASES:
+            raise ValueError(
+                f"Unknown address form {v!r}; expected one of {sorted(ADDRESS_FORMS)} "
+                "(v1 supports tú/usted only)."
+            )
+        return _ADDRESS_FORM_ALIASES[key]
+
+    @field_validator("when", mode="before")
+    @classmethod
+    def _default_when(cls, v: Any) -> str:
+        return str(v or "").strip() or "default"
+
+
+class AddressPair(BaseModel):
+    """Expected address between two characters, modeled per direction.
+
+    ``directions`` maps ``a_to_b`` / ``b_to_a`` to an ordered rule list. The two
+    directions are independent, so asymmetric cases (A→B tú while B→A usted in
+    public) are expressible.
+    """
+    a: str = Field(min_length=1, description="First character (canonical/Spanish name)")
+    b: str = Field(min_length=1, description="Second character")
+    relationship: Optional[str] = Field(default=None, description="How the two relate")
+    directions: dict[str, list[AddressRule]] = Field(default_factory=dict)
+
+    @field_validator("directions")
+    @classmethod
+    def _check_directions(cls, v: dict[str, list["AddressRule"]]) -> dict[str, list["AddressRule"]]:
+        for key, rules in v.items():
+            if key not in ADDRESS_DIRECTIONS:
+                raise ValueError(
+                    f"Unknown direction {key!r}; expected one of {list(ADDRESS_DIRECTIONS)}."
+                )
+            # A non-empty direction must resolve for any scene, so it needs a
+            # catch-all default rule after its conditional ones.
+            if rules and not any(r.when == "default" for r in rules):
+                raise ValueError(
+                    f"Direction {key!r} has rules but no default (when='default') fallback; "
+                    "add one so every scene resolves."
+                )
+        return v
+
+
+class AddressMap(BaseModel):
+    """Per-book forms-of-address expectations for the ``address`` judge.
+
+    ``content`` is the human-readable prose the judge actually reads (it must
+    state the asymmetric/contextual rules plainly); ``pairs`` / ``global_rules``
+    are the structured mirror for future UI / deterministic use.
+    """
+    content: str = Field(default="", description="Prose the judge reads")
+    pairs: list[AddressPair] = Field(default_factory=list)
+    global_rules: str = Field(
+        default="", description="Fallback rules when no pair matches (seeded from style guide)"
+    )
+    version: str = "1.0"
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
 class ChunkingMethod(str, Enum):
     """Methods for dividing chapters into chunks."""
     PARAGRAPH = "paragraph"

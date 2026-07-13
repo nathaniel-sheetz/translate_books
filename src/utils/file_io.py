@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.models import Blacklist, Chunk, Glossary, ProjectState, StyleGuide
+from src.models import AddressMap, Blacklist, Chunk, Glossary, ProjectState, StyleGuide
 
 
 def load_chunk(chunk_path: Path) -> Chunk:
@@ -417,6 +417,47 @@ def load_style_guide(path: Path) -> StyleGuide:
         return StyleGuide.model_validate(data)
     except Exception as e:
         raise ValueError(f"Invalid StyleGuide data in {path}: {e}")
+
+
+def load_address_map(path: Path) -> AddressMap:
+    """Load an AddressMap (forms-of-address expectations) from a JSON file.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        json.JSONDecodeError: If the file contains invalid JSON.
+        ValueError: If the JSON doesn't match the AddressMap schema.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Address map file not found: {path}")
+
+    try:
+        with path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(
+            f"Invalid JSON in address map file {path}: {e.msg}", e.doc, e.pos
+        )
+
+    try:
+        return AddressMap.model_validate(data)
+    except Exception as e:
+        raise ValueError(f"Invalid AddressMap data in {path}: {e}")
+
+
+def save_address_map(address_map: AddressMap, output_path: Path) -> None:
+    """Save an AddressMap to a JSON file with an atomic write."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data = address_map.model_dump(mode='json')
+
+    temp_path = output_path.with_suffix('.tmp')
+    try:
+        with temp_path.open('w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write('\n')
+        temp_path.replace(output_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def save_style_guide(style_guide: StyleGuide, output_path: Path) -> None:

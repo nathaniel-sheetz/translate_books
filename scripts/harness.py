@@ -172,6 +172,18 @@ def _build_parser() -> argparse.ArgumentParser:
     add_project(gc)
     gc.add_argument("--draft", default=None, help="Proposals JSON (default: .harness/glossary_draft.json)")
 
+    # address-map <action> --------------------------------------------------
+    am = sub.add_parser("address-map",
+                        help="Forms-of-address (usted/tú) map beat for the address judge (prepare/commit)")
+    am_sub = am.add_subparsers(dest="action", required=True)
+    amp = am_sub.add_parser("prepare")
+    add_project(amp)
+    amp.add_argument("--max-chapters", dest="max_chapters", type=int, default=6,
+                     help="Max sampled chapters (spread across the book; default 6)")
+    amc = am_sub.add_parser("commit")
+    add_project(amc)
+    amc.add_argument("--draft", default=None, help="Map JSON (default: .harness/address_map_draft.json)")
+
     # difficulty ------------------------------------------------------------
     dp = sub.add_parser("difficulty", help="Score difficulty; suggest a chunk target size")
     add_project(dp)
@@ -341,6 +353,11 @@ def _dispatch(args: argparse.Namespace):
             return flow.glossary_prepare(args.project, max_candidates=args.max_candidates)
         if args.action == "commit":
             return flow.glossary_commit(args.project, draft=args.draft)
+    if cmd == "address-map":
+        if args.action == "prepare":
+            return flow.address_map_prepare(args.project, max_chapters=args.max_chapters)
+        if args.action == "commit":
+            return flow.address_map_commit(args.project, draft=args.draft)
     if cmd == "difficulty":
         return flow.difficulty(args.project)
     if cmd == "chunk":
