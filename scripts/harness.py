@@ -71,6 +71,17 @@ _CHAPTER_PATTERN_HELP = (
 )
 
 
+def _positive_int(value: str) -> int:
+    """argparse type: integers >= 1."""
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from exc
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="harness", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -178,8 +189,8 @@ def _build_parser() -> argparse.ArgumentParser:
     am_sub = am.add_subparsers(dest="action", required=True)
     amp = am_sub.add_parser("prepare")
     add_project(amp)
-    amp.add_argument("--max-chapters", dest="max_chapters", type=int, default=6,
-                     help="Max sampled chapters (spread across the book; default 6)")
+    amp.add_argument("--max-chapters", dest="max_chapters", type=_positive_int, default=6,
+                     help="Max sampled chapters (spread across the book; default 6, min 1)")
     amc = am_sub.add_parser("commit")
     add_project(amc)
     amc.add_argument("--draft", default=None, help="Map JSON (default: .harness/address_map_draft.json)")

@@ -135,8 +135,17 @@ def _build_judge_context(
             amap = load_address_map(map_path)
             # v1 the judge reads the prose ``content``; fall back to global_rules
             # if a committed map left content empty.
-            context["address_map"] = (amap.content or "").strip() or amap.global_rules
-            address_map_loaded = True
+            prose = (amap.content or "").strip() or (amap.global_rules or "").strip()
+            if prose:
+                context["address_map"] = prose
+                address_map_loaded = True
+            elif "address" in judge_names:
+                return context, (
+                    f"address_map.json at {map_path} has empty content and "
+                    "global_rules — the address judge has nothing to check against. "
+                    "Re-draft with non-empty `content`, then:\n"
+                    f"  python scripts/harness.py address-map commit --project {project_dir.name}"
+                )
         except Exception as exc:  # noqa: BLE001 - surface as a clean CLI error
             return context, (
                 f"address_map.json at {map_path} failed to load: {exc}. "

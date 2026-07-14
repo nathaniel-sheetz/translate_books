@@ -77,8 +77,8 @@ python scripts/harness.py address-map prepare --project <slug>
 python scripts/harness.py address-map commit --project <slug>
 ```
 
-`prepare` seeds the prompt from the glossary's cast, the style guide's
-forms-of-address section, and a whole-book spread of dialogue-dense chapters
+`prepare` seeds the prompt from the glossary's cast, the full style guide
+(`style.json` content), and a whole-book spread of dialogue-dense chapters
 (chosen by `src/harness/address_sample.py`), so the map reflects relationships as
 they actually play out — including how they change — not just the opening chapters.
 

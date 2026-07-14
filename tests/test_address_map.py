@@ -63,6 +63,32 @@ def test_direction_without_default_rejected():
         )
 
 
+def test_direction_default_must_be_last():
+    with pytest.raises(Exception):
+        AddressPair.model_validate({
+            "a": "X", "b": "Y",
+            "directions": {
+                "a_to_b": [
+                    {"form": "tú", "when": "default"},
+                    {"form": "usted", "when": "public"},
+                ]
+            },
+        })
+
+
+def test_direction_duplicate_default_rejected():
+    with pytest.raises(Exception):
+        AddressPair.model_validate({
+            "a": "X", "b": "Y",
+            "directions": {
+                "a_to_b": [
+                    {"form": "tú", "when": "default"},
+                    {"form": "usted", "when": "default"},
+                ]
+            },
+        })
+
+
 def test_unknown_direction_rejected():
     with pytest.raises(Exception):
         AddressPair.model_validate(
@@ -137,6 +163,16 @@ def test_sampler_returns_whole_book_spread(sample_project: Path):
     assert any(i >= "chapter_07" for i in ids)
 
 
+def test_sampler_respects_max_chapters_of_one(sample_project: Path):
+    picks = select_address_sample_chapters(sample_project, max_chapters=1)
+    assert len(picks) == 1
+
+
+def test_sampler_rejects_non_positive_max_chapters(sample_project: Path):
+    with pytest.raises(ValueError, match="max_chapters"):
+        select_address_sample_chapters(sample_project, max_chapters=0)
+
+
 def test_sampler_skips_dialogue_light_chapters(tmp_path: Path):
     proj = tmp_path / "lightbook"
     (proj / "chapters").mkdir(parents=True)
@@ -199,6 +235,20 @@ def test_address_map_commit_rejects_bad_draft(beat_project: Path):
         encoding="utf-8",
     )
     with pytest.raises(HarnessValidationError):
+        flow.address_map_commit(str(beat_project))
+
+
+def test_address_map_commit_rejects_empty_content(beat_project: Path):
+    draft = state.ensure_harness_dir(beat_project) / "address_map_draft.json"
+    draft.write_text(
+        json.dumps({
+            "content": "   ",
+            "pairs": [_asymmetric_pair()],
+            "global_rules": "tú in family.",
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(HarnessValidationError, match="empty `content`"):
         flow.address_map_commit(str(beat_project))
 
 

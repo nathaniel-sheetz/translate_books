@@ -924,7 +924,8 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
         "instructions": (
             "Read prompt_path, draft the forms-of-address map as a JSON object "
             "{content, pairs, global_rules} to draft_path (each non-empty direction "
-            "must end with a when='default' rule), refine it with the user, then run "
+            "must include a when='default' rule as the last entry; put specific "
+            "when-rules before it), refine it with the user, then run "
             "`address-map commit`."
         ),
     }
@@ -952,9 +953,16 @@ def address_map_commit(project: str, *, draft: str | None = None) -> dict:
     except Exception as exc:  # pydantic ValidationError
         raise HarnessValidationError(
             f"Address map draft failed validation: {exc}\n"
-            "Fix the schema (form is 'tú'/'usted'; each non-empty direction needs a "
-            "when='default' rule) and re-draft."
+            "Fix the schema (form is 'tú'/'usted'; each non-empty direction must end "
+            "with exactly one when='default' rule) and re-draft."
         ) from exc
+
+    if not (address_map.content or "").strip():
+        raise HarnessValidationError(
+            "Address map draft has empty `content`. The address judge reads that "
+            "prose — fill it with the forms-of-address expectations (pairs alone "
+            "are not enough) and re-draft."
+        )
 
     out = project_dir / "address_map.json"
     save_address_map(address_map, out)

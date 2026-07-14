@@ -571,13 +571,15 @@ class AddressPair(BaseModel):
                 raise ValueError(
                     f"Unknown direction {key!r}; expected one of {list(ADDRESS_DIRECTIONS)}."
                 )
-            # A non-empty direction must resolve for any scene, so it needs a
-            # catch-all default rule after its conditional ones.
-            if rules and not any(r.when == "default" for r in rules):
-                raise ValueError(
-                    f"Direction {key!r} has rules but no default (when='default') fallback; "
-                    "add one so every scene resolves."
-                )
+            # First-match semantics: specific when-rules first, exactly one
+            # when="default" last so every scene resolves.
+            if rules:
+                default_idxs = [i for i, r in enumerate(rules) if r.when == "default"]
+                if len(default_idxs) != 1 or default_idxs[0] != len(rules) - 1:
+                    raise ValueError(
+                        f"Direction {key!r} must end with exactly one when='default' rule "
+                        "(put specific when-rules before it)."
+                    )
         return v
 
 

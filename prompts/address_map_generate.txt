@@ -60,8 +60,8 @@ Return ONLY a JSON object in exactly this shape:
 
 Rules for the JSON:
 - `form` is exactly "tú" or "usted" (this book is tú/usted only — no voseo).
-- Every non-empty direction MUST end with a `{ "form": ..., "when": "default" }`
+- Every non-empty direction MUST end with exactly one `{ "form": ..., "when": "default" }`
   rule so any scene resolves; put more specific `when` rules (public/private/…)
-  BEFORE it, in priority order.
+  BEFORE the default, in priority order.
 - Keep `content` self-contained and human-readable: it is what the judge reads.
 - Output ONLY the JSON object, no commentary, no code fences.

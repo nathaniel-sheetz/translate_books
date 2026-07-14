@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.29.0.0] - 2026-07-13
+
+### Added
+- **Usted/tú forms-of-address compliance judge.** New `address` judge checks Spanish translations against a per-book `address_map.json` (asymmetric pair rules, public/private contexts, chapter windows). Harness beat `address-map prepare/commit` samples dialogue-dense chapters, drafts the map, and validates it; `run_judges.py --judge address` loads the map into judge context. Docs in `docs/ADDRESS_JUDGE.md`; prompts for map generation and single/batch judging.
+
+### Fixed
+- **Address-map commit and run refuse empty expectations.** Commit requires non-empty `content` (pairs alone are not enough); run treats empty `content`+`global_rules` as a missing map for the address judge.
+- **Direction rules must end with exactly one `when=default`.** Matches first-match semantics so a leading default cannot shadow public/private rules.
+- **Chapter sampler respects `max_chapters`.** Stratified section picks are trimmed so caps like `--max-chapters 1` no longer overshoot; CLI rejects non-positive values.
+
 ## [0.28.2.0] - 2026-07-10
 
 ### Fixed

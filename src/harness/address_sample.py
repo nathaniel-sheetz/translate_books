@@ -110,7 +110,8 @@ def _chapter_ids_in_order(project_dir: Path) -> list[str]:
         except (json.JSONDecodeError, OSError, KeyError) as exc:
             logger.warning("Could not read chapter_manifest from %s: %s", manifest_path, exc)
 
-    # Fallback: derive ids from files on disk, in sorted (natural chapter) order.
+    # Fallback: derive ids from files on disk, in lexical sorted order
+    # (padded stems like chapter_02 sort correctly; unpadded chapter_10 < chapter_2).
     chapters_dir = project_dir / "chapters"
     if chapters_dir.exists():
         ids = sorted(p.stem for p in chapters_dir.glob("chapter_*.txt"))
@@ -136,6 +137,9 @@ def _stratified_pick(
     sample can't collapse onto the front of the book, then fill any remaining
     slots with the highest-density chapters left.
     """
+    if max_chapters < 1:
+        raise ValueError(f"max_chapters must be >= 1, got {max_chapters}")
+
     if len(ranked) <= max_chapters:
         return sorted(ranked, key=lambda s: s.chapter_id)
 
@@ -149,6 +153,12 @@ def _stratified_pick(
         top = sorted(section, key=lambda s: s.density, reverse=True)[:per_section]
         for s in top:
             chosen[s.chapter_id] = s
+
+    # Section picks can overshoot (e.g. max_chapters=1 → 1 per third). Trim to
+    # the densest max_chapters before filling remaining slots.
+    if len(chosen) > max_chapters:
+        keep = sorted(chosen.values(), key=lambda s: s.density, reverse=True)[:max_chapters]
+        chosen = {s.chapter_id: s for s in keep}
 
     # Fill remaining slots with the best density chapters not already chosen.
     for s in ranked:
