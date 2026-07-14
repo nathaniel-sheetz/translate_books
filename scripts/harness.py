@@ -263,6 +263,24 @@ def _build_parser() -> argparse.ArgumentParser:
                           "problem remains. Repeatable. Other guards stay enforced; waives are "
                           "reported under `waived` and logged in provenance.")
 
+    tfp = sub.add_parser(
+        "translate-fanout",
+        help="Headless claude -p wave for translate-prepare drafts (opt-in; no Task workers)",
+    )
+    add_project(tfp)
+    tfp.add_argument(
+        "--chunk-ids", dest="chunk_ids", default=None,
+        help="Comma-separated chunk_ids to run (default: all manifest entries still lacking a draft)",
+    )
+    tfp.add_argument(
+        "--concurrency", type=int, default=None,
+        help="Max parallel claude -p processes per wave (default: spawn_plan.batch_size)",
+    )
+    tfp.add_argument(
+        "--claude-bin", dest="claude_bin", default="claude",
+        help="claude CLI binary (default: claude)",
+    )
+
     ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
     add_project(ep)
     ep.add_argument("--title", default=None)
@@ -389,6 +407,16 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "translate-commit":
         return flow.translate_commit(args.project, worker_model=args.worker_model,
                                      allow_problems=args.allow_problems)
+    if cmd == "translate-fanout":
+        chunk_ids = None
+        if args.chunk_ids:
+            chunk_ids = [c.strip() for c in args.chunk_ids.split(",") if c.strip()]
+        return flow.translate_fanout(
+            args.project,
+            chunk_ids=chunk_ids,
+            concurrency=args.concurrency,
+            claude_bin=args.claude_bin,
+        )
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
     if cmd == "align":

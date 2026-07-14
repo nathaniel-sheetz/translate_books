@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.30.0.0] - 2026-07-14
+
+### Added
+- **Headless `translate-fanout` for translate-harness.** Opt-in alternative to Task workers: bounded `claude -p` waves write drafts from the prepare manifest (shared preamble via `--system-prompt-file` when the cache split is stable). Skill usage gate offers Task / headless / abort; prepare emits `preamble_path`/`body_path` when prefixes match.
+
+### Fixed
+- **Fan-out falls back to full `prompt.txt` when preamble+body diverge** (including rescued drafts), so a rewritten shared preamble cannot send a mismatched system+user prompt.
+- **Per-chunk exception isolation and fail-fast when `claude` is missing** so one I/O or launch error cannot abort the whole wave with empty `failed` lists.
+
 ## [0.29.0.1] - 2026-07-14
 
 ### Changed

@@ -929,6 +929,190 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     assert state.load_config(state.resolve_project_dir(str(tmp_path)))["parallelism"] == "all"
 
 
+def test_translate_prepare_emits_byte_identical_preamble_and_body(tmp_path: Path):
+    """Shared preamble + per-chunk body round-trip to prompt.txt; paths land on the manifest.
+
+    With always_include_dialogue forced on, the cacheable prefix is stable across a
+    dialogue chunk and a plain chunk — the headless fan-out precondition.
+    """
+    from src.api_translator import build_translation_prompt
+    from src.harness import flow, state as hstate
+    from src.utils.file_io import load_chunk
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=[
+            'She said, "Hello there," and waved.',
+            "The meadow was quiet in the afternoon sun.",
+        ],
+    )
+    hstate.save_config(tmp_path, {"always_include_dialogue": True})
+
+    prep = flow.translate_prepare(str(tmp_path))
+    assert len(prep["manifest"]) == 2
+    preamble_paths = {e.get("preamble_path") for e in prep["manifest"]}
+    assert len(preamble_paths) == 1 and None not in preamble_paths
+    preamble_path = Path(next(iter(preamble_paths)))
+    assert preamble_path.name == "preamble.txt"
+    preamble = preamble_path.read_text(encoding="utf-8")
+    assert preamble, "preamble must be non-empty"
+
+    for entry in prep["manifest"]:
+        assert "body_path" in entry and "preamble_path" in entry
+        body = Path(entry["body_path"]).read_text(encoding="utf-8")
+        prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
+        assert preamble + body == prompt
+
+    # First chunk has no predecessor context — full prompt must match the API builder.
+    first = prep["manifest"][0]
+    chunk0 = load_chunk(Path(first["chunk_path"]))
+    expected = build_translation_prompt(
+        chunk0,
+        project_name=tmp_path.name,
+        source_language="English",
+        target_language="Spanish",
+        always_include_dialogue=True,
+        always_include_image_instructions=False,
+    )
+    assert Path(first["prompt_path"]).read_text(encoding="utf-8") == expected
+
+
+def test_translate_prepare_omits_split_paths_when_prefix_diverges(tmp_path: Path):
+    """Without always_include_dialogue, a dialogue chunk and a plain chunk diverge —
+    only matching entries keep preamble_path/body_path."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=[
+            'She said, "Hello there," and waved.',
+            "The meadow was quiet in the afternoon sun.",
+        ],
+    )
+    hstate.save_config(tmp_path, {"always_include_dialogue": False})
+
+    prep = flow.translate_prepare(str(tmp_path))
+    assert len(prep["manifest"]) == 2
+    # First chunk establishes the preamble; the second diverges and must omit paths.
+    first, second = prep["manifest"][0], prep["manifest"][1]
+    assert "preamble_path" in first and "body_path" in first
+    assert "preamble_path" not in second and "body_path" not in second
+    # Full prompt.txt still written for both.
+    assert Path(first["prompt_path"]).exists()
+    assert Path(second["prompt_path"]).exists()
+
+
+def test_translate_fanout_writes_drafts_via_runner_seam(tmp_path: Path):
+    """translate-fanout invokes the runner with --system-prompt-file when split paths exist."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    hstate.save_config(tmp_path, {"always_include_dialogue": True, "batch_size": 2})
+
+    prep = flow.translate_prepare(str(tmp_path))
+    entry = prep["manifest"][0]
+    assert "preamble_path" in entry and "body_path" in entry
+
+    seen_cmds: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen_cmds.append(list(cmd))
+        assert "--system-prompt-file" in cmd
+        assert entry["preamble_path"] in cmd
+        assert input_text == Path(entry["body_path"]).read_text(encoding="utf-8")
+        assert Path(cwd).name == "claude-translate-empty"
+        return 0, "es_one es_short es_sentence es_for es_a es_draft", ""
+
+    out = flow.translate_fanout(str(tmp_path), runner=fake_runner)
+    assert out["counts"]["wrote"] == 1
+    assert entry["chunk_id"] in out["wrote"]
+    draft = Path(entry["draft_path"]).read_text(encoding="utf-8").strip()
+    assert draft.startswith("es_one")
+    assert seen_cmds and "--tools" in seen_cmds[0]
+
+    # Idempotent: existing draft is skipped.
+    out2 = flow.translate_fanout(str(tmp_path), runner=fake_runner)
+    assert out2["counts"]["skipped"] == 1
+    assert out2["counts"]["wrote"] == 0
+
+
+def test_translate_fanout_falls_back_when_split_mismatches_prompt(tmp_path: Path):
+    """Stale preamble+body that no longer equals prompt.txt → full prompt, no system file."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    hstate.save_config(tmp_path, {"always_include_dialogue": True, "batch_size": 2})
+
+    prep = flow.translate_prepare(str(tmp_path))
+    entry = prep["manifest"][0]
+    assert "preamble_path" in entry and "body_path" in entry
+    # Corrupt the body so the split no longer matches prompt.txt.
+    Path(entry["body_path"]).write_text("STALE BODY\n", encoding="utf-8")
+
+    seen_cmds: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen_cmds.append(list(cmd))
+        assert "--system-prompt-file" not in cmd
+        assert input_text == Path(entry["prompt_path"]).read_text(encoding="utf-8")
+        return 0, "es_fallback draft prose here", ""
+
+    out = flow.translate_fanout(str(tmp_path), runner=fake_runner)
+    assert out["counts"]["wrote"] == 1
+    assert entry["chunk_id"] in out["wrote"]
+    assert seen_cmds and "--system-prompt-file" not in seen_cmds[0]
+
+
+def test_translate_fanout_isolates_runner_exceptions(tmp_path: Path):
+    """A raising runner becomes a per-chunk failed entry, not a wave-aborting crash."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=["First sentence here.", "Second sentence here."],
+    )
+    hstate.save_config(tmp_path, {"always_include_dialogue": True, "batch_size": 2})
+    prep = flow.translate_prepare(str(tmp_path))
+    assert len(prep["manifest"]) == 2
+
+    def boom_runner(cmd, *, input_text, cwd):
+        raise RuntimeError("simulated launch failure")
+
+    out = flow.translate_fanout(str(tmp_path), runner=boom_runner)
+    assert "error" not in out
+    assert out["counts"]["wrote"] == 0
+    assert out["counts"]["failed"] == 2
+    assert all("RuntimeError" in f["error"] for f in out["failed"])
+
+
+def test_translate_fanout_fails_fast_when_claude_missing(tmp_path: Path, monkeypatch):
+    """Missing claude binary → one top-level error, no per-chunk wave."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    hstate.save_config(tmp_path, {"always_include_dialogue": True})
+    flow.translate_prepare(str(tmp_path))
+
+    monkeypatch.setattr(flow.shutil, "which", lambda _name: None)
+    out = flow.translate_fanout(str(tmp_path), claude_bin="claude-not-installed")
+    assert "error" in out
+    assert "claude not found" in out["error"]
+    assert out["counts"]["todo"] == 0
+    assert out["counts"]["failed"] == 0
+
+
 def test_translate_prepare_never_wipes_or_strands_uncommitted_drafts(tmp_path: Path):
     """A narrower re-prepare must not wipe (or orphan) a finished wave's drafts.
 
