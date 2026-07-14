@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1018,8 +1019,11 @@ def difficulty(project: str) -> dict:
 # ── translate subagent backend (Phase B): prepare / commit ─────────────────
 #
 #   translate-prepare ─► .harness/translate/<id>.prompt.txt + manifest.json
-#        (no spend)        the agent spawns one model-pinned worker per entry:
-#                          worker reads prompt_path -> writes prose to draft_path
+#        (no spend)        (+ optional shared preamble.txt + per-chunk .body.txt
+#                          for the headless ``translate-fanout`` path)
+#                          Task workers: read prompt_path -> write draft_path
+#                          Headless:     claude -p body + --system-prompt-file preamble
+#   translate-fanout  ─► run one wave of headless ``claude -p`` workers (opt-in)
 #   translate-commit  ─► guard each draft -> apply_translation + save_chunk
 #        (idempotent)      + a provenance log per chunk; reports failed/missing
 #
@@ -1044,6 +1048,20 @@ def translate_prepare(
     ``1-2`` / ``3,7``; all chapters when omitted), render the same prompt the API
     path sends and write it to ``.harness/translate/<id>.prompt.txt``; assign a
     ``draft_path`` the worker writes its prose to.
+
+    Also emits a cacheable split for the headless fan-out path:
+    ``.harness/translate/preamble.txt`` (shared prefix from
+    ``build_translation_prompt_parts``) and ``.harness/translate/<id>.body.txt``
+    (per-chunk suffix). Manifest entries get ``preamble_path`` + ``body_path``
+    only when that chunk's prefix is **byte-identical** to the shared preamble
+    (computed from the first non-empty prefix). The conditional ``dialogue_instructions`` /
+    ``image_placeholder_instructions`` live in the prefix — they are only constant
+    when the book sets ``always_include_dialogue`` /
+    ``always_include_image_instructions`` (passed here as ``always_include_dialogue``
+    + ``book_has_images``). On any prefix mismatch the entry omits those paths so
+    fan-out falls back to the full ``prompt.txt`` with no ``--system-prompt-file``
+    (correct, just uncached). ``preamble + body`` is always byte-identical to
+    ``prompt.txt`` when both split files are written.
 
     ``previous_chapter_context`` carries continuity from the preceding chunk
     (document order). When that preceding chunk is already **committed**, the
@@ -1133,7 +1151,7 @@ def translate_prepare(
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
     from scripts.translate_book import discover_chapters, parse_chapter_range
-    from src.api_translator import build_translation_prompt
+    from src.api_translator import build_translation_prompt_parts
     from src.translator import extract_previous_chapter_context
     from src.utils.file_io import load_chunk, load_glossary, load_style_guide
     from src.utils.text_utils import image_filenames
@@ -1190,6 +1208,11 @@ def translate_prepare(
 
     entries: list[dict] = []
     total_words = 0
+    # Shared cacheable prefix for headless fan-out. Written once from the first
+    # chunk that yields a non-empty prefix; later chunks must match byte-for-byte
+    # or they fall back to the full prompt.txt (no --system-prompt-file).
+    shared_preamble: str | None = None
+    preamble_path = translate_dir / "preamble.txt"
     # Track the preceding chunk's source AND translation (document order) so an
     # untranslated chunk whose predecessor is already committed gets EN+ES context.
     prev_source: str | None = None
@@ -1213,7 +1236,7 @@ def translate_prepare(
                 )
                 if prev_source else ""
             )
-            prompt = build_translation_prompt(
+            prefix, suffix = build_translation_prompt_parts(
                 chunk,
                 glossary=glossary,
                 style_guide=style_guide,
@@ -1224,6 +1247,7 @@ def translate_prepare(
                 always_include_dialogue=always_include_dialogue,
                 always_include_image_instructions=book_has_images,
             )
+            prompt = prefix + suffix
             prompt_path = translate_dir / f"{chunk.id}.prompt.txt"
             draft_path = translate_dir / f"{chunk.id}.draft.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
@@ -1235,14 +1259,32 @@ def translate_prepare(
             draft_text = _read_draft_text(draft_path) if draft_path.exists() else None
             if draft_text is not None and not draft_text.strip():
                 draft_path.unlink(missing_ok=True)
-            entries.append({
+            entry: dict = {
                 "chunk_id": chunk.id,
                 "chapter_id": chunk.chapter_id,
                 "chunk_path": str(cp),
                 "prompt_path": str(prompt_path),
                 "draft_path": str(draft_path),
                 "source_word_count": chunk.word_count,
-            })
+            }
+            # Cache split: only when the prefix is non-empty and matches the shared
+            # preamble (or establishes it). Mismatched prefixes omit the paths so
+            # translate-fanout uses prompt.txt without --system-prompt-file.
+            # Drop any stale .body.txt so a later rescue cannot reattach a mismatch.
+            body_path = translate_dir / f"{chunk.id}.body.txt"
+            if prefix:
+                if shared_preamble is None:
+                    shared_preamble = prefix
+                    preamble_path.write_text(shared_preamble, encoding="utf-8")
+                if prefix == shared_preamble:
+                    body_path.write_text(suffix, encoding="utf-8")
+                    entry["preamble_path"] = str(preamble_path)
+                    entry["body_path"] = str(body_path)
+                else:
+                    body_path.unlink(missing_ok=True)
+            else:
+                body_path.unlink(missing_ok=True)
+            entries.append(entry)
             # This untranslated chunk becomes the next chunk's predecessor; only
             # its source exists yet, so the next prompt gets source-only context
             # until this chunk is committed and prepare re-runs.
@@ -1307,14 +1349,36 @@ def translate_prepare(
         if rescue_chunk.has_translation:
             continue  # already committed; the leftover draft is harmless
         rescued_ids.add(cid)
-        rescued.append({
+        rescued_entry: dict = {
             "chunk_id": cid,
             "chapter_id": rescue_chunk.chapter_id,
             "chunk_path": str(chunk_cp),
             "prompt_path": str(translate_dir / f"{cid}.prompt.txt"),
             "draft_path": str(draft),
             "source_word_count": rescue_chunk.word_count,
-        })
+        }
+        # Carry forward a prior cache split only when preamble+body still equals
+        # prompt.txt — a later prepare may have rewritten the shared preamble.
+        prior_preamble = prior_entry.get("preamble_path") if prior_entry else None
+        prior_body = prior_entry.get("body_path") if prior_entry else None
+        body_candidate = translate_dir / f"{cid}.body.txt"
+        prompt_candidate = Path(rescued_entry["prompt_path"])
+        if (
+            prior_preamble
+            and prior_body
+            and _split_matches_prompt(
+                Path(prior_preamble), Path(prior_body), prompt_candidate
+            )
+        ):
+            rescued_entry["preamble_path"] = prior_preamble
+            rescued_entry["body_path"] = prior_body
+        elif (
+            shared_preamble is not None
+            and _split_matches_prompt(preamble_path, body_candidate, prompt_candidate)
+        ):
+            rescued_entry["preamble_path"] = str(preamble_path)
+            rescued_entry["body_path"] = str(body_candidate)
+        rescued.append(rescued_entry)
 
     if rescued:
         total_words += sum(e.get("source_word_count", 0) for e in rescued)
@@ -1361,8 +1425,10 @@ def translate_prepare(
         "rescued_prior_drafts": len(rescued),
         "chapters": chapters or "all",
         "instructions": (
-            "For each manifest entry, spawn a worker pinned to worker_model that reads "
-            "prompt_path and writes ONLY the translated prose to draft_path. Then run "
+            "For each manifest entry, either (1) spawn a Task worker pinned to "
+            "worker_model that reads prompt_path and writes ONLY the translated "
+            "prose to draft_path, or (2) run `translate-fanout` for the headless "
+            "claude -p path (uses preamble_path/body_path when present). Then run "
             "`translate-commit`. Nothing here spends or calls an API."
             if entries else
             "Nothing to translate — all chunks in scope already have translations."
@@ -1495,6 +1561,223 @@ def translate_commit(
             "again. Cap re-spawns ~3, then surface for manual edit."
             if (failed or missing) else
             "All in-scope chunks committed. Proceed to combine/epub."
+        ),
+    }
+
+
+def _neutral_claude_cwd() -> Path:
+    """Empty temp dir so ``claude -p`` does not auto-load a project CLAUDE.md."""
+    root = Path(os.environ.get("TEMP") or os.environ.get("TMP") or os.environ.get("TMPDIR")
+                or __import__("tempfile").gettempdir())
+    cwd = root / "claude-translate-empty"
+    cwd.mkdir(parents=True, exist_ok=True)
+    return cwd
+
+
+def _split_matches_prompt(preamble_p: Path, body_p: Path, prompt_p: Path) -> bool:
+    """True when ``preamble + body`` is byte-identical to ``prompt.txt``."""
+    try:
+        if not (preamble_p.exists() and body_p.exists() and prompt_p.exists()):
+            return False
+        return (
+            preamble_p.read_text(encoding="utf-8") + body_p.read_text(encoding="utf-8")
+            == prompt_p.read_text(encoding="utf-8")
+        )
+    except OSError:
+        return False
+
+
+def _default_claude_runner(
+    cmd: list[str], *, input_text: str, cwd: Path
+) -> tuple[int, str, str]:
+    """Run ``claude -p`` with the prompt on stdin; return (rc, stdout, stderr)."""
+    proc = subprocess.run(
+        cmd,
+        input=input_text,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def translate_fanout(
+    project: str,
+    *,
+    chunk_ids: list[str] | None = None,
+    concurrency: int | None = None,
+    claude_bin: str = "claude",
+    runner=None,
+) -> dict:
+    """Run one headless ``claude -p`` wave for translate-prepare manifest entries.
+
+    Opt-in alternative to Task-tool workers. For each selected entry that lacks a
+    non-empty draft, invoke ``claude -p`` from a neutral cwd (no project
+    ``CLAUDE.md``) with ``--tools ""`` and ``--output-format text``, writing
+    stdout to ``draft_path``. When ``preamble_path`` + ``body_path`` are present
+    and ``preamble + body`` still equals ``prompt_path``, the body is the user
+    prompt and the preamble is passed via ``--system-prompt-file`` (Claude Code
+    cross-invocation cache on Sonnet; system-role vs the Task/API single-user
+    prompt is intentional). On mismatch or missing split files, the full
+    ``prompt_path`` is used with no system-prompt file.
+
+    Processes entries in waves of ``concurrency`` (default: manifest
+    ``spawn_plan.batch_size``, else 3), finishing each wave before the next.
+    Already-drafted entries are skipped (idempotent). Does **not** call
+    ``translate-commit`` — the agent still commits after the wave.
+
+    ``chunk_ids``, when given, limits the wave to those ids (chapter-parallel /
+    sequential re-prepare loops pass only the current wave). ``runner`` is a
+    test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    project_dir = state.resolve_project_dir(project)
+    hdir = state.harness_dir(project_dir)
+    manifest_path = hdir / "translate" / "manifest.json"
+    if not manifest_path.exists():
+        return {"error": "no manifest — run `translate-prepare` first", "wrote": []}
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"error": f"manifest unreadable (truncated write?): {exc}", "wrote": []}
+
+    entries = list(doc.get("entries") or [])
+    if chunk_ids is not None:
+        wanted = set(chunk_ids)
+        entries = [e for e in entries if e.get("chunk_id") in wanted]
+        missing_ids = wanted - {e.get("chunk_id") for e in entries}
+        if missing_ids:
+            return {
+                "error": f"chunk_ids not in manifest: {sorted(missing_ids)}",
+                "wrote": [],
+            }
+
+    worker_model = doc.get("worker_model") or "sonnet"
+    spawn_plan = doc.get("spawn_plan") or {}
+    if concurrency is None:
+        try:
+            concurrency = int(spawn_plan.get("batch_size") or 3)
+        except (TypeError, ValueError):
+            concurrency = 3
+    if concurrency < 1:
+        return {"error": f"invalid concurrency {concurrency!r}; must be >= 1", "wrote": []}
+
+    run = runner or _default_claude_runner
+    cwd = _neutral_claude_cwd()
+
+    # Resolve the launcher to a concrete path. On Windows, ``subprocess`` calls
+    # CreateProcess, which does NOT search PATHEXT — a bare ``claude`` matches
+    # only the extensionless npm shim (not directly executable) and fails with
+    # WinError 2. ``shutil.which`` honors PATHEXT and returns ``claude.cmd`` /
+    # ``claude.exe``. Only resolve when using the real runner (tests pass a
+    # stub and expect ``claude_bin`` verbatim in the command).
+    if runner is None:
+        resolved = shutil.which(claude_bin)
+        if not resolved:
+            return {
+                "error": f"claude not found: {claude_bin!r} (not on PATH / PATHEXT)",
+                "wrote": [],
+                "failed": [],
+                "skipped_existing_draft": [],
+                "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
+            }
+        claude_bin = resolved
+
+    # Skip entries that already have a non-empty draft (idempotent / resume).
+    todo: list[dict] = []
+    skipped: list[str] = []
+    for entry in entries:
+        draft_path = Path(entry["draft_path"])
+        existing = _read_draft_text(draft_path) if draft_path.exists() else None
+        if existing is not None and existing.strip():
+            skipped.append(entry["chunk_id"])
+            continue
+        todo.append(entry)
+
+    wrote: list[str] = []
+    failed: list[dict] = []
+
+    def _run_one(entry: dict) -> tuple[str, bool, str]:
+        cid = entry["chunk_id"]
+        try:
+            draft_path = Path(entry["draft_path"])
+            prompt_path = Path(entry["prompt_path"])
+            preamble = entry.get("preamble_path")
+            body = entry.get("body_path")
+            # Prefer the cached split only when it still matches prompt.txt.
+            use_cached = bool(
+                preamble
+                and body
+                and _split_matches_prompt(Path(preamble), Path(body), prompt_path)
+            )
+            if use_cached:
+                input_text = Path(body).read_text(encoding="utf-8")
+                # ``--system-prompt-file`` is resolved by the worker, which runs in
+                # the neutral cwd — a manifest-relative path would miss. Absolutize.
+                cmd = [
+                    claude_bin, "-p",
+                    "--system-prompt-file", str(Path(preamble).resolve()),
+                    "--model", worker_model,
+                    "--tools", "",
+                    "--output-format", "text",
+                ]
+            else:
+                if not prompt_path.exists():
+                    return cid, False, f"missing prompt_path: {prompt_path}"
+                input_text = prompt_path.read_text(encoding="utf-8")
+                cmd = [
+                    claude_bin, "-p",
+                    "--model", worker_model,
+                    "--tools", "",
+                    "--output-format", "text",
+                ]
+            rc, stdout, stderr = run(cmd, input_text=input_text, cwd=cwd)
+            if rc != 0:
+                detail = (stderr or stdout or f"exit {rc}").strip()
+                return cid, False, detail[:500]
+            prose = (stdout or "").strip()
+            if not prose:
+                return cid, False, "empty stdout from claude -p"
+            draft_path.parent.mkdir(parents=True, exist_ok=True)
+            draft_path.write_text(prose + "\n", encoding="utf-8")
+            return cid, True, "cached" if use_cached else "full_prompt"
+        except Exception as exc:
+            return cid, False, f"{type(exc).__name__}: {exc}"[:500]
+
+    # Wave discipline: finish each batch of `concurrency` before starting the next.
+    for i in range(0, len(todo), concurrency):
+        wave = todo[i:i + concurrency]
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            futures = {pool.submit(_run_one, e): e for e in wave}
+            for fut in as_completed(futures):
+                cid, ok, detail = fut.result()
+                if ok:
+                    wrote.append(cid)
+                else:
+                    failed.append({"chunk_id": cid, "error": detail})
+
+    return {
+        "wrote": wrote,
+        "failed": failed,
+        "skipped_existing_draft": skipped,
+        "worker_model": worker_model,
+        "concurrency": concurrency,
+        "cwd": str(cwd),
+        "counts": {
+            "wrote": len(wrote),
+            "failed": len(failed),
+            "skipped": len(skipped),
+            "todo": len(todo),
+        },
+        "instructions": (
+            "Run `translate-commit` to land drafts. Re-run `translate-fanout` "
+            "(optionally with --chunk-ids) for any failed/missing, then commit again."
+            if (wrote or failed or skipped) else
+            "Nothing to fan out — no matching manifest entries."
         ),
     }
 
@@ -1951,7 +2234,8 @@ def status(project: str) -> dict:
         nxt = "all chunks translated — run `epub` to (re)build the book."
     elif stage in ("untranslated", "partial"):
         nxt = ("run `translate-prepare` (optionally --chapters) to render prompts for "
-               "the pending chunks, then spawn workers and `translate-commit`.")
+               "the pending chunks, then Task-spawn or `translate-fanout`, then "
+               "`translate-commit`.")
     else:
         nxt = "no chunks yet — run `difficulty` then `chunk` before translating."
 
@@ -2157,7 +2441,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "next": "the next command to run",
     },
     "translate-prepare": {
-        "manifest": "list of work entries: {chunk_id, chapter_id, chunk_path, prompt_path, draft_path, source_word_count}",
+        "manifest": "list of work entries: {chunk_id, chapter_id, chunk_path, prompt_path, draft_path, source_word_count, optional preamble_path/body_path}",
         "manifest_path": "path to the written manifest.json",
         "worker_model": "model each worker should be pinned to",
         "spawn_plan": "dict {parallelism, window, batch_size}",
@@ -2165,10 +2449,21 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "usage_summary": "dict {chunks, source_words, worker_model, parallelism, window, batch_size, spawn_mode_moot}",
         "rescued_prior_drafts": "count of uncommitted drafts carried over from a prior prepare or discovered on disk (even out of the current --chapters scope)",
         "chapters": "the --chapters scope echoed back ('all' when omitted)",
-        "instructions": "what to do next (spawn workers, then translate-commit)",
+        "instructions": "what to do next (Task spawn or translate-fanout, then translate-commit)",
         "error": "present only on failure (e.g. no chunks, bad --chapters)",
         "note": "present when no chapters matched the requested scope",
         "available_chapters": "present with note: chapter ids that do exist",
+    },
+    "translate-fanout": {
+        "wrote": "list of chunk_ids whose draft_path was written this run",
+        "failed": "list of {chunk_id, error} for claude -p failures",
+        "skipped_existing_draft": "list of chunk_ids that already had a non-empty draft",
+        "worker_model": "model passed to claude -p --model",
+        "concurrency": "wave width used",
+        "cwd": "neutral cwd used for claude -p (avoids project CLAUDE.md)",
+        "counts": "dict {wrote, failed, skipped, todo}",
+        "instructions": "what to do next (translate-commit, or re-fanout failed)",
+        "error": "present only on failure (e.g. no manifest)",
     },
     "translate-commit": {
         "committed": "list of chunk_ids stamped this run",

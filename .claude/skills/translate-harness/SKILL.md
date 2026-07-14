@@ -519,18 +519,44 @@ the spawn mode:
 python scripts/harness.py translate-prepare --project projects/<slug> --chapters <set> \
   --parallelism <mode> [--window <X>] [--worker-model sonnet] [--worker-thinking]
 ```
-This prints a `manifest` (each entry: `chunk_id`, `chapter_id`, `prompt_path`, `draft_path`), a
-`usage_summary`, the `worker_model`, and the saved `spawn_plan` (`parallelism` + `window`). It does
-**not** call an API. (Omit `--chapters` for the whole book.) Re-running only fills chunks that still
-need a translation, so resume is free.
+This prints a `manifest` (each entry: `chunk_id`, `chapter_id`, `prompt_path`, `draft_path`, and when
+the cacheable prefix is stable across chunks also `preamble_path` + `body_path`), a `usage_summary`,
+the `worker_model`, and the saved `spawn_plan` (`parallelism` + `window`). It does **not** call an
+API. (Omit `--chapters` for the whole book.) Re-running only fills chunks that still need a
+translation, so resume is free. The shared preamble lives at `.harness/translate/preamble.txt`;
+per-chunk bodies at `.harness/translate/<id>.body.txt` — `preamble + body` is byte-identical to
+`<id>.prompt.txt` when those paths are present.
 
 **4B-b. STOP — usage gate. END THE TURN.** The subagent analog of the cost gate: no dollars, but
 spawning N workers consumes real subscription/rate usage. Show the `usage_summary` ("N workers on
 `<model>`, mode `<parallelism>`, **thinking: on/off**" — read the thinking state from
-`usage_summary.worker_thinking`), confirm the worker model, and ask via AskUserQuestion: proceed /
-abort. **End your turn and wait.** Do not spawn workers in the same turn that produced the manifest.
+`usage_summary.worker_thinking`), confirm the worker model, and ask via AskUserQuestion:
+
+1. **Task workers (default)** — spawn `translator` Task subagents (Read→Write→`done` per chunk).
+2. **Headless fan-out** — run `translate-fanout` (`claude -p`, one generate turn per chunk; uses the
+   shared preamble cache when `preamble_path`/`body_path` are on the manifest).
+3. **Abort**
+
+**Worker-model / cache note (fold into this confirmation, not a new gate):** the ~2k-token shared
+preamble clears **Sonnet's** 1024-token cache minimum (caches for free on the headless path after
+chunk 1) but **not** Opus/Haiku's 4096. Prefer a **Sonnet** worker for headless caching; Haiku/Opus
+cache only if the preamble is later enlarged (full glossary in the prefix — follow-on). Task workers
+do not get cross-invocation prompt caching either way. **Stable prefix:** headless caching needs
+`preamble_path`/`body_path` on the manifest — prefer `always_include_dialogue` (and
+`always_include_image_instructions` when the book has images) so dialogue/image opt-ins don't make
+the prefix diverge across chunks. Without those, mixed chapters silently fall back to the full
+`prompt.txt` (correct, just uncached). Headless puts the preamble in `--system-prompt-file`
+(system role) for Claude Code caching; Task/API keep prefix+suffix as one user prompt — intentional
+divergence, not a bug.
+
+**End your turn and wait.** Do not spawn workers or run `translate-fanout` in the same turn that
+produced the manifest. **Log the choice:** `log-event --event fanout_mode --data
+'{"mode":"task"|"headless"}'` (skip if aborted).
 
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
+
+### Option [1] Task workers (default)
+
 Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
 `model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt:
 *"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Then
@@ -543,8 +569,26 @@ prompt above (no keyword → no extended thinking).
 
 The worker writes its file and reports back only that token — **do not** have it return the prose *or a
 recap of its choices* to you (either one floods your context). You learn each worker's success from
-`translate-commit`'s `committed`/`failed`/`missing` lists, not from its chat-back. After a wave's
-drafts are written, commit:
+`translate-commit`'s `committed`/`failed`/`missing` lists, not from its chat-back.
+
+### Option [2] Headless fan-out
+
+Run one wave via the harness (bounded parallelism, neutral cwd, no Task turns). Pass `--chunk-ids`
+when the spawn mode only wants the current wave's entries (chapter-parallel / sequential); omit it to
+fan out every still-undrafted manifest entry (all-parallel batches):
+```bash
+python scripts/harness.py translate-fanout --project projects/<slug> \
+  [--chunk-ids <id1,id2,...>] [--concurrency <batch_size>]
+```
+Each process is effectively:
+`claude -p` with the body (or full prompt) on stdin, optional `--system-prompt-file <preamble_path>`,
+`--model <worker_model>`, `--tools ""`, `--output-format text` → `draft_path`. The system-prompt
+split is used only when `preamble + body` still equals `prompt.txt`; otherwise fan-out falls back
+to the full prompt (no cache). Headless does **not**
+use extended "think hard" thinking. After the wave, commit as below — the prepare→commit seam is
+unchanged (`committed`/`failed`/`missing`).
+
+After a wave's drafts are written (Task or headless), commit:
 ```bash
 python scripts/harness.py translate-commit --project projects/<slug>
 ```
@@ -568,19 +612,23 @@ skipped).
 > **Spawning into a flaky API — probe, throttle, commit-then-check.** Worker spawns can fail when the
 > API is degraded. Handle it deterministically instead of hammering:
 > - **Probe before a big wave.** After *any* spawn failure (or a known incident), spawn **ONE** worker
->   first and confirm it writes a draft before fanning out. A 1-worker probe discovers an outage at a
->   fraction of the context/usage cost of a failed full wave.
+>   (Task) or `translate-fanout --chunk-ids <one_id>` first and confirm it writes a draft before
+>   fanning out. A 1-worker probe discovers an outage at a fraction of the context/usage cost of a
+>   failed full wave.
 > - **`500` vs `529` are opposite signals.** A **500** is a server outage — concurrency is irrelevant;
 >   **wait / back off**, don't change batch size, don't spam retries (pause and tell the user if it
 >   persists). A **529** is *overloaded* — **reduce concurrency**: step the wave down the ladder
 >   `batch_size → 3 → 1` until drafts land, then ramp back up toward `batch_size`.
-> - **Commit-then-check, regardless of the Agent error.** A worker often `529`s on its final *wrap-up*
->   turn **after** it already wrote a valid draft (you'll see `tool_uses: 2`). So an Agent-call error is
->   **not** a reliable "no draft" signal: after every wave (success or error) run `translate-commit` and
->   trust its `missing`/`failed` lists — not the Agent error text — to decide what to re-spawn. This
->   avoids re-translating chunks that already landed.
+> - **Commit-then-check, regardless of the Agent / claude -p error.** A Task worker often `529`s on
+>   its final *wrap-up* turn **after** it already wrote a valid draft (you'll see `tool_uses: 2`). A
+>   killed or partial `claude -p` leaves `missing` instead. So an error is **not** a reliable "no draft"
+>   signal: after every wave (success or error) run `translate-commit` and trust its
+>   `missing`/`failed` lists — not the spawn error text — to decide what to re-spawn. This avoids
+>   re-translating chunks that already landed.
 
-Spawn according to the saved mode (each wave is `batch_size` workers wide unless throttling down):
+Spawn according to the saved mode (each wave is `batch_size` workers wide unless throttling down).
+For **headless**, replace each "spawn Task workers" step with `translate-fanout` (pass `--chunk-ids`
+for the wave's entries; pass `--concurrency` when throttling):
 
 - **Sequential:** take the single lowest-position still-untranslated chunk, spawn **one** worker,
   `translate-commit`, then **re-run `translate-prepare`** (so the just-committed Spanish is baked into
@@ -588,7 +636,8 @@ Spawn according to the saved mode (each wave is `batch_size` workers wide unless
 - **Chapter-parallel (default):** work in windows of **X** chapters. For the current window:
   1. From the manifest, group entries by `chapter_id`; the **next wave** is the lowest-position
      still-untranslated chunk of each chapter in the window.
-  2. Spawn those workers **in parallel** (multiple `Task` calls in one message), then `translate-commit`.
+  2. Spawn those workers **in parallel** (multiple `Task` calls in one message, or one
+     `translate-fanout --chunk-ids ...`), then `translate-commit`.
   3. **Re-run `translate-prepare --chapters <window>`** so each committed chunk's translation flows
      into its chapter's next chunk, and repeat from step 1 until every chunk in the window is committed.
   4. Only then advance to the next window of X chapters. Complete chapters, **not** "all first chunks
@@ -602,12 +651,14 @@ Spawn according to the saved mode (each wave is `batch_size` workers wide unless
 - **All-parallel:** spawn workers for **all** manifest entries in bounded batches of `batch_size`
   (the saved fan-out width; rate limits), `translate-commit` after each batch. No re-prepare (this mode
   has no cross-chunk Spanish context). This is also the mode to use whenever `spawn_mode_moot` is true.
+  Headless: one `translate-fanout` call already waves at `batch_size`; then commit.
 
 **4B-d. Re-spawn the misses.** For any `failed` (the report names the problem per chunk) or `missing`
-(no draft written), re-spawn a worker for just those `chunk_id`s — write fresh prose to the same
-`draft_path` — and re-run `translate-commit`. Cap re-spawns at ~3 per chunk, then surface the chunk
-for a manual edit-or-skip decision rather than looping. **Log each re-spawn:** `log-event
---event respawn --data '{"chunk_id":"<id>","attempt":<n>,"reason":"failed"|"missing"}'`.
+(no draft written), re-spawn a worker for just those `chunk_id`s — Task spawn, or
+`translate-fanout --chunk-ids <ids>` — write fresh prose to the same `draft_path` — and re-run
+`translate-commit`. Cap re-spawns at ~3 per chunk, then surface the chunk for a manual edit-or-skip
+decision rather than looping. **Log each re-spawn:** `log-event --event respawn --data
+'{"chunk_id":"<id>","attempt":<n>,"reason":"failed"|"missing"}'`.
 
 **4B-e. Align the set + give a reader link.** Once the set's chunks are all committed, make it readable
 with no manual steps:
@@ -675,9 +726,10 @@ loop is gone — the user drafted nothing in an external chat.
 - No `TranslationBackend` Protocol. Both backends share one prompt builder
   (`build_translation_prompt`) and one stamp (`apply_translation`), so the seam is two functions,
   not a class hierarchy. The subagent backend (Phase B) is the `translate-prepare` /
-  `translate-commit` path (Step 4B), which now supports user-chosen spawn modes (sequential /
-  chapter-parallel / all-parallel). Still deferred: the **judge** backend and the portable
-  `claude -p --model` worker (Approach C). See TODOS.md.
+  `translate-commit` path (Step 4B), with user-chosen spawn modes (sequential /
+  chapter-parallel / all-parallel) and an opt-in headless `translate-fanout` (`claude -p`)
+  alongside Task workers. Still deferred: the **judge** headless backend (see
+  `docs/design/headless-judge-review-backend.md` when present) and enlarging the translation
+  preamble so Opus/Haiku clear the 4096-token cache minimum.
 - No long-book resume beyond the pipeline's existing chunk-level idempotency (`stage_translate`
   skips chunks that already have a translation).
-- No prompt caching (tracked separately in TODOS.md).
