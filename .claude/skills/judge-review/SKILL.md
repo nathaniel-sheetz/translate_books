@@ -64,7 +64,8 @@ Shared flags (`run`, `prepare`):
 - `--scope` is **repeatable** here — pass it multiple times to stage several
   chapters into one manifest for a single `commit` (see the multi-chapter note in B).
 - `--worker-model <tier>` (default `sonnet`) — pins each spawned `judge-worker`.
-- `--batch-size <n>` (default 5) — recommended workers per spawn wave.
+- `--batch-size <n>` (default 5) — workers per spawn wave; wait for the wave to
+  finish before launching the next (see 4b).
 - `--targets-per-worker <n>` (default 1) — group up to N **low-dialogue-density**
   targets into one worker prompt to amortize per-worker overhead (fewer, cheaper
   spawns). Dialogue-dense chunks are always judged solo. A grouped manifest entry
@@ -187,12 +188,36 @@ throws away completed work and forces a re-spawn. Prepare the whole request once
 pass `--keep-drafts`. Don't re-prepare just to "recover" a manifest — stage
 everything up front so you never need to.
 
-4b. **Spawn workers.** For each manifest entry (one target, or — with
-`--targets-per-worker` — a group of low-density targets sharing one prompt), spawn one
-worker with the **Task** tool: `subagent_type: judge-worker`, `model:` = the manifest's
-`worker_model`, in bounded batches of `batch_size`. Tell each worker its `prompt_path`
-and `draft_path`: read the prompt, write ONLY the JSON verdict to the draft, reply
-`done <id>`. On a 529 (overloaded) throttle the batch toward ~1 and continue.
+4b. **Spawn workers — one wave at a time, then wait.** For each manifest entry (one
+target, or — with `--targets-per-worker` — a group of low-density targets sharing one
+prompt), spawn one worker with the **Task** tool: `subagent_type: judge-worker`,
+`model:` = the manifest's `worker_model`. Tell each worker its `prompt_path` and
+`draft_path`: read the prompt, write ONLY the JSON verdict to the draft, reply
+`done <id>`.
+
+**Hard rule — never overlap waves.** Never launch wave N+1 until every worker from
+wave N has finished. Spawning multiple waves without waiting is a usage-limit failure
+mode and leaves workers in an indeterminate state.
+
+Wave contract (fan-out width = `batch_size`, default 5; throttle down on 529):
+
+1. **One wave per turn.** In a single assistant turn, spawn at most `batch_size`
+   workers in parallel (multiple `Task` calls in one message). Do not queue the next
+   wave in that same turn.
+2. **END THE TURN and wait.** Wait until every worker in the current wave has
+   returned (draft written / `done <id>`). No overlapping waves.
+3. **Wave-complete check before the next spawn.** Confirm drafts exist for that
+   wave's entries (`Read` / `ls` on each `draft_path`, or a partial `commit` if you
+   want early `missing` detection). An Agent error on wrap-up is **not** proof the
+   draft is missing — check the file (same as translate-harness commit-then-check).
+4. **Next wave only after the wait.** Then spawn the next ≤ `batch_size` workers.
+   Repeat until the manifest is exhausted.
+5. **529 throttle.** On overload, step the wave down `batch_size → 3 → 1`, still
+   waiting between waves; ramp back up toward `batch_size` when drafts land cleanly.
+
+Committing after each wave is fine for recovery; a single final `commit` after all
+waves is also fine. Either way, never start wave N+1 until wave N's workers have
+finished.
 
 5b. **Commit.** Collect + parse the drafts (and `--persist` if saving):
 ```bash
