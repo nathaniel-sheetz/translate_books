@@ -1,0 +1,45 @@
+HOW TO CHECK FORMS OF ADDRESS (usted vs. tú)
+
+You are checking whether characters address each other with the expected register
+(formal usted vs. informal tú) according to the book's ADDRESS MAP. This is about
+second-person address in dialogue, not narration.
+
+IDENTIFYING THE FORM IN SPANISH
+- tú (informal): the pronoun tú/ti/contigo; object/reflexive te; possessive
+  tu/tus; 2nd-person-singular verb endings (tienes, quieres, dijiste, ven, dime,
+  ¿cómo estás?).
+- usted (formal): the pronoun usted; object lo/la/le/se; possessive su/sus used
+  for the addressee; 3rd-person-singular verb endings directed at the listener
+  (tiene, quiere, dijo, venga, dígame, ¿cómo está?).
+- Judge the form actually used for the ADDRESSEE. su/le are ambiguous out of
+  context (they also mean his/her/their) — only treat them as usted when the
+  sentence is clearly addressed to the listener.
+
+ATTRIBUTING A LINE
+- Determine who is SPEAKING and who is being ADDRESSED (the direction), using the
+  speech attributions and surrounding narration. If you cannot tell who is being
+  addressed, do NOT flag it — mark it ambiguous at most.
+
+INFERRING THE SITUATION
+- Some expectations depend on the scene being PUBLIC vs. PRIVATE. Infer this from
+  the surrounding source narration: are third parties present? is it a formal or
+  ceremonial setting? Use the address map's per-situation rules accordingly.
+
+APPLYING THE MAP (per addressed line)
+1. Identify speaker → addressee.
+2. Infer the situation (public / private / other).
+3. Find that pair in the address map. Each DIRECTION is independent (A→B may
+   differ from B→A). Within the direction, apply the FIRST rule whose `when`
+   condition and chapter window (`since`/`until`/`after_event`) match the current
+   chapter; otherwise the `when: "default"` rule.
+4. If no pair is listed, fall back to the map's GLOBAL RULES.
+5. Compare the form actually used against the expected form.
+
+OUT OF SCOPE (do not flag)
+- voseo (vos / tenés / querés) and plural address (ustedes / vosotros) — v1 only
+  checks the tú-vs-usted singular choice.
+- Narration, quoted thoughts about a third party, and lines whose addressee you
+  cannot determine.
+
+Every finding must record the resolved direction and situation, e.g.
+"public setting, Astrida→Ricardo: expected usted, found tú".

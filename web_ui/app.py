@@ -5144,7 +5144,7 @@ _REVIEW_CODED_TYPES = frozenset(
     {"blacklist", "grammar", "dictionary", "completeness"}
 )
 # Tailored judges whose issues can be anchored to a sentence by text search.
-_REVIEW_JUDGE_TYPES = frozenset({"dialogue"})
+_REVIEW_JUDGE_TYPES = frozenset({"dialogue", "address"})
 
 
 def _row_containing_offset(rows_sorted: list[dict], offset: int) -> Optional[dict]:

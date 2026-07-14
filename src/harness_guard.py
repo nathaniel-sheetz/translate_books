@@ -30,7 +30,7 @@ from pathlib import Path
 from src.evaluators.completeness_eval import CompletenessEvaluator
 from src.evaluators.length_eval import LengthEvaluator
 from src.models import Chunk, IssueLevel
-from src.utils.file_io import load_chunk, load_glossary, load_style_guide
+from src.utils.file_io import load_address_map, load_chunk, load_glossary, load_style_guide
 from src.utils.text_utils import image_filename_counts, image_filenames
 
 
@@ -238,3 +238,14 @@ def validate_style_guide_file(path: Path):
 def validate_chunk_file(path: Path):
     """Validate a chunk JSON file against the Chunk model. Returns the Chunk."""
     return _wrap_loader(path, load_chunk, "Chunk")
+
+
+def validate_address_map_file(path: Path):
+    """Validate a written address_map.json against the AddressMap model.
+
+    The AddressMap validators already reject unknown forms/directions and a
+    non-empty direction that lacks a ``when="default"`` fallback; this wraps that
+    load so a bad agent draft fails with a re-draft-friendly message. Returns the
+    AddressMap.
+    """
+    return _wrap_loader(path, load_address_map, "Address map")

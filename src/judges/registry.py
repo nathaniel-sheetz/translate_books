@@ -9,17 +9,22 @@ are named lists of judges; built-in suites are layered under any defined in
 from __future__ import annotations
 
 from src.app_config import get_judge_suites
+from src.judges.address_judge import AddressComplianceJudge
 from src.judges.base import Judge
 from src.judges.dialogue_judge import DialogueComplianceJudge
 
 # Registry mapping judge names to classes.
 _JUDGE_REGISTRY: dict[str, type[Judge]] = {
     "dialogue": DialogueComplianceJudge,
+    "address": AddressComplianceJudge,
 }
 
 # Built-in suites (overridable / extendable via app_config.json).
+# ``address`` is deliberately NOT in ``default``: it needs a per-book address_map
+# prerequisite and is metered, so it is opt-in via its own suite / --judge.
 _BUILTIN_SUITES: dict[str, list[str]] = {
     "default": ["dialogue"],
+    "address": ["address"],
 }
 
 

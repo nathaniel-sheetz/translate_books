@@ -6,6 +6,13 @@ is a **dialogue-compliance checker** that verifies a Spanish translation follows
 the house dialogue rules in `prompts/dialogue.txt` (the rules document) via
 the judge prompt template `prompts/judge_dialogue.txt`.
 
+The second is the **address judge** (`address`), which checks usted/tú (formal
+vs. informal address) against a **per-book** `projects/<slug>/address_map.json`
+rather than a universal rules file — see [ADDRESS_JUDGE.md](ADDRESS_JUDGE.md). It
+is the reference for a judge whose book-specific expectations are injected via
+`context` (here, the CLI loads the map), while a universal rubric
+(`prompts/address_forms.txt`) stays in the prompt.
+
 This is distinct from the model-comparison **LLM judge** documented in
 [LLM_JUDGE_EVALUATOR.md](LLM_JUDGE_EVALUATOR.md): that one answers "is model A
 better than model B?"; tailored judges answer "does *this* translation comply
@@ -117,11 +124,14 @@ on `alignments/chapter_XX.json` (es_idx ↔ en/es ↔ chunk_id).
 
 ## Suites
 
-A suite is a named list of judges. Built-in: `default = ["dialogue"]`. Override
-or add suites in `app_config.json`:
+A suite is a named list of judges. Built-in: `default = ["dialogue"]` and
+`address = ["address"]`. The address judge is deliberately kept out of `default`
+because it needs the per-book `address_map.json` prerequisite and is metered — run
+it via `--judge address` or `--suite address`. Override or add suites in
+`app_config.json`:
 
 ```json
-{ "judge_suites": { "default": ["dialogue"], "prose": ["dialogue"] } }
+{ "judge_suites": { "default": ["dialogue"], "prose": ["dialogue", "address"] } }
 ```
 
 ## Persistence & feedback

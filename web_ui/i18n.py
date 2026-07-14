@@ -57,6 +57,7 @@ STRINGS = {
             "dictionary": "Dictionary",
             "completeness": "Completeness",
             "dialogue": "Dialogue",
+            "address": "Address (usted/tú)",
         },
 
         # Reader view
@@ -137,6 +138,7 @@ STRINGS = {
                 "dictionary": "Dictionary",
                 "completeness": "Completeness",
                 "dialogue": "Dialogue",
+                "address": "Address (usted/tú)",
             },
             "remove_chars": "{n} char selected",
             "remove_empty": "Select text to remove",
@@ -245,6 +247,7 @@ STRINGS = {
             "dictionary": "Diccionario",
             "completeness": "Completitud",
             "dialogue": "Diálogo",
+            "address": "Tratamiento (usted/tú)",
         },
 
         # Reader view
@@ -325,6 +328,7 @@ STRINGS = {
                 "dictionary": "Diccionario",
                 "completeness": "Completitud",
                 "dialogue": "Di\u00e1logo",
+                "address": "Tratamiento (usted/t\u00fa)",
             },
             "remove_chars": "{n} caracteres selec.",
             "remove_empty": "Seleccione texto a eliminar",

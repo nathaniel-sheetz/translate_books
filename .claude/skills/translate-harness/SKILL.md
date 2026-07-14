@@ -358,6 +358,37 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
 > After approval you proceed to difficulty scoring + chunking (Step 3) and then **stop again** at
 > the cost gate (Step 4). Do not jump to translate here.
 
+## Step 2B — ADDRESS MAP beat (OPTIONAL — never blocks translation)
+
+A per-book **forms-of-address map** (`projects/<slug>/address_map.json`) records
+which pairs of characters use **usted** vs. **tú**, including public/private and
+story-stage differences. It powers the later `address` compliance judge
+(judge-review); it does **not** affect this translation run.
+
+**This beat is optional and non-blocking. Offer it; do not require it.** Ask the
+user (plain question, not a gate) whether they want to build the address map now.
+If they decline or don't care, **skip straight to Step 3** — translation proceeds
+normally, and the map can be built later (here, or from judge-review's setup
+precheck) whenever they want to run the usted/tú judge.
+
+If they opt in:
+```bash
+python scripts/harness.py address-map prepare --project projects/<slug>
+```
+This samples the book's highest interpersonal-dialogue chapters (a spread across
+the whole book, not just the openers) and renders a prompt at `prompt_path`. Read
+it, draft the map JSON (`{content, pairs, global_rules}`) to the printed
+`draft_path` — each non-empty direction must end with a `when:"default"` rule —
+refine it with the user, then:
+```bash
+python scripts/harness.py address-map commit --project projects/<slug>
+```
+**STOP — approval beat** (same shape as glossary): present the committed pairs +
+global rules, AskUserQuestion (Approve all / Reject & talk it through; a custom
+answer = approve-with-edits → re-commit). Log:
+`log-event --event approval --data '{"beat":"address_map","decision":...}'`.
+Then continue to Step 3.
+
 ## Step 3 — Difficulty-aware chunk (deterministic) — estimator only
 
 **3a — Score difficulty → default chunk target size.** The glossary now exists, so the scorer
