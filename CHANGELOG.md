@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.29.0.1] - 2026-07-14
+
+### Changed
+- **`judge-review` skill: hard wait between spawn waves.** Step 4b now requires at most `batch_size` workers per turn, ending the turn and waiting until every worker in the wave finishes (and drafts exist) before launching the next wave—matching translate-harness wave semantics so overlapping waves do not hit usage limits or leave workers indeterminate.
+
 ## [0.29.0.0] - 2026-07-13
 
 ### Added
