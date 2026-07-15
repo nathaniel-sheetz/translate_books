@@ -30,6 +30,9 @@ _HEADING_RE = re.compile(
 )
 _HR_RE = re.compile(r'^-{3,}$')
 _EM_RE = re.compile(r'(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])')
+# Kept as a module constant so it can be used inside f-string expressions
+# (a backslash-bearing literal is illegal in an f-string expr before Py 3.12).
+_EM_REPL = r'<em>\1</em>'
 # In-text endnote marker token emitted by src.endnotes; rendered to a linked
 # superscript. Substituted after html.escape() (the {{...}} token is escape-safe).
 _ENDNOTE_RE = re.compile(r'\{\{ENDNOTE:(\d+)\}\}')
@@ -281,7 +284,7 @@ def _render_body_blocks(body: str) -> List[str]:
         ):
             verse_lines = [
                 f'  <p class="verse-line">'
-                f'{_ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(r"<em>\1</em>", escape(line.strip())))}'
+                f'{_ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(_EM_REPL, escape(line.strip())))}'
                 f'</p>'
                 for line in block.split('\n')
                 if line.strip()
@@ -294,7 +297,7 @@ def _render_body_blocks(body: str) -> List[str]:
         # pipeline) to <em>. Order matters: escape() leaves underscores
         # untouched, so substituting after it is safe.
         escaped = escape(block)
-        with_em = _EM_RE.sub(r'<em>\1</em>', escaped)
+        with_em = _EM_RE.sub(_EM_REPL, escaped)
         with_notes = _ENDNOTE_RE.sub(_ENDNOTE_SUP, with_em)
         out.append(f'<p>{with_notes}</p>')
 
@@ -334,7 +337,7 @@ def chapter_text_to_xhtml(
     if heading:
         parts.append(f'<h1>{escape(_normalize_heading(heading))}</h1>')
     if subtitle:
-        parts.append(f'<h2>{_EM_RE.sub(r"<em>\1</em>", escape(subtitle))}</h2>')
+        parts.append(f'<h2>{_EM_RE.sub(_EM_REPL, escape(subtitle))}</h2>')
 
     parts.extend(_render_body_blocks(body))
 
