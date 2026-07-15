@@ -54,7 +54,7 @@ def test_cost_gate_proceeds_with_confirm(monkeypatch):
     assert out["aggregated"]["total_evaluators"] == 1
 
     header = out["run_header"]
-    assert header["judges"] == {"dialogue": "1.1.0"}
+    assert header["judges"] == {"dialogue": "1.2.0"}
     assert "dialogue" in header["prompt_versions"]
     assert header["temperature"] == 0.0
     assert header["target_count"] == 1

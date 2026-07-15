@@ -29,17 +29,18 @@ Judges run one of two interchangeable ways (the same split as translate-harness)
 - **API backend** (`run`) — calls the LLM directly, behind a dollar **cost gate**.
   Fast, needs an API key, spends metered money. This skill never calls an LLM
   itself; the CLI does.
-- **Subagent backend** (`prepare` → spawn workers → `commit`) — renders each judge
-  prompt to a file, you spawn cheap **`judge-worker`** subagents to answer, then
-  collect the drafts. **Zero API spend** (runs on the session). The gate here is a
-  **usage** check before spawning N workers, not dollars.
+- **Subagent backend** (`prepare` → Task workers *or* headless `fanout` → `commit`) —
+  renders each judge prompt to a file, then either spawn cheap **`judge-worker`**
+  Task subagents or run a headless `claude -p` wave, then collect the drafts.
+  **Zero API spend** (runs on the session). The gate here is a **usage** check
+  before spawning N workers / fanning out, not dollars.
 
 Both backends build the *same* prompt and parse with the *same* parser, so the
 findings — and the persisted `evaluations/<chunk>.json` — are identical either way.
 
 ## The CLI (read first)
 
-`python scripts/run_judges.py <run|prepare|commit|apply>` is non-interactive and prints
+`python scripts/run_judges.py <run|prepare|fanout|commit|apply>` is non-interactive and prints
 one JSON object with a `_schema` block documenting every key.
 
 **Windows / UTF-8 — force it on every Python you run.** `run_judges.py` reconfigures stdout
@@ -75,6 +76,13 @@ Shared flags (`run`, `prepare`):
   `workers` (spawns) alongside `pairs` (target×judge units).
 - `--keep-drafts` — don't clear existing worker drafts. Re-`prepare` is otherwise
   destructive (it wipes the drafts for the entries it re-renders).
+  Solo entries may also carry `preamble_path` / `body_path` (shared per-judge
+  rubric cache for headless fan-out). Grouped entries do not — cache OR group,
+  don't stack.
+
+`fanout` (subagent backend, opt-in headless wave) takes `--project`, optional
+`--target-ids` (comma-separated solo `target_id` or `batch_id`), `--concurrency`
+(default: manifest `batch_size`), and `--claude-bin`.
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
 
@@ -178,8 +186,25 @@ Relay `usage_summary` (pairs to judge, worker_model, batch_size; `estimated_api_
 is the API-equivalent price, shown for context — nothing is spent). Under grouping,
 `usage_summary.workers` (actual spawns) is fewer than `pairs` (target×judge units) —
 relay both so the saving is visible. The **usage gate** is the subagent analog of the
-cost gate: no dollars, but spawning N workers consumes real session/rate usage. Get
-approval in a separate turn before spawning.
+cost gate: no dollars, but spawning N workers / a headless wave consumes real
+session/rate usage. Get approval in a separate turn before spawning.
+
+**STOP — usage gate. Ask which spawn mode** via `AskUserQuestion` (unless already chosen):
+
+1. **Task workers (default)** — spawn `judge-worker` Task subagents (Read→Write→`done`).
+2. **Headless fan-out** — run `fanout` (`claude -p`, one generate turn per entry; uses
+   the per-judge preamble cache when `preamble_path`/`body_path` are on the manifest).
+3. **Abort**
+
+**Worker-model / cache note (fold into this confirmation, not a new gate):** the shared
+preamble (dialogue rules ≈1.7k tok; address rubric+map ≈1.3–1.8k) clears **Sonnet's**
+1024-token cache minimum (caches for free on the headless path after entry 1) but
+**not** Opus/Haiku's 4096. Prefer a **Sonnet** worker for headless caching. Headless
+users should keep `--targets-per-worker 1` (cache instead of group — don't stack).
+Task workers do not get cross-invocation prompt caching either way.
+
+**End your turn and wait.** Do not spawn workers or run `fanout` in the same turn that
+produced the manifest.
 
 **Re-`prepare` is destructive.** It clears the drafts for the pairs it re-renders,
 so it must never run while you have **uncommitted** worker drafts in flight — that
@@ -188,12 +213,15 @@ throws away completed work and forces a re-spawn. Prepare the whole request once
 pass `--keep-drafts`. Don't re-prepare just to "recover" a manifest — stage
 everything up front so you never need to.
 
-4b. **Spawn workers — one wave at a time, then wait.** For each manifest entry (one
-target, or — with `--targets-per-worker` — a group of low-density targets sharing one
-prompt), spawn one worker with the **Task** tool: `subagent_type: judge-worker`,
-`model:` = the manifest's `worker_model`. Tell each worker its `prompt_path` and
-`draft_path`: read the prompt, write ONLY the JSON verdict to the draft, reply
-`done <id>`.
+4b. **Spawn workers per the chosen mode, then wait.**
+
+### Option [1] Task workers (default)
+
+For each manifest entry (one target, or — with `--targets-per-worker` — a group of
+low-density targets sharing one prompt), spawn one worker with the **Task** tool:
+`subagent_type: judge-worker`, `model:` = the manifest's `worker_model`. Tell each
+worker its `prompt_path` and `draft_path`: read the prompt, write ONLY the JSON
+verdict to the draft, reply `done <id>`.
 
 **Hard rule — never overlap waves.** Never launch wave N+1 until every worker from
 wave N has finished. Spawning multiple waves without waiting is a usage-limit failure
@@ -215,21 +243,39 @@ Wave contract (fan-out width = `batch_size`, default 5; throttle down on 529):
 5. **529 throttle.** On overload, step the wave down `batch_size → 3 → 1`, still
    waiting between waves; ramp back up toward `batch_size` when drafts land cleanly.
 
+### Option [2] Headless fan-out
+
+Run one wave via the CLI (bounded parallelism, neutral cwd, no Task turns). Pass
+`--target-ids` when recovering a subset; omit it to fan out every still-undrafted
+manifest entry. Prefer `--targets-per-worker 1` at prepare time so solo entries get
+the preamble cache:
+```bash
+python scripts/run_judges.py fanout --project understood-betsy \
+  [--target-ids <id1,id2,...>] [--concurrency <batch_size>]
+```
+Each process is effectively: `claude -p` with the body (or full prompt) on stdin,
+optional `--system-prompt-file <preamble_path>`, `--model <worker_model>`,
+`--tools ""`, `--output-format text` → `draft_path`. After the wave, commit as
+below — the prepare→commit seam is unchanged (`committed`/`failed`/`missing`).
+On 529, re-run with a lower `--concurrency`.
+
 Committing after each wave is fine for recovery; a single final `commit` after all
-waves is also fine. Either way, never start wave N+1 until wave N's workers have
-finished.
+waves is also fine. Either way, never start wave N+1 until wave N has finished
+(Task: workers returned; headless: `fanout` returned).
 
 5b. **Commit.** Collect + parse the drafts (and `--persist` if saving):
 ```bash
 python scripts/run_judges.py commit --project understood-betsy --persist
 ```
 Relay `committed` / `failed` / `missing`. **Re-spawn** any `failed` (bad/no JSON) or
-`missing` (no draft) entries — same prompt_path/draft_path — then re-run `commit`.
-`failed`/`missing` are keyed **per target** even inside a group, so recovery is per
-target: re-prepare just the affected chunk(s) as a **solo** scope (default
-`--targets-per-worker 1`, with `--keep-drafts` to protect good drafts still in flight)
-so one bad chunk never drags its group-mates. Cap re-spawns at ~3 per entry, then
-surface for manual review. Then relay findings the same way the API branch does.
+`missing` (no draft) entries — Task: same prompt_path/draft_path; headless:
+`fanout --target-ids <ids>` — then re-run `commit`. Trust `commit`'s lists, not a
+spawn/fanout error text, as the "no draft" signal. `failed`/`missing` are keyed
+**per target** even inside a group, so recovery is per target: re-prepare just the
+affected chunk(s) as a **solo** scope (default `--targets-per-worker 1`, with
+`--keep-drafts` to protect good drafts still in flight) so one bad chunk never
+drags its group-mates. Cap re-spawns at ~3 per entry, then surface for manual
+review. Then relay findings the same way the API branch does.
 
 ### C. Apply fixes (optional — after relaying findings)
 

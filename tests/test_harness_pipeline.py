@@ -1026,7 +1026,7 @@ def test_translate_fanout_writes_drafts_via_runner_seam(tmp_path: Path):
         assert "--system-prompt-file" in cmd
         assert entry["preamble_path"] in cmd
         assert input_text == Path(entry["body_path"]).read_text(encoding="utf-8")
-        assert Path(cwd).name == "claude-translate-empty"
+        assert Path(cwd).name == "claude-headless-empty"
         return 0, "es_one es_short es_sentence es_for es_a es_draft", ""
 
     out = flow.translate_fanout(str(tmp_path), runner=fake_runner)
@@ -1105,7 +1105,9 @@ def test_translate_fanout_fails_fast_when_claude_missing(tmp_path: Path, monkeyp
     hstate.save_config(tmp_path, {"always_include_dialogue": True})
     flow.translate_prepare(str(tmp_path))
 
-    monkeypatch.setattr(flow.shutil, "which", lambda _name: None)
+    import src.harness.headless as headless
+
+    monkeypatch.setattr(headless.shutil, "which", lambda _name: None)
     out = flow.translate_fanout(str(tmp_path), claude_bin="claude-not-installed")
     assert "error" in out
     assert "claude not found" in out["error"]

@@ -631,3 +631,121 @@ def test_batch_item_block_renders_extra_item_vars(tmp_path):
         "<translation>\ntr\n</translation>\n"
         "</item>"
     )
+
+
+# ---------------------------------------------------------------------------
+# prepare cache split + headless fanout
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_emits_byte_identical_preamble_and_body(tmp_path):
+    """Shared preamble + per-target body round-trip to prompt.txt for solo entries."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    for i, text in enumerate(["—Hola.", "—Adiós."]):
+        cid = f"chapter_01_chunk_{i:03d}"
+        save_chunk(_chunk(cid, "chapter_01", i, translated=text), chunks_dir / f"{cid}.json")
+
+    out = subagent.prepare(tmp_path, ["dialogue"], "chapter:chapter_01")
+    assert out["status"] == "ok"
+    assert len(out["manifest"]) == 2
+
+    preamble_paths = {e.get("preamble_path") for e in out["manifest"]}
+    assert len(preamble_paths) == 1 and None not in preamble_paths
+    preamble_path = Path(next(iter(preamble_paths)))
+    assert preamble_path.name == "preamble.dialogue.txt"
+    preamble = preamble_path.read_text(encoding="utf-8")
+    assert preamble
+    assert "# ---8<--- cache split ---8<---" not in preamble
+
+    for entry in out["manifest"]:
+        assert "body_path" in entry and "preamble_path" in entry
+        body = Path(entry["body_path"]).read_text(encoding="utf-8")
+        prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
+        assert preamble + body == prompt
+        assert body.startswith("# ---8<--- cache split ---8<---")
+
+
+def test_prepare_grouped_entries_omit_preamble_paths(tmp_path):
+    """Grouped (batch) entries keep only prompt_path — no cache split."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    # Low-density chunks so they pack together (raya count under solo threshold).
+    for i in range(2):
+        cid = f"chapter_01_chunk_{i:03d}"
+        save_chunk(
+            _chunk(cid, "chapter_01", i, translated="—Hola." * 3),
+            chunks_dir / f"{cid}.json",
+        )
+
+    out = subagent.prepare(
+        tmp_path, ["dialogue"], "chapter:chapter_01", targets_per_worker=2
+    )
+    batched = [e for e in out["manifest"] if "members" in e]
+    assert batched, "expected at least one grouped entry"
+    for entry in batched:
+        assert "preamble_path" not in entry
+        assert "body_path" not in entry
+        assert Path(entry["prompt_path"]).exists()
+
+
+def test_build_prompt_parts_round_trips(tmp_path):
+    """prefix + suffix == build_prompt; marker lands after shared block."""
+    judge = DialogueComplianceJudge()
+    target = JudgeTarget("c0", "chunk", '"Hi."', "—Hola.", {})
+    ctx = {"dialogue_rules": "Use the raya."}
+    prefix, suffix = judge.build_prompt_parts(target, ctx)
+    assert prefix + suffix == judge.build_prompt(target, ctx)
+    assert prefix
+    assert "</dialogue_rules>" in prefix
+    assert "\n<source>\n" not in prefix
+    assert suffix.startswith("# ---8<--- cache split ---8<---")
+    assert "\n<source>\n" in suffix
+
+
+def test_fanout_writes_drafts_via_runner_seam(tmp_path):
+    """fanout invokes the runner with --system-prompt-file when split paths exist."""
+    project, cid = _project_with_chunk(tmp_path)
+    prep = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    entry = prep["manifest"][0]
+    assert "preamble_path" in entry and "body_path" in entry
+
+    seen_cmds: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen_cmds.append(list(cmd))
+        assert "--system-prompt-file" in cmd
+        assert str(Path(entry["preamble_path"]).resolve()) in cmd
+        assert input_text == Path(entry["body_path"]).read_text(encoding="utf-8")
+        assert Path(cwd).name == "claude-headless-empty"
+        assert "--tools" in cmd
+        assert "text" in cmd
+        return 0, _GOOD_VERDICT, ""
+
+    out = subagent.fanout(project, runner=fake_runner)
+    assert out["counts"]["wrote"] == 1
+    assert cid in out["wrote"]
+    draft = Path(entry["draft_path"]).read_text(encoding="utf-8").strip()
+    assert json.loads(draft)["compliant"] is False
+    assert seen_cmds and "--output-format" in seen_cmds[0]
+
+    # Idempotent: existing draft is skipped.
+    out2 = subagent.fanout(project, runner=fake_runner)
+    assert out2["counts"]["skipped"] == 1
+    assert out2["counts"]["wrote"] == 0
+
+
+def test_fanout_commit_lands_headless_draft(tmp_path):
+    """commit parses a draft written by fanout the same as a Task worker draft."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    def fake_runner(cmd, *, input_text, cwd):
+        return 0, _GOOD_VERDICT, ""
+
+    fan = subagent.fanout(project, runner=fake_runner)
+    assert fan["counts"]["wrote"] == 1
+    out = subagent.commit(project, persist=False)
+    assert out["counts"]["committed"] == 1
+    assert out["committed"][0]["target_id"] == cid
+    assert out["counts"]["failed"] == 0

@@ -163,8 +163,10 @@ def _parse_batch_verdicts(raw: str) -> dict[str, Any]:
 _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
     "manifest": "list of work entries (one worker each). Solo: {target_id, target_type, judge, "
-    "prompt_path, draft_path, source_word_count}. Grouped (targets-per-worker > 1): "
-    "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count}]}",
+    "prompt_path, draft_path, source_word_count, optional preamble_path+body_path for headless "
+    "cache}. Grouped (targets-per-worker > 1): "
+    "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count}]} "
+    "(no preamble/body — cache is solo-only)",
     "manifest_path": "path to the written manifest.json (commit reads this)",
     "scopes": "the list of --scope values resolved into this one manifest",
     "judges": "judge names rendered",
@@ -173,6 +175,17 @@ _PREPARE_SCHEMA = {
     "usage_summary": "{pairs, targets, workers, targets_per_worker, source_words, worker_model, "
     "batch_size, estimated_api_cost}",
     "instructions": "what to do with the manifest (spawn workers, then commit)",
+}
+
+_FANOUT_SCHEMA = {
+    "wrote": "list of entry ids whose drafts were written this wave",
+    "failed": "list of {id, error} — re-run fanout for these",
+    "skipped": "list of entry ids that already had a non-empty draft",
+    "worker_model": "model tier used for claude -p",
+    "concurrency": "max parallel claude -p processes per wave",
+    "cwd": "neutral empty cwd used for the workers",
+    "counts": "{wrote, failed, skipped, todo}",
+    "instructions": "next step (commit, or re-fanout failed/missing)",
 }
 
 _COMMIT_SCHEMA = {
@@ -223,6 +236,13 @@ def prepare(
     :data:`_DENSITY_SOLO_THRESHOLD`) always stay solo. Each entry gets a
     ``draft_path`` the worker writes its JSON verdict to.
 
+    For **solo** entries only, when the template's cache-split marker is present,
+    also write a per-judge shared ``preamble.<judge>.txt`` +
+    ``<target_id>.<judge>.body.txt`` (``preamble + body`` byte-identical to
+    ``prompt.txt``) and record ``preamble_path`` / ``body_path`` on the manifest
+    for headless fan-out. Grouped entries keep only ``prompt_path`` (don't stack
+    grouping + caching).
+
     By default stale drafts from a prior run are cleared so ``commit`` never reads
     an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
     during a recovery re-prepare (re-prepare is otherwise destructive).
@@ -272,10 +292,13 @@ def prepare(
     total_words = 0
     total_pairs = 0  # (target, judge) pairs — the batch-invariant unit of work
     batch_seq = 0
+    # Per-judge shared preamble established by the first solo entry that splits.
+    shared_preambles: dict[str, str] = {}
     # Grouping is per judge: a batched prompt combines targets for ONE judge,
     # since the shared rule block + item schema are judge-specific.
     for judge_name in judge_names:
         judge = judge_instances[judge_name]
+        preamble_path = jdir / f"preamble.{judge_name}.txt"
         for group in _group_targets(targets, judge, targets_per_worker):
             total_pairs += len(group)
             if len(group) == 1:
@@ -284,17 +307,36 @@ def prepare(
                 total_words += words
                 prompt_path = jdir / f"{target.id}.{judge_name}.prompt.txt"
                 draft_path = jdir / f"{target.id}.{judge_name}.draft.json"
-                _write_prompt(judge.build_prompt(target, context), prompt_path, draft_path)
-                entries.append(
-                    {
-                        "target_id": target.id,
-                        "target_type": target.target_type,
-                        "judge": judge_name,
-                        "prompt_path": str(prompt_path),
-                        "draft_path": str(draft_path),
-                        "source_word_count": words,
-                    }
-                )
+                body_path = jdir / f"{target.id}.{judge_name}.body.txt"
+                prefix, suffix = judge.build_prompt_parts(target, context)
+                prompt = prefix + suffix
+                _write_prompt(prompt, prompt_path, draft_path)
+                entry: dict[str, Any] = {
+                    "target_id": target.id,
+                    "target_type": target.target_type,
+                    "judge": judge_name,
+                    "prompt_path": str(prompt_path),
+                    "draft_path": str(draft_path),
+                    "source_word_count": words,
+                }
+                # Cache split: only when the prefix is non-empty and matches the
+                # per-judge shared preamble (or establishes it). Mismatch → omit
+                # paths so fan-out uses the full prompt.txt.
+                if prefix:
+                    established = shared_preambles.get(judge_name)
+                    if established is None:
+                        shared_preambles[judge_name] = prefix
+                        preamble_path.write_text(prefix, encoding="utf-8")
+                        established = prefix
+                    if prefix == established:
+                        body_path.write_text(suffix, encoding="utf-8")
+                        entry["preamble_path"] = str(preamble_path)
+                        entry["body_path"] = str(body_path)
+                    else:
+                        body_path.unlink(missing_ok=True)
+                else:
+                    body_path.unlink(missing_ok=True)
+                entries.append(entry)
             else:
                 batch_id = f"batch_{batch_seq:03d}"
                 batch_seq += 1
@@ -362,11 +404,230 @@ def prepare(
             "targets) spawn one `judge-worker` subagent pinned to worker_model (Task "
             "tool, subagent_type=judge-worker, model=worker_model) that reads prompt_path "
             "and writes ONLY the JSON verdict to draft_path, in bounded batches of "
-            "batch_size. Then run `commit`. Nothing here spends or calls an API."
+            "batch_size — or run `fanout` for a headless claude -p wave. Then run "
+            "`commit`. Nothing here spends or calls an API."
             if entries
             else "Nothing to judge — scope resolved to no targets."
         ),
         "_schema": _PREPARE_SCHEMA,
+    }
+
+
+def _entry_fanout_id(entry: dict[str, Any]) -> str | None:
+    """Stable id for a manifest entry: solo ``target_id`` or grouped ``batch_id``."""
+    if entry.get("batch_id"):
+        return str(entry["batch_id"])
+    if entry.get("target_id"):
+        return str(entry["target_id"])
+    return None
+
+
+def _read_draft_text(path: Path) -> str | None:
+    """Read a draft file; return ``None`` when missing or unreadable."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def fanout(
+    project_dir: Path,
+    *,
+    target_ids: list[str] | None = None,
+    concurrency: int | None = None,
+    claude_bin: str = "claude",
+    runner=None,
+) -> dict[str, Any]:
+    """Run one headless ``claude -p`` wave for judge-prepare manifest entries.
+
+    Opt-in alternative to Task-tool workers. For each selected entry that lacks a
+    non-empty draft, invoke ``claude -p`` from a neutral cwd with ``--tools ""``
+    and ``--output-format text``, writing stdout to ``draft_path``. When
+    ``preamble_path`` + ``body_path`` are present, the body is the user prompt
+    and the preamble is passed via ``--system-prompt-file``; otherwise the full
+    ``prompt_path`` is used (grouped entries always take this path).
+
+    ``target_ids``, when given, matches a solo entry's ``target_id`` or a batch
+    entry's ``batch_id``. Does **not** call ``commit`` — the skill commits after
+    the wave. ``runner`` is a test seam:
+    ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+    """
+    from src.harness.headless import run_headless_wave
+
+    project_dir = Path(project_dir)
+    jdir = _judges_dir(project_dir)
+    manifest_path = jdir / "manifest.json"
+    if not manifest_path.exists():
+        return {
+            "error": "no judge manifest — run `prepare` first",
+            "wrote": [],
+            "failed": [],
+            "skipped": [],
+            "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
+            "_schema": _FANOUT_SCHEMA,
+        }
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {
+            "error": f"unreadable manifest {manifest_path}: {exc}",
+            "wrote": [],
+            "failed": [],
+            "skipped": [],
+            "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
+            "_schema": _FANOUT_SCHEMA,
+        }
+
+    entries = [e for e in (doc.get("entries") or []) if isinstance(e, dict)]
+    if target_ids is not None:
+        wanted = set(target_ids)
+        entries = [e for e in entries if _entry_fanout_id(e) in wanted]
+        found = {_entry_fanout_id(e) for e in entries}
+        missing_ids = wanted - found
+        if missing_ids:
+            return {
+                "error": f"target_ids not in manifest: {sorted(missing_ids)}",
+                "wrote": [],
+                "failed": [],
+                "skipped": [],
+                "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
+                "_schema": _FANOUT_SCHEMA,
+            }
+
+    worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
+    if concurrency is None:
+        try:
+            concurrency = int(doc.get("batch_size") or _DEFAULT_BATCH_SIZE)
+        except (TypeError, ValueError):
+            concurrency = _DEFAULT_BATCH_SIZE
+    if concurrency < 1:
+        return {
+            "error": f"invalid concurrency {concurrency!r}; must be >= 1",
+            "wrote": [],
+            "failed": [],
+            "skipped": [],
+            "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
+            "_schema": _FANOUT_SCHEMA,
+        }
+
+    skipped: list[str] = []
+    ready: list[dict[str, Any]] = []
+    pre_failed: list[dict[str, str]] = []
+    for entry in entries:
+        eid = _entry_fanout_id(entry)
+        if not eid:
+            pre_failed.append({"id": "?", "error": "malformed manifest entry: no target_id/batch_id"})
+            continue
+        draft_path = Path(entry["draft_path"])
+        existing = _read_draft_text(draft_path) if draft_path.exists() else None
+        if existing is not None and existing.strip():
+            skipped.append(eid)
+            continue
+        prompt_path = Path(entry["prompt_path"])
+        preamble = entry.get("preamble_path")
+        body = entry.get("body_path")
+        try:
+            if preamble and body and Path(preamble).exists() and Path(body).exists():
+                ready.append(
+                    {
+                        "id": eid,
+                        "input_text": Path(body).read_text(encoding="utf-8"),
+                        "output_path": str(draft_path),
+                        "system_prompt_file": preamble,
+                    }
+                )
+            elif not prompt_path.exists():
+                pre_failed.append(
+                    {"id": eid, "error": f"missing prompt_path: {prompt_path}"}
+                )
+            else:
+                ready.append(
+                    {
+                        "id": eid,
+                        "input_text": prompt_path.read_text(encoding="utf-8"),
+                        "output_path": str(draft_path),
+                        "system_prompt_file": None,
+                    }
+                )
+        except OSError as exc:
+            pre_failed.append(
+                {"id": eid, "error": f"{type(exc).__name__}: {exc}"[:500]}
+            )
+
+    if not ready and not pre_failed:
+        return {
+            "wrote": [],
+            "failed": [],
+            "skipped": skipped,
+            "worker_model": worker_model,
+            "concurrency": concurrency,
+            "cwd": None,
+            "counts": {
+                "wrote": 0,
+                "failed": 0,
+                "skipped": len(skipped),
+                "todo": 0,
+            },
+            "instructions": (
+                "Nothing to fan out — no matching manifest entries."
+                if not skipped else
+                "Run `commit` to land drafts. Re-run `fanout` (optionally with "
+                "--target-ids) for any failed/missing, then commit again."
+            ),
+            "_schema": _FANOUT_SCHEMA,
+        }
+
+    wave_out = run_headless_wave(
+        ready,
+        model=worker_model,
+        concurrency=concurrency,
+        claude_bin=claude_bin,
+        runner=runner,
+    )
+
+    if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):
+        return {
+            "error": wave_out["error"],
+            "wrote": [],
+            "failed": [],
+            "skipped": skipped,
+            "worker_model": worker_model,
+            "concurrency": concurrency,
+            "cwd": wave_out.get("cwd"),
+            "counts": {
+                "wrote": 0,
+                "failed": 0,
+                "skipped": len(skipped),
+                "todo": 0,
+            },
+            "_schema": _FANOUT_SCHEMA,
+            "instructions": "Fix the launcher error, then re-run `fanout`.",
+        }
+
+    failed = list(pre_failed)
+    failed.extend(wave_out.get("failed") or [])
+    wrote = list(wave_out.get("wrote") or [])
+
+    return {
+        "wrote": wrote,
+        "failed": failed,
+        "skipped": skipped,
+        "worker_model": worker_model,
+        "concurrency": concurrency,
+        "cwd": wave_out.get("cwd"),
+        "counts": {
+            "wrote": len(wrote),
+            "failed": len(failed),
+            "skipped": len(skipped),
+            "todo": len(ready) + len(pre_failed),
+        },
+        "instructions": (
+            "Run `commit` to land drafts. Re-run `fanout` (optionally with "
+            "--target-ids) for any failed/missing, then commit again."
+            if (wrote or failed or skipped)
+            else "Nothing to fan out — no matching manifest entries."
+        ),
+        "_schema": _FANOUT_SCHEMA,
     }
 
 

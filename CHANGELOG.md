@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.0.0] - 2026-07-14
+
+### Added
+- **Headless `fanout` for judge-review.** Opt-in alternative to Task workers: bounded `claude -p` waves write JSON drafts from the prepare manifest. Solo entries get a per-judge `preamble.<judge>.txt` + body split for `--system-prompt-file` caching (dialogue + address). Shared launcher in `src/harness/headless.py` (also used by `translate-fanout`). Skill usage gate offers Task / headless / abort.
+
+### Changed
+- **Dialogue judge 1.2.0 / address judge 1.1.0** — solo templates insert a cache-split marker after the shared block (prompt SHA / `prompt_version` bump). `Judge.build_prompt_parts()` mirrors the translation cache split.
+- **`translate-fanout` refactored** onto the shared headless launcher (neutral cwd renamed `claude-headless-empty`; behavior otherwise unchanged).
+
 ## [0.30.0.0] - 2026-07-14
 
 ### Added

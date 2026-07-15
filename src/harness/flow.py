@@ -31,7 +31,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1565,15 +1564,6 @@ def translate_commit(
     }
 
 
-def _neutral_claude_cwd() -> Path:
-    """Empty temp dir so ``claude -p`` does not auto-load a project CLAUDE.md."""
-    root = Path(os.environ.get("TEMP") or os.environ.get("TMP") or os.environ.get("TMPDIR")
-                or __import__("tempfile").gettempdir())
-    cwd = root / "claude-translate-empty"
-    cwd.mkdir(parents=True, exist_ok=True)
-    return cwd
-
-
 def _split_matches_prompt(preamble_p: Path, body_p: Path, prompt_p: Path) -> bool:
     """True when ``preamble + body`` is byte-identical to ``prompt.txt``."""
     try:
@@ -1585,23 +1575,6 @@ def _split_matches_prompt(preamble_p: Path, body_p: Path, prompt_p: Path) -> boo
         )
     except OSError:
         return False
-
-
-def _default_claude_runner(
-    cmd: list[str], *, input_text: str, cwd: Path
-) -> tuple[int, str, str]:
-    """Run ``claude -p`` with the prompt on stdin; return (rc, stdout, stderr)."""
-    proc = subprocess.run(
-        cmd,
-        input=input_text,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
 def translate_fanout(
@@ -1633,7 +1606,7 @@ def translate_fanout(
     sequential re-prepare loops pass only the current wave). ``runner`` is a
     test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from src.harness.headless import run_headless_wave
 
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
@@ -1666,99 +1639,102 @@ def translate_fanout(
     if concurrency < 1:
         return {"error": f"invalid concurrency {concurrency!r}; must be >= 1", "wrote": []}
 
-    run = runner or _default_claude_runner
-    cwd = _neutral_claude_cwd()
-
-    # Resolve the launcher to a concrete path. On Windows, ``subprocess`` calls
-    # CreateProcess, which does NOT search PATHEXT — a bare ``claude`` matches
-    # only the extensionless npm shim (not directly executable) and fails with
-    # WinError 2. ``shutil.which`` honors PATHEXT and returns ``claude.cmd`` /
-    # ``claude.exe``. Only resolve when using the real runner (tests pass a
-    # stub and expect ``claude_bin`` verbatim in the command).
-    if runner is None:
-        resolved = shutil.which(claude_bin)
-        if not resolved:
-            return {
-                "error": f"claude not found: {claude_bin!r} (not on PATH / PATHEXT)",
-                "wrote": [],
-                "failed": [],
-                "skipped_existing_draft": [],
-                "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
-            }
-        claude_bin = resolved
-
     # Skip entries that already have a non-empty draft (idempotent / resume).
-    todo: list[dict] = []
     skipped: list[str] = []
+    ready: list[dict] = []
+    pre_failed: list[dict] = []
     for entry in entries:
+        cid = entry["chunk_id"]
         draft_path = Path(entry["draft_path"])
         existing = _read_draft_text(draft_path) if draft_path.exists() else None
         if existing is not None and existing.strip():
-            skipped.append(entry["chunk_id"])
+            skipped.append(cid)
             continue
-        todo.append(entry)
-
-    wrote: list[str] = []
-    failed: list[dict] = []
-
-    def _run_one(entry: dict) -> tuple[str, bool, str]:
-        cid = entry["chunk_id"]
+        prompt_path = Path(entry["prompt_path"])
+        preamble = entry.get("preamble_path")
+        body = entry.get("body_path")
+        use_cached = bool(
+            preamble
+            and body
+            and _split_matches_prompt(Path(preamble), Path(body), prompt_path)
+        )
         try:
-            draft_path = Path(entry["draft_path"])
-            prompt_path = Path(entry["prompt_path"])
-            preamble = entry.get("preamble_path")
-            body = entry.get("body_path")
-            # Prefer the cached split only when it still matches prompt.txt.
-            use_cached = bool(
-                preamble
-                and body
-                and _split_matches_prompt(Path(preamble), Path(body), prompt_path)
-            )
             if use_cached:
-                input_text = Path(body).read_text(encoding="utf-8")
-                # ``--system-prompt-file`` is resolved by the worker, which runs in
-                # the neutral cwd — a manifest-relative path would miss. Absolutize.
-                cmd = [
-                    claude_bin, "-p",
-                    "--system-prompt-file", str(Path(preamble).resolve()),
-                    "--model", worker_model,
-                    "--tools", "",
-                    "--output-format", "text",
-                ]
+                ready.append(
+                    {
+                        "id": cid,
+                        "input_text": Path(body).read_text(encoding="utf-8"),
+                        "output_path": str(draft_path),
+                        "system_prompt_file": preamble,
+                    }
+                )
+            elif not prompt_path.exists():
+                pre_failed.append(
+                    {"chunk_id": cid, "error": f"missing prompt_path: {prompt_path}"}
+                )
             else:
-                if not prompt_path.exists():
-                    return cid, False, f"missing prompt_path: {prompt_path}"
-                input_text = prompt_path.read_text(encoding="utf-8")
-                cmd = [
-                    claude_bin, "-p",
-                    "--model", worker_model,
-                    "--tools", "",
-                    "--output-format", "text",
-                ]
-            rc, stdout, stderr = run(cmd, input_text=input_text, cwd=cwd)
-            if rc != 0:
-                detail = (stderr or stdout or f"exit {rc}").strip()
-                return cid, False, detail[:500]
-            prose = (stdout or "").strip()
-            if not prose:
-                return cid, False, "empty stdout from claude -p"
-            draft_path.parent.mkdir(parents=True, exist_ok=True)
-            draft_path.write_text(prose + "\n", encoding="utf-8")
-            return cid, True, "cached" if use_cached else "full_prompt"
-        except Exception as exc:
-            return cid, False, f"{type(exc).__name__}: {exc}"[:500]
+                ready.append(
+                    {
+                        "id": cid,
+                        "input_text": prompt_path.read_text(encoding="utf-8"),
+                        "output_path": str(draft_path),
+                        "system_prompt_file": None,
+                    }
+                )
+        except OSError as exc:
+            pre_failed.append(
+                {"chunk_id": cid, "error": f"{type(exc).__name__}: {exc}"[:500]}
+            )
 
-    # Wave discipline: finish each batch of `concurrency` before starting the next.
-    for i in range(0, len(todo), concurrency):
-        wave = todo[i:i + concurrency]
-        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-            futures = {pool.submit(_run_one, e): e for e in wave}
-            for fut in as_completed(futures):
-                cid, ok, detail = fut.result()
-                if ok:
-                    wrote.append(cid)
-                else:
-                    failed.append({"chunk_id": cid, "error": detail})
+    if not ready and not pre_failed:
+        return {
+            "wrote": [],
+            "failed": [],
+            "skipped_existing_draft": skipped,
+            "worker_model": worker_model,
+            "concurrency": concurrency,
+            "cwd": None,
+            "counts": {
+                "wrote": 0,
+                "failed": 0,
+                "skipped": len(skipped),
+                "todo": 0,
+            },
+            "instructions": (
+                "Nothing to fan out — no matching manifest entries."
+                if not skipped else
+                "Run `translate-commit` to land drafts. Re-run `translate-fanout` "
+                "(optionally with --chunk-ids) for any failed/missing, then commit again."
+            ),
+        }
+
+    wave_out = run_headless_wave(
+        ready,
+        model=worker_model,
+        concurrency=concurrency,
+        claude_bin=claude_bin,
+        runner=runner,
+    )
+
+    # Fail-fast when claude is missing (no jobs ran).
+    if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):
+        return {
+            "error": wave_out["error"],
+            "wrote": [],
+            "failed": [],
+            "skipped_existing_draft": skipped,
+            "counts": {
+                "wrote": 0,
+                "failed": 0,
+                "skipped": len(skipped),
+                "todo": 0,
+            },
+        }
+
+    failed = list(pre_failed)
+    for item in wave_out.get("failed") or []:
+        failed.append({"chunk_id": item["id"], "error": item["error"]})
+    wrote = list(wave_out.get("wrote") or [])
 
     return {
         "wrote": wrote,
@@ -1766,12 +1742,12 @@ def translate_fanout(
         "skipped_existing_draft": skipped,
         "worker_model": worker_model,
         "concurrency": concurrency,
-        "cwd": str(cwd),
+        "cwd": wave_out.get("cwd"),
         "counts": {
             "wrote": len(wrote),
             "failed": len(failed),
             "skipped": len(skipped),
-            "todo": len(todo),
+            "todo": len(ready) + len(pre_failed),
         },
         "instructions": (
             "Run `translate-commit` to land drafts. Re-run `translate-fanout` "
