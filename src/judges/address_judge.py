@@ -56,7 +56,7 @@ class AddressComplianceJudge(VerdictJudge):
 
     spec = JudgeSpec(
         name="address",
-        version="1.0.0",
+        version="1.1.0",
         kind="verdict",
         template="judge_address.txt",
         required_inputs=("source", "translation", "address_map", "address_rubric"),

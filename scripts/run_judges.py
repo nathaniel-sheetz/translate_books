@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Non-interactive CLI for tailored LLM judges (two backends).
 
-Three subcommands:
+Four subcommands:
 
   * ``run``     — **API backend**. Run one judge or a named suite over a chunk or
                   chapter NOW, calling the LLM behind a dollar cost gate, and
                   (optionally) persist findings into ``evaluations/<chunk>.json``.
   * ``prepare`` — **subagent backend**, phase 1. Render one prompt file per
                   ``(target, judge)`` plus a manifest, for spawned ``judge-worker``
-                  subagents to answer. Zero API spend.
+                  subagents to answer. Zero API spend. Solo entries may also get
+                  ``preamble_path`` / ``body_path`` for headless caching.
+  * ``fanout``  — **subagent backend**, opt-in headless wave. Bounded ``claude -p``
+                  processes write drafts from the prepare manifest (no Task workers).
   * ``commit``  — **subagent backend**, phase 2. Collect the workers' JSON drafts,
                   parse them, and (optionally) persist — identical output to ``run``.
 
@@ -19,8 +22,9 @@ Cost / usage safety:
   * ``run`` cost-estimates the suite up front; if the estimate exceeds
     ``--cost-limit`` (default $0.50) it refuses to spend and returns
     ``status: "cost_exceeded"`` — re-run with ``--confirm``.
-  * ``prepare`` / ``commit`` never call an API. The gate there is the
-    conversational usage check the skill does before spawning N workers.
+  * ``prepare`` / ``fanout`` / ``commit`` never call a metered API. The gate there
+    is the conversational usage check the skill does before spawning N workers
+    or running a headless wave.
 
 Every command prints one JSON object with a ``_schema`` block documenting its keys.
 
@@ -29,6 +33,7 @@ Examples:
         --judge dialogue --scope chapter:chapter_03
     python scripts/run_judges.py prepare --project understood-betsy \\
         --judge dialogue --scope chapter:chapter_03
+    python scripts/run_judges.py fanout --project understood-betsy
     python scripts/run_judges.py commit --project understood-betsy --persist
 """
 
@@ -280,6 +285,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pp.add_argument("--verbose", action="store_true", help="Debug logging")
 
+    # fanout — subagent backend, headless wave (opt-in) ---------------------
+    fp = sub.add_parser(
+        "fanout",
+        help="Headless claude -p wave for prepare drafts (opt-in; no Task workers)",
+    )
+    fp.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    fp.add_argument(
+        "--target-ids",
+        dest="target_ids",
+        default=None,
+        help="Comma-separated target_id / batch_id values to run "
+        "(default: all manifest entries still lacking a draft)",
+    )
+    fp.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="Max parallel claude -p processes per wave (default: manifest batch_size)",
+    )
+    fp.add_argument(
+        "--claude-bin",
+        dest="claude_bin",
+        default="claude",
+        help="claude CLI binary (default: claude)",
+    )
+    fp.add_argument("--verbose", action="store_true", help="Debug logging")
+
     # commit — subagent backend, phase 2 ------------------------------------
     cp = sub.add_parser(
         "commit",
@@ -472,6 +504,23 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     payload["project"] = str(project_dir)
     _emit(payload)
     return 0
+
+
+def _cmd_fanout(args: argparse.Namespace) -> int:
+    """Headless claude -p wave for prepare drafts (opt-in; no Task workers)."""
+    project_dir = _resolve_project(args.project)
+    target_ids = None
+    if args.target_ids:
+        target_ids = [t.strip() for t in args.target_ids.split(",") if t.strip()]
+    payload = subagent.fanout(
+        project_dir,
+        target_ids=target_ids,
+        concurrency=args.concurrency,
+        claude_bin=args.claude_bin,
+    )
+    payload["project"] = str(project_dir)
+    _emit(payload)
+    return 1 if payload.get("error") else 0
 
 
 def _cmd_commit(args: argparse.Namespace) -> int:
@@ -751,6 +800,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 _DISPATCH = {
     "run": _cmd_run,
     "prepare": _cmd_prepare,
+    "fanout": _cmd_fanout,
     "commit": _cmd_commit,
     "apply": _cmd_apply,
 }

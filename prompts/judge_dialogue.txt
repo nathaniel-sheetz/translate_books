@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge
-# Version: 1.1
+# Version: 1.2
 # Checks whether a Spanish translation follows the project's house dialogue
 # rules. Variables: dialogue_rules, source_text, translation_text
 
@@ -18,6 +18,8 @@ spoken dialogue. Do NOT flag the source. Judge ONLY the Spanish <translation>.
 <dialogue_rules>
 {{dialogue_rules}}
 </dialogue_rules>
+
+# ---8<--- cache split ---8<---
 
 <source>
 {{source_text}}

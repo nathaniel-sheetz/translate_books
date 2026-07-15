@@ -28,21 +28,21 @@ def _ctx() -> dict:
     }
 
 
-def test_clean_compliant(monkeypatch):
-    monkeypatch.setattr(
-        llm_io,
-        "call_judge",
-        lambda *a, **k: json.dumps({"compliant": True, "findings": [], "summary": "ok"}),
-    )
-    res = AddressComplianceJudge().run(_target(), _ctx())
+def test_build_prompt_parts_keeps_chapter_ref_in_suffix():
+    """chapter_ref is per-item — must land in the body, not the cached preamble."""
+    from src.judges.address_judge import AddressComplianceJudge
 
-    assert res.passed is True
-    assert res.issues == []
-    assert res.score == 1.0
-    assert res.eval_name == "address"
-    assert res.target_type == "chunk"
-    assert res.metadata["compliant"] is True
-    assert "prompt_version" in res.metadata
+    judge = AddressComplianceJudge()
+    target = JudgeTarget(
+        "c0", "chunk", '"Hi."', "—Hola.",
+        {"chapter_id": "chapter_02", "position": 0},
+    )
+    prefix, suffix = judge.build_prompt_parts(target, _ctx())
+    assert prefix + suffix == judge.build_prompt(target, _ctx())
+    assert "</address_map>" in prefix
+    assert "This passage is from:" not in prefix
+    assert "This passage is from:" in suffix
+    assert suffix.startswith("# ---8<--- cache split ---8<---")
 
 
 def test_explicit_error_vs_global_warning(monkeypatch):
@@ -168,5 +168,5 @@ def test_unparseable_twice_returns_error_issue(monkeypatch):
 def test_name_and_version():
     judge = AddressComplianceJudge()
     assert judge.name == "address"
-    assert judge.version == "1.0.0"
+    assert judge.version == "1.1.0"
     assert judge.batch_template == "judge_address_batch.txt"

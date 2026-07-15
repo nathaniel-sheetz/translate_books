@@ -209,7 +209,7 @@ def test_coerce_severity_custom_default():
 def test_judge_name_and_version_properties():
     judge = DialogueComplianceJudge()
     assert judge.name == "dialogue"
-    assert judge.version == "1.1.0"
+    assert judge.version == "1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ def test_make_result_without_optional_fields():
     """make_result works when prompt_version, model, and provider are all None."""
     judge = DialogueComplianceJudge()
     result = judge.make_result(_target(), [], score=1.0)
-    assert result.metadata.get("judge_version") == "1.1.0"
+    assert result.metadata.get("judge_version") == "1.2.0"
     assert result.metadata.get("judge_kind") == "verdict"
     assert "prompt_version" not in result.metadata
     assert "model" not in result.metadata
@@ -233,7 +233,7 @@ def test_make_result_extra_metadata_merged():
     judge = DialogueComplianceJudge()
     result = judge.make_result(_target(), [], score=0.8, metadata={"custom": "x"})
     assert result.metadata["custom"] == "x"
-    assert result.metadata["judge_version"] == "1.1.0"
+    assert result.metadata["judge_version"] == "1.2.0"
 
 
 def test_make_result_model_and_provider_stamped():

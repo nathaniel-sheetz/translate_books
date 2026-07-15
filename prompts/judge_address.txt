@@ -1,5 +1,5 @@
 # Forms-of-Address (usted/tú) Compliance Judge
-# Version: 1.0
+# Version: 1.1
 # Checks whether a Spanish translation uses the expected formal/informal address
 # per the book's address map. Variables: address_rubric, address_map,
 # source_text, translation_text, chapter_ref
@@ -26,6 +26,8 @@ scene (public vs. private). Do NOT flag the source. Judge ONLY the Spanish
 <address_map>
 {{address_map}}
 </address_map>
+
+# ---8<--- cache split ---8<---
 
 This passage is from: {{chapter_ref}}
 

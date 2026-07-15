@@ -27,6 +27,11 @@ from typing import Any, Optional
 
 from src.models import EvalResult, Issue, IssueLevel
 
+# Sentinel line inserted in solo judge templates so ``build_prompt_parts`` can
+# split the shared (cacheable) prefix from the per-target suffix. The model
+# ignores the comment; ``prefix + suffix`` stays byte-identical to ``build_prompt``.
+_CACHE_PREFIX_SPLIT_MARKER = "# ---8<--- cache split ---8<---"
+
 
 @dataclass
 class JudgeTarget:
@@ -178,6 +183,24 @@ class Judge(ABC):
 
         template = llm_io.load_template(self.spec.template)
         return llm_io.render(template, self.prompt_variables(target, context))
+
+    def build_prompt_parts(
+        self, target: JudgeTarget, context: dict[str, Any]
+    ) -> tuple[str, str]:
+        """Render the solo prompt split into ``(prefix, suffix)`` for caching.
+
+        ``prefix + suffix`` is byte-identical to :meth:`build_prompt`. The prefix
+        is everything before :data:`_CACHE_PREFIX_SPLIT_MARKER` (shared rules /
+        rubric+map); the suffix is the rest (per-target source/translation +
+        trailing JSON instruction). If the marker is absent, returns
+        ``("", full_prompt)`` so callers degrade to no caching.
+        """
+        prompt = self.build_prompt(target, context)
+        marker = _CACHE_PREFIX_SPLIT_MARKER
+        idx = prompt.find(marker)
+        if idx < 0:
+            return ("", prompt)
+        return (prompt[:idx], prompt[idx:])
 
     def build_batch_prompt(
         self, targets: list[JudgeTarget], context: dict[str, Any]
