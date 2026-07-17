@@ -15,6 +15,7 @@ from src.epub_builder import (
     _int_to_roman,
     _load_chapter_manifest,
     _load_toc_format,
+    _apply_language_default_label,
     _normalize_heading,
     _strip_image_blocks,
     build_epub,
@@ -340,6 +341,50 @@ class TestSynthesizeChapterHeading:
     def test_unknown_numeral_style_falls_back_to_arabic(self):
         cfg = {"label": "Ch", "numeral_style": "klingon"}
         assert synthesize_chapter_heading(2, cfg) == 'Ch 2'
+
+
+# --- language-derived chapter label ---
+
+class TestLanguageDefaultLabel:
+    @pytest.mark.parametrize("language, expected", [
+        ("es", "Capítulo"),
+        ("fr", "Chapitre"),
+        ("de", "Kapitel"),
+        ("it", "Capitolo"),
+        ("en", "Chapter"),
+    ])
+    def test_label_derived_from_language(self, language, expected):
+        assert _apply_language_default_label(None, language)["label"] == expected
+
+    def test_regional_subtag_is_honored(self):
+        # The harness stores locale-flavored codes; es-MX is still Spanish.
+        assert _apply_language_default_label(None, "es-MX")["label"] == "Capítulo"
+
+    def test_case_insensitive(self):
+        assert _apply_language_default_label(None, "ES")["label"] == "Capítulo"
+
+    def test_explicit_label_wins(self):
+        cfg = {"label": "Historia", "numeral_style": "arabic"}
+        assert _apply_language_default_label(cfg, "es")["label"] == "Historia"
+
+    def test_empty_label_is_preserved_not_overwritten(self):
+        # "" is the documented "numeral only" setting, not an absent value.
+        cfg = {"label": "", "numeral_style": "arabic"}
+        assert _apply_language_default_label(cfg, "es")["label"] == ""
+
+    def test_unknown_language_falls_through_to_chapter(self):
+        assert _apply_language_default_label(None, "klingon") is None
+        assert synthesize_chapter_heading(1, None) == "Chapter 1"
+
+    def test_numeral_style_is_preserved(self):
+        cfg = {"numeral_style": "roman"}
+        merged = _apply_language_default_label(cfg, "es")
+        assert synthesize_chapter_heading(4, merged) == "Capítulo IV"
+
+    def test_does_not_mutate_caller_config(self):
+        cfg = {"numeral_style": "roman"}
+        _apply_language_default_label(cfg, "es")
+        assert "label" not in cfg
 
 
 # --- _normalize_heading ---
