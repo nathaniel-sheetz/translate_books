@@ -124,9 +124,29 @@ class TestEncodingDetection:
 
     def test_local_file_read_through_fetch_html(self, tmp_path):
         # The regression the friction log hit: fetch_html's local branch used to
-        # hard-code UTF-8 while the URL branch honored the real encoding.
+        # hard-code UTF-8 while the URL branch used a different decoder.
         src = tmp_path / "book.htm"
         src.write_bytes(_page("<h2>I. — THE BUILDING OF ROME</h2>").encode("windows-1252"))
         html, _base_url = fetch_html(str(src))
         assert "I. — THE BUILDING OF ROME" in html
         assert "�" not in html
+
+    def test_url_fetch_uses_same_decoder(self, monkeypatch):
+        # Local and URL must share decode_html_bytes so the same windows-1252
+        # document does not diverge by source path.
+        raw = _page("<h2>I. — THE BUILDING OF ROME</h2>").encode("windows-1252")
+
+        class FakeResp:
+            content = raw
+
+            def raise_for_status(self):
+                return None
+
+        monkeypatch.setattr(
+            "scripts.ingest_gutenberg.requests.get",
+            lambda *a, **k: FakeResp(),
+        )
+        html, base_url = fetch_html("https://example.com/books/rome.htm")
+        assert "I. — THE BUILDING OF ROME" in html
+        assert "�" not in html
+        assert base_url == "https://example.com/books/"

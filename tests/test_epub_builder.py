@@ -1206,3 +1206,25 @@ class TestBuildEpubFromChunksEdgeCases:
                 chapters=[],
             )
 
+
+def test_build_epub_cli_prints_scrapeable_error(tmp_path, monkeypatch, capsys):
+    """Failures must use stdout ``ERROR in epub:`` so flow._run_script can fill
+    last_output.json (stderr ``Error:`` was invisible to the scraper)."""
+    import importlib
+
+    from src.harness import flow
+
+    build_epub_cli = importlib.import_module("scripts.build_epub")
+    missing = tmp_path / "no-such-project"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_epub.py", str(missing), "--title", "T", "--author", "A"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        build_epub_cli.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    match = flow._SCRIPT_ERROR_RE.match(out.strip().splitlines()[-1])
+    assert match is not None
+    assert "Project directory not found" in match.group("msg")
+

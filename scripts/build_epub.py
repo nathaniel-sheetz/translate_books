@@ -102,7 +102,9 @@ Examples:
 
     project_dir = args.project_dir.resolve()
     if not project_dir.is_dir():
-        print(f"Error: Project directory not found: {project_dir}", file=sys.stderr)
+        # stdout + "ERROR in epub:" so flow._run_script can scrape the cause into
+        # last_output.json (same contract as translate_book's stage failures).
+        print(f"  ERROR in epub: Project directory not found: {project_dir}")
         sys.exit(1)
 
     chapters_dir = args.chapters_dir
@@ -134,13 +136,13 @@ Examples:
             included = result.included
             skipped = result.skipped
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"  ERROR in epub: {e}")
         sys.exit(1)
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"  ERROR in epub: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"Error building EPUB: {e}", file=sys.stderr)
+        print(f"  ERROR in epub: {e}")
         sys.exit(1)
 
     # Print summary

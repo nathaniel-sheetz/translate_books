@@ -654,7 +654,7 @@ def test_stream_result_fills_error_on_failure():
 
 
 def test_stream_result_omits_error_on_success():
-    """The _schema documents error as present only on failure."""
+    """OUTPUT_SCHEMAS document error as present only on failure."""
     result = flow._stream_result("chunk", rc=0, summary=None, error="stale noise")
     assert "error" not in result
 

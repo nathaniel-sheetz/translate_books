@@ -2485,6 +2485,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "provider": "provider used for the estimate",
         "model": "model used for the estimate",
         "cost_only": "always True — this command never spends",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "cost": {
         "command": "the harness command ('cost')",
@@ -2497,6 +2498,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "provider": "provider used for the estimate",
         "model": "model used for the estimate",
         "cost_only": "always True — this command never spends",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "translate": {
         "command": "the harness command ('translate')",
@@ -2507,6 +2509,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "estimated_cost_usd": "estimated spend for this batch",
         "remaining_untranslated": "untranslated chunks left in the book after this batch",
         "note": "present when nothing was translated (already done / no match)",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "epub": {
         "command": "the harness command ('epub')",
@@ -2516,6 +2519,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "size_kb": "EPUB size in KB",
         "included": "list of translated chapter_ids included",
         "skipped": "list of untranslated/partial chapter_ids skipped",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "align": {
         "aligned": "list of {chapter_id, es_count, high_confidence_pct}",
