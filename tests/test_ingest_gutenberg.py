@@ -2,7 +2,7 @@
 
 from bs4 import BeautifulSoup
 
-from scripts.ingest_gutenberg import Converter
+from scripts.ingest_gutenberg import Converter, decode_html_bytes, fetch_html
 
 
 def _convert(html: str) -> str:
@@ -83,3 +83,50 @@ class TestItalicConversion:
     def test_italic_with_internal_punctuation(self):
         text = _convert("<p>Read <i>Don Quixote, Part I</i> first.</p>")
         assert "_Don Quixote, Part I_" in text
+
+
+def _page(body: str) -> str:
+    return (
+        '<html><head><meta http-equiv="Content-Type" '
+        'content="text/html; charset=windows-1252"></head>'
+        f"<body>{body}</body></html>"
+    )
+
+
+class TestEncodingDetection:
+    def test_windows_1252_declared_in_meta_is_honored(self):
+        # The em-dash separating numeral from title is byte 0x97 in windows-1252.
+        # Decoded as UTF-8 it becomes U+FFFD and the chapter heading is corrupted.
+        html = _page("<h2>I. — THE BUILDING OF ROME</h2>")
+        text = decode_html_bytes(html.encode("windows-1252"))
+        assert "I. — THE BUILDING OF ROME" in text
+        assert "�" not in text
+
+    def test_windows_1252_accents_survive(self):
+        html = _page("<p>Café naïve résumé</p>")
+        text = decode_html_bytes(html.encode("windows-1252"))
+        assert "Café naïve résumé" in text
+
+    def test_utf8_still_decodes(self):
+        html = '<html><head><meta charset="utf-8"></head><body><p>Café —</p></body></html>'
+        text = decode_html_bytes(html.encode("utf-8"))
+        assert "Café —" in text
+        assert "�" not in text
+
+    def test_utf8_bom_is_honored(self):
+        html = "<html><body><p>Café</p></body></html>"
+        text = decode_html_bytes(html.encode("utf-8-sig"))
+        assert "Café" in text
+
+    def test_ascii_is_unaffected(self):
+        text = decode_html_bytes(b"<html><body><p>Plain ASCII.</p></body></html>")
+        assert "Plain ASCII." in text
+
+    def test_local_file_read_through_fetch_html(self, tmp_path):
+        # The regression the friction log hit: fetch_html's local branch used to
+        # hard-code UTF-8 while the URL branch honored the real encoding.
+        src = tmp_path / "book.htm"
+        src.write_bytes(_page("<h2>I. — THE BUILDING OF ROME</h2>").encode("windows-1252"))
+        html, _base_url = fetch_html(str(src))
+        assert "I. — THE BUILDING OF ROME" in html
+        assert "�" not in html
