@@ -84,18 +84,12 @@ class TestLoadPromptTemplate:
         assert "{{glossary}}" in template
 
     def test_load_default_path(self):
-        """Test loading template from default path."""
-        # Default path should be prompts/translation.txt
-        default_path = Path("prompts/translation.txt")
-
-        if default_path.exists():
-            template = load_prompt_template()
-            assert isinstance(template, str)
-            assert len(template) > 0
-        else:
-            # If default doesn't exist, should raise FileNotFoundError
-            with pytest.raises(FileNotFoundError):
-                load_prompt_template()
+        """The default path always resolves: prompts/translation.txt when the user has
+        primed one, else the checked-in prompts/translation.example.txt. The active
+        prompt is gitignored, so on a fresh clone only the example exists."""
+        template = load_prompt_template()
+        assert isinstance(template, str)
+        assert len(template) > 0
 
     def test_load_missing_file(self):
         """Test loading non-existent template raises FileNotFoundError."""

@@ -99,8 +99,11 @@ def test_run_judge_suite_header_skips_bad_judge(monkeypatch):
 
 def test_run_judge_success_path(monkeypatch):
     """run_judge returns the judge's EvalResult on the happy path (line 50)."""
-    from src.judges import registry
-    monkeypatch.setattr(registry, "get_judge", lambda name: _make_judge())
+    # Patch the name runner actually calls: it does `from src.judges.registry import
+    # get_judge` at module load, so that binding lives on runner, and patching
+    # registry.get_judge is inert -- which silently ran the REAL dialogue judge and
+    # billed a live API call on every test run.
+    monkeypatch.setattr(runner, "get_judge", lambda name: _make_judge())
     result = runner.run_judge("dialogue", _target(), {})
     assert result.passed is True
     assert result.eval_name == "dialogue"
