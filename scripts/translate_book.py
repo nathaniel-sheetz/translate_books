@@ -857,9 +857,15 @@ def main():
 
     # Run pipeline stages
     t_total = time.time()
+    cost_only = bool(getattr(args, "cost_only", False))
     for stage_name in STAGES[start_idx:]:
+        # --cost-only implements the estimate by entering the translate stage and
+        # bailing out before a single API call, so it would otherwise announce
+        # itself as "Stage: TRANSLATE" and read as if money were about to move
+        # (friction-log #10). Name the stage after what it actually does.
+        banner = "COST-ESTIMATE" if cost_only and stage_name == "translate" else stage_name.upper()
         print(f"\n{'='*60}")
-        print(f"Stage: {stage_name.upper()}")
+        print(f"Stage: {banner}")
         print(f"{'='*60}")
 
         stage_fn = STAGE_FUNCTIONS[stage_name]
