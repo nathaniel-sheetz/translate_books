@@ -167,9 +167,14 @@ class TestBuildTranslatorContext:
     def test_source_slot_is_placeholder_not_chunk_text(self, monkeypatch):
         """Source text is swapped for a placeholder to avoid duplicating it."""
         # load_prompt_template defaults to prompts/translation.txt; the module's
-        # cwd may vary across test runners, so point it at the repo's file.
+        # cwd may vary across test runners, so point it at the repo's file. The
+        # active prompt is gitignored, so fall back to the checked-in example the
+        # same way load_prompt_template itself does -- a fresh clone has only that.
         from src.utils import file_io
-        repo_template = Path(__file__).resolve().parent.parent / "prompts" / "translation.txt"
+        prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+        repo_template = prompts_dir / "translation.txt"
+        if not repo_template.exists():
+            repo_template = prompts_dir / "translation.example.txt"
         monkeypatch.setattr(
             file_io, "load_prompt_template",
             lambda path=None: repo_template.read_text(encoding="utf-8"),

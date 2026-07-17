@@ -30,6 +30,7 @@ except ImportError:
 
 try:
     from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+    from bs4.dammit import UnicodeDammit
 except ImportError:
     sys.exit("beautifulsoup4 is required: pip install beautifulsoup4")
 
@@ -70,6 +71,21 @@ USER_AGENT = (
 # Fetching
 # ---------------------------------------------------------------------------
 
+def decode_html_bytes(raw: bytes) -> str:
+    """
+    Decode HTML bytes using the document's own encoding rather than assuming UTF-8.
+
+    Used for both local files and URL responses so the same document decodes
+    identically either way. UnicodeDammit tries, in order: a BOM, the charset
+    declared in a <meta> tag, then statistical detection. Honoring the declared
+    charset matters -- detection alone is unreliable on short or mostly-ASCII
+    documents, and a Gutenberg Australia file declaring windows-1252 decodes as
+    UTF-8 with every em-dash (0x97) and accent replaced by U+FFFD, silently
+    corrupting the headings that drive the chapter split.
+    """
+    return UnicodeDammit(raw, is_html=True).unicode_markup
+
+
 def fetch_html(source: str) -> tuple[str, str]:
     """
     Return (html_text, base_url).
@@ -77,7 +93,7 @@ def fetch_html(source: str) -> tuple[str, str]:
     """
     path = Path(source)
     if path.exists():
-        html = path.read_text(encoding="utf-8", errors="replace")
+        html = decode_html_bytes(path.read_bytes())
         base_url = path.parent.as_uri() + "/"
         return html, base_url
 
@@ -88,9 +104,7 @@ def fetch_html(source: str) -> tuple[str, str]:
 
     resp = requests.get(clean_url, headers={"User-Agent": USER_AGENT}, timeout=30)
     resp.raise_for_status()
-    # Use apparent encoding if charset missing
-    resp.encoding = resp.apparent_encoding
-    return resp.text, base_url
+    return decode_html_bytes(resp.content), base_url
 
 
 # ---------------------------------------------------------------------------

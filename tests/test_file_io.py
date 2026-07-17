@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.utils.file_io import (
     load_chunk,
+    load_prompt_template,
     save_chunk,
     render_prompt,
     filter_glossary_for_chunk,
@@ -84,6 +85,28 @@ class TestRenderPrompt:
     def test_no_placeholders(self):
         result = render_prompt("Plain text", {})
         assert result == "Plain text"
+
+
+class TestLoadPromptTemplate:
+    """The active prompts are gitignored per-user files shipped as *.example.txt,
+    so a fresh clone has only the examples (friction-log #5)."""
+
+    def test_reads_the_real_template_when_present(self, tmp_path):
+        real = tmp_path / "translation.txt"
+        real.write_text("real template", encoding="utf-8")
+        (tmp_path / "translation.example.txt").write_text("example", encoding="utf-8")
+        assert load_prompt_template(real) == "real template"
+
+    def test_falls_back_to_example_when_absent(self, tmp_path):
+        (tmp_path / "translation.example.txt").write_text("example", encoding="utf-8")
+        assert load_prompt_template(tmp_path / "translation.txt") == "example"
+
+    def test_raises_naming_both_paths_when_neither_exists(self, tmp_path):
+        with pytest.raises(FileNotFoundError) as exc:
+            load_prompt_template(tmp_path / "translation.txt")
+        # The message must name the example too, so the fix is obvious from the error.
+        assert "translation.txt" in str(exc.value)
+        assert "translation.example.txt" in str(exc.value)
 
 
 class TestFilterGlossaryForChunk:

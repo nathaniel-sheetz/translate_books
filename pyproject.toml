@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "translate-books"
+description = "Book translation harness (ingest -> chunk -> translate -> combine -> epub)."
+# 3.11 is the floor an actual run has been executed against. It is enforced by the
+# compileall + pytest job in .github/workflows/ci.yml — without that job a 3.12-only
+# construct (e.g. a backslash inside an f-string expression, legal only since PEP 701)
+# lands green and breaks 3.11 at import time.
+requires-python = ">=3.11"
+dynamic = ["version"]
+
+# Runtime deps live in requirements.txt; this file is metadata only.
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+# The repo runs from a checkout (src/ + scripts/ at the root), it is not installed as a
+# package. Empty discovery keeps setuptools from auto-globbing those into a distribution.
+[tool.setuptools]
+packages = []

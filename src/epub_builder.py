@@ -30,6 +30,9 @@ _HEADING_RE = re.compile(
 )
 _HR_RE = re.compile(r'^-{3,}$')
 _EM_RE = re.compile(r'(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])')
+# Kept as a module constant so it can be used inside f-string expressions
+# (a backslash-bearing literal is illegal in an f-string expr before Py 3.12).
+_EM_REPL = r'<em>\1</em>'
 # In-text endnote marker token emitted by src.endnotes; rendered to a linked
 # superscript. Substituted after html.escape() (the {{...}} token is escape-safe).
 _ENDNOTE_RE = re.compile(r'\{\{ENDNOTE:(\d+)\}\}')
@@ -46,6 +49,21 @@ _ENDNOTE_SUP = (
 _DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
     "label": "Chapter",
     "numeral_style": "arabic",  # "arabic" or "roman"
+}
+
+# Synthesized chapter label per target language, keyed by the primary subtag of the
+# EPUB's dc:language. Without this a Spanish book renders "Chapter 1" above its own
+# Spanish subtitle unless the project happens to set chapter_heading explicitly. A
+# language with no entry here falls through to _DEFAULT_HEADING_CONFIG's "Chapter".
+_CHAPTER_LABELS_BY_LANGUAGE: Dict[str, str] = {
+    "es": "Capítulo",
+    "fr": "Chapitre",
+    "de": "Kapitel",
+    "it": "Capitolo",
+    "pt": "Capítulo",
+    "ca": "Capítol",
+    "nl": "Hoofdstuk",
+    "en": "Chapter",
 }
 
 _DEFAULT_TRANSLATOR_HEADING = "Nota del traductor"
@@ -84,6 +102,26 @@ def _resolve_heading_config(
             merged['label'] = str(config['label'])
         if config.get('numeral_style') in ('arabic', 'roman'):
             merged['numeral_style'] = config['numeral_style']
+    return merged
+
+
+def _apply_language_default_label(
+    config: Optional[Dict[str, Any]],
+    language: str,
+) -> Optional[Dict[str, Any]]:
+    """Fill in a target-language chapter label when nothing else set one.
+
+    Precedence: an explicit label (from the caller or project.json) always wins --
+    including "", which means "numeral only" and must not be overwritten. Only when
+    no label was chosen at all do we derive one from the EPUB's language.
+    """
+    if config and config.get('label') is not None:
+        return config
+    label = _CHAPTER_LABELS_BY_LANGUAGE.get((language or '').split('-')[0].lower())
+    if label is None:
+        return config  # unknown language -> _DEFAULT_HEADING_CONFIG's "Chapter"
+    merged = dict(config or {})
+    merged['label'] = label
     return merged
 
 
@@ -281,7 +319,7 @@ def _render_body_blocks(body: str) -> List[str]:
         ):
             verse_lines = [
                 f'  <p class="verse-line">'
-                f'{_ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(r"<em>\1</em>", escape(line.strip())))}'
+                f'{_ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(_EM_REPL, escape(line.strip())))}'
                 f'</p>'
                 for line in block.split('\n')
                 if line.strip()
@@ -294,7 +332,7 @@ def _render_body_blocks(body: str) -> List[str]:
         # pipeline) to <em>. Order matters: escape() leaves underscores
         # untouched, so substituting after it is safe.
         escaped = escape(block)
-        with_em = _EM_RE.sub(r'<em>\1</em>', escaped)
+        with_em = _EM_RE.sub(_EM_REPL, escaped)
         with_notes = _ENDNOTE_RE.sub(_ENDNOTE_SUP, with_em)
         out.append(f'<p>{with_notes}</p>')
 
@@ -334,7 +372,7 @@ def chapter_text_to_xhtml(
     if heading:
         parts.append(f'<h1>{escape(_normalize_heading(heading))}</h1>')
     if subtitle:
-        parts.append(f'<h2>{_EM_RE.sub(r"<em>\1</em>", escape(subtitle))}</h2>')
+        parts.append(f'<h2>{_EM_RE.sub(_EM_REPL, escape(subtitle))}</h2>')
 
     parts.extend(_render_body_blocks(body))
 
@@ -639,7 +677,8 @@ def build_epub(
                       headings (used when a chapter does not begin with a
                       numeral line). Shape: {"label": str, "numeral_style":
                       "arabic"|"roman"}. If omitted, falls back to
-                      project.json's "chapter_heading" key, then defaults.
+                      project.json's "chapter_heading" key, then to a label
+                      derived from ``language``, then defaults.
         translator_note_heading: Heading for the optional "Note from the
                      Translator" final chapter. Falls back to a default constant
                      if blank/whitespace.
@@ -662,6 +701,8 @@ def build_epub(
 
     if chapter_heading_config is None:
         chapter_heading_config = _load_chapter_heading_config(project_path)
+    chapter_heading_config = _apply_language_default_label(
+        chapter_heading_config, language)
 
     chapter_manifest = _load_chapter_manifest(project_path)
     toc_format = _load_toc_format(project_path)

@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -110,7 +111,15 @@ def _quiet_stdout():
         yield
 
 
-def _run_script(cmd: list[str]) -> tuple[int, dict | None]:
+# A wrapped script's stage failure, e.g. "  ERROR in translate: Template file not
+# found: prompts/translation.txt" (scripts/translate_book.py). Captured off the stdout
+# stream so the diagnosis reaches last_output.json's ``error`` (friction-log #6 — the
+# artifact recorded exit_code 1 with error: null, and the only readable cause was in
+# stdout, which the skill tells the agent never to parse).
+_SCRIPT_ERROR_RE = re.compile(r"^\s*ERROR\b[^:]*:\s*(?P<msg>.+?)\s*$")
+
+
+def _run_script(cmd: list[str]) -> tuple[int, dict | None, str | None]:
     """Run a repo script as a subprocess from the repo root, streaming its stdout.
 
     The agent sees the script's real output (cost estimate, progress) live as it
@@ -123,7 +132,8 @@ def _run_script(cmd: list[str]) -> tuple[int, dict | None]:
 
     Force UTF-8 in the child so accented output survives a cp1252 Windows console
     (friction-log #4); reconfiguring the parent's stdout does not reach the child.
-    Returns ``(returncode, summary | None)``.
+    Also retain the last ``ERROR ...:`` line seen so a failure carries a readable
+    cause (friction-log #6). Returns ``(returncode, summary | None, error | None)``.
     """
     sys.stdout.flush()
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
@@ -139,6 +149,7 @@ def _run_script(cmd: list[str]) -> tuple[int, dict | None]:
         bufsize=1,
     )
     summary: dict | None = None
+    last_error: str | None = None
     if proc.stdout is not None:
         for line in proc.stdout:
             if line.startswith(state.HARNESS_RESULT_PREFIX):
@@ -148,24 +159,36 @@ def _run_script(cmd: list[str]) -> tuple[int, dict | None]:
                 except json.JSONDecodeError:
                     summary = None  # malformed sentinel -> fall back to a minimal result
                 continue  # machine-only line: never echo to the human stream
+            match = _SCRIPT_ERROR_RE.match(line)
+            if match:
+                last_error = match.group("msg")
             print(line, end="")
     rc = proc.wait()
-    return rc, summary
+    return rc, summary, last_error
 
 
-def _stream_result(command: str, rc: int, summary: dict | None) -> dict:
+def _stream_result(
+    command: str, rc: int, summary: dict | None, error: str | None = None
+) -> dict:
     """Shape a streaming command's return: a fresh dict carrying the exit code.
 
     Always returns a dict (never a bare int) so ``main()`` writes a fresh
     ``last_output.json`` for this command — closing the stale-artifact trap
     (friction-log #18) even when the wrapped script emitted no sentinel. ``main()``
     propagates ``exit_code`` as the process exit status.
+
+    On a non-zero exit, fill ``error`` from the wrapped script's last ``ERROR`` line
+    so the documented "read the artifact, never parse stdout" contract actually yields
+    a diagnosis (friction-log #6). A sentinel-supplied ``error`` is more specific, so
+    it wins; the scraped line is only a fallback.
     """
     result = dict(summary) if summary else {}
     # Harness-authoritative keys win: a wrapped script's sentinel must never
     # overwrite the command name or the real process exit code we recorded.
     result["command"] = command
     result["exit_code"] = rc
+    if rc != 0 and error and not result.get("error"):
+        result["error"] = error
     return result
 
 
@@ -2462,6 +2485,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "provider": "provider used for the estimate",
         "model": "model used for the estimate",
         "cost_only": "always True — this command never spends",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "cost": {
         "command": "the harness command ('cost')",
@@ -2474,6 +2498,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "provider": "provider used for the estimate",
         "model": "model used for the estimate",
         "cost_only": "always True — this command never spends",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "translate": {
         "command": "the harness command ('translate')",
@@ -2484,6 +2509,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "estimated_cost_usd": "estimated spend for this batch",
         "remaining_untranslated": "untranslated chunks left in the book after this batch",
         "note": "present when nothing was translated (already done / no match)",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "epub": {
         "command": "the harness command ('epub')",
@@ -2493,6 +2519,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "size_kb": "EPUB size in KB",
         "included": "list of translated chapter_ids included",
         "skipped": "list of untranslated/partial chapter_ids skipped",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "align": {
         "aligned": "list of {chapter_id, es_count, high_confidence_pct}",

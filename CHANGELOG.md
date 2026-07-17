@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.1.0] - 2026-07-17
+
+### Fixed
+- **`epub_builder` no longer fails to import on Python < 3.12.** Three f-strings embedded a backslash-bearing regex replacement (`r"<em>\1</em>"`) directly in the expression part — a hard `SyntaxError` before PEP 701. Since `scripts/translate_book.py` imports `epub_builder` at module load, this blocked *every* harness command on a 3.11 runtime, not just EPUB building. The literal is now the module constant `_EM_REPL`.
+- **Local and URL ingest share one encoding decoder.** `fetch_html`'s local branch hard-coded `read_text(encoding="utf-8", errors="replace")` while the URL branch used `resp.apparent_encoding`, so a windows-1252 source decoded with every em-dash (`0x97`) and accent replaced by U+FFFD — corrupting the headings the chapter split keys on, and doing it silently. Both paths now decode via bs4's `UnicodeDammit` (BOM → declared charset → detection).
+- **A wrapped script's failure reason reaches `last_output.json`.** A failed `chunk`/`cost`/`translate`/`epub` recorded `exit_code: 1` with `error: null`, leaving the cause only in streamed stdout — which the skill tells the agent never to parse. `_run_script` now retains the script's last `ERROR` line and `_stream_result` fills `error` on a non-zero exit; `OUTPUT_SCHEMAS` document the field. `build_epub.py` now prints `ERROR in epub: …` on stdout (it previously used stderr `Error:`, which the scraper never saw). A sentinel-supplied `error` still wins.
+- **Synthesized EPUB chapter labels follow the target language.** A Spanish EPUB rendered `<h1>Chapter 1</h1>` above its Spanish subtitle, because the label hard-defaulted to `"Chapter"` regardless of language; only projects that explicitly set a `chapter_heading` block escaped it. The label is now derived from `dc:language` (es→Capítulo, fr→Chapitre, de→Kapitel, …), honoring the primary subtag so `es-MX` resolves like `es`. An explicit label — including `""` for numeral-only — still wins, and an unrecognized language still falls back to `"Chapter"`.
+- **Cost-only runs announce `Stage: COST-ESTIMATE`.** The estimate enters the translate stage and bails out before any API call, so it borrowed that stage's banner and read as though a paid run had started. `chunk`/`cost` always pass `--cost-only` and cannot spend.
+- **Prompt templates fall back to their `*.example.txt` twin.** The active prompts are gitignored per-user files, so a fresh clone had none and every priced-or-estimated path — including `--cost-only`, which never spends — died with "Template file not found" until the examples were copied by hand. The example *is* the default content, so it is now used when the real file is absent; if neither exists, the error names both paths. (The new CI, being a fresh clone, surfaced this as 77 failing tests.)
+
+### Added
+- **Python 3.11 declared as the supported minimum**, via a metadata-only `pyproject.toml` that reads the version from `VERSION` (still the single source of truth).
+- **CI workflow** (`.github/workflows/ci.yml`): a dependency-free `compileall` job plus the test suite, both on 3.11. The repo previously had no test CI — both existing workflows are Claude bots. A real 3.11 interpreter is the only thing that catches the `SyntaxError` class above: a newer interpreter accepts the syntax, and `ast.parse(feature_version=(3, 11))` does not reject it either, since 3.12+ tokenizes f-strings with the new tokenizer.
+
 ## [0.31.0.0] - 2026-07-14
 
 ### Added
