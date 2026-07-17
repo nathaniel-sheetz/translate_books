@@ -642,6 +642,49 @@ def test_stream_result_without_summary_is_minimal_dict():
         "command": "epub", "exit_code": 1}
 
 
+# ── error capture (friction-log #6) ────────────────────────────────────────
+
+def test_stream_result_fills_error_on_failure():
+    """A failure must carry a readable cause: last_output.json used to record
+    exit_code 1 with error: null, leaving the diagnosis only in unparsed stdout."""
+    result = flow._stream_result(
+        "cost", rc=1, summary=None,
+        error="Template file not found: prompts/translation.txt")
+    assert result["error"] == "Template file not found: prompts/translation.txt"
+
+
+def test_stream_result_omits_error_on_success():
+    """The _schema documents error as present only on failure."""
+    result = flow._stream_result("chunk", rc=0, summary=None, error="stale noise")
+    assert "error" not in result
+
+
+def test_stream_result_sentinel_error_beats_scraped_line():
+    """A structured error from the sentinel is more specific than a scraped line."""
+    result = flow._stream_result(
+        "translate", rc=1, summary={"error": "specific cause"}, error="scraped line")
+    assert result["error"] == "specific cause"
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("  ERROR in translate: Template file not found: prompts/translation.txt",
+     "Template file not found: prompts/translation.txt"),
+    ("ERROR: something broke", "something broke"),
+    ("ERROR in epub: missing metadata", "missing metadata"),
+])
+def test_script_error_regex_extracts_message(line, expected):
+    assert flow._SCRIPT_ERROR_RE.match(line).group("msg") == expected
+
+
+@pytest.mark.parametrize("line", [
+    "  no error here",
+    "The ERROR was recovered",  # not at line start: prose, not a failure report
+    "",
+])
+def test_script_error_regex_ignores_non_errors(line):
+    assert flow._SCRIPT_ERROR_RE.match(line) is None
+
+
 # ── cost gate (the one paid step) ──────────────────────────────────────────
 
 def test_translate_fails_closed_without_yes(project: Path):
