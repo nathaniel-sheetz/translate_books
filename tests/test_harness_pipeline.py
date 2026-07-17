@@ -388,9 +388,10 @@ def test_run_script_forces_utf8_in_child_env(monkeypatch):
 
     monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
 
-    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    rc, summary, error = flow._run_script(["scripts/translate_book.py", "chunk"])
     assert rc == 0
     assert summary is None  # no HARNESS_RESULT sentinel was emitted
+    assert error is None
 
     env = captured["env"]
     assert env is not None, "_run_script must pass an explicit env to the child"
@@ -419,9 +420,10 @@ def test_run_script_captures_and_hides_harness_result_sentinel(monkeypatch, caps
 
     monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
 
-    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    rc, summary, error = flow._run_script(["scripts/translate_book.py", "chunk"])
     assert rc == 0
     assert summary == {"stage": "cost-estimate", "total_chunks_in_scope": 7}
+    assert error is None  # a clean run reports no error line
 
     out = capsys.readouterr().out
     assert "Chunking the book..." in out and "Estimate ready." in out
@@ -446,13 +448,37 @@ def test_run_script_malformed_sentinel_falls_back_to_none(monkeypatch, capsys):
 
     monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
 
-    rc, summary = flow._run_script(["scripts/translate_book.py", "chunk"])
+    rc, summary, error = flow._run_script(["scripts/translate_book.py", "chunk"])
     assert rc == 0
     assert summary is None  # malformed JSON -> graceful fallback, not a crash
+    assert error is None
 
     out = capsys.readouterr().out
     assert "Progress line." in out and "Done." in out
     assert state.HARNESS_RESULT_PREFIX not in out  # still hidden even when malformed
+
+
+def test_run_script_scrapes_error_line_from_stdout(monkeypatch, capsys):
+    """Friction-log #6: the wrapped script's failure reason reaches the caller so it can
+    land in last_output.json's ``error`` — while still printing normally for the human."""
+    from src.harness import flow
+
+    class FakeProc:
+        stdout = iter((
+            "Stage: COST-ESTIMATE\n",
+            "  ERROR in translate: Template file not found: prompts/translation.txt\n",
+        ))
+
+        def wait(self):
+            return 1
+
+    monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **k: FakeProc())
+
+    rc, _summary, error = flow._run_script(["scripts/translate_book.py", "chunk"])
+    assert rc == 1
+    assert error == "Template file not found: prompts/translation.txt"
+    # The error line is a diagnosis, not a machine-only sentinel: it still streams.
+    assert "ERROR in translate" in capsys.readouterr().out
 
 
 # ===========================================================================
