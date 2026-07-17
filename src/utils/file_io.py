@@ -205,6 +205,13 @@ def load_prompt_template(template_path: Optional[Path] = None) -> str:
     """
     Load a prompt template from file.
 
+    The active prompts (``prompts/translation.txt`` and friends) are gitignored
+    per-user files shipped as ``*.example.txt``, so a fresh clone has only the
+    examples. Fall back to the example rather than failing: the example *is* the
+    default content, and without this every priced-or-estimated path -- including
+    ``--cost-only``, which never spends -- dies on a clone that has not been
+    hand-primed with `cp`.
+
     Args:
         template_path: Path to the template file. If None, uses default
                       'prompts/translation.txt' from current directory.
@@ -213,7 +220,7 @@ def load_prompt_template(template_path: Optional[Path] = None) -> str:
         Template content as string
 
     Raises:
-        FileNotFoundError: If the template file doesn't exist
+        FileNotFoundError: If neither the template nor its *.example.* twin exists
 
     Example:
         >>> template = load_prompt_template()  # Loads default
@@ -223,7 +230,15 @@ def load_prompt_template(template_path: Optional[Path] = None) -> str:
         template_path = Path("prompts/translation.txt")
 
     if not template_path.exists():
-        raise FileNotFoundError(f"Template file not found: {template_path}")
+        # prompts/translation.txt -> prompts/translation.example.txt
+        example_path = template_path.with_suffix(f".example{template_path.suffix}")
+        if example_path.exists():
+            template_path = example_path
+        else:
+            raise FileNotFoundError(
+                f"Template file not found: {template_path} "
+                f"(no {example_path} to fall back to either)"
+            )
 
     with template_path.open('r', encoding='utf-8') as f:
         return f.read()
