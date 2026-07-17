@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Parses every module under the MINIMUM supported interpreter. This is the only
+  # reliable guard against 3.12-only syntax: a newer interpreter accepts it happily,
+  # and ast.parse(feature_version=(3, 11)) does NOT reject it either (3.12+ tokenizes
+  # f-strings with the new tokenizer, so PEP 701 constructs parse regardless). Only a
+  # real 3.11 interpreter catches it. Deliberately dependency-free so it always runs.
+  compile:
+    name: Compile (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Byte-compile all sources
+        run: python -m compileall -q src scripts tests
+
+  test:
+    name: Tests (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # pyenchant is a binding to a C library that pip cannot supply. Without it the
+      # dictionary evaluator's import guard trips and its tests skip rather than run.
+      - name: Install enchant
+        run: sudo apt-get update && sudo apt-get install -y libenchant-2-2
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -q
