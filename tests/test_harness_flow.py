@@ -699,3 +699,161 @@ def test_cli_translate_without_yes_exits_nonzero(project: Path):
     )
     assert result.returncode == 2
     assert "without --yes" in result.stderr
+
+
+# ── footnotes (imported Gutenberg reader footnotes) ─────────────────────────
+
+def test_setup_threads_footnotes_and_surfaces_detection(tmp_path: Path, monkeypatch):
+    """setup defaults to --footnotes import and threads it into stage_ingest, then surfaces
+    the ingest's detection (footnotes_detected / footnotes_mode). Without this field the
+    harness always dropped footnotes (friction #2)."""
+    import scripts.translate_book as tb
+
+    proj = tmp_path / "fnbook"
+    proj.mkdir()
+    seen: dict = {}
+
+    def fake_ingest(args, project_dir, st):
+        seen["footnotes"] = getattr(args, "footnotes", "MISSING")
+        (project_dir / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
+        st.update(stage_completed="ingest", footnote_count=3,
+                  footnote_mode=args.footnotes, source_words=123)
+        return st
+
+    def fake_split(args, project_dir, st):
+        (project_dir / "chapters").mkdir(exist_ok=True)
+        (project_dir / "chapters" / "chapter_01.txt").write_text(
+            _chapter_body("A"), encoding="utf-8")
+        st["stage_completed"] = "split"
+        return st
+
+    monkeypatch.setattr(tb, "stage_ingest", fake_ingest)
+    monkeypatch.setattr(tb, "stage_split", fake_split)
+    monkeypatch.setattr(flow, "_pattern_hints", lambda *a, **k: {
+        "pattern_used": "auto", "detected": "auto", "warnings": [], "sections": []})
+
+    result = flow.setup(str(proj), url="https://example.test/book.html", title="T", author="A")
+    assert seen["footnotes"] == "import"  # the harness default is import
+    assert result["footnotes_detected"] == 3
+    assert result["footnotes_mode"] == "import"
+
+    # An explicit --footnotes drop threads through unchanged.
+    flow.setup(str(proj), url="https://example.test/book.html", title="T", author="A",
+               footnotes="drop")
+    assert seen["footnotes"] == "drop"
+
+
+def test_setup_schema_documents_footnote_keys():
+    for key in ("footnotes_detected", "footnotes_mode"):
+        assert key in flow.OUTPUT_SCHEMAS["setup"]
+
+
+def test_setup_no_url_path_reports_no_footnotes(tmp_path: Path):
+    """The local source.txt path skips footnote detection, so the fields read 0 / None
+    (there is nothing to prompt about)."""
+    proj = tmp_path / "localbook"
+    proj.mkdir()
+    (proj / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
+    result = flow.setup(str(proj), url="", title="T", author="A")
+    assert result["footnotes_detected"] == 0
+    assert result["footnotes_mode"] is None
+
+
+def _write_sidecar(project: Path, notes: list[dict]) -> None:
+    (project / "footnotes.json").write_text(
+        json.dumps(notes, ensure_ascii=False), encoding="utf-8")
+
+
+def test_footnotes_translate_fails_closed_without_yes(project: Path, monkeypatch):
+    """The paid note-body translation refuses without --yes and never spawns the script."""
+    _write_sidecar(project, [{"number": 1, "source_body": "x"}])
+    monkeypatch.setattr(flow, "_run_script",
+                        lambda cmd: pytest.fail("must not spend without --yes"))
+    assert flow.footnotes_translate(str(project), yes=False) == 2
+
+
+def test_footnotes_translate_no_sidecar_is_noop(project: Path, monkeypatch):
+    """No footnotes.json -> a clean no-op, not a spend or an error, even with --yes."""
+    monkeypatch.setattr(flow, "_run_script",
+                        lambda cmd: pytest.fail("nothing imported -> must not spend"))
+    result = flow.footnotes_translate(str(project), yes=True)
+    assert result["exit_code"] == 0 and result["translated"] == 0
+    assert "note" in result
+
+
+def test_footnotes_translate_yes_invokes_translator(project: Path, monkeypatch):
+    """With --yes it wraps translate_footnotes.py with the config-derived flags and reports
+    translated/pending counts read back from the sidecar."""
+    import scripts.harness as harness
+
+    _write_sidecar(project, [
+        {"number": 1, "source_body": "x", "translated_body": "y"},
+        {"number": 2, "source_body": "z"},
+    ])
+    captured: dict = {}
+
+    def fake_run(cmd):
+        captured["cmd"] = cmd
+        return (0, None, None)
+
+    monkeypatch.setattr(flow, "_run_script", fake_run)
+    monkeypatch.setattr(sys, "argv",
+                        ["harness.py", "footnotes", "translate", "--project", str(project), "--yes"])
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 0
+    assert "scripts/translate_footnotes.py" in captured["cmd"]
+    assert "--project-dir" in captured["cmd"] and "--target-lang" in captured["cmd"]
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert (out["total"], out["translated"], out["pending"]) == (2, 1, 1)
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["footnotes translate"]
+
+
+def test_footnotes_apply_invokes_footnotes_stage(project: Path, monkeypatch):
+    """apply runs only translate_book's footnotes stage (with book metadata) and reports the
+    written count + rebuilt EPUB from the checkpoint."""
+    import scripts.harness as harness
+
+    _write_sidecar(project, [{"number": 1, "source_body": "x"}])
+    captured: dict = {}
+
+    def fake_run(cmd):
+        captured["cmd"] = cmd
+        (project / "pipeline_state.json").write_text(
+            json.dumps({"footnotes_written": 4, "epub_path": str(project / "b.epub")}),
+            encoding="utf-8")
+        return (0, None, None)
+
+    monkeypatch.setattr(flow, "_run_script", fake_run)
+    monkeypatch.setattr(sys, "argv",
+                        ["harness.py", "footnotes", "apply", "--project", str(project)])
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 0
+    assert "scripts/translate_book.py" in captured["cmd"]
+    assert "--start-stage" in captured["cmd"] and "footnotes" in captured["cmd"]
+    assert "--project-name" in captured["cmd"]
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["footnotes_written"] == 4 and out["epub_path"].endswith("b.epub")
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["footnotes apply"]
+
+
+def test_footnotes_drop_strips_tokens_and_removes_sidecar(project: Path):
+    """drop reverts an import locally: strip [FOOTNOTE:N] from source.txt + chapters and
+    delete the sidecar (the Step 0 'drop' choice, no re-fetch)."""
+    (project / "source.txt").write_text("Hello[FOOTNOTE:1] world[FOOTNOTE:2].", encoding="utf-8")
+    (project / "chapters" / "chapter_01.txt").write_text("Ch one[FOOTNOTE:3] end.", encoding="utf-8")
+    # chapter_02 (from the fixture) has no tokens and must be left untouched.
+    _write_sidecar(project, [{"number": 1, "source_body": "x"}])
+
+    result = flow.footnotes_drop(str(project))
+    assert result["tokens_stripped"] == 3
+    assert result["files_cleaned"] == 2  # source.txt + chapter_01
+    assert result["sidecar_removed"] is True
+    assert not (project / "footnotes.json").exists()
+    assert "[FOOTNOTE:" not in (project / "source.txt").read_text(encoding="utf-8")
+    assert "[FOOTNOTE:" not in (project / "chapters" / "chapter_01.txt").read_text(encoding="utf-8")
+    for key in result:  # every returned key is documented (#19)
+        assert key in flow.OUTPUT_SCHEMAS["footnotes drop"], key

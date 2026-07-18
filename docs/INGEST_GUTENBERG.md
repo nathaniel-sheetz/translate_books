@@ -40,6 +40,21 @@ Importing footnotes spans three steps:
    ```
 3. **Convert** (the `footnotes` stage of `translate_book.py`, run after `align`) — turns each surviving token into a `type:"footnote"` annotation in `annotations.jsonl`, anchored to the preceding word, then rebuilds the EPUB so the existing endnote machinery embeds them. The full pipeline runs this automatically; footnotes then appear as editable annotations in the reader and as endnotes in the EPUB. `translate_book.py` also accepts `--footnotes import`.
 
+### Via the translate-harness
+
+The harness exposes the same three steps as first-class commands, so a harness-driven run never has to shell out to these scripts by hand:
+
+```bash
+# Ingest step: setup imports footnotes by DEFAULT on the --url path, and reports
+# footnotes_detected / footnotes_mode in its output.
+python scripts/harness.py setup --url URL --title "T" --author "A"            # --footnotes import is the default
+python scripts/harness.py footnotes drop     --project projects/mybook        # opt out (strip tokens + delete sidecar, no re-fetch)
+
+# After chapters are translated AND aligned:
+python scripts/harness.py footnotes translate --project projects/mybook --yes # translate the note bodies (paid; refuses without --yes)
+python scripts/harness.py footnotes apply     --project projects/mybook       # convert tokens -> reader footnotes + rebuild EPUB
+```
+
 ## Output
 
 | Path | Contents |
