@@ -326,6 +326,92 @@ def image_placeholder_instruction(source_text: str, *, always_include: bool = Fa
     return _IMAGE_INSTRUCTION_FILENAME_ONLY
 
 
+# ---------------------------------------------------------------------------
+# Footnote reference tokens
+# ---------------------------------------------------------------------------
+
+# Matches [FOOTNOTE:N] where N is a 1-based, book-global index. Inserted by
+# ``src/footnote_import`` at ingest to mark the exact position of an imported
+# Gutenberg footnote reference, and carried verbatim through translation (the
+# same survivable-token strategy as [IMAGE:...]) so the marker lands at the
+# right spot in the target text.
+FOOTNOTE_TOKEN_RE = re.compile(r"\[FOOTNOTE:(\d+)\]")
+
+
+def footnote_token_numbers(text: str) -> list[int]:
+    """Return the footnote numbers of every ``[FOOTNOTE:N]`` token, in order."""
+    if not text:
+        return []
+    return [int(m.group(1)) for m in FOOTNOTE_TOKEN_RE.finditer(text)]
+
+
+def footnote_token_counts(text: str) -> "Counter[int]":
+    """Return a Counter of ``[FOOTNOTE:N]`` numbers in *text*.
+
+    Used to check that a translation preserved exactly the source's footnote
+    tokens: a number present in the source but missing from the translation is a
+    dropped footnote marker; a number in the translation but not the source is a
+    hallucinated one; a count mismatch catches a token emitted twice.
+    """
+    from collections import Counter
+    if not text:
+        return Counter()
+    return Counter(int(m.group(1)) for m in FOOTNOTE_TOKEN_RE.finditer(text))
+
+
+def footnote_tokens_preserved(source_text: str, translated_text: str) -> bool:
+    """True when *translated_text* carries exactly the source's footnote tokens."""
+    return footnote_token_counts(source_text) == footnote_token_counts(translated_text)
+
+
+def strip_footnote_tokens(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Remove every ``[FOOTNOTE:N]`` token; return ``(clean_text, placements)``.
+
+    ``placements`` is ``[(number, position_in_clean_text), ...]`` in document
+    order, where ``position_in_clean_text`` is the character offset in the
+    returned token-free text at which the token sat. This is what the
+    post-translation conversion uses to re-anchor each imported footnote.
+    """
+    placements: list[tuple[int, int]] = []
+    out: list[str] = []
+    last = 0
+    clean_len = 0
+    for m in FOOTNOTE_TOKEN_RE.finditer(text):
+        segment = text[last:m.start()]
+        out.append(segment)
+        clean_len += len(segment)
+        placements.append((int(m.group(1)), clean_len))
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out), placements
+
+
+_FOOTNOTE_INSTRUCTION = (
+    "   - If the source contains footnote markers in the format [FOOTNOTE:N] "
+    "(N is a number),\n"
+    "     copy them into the translation exactly as-is at the same position in "
+    "the text. Never\n"
+    "     translate, renumber, move, or drop them."
+)
+
+
+def footnote_placeholder_instruction(source_text: str, *, always_include: bool = False) -> str:
+    """Build the translation-prompt sub-bullet for footnote markers.
+
+    Returns the bullet only when the book/chunk actually has footnote tokens, so
+    a book without imported footnotes never sees it. ``always_include`` forces
+    the (constant) bullet regardless of this chunk's own tokens — a book-level
+    knob for cache-prefix stability, mirroring ``image_placeholder_instruction``.
+    The bullet includes leading ``   - `` so it slots into the STRUCTURE
+    PRESERVATION section next to the image bullet.
+    """
+    if always_include:
+        return _FOOTNOTE_INSTRUCTION
+    if not source_text:
+        return ""
+    return _FOOTNOTE_INSTRUCTION if FOOTNOTE_TOKEN_RE.search(source_text) else ""
+
+
 # Dialogue-handling instructions live in a standalone prompt file so the (long)
 # house-style block can be maintained separately from the system prompt and
 # injected only into chunks that actually contain dialogue — the same

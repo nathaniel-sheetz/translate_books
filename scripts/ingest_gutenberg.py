@@ -22,6 +22,10 @@ import sys
 import urllib.parse
 from pathlib import Path
 
+# Make the project root importable when run as a standalone script
+# (``python scripts/ingest_gutenberg.py``) so ``from src...`` resolves.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # --- optional imports with helpful error messages ---
 try:
     import requests
@@ -412,6 +416,8 @@ def print_report(
     total_words: int,
     images_downloaded: int,
     images_skipped: int,
+    footnotes_count: int = 0,
+    footnotes_mode: str = "drop",
 ):
     print()
     print("=== PROJECT GUTENBERG IMPORT ===")
@@ -421,6 +427,13 @@ def print_report(
         if images_skipped:
             img_msg += f", {images_skipped} failed"
         print(f"Images : {img_msg} -> {output_dir / 'images'}/")
+    if footnotes_count:
+        if footnotes_mode == "import":
+            print(f"Footnotes : {footnotes_count} imported -> {output_dir / 'footnotes.json'}")
+            print("            (translate them with scripts/translate_footnotes.py)")
+        else:
+            print(f"Footnotes : {footnotes_count} detected and dropped")
+            print("            (re-run with --footnotes import to keep them as reader footnotes)")
 
     if not chapters:
         print(f"\nNo chapter headings detected. Total words: {total_words:,}")
@@ -493,6 +506,15 @@ Examples:
         action="store_true",
         help="Insert placeholders but do not download image files",
     )
+    parser.add_argument(
+        "--footnotes",
+        choices=["import", "drop"],
+        default="drop",
+        help="What to do with Gutenberg footnotes. 'import' captures them as "
+             "[FOOTNOTE:N] tokens + footnotes.json for translation into reader "
+             "footnotes; 'drop' (default) removes them cleanly. Either way the "
+             "count is reported.",
+    )
     return parser.parse_args()
 
 
@@ -513,6 +535,24 @@ def main():
     soup = BeautifulSoup(html, "html.parser")
     body = find_book_body(soup)
 
+    # Footnotes: always detected; imported as survivable tokens (+ sidecar) or
+    # dropped cleanly, per --footnotes. Must run before the text conversion,
+    # which would otherwise flatten the linkage away.
+    from src.footnote_import import (
+        find_footnotes,
+        apply_import,
+        apply_drop,
+        records_from_matches,
+        write_footnotes_sidecar,
+    )
+    fn_matches = find_footnotes(body)
+    if fn_matches:
+        if args.footnotes == "import":
+            apply_import(fn_matches)
+            write_footnotes_sidecar(output_dir, records_from_matches(fn_matches))
+        else:
+            apply_drop(fn_matches)
+
     converter = Converter(
         base_url=base_url,
         images_dir=images_dir,
@@ -531,6 +571,8 @@ def main():
         total_words=total_words,
         images_downloaded=converter._images_downloaded,
         images_skipped=converter._images_skipped,
+        footnotes_count=len(fn_matches),
+        footnotes_mode=args.footnotes,
     )
 
 

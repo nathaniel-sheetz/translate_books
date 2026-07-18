@@ -51,6 +51,7 @@ STAGES = [
     "combine",
     "epub",
     "align",
+    "footnotes",
 ]
 
 
@@ -140,6 +141,25 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     body = find_book_body(soup)
 
+    # Footnotes: detect always; import as survivable [FOOTNOTE:N] tokens (+
+    # footnotes.json) or drop cleanly, per --footnotes. Runs before the text
+    # conversion that would otherwise flatten the linkage away.
+    from src.footnote_import import (
+        find_footnotes,
+        apply_import,
+        apply_drop,
+        records_from_matches,
+        write_footnotes_sidecar,
+    )
+    fn_mode = getattr(args, "footnotes", "drop") or "drop"
+    fn_matches = find_footnotes(body)
+    if fn_matches:
+        if fn_mode == "import":
+            apply_import(fn_matches)
+            write_footnotes_sidecar(project_dir, records_from_matches(fn_matches))
+        else:
+            apply_drop(fn_matches)
+
     images_dir = project_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
@@ -155,10 +175,15 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
     out_path.write_text(text, encoding="utf-8")
 
     word_count = len(text.split())
-    print(f"  Ingested: {word_count:,} words, {converter._images_downloaded} images")
+    fn_note = ""
+    if fn_matches:
+        fn_note = f", {len(fn_matches)} footnotes {'imported' if fn_mode == 'import' else 'dropped'}"
+    print(f"  Ingested: {word_count:,} words, {converter._images_downloaded} images{fn_note}")
 
     state["stage_completed"] = "ingest"
     state["source_words"] = word_count
+    state["footnote_count"] = len(fn_matches)
+    state["footnote_mode"] = fn_mode
     state["url"] = url
     # Heading-derived hints the agent can relay (parity with the web GUI's
     # Gutenberg report): a per-chapter report and an auto-suggested split
@@ -430,6 +455,18 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         )
 
         save_chunk(translated, chunk_path)
+
+        # Footnote-token survival guard (mirrors the image-placeholder check):
+        # a marker dropped/duplicated by the model would misplace a footnote, so
+        # surface it now rather than silently at build time.
+        from src.utils.text_utils import footnote_tokens_preserved
+        if not footnote_tokens_preserved(chunk.source_text, translated.translated_text or ""):
+            print(
+                f"\n    WARNING: [FOOTNOTE:N] tokens not preserved in {chunk.id}; "
+                "review before running the footnotes stage.",
+                end="",
+            )
+
         elapsed = time.time() - t0
         usage = last_cache_usage() or {}
         total_cache_read += int(usage.get("cache_read_input_tokens", 0) or 0)
@@ -627,6 +664,105 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
     return state
 
 
+def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
+    """Stage 9: Convert imported [FOOTNOTE:N] tokens into reader footnotes.
+
+    No-op unless ingest ran with ``--footnotes import`` (footnotes.json present).
+    Runs after align so aligned sentences exist; for each chapter it locates each
+    surviving token, writes a ``type:"footnote"`` annotation anchored to the
+    preceding word, strips the tokens from the stored translation + alignment,
+    then rebuilds the EPUB so the existing endnote machinery embeds them.
+    """
+    import json as _json
+    from src.footnote_import import (
+        load_footnotes_sidecar,
+        convert_chapter_footnotes,
+        write_footnote_annotations,
+    )
+    from src.utils.text_utils import strip_footnote_tokens
+
+    notes = load_footnotes_sidecar(project_dir)
+    if not notes:
+        print("  No imported footnotes (footnotes.json absent) — skipping.")
+        state["stage_completed"] = "footnotes"
+        return state
+
+    bodies = {
+        n["number"]: (n.get("translated_body") or n.get("source_body") or "").strip()
+        for n in notes
+    }
+    missing = [n["number"] for n in notes if not (n.get("translated_body") or "").strip()]
+    if missing:
+        print(f"  NOTE: {len(missing)} footnote(s) not yet translated "
+              "(run scripts/translate_footnotes.py); using source text for those.")
+
+    chunks_dir = project_dir / "chunks"
+    align_dir = project_dir / "alignments"
+    chapters = discover_chapters(chunks_dir)
+
+    total_written = 0
+    changed: list[str] = []
+    for chapter_id, chunk_paths in chapters.items():
+        chunks = [load_chunk(cp) for cp in chunk_paths]
+        if not all(c.has_translation for c in chunks):
+            continue
+        combined = combine_chunks(chunks)
+        if "[FOOTNOTE:" not in combined:
+            continue
+
+        # Clean the alignment's es sentences so both this conversion and the
+        # later endnote build match the token-free chapter text.
+        es_map: dict = {}
+        align_path = align_dir / f"{chapter_id}.json"
+        align_data = None
+        if align_path.exists():
+            align_data = _json.loads(align_path.read_text(encoding="utf-8"))
+            for a in align_data.get("alignments", []):
+                if "es" in a:
+                    a["es"] = strip_footnote_tokens(a["es"])[0]
+                if "es_idx" in a and "es" in a:
+                    es_map[a["es_idx"]] = a["es"]
+        else:
+            print(f"    {chapter_id}: no alignment file — run the align stage first; skipping")
+            continue
+
+        _clean, records = convert_chapter_footnotes(
+            chapter_id, project_dir.name, combined, es_map, bodies,
+        )
+        total_written += write_footnote_annotations(project_dir, chapter_id, records)
+        changed.append(chapter_id)
+
+        align_path.write_text(_json.dumps(align_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # Strip tokens from the stored translation so the rebuilt EPUB (which
+        # re-combines from chunks) is token-free and consistent with alignment.
+        for c, cp in zip(chunks, chunk_paths):
+            if c.translated_text and "[FOOTNOTE:" in c.translated_text:
+                c.translated_text = strip_footnote_tokens(c.translated_text)[0]
+                save_chunk(c, cp)
+
+        print(f"    {chapter_id}: {len(records)} footnote(s)")
+
+    print(f"  Wrote {total_written} footnote annotation(s) across {len(changed)} chapter(s)")
+
+    if changed:
+        project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
+        author = getattr(args, "author", "Unknown") or "Unknown"
+        target_lang_code = getattr(args, "target_lang_code", "es") or "es"
+        result = build_epub_from_chunks(
+            project_path=project_dir,
+            title=project_name,
+            author=author,
+            language=target_lang_code,
+        )
+        print(f"  Rebuilt EPUB with footnotes: {result.path}")
+        state["epub_path"] = str(result.path)
+
+    state["stage_completed"] = "footnotes"
+    state["footnotes_written"] = total_written
+    return state
+
+
 STAGE_FUNCTIONS = {
     "ingest": stage_ingest,
     "split": stage_split,
@@ -636,6 +772,7 @@ STAGE_FUNCTIONS = {
     "combine": stage_combine,
     "epub": stage_epub,
     "align": stage_align,
+    "footnotes": stage_footnotes,
 }
 
 
@@ -653,6 +790,13 @@ def main():
     )
     parser.add_argument("--project-name", help="Project/book title")
     parser.add_argument("--author", default="Unknown", help="Author name for EPUB metadata")
+    parser.add_argument(
+        "--footnotes",
+        choices=["import", "drop"],
+        default="drop",
+        help="Gutenberg footnote handling at ingest: 'import' keeps them as "
+             "translatable reader footnotes; 'drop' (default) removes them.",
+    )
 
     # Languages
     parser.add_argument("--source-lang", default="English", help="Source language name (default: English)")
