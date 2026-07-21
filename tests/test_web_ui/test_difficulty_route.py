@@ -60,7 +60,7 @@ def project(tmp_path, monkeypatch):
 
 class TestDifficultyRouteValidation:
     def test_bad_project_id_returns_400(self, client, project):
-        # "..." contains ".." which _safe_id rejects; Flask routes it through
+        # "..." is all dots, so _safe_id rejects it; Flask routes it through
         # unlike "../etc" which gets cleaned before reaching the route.
         rv = client.get("/api/project/.../difficulty")
         assert rv.status_code == 400
@@ -72,9 +72,11 @@ class TestDifficultyRouteValidation:
         rv = client.get("/api/project/C:foo/difficulty")
         assert rv.status_code == 400
 
-    def test_project_id_with_dot_returns_400(self, client, project):
+    def test_project_id_with_dot_is_not_rejected(self, client, project):
+        # Real project dirs use embedded dots (e.g. "foo.bak-ch1-restore"
+        # manual backups) — only an id made entirely of dots is unsafe.
         rv = client.get("/api/project/a.b/difficulty")
-        assert rv.status_code == 400
+        assert rv.status_code != 400
 
     def test_valid_hyphenated_project_id_not_rejected(self, client, project):
         # Allowlist must pass valid IDs like "understood-betsy" or "my_book".
