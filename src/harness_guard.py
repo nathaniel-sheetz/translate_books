@@ -31,7 +31,10 @@ from src.evaluators.completeness_eval import CompletenessEvaluator
 from src.evaluators.length_eval import LengthEvaluator
 from src.models import Chunk, IssueLevel
 from src.utils.file_io import load_address_map, load_chunk, load_glossary, load_style_guide
-from src.utils.text_utils import image_filename_counts, image_filenames
+from src.utils.text_utils import (
+    footnote_token_counts,
+    image_filename_counts,
+)
 
 
 class HarnessValidationError(Exception):
@@ -154,13 +157,17 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
       - image-token FILENAME parity vs source: ``[IMAGE:file]`` tokens are
         PRESERVED through translation (only the description is translated), so a
         dropped or hallucinated filename fails — the token's presence does not.
+      - footnote-token NUMBER parity vs source: ``[FOOTNOTE:N]`` tokens are
+        preserved exactly (same multiset of N); a dropped or hallucinated note
+        fails the same way images do.
       - ``completeness_eval`` + ``length_eval`` ERROR-severity issues
         (placeholder text, empty, wildly off length); WARNINGS do not block.
 
         AGENT PROSE (untrusted)            guard_translation_draft           COMMIT
         ──────────────────────            ───────────────────────           ──────
-        worker draft  ──────────►  empty? echo? image parity?  ──ok──►  apply_translation
-                                   completeness/length ERROR?            + save_chunk
+        worker draft  ──────────►  empty? echo? image/footnote  ──ok──►  apply_translation
+                                   parity? completeness/length            + save_chunk
+                                   ERROR?
                                         │ problems
                                         ▼ return [..]  ──► re-spawn (cap 3) ─► manual
     """
@@ -196,6 +203,19 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
         if extra:
             detail.append(f"hallucinated {extra}")
         problems.append("image-token filename mismatch vs source: " + "; ".join(detail))
+
+    # Footnote-token number parity (same Counter pattern as images).
+    src_fns = footnote_token_counts(chunk.source_text or "")
+    out_fns = footnote_token_counts(prose or "")
+    if src_fns != out_fns:
+        detail = []
+        missing = sorted(src_fns - out_fns)
+        extra = sorted(out_fns - src_fns)
+        if missing:
+            detail.append(f"dropped {missing}")
+        if extra:
+            detail.append(f"hallucinated {extra}")
+        problems.append("footnote-token-parity: " + "; ".join(detail))
 
     # Reuse the existing evaluators; only ERROR-severity issues block the commit.
     eval_chunk = chunk.model_copy(update={"translated_text": text})

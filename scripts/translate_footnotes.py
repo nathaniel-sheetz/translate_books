@@ -11,7 +11,9 @@ the chapters are in the pipeline.
 
 Usage:
     python scripts/translate_footnotes.py --project-dir projects/mybook
-    python scripts/translate_footnotes.py --project-dir projects/mybook --yes
+
+Cost/confirmation gating lives in the harness (``harness footnotes translate --yes``).
+The standalone script spends when invoked directly.
 """
 
 import argparse

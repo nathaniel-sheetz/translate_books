@@ -248,6 +248,23 @@ class TestGuardTranslationDraft:
         problems = guard_translation_draft(_chunk(src), out)
         assert any("image-token filename mismatch" in p for p in problems)
 
+    def test_dropped_footnote_token_is_flagged(self):
+        src = f"{_SRC} [FOOTNOTE:1] more. [FOOTNOTE:2]"
+        # Worker kept #1 and dropped #2 (observed Animal Story Book friction).
+        out = f"{_OK} [FOOTNOTE:1] mas."
+        problems = guard_translation_draft(_chunk(src), out)
+        assert any("footnote-token-parity" in p and "dropped" in p for p in problems)
+
+    def test_hallucinated_footnote_token_is_flagged(self):
+        problems = guard_translation_draft(_chunk(_SRC), f"{_OK} [FOOTNOTE:9]")
+        assert any("footnote-token-parity" in p and "hallucinated" in p for p in problems)
+
+    def test_preserved_footnote_tokens_pass(self):
+        src = f"{_SRC} [FOOTNOTE:1] end. [FOOTNOTE:2]"
+        out = f"{_OK} [FOOTNOTE:1] fin. [FOOTNOTE:2]"
+        problems = guard_translation_draft(_chunk(src), out)
+        assert not any("footnote-token-parity" in p for p in problems)
+
     def test_too_short_translation_is_flagged_by_length(self):
         # < 0.5x source length -> length evaluator ERROR.
         problems = guard_translation_draft(_chunk(_SRC), "El sol.")

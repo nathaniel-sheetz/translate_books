@@ -679,7 +679,7 @@ def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
         convert_chapter_footnotes,
         write_footnote_annotations,
     )
-    from src.utils.text_utils import strip_footnote_tokens
+    from src.utils.text_utils import footnote_token_numbers, strip_footnote_tokens
 
     notes = load_footnotes_sidecar(project_dir)
     if not notes:
@@ -698,6 +698,7 @@ def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
 
     chunks_dir = project_dir / "chunks"
     align_dir = project_dir / "alignments"
+    chapters_dir = project_dir / "chapters"
     chapters = discover_chapters(chunks_dir)
 
     total_written = 0
@@ -708,6 +709,16 @@ def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
             continue
         combined = combine_chunks(chunks)
         if "[FOOTNOTE:" not in combined:
+            # Still report if the chapter *source* had tokens that translation lost.
+            src_path = chapters_dir / f"{chapter_id}.txt"
+            if src_path.exists():
+                src_nums = footnote_token_numbers(src_path.read_text(encoding="utf-8"))
+                if src_nums:
+                    print(
+                        f"    {chapter_id}: 0 written "
+                        f"({len(src_nums)} expected from source, missing: "
+                        f"{sorted(set(src_nums))})"
+                    )
             continue
 
         # Clean the alignment's es sentences so both this conversion and the
@@ -726,6 +737,14 @@ def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
             print(f"    {chapter_id}: no alignment file — run the align stage first; skipping")
             continue
 
+        surviving = footnote_token_numbers(combined)
+        src_path = chapters_dir / f"{chapter_id}.txt"
+        expected = (
+            footnote_token_numbers(src_path.read_text(encoding="utf-8"))
+            if src_path.exists()
+            else surviving
+        )
+
         _clean, records = convert_chapter_footnotes(
             chapter_id, project_dir.name, combined, es_map, bodies,
         )
@@ -741,7 +760,19 @@ def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
                 c.translated_text = strip_footnote_tokens(c.translated_text)[0]
                 save_chunk(c, cp)
 
-        print(f"    {chapter_id}: {len(records)} footnote(s)")
+        written_nums = sorted({r.get("fn_number") for r in records if r.get("fn_number") is not None})
+        missing_nums = sorted(set(expected) - set(surviving))
+        if missing_nums or len(records) != len(surviving):
+            print(
+                f"    {chapter_id}: {len(records)} written "
+                f"({len(expected)} expected from source, "
+                f"{len(surviving)} surviving in translation"
+                + (f", missing: {missing_nums}" if missing_nums else "")
+                + (f", wrote: {written_nums}" if written_nums else "")
+                + ")"
+            )
+        else:
+            print(f"    {chapter_id}: {len(records)} footnote(s)")
 
     print(f"  Wrote {total_written} footnote annotation(s) across {len(changed)} chapter(s)")
 
