@@ -467,19 +467,26 @@ the Step 4 gate **only if** the user picks the API backend; on the subagent path
 **If footnotes were imported, do Step 4C before Step 5** to translate + embed them (the API
 `translate` run auto-chains through combine/epub/align, but not the footnote *body* translation).
 
-## Step 4B — Subagent backend (zero-API-key, model-pinned) — ALTERNATIVE to Step 4
+## Step 4B — No-API-key backends (subagent / headless, model-pinned) — ALTERNATIVE to Step 4
 
-Two translation backends, same downstream pipeline. Pick one with the user:
+**Three** translation backends share one downstream pipeline. This is a single first-class choice —
+pick ONE with the user (bias toward a no-API-key backend when there is no `ANTHROPIC_API_KEY`):
 
-- **API backend (Step 4):** fast, batchable, but needs an `ANTHROPIC_API_KEY` and spends metered dollars.
-- **Subagent backend (this step):** no API key — translation runs as **spawned worker subagents on
-  the running subscription**, so a stranger can translate token-free. You (the orchestrator, e.g.
-  Opus) stay the smart driver while workers run on a **cheaper pinned model** (default `sonnet`).
-  The dollar figure from `chunk`/`cost` is the **metered-API** price and does **not** apply here;
-  this path's gate is the `usage_summary` from `translate-prepare` (4B-b), not a cost estimate.
+- **API (Step 4):** fast, batchable, but needs an `ANTHROPIC_API_KEY` and spends metered dollars.
+- **Subagent — Task workers (this step):** no API key — each chunk is translated by a `translator`
+  **Task subagent** you spawn (Read→Write→`done`). You (the orchestrator, e.g. Opus) stay the smart
+  driver while workers run on a **cheaper pinned model** (default `sonnet`).
+- **Headless — `claude -p` fan-out (this step):** no API key — the harness runs one bounded wave of
+  `claude -p` worker processes (`translate-fanout`) instead of Task subagents. Same pinned model and
+  spawn modes; it additionally reuses a shared preamble cache on Sonnet (see the cache note in 4B-b).
 
-Once the user picks, **log it**: `log-event --event backend --data '{"backend":"api"|"subagent",
-"model":"<model>"}'` (records the model/cost path the int-return `translate` wrapper can't).
+Both no-API-key backends run **spawned workers on the running subscription**, so a stranger can
+translate token-free; the dollar figure from `chunk`/`cost` is the **metered-API** price and does
+**not** apply — their gate is the `usage_summary` from `translate-prepare` (4B-b), not a cost estimate.
+
+Once the user picks, **log it** — this single beat is what every later step reads back to stay on the
+same backend, including **footnote translation** (Step 4C carries it forward automatically):
+`log-event --event backend --data '{"backend":"api"|"subagent"|"headless","model":"<model>"}'`.
 
 The translate phase is a **review-first, set-by-set** flow: translate a small batch, auto-align it so
 it is instantly readable, then translate the rest with the same spawn settings. Do the beats in order
@@ -548,12 +555,10 @@ per-chunk bodies at `.harness/translate/<id>.body.txt` — `preamble + body` is 
 **4B-b. STOP — usage gate. END THE TURN.** The subagent analog of the cost gate: no dollars, but
 spawning N workers consumes real subscription/rate usage. Show the `usage_summary` ("N workers on
 `<model>`, mode `<parallelism>`, **thinking: on/off**" — read the thinking state from
-`usage_summary.worker_thinking`), confirm the worker model, and ask via AskUserQuestion:
-
-1. **Task workers (default)** — spawn `translator` Task subagents (Read→Write→`done` per chunk).
-2. **Headless fan-out** — run `translate-fanout` (`claude -p`, one generate turn per chunk; uses the
-   shared preamble cache when `preamble_path`/`body_path` are on the manifest).
-3. **Abort**
+`usage_summary.worker_thinking`), confirm the worker model **and the backend already chosen** in the
+Step 4B intro, and ask via AskUserQuestion: **proceed / abort**. When approved, spawn per that
+backend — **Subagent (Task workers)** → Option [1] below; **Headless** → `translate-fanout`
+(Option [2]).
 
 **Worker-model / cache note (fold into this confirmation, not a new gate):** the ~2k-token shared
 preamble clears **Sonnet's** 1024-token cache minimum (caches for free on the headless path after
@@ -568,8 +573,8 @@ the prefix diverge across chunks. Without those, mixed chapters silently fall ba
 divergence, not a bug.
 
 **End your turn and wait.** Do not spawn workers or run `translate-fanout` in the same turn that
-produced the manifest. **Log the choice:** `log-event --event fanout_mode --data
-'{"mode":"task"|"headless"}'` (skip if aborted).
+produced the manifest. (The backend was already logged in the Step 4B intro; no separate
+`fanout_mode` beat is needed.)
 
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
 
@@ -718,22 +723,48 @@ Then continue exactly as the API path does — **Step 4C if footnotes were impor
 chapters are translated **and aligned** (the embed reads `alignments/`), and **before** the final
 EPUB.
 
-Once the chapters are done, **STOP and ask the user (its own beat): "Translate the footnotes now?"**
-This is a **metered API step**, so it needs an explicit, separate-turn go-ahead — never fold it into
-an earlier approval. It is small (note bodies only) and cheap, but treat it like the Step 4 gate.
+Footnotes translate on the **same backend you chose for the chapters** (Step 4/4B) — the note bodies
+never force a different path. `footnotes translate` resolves it automatically from the `backend`
+run-log beat (`--backend {auto,api,headless,subagent}`, default `auto`; pass an explicit value only to
+override). Once the chapters are done, **STOP and ask the user (its own beat): "Translate the
+footnotes now?"** — a separate-turn go-ahead, never folded into an earlier approval. Notes are few and
+short.
 
-- **Yes** → in a later turn, translate the note bodies, then embed:
+- **Yes** → in a later turn, translate on the resolved backend, then embed. Pick the matching path:
+
+  - **API backend** — a metered step (like Step 4): confirm cost in this beat, then
+    ```bash
+    python scripts/harness.py footnotes translate --project projects/<slug> --yes
+    ```
+    `footnotes translate` refuses without `--yes` on the API backend.
+  - **Headless backend** — no dollars (subscription usage), so no `--yes`. One command runs a
+    `claude -p` wave and writes the bodies back:
+    ```bash
+    python scripts/harness.py footnotes translate --project projects/<slug>
+    ```
+  - **Subagent (Task) backend** — spawn workers exactly like the chapters:
+    ```bash
+    python scripts/harness.py footnotes translate-prepare --project projects/<slug>
+    ```
+    Then spawn one `translator` Task subagent per manifest `entries[]` item (`.claude/agents/translator.md`,
+    pinned `worker_model`): *"Read `<prompt_path>`. Write ONLY the `N| <translation>` lines to
+    `<draft_path>`. Reply `done <batch_id>`."* Then land them:
+    ```bash
+    python scripts/harness.py footnotes translate-commit --project projects/<slug>
+    ```
+    `translate-commit` reports `committed` / `pending`; re-prepare + re-spawn any `pending` notes.
+
+  In every case, once the bodies are filled, embed them:
   ```bash
-  python scripts/harness.py footnotes translate --project projects/<slug> --yes
-  python scripts/harness.py footnotes apply     --project projects/<slug>
+  python scripts/harness.py footnotes apply --project projects/<slug>
   ```
-  `footnotes translate` refuses without `--yes` (like `translate`); it fills each note's
-  `translated_body` in `footnotes.json` (report `translated` / `pending`). `footnotes apply` then
-  converts every surviving `[FOOTNOTE:N]` token into an anchored reader footnote, strips the raw
-  tokens from the stored translation, and **rebuilds the EPUB** with a numbered back-matter section.
+  `footnotes apply` converts every surviving `[FOOTNOTE:N]` token into an anchored reader footnote,
+  strips the raw tokens from the stored translation, and **rebuilds the EPUB** with a numbered
+  back-matter section.
 - **No** → still run **`footnotes apply`** alone, so the raw `[FOOTNOTE:N]` tokens don't leak into
   the EPUB as literal text. Warn the user the notes will appear in the **source language**
-  (untranslated); they can run `footnotes translate --yes` + `footnotes apply` later to translate them.
+  (untranslated); they can translate them later (`footnotes translate` [`--yes` on the API backend],
+  then `footnotes apply`).
 
 `footnotes apply` is idempotent — on the **API path**, `translate` already auto-ran the footnotes
 stage once (with source text, since the bodies weren't translated yet), and re-applying simply
@@ -772,12 +803,14 @@ loop is gone — the user drafted nothing in an external chat.
 
 ## What this skill deliberately does NOT do (v1)
 
-- No `TranslationBackend` Protocol. Both backends share one prompt builder
-  (`build_translation_prompt`) and one stamp (`apply_translation`), so the seam is two functions,
-  not a class hierarchy. The subagent backend (Phase B) is the `translate-prepare` /
+- No `TranslationBackend` Protocol. The backends share one prompt builder
+  (`build_translation_prompt`) and one stamp (`apply_translation`), so the seam is a few functions,
+  not a class hierarchy. The no-API-key backends (Phase B) are the `translate-prepare` /
   `translate-commit` path (Step 4B), with user-chosen spawn modes (sequential /
-  chapter-parallel / all-parallel) and an opt-in headless `translate-fanout` (`claude -p`)
-  alongside Task workers. Still deferred: the **judge** headless backend (see
+  chapter-parallel / all-parallel) and a first-class choice between Task workers and headless
+  `translate-fanout` (`claude -p`). Footnote translation (Step 4C) carries the chosen backend forward
+  through the same seam (`footnotes translate` for api/headless; `footnotes translate-prepare` /
+  `translate-commit` for Task workers). Still deferred: the **judge** headless backend (see
   `docs/design/headless-judge-review-backend.md` when present) and enlarging the translation
   preamble so Opus/Haiku clear the 4096-token cache minimum.
 - No long-book resume beyond the pipeline's existing chunk-level idempotency (`stage_translate`

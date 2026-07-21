@@ -299,15 +299,31 @@ def _build_parser() -> argparse.ArgumentParser:
                              "(translate/apply/drop). Needs `setup --footnotes import`.")
     fn_sub = fn.add_subparsers(dest="action", required=True)
     fnt = fn_sub.add_parser("translate",
-                            help="The paid step: translate the note bodies in footnotes.json "
-                                 "(requires --yes)")
+                            help="Translate the note bodies on the book's chosen backend "
+                                 "(api needs --yes; headless runs a claude -p wave)")
     add_project(fnt)
     fnt.add_argument("--yes", action="store_true",
-                     help="Confirm the metered footnote translation (approve in a SEPARATE turn first)")
+                     help="Confirm the metered (api-backend) footnote translation "
+                          "(approve in a SEPARATE turn first). Ignored on the headless backend.")
+    fnt.add_argument("--backend", default="auto",
+                     choices=["auto", "api", "headless", "subagent"],
+                     help="Translation backend (default: auto = carry forward the chapter "
+                          "backend from the run log). 'api' shells to the metered path; "
+                          "'headless' runs a claude -p wave; 'subagent' prints the "
+                          "prepare/commit steps (Task workers are orchestrator-driven).")
     fnt.add_argument("--provider", default=None)
     fnt.add_argument("--model", default=None)
     fnt.add_argument("--retranslate", action="store_true",
                      help="Re-translate notes that already have a translated_body")
+    fntp = fn_sub.add_parser("translate-prepare",
+                             help="Subagent path: render a prompt per footnote batch + a manifest "
+                                  "(no spend); then spawn translator subagents and translate-commit")
+    add_project(fntp)
+    fntp.add_argument("--retranslate", action="store_true",
+                      help="Re-prepare notes that already have a translated_body")
+    fntc = fn_sub.add_parser("translate-commit",
+                             help="Parse the footnote batch drafts into footnotes.json (idempotent)")
+    add_project(fntc)
     fna = fn_sub.add_parser("apply",
                             help="Free: convert surviving [FOOTNOTE:N] tokens into reader "
                                  "footnotes and rebuild the EPUB (needs alignments)")
@@ -452,8 +468,14 @@ def _dispatch(args: argparse.Namespace):
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
     if cmd == "footnotes":
         if args.action == "translate":
-            return flow.footnotes_translate(args.project, yes=args.yes, provider=args.provider,
-                                            model=args.model, retranslate=args.retranslate)
+            backend = None if args.backend == "auto" else args.backend
+            return flow.footnotes_translate(args.project, yes=args.yes, backend=backend,
+                                            provider=args.provider, model=args.model,
+                                            retranslate=args.retranslate)
+        if args.action == "translate-prepare":
+            return flow.footnotes_translate_prepare(args.project, retranslate=args.retranslate)
+        if args.action == "translate-commit":
+            return flow.footnotes_translate_commit(args.project)
         if args.action == "apply":
             return flow.footnotes_apply(args.project)
         if args.action == "drop":
