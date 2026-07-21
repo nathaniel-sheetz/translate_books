@@ -857,3 +857,44 @@ def test_footnotes_drop_strips_tokens_and_removes_sidecar(project: Path):
     assert "[FOOTNOTE:" not in (project / "chapters" / "chapter_01.txt").read_text(encoding="utf-8")
     for key in result:  # every returned key is documented (#19)
         assert key in flow.OUTPUT_SCHEMAS["footnotes drop"], key
+
+
+def test_footnotes_apply_noop_without_sidecar(project: Path, monkeypatch):
+    import scripts.harness as harness
+
+    called = {"n": 0}
+
+    def boom(cmd):
+        called["n"] += 1
+        raise AssertionError(f"should not run script: {cmd}")
+
+    monkeypatch.setattr(flow, "_run_script", boom)
+    monkeypatch.setattr(sys, "argv",
+                        ["harness.py", "footnotes", "apply", "--project", str(project)])
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 0
+    assert called["n"] == 0
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["footnotes_written"] == 0
+    assert "no footnotes.json" in out.get("note", "")
+
+
+def test_footnote_counts_bad_json_is_zero(project: Path):
+    sidecar = project / "footnotes.json"
+    sidecar.write_text("{broken", encoding="utf-8")
+    assert flow._footnote_counts(sidecar) == {"total": 0, "translated": 0, "pending": 0}
+
+
+def test_footnotes_drop_updates_pipeline_state(project: Path):
+    (project / "source.txt").write_text("Hi[FOOTNOTE:1].", encoding="utf-8")
+    _write_sidecar(project, [{"number": 1, "source_body": "x"}])
+    (project / "pipeline_state.json").write_text(
+        json.dumps({"footnote_mode": "import", "footnote_count": 3}),
+        encoding="utf-8",
+    )
+    flow.footnotes_drop(str(project))
+    pstate = json.loads((project / "pipeline_state.json").read_text(encoding="utf-8"))
+    assert pstate["footnote_mode"] == "drop"
+    assert pstate["footnote_count"] == 0
+    assert not (project / "footnotes.json").exists()

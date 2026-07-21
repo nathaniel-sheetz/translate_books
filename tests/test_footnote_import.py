@@ -89,6 +89,11 @@ def test_sidecar_roundtrip(tmp_path):
     assert loaded[0]["detected"] == "backlink"
 
 
+def test_load_corrupt_sidecar_returns_empty(tmp_path):
+    (tmp_path / "footnotes.json").write_text("{not-json", encoding="utf-8")
+    assert load_footnotes_sidecar(tmp_path) == []
+
+
 # ---------------------------------------------------------------------------
 # Conversion: [FOOTNOTE:N] -> annotations
 # ---------------------------------------------------------------------------

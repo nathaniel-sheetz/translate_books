@@ -90,3 +90,39 @@ def test_stage_footnotes_noop_without_sidecar(tmp_path):
     state = tb.stage_footnotes(args, proj, {})
     assert state["stage_completed"] == "footnotes"
     assert not (proj / "annotations.jsonl").exists()
+
+
+def test_stage_footnotes_reports_partial_token_loss(tmp_path, monkeypatch, capsys):
+    """When chapter source had more [FOOTNOTE:N] than the translation, apply logs the gap."""
+    proj = _make_project(tmp_path)
+    (proj / "chapters").mkdir(exist_ok=True)
+    # Source carried notes 1 and 2; translation only kept note 1.
+    (proj / "chapters" / "chapter_01.txt").write_text(
+        "He paused.[FOOTNOTE:1] Then left.[FOOTNOTE:2]", encoding="utf-8"
+    )
+    (proj / "footnotes.json").write_text(json.dumps([
+        {"number": 1, "ref_marker": "[1]", "source_body": "A note.",
+         "translated_body": "Una nota.", "detected": "backlink"},
+        {"number": 2, "ref_marker": "[2]", "source_body": "Second.",
+         "translated_body": "Segunda.", "detected": "backlink"},
+    ]), encoding="utf-8")
+
+    class _Res:
+        path = proj / "book.epub"
+
+    monkeypatch.setattr(tb, "build_epub_from_chunks", lambda **kwargs: _Res())
+    args = types.SimpleNamespace(project_name="mybook", author="X", target_lang_code="es")
+    tb.stage_footnotes(args, proj, {})
+    out = capsys.readouterr().out
+    assert "expected" in out.lower() or "missing" in out.lower()
+    assert "2" in out
+
+
+def test_stage_footnotes_skips_without_alignment(tmp_path, monkeypatch, capsys):
+    proj = _make_project(tmp_path)
+    (proj / "alignments" / "chapter_01.json").unlink()
+    monkeypatch.setattr(tb, "build_epub_from_chunks", lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not build")))
+    args = types.SimpleNamespace(project_name="mybook", author="X", target_lang_code="es")
+    state = tb.stage_footnotes(args, proj, {})
+    assert state.get("footnotes_written", 0) == 0
+    assert "no alignment" in capsys.readouterr().out.lower()
