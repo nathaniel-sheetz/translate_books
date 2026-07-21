@@ -129,13 +129,16 @@ def _read_annotations(proj_dir: Path) -> list[dict]:
 
 
 class TestRealignValidation:
-    def test_bad_project_id_returns_400(self, client):
+    def test_bad_project_id_returns_404(self, client):
+        # "..bad" isn't the traversal segment ".." — just an ordinary (if
+        # unusual) name — so it now passes _safe_id and 404s as not-found,
+        # same as any other nonexistent project id.
         rv = client.post("/api/project/..bad/align/chapter_01")
-        assert rv.status_code == 400
+        assert rv.status_code == 404
 
-    def test_bad_chapter_id_returns_400(self, client):
+    def test_bad_chapter_id_returns_404(self, client):
         rv = client.post("/api/project/test-project/align/..bad")
-        assert rv.status_code == 400
+        assert rv.status_code == 404
 
     def test_no_chunks_returns_404(self, client, project, monkeypatch):
         # Remove the only chunk so the glob matches nothing.

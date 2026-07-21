@@ -52,8 +52,9 @@
     --status-complete-bg: #e6f4ea;
     --status-complete-color: #2d8a4e;
     --status-complete-border: #b7dfbf;
-    --status-archived-bg: #f0ece7;
-    --status-archived-color: #aaa;
+    --status-archived-bg: #e6ddd0;
+    --status-archived-color: #7a6a52;
+    --status-archived-border: #d8cbb5;
     --status-ok: #2d8a4e;
     --status-missing: #b33;
     --btn-new-bg: #4f46e5;
@@ -130,8 +131,9 @@
     --status-complete-bg: rgba(45, 138, 78, 0.15);
     --status-complete-color: #6ab87f;
     --status-complete-border: rgba(45, 138, 78, 0.3);
-    --status-archived-bg: #2a2a2a;
-    --status-archived-color: #666;
+    --status-archived-bg: rgba(180, 140, 60, 0.12);
+    --status-archived-color: #b0906a;
+    --status-archived-border: rgba(180, 140, 60, 0.3);
     --status-ok: #6ab87f;
     --status-missing: #e06060;
     --btn-new-bg: #6366f1;
@@ -390,7 +392,7 @@ body {
 .status-select.status-archived {
     background: var(--status-archived-bg);
     color: var(--status-archived-color);
-    border-color: var(--border-light);
+    border-color: var(--status-archived-border);
 }
 
 /* Archived card */

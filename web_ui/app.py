@@ -281,8 +281,16 @@ def _chapter_display_label(chapter_id: str, manifest: dict, chapter_prefix: str)
 
 
 def _safe_id(value: str) -> bool:
-    """Return True only for IDs that are safe filesystem names."""
-    return bool(value) and bool(re.fullmatch(r"[A-Za-z0-9_\-]+", value))
+    """Return True only for IDs that are safe filesystem names.
+
+    Periods are allowed within the name (real project dirs use them, e.g.
+    backup folders like "foo.bak-ch1-restore"), but an id made up entirely
+    of dots (".", "..", "...", ...) is rejected so it can't be used for
+    path traversal or collide with special directory entries.
+    """
+    if not value or set(value) == {"."}:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.\-]+", value))
 
 
 def _get_ui_lang() -> str:

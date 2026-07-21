@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.32.0.1] - 2026-07-21
+
+### Fixed
+- **Project ids with embedded periods work again.** `_safe_id` allowed only `[A-Za-z0-9_-]`, so folders like `foo.bak-ch1-restore` got 400 on status/align/difficulty routes — archive looked like a no-op in the UI. Periods are allowed inside the name; ids made entirely of dots (`.`, `..`, `...`) are still rejected.
+- **Archived status chip contrast.** Light and dark themes now use a dedicated archived border token and stronger archived colors so the select is readable.
+
 ## [0.32.0.0] - 2026-07-21
 
 ### Added
