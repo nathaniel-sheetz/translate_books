@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.32.0.0] - 2026-07-21
+
+### Added
+- **Gutenberg footnotes as translatable reader endnotes.** Ingest can import note markers as survivable `[FOOTNOTE:N]` tokens plus a `footnotes.json` sidecar; harness/CLI beats translate note bodies and convert surviving tokens into `type:"footnote"` annotations that the existing EPUB endnote path renders. Harness setup defaults to `--footnotes import` (standalone ingest still defaults to `drop`).
+- **Footnote-token parity on translate-commit.** Dropped or hallucinated `[FOOTNOTE:N]` tokens fail the draft guard the same way image tokens do, so silent note loss cannot land. Apply also logs expected vs surviving vs written counts.
+
+### Changed
+- **Multi-note sentences in EPUB.** Endnote build keys imported footnotes by `(es_idx, sub_id)` so several Gutenberg notes on one sentence all appear in the EPUB (reader multi-note load still pending — see local TODOS).
+
 ## [0.31.1.0] - 2026-07-17
 
 ### Fixed

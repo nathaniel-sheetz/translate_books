@@ -47,20 +47,23 @@ class Endnote(NamedTuple):
     text: str
 
 
-def _load_footnote_annotations(project_path: Path, chapter_id: str) -> Dict[int, str]:
-    """Return ``{es_idx: content}`` for active ``footnote`` annotations.
+def _load_footnote_annotations(project_path: Path, chapter_id: str) -> Dict[int, List[str]]:
+    """Return ``{es_idx: [content, ...]}`` for active ``footnote`` annotations.
 
     Applies the same append-only / tombstone / latest-wins rule used by the web
-    UI (``web_ui/app.py:_load_annotations``): the most recent record per
-    ``es_idx`` wins, ``{"removed": true}`` deletes, and the *final* type at an
-    index decides whether it is still a footnote (a later non-footnote edit at
-    the same sentence supersedes an earlier footnote).
+    UI (``web_ui/app.py:_load_annotations``), but keyed by ``(es_idx, sub_id)``
+    so more than one footnote can share a sentence: the most recent record per
+    key wins, ``{"removed": true}`` deletes, and the *final* type at a key
+    decides whether it is still a footnote (a later non-footnote edit
+    supersedes an earlier footnote). A hand-authored annotation has no
+    ``sub_id`` (``None``), giving one note per sentence exactly as before;
+    imported footnotes carry a stable ``sub_id`` so several coexist.
     """
     path = project_path / "annotations.jsonl"
     if not path.exists():
         return {}
 
-    by_idx: Dict[int, dict] = {}
+    by_key: Dict[Tuple[Optional[int], Optional[str]], dict] = {}
     for line in path.read_text(encoding="utf-8").strip().split("\n"):
         if not line.strip():
             continue
@@ -70,19 +73,21 @@ def _load_footnote_annotations(project_path: Path, chapter_id: str) -> Dict[int,
             continue
         if record.get("chapter_id") != chapter_id:
             continue
+        key = (record.get("es_idx"), record.get("sub_id"))
         if record.get("removed"):
-            by_idx.pop(record.get("es_idx"), None)
+            by_key.pop(key, None)
         else:
-            es_idx = record.get("es_idx")
-            if es_idx is None:
+            if record.get("es_idx") is None:
                 continue
-            by_idx[es_idx] = record
+            by_key[key] = record
 
-    return {
-        idx: (rec.get("content") or "")
-        for idx, rec in by_idx.items()
-        if rec.get("type") == "footnote"
-    }
+    out: Dict[int, List[str]] = {}
+    # Sort by (es_idx, sub_id) for a stable, deterministic order within a
+    # sentence; ``str()`` keeps ``None`` (legacy single notes) comparable.
+    for (es_idx, _sub), rec in sorted(by_key.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
+        if rec.get("type") == "footnote":
+            out.setdefault(es_idx, []).append(rec.get("content") or "")
+    return out
 
 
 def _load_alignment_es_map(project_path: Path, chapter_id: str) -> Dict[int, str]:
@@ -170,10 +175,6 @@ def build_endnote_artifacts(
         # when the translator reorganises sentences relative to the alignment.
         pending: List[Tuple[int, int, str]] = []  # (inject_pos, es_idx, display_text)
         for es_idx in sorted(annotations):
-            anchor, display_text = parse_endnote_content(annotations[es_idx])
-            if not display_text:
-                continue  # legacy placeholder (e.g. bare "[Sancerre]")
-
             sentence = es_map.get(es_idx)
             if not sentence:
                 logger.warning(
@@ -190,9 +191,16 @@ def build_endnote_artifacts(
                 )
                 continue
             sent_end = sent_start + len(sentence)
-            pending.append(
-                (_injection_point(text, sent_start, sent_end, anchor), es_idx, display_text)
-            )
+
+            # A sentence may carry more than one footnote; inject each at its own
+            # anchor (or the sentence end when the anchor is absent/not found).
+            for content in annotations[es_idx]:
+                anchor, display_text = parse_endnote_content(content)
+                if not display_text:
+                    continue  # legacy placeholder (e.g. bare "[Sancerre]")
+                pending.append(
+                    (_injection_point(text, sent_start, sent_end, anchor), es_idx, display_text)
+                )
 
         # Pass 2: sort by text position and assign sequential numbers so the
         # in-text markers always read 1, 2, 3, … regardless of es_idx order.

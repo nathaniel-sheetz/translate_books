@@ -143,8 +143,9 @@ must never gate the flow — log and move on; a failed log must not stop a run.
 
 ```
 ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► difficulty ─► chunk ─► [COST beat] ─►
- (setup)         agent drafts          agent drafts      (det.; sizes  (det.)   translate ─►
-                 + refine + approval    + approval         chunks)               combine ─► epub
+ (setup;         agent drafts          agent drafts      (det.; sizes  (det.)   translate ─►
+  [FN keep/drop]) + refine + approval   + approval         chunks)               combine ─► align ─►
+                                                                    [FN translate+apply beat] ─► epub
 ```
 
 The style guide goes **first** on purpose: it captures the user's key decisions
@@ -205,6 +206,20 @@ translated — and each stripped heading is reported back under `dropped` in the
 `split-preview` / `split` output. Confirm `dropped` matches what you expected. Real front matter
 (foreword, preface, prologue, dedication, author's note …) is auto-detected and **kept**, and it
 renders its *translated* heading in the EPUB automatically — no manual relabel.
+
+**Footnotes — keep as reader footnotes, or drop?** On the `--url` path, `setup` **imports**
+Gutenberg footnotes by default: it captures each note as a survivable `[FOOTNOTE:N]` token in the
+body plus a `footnotes.json` sidecar, and reports `footnotes_detected` (count) and `footnotes_mode`
+(`import`) in its output. **If `footnotes_detected > 0`, STOP and ask the user** — AskUserQuestion
+with two options, *"Keep as translatable reader footnotes"* and *"Drop them"* — since footnotes
+noticeably change the reader experience and add a small paid step later (Step 4C). Then:
+- **Keep** → nothing to run; the tokens ride through split/chunk/translate untouched. Tell the user
+  the note bodies get translated after the chapters, at Step 4C. `log-event` the decision.
+- **Drop** → run `python scripts/harness.py footnotes drop --project projects/<slug>`, which strips
+  the tokens from `source.txt` + chapters and deletes the sidecar (no re-fetch). `log-event` it.
+
+Footnote detection only happens on the `--url`/HTML path — a project seeded from a local
+`source.txt` can't detect or import them (`footnotes_detected` is `0`), so there is nothing to ask.
 
 **Refine the split if it looks wrong** — the `setup` split misfires, reports "No chapters
 detected," or a *real* section is mis-numbered as a chapter (or vice-versa). Don't hand-edit
@@ -449,6 +464,9 @@ the Step 4 gate **only if** the user picks the API backend; on the subagent path
    `translate` refuses to run without `--yes`. The model defaults to Sonnet 5 (or whatever was
    persisted in config); pass `--model` to override, and surface the choice rather than assuming.
 
+**If footnotes were imported, do Step 4C before Step 5** to translate + embed them (the API
+`translate` run auto-chains through combine/epub/align, but not the footnote *body* translation).
+
 ## Step 4B — Subagent backend (zero-API-key, model-pinned) — ALTERNATIVE to Step 4
 
 Two translation backends, same downstream pipeline. Pick one with the user:
@@ -687,9 +705,40 @@ Committed translations also live in `projects/<slug>/chunks/*.json`. `--max-chun
 **4B-f. Translate the rest (if a subset was done).** If you only did a review batch, prompt the user to
 translate the **remaining** chapters now, noting the **same spawn mode/window as before** will be used
 (it is saved — you can omit `--parallelism`/`--window`). On yes, repeat 4B-a → 4B-e for the remaining
-`--chapters` range. When the whole book is translated, continue to Step 5 (combine + EPUB).
+`--chapters` range. When the whole book is translated, continue (Step 4C if footnotes were imported,
+then Step 5 — combine + EPUB).
 
-Then continue to Step 5 (combine + EPUB) exactly as the API path does.
+Then continue exactly as the API path does — **Step 4C if footnotes were imported**, then Step 5
+(combine + EPUB).
+
+## Step 4C — Footnotes: translate the notes, then embed them (only if imported)
+
+**Skip this whole step unless footnotes were imported** (`projects/<slug>/footnotes.json` exists /
+`setup` reported `footnotes_mode: import` and the user didn't drop them). This runs **after** the
+chapters are translated **and aligned** (the embed reads `alignments/`), and **before** the final
+EPUB.
+
+Once the chapters are done, **STOP and ask the user (its own beat): "Translate the footnotes now?"**
+This is a **metered API step**, so it needs an explicit, separate-turn go-ahead — never fold it into
+an earlier approval. It is small (note bodies only) and cheap, but treat it like the Step 4 gate.
+
+- **Yes** → in a later turn, translate the note bodies, then embed:
+  ```bash
+  python scripts/harness.py footnotes translate --project projects/<slug> --yes
+  python scripts/harness.py footnotes apply     --project projects/<slug>
+  ```
+  `footnotes translate` refuses without `--yes` (like `translate`); it fills each note's
+  `translated_body` in `footnotes.json` (report `translated` / `pending`). `footnotes apply` then
+  converts every surviving `[FOOTNOTE:N]` token into an anchored reader footnote, strips the raw
+  tokens from the stored translation, and **rebuilds the EPUB** with a numbered back-matter section.
+- **No** → still run **`footnotes apply`** alone, so the raw `[FOOTNOTE:N]` tokens don't leak into
+  the EPUB as literal text. Warn the user the notes will appear in the **source language**
+  (untranslated); they can run `footnotes translate --yes` + `footnotes apply` later to translate them.
+
+`footnotes apply` is idempotent — on the **API path**, `translate` already auto-ran the footnotes
+stage once (with source text, since the bodies weren't translated yet), and re-applying simply
+re-converts with the translated bodies (prior imported-footnote annotations are replaced). Running
+Step 5 `epub` afterward stays consistent — it renders the persisted footnote annotations.
 
 ## Step 5 — Combine + EPUB (translated chapters only)
 

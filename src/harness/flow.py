@@ -217,6 +217,7 @@ def setup(
     back_matter_titles: list[str] | None = None,
     min_chapter_size: int | None = None,
     auto_strip_boilerplate: bool = True,
+    footnotes: str = "import",
 ) -> dict:
     """Create the project, persist config, run ingest + split (NOT chunk).
 
@@ -274,6 +275,11 @@ def setup(
         front_matter_titles=front_matter_titles or None,
         back_matter_titles=back_matter_titles or None,
         auto_strip_boilerplate=auto_strip_boilerplate,
+        # 'import' (default) captures Gutenberg footnotes as [FOOTNOTE:N] tokens +
+        # footnotes.json so the skill can offer keep/drop at Step 0; a harmless no-op
+        # when the source has none (or on the local source.txt path, which skips
+        # detection). Without this field stage_ingest defaulted to 'drop' (friction #2).
+        footnotes=footnotes,
     )
     with _quiet_stdout():
         pstate = load_pipeline_state(project_dir)
@@ -303,6 +309,8 @@ def setup(
         "chapter_count": len(chapters),
         "pattern_used": hints["pattern_used"],  # the pattern actually split on
         "dropped": pstate.get("dropped", []),  # boilerplate stripped at split
+        "footnotes_detected": pstate.get("footnote_count", 0),  # notes found at ingest
+        "footnotes_mode": pstate.get("footnote_mode"),  # 'import' | 'drop' | None
         "source_words": pstate.get("source_words"),
         "suggested_pattern": pstate.get("suggested_pattern") or hints["detected"],
         "chapter_report": pstate.get("chapter_report") or _local_chapter_report(hints["sections"]),
@@ -1945,6 +1953,158 @@ def epub(project: str, *, title: str | None = None, author: str | None = None, l
     ]))
 
 
+# ── footnotes (imported Gutenberg reader footnotes) ─────────────────────────
+
+def _footnote_counts(sidecar: Path) -> dict:
+    """Read footnotes.json and count total / translated / pending note bodies."""
+    try:
+        notes = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - counts are advisory, never fatal
+        return {"total": 0, "translated": 0, "pending": 0}
+    translated = sum(1 for n in notes if (n.get("translated_body") or "").strip())
+    return {"total": len(notes), "translated": translated, "pending": len(notes) - translated}
+
+
+def footnotes_translate(
+    project: str,
+    *,
+    yes: bool,
+    provider: str | None = None,
+    model: str | None = None,
+    retranslate: bool = False,
+) -> int | dict:
+    """Paid: translate the imported footnote bodies in ``footnotes.json``.
+
+    ``translate_footnotes.py`` has no internal cost gate, so — like ``translate`` — the
+    harness is the gate: fail closed without ``--yes`` (the estimate must be approved by the
+    user in a SEPARATE turn first). A clean no-op when no footnotes were imported.
+    """
+    project_dir = state.resolve_project_dir(project)
+    sidecar = project_dir / "footnotes.json"
+    if not sidecar.exists():
+        return _stream_result("footnotes", 0, {
+            "stage": "footnotes-translate",
+            "note": "no footnotes.json — nothing to translate (import at setup with --footnotes import)",
+            "total": 0, "translated": 0, "pending": 0,
+        })
+    if not yes:
+        print(
+            "Refusing to translate footnotes without --yes. The cost must be approved by the "
+            "user in a SEPARATE turn first; only then re-run `footnotes translate` with --yes.",
+            file=sys.stderr,
+        )
+        return 2
+    cfg = state.load_config(project_dir)
+    cmd = [
+        "scripts/translate_footnotes.py",
+        "--project-dir", str(project_dir),
+        "--target-lang", cfg.get("target_language") or "Spanish",
+        "--title", cfg.get("title") or project_dir.name,
+    ]
+    if provider:
+        cmd += ["--provider", provider]
+    if model:
+        cmd += ["--model", model]
+    if retranslate:
+        cmd.append("--retranslate")
+    result = _stream_result("footnotes", *_run_script(cmd))
+    # translate_footnotes.py emits no HARNESS_RESULT sentinel; derive counts from the sidecar.
+    result["stage"] = "footnotes-translate"
+    result.update(_footnote_counts(sidecar))
+    return result
+
+
+def footnotes_apply(project: str) -> int | dict:
+    """Free: convert surviving ``[FOOTNOTE:N]`` tokens into reader footnotes + rebuild the EPUB.
+
+    Runs only the ``footnotes`` pipeline stage (last in ``translate_book``'s STAGES), which
+    needs the align stage to have run — un-aligned chapters are skipped. Idempotent:
+    re-running re-converts (prior ``origin:"gutenberg"`` annotations are tombstoned), so it is
+    safe after the API path's auto-run. A clean no-op when no footnotes were imported.
+    """
+    project_dir = state.resolve_project_dir(project)
+    sidecar = project_dir / "footnotes.json"
+    if not sidecar.exists():
+        return _stream_result("footnotes", 0, {
+            "stage": "footnotes-apply",
+            "note": "no footnotes.json — nothing to apply",
+            "footnotes_written": 0,
+        })
+    cfg = state.load_config(project_dir)
+    result = _stream_result("footnotes", *_run_script([
+        "scripts/translate_book.py",
+        "--project-dir", str(project_dir),
+        "--start-stage", "footnotes",
+        "--project-name", cfg.get("title") or project_dir.name,
+        "--author", cfg.get("author") or "Unknown",
+        "--target-lang-code", cfg.get("language_code") or "es",
+    ]))
+    result["stage"] = "footnotes-apply"
+    # The stage prints but emits no sentinel; read the checkpoint for the count + EPUB path.
+    try:
+        pstate = json.loads((project_dir / "pipeline_state.json").read_text(encoding="utf-8"))
+        result["footnotes_written"] = pstate.get("footnotes_written", 0)
+        if pstate.get("epub_path"):
+            result["epub_path"] = pstate["epub_path"]
+    except Exception:  # noqa: BLE001 - advisory enrichment only
+        pass
+    return result
+
+
+def footnotes_drop(project: str) -> dict:
+    """Free/local: revert an import without re-fetching — the Step 0 'drop' choice.
+
+    Strips ``[FOOTNOTE:N]`` tokens from ``source.txt`` and every split ``chapter_*.txt``, and
+    deletes ``footnotes.json``, so the rest of the pipeline runs as if footnotes were dropped
+    at ingest. Reflects the drop in ``pipeline_state.json`` so ``status``/``setup`` read consistently.
+    """
+    from src.utils.text_utils import strip_footnote_tokens
+
+    project_dir = state.resolve_project_dir(project)
+    targets: list[Path] = []
+    src = project_dir / "source.txt"
+    if src.exists():
+        targets.append(src)
+    targets.extend(sorted((project_dir / "chapters").glob("chapter_*.txt")))
+
+    tokens_stripped = 0
+    files_cleaned = 0
+    for p in targets:
+        text = p.read_text(encoding="utf-8")
+        if "[FOOTNOTE:" not in text:
+            continue
+        cleaned, placements = strip_footnote_tokens(text)
+        p.write_text(cleaned, encoding="utf-8")
+        tokens_stripped += len(placements)
+        files_cleaned += 1
+
+    sidecar = project_dir / "footnotes.json"
+    sidecar_removed = sidecar.exists()
+    if sidecar_removed:
+        sidecar.unlink()
+
+    pstate_path = project_dir / "pipeline_state.json"
+    if pstate_path.exists():
+        try:
+            pstate = json.loads(pstate_path.read_text(encoding="utf-8"))
+            pstate["footnote_count"] = 0
+            pstate["footnote_mode"] = "drop"
+            pstate_path.write_text(
+                json.dumps(pstate, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001 - checkpoint hygiene only
+            pass
+
+    return {
+        "command": "footnotes",
+        "exit_code": 0,
+        "stage": "footnotes-drop",
+        "tokens_stripped": tokens_stripped,
+        "files_cleaned": files_cleaned,
+        "sidecar_removed": sidecar_removed,
+    }
+
+
 def align(
     project: str,
     *,
@@ -2357,6 +2517,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapter_count": "number of sections written to chapters/",
         "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved to a concrete pattern here)",
         "dropped": "list of {label, reason} for boilerplate stripped at split (Contents, Title Page, ...)",
+        "footnotes_detected": "count of Gutenberg footnotes found at ingest (0 if none, or on the local source.txt path which skips detection)",
+        "footnotes_mode": "how footnotes were handled: 'import' (default; kept as [FOOTNOTE:N] tokens + footnotes.json) or 'drop'; null when none detected. On 'import' with footnotes_detected>0, prompt keep/drop and run `footnotes drop` to discard",
         "source_words": "word count of the ingested source (null on the no-URL path)",
         "suggested_pattern": "best-fit chapter pattern detected from the text (or the HTML on the URL path); compare to pattern_used to catch a wrong pick",
         "chapter_report": "per-chapter {number, heading, words, chunks} report; now populated on the local source.txt path too",
@@ -2520,6 +2682,33 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "included": "list of translated chapter_ids included",
         "skipped": "list of untranslated/partial chapter_ids skipped",
         "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
+    },
+    "footnotes translate": {
+        "command": "the harness command ('footnotes')",
+        "exit_code": "wrapped-script exit code (0 = ok; 2 = refused without --yes)",
+        "stage": "'footnotes-translate'",
+        "total": "footnote notes in footnotes.json",
+        "translated": "notes now carrying a translated_body",
+        "pending": "notes still untranslated (0 = all done)",
+        "note": "present when there was nothing to translate (no footnotes.json)",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line)",
+    },
+    "footnotes apply": {
+        "command": "the harness command ('footnotes')",
+        "exit_code": "wrapped-script exit code (0 = ok)",
+        "stage": "'footnotes-apply'",
+        "footnotes_written": "reader-footnote annotations written across chapters this run",
+        "epub_path": "path to the rebuilt EPUB (present when any footnote was applied)",
+        "note": "present when there was nothing to apply (no footnotes.json)",
+        "error": "present only on failure (scraped from the wrapped script's last ERROR line)",
+    },
+    "footnotes drop": {
+        "command": "the harness command ('footnotes')",
+        "exit_code": "always 0 (local operation)",
+        "stage": "'footnotes-drop'",
+        "tokens_stripped": "count of [FOOTNOTE:N] tokens removed from source.txt + chapters",
+        "files_cleaned": "number of files a token was stripped from",
+        "sidecar_removed": "whether footnotes.json existed and was deleted",
     },
     "align": {
         "aligned": "list of {chapter_id, es_count, high_confidence_pct}",

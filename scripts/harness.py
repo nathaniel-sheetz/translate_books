@@ -128,6 +128,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     action="store_false",
                     help="Keep navigation/boilerplate (Contents, Title Page, ...) "
                          "instead of stripping it (default: strip)")
+    sp.add_argument("--footnotes", dest="footnotes", choices=["import", "drop"],
+                    default="import",
+                    help="Gutenberg footnote handling at ingest (URL path only): "
+                         "'import' (default) captures them as translatable [FOOTNOTE:N] "
+                         "tokens + footnotes.json; 'drop' removes them. Detected either way "
+                         "and reported as footnotes_detected/footnotes_mode.")
 
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
@@ -287,6 +293,30 @@ def _build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--author", default=None)
     ep.add_argument("--language", default=None)
 
+    # footnotes <action> ----------------------------------------------------
+    fn = sub.add_parser("footnotes",
+                        help="Reader-footnote beat for imported Gutenberg footnotes "
+                             "(translate/apply/drop). Needs `setup --footnotes import`.")
+    fn_sub = fn.add_subparsers(dest="action", required=True)
+    fnt = fn_sub.add_parser("translate",
+                            help="The paid step: translate the note bodies in footnotes.json "
+                                 "(requires --yes)")
+    add_project(fnt)
+    fnt.add_argument("--yes", action="store_true",
+                     help="Confirm the metered footnote translation (approve in a SEPARATE turn first)")
+    fnt.add_argument("--provider", default=None)
+    fnt.add_argument("--model", default=None)
+    fnt.add_argument("--retranslate", action="store_true",
+                     help="Re-translate notes that already have a translated_body")
+    fna = fn_sub.add_parser("apply",
+                            help="Free: convert surviving [FOOTNOTE:N] tokens into reader "
+                                 "footnotes and rebuild the EPUB (needs alignments)")
+    add_project(fna)
+    fnd = fn_sub.add_parser("drop",
+                            help="Free: strip [FOOTNOTE:N] tokens from source.txt + chapters "
+                                 "and delete footnotes.json (the Step 0 'drop' choice)")
+    add_project(fnd)
+
     # align (reader mode) ---------------------------------------------------
     al = sub.add_parser("align",
                         help="Align translated chapters for the reader; print a reader link")
@@ -354,6 +384,7 @@ def _dispatch(args: argparse.Namespace):
             back_matter_titles=args.back_matter_titles,
             min_chapter_size=args.min_chapter_size,
             auto_strip_boilerplate=args.auto_strip_boilerplate,
+            footnotes=args.footnotes,
         )
     if cmd in ("split-preview", "split"):
         fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
@@ -419,6 +450,14 @@ def _dispatch(args: argparse.Namespace):
         )
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
+    if cmd == "footnotes":
+        if args.action == "translate":
+            return flow.footnotes_translate(args.project, yes=args.yes, provider=args.provider,
+                                            model=args.model, retranslate=args.retranslate)
+        if args.action == "apply":
+            return flow.footnotes_apply(args.project)
+        if args.action == "drop":
+            return flow.footnotes_drop(args.project)
     if cmd == "align":
         return flow.align(args.project, chapters=args.chapters,
                           source_lang_code=args.source_lang_code,
@@ -441,7 +480,7 @@ def _dispatch(args: argparse.Namespace):
 # a dict carrying ``exit_code`` (via ``flow._stream_result``), or a bare int on a pre-flight
 # refusal (``epub`` missing metadata, ``translate`` without ``--yes``). Either way ``main()``
 # leaves a FRESH ``last_output.json`` and propagates the wrapped exit code (friction-log #18).
-_STREAMING_COMMANDS = ("chunk", "cost", "translate", "epub")
+_STREAMING_COMMANDS = ("chunk", "cost", "translate", "epub", "footnotes")
 
 
 def _stamp_schema(args: argparse.Namespace, result: dict) -> None:

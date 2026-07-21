@@ -106,7 +106,7 @@ class TestStageOrder:
     def test_stages_order(self):
         assert STAGES == [
             "ingest", "split", "chunk", "translate",
-            "evaluate", "combine", "epub", "align",
+            "evaluate", "combine", "epub", "align", "footnotes",
         ]
 
     def test_resume_from_completed_stage(self, tmp_path):
@@ -118,7 +118,7 @@ class TestStageOrder:
 
     def test_resume_from_last_stage(self):
         """Completed last stage means pipeline is done."""
-        state = {"stage_completed": "align"}
+        state = {"stage_completed": STAGES[-1]}
         completed = state["stage_completed"]
         start_idx = STAGES.index(completed) + 1
         assert start_idx >= len(STAGES)

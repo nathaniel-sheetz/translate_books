@@ -28,10 +28,25 @@ from src.utils.prompt_logger import (
 )
 from src.utils.text_utils import (
     dialogue_instruction,
+    footnote_placeholder_instruction,
     image_filenames,
     image_placeholder_instruction,
     source_has_dialogue,
 )
+
+
+def _structure_preservation_instructions(source_text: str, *, always_include_images: bool) -> str:
+    """Combine the image + footnote STRUCTURE PRESERVATION bullets.
+
+    Both slot into the same prompt variable. The footnote bullet appears only
+    when the chunk actually carries [FOOTNOTE:N] tokens, so a book without
+    imported footnotes never sees it.
+    """
+    bullets = [
+        image_placeholder_instruction(source_text, always_include=always_include_images),
+        footnote_placeholder_instruction(source_text),
+    ]
+    return "\n".join(b for b in bullets if b)
 
 # Boundary between the cacheable fixed prefix and the per-chunk variable suffix
 # in prompts/translation.txt (first line of the GLOSSARY TERMS section).
@@ -381,8 +396,8 @@ def build_translation_prompt(
         "context": "",
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": previous_chapter_context,
-        "image_placeholder_instructions": image_placeholder_instruction(
-            chunk.source_text, always_include=always_include_image_instructions
+        "image_placeholder_instructions": _structure_preservation_instructions(
+            chunk.source_text, always_include_images=always_include_image_instructions
         ),
         "dialogue_instructions": dialogue_instruction(
             chunk.source_text, target_language, always_include=always_include_dialogue
@@ -524,8 +539,8 @@ def estimate_cost(
             "context": "",
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": "",
-            "image_placeholder_instructions": image_placeholder_instruction(
-                chunk.source_text, always_include=always_include_image_instructions
+            "image_placeholder_instructions": _structure_preservation_instructions(
+                chunk.source_text, always_include_images=always_include_image_instructions
             ),
             "dialogue_instructions": dialogue_instruction(
                 chunk.source_text, target_language, always_include=always_include_dialogue

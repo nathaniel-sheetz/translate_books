@@ -20,7 +20,43 @@ from src.utils.text_utils import (
     _resolve_dialogue_path,
     _load_dialogue_block,
     _source_has_dialogue,
+    footnote_token_counts,
+    footnote_token_numbers,
+    footnote_tokens_preserved,
+    strip_footnote_tokens,
+    footnote_placeholder_instruction,
 )
+
+
+class TestFootnoteTokens:
+    """Tests for [FOOTNOTE:N] token helpers."""
+
+    def test_numbers_and_counts(self):
+        text = "a[FOOTNOTE:1] b[FOOTNOTE:2] c[FOOTNOTE:1]"
+        assert footnote_token_numbers(text) == [1, 2, 1]
+        assert footnote_token_counts(text) == {1: 2, 2: 1}
+
+    def test_preserved_true_when_multiset_matches(self):
+        src = "uno[FOOTNOTE:1] dos[FOOTNOTE:2]"
+        tgt = "one[FOOTNOTE:1] two[FOOTNOTE:2]"
+        assert footnote_tokens_preserved(src, tgt)
+
+    def test_preserved_false_on_dropped_token(self):
+        src = "uno[FOOTNOTE:1] dos[FOOTNOTE:2]"
+        tgt = "one[FOOTNOTE:1] two"
+        assert not footnote_tokens_preserved(src, tgt)
+
+    def test_strip_returns_clean_text_and_placements(self):
+        clean, placements = strip_footnote_tokens("ab[FOOTNOTE:3]cd[FOOTNOTE:4]")
+        assert clean == "abcd"
+        # position is the offset in the token-free text where each token sat
+        assert placements == [(3, 2), (4, 4)]
+
+    def test_instruction_only_when_tokens_present(self):
+        assert footnote_placeholder_instruction("no tokens here") == ""
+        assert "[FOOTNOTE:N]" in footnote_placeholder_instruction("x[FOOTNOTE:1]")
+        # always_include forces the bullet regardless of this chunk's content
+        assert "[FOOTNOTE:N]" in footnote_placeholder_instruction("", always_include=True)
 
 
 class TestNormalizeNewlines:
