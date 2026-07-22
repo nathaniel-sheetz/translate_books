@@ -43,7 +43,7 @@ class DialogueComplianceJudge(VerdictJudge):
 
     spec = JudgeSpec(
         name="dialogue",
-        version="1.2.0",
+        version="1.3.0",
         kind="verdict",
         template="judge_dialogue.txt",
         required_inputs=("source", "translation", "dialogue_rules"),

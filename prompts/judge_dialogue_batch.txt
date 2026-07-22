@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge — batched (multiple items per prompt)
-# Version: 1.1
+# Version: 1.2
 # Checks whether one or more Spanish translations follow the project's house
 # dialogue rules in a single call. Variables: dialogue_rules, items
 # Each <item> carries an id plus its own <source>/<translation>; return exactly
@@ -47,7 +47,13 @@ For each violation choose the single most specific `rule` id from this list:
 - "raya-spacing": a space after an opening raya (— Hola) or a hyphen/en-dash
   used where a raya (em dash —) is required.
 - "one-turn-one-paragraph": a speaker turn that does not begin its own new
-  paragraph, or two speakers' turns sharing a paragraph.
+  paragraph, or two speakers' turns sharing a paragraph. (Consecutive
+  same-speaker speech paragraphs may open with »; after intervening narration,
+  resume with —.)
+- "same-speaker-continuation": a speech paragraph that follows DIRECTLY after
+  another speech paragraph by the same speaker opens with — instead of », OR
+  » is used after intervening narration / for a new speaker (» only applies to
+  back-to-back same-speaker speech); also a space after an opening » (» Entonces).
 - "narration-separation": introductory narration packed onto the same line as
   the speech instead of its own paragraph, or a bare narrative sentence dropped
   between dialogue fragments.
@@ -59,9 +65,10 @@ For each violation choose the single most specific `rule` id from this list:
 - "other": a clear dialogue-rule violation that none of the above describes.
 
 Severity guidance: use "error" for unambiguous violations (English quotes in
-dialogue, hyphen instead of raya, space after the opening raya); "warning" for
-structural problems (turn not on its own paragraph, narration not separated);
-"info" for borderline or stylistic notes.
+dialogue, hyphen instead of raya, space after the opening raya or »); "warning"
+for structural problems (turn not on its own paragraph, wrong —/» for
+same-speaker continuation, narration not separated); "info" for borderline or
+stylistic notes.
 
 If an item's translation contains no spoken dialogue, or fully complies, return
 an empty findings list with "compliant": true for that item. Every object in an
