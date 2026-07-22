@@ -3,7 +3,8 @@ Dialogue-compliance judge.
 
 Verifies that a Spanish translation follows the house dialogue rules already
 written for the translator in ``prompts/dialogue.txt`` (raya usage,
-one-turn-one-paragraph, incisos, guillemets for thoughts, ...). It is a pure
+one-turn-one-paragraph, same-speaker » continuation, incisos, guillemets
+for thoughts, ...). It is a pure
 *verdict* judge: it flags violations as :class:`Issue`s and assigns a
 compliance score; it never rewrites text.
 """
