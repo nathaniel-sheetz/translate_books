@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.34.0.1] - 2026-07-22
+
+### Changed
+- **Spanish dialogue house style: same-speaker continuation marker.** Consecutive speech paragraphs by the same speaker open with `»`; intervening narration resumes with `—`. Updated `prompts/dialogue.example.txt`, the dialogue judge prompts (new `same-speaker-continuation` rule id, v1.3), and the judge version to `1.3.0`.
+
 ## [0.34.0.0] - 2026-07-22
 
 ### Added
