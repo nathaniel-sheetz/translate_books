@@ -13,6 +13,7 @@ Footnote bodies now translate on the *same* backend the user chose for the chapt
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,51 @@ def test_prepare_commit_returns_carry_exit_code(tmp_path):
     (proj / ".harness" / "footnotes" / "manifest.json").write_text("{ not json", "utf-8")
     bad = flow.footnotes_translate_commit(str(proj))
     assert bad["exit_code"] == 1 and "unreadable" in bad["error"]
+
+
+def _run_cli(monkeypatch, *argv) -> int:
+    """Drive the real ``scripts.harness.main()`` streaming branch and return the exit
+    code. This is the layer the flow-level tests bypass — where the missing
+    ``exit_code`` key crashed with ``KeyError`` before printing anything."""
+    import scripts.harness as harness
+    monkeypatch.setattr(sys, "argv", ["harness.py", *argv])
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    code = exc.value.code
+    return 0 if code is None else int(code)
+
+
+def test_footnotes_prepare_commit_end_to_end_via_main(tmp_path, monkeypatch):
+    """The subagent seam driven through ``main()`` (not the flow functions directly):
+    prepare -> workers write drafts -> commit, each exiting 0 and leaving a fresh
+    ``last_output.json`` carrying ``command``/``exit_code``."""
+    proj = _project_with_notes(tmp_path, [_pending_note(1, "First."), _pending_note(2, "Second.")])
+    artifact = proj / ".harness" / "last_output.json"
+
+    assert _run_cli(monkeypatch, "footnotes", "translate-prepare", "--project", str(proj)) == 0
+    out = json.loads(artifact.read_text(encoding="utf-8"))
+    assert out["command"] == "footnotes" and out["exit_code"] == 0
+
+    manifest = json.loads((proj / ".harness" / "footnotes" / "manifest.json").read_text("utf-8"))
+    for entry in manifest["entries"]:  # simulate translator subagents writing drafts
+        lines = "\n".join(f"{num}| Nota {num}." for num in entry["numbers"])
+        Path(entry["draft_path"]).write_text(lines + "\n", encoding="utf-8")
+
+    assert _run_cli(monkeypatch, "footnotes", "translate-commit", "--project", str(proj)) == 0
+    out = json.loads(artifact.read_text(encoding="utf-8"))
+    assert out["command"] == "footnotes" and out["exit_code"] == 0
+    assert out["committed"] == [1, 2]
+    assert _bodies(proj) == {1: "Nota 1.", 2: "Nota 2."}
+
+
+def test_footnotes_commit_without_manifest_exits_1_via_main(tmp_path, monkeypatch):
+    """The regressed path: ``footnotes translate-commit`` with no manifest used to
+    crash with ``KeyError: 'exit_code'`` in ``main()``. It must now exit 1 cleanly."""
+    proj = _project_with_notes(tmp_path, [_pending_note(1, "First.")])
+    assert _run_cli(monkeypatch, "footnotes", "translate-commit", "--project", str(proj)) == 1
+    out = json.loads((proj / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["command"] == "footnotes" and out["exit_code"] == 1
+    assert "error" in out
 
 
 # ── guards ──────────────────────────────────────────────────────────────────
