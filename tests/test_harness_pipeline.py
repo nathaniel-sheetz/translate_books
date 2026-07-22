@@ -1491,6 +1491,105 @@ def test_status_single_chunk_per_chapter_is_moot(tmp_path: Path):
     assert flow.status(str(tmp_path))["spawn_mode_moot"] is True
 
 
+def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
+    """config-set writes once-per-book decisions into .harness/config.json."""
+    from src.harness import flow, state
+
+    (tmp_path / "source.txt").write_text("hello", encoding="utf-8")
+    state.ensure_harness_dir(tmp_path)
+
+    out = flow.config_set(str(tmp_path), key="backend", value="subagent")
+    assert out["key"] == "backend" and out["value"] == "subagent"
+    cfg = state.load_config(tmp_path)
+    assert cfg["backend"] == "subagent"
+
+    flow.config_set(str(tmp_path), key="footnotes_decision", value="none")
+    cfg = state.load_config(tmp_path)
+    assert cfg["footnotes_decision"] == "none"
+    # Other defaults still present after the merge write.
+    assert cfg["target_language"] == "Spanish"
+
+    with pytest.raises(ValueError, match="unknown config key"):
+        flow.config_set(str(tmp_path), key="not_a_key", value="x")
+    with pytest.raises(ValueError, match="invalid value"):
+        flow.config_set(str(tmp_path), key="backend", value="gemini")
+
+
+def test_status_echoes_backend_and_suggested_reference(tmp_path: Path):
+    """status surfaces persisted backend + a router hint for the skill."""
+    from src.harness import flow, state
+
+    (tmp_path / "source.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "style.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "glossary.json").write_text("{}", encoding="utf-8")
+    state.ensure_harness_dir(tmp_path)
+    flow.config_set(str(tmp_path), key="backend", value="headless")
+
+    pre = flow.status(str(tmp_path))
+    assert pre["backend"] == "headless"
+    assert pre["stage"] == "pre-chunk"
+    assert pre["suggested_reference"] == "references/chunk.md"
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."])
+    st = flow.status(str(tmp_path))
+    assert st["stage"] == "untranslated"
+    assert st["suggested_reference"] == "references/translate-workers.md"
+
+    flow.config_set(str(tmp_path), key="backend", value="api")
+    st_api = flow.status(str(tmp_path))
+    assert st_api["suggested_reference"] == "references/translate-api.md"
+
+
+def test_resolve_backend_reads_persisted_config(tmp_path: Path):
+    """When no run-log beat exists, resolve_backend honors config-set backend."""
+    from src.harness import flow, state
+
+    (tmp_path / "source.txt").write_text("hello", encoding="utf-8")
+    state.ensure_harness_dir(tmp_path)
+    flow.config_set(str(tmp_path), key="backend", value="headless")
+    assert flow.resolve_backend(tmp_path) == "headless"
+
+
+def test_suggested_reference_footnotes_route_advances_after_apply(tmp_path: Path):
+    """Kept-footnotes book stops routing to footnotes.md once notes are written.
+
+    Regression guard: footnotes_apply intentionally leaves footnotes.json on disk,
+    so a presence-only check would route to footnotes.md forever. The router must
+    key off pipeline_state.footnotes_written to advance to epub/reviews.
+    """
+    from src.harness import flow
+
+    (tmp_path / "footnotes.json").write_text("{}", encoding="utf-8")
+    artifacts = {"source": True, "style_guide": True, "glossary": True, "chunks": True}
+    keep = {"footnotes_decision": "keep"}
+
+    # Notes present but not yet applied -> route to footnotes.
+    assert flow._suggested_reference(
+        tmp_path, keep, artifacts, "fully-translated", []
+    ) == "references/footnotes.md"
+
+    # Footnotes stage has written notes -> advance (no epub yet -> epub.md).
+    (tmp_path / "pipeline_state.json").write_text(
+        '{"footnotes_written": 3}', encoding="utf-8"
+    )
+    assert flow._suggested_reference(
+        tmp_path, keep, artifacts, "fully-translated", []
+    ) == "references/epub.md"
+
+    # ...and once an epub exists -> reviews.
+    assert flow._suggested_reference(
+        tmp_path, keep, artifacts, "fully-translated", ["book.epub"]
+    ) == "references/reviews.md"
+
+    # A dropped-footnotes book never routes to footnotes.md, applied or not.
+    (tmp_path / "pipeline_state.json").unlink()
+    assert flow._suggested_reference(
+        tmp_path, {"footnotes_decision": "drop"}, artifacts, "fully-translated", []
+    ) == "references/epub.md"
+
+
 def test_runs_summarizes_latest_run_from_log(tmp_path: Path, monkeypatch):
     """runs() reads the write-only run log back into a per-run retro (friction-log #11)."""
     from src.harness import flow
