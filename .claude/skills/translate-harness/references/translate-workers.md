@@ -24,9 +24,11 @@ exactly three predefined options** (include the ~$X figure in the API label):
    combine → epub → align.
 2. **Subagent (Task workers)** — subscription; you spawn one `translator` Task per chunk
    (Read→Write→`done`); workers appear in your transcript; no preamble cache across Task calls.
-3. **Headless (`claude -p` fan-out)** — subscription; harness runs `translate-fanout`; preamble
-   cache on Sonnet after chunk 1; stays out of orchestrator context. **Bias toward this** when
-   the worker tier is Sonnet and the book has many chunks.
+3. **Headless (CLI fan-out)** — subscription; harness runs `translate-fanout` via
+   `claude -p` (default) or `cursor-agent -p`; preamble cache on Claude/Sonnet after
+   chunk 1; stays out of orchestrator context. **Bias toward this** when the worker
+   tier is Sonnet and the book has many chunks. After choosing headless, optionally
+   `config-set headless_cli cursor` (default remains `claude`).
 
 In the question text, remind: do **not** treat "no API $" as one choice — options 2 and 3 are
 different backends with different caching and failure modes. Bias toward a no-API-key backend
@@ -157,15 +159,33 @@ when the spawn mode only wants the current wave's entries (chapter-parallel / se
 fan out every still-undrafted manifest entry (all-parallel batches):
 ```bash
 python scripts/harness.py translate-fanout --project projects/<slug> \
-  [--chunk-ids <id1,id2,...>] [--concurrency <batch_size>]
+  [--chunk-ids <id1,id2,...>] [--concurrency <batch_size>] \
+  [--cli {claude,cursor}] [--cli-bin <bin>]
 ```
-Each process is effectively:
+Persist the CLI family once per book (optional; default `claude`):
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+  --key headless_cli --value cursor
+```
+Pin a Cursor model id at prepare time (manifest `worker_model`), e.g.
+`translate-prepare --worker-model grok-4.5` or `--worker-model auto`. Or pass
+`--cli cursor` on the fan-out itself (worker model still comes from the manifest).
+
+**Claude profile (default):** each process is effectively
 `claude -p` with the body (or full prompt) on stdin, optional `--system-prompt-file <preamble_path>`,
 `--model <worker_model>`, `--tools ""`, `--output-format text` → `draft_path`. The system-prompt
 split is used only when `preamble + body` still equals `prompt.txt`; otherwise fan-out falls back
-to the full prompt (no cache). Headless does **not**
-use extended "think hard" thinking. After the wave, commit as below — the prepare→commit seam is
-unchanged (`committed`/`failed`/`missing`).
+to the full prompt (no cache).
+
+**Cursor profile (`--cli cursor` / `headless_cli=cursor`):** each process is
+`cursor-agent -p --trust --mode ask --model <worker_model> --output-format text` with the
+**full prompt on stdin** (no `--system-prompt-file`, no `--tools`). Auth is the interactive
+`cursor-agent login` session — no `CURSOR_API_KEY`, no metered per-call spend. Pin
+`worker_model` to a Cursor id (`grok-4.5`, `auto`, …); a Claude alias with cursor is almost
+certainly a misconfiguration (warning only).
+
+Headless does **not** use extended "think hard" thinking. After the wave, commit as below — the
+prepare→commit seam is unchanged (`committed`/`failed`/`missing`).
 
 After a wave's drafts are written (Task or headless), commit:
 ```bash

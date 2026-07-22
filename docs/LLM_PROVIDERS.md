@@ -2,6 +2,30 @@
 
 This guide covers how to configure LLM providers and models, add new providers (like DeepInfra, Together, Groq), and use the model selection UI in the dashboard.
 
+## Subscription CLIs (no metered API key)
+
+The translate-harness / judge-review **headless** backend can drive either:
+
+| CLI | Binary | Auth | Config |
+|---|---|---|---|
+| Claude Code | `claude` | `claude` login session | `headless_cli=claude` (default) |
+| Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` |
+
+```bash
+python scripts/harness.py config-set --project projects/<slug> --key headless_cli --value cursor
+# Pin a Cursor model id at translate-prepare / judge-prepare time:
+python scripts/harness.py translate-prepare --project projects/<slug> --worker-model grok-4.5
+# or: --worker-model auto
+```
+
+There is **no** `CURSOR_API_KEY` path for the harness — subscription login only,
+mirroring how `claude -p` uses the Claude subscription. Install the Cursor CLI
+separately (`https://cursor.com/install`) and run `cursor-agent login` once.
+Token/cost metering is unavailable on this path (same as existing `claude -p`
+headless). See `references/translate-workers.md` and `judge-review/SKILL.md`.
+
+Metered dashboard / API translation still uses the providers below.
+
 ## Quick Start
 
 1. Copy the example config:

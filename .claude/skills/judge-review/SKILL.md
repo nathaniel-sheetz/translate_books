@@ -82,7 +82,16 @@ Shared flags (`run`, `prepare`):
 
 `fanout` (subagent backend, opt-in headless wave) takes `--project`, optional
 `--target-ids` (comma-separated solo `target_id` or `batch_id`), `--concurrency`
-(default: manifest `batch_size`), and `--claude-bin`.
+(default: manifest `batch_size`), `--cli {claude,cursor}` (default: config
+`headless_cli`, else `claude`), and `--cli-bin` (back-compat alias: `--claude-bin`).
+
+**Cursor headless:** `fanout --cli cursor` (or
+`config-set --key headless_cli --value cursor`) drives `cursor-agent` under a
+subscription login — pin `--worker-model` / manifest `worker_model` to a Cursor
+id (`grok-4.5`, `auto`, …). Cursor uses the full prompt (no cache-split /
+`--system-prompt-file`). The **Task-worker** path (`prepare` → spawn
+`judge-worker` → `commit`) stays **Claude-only** — the Task tool spawns Claude
+subagents; Cursor is offered only on the headless `fanout` path.
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
 

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.34.0.0] - 2026-07-22
+
+### Added
+- **Cursor Agent as a headless fan-out CLI** (`headless_cli=cursor` / `--cli cursor`) alongside Claude Code. Translate, footnotes, and judge waves can run via `cursor-agent -p` under a Cursor subscription (ask mode, preamble folded into stdin). Docs and skill references cover the new launcher; `config-set headless_cli` persists the choice.
+
+### Fixed
+- **Cursor JSON envelopes no longer poison drafts.** Non-string `result` values and `is_error` / `subtype=error` envelopes fail the job instead of writing `repr` or error text as a successful draft.
+- **`--claude-bin` with `--cli cursor` hard-errors** instead of aiming Claude argv at the wrong binary; use `--cli-bin` for Cursor.
+- **Per-job subprocess timeouts** (15m Cursor / 30m Claude) so a hung `-p` worker cannot pin a whole wave.
+- **Judge `fanout` now warns** when `headless_cli=cursor` is paired with a Claude-looking `worker_model`, matching translate/footnotes.
+
 ## [0.33.0.0] - 2026-07-22
 
 ### Added

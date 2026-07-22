@@ -271,7 +271,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     tfp = sub.add_parser(
         "translate-fanout",
-        help="Headless claude -p wave for translate-prepare drafts (opt-in; no Task workers)",
+        help="Headless CLI wave for translate-prepare drafts (opt-in; no Task workers)",
     )
     add_project(tfp)
     tfp.add_argument(
@@ -280,11 +280,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tfp.add_argument(
         "--concurrency", type=int, default=None,
-        help="Max parallel claude -p processes per wave (default: spawn_plan.batch_size)",
+        help="Max parallel headless CLI processes per wave (default: spawn_plan.batch_size)",
     )
     tfp.add_argument(
-        "--claude-bin", dest="claude_bin", default="claude",
-        help="claude CLI binary (default: claude)",
+        "--cli", dest="cli", default=None, choices=["claude", "cursor"],
+        help="Headless CLI family (default: config headless_cli, else claude)",
+    )
+    tfp.add_argument(
+        "--cli-bin", dest="cli_bin", default=None,
+        help="Headless CLI binary override (default: claude or cursor-agent)",
+    )
+    tfp.add_argument(
+        "--claude-bin", dest="claude_bin", default=None,
+        help="Back-compat alias for --cli-bin (Claude profile)",
     )
 
     ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
@@ -309,8 +317,15 @@ def _build_parser() -> argparse.ArgumentParser:
                      choices=["auto", "api", "headless", "subagent"],
                      help="Translation backend (default: auto = carry forward the chapter "
                           "backend from the run log). 'api' shells to the metered path; "
-                          "'headless' runs a claude -p wave; 'subagent' prints the "
+                          "'headless' runs a headless CLI wave; 'subagent' prints the "
                           "prepare/commit steps (Task workers are orchestrator-driven).")
+    fnt.add_argument("--cli", dest="cli", default=None, choices=["claude", "cursor"],
+                     help="Headless CLI family when backend=headless "
+                          "(default: config headless_cli, else claude)")
+    fnt.add_argument("--cli-bin", dest="cli_bin", default=None,
+                     help="Headless CLI binary override (default: claude or cursor-agent)")
+    fnt.add_argument("--claude-bin", dest="claude_bin", default=None,
+                     help="Back-compat alias for --cli-bin (Claude profile)")
     fnt.add_argument("--provider", default=None)
     fnt.add_argument("--model", default=None)
     fnt.add_argument("--retranslate", action="store_true",
@@ -477,6 +492,8 @@ def _dispatch(args: argparse.Namespace):
             args.project,
             chunk_ids=chunk_ids,
             concurrency=args.concurrency,
+            cli=args.cli,
+            cli_bin=args.cli_bin,
             claude_bin=args.claude_bin,
         )
     if cmd == "epub":
@@ -484,9 +501,14 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "footnotes":
         if args.action == "translate":
             backend = None if args.backend == "auto" else args.backend
-            return flow.footnotes_translate(args.project, yes=args.yes, backend=backend,
-                                            provider=args.provider, model=args.model,
-                                            retranslate=args.retranslate)
+            return flow.footnotes_translate(
+                args.project, yes=args.yes, backend=backend,
+                provider=args.provider, model=args.model,
+                retranslate=args.retranslate,
+                cli=getattr(args, "cli", None),
+                cli_bin=getattr(args, "cli_bin", None),
+                claude_bin=getattr(args, "claude_bin", None),
+            )
         if args.action == "translate-prepare":
             return flow.footnotes_translate_prepare(args.project, retranslate=args.retranslate)
         if args.action == "translate-commit":

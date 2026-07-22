@@ -45,6 +45,11 @@ A judge runs one of two interchangeable ways (the same split as translate-harnes
   judge's prompt to a file for a spawned worker, then collects + parses the JSON
   verdict. **Zero API spend**; runs on the session. The gate is a usage check
   before spawning N workers, not dollars.
+- **Headless fan-out (opt-in)** — `run_judges.py fanout` after `prepare`, then
+  `commit`. Same draft/commit seam as Task workers, but the harness shells out
+  to a logged-in CLI (`claude -p` or `cursor-agent -p`) with `--cli {claude,cursor}`.
+  Cursor uses subscription auth (`cursor-agent login`); no `CURSOR_API_KEY`.
+  Task workers remain Claude-only.
 
 The two share one seam: every judge implements `build_prompt(target, context)` and
 `parse_response(target, raw, context)` on the `Judge` base. The API `run()` does
