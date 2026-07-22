@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.0.0] - 2026-07-22
+
+### Added
+- **`config-set` CLI command** persists once-per-book skill decisions (`backend`, `footnotes_decision`) into `.harness/config.json`, so later sessions stop re-asking. Unknown keys/values fail closed (argparse `choices` on the CLI, a `ValueError` guard in the flow layer).
+- **`status` now echoes `backend` / `footnotes_decision` and a `suggested_reference`** router hint (`references/*.md`), so the skill router reads the next step off the harness instead of re-deriving the mapping in prose. `resolve_backend` also honors a persisted `config.backend` (checked after run-log beats, before spawn-knob inference).
+
+### Changed
+- **`translate-harness` SKILL.md thinned** by moving its bulk into on-demand `references/*.md` files (setup, style-guide, glossary, chunk, translate-api, translate-workers, footnotes, epub, reviews, EXTENDING).
+
+### Fixed
+- **`suggested_reference` no longer sticks on `footnotes.md`.** `footnotes_apply` intentionally leaves `footnotes.json` on disk, so a presence-only check routed kept-footnotes books to the footnotes step forever; the router now keys off `pipeline_state.footnotes_written` and advances to `epub.md`/`reviews.md` once the notes are written.
+
 ## [0.32.1.0] - 2026-07-22
 
 ### Fixed

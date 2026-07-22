@@ -1975,15 +1975,17 @@ def resolve_backend(project_dir: Path, explicit: str | None = None) -> str:
 
     The chapter-translation backend the user picks in Step 4/4B is recorded as a
     ``backend`` beat in ``logs/harness_runs.jsonl`` (``api`` | ``subagent`` |
-    ``headless``). Footnote translation carries that choice forward so the note
-    bodies translate on the *same* backend. Resolution order:
+    ``headless``) and optionally persisted via ``config-set`` into
+    ``.harness/config.json``. Footnote translation carries that choice forward so
+    the note bodies translate on the *same* backend. Resolution order:
 
     1. ``explicit`` (an ``--backend`` flag) when it names a known backend.
     2. The most recent ``backend`` beat for this project's current ``run_id``. A
        legacy ``subagent`` beat paired with a later ``fanout_mode: headless`` beat
        resolves to ``headless`` (headless used to be a sub-mode of subagent).
     3. The most recent ``backend`` beat for the project across any run.
-    4. Config inference: persisted subagent spawn knobs (``worker_model`` /
+    4. Persisted ``config.backend`` from ``config-set``.
+    5. Config inference: persisted subagent spawn knobs (``worker_model`` /
        ``parallelism``) imply ``subagent``; otherwise ``api`` (today's default, so
        projects predating the run-log beat are unchanged).
     """
@@ -2017,6 +2019,11 @@ def resolve_backend(project_dir: Path, explicit: str | None = None) -> str:
     resolved = _from_events(read_run_events(project=slug))
     if resolved:
         return resolved
+
+    # Persisted once-per-book choice (config-set / skill router). Checked after
+    # run-log beats so an in-progress run's logged pick still wins mid-session.
+    if cfg.get("backend") in _BACKENDS:
+        return cfg["backend"]
 
     if cfg.get("worker_model") or cfg.get("parallelism"):
         return "subagent"
@@ -2646,6 +2653,96 @@ def show_translation(
     }
 
 
+# ── config-set (persist once-per-book skill decisions) ──────────────────────
+
+_CONFIG_SET_KEYS = {
+    "backend": frozenset({"api", "subagent", "headless"}),
+    "footnotes_decision": frozenset({"keep", "drop", "none"}),
+}
+
+
+def config_set(project: str, *, key: str, value: str) -> dict:
+    """Persist one once-per-book skill decision into ``.harness/config.json``.
+
+    Thin wrapper over ``state.load_config`` / ``state.save_config`` so the skill
+    can record ``backend`` and ``footnotes_decision`` at decision time (before any
+    translate run) and later sessions stop re-asking. Unknown keys / values fail
+    closed with a clear error rather than poisoning the config.
+    """
+    if key not in _CONFIG_SET_KEYS:
+        allowed = ", ".join(sorted(_CONFIG_SET_KEYS))
+        raise ValueError(f"unknown config key {key!r}; allowed: {allowed}")
+    allowed_values = _CONFIG_SET_KEYS[key]
+    if value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ValueError(f"invalid value {value!r} for {key}; allowed: {allowed}")
+
+    project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
+    cfg[key] = value
+    state.save_config(project_dir, cfg)
+    return {"project": project_dir.name, "key": key, "value": value, "config": cfg}
+
+
+def _footnotes_applied(project_dir: Path) -> bool:
+    """True once the footnotes stage has written reader notes into the book.
+
+    Keys off ``pipeline_state.json``'s ``footnotes_written`` (set by the footnotes
+    stage in ``translate_book.py``), the one signal that survives ``footnotes_apply``
+    — the sidecar ``footnotes.json`` is intentionally *not* deleted on apply, so the
+    router needs this to know the notes are done rather than merely present.
+    """
+    pstate = project_dir / "pipeline_state.json"
+    if not pstate.exists():
+        return False
+    try:
+        data = json.loads(pstate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return data.get("footnotes_written", 0) > 0
+
+
+def _suggested_reference(
+    project_dir: Path,
+    cfg: dict,
+    artifacts: dict,
+    stage: str,
+    epubs: list,
+) -> str:
+    """Map status signals → the translate-harness reference file to load next."""
+    if not (project_dir / "project.json").exists() and not artifacts.get("source"):
+        return "references/setup.md"
+    if not artifacts.get("style_guide"):
+        return "references/style-guide.md"
+    if not artifacts.get("glossary"):
+        return "references/glossary.md"
+    if stage == "pre-chunk" or not artifacts.get("chunks"):
+        return "references/chunk.md"
+
+    backend = cfg.get("backend")
+    footnotes_decision = cfg.get("footnotes_decision")
+    has_footnotes = (project_dir / "footnotes.json").exists()
+
+    if stage in ("untranslated", "partial"):
+        if backend == "api":
+            return "references/translate-api.md"
+        # workers path, or backend not yet chosen (choice lives in translate-workers)
+        return "references/translate-workers.md"
+
+    if stage == "fully-translated":
+        if (
+            has_footnotes
+            and footnotes_decision not in ("drop", "none")
+            and not _footnotes_applied(project_dir)
+        ):
+            return "references/footnotes.md"
+        if not epubs:
+            return "references/epub.md"
+        return "references/reviews.md"
+
+    return "references/reviews.md"
+
+
 # ── status (resume at a glance) ─────────────────────────────────────────────
 
 def status(project: str) -> dict:
@@ -2656,6 +2753,8 @@ def status(project: str) -> dict:
     exist, per-chapter translated-vs-pending counts (via ``chunk.has_translation``),
     the saved spawn plan, and whether the book is single-chunk-per-chapter (so the
     spawn-mode choice is moot). ``stage`` is the one-word summary the agent leads with.
+    Also echoes ``backend`` / ``footnotes_decision`` and a ``suggested_reference`` so
+    the skill router does not re-derive the mapping in prose.
     """
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
@@ -2670,6 +2769,8 @@ def status(project: str) -> dict:
     }
     epubs = sorted(p.name for p in project_dir.glob("*.epub"))
     spawn_plan, _ = _spawn_plan_from_cfg(cfg)
+    backend = cfg.get("backend")
+    footnotes_decision = cfg.get("footnotes_decision")
     base = {
         "project": project_dir.name,
         "artifacts": artifacts,
@@ -2677,18 +2778,24 @@ def status(project: str) -> dict:
         "spawn_plan": spawn_plan,
         "worker_model": cfg.get("worker_model") or "sonnet",
         "run_id": cfg.get("run_id"),
+        "backend": backend,
+        "footnotes_decision": footnotes_decision,
     }
 
     chunks_dir = project_dir / "chunks"
     if not chunks_dir.exists():
+        stage = "pre-chunk"
         return {
             **base,
-            "stage": "pre-chunk",
+            "stage": stage,
             "spawn_mode_moot": None,
             "totals": {},
             "pending_chapters": [],
             "chapters": [],
             "next": "no chunks yet — run `difficulty` then `chunk` before translating.",
+            "suggested_reference": _suggested_reference(
+                project_dir, cfg, artifacts, stage, epubs
+            ),
         }
 
     if str(state.REPO_ROOT) not in sys.path:
@@ -2749,6 +2856,9 @@ def status(project: str) -> dict:
         "pending_chapters": pending_chapters,
         "chapters": chapters_out,
         "next": nxt,
+        "suggested_reference": _suggested_reference(
+            project_dir, cfg, artifacts, stage, epubs
+        ),
     }
 
 
@@ -3073,12 +3183,21 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "spawn_plan": "dict {parallelism, window, batch_size}",
         "worker_model": "configured worker model",
         "run_id": "current run id",
+        "backend": "persisted translation backend (api | subagent | headless), or null if unset",
+        "footnotes_decision": "persisted footnotes choice (keep | drop | none), or null if unset",
         "stage": "one-word progress: pre-chunk | untranslated | partial | fully-translated",
         "spawn_mode_moot": "True if one chunk per chapter (else False; null pre-chunk)",
         "totals": "dict {chapters, complete_chapters, total_chunks, translated_chunks, pending_chunks}",
         "pending_chapters": "list of chapter_ids not yet fully translated",
         "chapters": "list of {chapter_id, chunks, translated, complete}",
         "next": "suggested next command",
+        "suggested_reference": "translate-harness references/*.md path the skill should Read next",
+    },
+    "config-set": {
+        "project": "project slug",
+        "key": "config key that was set",
+        "value": "value that was persisted",
+        "config": "full .harness/config.json after the write",
     },
     "runs": {
         "project": "project slug",

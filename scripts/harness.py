@@ -382,6 +382,21 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="JSON object of fields to record, e.g. "
                           "'{\"beat\":\"glossary\",\"decision\":\"approved_first_pass\"}'")
 
+    # config-set (persist once-per-book skill decisions) --------------------
+    csp = sub.add_parser(
+        "config-set",
+        help="Persist a once-per-book skill decision into .harness/config.json "
+             "(backend, footnotes_decision)",
+    )
+    add_project(csp)
+    csp.add_argument("--key", required=True, choices=sorted(flow._CONFIG_SET_KEYS),
+                     help="Config key to set")
+    csp.add_argument("--value", required=True,
+                     choices=sorted({v for vals in flow._CONFIG_SET_KEYS.values()
+                                     for v in vals}),
+                     help="Value to persist (backend: api|subagent|headless; "
+                          "footnotes_decision: keep|drop|none)")
+
     return parser
 
 
@@ -495,6 +510,8 @@ def _dispatch(args: argparse.Namespace):
         return flow.runs(args.project, run_id=args.run_id)
     if cmd == "log-event":
         return flow.log_event(args.project, event=args.event, data=args.data)
+    if cmd == "config-set":
+        return flow.config_set(args.project, key=args.key, value=args.value)
     raise SystemExit(f"unknown command: {cmd}")
 
 
