@@ -160,6 +160,7 @@ def test_footnotes_prepare_renders_batches_and_manifest(tmp_path):
         _translated_note(2, "Second.", "Ya."),
     ])
     result = flow.footnotes_translate_prepare(str(proj))
+    assert result["exit_code"] == 0
     assert result["pending"] == 1 and result["total"] == 2
     assert len(result["entries"]) == 1
     entry = result["entries"][0]
@@ -176,6 +177,7 @@ def test_footnotes_commit_parses_drafts_into_sidecar(tmp_path):
         lines = "\n".join(f"{num}| Nota {num}." for num in entry["numbers"])
         Path(entry["draft_path"]).write_text(lines + "\n", encoding="utf-8")
     result = flow.footnotes_translate_commit(str(proj))
+    assert result["exit_code"] == 0
     assert result["committed"] == [1, 2]
     bodies = _bodies(proj)
     assert bodies[1] == "Nota 1." and bodies[2] == "Nota 2."
@@ -193,6 +195,27 @@ def test_footnotes_commit_without_manifest_errors(tmp_path):
     proj = _project_with_notes(tmp_path, [_pending_note(1, "First.")])
     result = flow.footnotes_translate_commit(str(proj))
     assert "error" in result
+    assert result["exit_code"] == 1  # a real precondition failure, not a no-op
+
+
+def test_prepare_commit_returns_carry_exit_code(tmp_path):
+    """`footnotes` is a streaming command, so `main()` unconditionally reads
+    ``result["exit_code"]``. Every prepare/commit return branch must carry it, or
+    the CLI dies with ``KeyError: 'exit_code'`` before printing anything."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    state.save_config(empty, {})
+    # prepare with no sidecar (the no-op branch) still carries exit_code 0.
+    noop = flow.footnotes_translate_prepare(str(empty))
+    assert noop["exit_code"] == 0 and noop["command"] == "footnotes"
+
+    proj = _project_with_notes(tmp_path, [_pending_note(1, "First.")])
+    prep = flow.footnotes_translate_prepare(str(proj))
+    assert prep["exit_code"] == 0 and prep["command"] == "footnotes"
+    # commit on an unreadable manifest is a hard failure -> exit 1.
+    (proj / ".harness" / "footnotes" / "manifest.json").write_text("{ not json", "utf-8")
+    bad = flow.footnotes_translate_commit(str(proj))
+    assert bad["exit_code"] == 1 and "unreadable" in bad["error"]
 
 
 # ── guards ──────────────────────────────────────────────────────────────────

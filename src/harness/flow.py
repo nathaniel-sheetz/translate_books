@@ -2202,12 +2202,15 @@ def footnotes_translate_prepare(project: str, *, retranslate: bool = False) -> d
     project_dir = state.resolve_project_dir(project)
     sidecar = project_dir / "footnotes.json"
     if not sidecar.exists():
-        return {"stage": "footnotes-translate-prepare",
+        return {"command": "footnotes", "exit_code": 0,
+                "stage": "footnotes-translate-prepare",
                 "note": "no footnotes.json — nothing to prepare", "entries": [],
                 "total": 0, "pending": 0}
     entries, meta = _render_footnote_batches(project_dir, retranslate=retranslate)
     _write_footnote_manifest(project_dir, entries, meta)
     return {
+        "command": "footnotes",
+        "exit_code": 0,
         "stage": "footnotes-translate-prepare",
         "worker_model": meta["worker_model"],
         "total": meta["total"],
@@ -2238,13 +2241,15 @@ def footnotes_translate_commit(project: str) -> dict:
     project_dir = state.resolve_project_dir(project)
     manifest_path = _footnote_manifest_path(project_dir)
     if not manifest_path.exists():
-        return {"stage": "footnotes-translate-commit",
+        return {"command": "footnotes", "exit_code": 1,
+                "stage": "footnotes-translate-commit",
                 "error": "no footnote manifest — run `footnotes translate-prepare` first",
                 "committed": [], "pending": [], "failed": []}
     try:
         doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        return {"stage": "footnotes-translate-commit",
+        return {"command": "footnotes", "exit_code": 1,
+                "stage": "footnotes-translate-commit",
                 "error": f"manifest unreadable: {exc}",
                 "committed": [], "pending": [], "failed": []}
 
@@ -2280,6 +2285,11 @@ def footnotes_translate_commit(project: str) -> dict:
     write_footnotes_sidecar(project_dir, records)
     counts = _footnote_counts(footnotes_sidecar_path(project_dir))
     return {
+        "command": "footnotes",
+        # A partial commit (some notes still `pending`) is not a failure — it mirrors
+        # the chapter fan-out, which stays rc 0 and reports misses for a re-run. The
+        # headless path re-wraps this via `_stream_result`, which overrides both keys.
+        "exit_code": 0,
         "stage": "footnotes-translate-commit",
         # counts first: the per-commit `committed`/`pending` note-number lists then
         # override the count ints of the same name with the actionable detail.
