@@ -288,7 +288,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # fanout — subagent backend, headless wave (opt-in) ---------------------
     fp = sub.add_parser(
         "fanout",
-        help="Headless claude -p wave for prepare drafts (opt-in; no Task workers)",
+        help="Headless CLI wave for prepare drafts (opt-in; no Task workers)",
     )
     fp.add_argument("--project", required=True, help="Project id (under projects/) or path")
     fp.add_argument(
@@ -302,13 +302,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--concurrency",
         type=int,
         default=None,
-        help="Max parallel claude -p processes per wave (default: manifest batch_size)",
+        help="Max parallel headless CLI processes per wave (default: manifest batch_size)",
+    )
+    fp.add_argument(
+        "--cli",
+        dest="cli",
+        default=None,
+        choices=["claude", "cursor"],
+        help="Headless CLI family (default: config headless_cli, else claude)",
+    )
+    fp.add_argument(
+        "--cli-bin",
+        dest="cli_bin",
+        default=None,
+        help="Headless CLI binary override (default: claude or cursor-agent)",
     )
     fp.add_argument(
         "--claude-bin",
         dest="claude_bin",
-        default="claude",
-        help="claude CLI binary (default: claude)",
+        default=None,
+        help="Back-compat alias for --cli-bin (Claude profile)",
     )
     fp.add_argument("--verbose", action="store_true", help="Debug logging")
 
@@ -507,7 +520,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
 
 
 def _cmd_fanout(args: argparse.Namespace) -> int:
-    """Headless claude -p wave for prepare drafts (opt-in; no Task workers)."""
+    """Headless CLI wave for prepare drafts (opt-in; no Task workers)."""
     project_dir = _resolve_project(args.project)
     target_ids = None
     if args.target_ids:
@@ -516,6 +529,8 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
         project_dir,
         target_ids=target_ids,
         concurrency=args.concurrency,
+        cli=args.cli,
+        cli_bin=args.cli_bin,
         claude_bin=args.claude_bin,
     )
     payload["project"] = str(project_dir)

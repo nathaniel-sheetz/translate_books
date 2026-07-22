@@ -749,3 +749,46 @@ def test_fanout_commit_lands_headless_draft(tmp_path):
     assert out["counts"]["committed"] == 1
     assert out["committed"][0]["target_id"] == cid
     assert out["counts"]["failed"] == 0
+
+
+def test_fanout_cursor_skips_cache_split_and_commits(tmp_path):
+    """cursor fanout uses the full prompt; commit still parses the JSON verdict."""
+    project, cid = _project_with_chunk(tmp_path)
+    prep = subagent.prepare(project, ["dialogue"], f"chunk:{cid}", worker_model="grok-4.5")
+    entry = prep["manifest"][0]
+    assert "preamble_path" in entry
+    full_prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
+
+    seen_cmds: list[list[str]] = []
+    seen_inputs: list[str] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen_cmds.append(list(cmd))
+        seen_inputs.append(input_text)
+        assert "--system-prompt-file" not in cmd
+        assert "--tools" not in cmd
+        assert "grok-4.5" in cmd
+        return 0, _GOOD_VERDICT, ""
+
+    fan = subagent.fanout(project, cli="cursor", runner=fake_runner)
+    assert fan["counts"]["wrote"] == 1
+    assert fan["cli"] == "cursor"
+    assert seen_inputs and seen_inputs[0] == full_prompt
+    out = subagent.commit(project, persist=False)
+    assert out["counts"]["committed"] == 1
+    assert out["committed"][0]["target_id"] == cid
+
+
+def test_fanout_cursor_warns_on_claude_worker_model(tmp_path, capsys):
+    """cursor + Claude-looking worker_model surfaces the same warning as translate."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}", worker_model="sonnet")
+
+    def fake_runner(cmd, *, input_text, cwd):
+        return 0, _GOOD_VERDICT, ""
+
+    fan = subagent.fanout(project, cli="cursor", runner=fake_runner)
+    assert "warning" in fan
+    assert "headless_cli=cursor" in fan["warning"]
+    err = capsys.readouterr().err
+    assert "headless_cli=cursor" in err

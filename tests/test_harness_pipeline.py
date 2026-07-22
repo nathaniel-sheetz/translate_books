@@ -1397,6 +1397,8 @@ def test_translate_threads_thinking_flag_to_subprocess(tmp_path: Path, monkeypat
     ("claude-opus-4-8", True),
     ("claude-fable-5-20250101", False),   # full fable id: rejected by the fallback, not the alias short-circuit
     ("claude-3-5-sonnet-latest", False),  # legacy: no toggleable thinking
+    ("grok-4.5", False),                  # Cursor model: never Claude thinking
+    ("auto", False),                      # Cursor automatic: never Claude thinking
     ("", False),                          # empty guard
 ])
 def test_worker_supports_thinking_full_id_fallback(worker_model, expected):
@@ -1404,6 +1406,61 @@ def test_worker_supports_thinking_full_id_fallback(worker_model, expected):
     from src.harness import flow
 
     assert flow._worker_supports_thinking(worker_model) is expected
+
+
+def test_translate_fanout_cursor_skips_cache_split(tmp_path: Path):
+    """cursor profile sends the full prompt and never passes --system-prompt-file."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    hstate.save_config(tmp_path, {"always_include_dialogue": True, "batch_size": 2})
+
+    prep = flow.translate_prepare(str(tmp_path), worker_model="grok-4.5")
+    entry = prep["manifest"][0]
+    assert "preamble_path" in entry and "body_path" in entry
+    full_prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
+
+    seen_cmds: list[list[str]] = []
+    seen_inputs: list[str] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen_cmds.append(list(cmd))
+        seen_inputs.append(input_text)
+        assert "--system-prompt-file" not in cmd
+        assert "--tools" not in cmd
+        assert "--mode" in cmd and "ask" in cmd
+        assert "grok-4.5" in cmd
+        return 0, "es_cursor draft prose", ""
+
+    out = flow.translate_fanout(str(tmp_path), cli="cursor", runner=fake_runner)
+    assert out["counts"]["wrote"] == 1
+    assert out["cli"] == "cursor"
+    assert seen_inputs and seen_inputs[0] == full_prompt
+    draft = Path(entry["draft_path"]).read_text(encoding="utf-8").strip()
+    assert draft.startswith("es_cursor")
+
+
+def test_translate_fanout_cursor_warns_on_claude_worker_model(tmp_path: Path, capsys):
+    """cursor + sonnet worker_model emits a warning but still runs."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    hstate.save_config(tmp_path, {"always_include_dialogue": True, "batch_size": 2})
+    flow.translate_prepare(str(tmp_path), worker_model="sonnet")
+
+    def fake_runner(cmd, *, input_text, cwd):
+        return 0, "es draft", ""
+
+    out = flow.translate_fanout(str(tmp_path), cli="cursor", runner=fake_runner)
+    assert out["counts"]["wrote"] == 1
+    assert "warning" in out
+    assert "sonnet" in out["warning"]
+    err = capsys.readouterr().err
+    assert "sonnet" in err
 
 
 def test_translate_prepare_clamps_window_to_batch_size(tmp_path: Path):
@@ -1508,11 +1565,19 @@ def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
     assert cfg["footnotes_decision"] == "none"
     # Other defaults still present after the merge write.
     assert cfg["target_language"] == "Spanish"
+    assert cfg["headless_cli"] == "claude"
+
+    flow.config_set(str(tmp_path), key="headless_cli", value="cursor")
+    cfg = state.load_config(tmp_path)
+    assert cfg["headless_cli"] == "cursor"
+    assert flow.status(str(tmp_path))["headless_cli"] == "cursor"
 
     with pytest.raises(ValueError, match="unknown config key"):
         flow.config_set(str(tmp_path), key="not_a_key", value="x")
     with pytest.raises(ValueError, match="invalid value"):
         flow.config_set(str(tmp_path), key="backend", value="gemini")
+    with pytest.raises(ValueError, match="invalid value"):
+        flow.config_set(str(tmp_path), key="headless_cli", value="codex")
 
 
 def test_status_echoes_backend_and_suggested_reference(tmp_path: Path):

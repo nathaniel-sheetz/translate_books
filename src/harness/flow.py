@@ -88,8 +88,9 @@ def _worker_supports_thinking(worker_model: str) -> bool:
     ``fable``), not a full model id, so ``api_translator.model_supports_thinking``
     (which matches ``claude-sonnet-5`` etc.) can't be applied to it directly. The
     keyword-triggerable aliases toggle on via a "think hard" spawn keyword; ``fable``
-    is always-on (nothing to toggle) → ``False``. A full model id (non-alias) falls
-    back to the API-path support check.
+    is always-on (nothing to toggle) → ``False``. A full Claude model id (non-alias)
+    falls back to the API-path support check. Cursor / non-Claude ids (``grok-*``,
+    ``auto``, ``gpt-*``, ``composer-*``, …) never get the Claude thinking keyword.
     """
     if not worker_model:
         return False
@@ -98,8 +99,17 @@ def _worker_supports_thinking(worker_model: str) -> bool:
         return True
     if alias == "fable":
         return False
+    # Cursor headless models and other non-Claude ids: never inject "think hard".
+    if not alias.startswith("claude-"):
+        return False
     from src.api_translator import model_supports_thinking
     return model_supports_thinking(worker_model)
+
+
+def _warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
+    """Return a warning when cursor is paired with a Claude-looking worker_model."""
+    from src.harness.headless import warn_cursor_claude_model
+    return warn_cursor_claude_model(cli, worker_model)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -1052,8 +1062,9 @@ def difficulty(project: str) -> dict:
 #        (no spend)        (+ optional shared preamble.txt + per-chunk .body.txt
 #                          for the headless ``translate-fanout`` path)
 #                          Task workers: read prompt_path -> write draft_path
-#                          Headless:     claude -p body + --system-prompt-file preamble
-#   translate-fanout  ─► run one wave of headless ``claude -p`` workers (opt-in)
+#                          Headless:     CLI -p body + --system-prompt-file preamble
+#                                        (claude; cursor folds preamble into stdin)
+#   translate-fanout  ─► run one wave of headless CLI workers (claude|cursor; opt-in)
 #   translate-commit  ─► guard each draft -> apply_translation + save_chunk
 #        (idempotent)      + a provenance log per chunk; reports failed/missing
 #
@@ -1458,7 +1469,7 @@ def translate_prepare(
             "For each manifest entry, either (1) spawn a Task worker pinned to "
             "worker_model that reads prompt_path and writes ONLY the translated "
             "prose to draft_path, or (2) run `translate-fanout` for the headless "
-            "claude -p path (uses preamble_path/body_path when present). Then run "
+            "CLI path (claude|cursor; uses preamble_path/body_path when present). Then run "
             "`translate-commit`. Nothing here spends or calls an API."
             if entries else
             "Nothing to translate — all chunks in scope already have translations."
@@ -1613,20 +1624,22 @@ def translate_fanout(
     *,
     chunk_ids: list[str] | None = None,
     concurrency: int | None = None,
-    claude_bin: str = "claude",
+    cli: str | None = None,
+    cli_bin: str | None = None,
+    claude_bin: str | None = None,
     runner=None,
 ) -> dict:
-    """Run one headless ``claude -p`` wave for translate-prepare manifest entries.
+    """Run one headless CLI wave for translate-prepare manifest entries.
 
     Opt-in alternative to Task-tool workers. For each selected entry that lacks a
-    non-empty draft, invoke ``claude -p`` from a neutral cwd (no project
-    ``CLAUDE.md``) with ``--tools ""`` and ``--output-format text``, writing
-    stdout to ``draft_path``. When ``preamble_path`` + ``body_path`` are present
-    and ``preamble + body`` still equals ``prompt_path``, the body is the user
-    prompt and the preamble is passed via ``--system-prompt-file`` (Claude Code
-    cross-invocation cache on Sonnet; system-role vs the Task/API single-user
-    prompt is intentional). On mismatch or missing split files, the full
-    ``prompt_path`` is used with no system-prompt file.
+    non-empty draft, invoke the selected headless CLI (``claude`` or ``cursor``)
+    from a neutral cwd, writing stdout to ``draft_path``.
+
+    Claude profile: when ``preamble_path`` + ``body_path`` are present and
+    ``preamble + body`` still equals ``prompt_path``, the body is the user prompt
+    and the preamble is passed via ``--system-prompt-file`` (Claude Code
+    cross-invocation cache on Sonnet). Cursor has no system-prompt-file flag —
+    fan-out skips the split and sends the full prompt on stdin.
 
     Processes entries in waves of ``concurrency`` (default: manifest
     ``spawn_plan.batch_size``, else 3), finishing each wave before the next.
@@ -1636,10 +1649,13 @@ def translate_fanout(
     ``chunk_ids``, when given, limits the wave to those ids (chapter-parallel /
     sequential re-prepare loops pass only the current wave). ``runner`` is a
     test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+    ``claude_bin`` is a back-compat alias for ``cli_bin``.
     """
     from src.harness.headless import run_headless_wave
 
     project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
+    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
     hdir = state.harness_dir(project_dir)
     manifest_path = hdir / "translate" / "manifest.json"
     if not manifest_path.exists():
@@ -1661,6 +1677,9 @@ def translate_fanout(
             }
 
     worker_model = doc.get("worker_model") or "sonnet"
+    model_warning = _warn_cursor_claude_model(cli_name, worker_model)
+    if model_warning:
+        print(model_warning, file=sys.stderr)
     spawn_plan = doc.get("spawn_plan") or {}
     if concurrency is None:
         try:
@@ -1671,6 +1690,8 @@ def translate_fanout(
         return {"error": f"invalid concurrency {concurrency!r}; must be >= 1", "wrote": []}
 
     # Skip entries that already have a non-empty draft (idempotent / resume).
+    # Cursor cannot use --system-prompt-file — skip the cache split entirely.
+    use_cache_split = cli_name != "cursor"
     skipped: list[str] = []
     ready: list[dict] = []
     pre_failed: list[dict] = []
@@ -1685,7 +1706,8 @@ def translate_fanout(
         preamble = entry.get("preamble_path")
         body = entry.get("body_path")
         use_cached = bool(
-            preamble
+            use_cache_split
+            and preamble
             and body
             and _split_matches_prompt(Path(preamble), Path(body), prompt_path)
         )
@@ -1718,11 +1740,12 @@ def translate_fanout(
             )
 
     if not ready and not pre_failed:
-        return {
+        out = {
             "wrote": [],
             "failed": [],
             "skipped_existing_draft": skipped,
             "worker_model": worker_model,
+            "cli": cli_name,
             "concurrency": concurrency,
             "cwd": None,
             "counts": {
@@ -1738,22 +1761,28 @@ def translate_fanout(
                 "(optionally with --chunk-ids) for any failed/missing, then commit again."
             ),
         }
+        if model_warning:
+            out["warning"] = model_warning
+        return out
 
     wave_out = run_headless_wave(
         ready,
         model=worker_model,
         concurrency=concurrency,
+        cli=cli_name,
+        cli_bin=cli_bin,
         claude_bin=claude_bin,
         runner=runner,
     )
 
-    # Fail-fast when claude is missing (no jobs ran).
+    # Fail-fast when the CLI binary is missing (no jobs ran).
     if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):
-        return {
+        err_out = {
             "error": wave_out["error"],
             "wrote": [],
             "failed": [],
             "skipped_existing_draft": skipped,
+            "cli": cli_name,
             "counts": {
                 "wrote": 0,
                 "failed": 0,
@@ -1761,17 +1790,21 @@ def translate_fanout(
                 "todo": 0,
             },
         }
+        if model_warning:
+            err_out["warning"] = model_warning
+        return err_out
 
     failed = list(pre_failed)
     for item in wave_out.get("failed") or []:
         failed.append({"chunk_id": item["id"], "error": item["error"]})
     wrote = list(wave_out.get("wrote") or [])
 
-    return {
+    out = {
         "wrote": wrote,
         "failed": failed,
         "skipped_existing_draft": skipped,
         "worker_model": worker_model,
+        "cli": cli_name,
         "concurrency": concurrency,
         "cwd": wave_out.get("cwd"),
         "counts": {
@@ -1787,6 +1820,9 @@ def translate_fanout(
             "Nothing to fan out — no matching manifest entries."
         ),
     }
+    if model_warning:
+        out["warning"] = model_warning
+    return out
 
 
 # ── chunk / cost / translate / epub (subprocess wrappers) ──────────────────
@@ -2116,7 +2152,9 @@ def footnotes_translate(
     model: str | None = None,
     retranslate: bool = False,
     runner=None,
-    claude_bin: str = "claude",
+    cli: str | None = None,
+    cli_bin: str | None = None,
+    claude_bin: str | None = None,
 ) -> int | dict:
     """Translate the imported footnote bodies on the book's chosen backend.
 
@@ -2126,8 +2164,9 @@ def footnotes_translate(
     - **api** — the metered path. Fail closed without ``--yes`` (the cost must be
       approved by the user in a SEPARATE turn first), then shell to
       ``translate_footnotes.py`` → ``call_llm``.
-    - **headless** — render batch prompts, run one ``claude -p`` wave, and commit the
-      drafts. No metered spend, so no ``--yes`` gate.
+    - **headless** — render batch prompts, run one headless CLI wave, and commit the
+      drafts. No metered spend, so no ``--yes`` gate. ``cli`` / ``headless_cli``
+      selects Claude vs Cursor.
     - **subagent** — the Task-worker path is orchestrator-driven, so this does *not*
       translate; it returns guidance to use ``footnotes translate-prepare`` → spawn
       ``translator`` subagents → ``footnotes translate-commit``.
@@ -2161,9 +2200,11 @@ def footnotes_translate(
         })
 
     if resolved == "headless":
-        hres = _footnotes_headless(project, retranslate=retranslate,
-                                   runner=runner, claude_bin=claude_bin)
-        # A hard wave failure (e.g. claude off PATH) is a real failure, not a no-op —
+        hres = _footnotes_headless(
+            project, retranslate=retranslate, runner=runner,
+            cli=cli, cli_bin=cli_bin, claude_bin=claude_bin,
+        )
+        # A hard wave failure (e.g. CLI off PATH) is a real failure, not a no-op —
         # exit non-zero so it is never mistaken for success. Partial misses stay rc 0
         # (reported under `pending` for a re-run, like the chapter fan-out).
         rc = 1 if hres.get("error") else 0
@@ -2307,10 +2348,12 @@ def footnotes_translate_commit(project: str) -> dict:
 
 
 def _footnotes_headless(
-    project: str, *, retranslate: bool, runner=None, claude_bin: str = "claude",
+    project: str, *, retranslate: bool, runner=None,
+    cli: str | None = None, cli_bin: str | None = None,
+    claude_bin: str | None = None,
     concurrency: int | None = None,
 ) -> dict:
-    """Headless backend: render batches, run one ``claude -p`` wave, commit the drafts.
+    """Headless backend: render batches, run one CLI wave, commit the drafts.
 
     The footnote analog of ``translate-fanout``: prepare → wave → commit in one call
     (footnotes are few and short, so there is no per-wave Task orchestration). ``runner``
@@ -2320,12 +2363,14 @@ def _footnotes_headless(
 
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
+    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
     entries, meta = _render_footnote_batches(project_dir, retranslate=retranslate)
     _write_footnote_manifest(project_dir, entries, meta)
 
     if not entries:
         counts = _footnote_counts(project_dir / "footnotes.json")
         return {"stage": "footnotes-translate", "backend": "headless",
+                "cli": cli_name,
                 "note": "all imported footnotes are already translated",
                 "committed": [], "pending": [], **counts}
 
@@ -2341,20 +2386,32 @@ def _footnotes_headless(
         except (TypeError, ValueError):
             concurrency = 3
 
+    worker_model = meta["worker_model"]
+    model_warning = _warn_cursor_claude_model(cli_name, worker_model)
+    if model_warning:
+        print(model_warning, file=sys.stderr)
+
     wave = run_headless_wave(
-        jobs, model=meta["worker_model"], concurrency=concurrency,
-        claude_bin=claude_bin, runner=runner,
+        jobs, model=worker_model, concurrency=concurrency,
+        cli=cli_name, cli_bin=cli_bin, claude_bin=claude_bin, runner=runner,
     )
-    # Fail fast when claude is missing (no jobs ran) — never silently fall back to spend.
+    # Fail fast when the CLI is missing (no jobs ran) — never silently fall back to spend.
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
         counts = _footnote_counts(project_dir / "footnotes.json")
-        return {"stage": "footnotes-translate", "backend": "headless",
-                "error": wave["error"], "committed": [], "pending": [], **counts}
+        out = {"stage": "footnotes-translate", "backend": "headless",
+               "cli": cli_name,
+               "error": wave["error"], "committed": [], "pending": [], **counts}
+        if model_warning:
+            out["warning"] = model_warning
+        return out
 
     result = footnotes_translate_commit(project)
     result["stage"] = "footnotes-translate"
     result["backend"] = "headless"
+    result["cli"] = cli_name
     result["wave"] = {"wrote": wave.get("wrote") or [], "failed": wave.get("failed") or []}
+    if model_warning:
+        result["warning"] = model_warning
     return result
 
 
@@ -2658,6 +2715,7 @@ def show_translation(
 _CONFIG_SET_KEYS = {
     "backend": frozenset({"api", "subagent", "headless"}),
     "footnotes_decision": frozenset({"keep", "drop", "none"}),
+    "headless_cli": frozenset({"claude", "cursor"}),
 }
 
 
@@ -2665,9 +2723,10 @@ def config_set(project: str, *, key: str, value: str) -> dict:
     """Persist one once-per-book skill decision into ``.harness/config.json``.
 
     Thin wrapper over ``state.load_config`` / ``state.save_config`` so the skill
-    can record ``backend`` and ``footnotes_decision`` at decision time (before any
-    translate run) and later sessions stop re-asking. Unknown keys / values fail
-    closed with a clear error rather than poisoning the config.
+    can record ``backend``, ``footnotes_decision``, and ``headless_cli`` at
+    decision time (before any translate run) and later sessions stop re-asking.
+    Unknown keys / values fail closed with a clear error rather than poisoning
+    the config.
     """
     if key not in _CONFIG_SET_KEYS:
         allowed = ", ".join(sorted(_CONFIG_SET_KEYS))
@@ -2753,8 +2812,8 @@ def status(project: str) -> dict:
     exist, per-chapter translated-vs-pending counts (via ``chunk.has_translation``),
     the saved spawn plan, and whether the book is single-chunk-per-chapter (so the
     spawn-mode choice is moot). ``stage`` is the one-word summary the agent leads with.
-    Also echoes ``backend`` / ``footnotes_decision`` and a ``suggested_reference`` so
-    the skill router does not re-derive the mapping in prose.
+    Also echoes ``backend`` / ``footnotes_decision`` / ``headless_cli`` and a
+    ``suggested_reference`` so the skill router does not re-derive the mapping in prose.
     """
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
@@ -2780,6 +2839,7 @@ def status(project: str) -> dict:
         "run_id": cfg.get("run_id"),
         "backend": backend,
         "footnotes_decision": footnotes_decision,
+        "headless_cli": cfg.get("headless_cli") or "claude",
     }
 
     chunks_dir = project_dir / "chunks"
@@ -3064,11 +3124,13 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     },
     "translate-fanout": {
         "wrote": "list of chunk_ids whose draft_path was written this run",
-        "failed": "list of {chunk_id, error} for claude -p failures",
+        "failed": "list of {chunk_id, error} for headless CLI failures",
         "skipped_existing_draft": "list of chunk_ids that already had a non-empty draft",
-        "worker_model": "model passed to claude -p --model",
+        "worker_model": "model passed to the headless CLI --model",
         "concurrency": "wave width used",
-        "cwd": "neutral cwd used for claude -p (avoids project CLAUDE.md)",
+        "cwd": "neutral cwd used for headless CLI (avoids project CLAUDE.md)",
+        "cli": "headless CLI used (claude|cursor)",
+        "warning": "optional non-fatal notice (e.g. Cursor Claude-model alias)",
         "counts": "dict {wrote, failed, skipped, todo}",
         "instructions": "what to do next (translate-commit, or re-fanout failed)",
         "error": "present only on failure (e.g. no manifest)",
@@ -3185,6 +3247,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "run_id": "current run id",
         "backend": "persisted translation backend (api | subagent | headless), or null if unset",
         "footnotes_decision": "persisted footnotes choice (keep | drop | none), or null if unset",
+        "headless_cli": "headless launcher family (claude | cursor); default claude",
         "stage": "one-word progress: pre-chunk | untranslated | partial | fully-translated",
         "spawn_mode_moot": "True if one chunk per chapter (else False; null pre-chunk)",
         "totals": "dict {chapters, complete_chapters, total_chunks, translated_chunks, pending_chunks}",

@@ -55,6 +55,24 @@ Shared seam today: `build_translation_prompt` + `apply_translation` — no
 `TranslationBackend` Protocol. Prefer that over a class hierarchy unless the
 new backend truly cannot share the stamp path.
 
+### 3a. New CLI family inside `headless` (preferred for subscription CLIs)
+
+When the new driver is still "fan out prompts → write drafts → commit" and only
+the launcher binary/flags differ (Codex, Gemini CLI, …), **do not** add a fourth
+`backend` value. Keep `backend=headless` and extend the CLI selector:
+
+1. Add a profile in `src/harness/headless.py` (`_build_cmd` / `_extract_output` /
+   default binary / not-found hint). Fold any Claude-only
+   `--system-prompt-file` into stdin when the new CLI lacks that flag.
+2. Add the name to `_CONFIG_SET_KEYS["headless_cli"]` and `DEFAULTS["headless_cli"]`.
+3. Thread `--cli` / `--cli-bin` (already on `translate-fanout`, footnotes
+   translate, and `run_judges.py fanout`) — no new fan-out / commit commands.
+4. Document the profile in `references/translate-workers.md` and
+   `judge-review/SKILL.md`. Task-worker paths stay Claude-only (the Task tool
+   spawns Claude subagents).
+
+Recipe used for Cursor: `headless_cli=cursor` → `cursor-agent -p --trust --mode ask`.
+
 ## 4. New review type (judge)
 
 Lives in the **judge-review** skill, not here. Cross-link; do not duplicate.

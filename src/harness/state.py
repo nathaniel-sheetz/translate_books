@@ -44,6 +44,9 @@ DEFAULTS: dict[str, object] = {
     # None / absent means auto (on when any chunk has [IMAGE:...] placeholders).
     # Stored as bool when the user sets --always-images / --no-always-images at setup.
     "always_include_image_instructions": None,
+    # Which CLI family the headless backend drives (``claude -p`` vs ``cursor-agent``).
+    # Backend stays ``headless``; this only selects the launcher profile.
+    "headless_cli": "claude",
 }
 
 # Config keys a command may override (CLI flag -> config key); used by setup.

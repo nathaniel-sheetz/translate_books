@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -181,9 +182,11 @@ _FANOUT_SCHEMA = {
     "wrote": "list of entry ids whose drafts were written this wave",
     "failed": "list of {id, error} — re-run fanout for these",
     "skipped": "list of entry ids that already had a non-empty draft",
-    "worker_model": "model tier used for claude -p",
-    "concurrency": "max parallel claude -p processes per wave",
+    "worker_model": "model tier used for the headless CLI",
+    "concurrency": "max parallel headless CLI processes per wave",
     "cwd": "neutral empty cwd used for the workers",
+    "cli": "headless CLI used (claude|cursor)",
+    "warning": "optional non-fatal notice (e.g. Cursor Claude-model alias)",
     "counts": "{wrote, failed, skipped, todo}",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
@@ -404,7 +407,7 @@ def prepare(
             "targets) spawn one `judge-worker` subagent pinned to worker_model (Task "
             "tool, subagent_type=judge-worker, model=worker_model) that reads prompt_path "
             "and writes ONLY the JSON verdict to draft_path, in bounded batches of "
-            "batch_size — or run `fanout` for a headless claude -p wave. Then run "
+            "batch_size — or run `fanout` for a headless CLI wave (claude|cursor). Then run "
             "`commit`. Nothing here spends or calls an API."
             if entries
             else "Nothing to judge — scope resolved to no targets."
@@ -435,26 +438,34 @@ def fanout(
     *,
     target_ids: list[str] | None = None,
     concurrency: int | None = None,
-    claude_bin: str = "claude",
+    cli: str | None = None,
+    cli_bin: str | None = None,
+    claude_bin: str | None = None,
     runner=None,
 ) -> dict[str, Any]:
-    """Run one headless ``claude -p`` wave for judge-prepare manifest entries.
+    """Run one headless CLI wave for judge-prepare manifest entries.
 
     Opt-in alternative to Task-tool workers. For each selected entry that lacks a
-    non-empty draft, invoke ``claude -p`` from a neutral cwd with ``--tools ""``
-    and ``--output-format text``, writing stdout to ``draft_path``. When
-    ``preamble_path`` + ``body_path`` are present, the body is the user prompt
-    and the preamble is passed via ``--system-prompt-file``; otherwise the full
-    ``prompt_path`` is used (grouped entries always take this path).
+    non-empty draft, invoke the selected headless CLI (``claude`` or ``cursor``)
+    from a neutral cwd, writing stdout to ``draft_path``.
+
+    Claude profile: when ``preamble_path`` + ``body_path`` are present, the body
+    is the user prompt and the preamble is passed via ``--system-prompt-file``.
+    Cursor has no system-prompt-file — fan-out skips the split and uses the full
+    ``prompt_path``. Grouped entries always take the full-prompt path.
 
     ``target_ids``, when given, matches a solo entry's ``target_id`` or a batch
     entry's ``batch_id``. Does **not** call ``commit`` — the skill commits after
     the wave. ``runner`` is a test seam:
     ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+    ``claude_bin`` is a back-compat alias for ``cli_bin``.
     """
-    from src.harness.headless import run_headless_wave
+    from src.harness.headless import run_headless_wave, warn_cursor_claude_model
+    from src.harness import state as hstate
 
     project_dir = Path(project_dir)
+    cfg = hstate.load_config(project_dir)
+    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
     jdir = _judges_dir(project_dir)
     manifest_path = jdir / "manifest.json"
     if not manifest_path.exists():
@@ -495,6 +506,9 @@ def fanout(
             }
 
     worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
+    model_warning = warn_cursor_claude_model(cli_name, worker_model)
+    if model_warning:
+        print(model_warning, file=sys.stderr)
     if concurrency is None:
         try:
             concurrency = int(doc.get("batch_size") or _DEFAULT_BATCH_SIZE)
@@ -510,6 +524,8 @@ def fanout(
             "_schema": _FANOUT_SCHEMA,
         }
 
+    # Cursor cannot use --system-prompt-file — skip the cache split entirely.
+    use_cache_split = cli_name != "cursor"
     skipped: list[str] = []
     ready: list[dict[str, Any]] = []
     pre_failed: list[dict[str, str]] = []
@@ -527,7 +543,13 @@ def fanout(
         preamble = entry.get("preamble_path")
         body = entry.get("body_path")
         try:
-            if preamble and body and Path(preamble).exists() and Path(body).exists():
+            if (
+                use_cache_split
+                and preamble
+                and body
+                and Path(preamble).exists()
+                and Path(body).exists()
+            ):
                 ready.append(
                     {
                         "id": eid,
@@ -555,11 +577,12 @@ def fanout(
             )
 
     if not ready and not pre_failed:
-        return {
+        out = {
             "wrote": [],
             "failed": [],
             "skipped": skipped,
             "worker_model": worker_model,
+            "cli": cli_name,
             "concurrency": concurrency,
             "cwd": None,
             "counts": {
@@ -576,22 +599,28 @@ def fanout(
             ),
             "_schema": _FANOUT_SCHEMA,
         }
+        if model_warning:
+            out["warning"] = model_warning
+        return out
 
     wave_out = run_headless_wave(
         ready,
         model=worker_model,
         concurrency=concurrency,
+        cli=cli_name,
+        cli_bin=cli_bin,
         claude_bin=claude_bin,
         runner=runner,
     )
 
     if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):
-        return {
+        err_out = {
             "error": wave_out["error"],
             "wrote": [],
             "failed": [],
             "skipped": skipped,
             "worker_model": worker_model,
+            "cli": cli_name,
             "concurrency": concurrency,
             "cwd": wave_out.get("cwd"),
             "counts": {
@@ -603,16 +632,20 @@ def fanout(
             "_schema": _FANOUT_SCHEMA,
             "instructions": "Fix the launcher error, then re-run `fanout`.",
         }
+        if model_warning:
+            err_out["warning"] = model_warning
+        return err_out
 
     failed = list(pre_failed)
     failed.extend(wave_out.get("failed") or [])
     wrote = list(wave_out.get("wrote") or [])
 
-    return {
+    out = {
         "wrote": wrote,
         "failed": failed,
         "skipped": skipped,
         "worker_model": worker_model,
+        "cli": cli_name,
         "concurrency": concurrency,
         "cwd": wave_out.get("cwd"),
         "counts": {
@@ -629,6 +662,9 @@ def fanout(
         ),
         "_schema": _FANOUT_SCHEMA,
     }
+    if model_warning:
+        out["warning"] = model_warning
+    return out
 
 
 def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
