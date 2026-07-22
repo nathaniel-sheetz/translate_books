@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.32.1.0] - 2026-07-22
+
+### Fixed
+- **`footnotes translate-prepare` / `translate-commit` no longer crash on the CLI.** `footnotes` is a streaming command, so `main()` unconditionally reads `result["exit_code"]`; the two new subagent-backend subcommands returned dicts without that key, so both died with `KeyError: 'exit_code'` before printing anything — breaking the subagent footnote backend end-to-end (the unit tests missed it by calling the flow functions directly, bypassing `main()`). Every prepare/commit return now carries `command`/`exit_code`: success and partial (`pending`) commits exit 0; a missing or unreadable manifest exits 1. Added a regression test asserting the streaming-command contract.
+
 ## [0.32.0.1] - 2026-07-21
 
 ### Fixed

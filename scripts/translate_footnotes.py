@@ -17,105 +17,23 @@ The standalone script spends when invoked directly.
 """
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.footnote_import import load_footnotes_sidecar, footnotes_sidecar_path, write_footnotes_sidecar, FootnoteRecord
-from src.utils.file_io import load_glossary, load_style_guide
-
-
-# Keep each batch's source text under this many characters so the model's reply
-# stays manageable and easy to reconcile.
-_BATCH_CHAR_BUDGET = 6000
-
-_LINE_RE = re.compile(r"^\s*(\d+)\s*\|\s*(.*)$")
-
-
-def batch_notes(notes: list[dict], char_budget: int = _BATCH_CHAR_BUDGET) -> list[list[dict]]:
-    """Group untranslated notes into batches under a character budget."""
-    batches: list[list[dict]] = []
-    current: list[dict] = []
-    size = 0
-    for n in notes:
-        body = n.get("source_body") or ""
-        if current and size + len(body) > char_budget:
-            batches.append(current)
-            current, size = [], 0
-        current.append(n)
-        size += len(body)
-    if current:
-        batches.append(current)
-    return batches
-
-
-def build_footnotes_prompt(
-    notes: list[dict],
-    *,
-    source_language: str,
-    target_language: str,
-    title: str,
-    glossary_text: str = "",
-    style_text: str = "",
-) -> str:
-    """Render the batch translation prompt for a group of footnotes."""
-    parts = [
-        f'You are a professional literary translator. Translate these footnotes '
-        f'from {source_language} to {target_language} for the book "{title}".',
-        "",
-        "Rules:",
-        f"- Translate each numbered note into natural, fluent {target_language}.",
-        "- Preserve _underscore italics_ exactly (they mark italic text).",
-        "- Preserve any [IMAGE:...] tokens verbatim.",
-        "- Do NOT add, drop, merge, or renumber notes.",
-        "- Return EXACTLY one line per note, formatted as:  N| <translation>",
-        "",
-    ]
-    if glossary_text.strip():
-        parts += ["GLOSSARY (use these renderings):", glossary_text.strip(), ""]
-    if style_text.strip():
-        parts += ["STYLE GUIDE:", style_text.strip(), ""]
-    parts.append("FOOTNOTES:")
-    for n in notes:
-        parts.append(f"{n['number']}| {n.get('source_body') or ''}")
-    return "\n".join(parts)
-
-
-def parse_numbered_translations(response: str) -> dict[int, str]:
-    """Parse ``N| translation`` lines, joining wrapped continuation lines."""
-    out: dict[int, str] = {}
-    current: int | None = None
-    for line in (response or "").splitlines():
-        m = _LINE_RE.match(line)
-        if m:
-            current = int(m.group(1))
-            out[current] = m.group(2).strip()
-        elif current is not None and line.strip():
-            out[current] = (out[current] + " " + line.strip()).strip()
-    return out
-
-
-def _glossary_text(project_dir: Path) -> str:
-    path = project_dir / "glossary.json"
-    if not path.exists():
-        return ""
-    try:
-        from src.api_translator import format_glossary_for_prompt
-        return format_glossary_for_prompt(load_glossary(path))
-    except Exception:
-        return ""
-
-
-def _style_text(project_dir: Path) -> str:
-    path = project_dir / "style.json"
-    if not path.exists():
-        return ""
-    try:
-        return load_style_guide(path).content
-    except Exception:
-        return ""
+# The batch/prompt/parse/context helpers are shared with the harness subagent +
+# headless footnote backends (src/harness/flow.py); they live in one place so
+# both paths render identical prompts. Re-exported here so callers/tests that
+# import them off this module keep working.
+from src.footnotes_translate_core import (  # noqa: F401
+    batch_notes,
+    build_footnotes_prompt,
+    parse_numbered_translations,
+    read_glossary_text as _glossary_text,
+    read_style_text as _style_text,
+)
 
 
 def translate_footnotes(

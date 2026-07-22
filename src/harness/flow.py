@@ -1965,19 +1965,167 @@ def _footnote_counts(sidecar: Path) -> dict:
     return {"total": len(notes), "translated": translated, "pending": len(notes) - translated}
 
 
+# ── backend resolution (carry the chapter choice forward to footnotes) ──────
+
+_BACKENDS = ("api", "subagent", "headless")
+
+
+def resolve_backend(project_dir: Path, explicit: str | None = None) -> str:
+    """Resolve which translation backend a step should use.
+
+    The chapter-translation backend the user picks in Step 4/4B is recorded as a
+    ``backend`` beat in ``logs/harness_runs.jsonl`` (``api`` | ``subagent`` |
+    ``headless``). Footnote translation carries that choice forward so the note
+    bodies translate on the *same* backend. Resolution order:
+
+    1. ``explicit`` (an ``--backend`` flag) when it names a known backend.
+    2. The most recent ``backend`` beat for this project's current ``run_id``. A
+       legacy ``subagent`` beat paired with a later ``fanout_mode: headless`` beat
+       resolves to ``headless`` (headless used to be a sub-mode of subagent).
+    3. The most recent ``backend`` beat for the project across any run.
+    4. Config inference: persisted subagent spawn knobs (``worker_model`` /
+       ``parallelism``) imply ``subagent``; otherwise ``api`` (today's default, so
+       projects predating the run-log beat are unchanged).
+    """
+    if explicit in _BACKENDS:
+        return explicit
+
+    from src.utils.run_logger import read_run_events
+
+    cfg = state.load_config(project_dir)
+    slug = project_dir.name
+
+    def _from_events(events: list[dict]) -> str | None:
+        backend: str | None = None
+        fanout_headless = False
+        for rec in events:  # chronological; last write wins
+            ev = rec.get("event")
+            if ev == "backend" and rec.get("backend") in _BACKENDS:
+                backend = rec.get("backend")
+                fanout_headless = False  # a fresh backend pick resets any pairing
+            elif ev == "fanout_mode":
+                fanout_headless = rec.get("mode") == "headless"
+        if backend == "subagent" and fanout_headless:
+            return "headless"
+        return backend
+
+    run_id = cfg.get("run_id")
+    if run_id:
+        resolved = _from_events(read_run_events(project=slug, run_id=run_id))
+        if resolved:
+            return resolved
+    resolved = _from_events(read_run_events(project=slug))
+    if resolved:
+        return resolved
+
+    if cfg.get("worker_model") or cfg.get("parallelism"):
+        return "subagent"
+    return "api"
+
+
+# ── footnote translation: engine per backend (api / headless / subagent) ────
+
+def _footnote_work_dir(project_dir: Path) -> Path:
+    return state.harness_dir(project_dir) / "footnotes"
+
+
+def _footnote_manifest_path(project_dir: Path) -> Path:
+    return _footnote_work_dir(project_dir) / "manifest.json"
+
+
+def _render_footnote_batches(
+    project_dir: Path, *, retranslate: bool, source_language: str = "English",
+) -> tuple[list[dict], dict]:
+    """Render one prompt file per pending footnote batch; return ``(entries, meta)``.
+
+    Rebuilds ``.harness/footnotes/`` from the current pending set (notes lacking a
+    ``translated_body``, or every note when ``retranslate``). Stale ``batch_*``
+    prompt/draft files from a prior prepare are cleared first so ``commit`` never
+    reads a draft against a regrouped batch — committed notes have already left the
+    pending set, so a re-prepare only ever rebuilds still-unfinished work.
+    """
+    from src.footnote_import import load_footnotes_sidecar
+    from src.footnotes_translate_core import (
+        batch_notes, build_footnotes_prompt, read_glossary_text, read_style_text,
+    )
+
+    cfg = state.load_config(project_dir)
+    notes = load_footnotes_sidecar(project_dir)
+    pending = [n for n in notes if retranslate or not (n.get("translated_body") or "").strip()]
+
+    fdir = _footnote_work_dir(project_dir)
+    fdir.mkdir(parents=True, exist_ok=True)
+    for stale in list(fdir.glob("batch_*.prompt.txt")) + list(fdir.glob("batch_*.draft.txt")):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    glossary = read_glossary_text(project_dir)
+    style = read_style_text(project_dir)
+    target = cfg.get("target_language") or "Spanish"
+    title = cfg.get("title") or project_dir.name
+
+    entries: list[dict] = []
+    for i, batch in enumerate(batch_notes(pending)):
+        bid = f"batch_{i:02d}"
+        prompt = build_footnotes_prompt(
+            batch, source_language=source_language, target_language=target,
+            title=title, glossary_text=glossary, style_text=style,
+        )
+        prompt_path = fdir / f"{bid}.prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        entries.append({
+            "batch_id": bid,
+            "prompt_path": str(prompt_path),
+            "draft_path": str(fdir / f"{bid}.draft.txt"),
+            "numbers": [n["number"] for n in batch],
+        })
+
+    meta = {
+        "worker_model": cfg.get("worker_model") or "sonnet",
+        "source_language": source_language,
+        "target_language": target,
+        "title": title,
+        "total": len(notes),
+        "pending": len(pending),
+    }
+    return entries, meta
+
+
+def _write_footnote_manifest(project_dir: Path, entries: list[dict], meta: dict) -> None:
+    doc = {**meta, "entries": entries}
+    _footnote_manifest_path(project_dir).write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def footnotes_translate(
     project: str,
     *,
-    yes: bool,
+    yes: bool = False,
+    backend: str | None = None,
     provider: str | None = None,
     model: str | None = None,
     retranslate: bool = False,
+    runner=None,
+    claude_bin: str = "claude",
 ) -> int | dict:
-    """Paid: translate the imported footnote bodies in ``footnotes.json``.
+    """Translate the imported footnote bodies on the book's chosen backend.
 
-    ``translate_footnotes.py`` has no internal cost gate, so — like ``translate`` — the
-    harness is the gate: fail closed without ``--yes`` (the estimate must be approved by the
-    user in a SEPARATE turn first). A clean no-op when no footnotes were imported.
+    The backend is carried forward from the chapter translation (``--backend`` for an
+    explicit override; otherwise resolved from the ``backend`` run-log beat):
+
+    - **api** — the metered path. Fail closed without ``--yes`` (the cost must be
+      approved by the user in a SEPARATE turn first), then shell to
+      ``translate_footnotes.py`` → ``call_llm``.
+    - **headless** — render batch prompts, run one ``claude -p`` wave, and commit the
+      drafts. No metered spend, so no ``--yes`` gate.
+    - **subagent** — the Task-worker path is orchestrator-driven, so this does *not*
+      translate; it returns guidance to use ``footnotes translate-prepare`` → spawn
+      ``translator`` subagents → ``footnotes translate-commit``.
+
+    A clean no-op when no footnotes were imported.
     """
     project_dir = state.resolve_project_dir(project)
     sidecar = project_dir / "footnotes.json"
@@ -1987,6 +2135,34 @@ def footnotes_translate(
             "note": "no footnotes.json — nothing to translate (import at setup with --footnotes import)",
             "total": 0, "translated": 0, "pending": 0,
         })
+
+    resolved = resolve_backend(project_dir, backend)
+
+    if resolved == "subagent":
+        # Spawning Task workers is the orchestrator's job, not the CLI's — point the
+        # agent at the prepare/commit seam instead of spending anything here.
+        return _stream_result("footnotes", 0, {
+            "stage": "footnotes-translate",
+            "backend": "subagent",
+            "action_required": "prepare-commit",
+            "note": (
+                "backend is subagent (Task workers): run `footnotes translate-prepare`, spawn a "
+                "`translator` subagent per batch to fill each draft, then `footnotes "
+                "translate-commit`. No API spend, no --yes."
+            ),
+            **_footnote_counts(sidecar),
+        })
+
+    if resolved == "headless":
+        hres = _footnotes_headless(project, retranslate=retranslate,
+                                   runner=runner, claude_bin=claude_bin)
+        # A hard wave failure (e.g. claude off PATH) is a real failure, not a no-op —
+        # exit non-zero so it is never mistaken for success. Partial misses stay rc 0
+        # (reported under `pending` for a re-run, like the chapter fan-out).
+        rc = 1 if hres.get("error") else 0
+        return _stream_result("footnotes", rc, hres)
+
+    # resolved == "api": the metered path, gated on --yes like `translate`.
     if not yes:
         print(
             "Refusing to translate footnotes without --yes. The cost must be approved by the "
@@ -2010,7 +2186,168 @@ def footnotes_translate(
     result = _stream_result("footnotes", *_run_script(cmd))
     # translate_footnotes.py emits no HARNESS_RESULT sentinel; derive counts from the sidecar.
     result["stage"] = "footnotes-translate"
+    result["backend"] = "api"
     result.update(_footnote_counts(sidecar))
+    return result
+
+
+def footnotes_translate_prepare(project: str, *, retranslate: bool = False) -> dict:
+    """Subagent path: render a prompt per pending footnote batch + a manifest (no spend).
+
+    The Task-worker analog of ``translate-prepare`` for footnotes: the agent then spawns a
+    ``translator`` subagent per ``batch_NN`` (reads ``batch_NN.prompt.txt`` → writes
+    ``batch_NN.draft.txt``) and runs ``footnotes translate-commit``. A clean no-op when no
+    footnotes were imported or all are already translated.
+    """
+    project_dir = state.resolve_project_dir(project)
+    sidecar = project_dir / "footnotes.json"
+    if not sidecar.exists():
+        return {"command": "footnotes", "exit_code": 0,
+                "stage": "footnotes-translate-prepare",
+                "note": "no footnotes.json — nothing to prepare", "entries": [],
+                "total": 0, "pending": 0}
+    entries, meta = _render_footnote_batches(project_dir, retranslate=retranslate)
+    _write_footnote_manifest(project_dir, entries, meta)
+    return {
+        "command": "footnotes",
+        "exit_code": 0,
+        "stage": "footnotes-translate-prepare",
+        "worker_model": meta["worker_model"],
+        "total": meta["total"],
+        "pending": meta["pending"],
+        "entries": entries,
+        "instructions": (
+            "Spawn one `translator` subagent per entry: read `prompt_path`, write ONLY the "
+            "`N| <translation>` lines to `draft_path`, reply `done <batch_id>`. Then run "
+            "`footnotes translate-commit`."
+            if entries else
+            "Nothing to prepare — all imported footnotes are already translated."
+        ),
+    }
+
+
+def footnotes_translate_commit(project: str) -> dict:
+    """Parse the batch drafts from a footnote prepare into ``footnotes.json``.
+
+    Reads each manifest entry's ``draft_path``, parses its ``N| translation`` lines, and
+    writes the results into the note bodies. Idempotent: already-filled notes are left
+    as-is, and a missing/blank draft leaves its notes ``pending`` for a re-spawn.
+    """
+    from src.footnote_import import (
+        load_footnotes_sidecar, write_footnotes_sidecar, FootnoteRecord, footnotes_sidecar_path,
+    )
+    from src.footnotes_translate_core import parse_numbered_translations
+
+    project_dir = state.resolve_project_dir(project)
+    manifest_path = _footnote_manifest_path(project_dir)
+    if not manifest_path.exists():
+        return {"command": "footnotes", "exit_code": 1,
+                "stage": "footnotes-translate-commit",
+                "error": "no footnote manifest — run `footnotes translate-prepare` first",
+                "committed": [], "pending": [], "failed": []}
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"command": "footnotes", "exit_code": 1,
+                "stage": "footnotes-translate-commit",
+                "error": f"manifest unreadable: {exc}",
+                "committed": [], "pending": [], "failed": []}
+
+    notes = load_footnotes_sidecar(project_dir)
+    by_number = {n["number"]: n for n in notes}
+    committed: list[int] = []
+    pending: list[int] = []
+
+    for entry in doc.get("entries") or []:
+        numbers = entry.get("numbers") or []
+        draft_path = Path(entry["draft_path"])
+        text = _read_draft_text(draft_path) if draft_path.exists() else None
+        if not text or not text.strip():
+            pending.extend(numbers)
+            continue
+        translations = parse_numbered_translations(text)
+        for num in numbers:
+            note = by_number.get(num)
+            if note is None:
+                continue
+            body = (translations.get(num) or "").strip()
+            if body:
+                note["translated_body"] = body
+                committed.append(num)
+            else:
+                pending.append(num)
+
+    records = [FootnoteRecord(
+        number=n["number"], ref_marker=n.get("ref_marker", ""),
+        source_body=n.get("source_body", ""), detected=n.get("detected", ""),
+        translated_body=n.get("translated_body"),
+    ) for n in notes]
+    write_footnotes_sidecar(project_dir, records)
+    counts = _footnote_counts(footnotes_sidecar_path(project_dir))
+    return {
+        "command": "footnotes",
+        # A partial commit (some notes still `pending`) is not a failure — it mirrors
+        # the chapter fan-out, which stays rc 0 and reports misses for a re-run. The
+        # headless path re-wraps this via `_stream_result`, which overrides both keys.
+        "exit_code": 0,
+        "stage": "footnotes-translate-commit",
+        # counts first: the per-commit `committed`/`pending` note-number lists then
+        # override the count ints of the same name with the actionable detail.
+        **counts,
+        "committed": sorted(set(committed)),
+        "pending": sorted(set(pending)),
+    }
+
+
+def _footnotes_headless(
+    project: str, *, retranslate: bool, runner=None, claude_bin: str = "claude",
+    concurrency: int | None = None,
+) -> dict:
+    """Headless backend: render batches, run one ``claude -p`` wave, commit the drafts.
+
+    The footnote analog of ``translate-fanout``: prepare → wave → commit in one call
+    (footnotes are few and short, so there is no per-wave Task orchestration). ``runner``
+    is the ``run_headless_wave`` test seam.
+    """
+    from src.harness.headless import run_headless_wave
+
+    project_dir = state.resolve_project_dir(project)
+    cfg = state.load_config(project_dir)
+    entries, meta = _render_footnote_batches(project_dir, retranslate=retranslate)
+    _write_footnote_manifest(project_dir, entries, meta)
+
+    if not entries:
+        counts = _footnote_counts(project_dir / "footnotes.json")
+        return {"stage": "footnotes-translate", "backend": "headless",
+                "note": "all imported footnotes are already translated",
+                "committed": [], "pending": [], **counts}
+
+    jobs = [{
+        "id": e["batch_id"],
+        "input_text": Path(e["prompt_path"]).read_text(encoding="utf-8"),
+        "output_path": e["draft_path"],
+    } for e in entries]
+
+    if concurrency is None:
+        try:
+            concurrency = int(cfg.get("batch_size") or 3)
+        except (TypeError, ValueError):
+            concurrency = 3
+
+    wave = run_headless_wave(
+        jobs, model=meta["worker_model"], concurrency=concurrency,
+        claude_bin=claude_bin, runner=runner,
+    )
+    # Fail fast when claude is missing (no jobs ran) — never silently fall back to spend.
+    if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
+        counts = _footnote_counts(project_dir / "footnotes.json")
+        return {"stage": "footnotes-translate", "backend": "headless",
+                "error": wave["error"], "committed": [], "pending": [], **counts}
+
+    result = footnotes_translate_commit(project)
+    result["stage"] = "footnotes-translate"
+    result["backend"] = "headless"
+    result["wave"] = {"wrote": wave.get("wrote") or [], "failed": wave.get("failed") or []}
     return result
 
 
