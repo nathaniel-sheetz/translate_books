@@ -182,21 +182,36 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.rv2-src { display: flow-root; }
 .rv2-src-toggle {
-  position: absolute;
-  right: 0;
-  bottom: 4px;
-  z-index: 1;
-  background: var(--rv2-sheet-bg);
   border: none;
+  background: none;
   color: var(--rv2-accent);
   font-size: 11.5px;
   font-weight: 600;
   cursor: pointer;
   line-height: 1.5;
+  padding: 2px 0 2px 6px;
+}
+/* Expanded ("less"): the full source is visible, so let the toggle flow after
+   the text and float right. When the last line runs to the edge it drops onto
+   its own line instead of covering the final word. */
+.rv2-sheet:not(.rv2-kb) .rv2-src:not(.clamp) .rv2-src-toggle {
+  float: right;
+}
+/* Clamped ("more") and keyboard-up: the source is truncated, so pin the toggle
+   over the last line with a fade masking the cut-off text. */
+.rv2-src.clamp .rv2-src-toggle,
+.rv2-sheet.rv2-kb .rv2-src .rv2-src-toggle {
+  position: absolute;
+  right: 0;
+  bottom: 4px;
+  z-index: 1;
+  background: var(--rv2-sheet-bg);
   padding: 2px 0 2px 4px;
 }
-.rv2-src-toggle::before {
+.rv2-src.clamp .rv2-src-toggle::before,
+.rv2-sheet.rv2-kb .rv2-src .rv2-src-toggle::before {
   content: "";
   position: absolute;
   right: 100%;
