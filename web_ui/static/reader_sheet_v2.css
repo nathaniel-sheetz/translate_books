@@ -87,11 +87,21 @@
   display: flex;
   flex-direction: column;
   max-height: 82vh;
+  max-height: 82dvh;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   transition: max-height 0.2s;
 }
 .rv2-sheet[hidden] { display: none; }
-.rv2-sheet.rv2-collapsed { max-height: 42vh; }
+.rv2-sheet.rv2-collapsed { max-height: 42vh; max-height: 42dvh; }
+/* Keyboard up + editing: pin the top just below the fixed 48px reader topbar
+   and keep bottom:0 so the sheet fills the whole space above the keyboard (the
+   layout viewport is already shrunk by interactive-widget=resizes-content).
+   A definite height lets the edit textarea grow and the action bar sit at the
+   bottom instead of being clipped by the URL bar or floating over the text. */
+.rv2-sheet.rv2-kb.editing {
+  top: 56px;
+  max-height: none;
+}
 .rv2-sheet * { box-sizing: border-box; }
 
 .rv2-inner {
@@ -164,6 +174,14 @@
 }
 .rv2-sheet.editing .rv2-src { --rv2-src-lines: 3; }
 .rv2-src.min { --rv2-src-lines: 1; }
+/* Keyboard up: pin the source to a single line so the editor gets the room.
+   "more" (rv2-src-toggle) dismisses the keyboard to reveal it in full. */
+.rv2-sheet.rv2-kb .rv2-src .txt {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .rv2-src-toggle {
   position: absolute;
   right: 0;
@@ -407,6 +425,8 @@
 .rv2-ghost { background: var(--rv2-btn); color: var(--rv2-muted3); border: 1px solid var(--rv2-border-light); }
 .rv2-ghost:hover { background: var(--rv2-filter-hover); color: var(--rv2-text); }
 .rv2-sm { padding: 0 12px; min-height: 44px; font-size: 12px; }
+.rv2-iconbtn { padding: 0; min-width: 44px; width: 44px; flex: none; }
+.rv2-iconbtn svg { width: 18px; height: 18px; }
 .rv2-icon-del {
   flex: none;
   min-width: 44px;
@@ -437,18 +457,27 @@
   color: var(--rv2-muted2);
   font-weight: 700;
 }
+/* Action row is now a FOOTER: a direct flex child of .rv2-inner that lives below
+   the scroll, so it is always at the sheet bottom and can never be pushed into
+   the scroll's overflow. Hidden unless the Edit tab is active. */
 .rv2-edit-save {
-  display: flex;
+  display: none;
   gap: 7px;
   align-items: center;
-  position: sticky;
-  bottom: 0;
-  z-index: 3;
-  margin-top: 2px;
-  padding: 8px 0 4px;
+  flex: none;
+  padding: 8px 16px calc(8px + env(safe-area-inset-bottom, 0px));
   background: var(--rv2-sheet-bg);
   border-top: 1px solid var(--rv2-divider);
 }
+.rv2-sheet.editing .rv2-edit-save { display: flex; }
+/* Edit panel fills the scroll; the textarea takes the space and scrolls
+   internally. No action row inside the scroll anymore, so overflow is harmless. */
+.rv2-sheet.editing #rv2-panel-edit.active {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.rv2-sheet.editing #rv2-edit-ta { flex: 1 1 0; min-height: 0; }
 .rv2-chip {
   display: inline-flex;
   align-items: center;

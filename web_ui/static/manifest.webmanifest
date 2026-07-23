@@ -1,0 +1,10 @@
+{
+  "name": "Translation Reader",
+  "short_name": "Reader",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "/read/",
+  "scope": "/",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a"
+}

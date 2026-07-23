@@ -2,12 +2,24 @@
 <html lang="{{ lang | default('en') }}">
 <head>
     <meta charset="UTF-8">
+    {% if mode == "read" and reader_ui_version == "v2" %}
+    <!-- v2 reader: let the soft keyboard resize the layout viewport so the
+         bottom sheet rides above it via CSS (no per-frame JS geometry, which
+         flickered as the URL bar showed/hid). Scoped to v2 to leave classic
+         untouched. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+    {% else %}
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    {% endif %}
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=16">
     {% endif %}
 </head>
 <body>
@@ -631,19 +643,22 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
               <button class="rv2-btn rv2-ghost rv2-sm" id="rv2-expand-btn" type="button">{{ t.js.v2.expand }}</button>
             </div>
             <textarea id="rv2-edit-ta" spellcheck="false"></textarea>
-            <div class="rv2-edit-save">
-              <button class="rv2-btn rv2-primary rv2-sm" id="rv2-edit-save" type="button">{{ t.js.v2.save }}</button>
-              <span class="rv2-spacer"></span>
-              <button class="rv2-chip" id="rv2-chip-retranslate" type="button" aria-label="{{ t.js.v2.aria_retranslate }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 10a6 6 0 0 1 10.5-4M16 10a6 6 0 0 1-10.5 4"/><path d="M14.5 3v3h-3M5.5 17v-3h3"/></svg></button>
-              <button class="rv2-chip" id="rv2-chip-boundaries" type="button" aria-label="{{ t.js.v2.aria_edit_boundaries }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 4H4v12h2M14 4h2v12h-2"/><path d="M9 7l2 3-2 3"/></svg></button>
-              <button class="rv2-chip danger" id="rv2-chip-remove" type="button" aria-label="{{ t.js.v2.aria_remove }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg></button>
-            </div>
           </div>
 
           <!-- Issues -->
           <div class="rv2-panel" id="rv2-panel-issues">
             <div id="rv2-issue-list"></div>
           </div>
+        </div>
+        <!-- Edit action row: a footer OUTSIDE the scroll (direct flex child of
+             the sheet) so it is always visible at the sheet bottom no matter how
+             tall the translation is. Shown only on the Edit tab (CSS). -->
+        <div class="rv2-edit-save">
+          <button class="rv2-btn rv2-primary rv2-iconbtn" id="rv2-edit-save" type="button" aria-label="{{ t.js.v2.save }}" title="{{ t.js.v2.save }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4.5 3.5h8L16 7v9.5H4.5z"/><path d="M7 3.5v3.5h5V3.5"/><rect x="7" y="10.5" width="6" height="4.5"/></svg></button>
+          <span class="rv2-spacer"></span>
+          <button class="rv2-chip" id="rv2-chip-retranslate" type="button" aria-label="{{ t.js.v2.aria_retranslate }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 10a6 6 0 0 1 10.5-4M16 10a6 6 0 0 1-10.5 4"/><path d="M14.5 3v3h-3M5.5 17v-3h3"/></svg></button>
+          <button class="rv2-chip" id="rv2-chip-boundaries" type="button" aria-label="{{ t.js.v2.aria_edit_boundaries }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 4H4v12h2M14 4h2v12h-2"/><path d="M9 7l2 3-2 3"/></svg></button>
+          <button class="rv2-chip danger" id="rv2-chip-remove" type="button" aria-label="{{ t.js.v2.aria_remove }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg></button>
         </div>
       </div>
     </section>
@@ -833,10 +848,10 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     });
 })();
 </script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=23"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=24"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
-<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=9"></script>
 {% endif %}
 
 {% elif mode == "not_found" %}

@@ -26,6 +26,7 @@
     const T = (k, d) => (V[k] != null ? V[k] : d);
     const el = (id) => document.getElementById(id);
     const core = () => window.ReaderCore || {};
+    const TOPBAR_PX = 56;   // fixed 48px reader topbar + 8px breathing room
 
     const els = {
         src: el('rv2-src'),
@@ -69,6 +70,7 @@
     };
     const PENCIL = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13.5 3.5l3 3L7 16l-4 1 1-4z"/></svg>';
     const TRASH = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg>';
+    const DISK = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4.5 3.5h8L16 7v9.5H4.5z"/><path d="M7 3.5v3.5h5V3.5"/><rect x="7" y="10.5" width="6" height="4.5"/></svg>';
 
     const DOT = { address: 'addr', grammar: 'gram', dictionary: 'gloss', consistency: 'cons', register: 'reg' };
     const SEVCLASS = { error: 'error', info: 'info' };
@@ -114,13 +116,15 @@
         overlay.hidden = false;
         sheet.hidden = false;
         sheet.classList.remove('rv2-collapsed');
-        requestAnimationFrame(refreshSrcToggle);
+        requestAnimationFrame(function () { refreshSrcToggle(); anchorSheet(); });
     }
     function hide() {
         overlay.hidden = true;
         sheet.hidden = true;
-        sheet.classList.remove('editing', 'editfull');
+        sheet.classList.remove('editing', 'editfull', 'rv2-kb');
+        sheet.style.top = '';
         sheet.style.bottom = '';
+        sheet.style.height = '';
         sheet.style.maxHeight = '';
         endCompose();
     }
@@ -136,6 +140,7 @@
             : T('source_label', 'English source');
         if (!editing) setEditFull(false);
         refreshSrcToggle();
+        anchorSheet();
     }
     els.tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
 
@@ -148,12 +153,23 @@
     }
     function refreshSrcToggle() {
         const box = els.src, txt = els.srcTxt, btn = els.srcToggle;
+        // Keyboard up: source is pinned to one line, always offer "more" (it
+        // doubles as the dismiss-keyboard affordance).
+        if (sheet.classList.contains('rv2-kb')) { btn.style.display = ''; return; }
         if (!box.classList.contains('clamp')) { btn.style.display = ''; return; }
         const truncated = (txt.scrollHeight - txt.clientHeight) > 2;
         btn.style.display = truncated ? '' : 'none';
     }
     els.srcToggle.addEventListener('click', function () {
         const box = els.src;
+        // Keyboard up: the source is clamped to one line to make room for the
+        // editor. Tapping "more" dismisses the keyboard and reveals it in full.
+        if (sheet.classList.contains('rv2-kb')) {
+            endCompose();                       // blur → keyboard hides → focusout clears rv2-kb
+            box.classList.remove('min', 'clamp');
+            els.srcToggle.textContent = T('less', 'less');
+            return;
+        }
         if (box.classList.contains('min')) {
             box.classList.remove('min', 'clamp');
             els.srcToggle.textContent = T('less', 'less');
@@ -179,15 +195,17 @@
         const tps = ['word_choice', 'inconsistency', 'footnote', 'flag']
             .map((tp) => '<button class="rv2-tp" type="button" data-type="' + tp + '" aria-label="' + esc(ANN_NAMES[tp]) + '"></button>')
             .join('');
+        const cancelLbl = esc(T('cancel', 'Cancel'));
+        const saveLbl = esc(T('save', 'Save'));
         const trailing = withDelete
             ? '<button class="rv2-icon-del" type="button" aria-label="' + esc(T('aria_delete_note', 'Delete note')) + '">' + TRASH + '</button>'
-            : '<button class="rv2-btn rv2-ghost rv2-sm rv2-cancel" type="button">' + esc(T('cancel', 'Cancel')) + '</button>';
+            : '<button class="rv2-icon-del rv2-cancel" type="button" aria-label="' + cancelLbl + '" title="' + cancelLbl + '">' + TRASH + '</button>';
         return '<div class="rv2-composer">'
             + '<textarea placeholder="' + esc(T('note_placeholder', 'Note text…')) + '">' + esc(value) + '</textarea>'
             + '<div class="rv2-fn-hint' + (type === 'footnote' ? ' show' : '') + '">' + esc(T('fn_hint', '')) + '</div>'
             + '<div class="rv2-composer-bar"><div class="rv2-type-row">' + tps + '</div>'
             + trailing
-            + '<button class="rv2-btn rv2-primary rv2-sm rv2-save" type="button">' + esc(T('save', 'Save')) + '</button>'
+            + '<button class="rv2-btn rv2-primary rv2-iconbtn rv2-save" type="button" aria-label="' + saveLbl + '" title="' + saveLbl + '">' + DISK + '</button>'
             + '</div></div>';
     }
     function existingCard(ann) {
@@ -409,23 +427,78 @@
     overlay.addEventListener('click', () => core().close && core().close());
     els.grip.addEventListener('click', () => sheet.classList.toggle('rv2-collapsed'));
 
-    // ── Keyboard-aware sizing (ride above the soft keyboard) ───────────────────
+    // ── Keyboard-aware state (focus-driven + visual-viewport anchoring) ────────
+    // interactive-widget=resizes-content (v2 viewport meta) lets the soft
+    // keyboard shrink the layout viewport so the sheet rides above it. We flip an
+    // `rv2-kb` class on focus (CSS grows the Edit sheet to full height and pins
+    // the source to one line). For that full-height Edit case we also anchor the
+    // sheet precisely to the *visible* region so it clears both the keyboard and
+    // a bottom URL bar that stays up while typing. We use only vv.offsetTop /
+    // vv.height (never window.innerHeight, which jumps as the URL bar toggles and
+    // caused the earlier flicker), so it stays stable across URL-bar changes.
     const vv = window.visualViewport;
-    function onVV() {
-        if (!vv || sheet.hidden) return;
-        const kb = window.innerHeight - vv.height - (vv.offsetTop || 0);
-        if (kb > 120) {
-            sheet.style.bottom = kb + 'px';
-            sheet.style.maxHeight = Math.max(160, vv.height - 8) + 'px';
-        } else {
-            sheet.style.bottom = '';
-            sheet.style.maxHeight = '';
-        }
-        refreshSrcToggle();
+    // Measure a viewport-percentage unit (svh/lvh) in px via a throwaway probe.
+    function vp(unit) {
+        const p = document.createElement('div');
+        p.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;visibility:hidden;height:100' + unit;
+        document.body.appendChild(p);
+        const h = p.getBoundingClientRect().height;
+        p.remove();
+        return h;
     }
+    // Tallest large-viewport height seen (keyboard down) = our reference for
+    // detecting when the keyboard is up. Seeded now, while the keyboard is down.
+    let maxLvh = 0;
+    try { maxLvh = vp('lvh'); } catch (e) { /* svh/lvh unsupported */ }
+    // Samsung Internet's bottom toolbar RESERVES space when the keyboard is down
+    // (the sheet already sits above it) but OVERLAYS the viewport when the
+    // keyboard is up. Only in that overlay case do we pad the action row up by
+    // the toolbar height (lvh − svh); otherwise reserving would leave a blank
+    // strip. The sheet itself always fills to vv.bottom, so nothing bleeds.
+    function urlbarReserve() {
+        let svh, lvh;
+        try { svh = vp('svh'); lvh = vp('lvh'); } catch (e) { return 0; }
+        if (lvh > maxLvh) maxLvh = lvh;
+        const keyboardUp = lvh < maxLvh - 100;
+        return keyboardUp ? Math.max(0, Math.round(lvh - svh)) : 0;
+    }
+    // Full-height edit sheet: fill from just below the topbar down to the bottom
+    // of the *visual* viewport, then reserve the toolbar strip on the action row.
+    function anchorSheet() {
+        if (!vv || sheet.hidden) return;
+        if (sheet.classList.contains('rv2-kb') && sheet.classList.contains('editing')) {
+            sheet.style.top = (vv.offsetTop + TOPBAR_PX) + 'px';
+            sheet.style.height = Math.max(160, vv.height - TOPBAR_PX) + 'px';
+            sheet.style.bottom = 'auto';
+            sheet.style.setProperty('--rv2-urlbar', urlbarReserve() + 'px');
+        } else {
+            sheet.style.top = '';
+            sheet.style.height = '';
+            sheet.style.bottom = '';
+            sheet.style.setProperty('--rv2-urlbar', '0px');
+        }
+    }
+    function isField(t) { return !!t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT'); }
+    sheet.addEventListener('focusin', function (e) {
+        if (!isField(e.target) || sheet.classList.contains('rv2-kb')) return;
+        sheet.classList.add('rv2-kb');
+        els.srcToggle.textContent = T('more', 'more');
+        refreshSrcToggle();
+        anchorSheet();
+    });
+    sheet.addEventListener('focusout', function () {
+        // Defer so moving focus between fields inside the sheet doesn't flicker.
+        setTimeout(function () {
+            if (sheet.hidden) return;
+            if (isField(document.activeElement) && sheet.contains(document.activeElement)) return;
+            sheet.classList.remove('rv2-kb');
+            refreshSrcToggle();
+            anchorSheet();
+        }, 60);
+    });
     if (vv) {
-        vv.addEventListener('resize', onVV);
-        vv.addEventListener('scroll', onVV);
+        vv.addEventListener('resize', anchorSheet);
+        vv.addEventListener('scroll', anchorSheet);
     }
     window.addEventListener('resize', refreshSrcToggle);
 
