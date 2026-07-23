@@ -32,10 +32,21 @@
         <h1>{{ t.reader_title }}</h1>
         <div class="nav-header-actions">
             <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project }}</button>
-            <div class="lang-toggle">
-                <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
-                <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
-            </div>
+        </div>
+    </div>
+
+    <!-- Settings toggles: UI language + reader sheet layout -->
+    <div class="nav-toggles">
+        <div class="lang-toggle">
+            <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
+            <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
+        </div>
+        <div class="lang-toggle ui-version-toggle" role="group"
+             aria-label="{{ t.ui_version_switch_label }}">
+            <button class="lang-btn {% if reader_ui_version != 'v2' %}active{% endif %}"
+                    data-ui-version="classic">{{ t.ui_version_classic }}</button>
+            <button class="lang-btn {% if reader_ui_version == 'v2' %}active{% endif %}"
+                    data-ui-version="v2">{{ t.ui_version_new }}</button>
         </div>
     </div>
 
@@ -118,13 +129,26 @@
 </div>
 
 <script>
-document.querySelectorAll('.lang-btn').forEach(function(btn) {
+document.querySelectorAll('.lang-btn[data-lang]').forEach(function(btn) {
     btn.addEventListener('click', function() {
         fetch('/api/set-lang', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ lang: btn.dataset.lang }),
         }).then(function() { location.reload(); });
+    });
+});
+
+// Reader sheet layout (classic / v2) opt-in toggle. Persists via cookie.
+document.querySelectorAll('.ui-version-toggle [data-ui-version]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+        if (btn.classList.contains('active')) return;
+        fetch('/api/set-ui-version', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version: btn.getAttribute('data-ui-version') }),
+        }).then(function() { location.reload(); })
+          .catch(function() { location.reload(); });
     });
 });
 
@@ -505,13 +529,6 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <line x1="21" y1="12" x2="14" y2="12"/>
             </svg>
         </button>
-        <div class="lang-toggle ui-version-toggle" role="group"
-             aria-label="{{ t.ui_version_switch_label }}">
-            <button class="lang-btn {% if reader_ui_version != 'v2' %}active{% endif %}"
-                    data-ui-version="classic">{{ t.ui_version_classic }}</button>
-            <button class="lang-btn {% if reader_ui_version == 'v2' %}active{% endif %}"
-                    data-ui-version="v2">{{ t.ui_version_new }}</button>
-        </div>
         <span class="reader-stats" id="reader-stats"></span>
     </div>
 

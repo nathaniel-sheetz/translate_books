@@ -994,7 +994,14 @@ def reader_projects():
             "has_alignments": alignment_count > 0,
         })
 
-    return render_template("reader.html", mode="projects", projects=projects, t=t, lang=_get_ui_lang())
+    return render_template(
+        "reader.html",
+        mode="projects",
+        projects=projects,
+        t=t,
+        lang=_get_ui_lang(),
+        reader_ui_version=_get_reader_ui_version(),
+    )
 
 
 @app.route("/read/<project_id>")

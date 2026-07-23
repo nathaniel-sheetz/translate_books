@@ -186,8 +186,8 @@ body {
 .nav-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
+    align-items: flex-start;
+    margin-bottom: 16px;
 }
 
 .nav-header h1 {
@@ -469,6 +469,16 @@ body {
     gap: 12px;
 }
 
+/* Settings toggles row: sits below the header, above the filter chips. */
+.nav-toggles {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 0;
+    margin-bottom: 20px;
+}
+
 .btn-new-project {
     background: var(--btn-new-bg);
     color: #fff;
@@ -479,6 +489,7 @@ body {
     cursor: pointer;
     font-weight: 500;
     white-space: nowrap;
+    margin-top: 4px;
 }
 
 .btn-new-project:hover {
