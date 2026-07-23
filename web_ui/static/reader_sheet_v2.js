@@ -356,17 +356,24 @@
 
         const acts = document.createElement('div');
         acts.className = 'rv2-issue-actions';
-        const apply = document.createElement('button');
-        apply.type = 'button';
-        apply.className = 'rv2-btn rv2-primary rv2-sm';
-        apply.textContent = T('apply', 'Apply');
-        apply.addEventListener('click', function (e) {
+        // Primary "Apply" is the resolved-feedback action, promoted to first
+        // position and styled primary. It records the resolved signal and drops
+        // the issue, then sends the user to the Edit tab with the full
+        // translation intact so they can apply the fix by hand — it must NOT
+        // overwrite the translation with the raw suggestion.
+        const applyResolved = document.createElement('button');
+        applyResolved.type = 'button';
+        applyResolved.className = 'rv2-btn rv2-primary rv2-sm';
+        applyResolved.textContent = T('apply', 'Apply');
+        applyResolved.addEventListener('click', function (e) {
             e.stopPropagation();
-            if (f.suggestion) els.editTa.value = f.suggestion;
+            acts.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+            if (core().submitFeedback) core().submitFeedback(cur.esIdx, f, 'resolved');
+            dropIssue(wrap, f);
             setTab('edit');
         });
-        acts.appendChild(apply);
-        FB.forEach(function (pair) {
+        acts.appendChild(applyResolved);
+        FB.filter((pair) => pair[0] !== 'resolved').forEach(function (pair) {
             const b = document.createElement('button');
             b.type = 'button';
             b.className = 'rv2-fb-btn';
