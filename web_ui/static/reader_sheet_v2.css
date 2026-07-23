@@ -351,10 +351,27 @@
   align-items: center;
   gap: 8px;
   margin-top: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 .rv2-type-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.rv2-composer-bar .rv2-type-row { flex: 1 1 auto; min-width: 0; }
+/* Keep the type icons + trash + save on one line. The type icons take the
+   remaining width and scroll horizontally when they don't fit (narrow phones):
+   the last icon is cut off and reachable with a finger swipe, while trash and
+   save stay pinned. On wider screens everything fits so there's no scroll and
+   the layout matches the pre-scroll behavior. margin-right holds a small gap
+   between the icon group and the trash button for visual separation. */
+.rv2-composer-bar .rv2-type-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  margin-right: 4px;
+}
+.rv2-composer-bar .rv2-type-row::-webkit-scrollbar { display: none; }
+.rv2-composer-bar .rv2-type-row .rv2-tp { flex: none; }
 .rv2-issue-detail .rv2-ctx {
   border-left: 2px solid var(--rv2-border-light);
   padding: 3px 0 3px 10px;
