@@ -6,6 +6,9 @@
     <title>{{ t.reader_title }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
+    {% if mode == "read" and reader_ui_version == "v2" %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=1">
+    {% endif %}
 </head>
 <body>
 <script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
@@ -490,6 +493,13 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <line x1="21" y1="12" x2="14" y2="12"/>
             </svg>
         </button>
+        <div class="lang-toggle ui-version-toggle" role="group"
+             aria-label="{{ t.ui_version_switch_label }}">
+            <button class="lang-btn {% if reader_ui_version != 'v2' %}active{% endif %}"
+                    data-ui-version="classic">{{ t.ui_version_classic }}</button>
+            <button class="lang-btn {% if reader_ui_version == 'v2' %}active{% endif %}"
+                    data-ui-version="v2">{{ t.ui_version_new }}</button>
+        </div>
         <span class="reader-stats" id="reader-stats"></span>
     </div>
 
@@ -498,6 +508,12 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         <div class="loading">{{ t.loading }}</div>
     </div>
 
+    <!-- Classic bottom sheet. Under the opt-in v2 layout this host is hidden but
+         kept in the DOM: reader.js still drives it (and the shared modals) as the
+         working controller, while the v2 sheet below is a skin over the same
+         state and endpoints. -->
+    <div class="classic-sheet-host" id="classic-sheet-host"
+         {% if reader_ui_version == "v2" %}hidden{% endif %}>
     <!-- Bottom sheet for English reference + editing -->
     <div class="bottom-sheet" id="bottom-sheet">
         <div class="sheet-handle" id="sheet-handle"></div>
@@ -567,6 +583,72 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
 
     <!-- Overlay for dismissing bottom sheet -->
     <div class="sheet-overlay" id="sheet-overlay"></div>
+    </div><!-- /classic-sheet-host -->
+
+    {% if reader_ui_version == "v2" %}
+    <!-- Redesigned bottom sheet (opt-in v2): Annotate / Edit / Issues tabs. -->
+    <div class="rv2-overlay" id="rv2-overlay" hidden></div>
+    <section class="rv2-sheet" id="reader-sheet-v2" hidden aria-label="{{ t.js.v2.source_label }}">
+      <div class="rv2-inner">
+        <button class="rv2-grip" id="rv2-grip" type="button" aria-label="{{ t.js.v2.aria_grip }}"><span class="rv2-handle"></span></button>
+        <div class="rv2-top">
+          <div class="rv2-src-row">
+            <span class="rv2-kicker" id="rv2-src-kicker">{{ t.js.v2.source_label }}</span>
+            <span class="rv2-spacer"></span>
+            <button class="rv2-close" id="rv2-close" type="button" aria-label="{{ t.js.v2.aria_close }}">&times;</button>
+          </div>
+          <div class="rv2-src clamp" id="rv2-src">
+            <span class="txt" id="rv2-src-txt"></span>
+            <button class="rv2-src-toggle" id="rv2-src-toggle" type="button">{{ t.js.v2.more }}</button>
+          </div>
+        </div>
+
+        <div class="rv2-tabs" id="rv2-tabs">
+          <button class="rv2-tab active" type="button" data-tab="annotate">{{ t.js.v2.tab_annotate }} <span class="rv2-count" id="rv2-ann-count" hidden>0</span></button>
+          <button class="rv2-tab" type="button" data-tab="edit">{{ t.js.v2.tab_edit }}</button>
+          <button class="rv2-tab" type="button" data-tab="issues">{{ t.js.v2.tab_issues }} <span class="rv2-count" id="rv2-issue-count" hidden>0</span></button>
+        </div>
+
+        <div class="rv2-scroll" id="rv2-scroll">
+          <!-- Annotate -->
+          <div class="rv2-panel active" id="rv2-panel-annotate">
+            <div id="rv2-card-list"></div>
+            <div class="rv2-add-row" id="rv2-add-row">
+              <span class="rv2-add-lbl">{{ t.js.v2.add }}</span>
+              <div class="rv2-add-icons" id="rv2-add-icons">
+                <button class="rv2-tp" type="button" data-type="word_choice" aria-label="{{ t.js.ann_word_choice }}"></button>
+                <button class="rv2-tp" type="button" data-type="inconsistency" aria-label="{{ t.js.ann_inconsistency }}"></button>
+                <button class="rv2-tp" type="button" data-type="footnote" aria-label="{{ t.js.ann_footnote }}"></button>
+                <button class="rv2-tp" type="button" data-type="flag" aria-label="{{ t.js.ann_flag }}"></button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Edit -->
+          <div class="rv2-panel" id="rv2-panel-edit">
+            <div class="rv2-edit-head">
+              <span class="rv2-edit-kicker">{{ t.js.v2.translation_label }}</span>
+              <button class="rv2-btn rv2-ghost rv2-sm" id="rv2-expand-btn" type="button">{{ t.js.v2.expand }}</button>
+            </div>
+            <textarea id="rv2-edit-ta" spellcheck="false"></textarea>
+            <div class="rv2-edit-save">
+              <button class="rv2-btn rv2-primary rv2-sm" id="rv2-edit-save" type="button">{{ t.js.v2.save }}</button>
+              <span class="rv2-spacer"></span>
+              <button class="rv2-chip" id="rv2-chip-retranslate" type="button" aria-label="{{ t.js.v2.aria_retranslate }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 10a6 6 0 0 1 10.5-4M16 10a6 6 0 0 1-10.5 4"/><path d="M14.5 3v3h-3M5.5 17v-3h3"/></svg></button>
+              <button class="rv2-chip" id="rv2-chip-boundaries" type="button" aria-label="{{ t.js.v2.aria_edit_boundaries }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 4H4v12h2M14 4h2v12h-2"/><path d="M9 7l2 3-2 3"/></svg></button>
+              <button class="rv2-chip danger" id="rv2-chip-remove" type="button" aria-label="{{ t.js.v2.aria_remove }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg></button>
+            </div>
+          </div>
+
+          <!-- Issues -->
+          <div class="rv2-panel" id="rv2-panel-issues">
+            <div id="rv2-issue-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <div class="rv2-bubble" id="rv2-bubble"></div>
+    {% endif %}
 
     <!-- Remove-text modal -->
     <div id="remove-modal" class="modal-overlay" style="display:none">
@@ -732,8 +814,30 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=22"></script>
+<script>window.READER_UI_VERSION = {{ reader_ui_version | default('classic') | tojson }};</script>
+<script>
+// Sheet-layout opt-in toggle. Version-agnostic: rendered in both layouts so the
+// user can switch either direction. Persists via the reader_ui_version cookie.
+(function () {
+    document.querySelectorAll('.ui-version-toggle [data-ui-version]').forEach(function (b) {
+        b.addEventListener('click', function () {
+            if (b.classList.contains('active')) return;
+            var v = b.getAttribute('data-ui-version');
+            fetch('/api/set-ui-version', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ version: v }),
+            }).then(function () { location.reload(); })
+              .catch(function () { location.reload(); });
+        });
+    });
+})();
+</script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=23"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
+{% if reader_ui_version == "v2" %}
+<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=1"></script>
+{% endif %}
 
 {% elif mode == "not_found" %}
 <div class="nav-page">

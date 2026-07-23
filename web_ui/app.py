@@ -314,6 +314,29 @@ def set_language():
     return resp
 
 
+# Reader bottom-sheet UI version. "classic" is the shipped sheet; "v2" is the
+# opt-in redesigned sheet (Annotate / Edit / Issues tabs). Mirrors the language
+# cookie precedent above: a persistent per-device preference, default classic.
+_READER_UI_VERSIONS = ("classic", "v2")
+
+
+def _get_reader_ui_version() -> str:
+    """Read the reader sheet UI version from cookie, default to classic."""
+    v = request.cookies.get("reader_ui_version", "classic")
+    return v if v in _READER_UI_VERSIONS else "classic"
+
+
+@app.route("/api/set-ui-version", methods=["POST"])
+def set_ui_version():
+    """Set the reader sheet UI version via cookie."""
+    version = (request.json or {}).get("version", "classic")
+    if version not in _READER_UI_VERSIONS:
+        version = "classic"
+    resp = make_response(jsonify({"version": version}))
+    resp.set_cookie("reader_ui_version", version, max_age=365 * 24 * 3600, samesite="Lax")
+    return resp
+
+
 _VALID_STATUSES = {"pending", "in_progress", "complete", "archived"}
 
 
@@ -1097,14 +1120,31 @@ def reader_view(project_id, chapter):
     project_dir = _resolve_project_dir(project_id)
     has_pending_corrections = _chapter_has_pending_corrections(project_dir, chapter)
 
-    return render_template(
+    # Sheet UI version: a `?ui=` query param overrides (and persists) the cookie
+    # so shared "?ui=v2" links open the redesigned sheet; otherwise the cookie
+    # preference wins, defaulting to classic.
+    ui_override = request.args.get("ui")
+    if ui_override in _READER_UI_VERSIONS:
+        ui_version = ui_override
+    else:
+        ui_override = None
+        ui_version = _get_reader_ui_version()
+
+    resp = make_response(render_template(
         "reader.html", mode="read",
         project_id=project_id, project_title=_project_title(project_id),
         chapter=chapter, t=t, lang=_get_ui_lang(),
         prev_chapter=prev_chapter, next_chapter=next_chapter,
         display_label=display_label,
         has_pending_corrections=has_pending_corrections,
-    )
+        reader_ui_version=ui_version,
+    ))
+    if ui_override is not None:
+        resp.set_cookie(
+            "reader_ui_version", ui_version,
+            max_age=365 * 24 * 3600, samesite="Lax",
+        )
+    return resp
 
 
 @app.route("/api/alignment/<project_id>/<chapter>")

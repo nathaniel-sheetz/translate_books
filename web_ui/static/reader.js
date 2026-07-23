@@ -15,6 +15,11 @@
     // i18n strings injected by the template
     const i = window.__i18n || {};
 
+    // Opt-in redesigned sheet. When on, the classic sheet is hidden but still
+    // driven here; the v2 skin (reader_sheet_v2.js) mirrors this state and routes
+    // its actions back through ReaderCore (exposed at the end of this module).
+    const V2 = (window.READER_UI_VERSION === 'v2');
+
     // On desktop (mouse/trackpad), auto-expand the sheet on tap — no keyboard popup concern
     const isDesktop = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
@@ -315,6 +320,19 @@
         } else {
             bottomSheet.classList.remove('expanded');
         }
+
+        // Hand the same state to the v2 skin (which owns the visible sheet).
+        if (V2 && window.ReaderSheetV2) {
+            window.ReaderSheetV2.onOpen({
+                esIdx: alignment.es_idx,
+                en: alignment.en,
+                es: alignment.es,
+                ann: annotationsMap[alignment.es_idx] || null,
+                findings: reviewConfig.on ? (reviewMap[alignment.es_idx] || []) : [],
+                reviewOn: reviewConfig.on,
+                defaultErrors: defaultErrors,
+            });
+        }
     }
 
     function resetAnnotationUI() {
@@ -338,6 +356,7 @@
 
         bottomSheet.classList.remove('visible', 'expanded');
         sheetOverlay.classList.remove('visible');
+        if (V2 && window.ReaderSheetV2) window.ReaderSheetV2.onClose();
 
         const prev = content.querySelector('.sentence.active');
         if (prev) prev.classList.remove('active');
@@ -712,17 +731,31 @@
         });
     });
 
-    // Save annotation
-    btnAnnSave.addEventListener('click', () => {
-        if (activeIdx === null || !selectedAnnType) return;
+    // Save annotation. Extracted so the v2 skin can persist directly with an
+    // explicit (type, content), while the classic button path (below) keeps
+    // reading from selectedAnnType + the note input exactly as before.
+    function doSaveAnnotation(type, text) {
+        if (activeIdx === null || !type) return;
 
+        const idx = activeIdx;
         const payload = {
             project_id: projectId,
             chapter_id: chapter,
-            es_idx: activeIdx,
-            type: selectedAnnType,
-            content: annNoteInput.value.trim(),
+            es_idx: idx,
+            type: type,
+            content: text,
         };
+
+        function applySaved() {
+            annotationsMap[idx] = payload;
+            const el = content.querySelector(`[data-es-idx="${idx}"]`);
+            if (el) {
+                el.className = el.className.replace(/\bann-\w+/g, '');
+                el.classList.add('ann-' + type);
+            }
+            updateStats();
+            closeSheet();
+        }
 
         btnAnnSave.disabled = true;
         btnAnnSave.textContent = '...';
@@ -733,34 +766,21 @@
             body: JSON.stringify(payload),
         })
             .then(r => r.json())
-            .then(result => {
-                if (result.saved) {
-                    annotationsMap[activeIdx] = payload;
-                    const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
-                    if (el) {
-                        el.className = el.className.replace(/\bann-\w+/g, '');
-                        el.classList.add('ann-' + selectedAnnType);
-                    }
-                    updateStats();
-                    closeSheet();
-                }
-            })
+            .then(result => { if (result.saved) applySaved(); })
             .catch(() => {
                 enqueue('/api/annotation', 'POST', payload);
-                // Still update UI optimistically
-                annotationsMap[activeIdx] = payload;
-                const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
-                if (el) {
-                    el.className = el.className.replace(/\bann-\w+/g, '');
-                    el.classList.add('ann-' + selectedAnnType);
-                }
-                updateStats();
-                closeSheet();
+                applySaved();  // optimistic update — same as before
             })
             .finally(() => {
                 btnAnnSave.disabled = false;
                 btnAnnSave.textContent = i.save || 'Save';
             });
+    }
+
+    // Save annotation
+    btnAnnSave.addEventListener('click', () => {
+        if (activeIdx === null || !selectedAnnType) return;
+        doSaveAnnotation(selectedAnnType, annNoteInput.value.trim());
     });
 
     // Allow Enter key in note input to save
@@ -2021,4 +2041,36 @@
                 retransReplace.disabled = false;
             });
     });
+
+    // ── ReaderCore: the seam the v2 skin drives ────────────────────────────────
+    // Only the v2 layout needs this; it reuses this module's data + endpoints so
+    // there is a single source of truth for persistence, modals, and re-render.
+    if (V2) {
+        window.ReaderCore = {
+            // Persist an edit to the active sentence (reuses the correction flow,
+            // which updates the sentence, shows the realign nudge, and closes).
+            saveCorrection(text) {
+                if (activeIdx === null) return;
+                sheetTextarea.value = text;
+                btnSave.click();
+            },
+            // Persist the single annotation for the active sentence.
+            saveAnnotation(type, content) {
+                doSaveAnnotation(type, (content || '').trim());
+            },
+            deleteAnnotation() {
+                if (annRemoveBtn) annRemoveBtn.click();
+            },
+            // Record reviewer feedback on a finding (drops it + siblings, repaints).
+            submitFeedback(esIdx, finding, feedbackType) {
+                submitFeedback(esIdx, finding, feedbackType, null);
+            },
+            // Chunk-level actions open the shared modals via the hidden classic
+            // controls, so the whole retranslate / remove / boundary flow is reused.
+            retranslate() { if (retransBtn) retransBtn.click(); },
+            removeText() { if (removeBtn) removeBtn.click(); },
+            editBoundaries() { if (sheetEditChunk) sheetEditChunk.click(); },
+            close() { closeSheet(); },
+        };
+    }
 })();
