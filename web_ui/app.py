@@ -1806,33 +1806,57 @@ def save_correction():
         return jsonify({"error": str(e)}), 500
 
 
-def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, dict]:
-    """Load annotations for a chapter, keyed by es_idx. Latest per es_idx wins."""
+def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, list[dict]]:
+    """Load annotations for a chapter, grouped by es_idx.
+
+    Keyed by ``(es_idx, sub_id)`` with append-only tombstone / latest-wins
+    semantics (the same rule ``src/endnotes.py`` uses for the EPUB path), so
+    several annotations can share one aligned sentence. Hand-authored legacy
+    records without a ``sub_id`` collapse to the ``(es_idx, None)`` slot — one
+    per sentence, exactly as before. Returns ``{es_idx: [records oldest→newest]}``.
+    """
     annotations_path = project_dir / "annotations.jsonl"
     if not annotations_path.exists():
         return {}
 
-    by_idx: dict[int, dict] = {}
+    by_key: dict[tuple, dict] = {}
     for line in annotations_path.read_text(encoding="utf-8").strip().split("\n"):
         if not line.strip():
             continue
-        record = json.loads(line)
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if record.get("chapter_id") != chapter_id:
             continue
+        es_idx = record.get("es_idx")
+        key = (es_idx, record.get("sub_id"))
         if record.get("removed"):
-            by_idx.pop(record.get("es_idx"), None)
-        else:
-            by_idx[record["es_idx"]] = record
-    return by_idx
+            by_key.pop(key, None)
+        elif es_idx is not None:
+            by_key[key] = record
+
+    grouped: dict[int, list[dict]] = {}
+    # Sort globally by (timestamp, sub_id) so each per-sentence list is oldest→newest.
+    for (es_idx, _sub), rec in sorted(
+        by_key.items(), key=lambda kv: (str(kv[1].get("timestamp", "")), str(kv[0][1]))
+    ):
+        grouped.setdefault(es_idx, []).append(rec)
+    return grouped
 
 
 def _load_annotation_counts(project_dir: Path) -> dict[str, int]:
-    """Return active annotation count per chapter_id in a single file read."""
+    """Return the number of sentences with >=1 active annotation, per chapter_id.
+
+    Keyed by ``(es_idx, sub_id)`` so a per-sub_id tombstone doesn't clear a whole
+    sentence; counts distinct ``es_idx`` that still carry a live annotation, which
+    preserves the existing "sentences annotated" badge meaning under multiples.
+    """
     annotations_path = project_dir / "annotations.jsonl"
     if not annotations_path.exists():
         return {}
 
-    by_chapter: dict[str, dict[int, dict]] = {}
+    by_chapter: dict[str, dict[tuple, dict]] = {}
     for line in annotations_path.read_text(encoding="utf-8").strip().split("\n"):
         if not line.strip():
             continue
@@ -1844,11 +1868,12 @@ def _load_annotation_counts(project_dir: Path) -> dict[str, int]:
         if not ch:
             continue
         ch_map = by_chapter.setdefault(ch, {})
+        key = (record.get("es_idx"), record.get("sub_id"))
         if record.get("removed"):
-            ch_map.pop(record.get("es_idx"), None)
-        else:
-            ch_map[record["es_idx"]] = record
-    return {ch: len(m) for ch, m in by_chapter.items()}
+            ch_map.pop(key, None)
+        elif record.get("es_idx") is not None:
+            ch_map[key] = record
+    return {ch: len({k[0] for k in m}) for ch, m in by_chapter.items()}
 
 
 @app.route("/api/annotations/<project_id>/<chapter>")
@@ -1861,7 +1886,8 @@ def get_annotations(project_id, chapter):
         return jsonify({"error": f"Project not found: {project_id}"}), 404
 
     annotations = _load_annotations(project_dir, chapter)
-    return jsonify({"annotations": list(annotations.values())})
+    flat = [ann for lst in annotations.values() for ann in lst]
+    return jsonify({"annotations": flat})
 
 
 @app.route("/api/annotation", methods=["POST"])
@@ -1874,6 +1900,7 @@ def save_annotation():
         es_idx = data.get("es_idx")
         ann_type = data.get("type", "flag")
         content = data.get("content", "")
+        sub_id = data.get("sub_id")
         _allowed_ann_types = {"word_choice", "inconsistency", "footnote", "flag"}
         if ann_type not in _allowed_ann_types:
             ann_type = "flag"
@@ -1887,10 +1914,21 @@ def save_annotation():
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
+        # An edit reuses the client's sub_id (constrained to a safe id charset so
+        # it is safe to echo into DOM data-attributes); a create with no/invalid
+        # sub_id gets a fresh server-generated id so several annotations can
+        # coexist on one sentence. The "u" prefix keeps user ids clear of
+        # imported-footnote ids ("gb1", ...).
+        if sub_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(sub_id)):
+            sub_id = None
+        if not sub_id:
+            sub_id = "u" + secrets.token_hex(4)
+
         record = {
             "project_id": project_id,
             "chapter_id": chapter_id,
             "es_idx": es_idx,
+            "sub_id": sub_id,
             "type": ann_type,
             "content": content or "",
             "timestamp": datetime.now().isoformat(),
@@ -1900,7 +1938,7 @@ def save_annotation():
         with open(annotations_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        return jsonify({"saved": True})
+        return jsonify({"saved": True, "sub_id": sub_id})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1914,6 +1952,7 @@ def remove_annotation():
         project_id = data.get("project_id")
         chapter_id = data.get("chapter_id")
         es_idx = data.get("es_idx")
+        sub_id = data.get("sub_id")
 
         if not all([project_id, chapter_id, es_idx is not None]):
             return jsonify({"error": "Missing required fields"}), 400
@@ -1924,6 +1963,8 @@ def remove_annotation():
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
+        # Tombstone the exact (es_idx, sub_id) key. Without a sub_id this removes
+        # the legacy (es_idx, None) slot, matching the pre-multi behavior.
         record = {
             "project_id": project_id,
             "chapter_id": chapter_id,
@@ -1931,6 +1972,8 @@ def remove_annotation():
             "removed": True,
             "timestamp": datetime.now().isoformat(),
         }
+        if sub_id is not None:
+            record["sub_id"] = sub_id
 
         annotations_path = project_dir / "annotations.jsonl"
         with open(annotations_path, "a", encoding="utf-8") as f:
@@ -4778,11 +4821,11 @@ def _reanchor_annotations_after_realign(
     orphaned: list[dict] = []
     appended: list[dict] = []
 
-    for old_idx, record in active.items():
+    for old_idx, records in active.items():
         old_es_text = old_es_map.get(old_idx)
         if old_es_text is None:
             # Annotation references a sentence we don't know about — leave it.
-            orphaned.append(record)
+            orphaned.extend(records)
             continue
 
         new_idx = text_to_new_idx.get(old_es_text)
@@ -4794,29 +4837,38 @@ def _reanchor_annotations_after_realign(
                     new_idx = candidate_idx
                     break
         if new_idx is None:
-            orphaned.append(record)
+            orphaned.extend(records)
             continue
         if new_idx == old_idx:
             continue
 
         ts = datetime.now().isoformat()
-        # Mark the old index as removed
-        appended.append({
-            "project_id": record.get("project_id"),
-            "chapter_id": chapter_id,
-            "es_idx": old_idx,
-            "removed": True,
-            "timestamp": ts,
-        })
-        # Re-create at the new index with the same type/content
-        appended.append({
-            "project_id": record.get("project_id"),
-            "chapter_id": chapter_id,
-            "es_idx": new_idx,
-            "type": record.get("type", "flag"),
-            "content": record.get("content", ""),
-            "timestamp": ts,
-        })
+        # Re-anchor every annotation on this sentence, preserving each one's
+        # identity (sub_id) and any imported-footnote provenance.
+        for record in records:
+            remove_row = {
+                "project_id": record.get("project_id"),
+                "chapter_id": chapter_id,
+                "es_idx": old_idx,
+                "removed": True,
+                "timestamp": ts,
+            }
+            recreate_row = {
+                "project_id": record.get("project_id"),
+                "chapter_id": chapter_id,
+                "es_idx": new_idx,
+                "type": record.get("type", "flag"),
+                "content": record.get("content", ""),
+                "timestamp": ts,
+            }
+            if record.get("sub_id") is not None:
+                remove_row["sub_id"] = record["sub_id"]
+                recreate_row["sub_id"] = record["sub_id"]
+            for extra in ("origin", "fn_number"):
+                if record.get(extra) is not None:
+                    recreate_row[extra] = record[extra]
+            appended.append(remove_row)
+            appended.append(recreate_row)
 
     if appended:
         with open(annotations_path, "a", encoding="utf-8") as f:

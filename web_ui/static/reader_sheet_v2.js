@@ -7,9 +7,11 @@
  * routes back through window.ReaderCore so there is a single source of truth for
  * persistence, the retranslate/remove modals, and re-render.
  *
- * Data model note: the backend stores exactly ONE annotation (type + content)
- * per sentence, so the Annotate tab shows a single card (edit/delete) or the
- * Add row — not the multi-note list from the static mockup.
+ * Data model note: a sentence can carry several annotations (each keyed by a
+ * stable sub_id), so the Annotate tab renders one card per annotation plus a
+ * persistent Add row. reader.js owns the list and hands it here as cur.anns;
+ * every create/edit/delete routes through ReaderCore and is echoed back via
+ * setAnnotations so the list refreshes in place without closing the sheet.
  */
 
 (function () {
@@ -103,7 +105,7 @@
     }
 
     // ── State ──────────────────────────────────────────────────────────────────
-    let cur = null;   // { esIdx, en, es, ann, findings, reviewOn, defaultErrors }
+    let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors }
 
     // ── Open / close ───────────────────────────────────────────────────────────
     function onOpen(data) {
@@ -188,14 +190,14 @@
         refreshSrcToggle();
     });
 
-    // ── Annotate (single annotation per sentence) ──────────────────────────────
+    // ── Annotate (multiple annotations per sentence) ───────────────────────────
     function renderAnnotate() {
         els.cardList.innerHTML = '';
+        // The Add row is always available — creating stays consistent whether or
+        // not annotations already exist.
         els.addRow.classList.remove('rv2-hide');
-        if (cur && cur.ann) {
-            els.cardList.appendChild(existingCard(cur.ann));
-            els.addRow.classList.add('rv2-hide');
-        }
+        const anns = (cur && cur.anns) || [];
+        anns.forEach((ann) => els.cardList.appendChild(existingCard(ann)));
     }
     function composerHtml(type, value, withDelete) {
         const tps = ['word_choice', 'inconsistency', 'footnote', 'flag']
@@ -219,6 +221,7 @@
         const d = document.createElement('div');
         d.className = 'rv2-card';
         d.dataset.type = type;
+        if (ann.sub_id) d.dataset.subId = ann.sub_id;
         d.innerHTML =
             '<div class="rv2-card-head">'
             + '<span class="rv2-badge ' + type + '">' + typeGlyph(type) + '</span>'
@@ -259,7 +262,7 @@
     function closeAdd() {
         const w = el('rv2-add-card');
         if (w) w.remove();
-        if (!cur || !cur.ann) els.addRow.classList.remove('rv2-hide');
+        els.addRow.classList.remove('rv2-hide');
     }
     els.addIcons.addEventListener('click', function (e) {
         const tp = e.target.closest('.rv2-tp');
@@ -269,12 +272,17 @@
         const tp = e.target.closest('.rv2-type-row .rv2-tp');
         if (tp) { selectType(tp.closest('.rv2-card'), tp.dataset.type); return; }
         if (e.target.closest('.rv2-cancel')) { closeAdd(); endCompose(); return; }
-        if (e.target.closest('.rv2-icon-del')) { core().deleteAnnotation && core().deleteAnnotation(); return; }
+        if (e.target.closest('.rv2-icon-del')) {
+            const card = e.target.closest('.rv2-card');
+            if (core().deleteAnnotation) core().deleteAnnotation(card && card.dataset.subId);
+            return;
+        }
         if (e.target.closest('.rv2-save')) {
             const card = e.target.closest('.rv2-card');
             const type = card.dataset.type;
             const val = (card.querySelector('textarea').value || '').trim();
-            if (core().saveAnnotation) core().saveAnnotation(type, val);
+            // An existing card carries its sub_id (edit); the add card has none (create).
+            if (core().saveAnnotation) core().saveAnnotation(type, val, card.dataset.subId);
             return;
         }
     });
@@ -419,7 +427,7 @@
         node.hidden = n === 0;
     }
     function updateCounts() {
-        countEl(els.annCount, cur && cur.ann ? 1 : 0);
+        countEl(els.annCount, cur && cur.anns ? cur.anns.length : 0);
         countEl(els.issueCount, cur && cur.findings ? cur.findings.length : 0);
     }
 
@@ -538,8 +546,17 @@
         sheet.addEventListener(ev, function () { clearTimeout(bTimer); hideBubble(); }));
     sheet.addEventListener('pointermove', function () { clearTimeout(bTimer); });
 
+    // Refresh the annotation list in place after a create/edit/delete, keeping
+    // the sheet open (and any add composer collapsed) so more can be added.
+    function setAnnotations(list) {
+        if (!cur) return;
+        cur.anns = list || [];
+        renderAnnotate();
+        updateCounts();
+    }
+
     // Paint the static Add-row icons once.
     paintTps(els.addIcons);
 
-    window.ReaderSheetV2 = { onOpen, onClose };
+    window.ReaderSheetV2 = { onOpen, onClose, setAnnotations };
 })();

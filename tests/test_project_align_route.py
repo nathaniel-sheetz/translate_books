@@ -307,7 +307,8 @@ class TestRealignReanchor:
         from web_ui.app import _load_annotations
         effective = _load_annotations(project, "chapter_01")
         assert list(effective.keys()) == [2]
-        assert effective[2]["content"] == "loud dog"
+        assert len(effective[2]) == 1
+        assert effective[2][0]["content"] == "loud dog"
 
     def test_prefix_fallback_match_reanchors(
         self, client, project, monkeypatch,
@@ -355,7 +356,8 @@ class TestRealignReanchor:
         from web_ui.app import _load_annotations
         effective = _load_annotations(project, "chapter_01")
         assert list(effective.keys()) == [1]
-        assert effective[1]["content"] == "tone check"
+        assert len(effective[1]) == 1
+        assert effective[1][0]["content"] == "tone check"
 
     def test_unmatchable_annotation_is_orphaned(
         self, client, project, monkeypatch,
