@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.35.0.0] - 2026-07-23
+
+### Added
+- **Opt-in v2 reader bottom sheet** (Annotate / Edit / Issues) behind a per-device `reader_ui_version` cookie. Classic stays the default; switch on the project list or with `?ui=v2`.
+- **PWA manifest** for the reader (`manifest.webmanifest`) so the tablet reading flow can install as a web app.
+
+### Changed
+- **UI language + reader layout toggles** moved to the project list page so they stay out of the chapter reading chrome.
+- **Issues "Apply"** opens the Edit tab (primary action) instead of a separate "Resolved" affordance.
+- **Edit tab action row** pinned with chips left / Save right; annotate composer keeps type chips and icons on one scrollable line.
+
+### Fixed
+- **Annotation type allowlist** on save and in the v2 sheet: unknown types coerce to `flag` so freeform `type` values cannot break out of HTML class attributes.
+- **v2 soft-keyboard / sheet interaction** and source "less" link placement so the expand control no longer sits over the last word of source text.
+
 ## [0.34.0.1] - 2026-07-22
 
 ### Changed
