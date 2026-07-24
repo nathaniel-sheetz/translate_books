@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.0.0] - 2026-07-24
+
+### Added
+- **Multiple annotations per aligned sentence** in the v2 reader. Notes are keyed by `(es_idx, sub_id)`; creates mint a server `u…` id so several can coexist, each independently editable/deletable. Imported Gutenberg footnotes (`gb1`, `gb2`, …) all surface on the same sentence.
+
+### Changed
+- **v2 Annotate tab** keeps a persistent Add row and refreshes the card list in place after create/edit/delete (sheet stays open).
+- **Classic reader** still targets a single representative annotation per sentence when multiples exist.
+
+### Fixed
+- **Legacy notes without `sub_id`** round-trip via a wire sentinel (`sub_id: "legacy"`) so edit/delete update the old slot instead of minting a sibling.
+- **Invalid `sub_id`** on save/delete returns 400 instead of silently reminting or writing an unaddressable key.
+
 ## [0.35.0.0] - 2026-07-23
 
 ### Added

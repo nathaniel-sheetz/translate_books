@@ -1806,14 +1806,37 @@ def save_correction():
         return jsonify({"error": str(e)}), 500
 
 
+# Wire-protocol sentinel for pre-multi records that have no sub_id on disk.
+# GET emits it so the client can edit/delete; POST/DELETE map it back to the
+# (es_idx, None) storage slot without rewriting historical rows.
+_LEGACY_SUB_ID = "legacy"
+_SUB_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _ann_storage_sub_id(sub_id):
+    """Map a wire/API sub_id to the storage key (None = legacy single-slot)."""
+    if sub_id is None or sub_id == "" or sub_id == _LEGACY_SUB_ID:
+        return None
+    return sub_id
+
+
+def _ann_for_wire(ann: dict) -> dict:
+    """Copy a stored annotation, giving legacy rows a round-trippable sub_id."""
+    out = dict(ann)
+    if _ann_storage_sub_id(out.get("sub_id")) is None:
+        out["sub_id"] = _LEGACY_SUB_ID
+    return out
+
+
 def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, list[dict]]:
     """Load annotations for a chapter, grouped by es_idx.
 
     Keyed by ``(es_idx, sub_id)`` with append-only tombstone / latest-wins
-    semantics (the same rule ``src/endnotes.py`` uses for the EPUB path), so
-    several annotations can share one aligned sentence. Hand-authored legacy
-    records without a ``sub_id`` collapse to the ``(es_idx, None)`` slot — one
-    per sentence, exactly as before. Returns ``{es_idx: [records oldest→newest]}``.
+    semantics, so several annotations can share one aligned sentence.
+    Hand-authored legacy records without a ``sub_id`` collapse to the
+    ``(es_idx, None)`` slot — one per sentence, exactly as before. Within each
+    sentence, records are ordered oldest→newest by ``(timestamp, sub_id)``.
+    Returns ``{es_idx: [records]}`` (storage shape; use ``_ann_for_wire`` for APIs).
     """
     annotations_path = project_dir / "annotations.jsonl"
     if not annotations_path.exists():
@@ -1830,7 +1853,7 @@ def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, list[dict
         if record.get("chapter_id") != chapter_id:
             continue
         es_idx = record.get("es_idx")
-        key = (es_idx, record.get("sub_id"))
+        key = (es_idx, _ann_storage_sub_id(record.get("sub_id")))
         if record.get("removed"):
             by_key.pop(key, None)
         elif es_idx is not None:
@@ -1868,7 +1891,7 @@ def _load_annotation_counts(project_dir: Path) -> dict[str, int]:
         if not ch:
             continue
         ch_map = by_chapter.setdefault(ch, {})
-        key = (record.get("es_idx"), record.get("sub_id"))
+        key = (record.get("es_idx"), _ann_storage_sub_id(record.get("sub_id")))
         if record.get("removed"):
             ch_map.pop(key, None)
         elif record.get("es_idx") is not None:
@@ -1886,7 +1909,7 @@ def get_annotations(project_id, chapter):
         return jsonify({"error": f"Project not found: {project_id}"}), 404
 
     annotations = _load_annotations(project_dir, chapter)
-    flat = [ann for lst in annotations.values() for ann in lst]
+    flat = [_ann_for_wire(ann) for lst in annotations.values() for ann in lst]
     return jsonify({"annotations": flat})
 
 
@@ -1914,31 +1937,34 @@ def save_annotation():
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
-        # An edit reuses the client's sub_id (constrained to a safe id charset so
-        # it is safe to echo into DOM data-attributes); a create with no/invalid
-        # sub_id gets a fresh server-generated id so several annotations can
-        # coexist on one sentence. The "u" prefix keeps user ids clear of
-        # imported-footnote ids ("gb1", ...).
-        if sub_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(sub_id)):
-            sub_id = None
-        if not sub_id:
-            sub_id = "u" + secrets.token_hex(4)
+        # Edit reuses the client's sub_id (safe charset for DOM data-attrs).
+        # "legacy" addresses the pre-multi (es_idx, None) slot without minting.
+        # No sub_id → create with a fresh "u…" id (clear of imported "gb…" ids).
+        # Invalid sub_id → 400 (do not silently remint; that would fork a duplicate).
+        if sub_id == _LEGACY_SUB_ID or sub_id is None or sub_id == "":
+            storage_sub = None if sub_id == _LEGACY_SUB_ID else ("u" + secrets.token_hex(4))
+        elif not _SUB_ID_RE.fullmatch(str(sub_id)):
+            return jsonify({"error": "Invalid sub_id"}), 400
+        else:
+            storage_sub = str(sub_id)
+        wire_sub = _LEGACY_SUB_ID if storage_sub is None else storage_sub
 
         record = {
             "project_id": project_id,
             "chapter_id": chapter_id,
             "es_idx": es_idx,
-            "sub_id": sub_id,
             "type": ann_type,
             "content": content or "",
             "timestamp": datetime.now().isoformat(),
         }
+        if storage_sub is not None:
+            record["sub_id"] = storage_sub
 
         annotations_path = project_dir / "annotations.jsonl"
         with open(annotations_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        return jsonify({"saved": True, "sub_id": sub_id})
+        return jsonify({"saved": True, "sub_id": wire_sub})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1963,8 +1989,14 @@ def remove_annotation():
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
-        # Tombstone the exact (es_idx, sub_id) key. Without a sub_id this removes
-        # the legacy (es_idx, None) slot, matching the pre-multi behavior.
+        # Tombstone the exact (es_idx, sub_id) key. Missing/"legacy" removes the
+        # (es_idx, None) slot. Same charset constraint as POST.
+        if sub_id is not None and sub_id != "" and sub_id != _LEGACY_SUB_ID:
+            if not _SUB_ID_RE.fullmatch(str(sub_id)):
+                return jsonify({"error": "Invalid sub_id"}), 400
+            storage_sub = str(sub_id)
+        else:
+            storage_sub = None
         record = {
             "project_id": project_id,
             "chapter_id": chapter_id,
@@ -1972,8 +2004,8 @@ def remove_annotation():
             "removed": True,
             "timestamp": datetime.now().isoformat(),
         }
-        if sub_id is not None:
-            record["sub_id"] = sub_id
+        if storage_sub is not None:
+            record["sub_id"] = storage_sub
 
         annotations_path = project_dir / "annotations.jsonl"
         with open(annotations_path, "a", encoding="utf-8") as f:

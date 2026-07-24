@@ -132,6 +132,24 @@ class TestLegacyCompat:
         anns = _get(client)
         assert len(anns) == 1
         assert anns[0]["content"] == "old note"
+        # Wire protocol: missing storage sub_id surfaces as the "legacy" sentinel
+        # so the client can edit/delete without minting a sibling.
+        assert anns[0]["sub_id"] == "legacy"
+
+    def test_legacy_edit_via_sentinel_updates_in_place(self, client, project):
+        _write_raw(project, [
+            {"project_id": "test-project", "chapter_id": "chapter_01",
+             "es_idx": 0, "type": "flag", "content": "old note",
+             "timestamp": "2026-01-01T00:00:00"},
+        ])
+        r = _post(client, es_idx=0, type="footnote", content="revised", sub_id="legacy")
+        assert r.status_code == 200
+        assert r.get_json()["sub_id"] == "legacy"
+        anns = _get(client)
+        assert len(anns) == 1
+        assert anns[0]["content"] == "revised"
+        assert anns[0]["type"] == "footnote"
+        assert anns[0]["sub_id"] == "legacy"
 
     def test_legacy_tombstone_without_sub_id_removes_it(self, client, project):
         _write_raw(project, [
@@ -141,6 +159,27 @@ class TestLegacyCompat:
         ])
         assert _delete(client, es_idx=0).status_code == 200
         assert _get(client) == []
+
+    def test_legacy_delete_via_sentinel(self, client, project):
+        _write_raw(project, [
+            {"project_id": "test-project", "chapter_id": "chapter_01",
+             "es_idx": 0, "type": "flag", "content": "old note",
+             "timestamp": "2026-01-01T00:00:00"},
+        ])
+        assert _delete(client, es_idx=0, sub_id="legacy").status_code == 200
+        assert _get(client) == []
+
+    def test_invalid_sub_id_rejected(self, client, project):
+        r = _post(client, es_idx=0, type="flag", content="x", sub_id="bad id!")
+        assert r.status_code == 400
+        assert _get(client) == []
+        _write_raw(project, [
+            {"project_id": "test-project", "chapter_id": "chapter_01",
+             "es_idx": 0, "sub_id": "uabc", "type": "flag", "content": "keep",
+             "timestamp": "2026-01-01T00:00:00"},
+        ])
+        assert _delete(client, es_idx=0, sub_id="bad id!").status_code == 400
+        assert len(_get(client)) == 1
 
 
 class TestFootnoteSurfacing:
