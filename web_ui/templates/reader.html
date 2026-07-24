@@ -847,24 +847,6 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
 <script>window.READER_UI_VERSION = {{ reader_ui_version | default('classic') | tojson }};</script>
-<script>
-// Sheet-layout opt-in toggle. Version-agnostic: rendered in both layouts so the
-// user can switch either direction. Persists via the reader_ui_version cookie.
-(function () {
-    document.querySelectorAll('.ui-version-toggle [data-ui-version]').forEach(function (b) {
-        b.addEventListener('click', function () {
-            if (b.classList.contains('active')) return;
-            var v = b.getAttribute('data-ui-version');
-            fetch('/api/set-ui-version', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ version: v }),
-            }).then(function () { location.reload(); })
-              .catch(function () { location.reload(); });
-        });
-    });
-})();
-</script>
 <script src="{{ url_for('static', filename='reader.js') }}?v=24"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}

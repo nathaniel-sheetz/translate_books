@@ -87,7 +87,13 @@
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
     }
+    // Never interpolate raw ann.type into HTML/class names — API accepts freeform strings.
+    const ANN_TYPES = { word_choice: 1, inconsistency: 1, footnote: 1, flag: 1 };
+    function safeAnnType(type) {
+        return ANN_TYPES[type] ? type : 'flag';
+    }
     function typeGlyph(type) {
+        type = safeAnnType(type);
         return type === 'footnote' ? '<span class="a">a</span>' : (ICON[type] || '');
     }
     function paintTps(scope) {
@@ -209,7 +215,7 @@
             + '</div></div>';
     }
     function existingCard(ann) {
-        const type = ann.type;
+        const type = safeAnnType(ann.type);
         const d = document.createElement('div');
         d.className = 'rv2-card';
         d.dataset.type = type;
@@ -229,6 +235,7 @@
         return d;
     }
     function selectType(card, type) {
+        type = safeAnnType(type);
         card.dataset.type = type;
         card.querySelectorAll('.rv2-type-row .rv2-tp').forEach((x) => x.classList.toggle('sel', x.dataset.type === type));
         const hint = card.querySelector('.rv2-fn-hint');

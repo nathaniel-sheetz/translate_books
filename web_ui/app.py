@@ -1874,6 +1874,9 @@ def save_annotation():
         es_idx = data.get("es_idx")
         ann_type = data.get("type", "flag")
         content = data.get("content", "")
+        _allowed_ann_types = {"word_choice", "inconsistency", "footnote", "flag"}
+        if ann_type not in _allowed_ann_types:
+            ann_type = "flag"
 
         if not all([project_id, chapter_id, es_idx is not None]):
             return jsonify({"error": "Missing required fields"}), 400

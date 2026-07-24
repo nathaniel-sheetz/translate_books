@@ -65,11 +65,19 @@ class TestDefaultClassic:
         assert V2_ASSET not in html
         assert 'window.READER_UI_VERSION = "classic"' in html
 
-    def test_toggle_present_with_both_options(self, client, project_with_alignment):
-        html = client.get(READ_URL).get_data(as_text=True)
+    def test_toggle_present_on_project_list(self, client, project_with_alignment):
+        # Toggle lives on the project list (/read/), not the chapter reader.
+        html = client.get("/read/").get_data(as_text=True)
         assert "ui-version-toggle" in html
         assert 'data-ui-version="classic"' in html
         assert 'data-ui-version="v2"' in html
+
+    def test_toggle_absent_from_chapter_reader(self, client, project_with_alignment):
+        # Toggle markup lives on /read/ only; chapter pages must not render the buttons.
+        html = client.get(READ_URL).get_data(as_text=True)
+        assert 'class="lang-toggle ui-version-toggle"' not in html
+        assert 'data-ui-version="classic"' not in html
+        assert 'data-ui-version="v2"' not in html
 
 
 class TestCookieOptIn:
@@ -130,3 +138,39 @@ class TestSetUiVersionRoute:
     def test_missing_body_defaults_classic(self, client):
         rv = client.post("/api/set-ui-version", json={})
         assert rv.get_json()["version"] == "classic"
+
+
+class TestAnnotationTypeAllowlist:
+    """Regression: freeform ann.type used to land in v2 innerHTML class attrs."""
+
+    def test_known_type_persisted(self, client, project_with_alignment):
+        rv = client.post("/api/annotation", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 0,
+            "type": "footnote",
+            "content": "note",
+        })
+        assert rv.status_code == 200
+        path = project_with_alignment / "annotations.jsonl"
+        last = path.read_text(encoding="utf-8").strip().splitlines()[-1]
+        assert json.loads(last)["type"] == "footnote"
+
+    def test_unknown_type_coerces_to_flag(self, client, project_with_alignment):
+        rv = client.post("/api/annotation", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 0,
+            "type": '"><img src=x onerror=alert(1)>',
+            "content": "x",
+        })
+        assert rv.status_code == 200
+        path = project_with_alignment / "annotations.jsonl"
+        last = path.read_text(encoding="utf-8").strip().splitlines()[-1]
+        assert json.loads(last)["type"] == "flag"
+
+    def test_v2_js_allowlists_types(self):
+        js = (Path(__file__).resolve().parents[2]
+              / "web_ui" / "static" / "reader_sheet_v2.js").read_text(encoding="utf-8")
+        assert "function safeAnnType" in js
+        assert "ANN_TYPES" in js
