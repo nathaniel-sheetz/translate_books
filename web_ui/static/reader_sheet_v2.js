@@ -105,7 +105,7 @@
     }
 
     // ── State ──────────────────────────────────────────────────────────────────
-    let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors }
+    let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors, tappedWord }
 
     // ── Open / close ───────────────────────────────────────────────────────────
     function onOpen(data) {
@@ -134,6 +134,7 @@
         sheet.style.bottom = '';
         sheet.style.height = '';
         sheet.style.maxHeight = '';
+        if (cur) cur.tappedWord = null;   // fresh capture on the next tap
         endCompose();
     }
 
@@ -199,7 +200,7 @@
         const anns = (cur && cur.anns) || [];
         anns.forEach((ann) => els.cardList.appendChild(existingCard(ann)));
     }
-    function composerHtml(type, value, withDelete) {
+    function composerHtml(type, value, withDelete, anchorChip) {
         const tps = ['word_choice', 'inconsistency', 'footnote', 'flag']
             .map((tp) => '<button class="rv2-tp" type="button" data-type="' + tp + '" aria-label="' + esc(ANN_NAMES[tp]) + '"></button>')
             .join('');
@@ -208,8 +209,15 @@
         const trailing = withDelete
             ? '<button class="rv2-icon-del" type="button" aria-label="' + esc(T('aria_delete_note', 'Delete note')) + '">' + TRASH + '</button>'
             : '<button class="rv2-icon-del rv2-cancel" type="button" aria-label="' + cancelLbl + '" title="' + cancelLbl + '">' + TRASH + '</button>';
+        // The anchor chip clears the auto-inserted [word] seed. It shows only
+        // while the note is still the bare bracket token (toggled on input), so it
+        // never covers typed text.
+        const anchorX = anchorChip
+            ? '<button class="rv2-anchor-x" type="button" aria-label="' + esc(T('aria_remove_anchor', 'Remove tapped word')) + '">&times;</button>'
+            : '';
         return '<div class="rv2-composer">'
             + '<textarea placeholder="' + esc(T('note_placeholder', 'Note text…')) + '">' + esc(value) + '</textarea>'
+            + anchorX
             + '<div class="rv2-fn-hint' + (type === 'footnote' ? ' show' : '') + '">' + esc(T('fn_hint', '')) + '</div>'
             + '<div class="rv2-composer-bar"><div class="rv2-type-row">' + tps + '</div>'
             + trailing
@@ -253,7 +261,10 @@
         wrap.className = 'rv2-card open';
         wrap.id = 'rv2-add-card';
         wrap.dataset.type = type;
-        wrap.innerHTML = '<div class="rv2-card-body">' + composerHtml(type, '', false) + '</div>';
+        // Pre-fill the tapped word (in brackets) so it becomes the footnote anchor
+        // and a mnemonic for text-free notes; the anchor chip lets it be removed.
+        const seed = (cur && cur.tappedWord) ? '[' + cur.tappedWord + '] ' : '';
+        wrap.innerHTML = '<div class="rv2-card-body">' + composerHtml(type, seed, false, !!seed) + '</div>';
         els.cardList.appendChild(wrap);
         paintTps(wrap);
         selectType(wrap, type);
@@ -271,6 +282,14 @@
     panels.annotate.addEventListener('click', function (e) {
         const tp = e.target.closest('.rv2-type-row .rv2-tp');
         if (tp) { selectType(tp.closest('.rv2-card'), tp.dataset.type); return; }
+        const anchorX = e.target.closest('.rv2-anchor-x');
+        if (anchorX) {
+            const card = e.target.closest('.rv2-card');
+            const ta = card && card.querySelector('textarea');
+            if (ta) { ta.value = ta.value.replace(/^\s*\[[^\]]*\]\s*/, ''); ta.focus(); }
+            anchorX.classList.add('rv2-hide');
+            return;
+        }
         if (e.target.closest('.rv2-cancel')) { closeAdd(); endCompose(); return; }
         if (e.target.closest('.rv2-icon-del')) {
             const card = e.target.closest('.rv2-card');
@@ -285,6 +304,16 @@
             if (core().saveAnnotation) core().saveAnnotation(type, val, card.dataset.subId);
             return;
         }
+    });
+    // Keep the anchor chip visible only while the note is the bare [word] seed, so
+    // it never blocks the typing space once the user starts writing.
+    panels.annotate.addEventListener('input', function (e) {
+        const ta = e.target;
+        if (!ta || ta.tagName !== 'TEXTAREA') return;
+        const card = ta.closest('.rv2-card');
+        const x = card && card.querySelector('.rv2-anchor-x');
+        if (!x) return;
+        x.classList.toggle('rv2-hide', !/^\s*\[[^\]]*\]\s*$/.test(ta.value));
     });
 
     // ── Edit ───────────────────────────────────────────────────────────────────
@@ -436,6 +465,9 @@
         if (!ta) return;
         setTimeout(function () {
             ta.focus();
+            // Drop the caret at the end so a seeded "[word] " note (or an edit) is
+            // ready to type into right after the bracket, no repositioning needed.
+            try { const n = ta.value.length; ta.setSelectionRange(n, n); } catch (e) { /* non-text input */ }
             (ta.closest('.rv2-card') || ta).scrollIntoView({ block: 'start' });
         }, 30);
     }

@@ -269,13 +269,38 @@
                 span.classList.add('ann-' + hlType);
             }
 
-            span.addEventListener('click', () => onSentenceTap(a));
+            span.addEventListener('click', (e) => onSentenceTap(a, e));
 
             content.appendChild(span);
         }
     }
 
-    function onSentenceTap(alignment) {
+    // Resolve the word directly under a tap so a new annotation can pre-fill it as
+    // a footnote anchor / mnemonic. We read caret position from the tap rather than
+    // restructuring the DOM into per-word spans (review highlights may split the
+    // sentence across multiple text nodes / spans).
+    // Returns null when the tap misses a word (whitespace) or no event is present
+    // (programmatic calls) — callers treat null as "no word captured".
+    function wordAtPoint(evt) {
+        if (!evt || evt.clientX == null || evt.clientY == null) return null;
+        let node = null, offset = 0;
+        if (document.caretRangeFromPoint) {            // Chrome/WebKit
+            const r = document.caretRangeFromPoint(evt.clientX, evt.clientY);
+            if (r) { node = r.startContainer; offset = r.startOffset; }
+        } else if (document.caretPositionFromPoint) {  // Firefox
+            const p = document.caretPositionFromPoint(evt.clientX, evt.clientY);
+            if (p) { node = p.offsetNode; offset = p.offset; }
+        }
+        if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+        const text = node.textContent || '';
+        const isWord = (ch) => ch != null && (/[\p{L}\p{N}]/u.test(ch) || ch === "'" || ch === '’' || ch === '-');
+        let s = offset, e = offset;
+        while (s > 0 && isWord(text[s - 1])) s--;
+        while (e < text.length && isWord(text[e])) e++;
+        return text.slice(s, e).replace(/^['’-]+|['’-]+$/g, '').trim() || null;
+    }
+
+    function onSentenceTap(alignment, evt) {
         // Deactivate previous
         const prev = content.querySelector('.sentence.active');
         if (prev) prev.classList.remove('active');
@@ -285,6 +310,9 @@
         if (el) el.classList.add('active');
 
         activeIdx = alignment.es_idx;
+
+        // Capture the tapped word (if any) to pre-fill a new annotation below.
+        const tappedWord = wordAtPoint(evt);
 
         // Populate bottom sheet
         sheetEn.textContent = alignment.en;
@@ -358,6 +386,7 @@
                 findings: reviewConfig.on ? (reviewMap[alignment.es_idx] || []) : [],
                 reviewOn: reviewConfig.on,
                 defaultErrors: defaultErrors,
+                tappedWord: tappedWord,
             });
         }
     }

@@ -335,6 +335,7 @@
 .rv2-card-body { display: none; padding: 9px; }
 .rv2-card.open .rv2-card-body { display: block; }
 
+.rv2-composer { position: relative; }
 .rv2-composer textarea,
 #rv2-edit-ta {
   width: 100%;
@@ -349,6 +350,30 @@
   resize: none;
   min-height: 60px;
 }
+
+/* Quick-clear for the auto-inserted [word] seed. Shown only while the note is the
+   bare bracket token (JS toggles rv2-hide on input), so it never covers typed text.
+   The seed sits at the top-left, so a top-right chip stays clear of it. */
+.rv2-anchor-x {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--rv2-border-light);
+  background: var(--rv2-bg);
+  color: var(--rv2-muted2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+}
+.rv2-anchor-x:hover { color: var(--rv2-danger); border-color: var(--rv2-danger); }
+.rv2-anchor-x.rv2-hide { display: none; }   /* the shared .rv2-hide is scoped to .rv2-add-row */
 #rv2-edit-ta { min-height: 120px; border-radius: 9px; padding: 11px 12px; line-height: 1.6; transition: min-height 0.2s; }
 
 .rv2-fn-hint {
