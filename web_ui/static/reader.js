@@ -88,9 +88,28 @@
     const sheetEditArea = document.getElementById('sheet-edit-area');
 
     let alignmentData = null;
-    let annotationsMap = {};   // es_idx -> annotation record
+    let annotationsMap = {};   // es_idx -> [annotation records] (oldest→newest)
     let activeIdx = null;
+    let activeRepSubId = null; // sub_id of the annotation the classic single-slot UI targets
     let selectedAnnType = null;
+
+    // Sentence highlight color is chosen by type ranking when a sentence carries
+    // several annotations: word_choice > inconsistency > footnote > flag(Other).
+    const ANN_RANK = ['word_choice', 'inconsistency', 'footnote', 'flag'];
+    function annHighlightType(list) {
+        if (!list || !list.length) return null;
+        for (const t of ANN_RANK) {
+            if (list.some(a => a.type === t)) return t;
+        }
+        return list[list.length - 1].type;  // unknown type: fall back to newest
+    }
+    function repaintHighlight(idx) {
+        const el = content.querySelector(`[data-es-idx="${idx}"]`);
+        if (!el) return;
+        el.className = el.className.replace(/\bann-\w+/g, '');
+        const hlType = annHighlightType(annotationsMap[idx]);
+        if (hlType) el.classList.add('ann-' + hlType);
+    }
 
     // --- Review mode (opt-in overlay of evaluator findings) ---
     // Selection is chosen on the chapter-list page and persisted per project;
@@ -140,10 +159,15 @@
                 const annData = results[1];
                 alignmentData = data;
 
-                // Build annotations map
+                // Build annotations map: es_idx -> [records], oldest→newest.
                 annotationsMap = {};
                 for (const ann of (annData.annotations || [])) {
-                    annotationsMap[ann.es_idx] = ann;
+                    (annotationsMap[ann.es_idx] || (annotationsMap[ann.es_idx] = [])).push(ann);
+                }
+                for (const k of Object.keys(annotationsMap)) {
+                    annotationsMap[k].sort((a, b) =>
+                        String(a.timestamp || '').localeCompare(String(b.timestamp || '')) ||
+                        String(a.sub_id || '').localeCompare(String(b.sub_id || '')));
                 }
 
                 const reviewData = reviewConfig.on ? results[2] : null;
@@ -239,10 +263,10 @@
                 span.classList.add('corrected');
             }
 
-            // Apply annotation highlight
-            const ann = annotationsMap[a.es_idx];
-            if (ann) {
-                span.classList.add('ann-' + ann.type);
+            // Apply annotation highlight (ranked when several share a sentence)
+            const hlType = annHighlightType(annotationsMap[a.es_idx]);
+            if (hlType) {
+                span.classList.add('ann-' + hlType);
             }
 
             span.addEventListener('click', () => onSentenceTap(a));
@@ -269,19 +293,22 @@
         // Reset annotation UI
         resetAnnotationUI();
 
-        // Show existing annotation if present
-        const ann = annotationsMap[alignment.es_idx];
-        if (ann) {
+        // Classic single-slot UI shows one representative (newest) annotation;
+        // the v2 skin (below) shows the full list.
+        const annList = annotationsMap[alignment.es_idx] || [];
+        const rep = annList.length ? annList[annList.length - 1] : null;
+        activeRepSubId = rep ? (rep.sub_id || null) : null;
+        if (rep) {
             // Highlight the matching type button
-            const matchBtn = document.querySelector(`.ann-type-btn[data-type="${ann.type}"]`);
+            const matchBtn = document.querySelector(`.ann-type-btn[data-type="${rep.type}"]`);
             if (matchBtn) matchBtn.classList.add('selected');
-            selectedAnnType = ann.type;
-            annTypeLabel.textContent = ANN_TYPE_NAMES[ann.type] || ann.type;
+            selectedAnnType = rep.type;
+            annTypeLabel.textContent = ANN_TYPE_NAMES[rep.type] || rep.type;
             annTypeLabel.style.display = 'block';
 
             // Show existing note
-            if (ann.content) {
-                annExisting.textContent = ann.content;
+            if (rep.content) {
+                annExisting.textContent = rep.content;
                 annExisting.style.display = 'block';
             }
 
@@ -289,7 +316,7 @@
             annRemoveBtn.classList.add('has-annotation');
 
             // Pre-fill note input
-            annNoteInput.value = ann.content || '';
+            annNoteInput.value = rep.content || '';
         }
 
         // Review mode: populate the Errors tab and default to it when this
@@ -327,7 +354,7 @@
                 esIdx: alignment.es_idx,
                 en: alignment.en,
                 es: alignment.es,
-                ann: annotationsMap[alignment.es_idx] || null,
+                anns: annotationsMap[alignment.es_idx] || [],
                 findings: reviewConfig.on ? (reviewMap[alignment.es_idx] || []) : [],
                 reviewOn: reviewConfig.on,
                 defaultErrors: defaultErrors,
@@ -734,7 +761,7 @@
     // Save annotation. Extracted so the v2 skin can persist directly with an
     // explicit (type, content), while the classic button path (below) keeps
     // reading from selectedAnnType + the note input exactly as before.
-    function doSaveAnnotation(type, text) {
+    function doSaveAnnotation(type, text, subId) {
         if (activeIdx === null || !type) return;
 
         const idx = activeIdx;
@@ -745,16 +772,26 @@
             type: type,
             content: text,
         };
+        // A sub_id means "edit this annotation"; its absence means "create a new
+        // one" (the server assigns a fresh sub_id and returns it).
+        if (subId) payload.sub_id = subId;
 
-        function applySaved() {
-            annotationsMap[idx] = payload;
-            const el = content.querySelector(`[data-es-idx="${idx}"]`);
-            if (el) {
-                el.className = el.className.replace(/\bann-\w+/g, '');
-                el.classList.add('ann-' + type);
-            }
+        function applySaved(savedSubId) {
+            const sid = savedSubId || subId || null;
+            const rec = { es_idx: idx, type: type, content: text, sub_id: sid };
+            const list = annotationsMap[idx] || (annotationsMap[idx] = []);
+            const pos = sid ? list.findIndex(a => (a.sub_id || null) === sid) : -1;
+            if (pos >= 0) list[pos] = rec; else list.push(rec);
+            repaintHighlight(idx);
             updateStats();
-            closeSheet();
+            // v2: keep the sheet open and refresh the card list so the user can
+            // add another annotation. Classic: close as before.
+            if (V2 && window.ReaderSheetV2) {
+                activeRepSubId = sid;
+                window.ReaderSheetV2.setAnnotations(annotationsMap[idx] || []);
+            } else {
+                closeSheet();
+            }
         }
 
         btnAnnSave.disabled = true;
@@ -766,10 +803,13 @@
             body: JSON.stringify(payload),
         })
             .then(r => r.json())
-            .then(result => { if (result.saved) applySaved(); })
+            .then(result => { if (result.saved) applySaved(result.sub_id); })
             .catch(() => {
+                // Offline: mint a client sub_id so the optimistic record stays
+                // addressable for later edit/delete.
+                if (!payload.sub_id) payload.sub_id = 'u' + Math.random().toString(16).slice(2, 10);
                 enqueue('/api/annotation', 'POST', payload);
-                applySaved();  // optimistic update — same as before
+                applySaved(payload.sub_id);
             })
             .finally(() => {
                 btnAnnSave.disabled = false;
@@ -777,10 +817,11 @@
             });
     }
 
-    // Save annotation
+    // Save annotation (classic single-slot button edits the representative when
+    // one exists, otherwise creates a new annotation).
     btnAnnSave.addEventListener('click', () => {
         if (activeIdx === null || !selectedAnnType) return;
-        doSaveAnnotation(selectedAnnType, annNoteInput.value.trim());
+        doSaveAnnotation(selectedAnnType, annNoteInput.value.trim(), activeRepSubId);
     });
 
     // Allow Enter key in note input to save
@@ -791,23 +832,30 @@
         }
     });
 
-    // Remove annotation
-    annRemoveBtn.addEventListener('click', () => {
-        if (activeIdx === null) return;
+    // Remove one annotation by sub_id (null → the legacy single-slot record).
+    function doRemoveAnnotation(idx, subId) {
+        if (idx === null || idx === undefined) return;
 
         const deletePayload = {
             project_id: projectId,
             chapter_id: chapter,
-            es_idx: activeIdx,
+            es_idx: idx,
         };
-        const idxToRemove = activeIdx;
+        if (subId) deletePayload.sub_id = subId;
 
         function applyRemoveUI() {
-            delete annotationsMap[idxToRemove];
-            const el = content.querySelector(`[data-es-idx="${idxToRemove}"]`);
-            if (el) el.className = el.className.replace(/\bann-\w+/g, '');
+            const list = annotationsMap[idx] || [];
+            const next = list.filter(a => (a.sub_id || null) !== (subId || null));
+            if (next.length) annotationsMap[idx] = next; else delete annotationsMap[idx];
+            repaintHighlight(idx);
             updateStats();
-            closeSheet();
+            // v2: keep the sheet open and refresh; classic: close as before.
+            if (V2 && window.ReaderSheetV2) {
+                activeRepSubId = next.length ? (next[next.length - 1].sub_id || null) : null;
+                window.ReaderSheetV2.setAnnotations(annotationsMap[idx] || []);
+            } else {
+                closeSheet();
+            }
         }
 
         fetch('/api/annotation', {
@@ -821,6 +869,11 @@
                 enqueue('/api/annotation', 'DELETE', deletePayload);
                 applyRemoveUI();
             });
+    }
+
+    // Remove annotation (classic single-slot button targets the representative).
+    annRemoveBtn.addEventListener('click', () => {
+        doRemoveAnnotation(activeIdx, activeRepSubId);
     });
 
     const STICKY_NOTE_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M2 2h12v8l-4 4H2z"/><path d="M10 10v4"/></svg>';
@@ -2054,12 +2107,13 @@
                 sheetTextarea.value = text;
                 btnSave.click();
             },
-            // Persist the single annotation for the active sentence.
-            saveAnnotation(type, content) {
-                doSaveAnnotation(type, (content || '').trim());
+            // Persist an annotation for the active sentence. A sub_id edits that
+            // annotation; its absence creates a new one (several may coexist).
+            saveAnnotation(type, content, subId) {
+                doSaveAnnotation(type, (content || '').trim(), subId);
             },
-            deleteAnnotation() {
-                if (annRemoveBtn) annRemoveBtn.click();
+            deleteAnnotation(subId) {
+                doRemoveAnnotation(activeIdx, subId != null ? subId : activeRepSubId);
             },
             // Record reviewer feedback on a finding (drops it + siblings, repaints).
             submitFeedback(esIdx, finding, feedbackType) {
