@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.36.0.1] - 2026-07-24
+
+### Added
+- **Tapped-word seed in v2 annotations.** Opening a new note pre-fills `[word]` from the tapped token (footnote anchor / mnemonic), with a clear chip while the note is still the bare bracket, and the caret placed after the seed.
+
 ## [0.36.0.0] - 2026-07-24
 
 ### Added

@@ -276,12 +276,13 @@
     }
 
     // Resolve the word directly under a tap so a new annotation can pre-fill it as
-    // a footnote anchor / mnemonic. Sentences render as a single text node, so we
-    // read the caret position rather than restructuring the DOM into per-word spans.
+    // a footnote anchor / mnemonic. We read caret position from the tap rather than
+    // restructuring the DOM into per-word spans (review highlights may split the
+    // sentence across multiple text nodes / spans).
     // Returns null when the tap misses a word (whitespace) or no event is present
     // (programmatic calls) — callers treat null as "no word captured".
     function wordAtPoint(evt) {
-        if (!evt || evt.clientX == null) return null;
+        if (!evt || evt.clientX == null || evt.clientY == null) return null;
         let node = null, offset = 0;
         if (document.caretRangeFromPoint) {            // Chrome/WebKit
             const r = document.caretRangeFromPoint(evt.clientX, evt.clientY);

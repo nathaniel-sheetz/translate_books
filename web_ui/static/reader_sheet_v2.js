@@ -282,11 +282,12 @@
     panels.annotate.addEventListener('click', function (e) {
         const tp = e.target.closest('.rv2-type-row .rv2-tp');
         if (tp) { selectType(tp.closest('.rv2-card'), tp.dataset.type); return; }
-        if (e.target.closest('.rv2-anchor-x')) {
+        const anchorX = e.target.closest('.rv2-anchor-x');
+        if (anchorX) {
             const card = e.target.closest('.rv2-card');
             const ta = card && card.querySelector('textarea');
             if (ta) { ta.value = ta.value.replace(/^\s*\[[^\]]*\]\s*/, ''); ta.focus(); }
-            e.target.closest('.rv2-anchor-x').classList.add('rv2-hide');
+            anchorX.classList.add('rv2-hide');
             return;
         }
         if (e.target.closest('.rv2-cancel')) { closeAdd(); endCompose(); return; }
