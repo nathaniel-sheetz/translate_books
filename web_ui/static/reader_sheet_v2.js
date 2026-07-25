@@ -464,6 +464,9 @@
         if (!ta) return;
         setTimeout(function () {
             ta.focus();
+            // Drop the caret at the end so a seeded "[word] " note (or an edit) is
+            // ready to type into right after the bracket, no repositioning needed.
+            try { const n = ta.value.length; ta.setSelectionRange(n, n); } catch (e) { /* non-text input */ }
             (ta.closest('.rv2-card') || ta).scrollIntoView({ block: 'start' });
         }, 30);
     }
