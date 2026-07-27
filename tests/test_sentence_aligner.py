@@ -509,6 +509,63 @@ class TestCoverageGaps:
         assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (1, 2)
         assert gaps[0]["preview"].startswith("a")
 
+    def test_hard_wrapped_line_fragments_are_not_reported(self):
+        """Regression for projects/fabre chapter_10.
+
+        Some sources are hard-wrapped at ~70 columns, and ``is_verse_block`` reads
+        those prose paragraphs as verse and splits them per line. One translated
+        Spanish sentence then faces seven English line *fragments*, all unclaimed
+        by the 1-ES:N-EN rule — 414 chars of "missing" text that was never missing.
+        Fragments do not end like sentences, so they contribute no mass.
+        """
+        fragments = [
+            "longer drag himself along; a pig is a tottering veteran at twenty; at",
+            "fifteen at the most, a cat no longer chases mice, it says good-by to the",
+            "joys of the roof and retires to some corner of a granary to die in",
+            "peace; the goat and sheep, at ten or fifteen, touch extreme old age, the",
+            "rabbit is at the end of its skein at eight or ten; and the miserable",
+            "rat, if it lives four years, is looked upon among its own kind as a",
+        ]
+        en = [_sent(150)] + fragments + [_sent(150)]
+        alignments = [{"en_idx": 0}, {"en_idx": len(en) - 1}]
+
+        assert sum(len(f) for f in fragments) > MIN_GAP_CHARS  # would fire on mass alone
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_only_complete_sentences_contribute_mass(self):
+        en = [
+            _sent(150),
+            "a wrapped fragment that simply runs on past the column limit and",
+            _sent(400),
+        ]
+        alignments = [{"en_idx": 0}]
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert len(gaps) == 1
+        assert gaps[0]["chars"] == 400  # fragment excluded
+        assert gaps[0]["sentences"] == 2  # but still inside the reported span
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("A normal sentence.", True),
+            ("Shouted loudly!", True),
+            ("Really?", True),
+            ('He said, "go away."', True),
+            ("«Se acabó.»", True),
+            ("Trailing off…", True),
+            ("a wrapped line fragment that ends mid", False),
+            ("", False),
+            ("   ", False),
+            ('"', False),
+        ],
+    )
+    def test_complete_sentence_predicate(self, text, expected):
+        from src.sentence_aligner import _is_complete_sentence
+
+        assert _is_complete_sentence(text) is expected
+
     def test_multiple_runs_reported_separately(self):
         en = [_sent(200) for _ in range(8)]
         alignments = [{"en_idx": 0}, {"en_idx": 4}]

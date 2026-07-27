@@ -28,16 +28,22 @@ MAX_SENTENCE_WORDS = 50
 HIGH_CONFIDENCE_THRESHOLD = 0.5
 SKIP_PENALTY = 0.05
 
-# Coverage-gap reporting (see _coverage_gaps). Calibrated over 505 translated
-# chunks across 18 books: substantive orphan-run mass is 0 for 96.6% of chunks,
-# under 300 chars for another 1.6%, and there is an empty band between 300 and
-# 499 before the real omissions start. 300 flagged 10 chunks, all of them
-# genuine drops, and zero false positives.
+# Coverage-gap reporting (see _coverage_gaps). Calibrated by re-aligning all 522
+# translated chunks across 18 books: qualifying orphan-run mass is 0 for ~96% of
+# chunks, and there is an empty band between 300 and 499 chars before the real
+# omissions start. At 300 the scan flagged 10 chunks, every one a genuine drop.
 MIN_GAP_CHARS = 300
 # Sentence splitting emits standalone junk records for Gutenberg rules ("---"),
 # stray quote marks and verse punctuation. They are never "translated", so they
 # must not contribute to a gap's mass.
 MIN_SENTENCE_CHARS = 25
+# Only complete sentences count toward a gap. Some sources are hard-wrapped at
+# ~70 columns, and is_verse_block reads those prose paragraphs as verse and
+# splits them per line — so one translated Spanish sentence can face seven
+# English line *fragments*, whose combined mass would otherwise clear
+# MIN_GAP_CHARS even though nothing was dropped.
+SENTENCE_TERMINALS = ".!?…"
+SENTENCE_CLOSERS = "\"'”’»)]"
 
 
 def _get_model():
@@ -404,6 +410,12 @@ def _group_nto1(
     return alignments
 
 
+def _is_complete_sentence(text: str) -> bool:
+    """Whether a split record ends like a real sentence rather than a wrapped line."""
+    stripped = text.strip().rstrip(SENTENCE_CLOSERS)
+    return bool(stripped) and stripped[-1] in SENTENCE_TERMINALS
+
+
 def _coverage_gaps(
     en_sentences: list[str],
     alignments: list[dict],
@@ -425,6 +437,13 @@ def _coverage_gaps(
     the DP cannot represent (each ES sentence gets one EN sentence, so when
     Spanish packs two English sentences into one, the second goes unclaimed
     even though it *was* translated).
+
+    Mass counts only records that are long enough (MIN_SENTENCE_CHARS) *and* end
+    like a sentence, because a dropped paragraph is made of whole sentences. That
+    second condition is what keeps hard-wrapped sources from reading as omissions:
+    their line fragments never terminate, so a merged run of them contributes
+    nothing. The known cost is unpunctuated verse — a dropped poem whose lines
+    carry no terminal punctuation would not be reported.
 
     Returns one record per reported run:
         {
@@ -451,7 +470,9 @@ def _coverage_gaps(
         if not run:
             return
         substantive = [
-            i for i in run if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
+            i for i in run
+            if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
+            and _is_complete_sentence(en_sentences[i])
         ]
         chars = sum(len(en_sentences[i].strip()) for i in substantive)
         if chars < MIN_GAP_CHARS:
