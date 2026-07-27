@@ -88,7 +88,7 @@ python scripts/harness.py config-set --project projects/<slug> \
 glossary does **not** authorize translation. There is exactly one paid step (`translate` /
 API footnotes translate); it needs its own fresh, explicit `--yes` after a separate-turn
 approval. Stage-specific STOP beats (style-guide G1/G2/G3, **4B-backend three-way**, cost
-hard-stop, spawn-mode) live in the reference files — load those when that stage runs.
+hard-stop, spawn-mode, **redo gate**) live in the reference files — load those when that stage runs.
 When `backend` is unset, load `references/translate-workers.md` and run its **three-option**
 gate (API / subagent / headless) — never invent a binary "API vs subagent."
 
@@ -104,6 +104,12 @@ ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► difficulty 
 Style guide first (locale/register steer the glossary). Glossary before chunking (difficulty
 excludes glossary terms; book difficulty sets default chunk size). Ingest/split in `setup`
 is the only deterministic prep that runs up front.
+
+**`combine` is automatic**: the API path chains it, and on the workers path `translate-commit` runs
+it per chapter as each chapter completes (rewriting `chapters/<id>.txt` from the translated chunks).
+`harness combine` is the explicit repair/backfill verb — `status.combine_stale` says when it is
+needed. **Redoing chapters that already have translations is NOT a re-run of the forward pipeline**
+→ load `references/retranslate.md` first, then re-enter at translate.
 
 ## Entry ritual / resume
 
@@ -126,8 +132,9 @@ is the only deterministic prep that runs up front.
 | Translate (metered) | `config.backend == api` | `references/translate-api.md` |
 | Translate (workers) | `config.backend in {subagent, headless}` **or backend unset** (run 4B-backend three-way gate first) | `references/translate-workers.md` |
 | Handle footnotes | `footnotes.json` exists and `footnotes_decision` not `none`/`drop` | `references/footnotes.md` |
-| Build the EPUB | `stage: fully-translated`, no `.epub` | `references/epub.md` |
+| Build the EPUB / refresh `chapters/*.txt` | `stage: fully-translated` with no `.epub`, **or `status.combine_stale` non-empty** | `references/epub.md` |
 | Review a translated wave | translated chapters exist | `references/reviews.md` |
+| Redo / re-translate chapters that **already** have translations | user says redo / re-translate / start over **and** `status` shows `partial`/`fully-translated` | `references/retranslate.md` |
 | Add a stage/backend/processor/judge | — | `references/EXTENDING.md` |
 
 Prefer `suggested_reference` from `status` when present; fall back to this table.

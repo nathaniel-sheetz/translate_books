@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.38.0.0] - 2026-07-27
+
+### Added
+- **`harness retranslate` — the missing redo verb.** Clears `translated_text` / `translated_at` / `status` / `review_data` / `last_llm_log` / `prompt_metadata` **and** deletes the chunk's stale `.draft.txt` / `.prompt.txt` / `.body.txt`, atomically. Without `--yes` it is a preview that changes nothing; `--archive` snapshots chunks, `chapters/*.txt`, `alignments/`, the EPUBs and the review sidecars into `archive/<stamp>/` first (a precondition — a failed copy clears nothing). Reports the artifacts a redo orphans (annotations are *mis-anchored*, not merely stale) without ever mutating them, and writes a `retranslate` run-log beat.
+- **`harness combine`** — rewrites `chapters/<id>.txt` from the translated chunks for fully-translated chapters. The pipeline documented a `combine` stage that had no CLI surface on the workers path.
+- **`status.combine_stale`** — fully-translated chapters whose `chapters/*.txt` is missing or older than its chunks, so the drift surfaces on entry instead of silently reaching the reader.
+- **`references/retranslate.md`** in the translate-harness skill: the redo gate (including "create a separate archive of the original?"), a probe-before-fan-out rule for any non-virgin project, and a verification beat, because `0 failed` is not evidence a redo happened.
+
+### Fixed
+- **`chapters/*.txt` was never written on the subagent/headless path.** `stage_combine` is only reachable through the metered-API auto-chain, so worker-path projects kept the English split output (or, after a redo, the previous translation) while the web reader derived paragraph breaks and `[IMAGE:...]` placement from it. `translate-commit` now recombines each chapter as it becomes fully translated (`recombined` / `combine_failed`, which never fail the commit).
+- **Re-chunking could store translated prose as `source_text`.** `stage_chunk` read `chapters/*.txt` raw; it now goes through `load_chapter_source_text` (chunks-first precedence), closing a Spanish→Spanish translation path that every guard would have passed.
+- **The documented redo recipe was a silent no-op.** `translate-workers.md` told you to delete `translated_text` and re-run; the surviving draft made `translate-fanout` skip and `translate-commit` re-land the *old* prose reporting success. That line now points at `retranslate`.
+
 ## [0.37.0.0] - 2026-07-27
 
 ### Added

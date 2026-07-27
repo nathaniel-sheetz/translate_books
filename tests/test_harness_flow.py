@@ -898,3 +898,73 @@ def test_footnotes_drop_updates_pipeline_state(project: Path):
     assert pstate["footnote_mode"] == "drop"
     assert pstate["footnote_count"] == 0
     assert not (project / "footnotes.json").exists()
+
+
+# ── retranslate / combine plumbing ─────────────────────────────────────────
+
+def _translated_chunk(project: Path) -> Path:
+    """Give the fixture project one fully-translated chunk."""
+    from src.models import Chunk, ChunkMetadata, ChunkStatus
+    from src.utils.file_io import save_chunk
+
+    chunks_dir = project / "chunks"
+    chunks_dir.mkdir(exist_ok=True)
+    src = "A short source sentence."
+    chunk = Chunk(
+        id="chapter_01_chunk_000", chapter_id="chapter_01", position=0,
+        source_text=src, translated_text="Una frase breve.",
+        metadata=ChunkMetadata(char_start=0, char_end=len(src), overlap_start=0,
+                               overlap_end=0, paragraph_count=1,
+                               word_count=len(src.split())),
+        status=ChunkStatus.TRANSLATED,
+    )
+    cp = chunks_dir / "chapter_01_chunk_000.json"
+    save_chunk(chunk, cp)
+    return cp
+
+
+def test_retranslate_and_combine_schemas_document_every_key(project: Path):
+    """Friction-log #19 in its strong form: no key ships undocumented."""
+    _translated_chunk(project)
+
+    for command, result in (
+        ("retranslate", flow.retranslate(str(project))),
+        ("combine", flow.combine(str(project))),
+    ):
+        schema = flow.OUTPUT_SCHEMAS[command]
+        undocumented = sorted(set(result) - set(schema))
+        assert not undocumented, f"{command} returns undocumented keys: {undocumented}"
+
+
+def test_translate_commit_and_status_schemas_document_the_recombine_keys():
+    """The new combine seam has to be discoverable from _schema alone."""
+    commit = flow.OUTPUT_SCHEMAS["translate-commit"]
+    assert "recombined" in commit and "combine_failed" in commit
+    assert "recombined" in commit["counts"]
+    assert "combine_stale" in flow.OUTPUT_SCHEMAS["status"]
+
+
+def test_retranslate_and_combine_are_not_streaming_commands():
+    """Both return plain dicts; the streaming branch would KeyError on exit_code."""
+    import scripts.harness as harness
+
+    assert "retranslate" not in harness._STREAMING_COMMANDS
+    assert "combine" not in harness._STREAMING_COMMANDS
+
+
+def test_cli_retranslate_preview_is_nonmutating(project: Path, monkeypatch):
+    """The CLI preview path stamps _schema, writes last_output.json, and changes nothing."""
+    import scripts.harness as harness
+
+    cp = _translated_chunk(project)
+    before = cp.read_bytes()
+
+    monkeypatch.setattr(sys, "argv",
+                        ["harness.py", "retranslate", "--project", str(project)])
+    harness.main()  # a dict command returns normally (no SystemExit)
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["retranslate"]
+    assert out["dry_run"] is True
+    assert out["cleared"] == ["chapter_01_chunk_000"]
+    assert cp.read_bytes() == before

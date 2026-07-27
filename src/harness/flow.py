@@ -1523,6 +1523,9 @@ def translate_commit(
     skipped: list[str] = []
     waived: dict[str, list[str]] = {}
     evaluated = 0
+    # Chapters that gained a chunk this run — candidates for the post-loop recombine
+    # that refreshes chapters/<id>.txt (see below).
+    touched_chapters: set[str] = set()
     project_slug = project_dir.name
 
     from web_ui.evaluations import (
@@ -1581,6 +1584,62 @@ def translate_commit(
         except Exception:
             pass
         committed.append(entry["chunk_id"])
+        # From the loaded chunk, not entry["chapter_id"]: an older manifest may not
+        # carry that key.
+        touched_chapters.add(chunk.chapter_id)
+
+    # Refresh chapters/<id>.txt for every chapter that became FULLY translated in this
+    # run. Before this, the workers path never wrote that file at all (there was no
+    # `combine` command), so it still held the English split output — and the web
+    # reader derives paragraph breaks and [IMAGE:...] placement from it.
+    #
+    # Completeness is re-derived from chunks/ on disk, never from the manifest: a
+    # manifest only carries chunks that NEEDED translation, so a chapter can complete
+    # from one new commit plus three chunks skipped as already-translated above.
+    recombined: list[str] = []
+    combine_failed: list[dict] = []
+    if touched_chapters:
+        from scripts.translate_book import discover_chapters
+        from src.corrections_apply import recombine_chapter
+
+        discovered = discover_chapters(project_dir / "chunks")
+        for chapter_id in sorted(touched_chapters):
+            cps = discovered.get(chapter_id) or []
+            try:
+                if not cps or not all(load_chunk(cp).has_translation for cp in cps):
+                    continue  # still partial — there is nothing coherent to stitch yet
+                recombine_chapter(project_dir, chapter_id)
+                recombined.append(chapter_id)
+            except Exception as exc:  # noqa: BLE001 - never fail an authoritative commit
+                # Deliberately NOT the evaluator's silent `pass` above: a failed
+                # recombine leaves chapters/<id>.txt out of sync with prose the user is
+                # about to read, and silent invisibility is the failure class this whole
+                # seam exists to kill. Report it; the chunks are already stamped.
+                combine_failed.append({"chapter_id": chapter_id,
+                                       "error": f"{type(exc).__name__}: {exc}"[:500]})
+
+    if failed or missing:
+        instructions = (
+            "Re-spawn workers for any `failed` (fix per the named problems) and `missing` "
+            "chunk_ids — write fresh prose to their draft_path — then run `translate-commit` "
+            "again. Cap re-spawns ~3, then surface for manual edit."
+        )
+    else:
+        instructions = "All in-scope chunks committed"
+        instructions += (
+            f"; refreshed chapters/*.txt for {len(recombined)} chapter(s)."
+            if recombined else "."
+        )
+        if combine_failed:
+            instructions += (
+                f" WARNING: {len(combine_failed)} chapter(s) failed to recombine (see "
+                f"`combine_failed`) — chapters/*.txt is stale for those; fix and run "
+                f"`combine --chapters <ids>`."
+            )
+        instructions += (
+            " Next: `align --chapters <set>` for the reader link, then `epub` when the "
+            "book is done."
+        )
 
     return {
         "committed": committed,
@@ -1589,20 +1648,18 @@ def translate_commit(
         "skipped_already_translated": skipped,
         "waived": waived,
         "evaluated": evaluated,
+        "recombined": recombined,
+        "combine_failed": combine_failed,
         "counts": {
             "committed": len(committed),
             "failed": len(failed),
             "missing": len(missing),
             "skipped": len(skipped),
             "evaluated": evaluated,
+            "recombined": len(recombined),
+            "combine_failed": len(combine_failed),
         },
-        "instructions": (
-            "Re-spawn workers for any `failed` (fix per the named problems) and `missing` "
-            "chunk_ids — write fresh prose to their draft_path — then run `translate-commit` "
-            "again. Cap re-spawns ~3, then surface for manual edit."
-            if (failed or missing) else
-            "All in-scope chunks committed. Proceed to combine/epub."
-        ),
+        "instructions": instructions,
     }
 
 
@@ -1823,6 +1880,507 @@ def translate_fanout(
     if model_warning:
         out["warning"] = model_warning
     return out
+
+
+# ── retranslate (the redo verb — the one destructive beat) ──────────────────
+#
+# Everything else in this module is resume-shaped: idempotent FORWARD, skip what
+# is already done. A redo inverts that, and the two intents are indistinguishable
+# to prepare/fanout/commit because chunk state and draft state live apart:
+#
+#   clear translated_text  → drafts untouched
+#   translate-prepare      → keeps non-empty drafts by design (:1296-1302); the
+#                            rescue only covers drafts NOT in the new manifest
+#                            (:1359-1360), so it reports rescued_prior_drafts: 0
+#   translate-fanout       → skips every entry that already has a draft (:1698)
+#   translate-commit       → skips only chunks that already has_translation
+#                            (:1537) — just cleared, so it commits ALL the stale
+#                            drafts and reports "N committed, 0 failed"
+#
+# The user gets "fully re-translated, zero failures" over byte-identical old
+# prose; every guard passes because the old drafts are genuinely good
+# translations, just not new ones. This function is the supported way to break
+# that chain: it clears the chunk AND deletes the draft, atomically, with a
+# preview, an optional archive, and a run-log beat.
+
+def retranslate(
+    project: str,
+    *,
+    chapters: str | None = None,
+    chunk_ids: list[str] | None = None,
+    yes: bool = False,
+    archive: bool = False,
+) -> dict:
+    """Clear translations + their stale worker drafts so a redo actually re-runs.
+
+    **Without ``yes`` this is a PREVIEW** — it reports exactly what would change and
+    touches nothing (``dry_run: True``). With ``yes`` it clears each in-scope chunk's
+    ``translated_text`` / ``translated_at`` / ``status`` / ``review_data`` /
+    ``last_llm_log`` / ``prompt_metadata`` and deletes that chunk's rendered
+    ``.draft.txt`` / ``.prompt.txt`` / ``.body.txt``. Chunk JSON files are never
+    deleted (``source_text`` and the chunking live there), and ``preamble.txt`` /
+    ``manifest.json`` are kept: prepare rewrites both, and leaving the manifest makes a
+    premature ``translate-commit`` fail LOUDLY with ``missing`` instead of silently.
+
+    ``archive`` snapshots the chunks, ``chapters/*.txt``, ``alignments/*.json``, the
+    EPUBs and the review sidecars into ``archive/<stamp>/`` **before** anything is
+    cleared; if that copy fails the whole command aborts having changed nothing.
+    There is no restore command — restoring is a documented manual copy.
+
+    Downstream artifacts (annotations, corrections, review marks, EPUBs) are
+    **reported, never mutated** — annotations in particular carry sentence indices into
+    the prose being replaced, so a redo mis-anchors them rather than merely staling
+    them. ``evaluations/`` is self-healing (``translate-commit`` re-runs the coded
+    evaluators per commit).
+
+    Note for future work: per-chunk provenance cannot be stamped onto the chunk JSON —
+    ``Chunk.model_config = {"extra": "ignore"}`` means any extra key is silently
+    dropped on the next ``save_chunk``. The archive dir, the ``retranslate`` run-log
+    event and ``translated_at: None`` carry that provenance instead.
+    """
+    from datetime import datetime
+
+    project_dir = state.resolve_project_dir(project)
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return {"error": "no chunks yet — nothing to re-translate", "cleared": []}
+    if chapters and chunk_ids:
+        return {"error": "pass --chapters or --chunk-ids, not both", "cleared": []}
+
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
+    from scripts.translate_book import discover_chapters, parse_chapter_range
+    from src.models import ChunkStatus
+    from src.utils.file_io import load_chunk, save_chunk
+
+    all_discovered = discover_chapters(chunks_dir)
+
+    # ── scope ────────────────────────────────────────────────────────────────
+    scope_label: str
+    in_scope: list[tuple[str, Path]] = []  # (chunk_id, chunk_path)
+    if chunk_ids:
+        by_id = {cp.stem: (cid, cp) for cid, cps in all_discovered.items() for cp in cps}
+        unknown = [c for c in chunk_ids if c not in by_id]
+        if unknown:
+            return {
+                "error": f"unknown chunk_ids: {', '.join(sorted(unknown))}",
+                "cleared": [],
+                "available_chunk_ids": sorted(by_id),
+            }
+        in_scope = [(cid, by_id[cid][1]) for cid in chunk_ids]
+        scope_label = ",".join(chunk_ids)
+    else:
+        discovered = all_discovered
+        if chapters:
+            try:
+                requested = parse_chapter_range(chapters)
+            except (ValueError, TypeError) as exc:
+                return {"error": f"invalid chapters value {chapters!r}: {exc}", "cleared": []}
+            discovered = {k: v for k, v in all_discovered.items() if k in requested}
+            if not discovered:
+                return {
+                    "cleared": [],
+                    "chapters": chapters,
+                    "available_chapters": sorted(all_discovered.keys()),
+                    "note": f"no matching chapters for chapters {chapters}",
+                }
+        in_scope = [(cp.stem, cp) for cid in sorted(discovered) for cp in discovered[cid]]
+        scope_label = chapters or "all"
+
+    chunk_ids_in_scope = [cid for cid, _ in in_scope]
+    _scope_set = set(chunk_ids_in_scope)
+    chapter_ids = sorted({ch_id for ch_id, cps in all_discovered.items()
+                          if any(cp.stem in _scope_set for cp in cps)})
+
+    cleared: list[str] = []
+    already_untranslated: list[str] = []
+    cleared_review_data: list[str] = []
+    for cid, cp in in_scope:
+        try:
+            c = load_chunk(cp)
+        except (OSError, ValueError):
+            already_untranslated.append(cid)
+            continue
+        if c.has_translation:
+            cleared.append(cid)
+        else:
+            already_untranslated.append(cid)
+        if c.review_data is not None:
+            cleared_review_data.append(cid)
+
+    # ── stale drafts: the landmine, named explicitly ─────────────────────────
+    tdir = state.harness_dir(project_dir) / "translate"
+
+    def _file_info(p: Path) -> dict:
+        st = p.stat()
+        return {
+            "path": str(p),
+            "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            "bytes": st.st_size,
+        }
+
+    stale_drafts: list[dict] = []
+    for cid in chunk_ids_in_scope:
+        dp = tdir / f"{cid}.draft.txt"
+        if dp.exists() and (_read_draft_text(dp) or "").strip():
+            stale_drafts.append({"chunk_id": cid, **_file_info(dp)})
+
+    downstream = _downstream_report(project_dir, chapter_ids)
+    warnings = _retranslate_warnings(downstream, stale_drafts, cleared_review_data)
+    existing_archives = sorted(
+        p.name for p in (project_dir / "archive").glob("*") if p.is_dir()
+    ) if (project_dir / "archive").exists() else []
+
+    counts = {
+        "chunks": len(cleared),
+        "chapters": len(chapter_ids),
+        "drafts": len(stale_drafts),
+        "annotations": downstream["annotations"]["rows_in_scope"],
+        "reviewed": len(downstream["reviewed"]["marked_in_scope"]),
+        "epubs": len(downstream["epubs"]),
+    }
+
+    # ── preview: report and stop ─────────────────────────────────────────────
+    if not yes:
+        return {
+            "dry_run": True,
+            "scope": {"chapters": scope_label if not chunk_ids else None,
+                      "chunk_ids": chunk_ids or None},
+            "chapters": chapter_ids,
+            "cleared": cleared,
+            "already_untranslated": already_untranslated,
+            "cleared_review_data": cleared_review_data,
+            "stale_drafts": stale_drafts,
+            "drafts_deleted": [],
+            "prompts_deleted": 0,
+            "bodies_deleted": 0,
+            "archived": False,
+            "archive": {"requested": archive, "dir": None, "manifest": None,
+                        "files": 0, "total_bytes": 0,
+                        "existing_archives": existing_archives},
+            "downstream": downstream,
+            "warnings": warnings,
+            "counts": counts,
+            "instructions": (
+                f"PREVIEW ONLY — nothing was changed. {len(cleared)} chunk(s) across "
+                f"{len(chapter_ids)} chapter(s) would be cleared and {len(stale_drafts)} stale "
+                f"draft(s) deleted. Show the user `stale_drafts`, `downstream` and `warnings`, "
+                f"then END THE TURN and ask for approval (including whether to archive). "
+                f"Re-run with --yes (add --archive to snapshot first) in a LATER turn."
+            ),
+        }
+
+    # ── archive FIRST: a precondition, not best-effort ───────────────────────
+    # projects/ is gitignored, so this snapshot is the only thing between the user
+    # and unrecoverable loss. Deliberately unlike the evaluator's swallow-all in
+    # translate_commit: if any copy fails we abort having changed nothing.
+    archive_info: dict = {"requested": archive, "dir": None, "manifest": None,
+                          "files": 0, "total_bytes": 0,
+                          "existing_archives": existing_archives}
+    if archive:
+        try:
+            archive_info = _write_retranslate_archive(
+                project_dir,
+                chunk_paths=[cp for _, cp in in_scope],
+                chapter_ids=chapter_ids,
+                scope={"chapters": scope_label if not chunk_ids else None,
+                       "chunk_ids": chunk_ids or None},
+                downstream=downstream,
+            )
+            archive_info["requested"] = True
+            archive_info["existing_archives"] = existing_archives
+        except OSError as exc:
+            return {
+                "error": f"archive failed, nothing was cleared: {exc}",
+                "archived": False,
+                "cleared": [],
+                "drafts_deleted": [],
+                "stale_drafts": stale_drafts,
+                "counts": {**counts, "chunks": 0, "drafts": 0},
+            }
+
+    # ── execute ──────────────────────────────────────────────────────────────
+    for _cid, cp in in_scope:
+        try:
+            c = load_chunk(cp)
+        except (OSError, ValueError):
+            continue
+        c.translated_text = None
+        c.translated_at = None
+        c.status = ChunkStatus.PENDING  # the ENUM: a bare "pending" trips a pydantic
+        c.review_data = None            # serializer warning on save
+        c.last_llm_log = None
+        c.prompt_metadata = None
+        save_chunk(c, cp)
+
+    drafts_deleted: list[dict] = []
+    prompts_deleted = bodies_deleted = 0
+    for cid in chunk_ids_in_scope:
+        dp = tdir / f"{cid}.draft.txt"
+        if dp.exists():
+            drafts_deleted.append({"chunk_id": cid, **_file_info(dp)})
+            dp.unlink(missing_ok=True)
+        # prompt/body were rendered against the OLD previous-section context (and
+        # possibly an older glossary/style guide); prepare rewrites both. A surviving
+        # stale prompt+body pair can also reattach cache-split paths to a rescued draft
+        # via _split_matches_prompt.
+        pp = tdir / f"{cid}.prompt.txt"
+        if pp.exists():
+            pp.unlink(missing_ok=True)
+            prompts_deleted += 1
+        bp = tdir / f"{cid}.body.txt"
+        if bp.exists():
+            bp.unlink(missing_ok=True)
+            bodies_deleted += 1
+
+    from src.utils.run_logger import log_run_event
+    log_run_event(
+        run_id=state.ensure_run_id(project_dir),
+        project=project_dir.name,
+        event="retranslate",
+        scope=scope_label,
+        chunks=len(cleared),
+        chapters=len(chapter_ids),
+        drafts_deleted=len(drafts_deleted),
+        review_data_cleared=len(cleared_review_data),
+        archived=bool(archive_info.get("dir")),
+        archive_dir=archive_info.get("dir"),
+    )
+
+    return {
+        "dry_run": False,
+        "scope": {"chapters": scope_label if not chunk_ids else None,
+                  "chunk_ids": chunk_ids or None},
+        "chapters": chapter_ids,
+        "cleared": cleared,
+        "already_untranslated": already_untranslated,
+        "cleared_review_data": cleared_review_data,
+        "stale_drafts": stale_drafts,
+        "drafts_deleted": drafts_deleted,
+        "prompts_deleted": prompts_deleted,
+        "bodies_deleted": bodies_deleted,
+        "archived": bool(archive_info.get("dir")),
+        "archive": archive_info,
+        "downstream": downstream,
+        "warnings": warnings,
+        "counts": {**counts, "drafts": len(drafts_deleted)},
+        "instructions": (
+            f"Cleared {len(cleared)} chunk(s); deleted {len(drafts_deleted)} draft(s). "
+            f"Next: `translate-prepare` for this scope, then PROBE ONE chunk "
+            f"(`translate-fanout --chunk-ids <one_id>`) and confirm it lands in `wrote`, "
+            f"NOT `skipped_existing_draft`, before the full wave. Nothing under `downstream` "
+            f"was mutated — those artifacts still describe the replaced text."
+        ),
+    }
+
+
+def _downstream_report(project_dir: Path, chapter_ids: list[str]) -> dict:
+    """Read-only census of artifacts that will describe replaced prose after a redo.
+
+    Never mutates anything. ``evaluations/`` is reported with ``self_healing: True``
+    because ``translate_commit`` re-runs the coded evaluators per committed chunk — the
+    one downstream artifact that survives a redo consistent.
+    """
+    from datetime import datetime
+
+    scope = set(chapter_ids)
+
+    def _jsonl_rows(path: Path) -> tuple[int, int]:
+        """(total rows, rows whose chapter_id is in scope)."""
+        if not path.exists():
+            return 0, 0
+        total = in_scope = 0
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                total += 1
+                try:
+                    if json.loads(line).get("chapter_id") in scope:
+                        in_scope += 1
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            return total, in_scope
+        return total, in_scope
+
+    ann_path = project_dir / "annotations.jsonl"
+    ann_rows, ann_in_scope = _jsonl_rows(ann_path)
+    corr_path = project_dir / "corrections_applied.jsonl"
+    corr_rows, corr_in_scope = _jsonl_rows(corr_path)
+    retr_path = project_dir / "retranslations.jsonl"
+    retr_rows, _ = _jsonl_rows(retr_path)
+
+    reviewed_path = project_dir / "reviewed.json"
+    marked: list[str] = []
+    if reviewed_path.exists():
+        try:
+            marked = sorted(json.loads(reviewed_path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError, TypeError):
+            marked = []
+
+    epubs: list[dict] = []
+    for p in sorted(project_dir.glob("*.epub")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        epubs.append({
+            "name": p.name,
+            "built_at": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            "size_kb": round(st.st_size / 1024),
+        })
+
+    align_dir = project_dir / "alignments"
+    aligned = sorted(ch for ch in scope if (align_dir / f"{ch}.json").exists())
+    eval_dir = project_dir / "evaluations"
+    n_evals = len(list(eval_dir.glob("*.json"))) if eval_dir.exists() else 0
+    edits_dir = project_dir / ".chunk_edits"
+    edited = sorted(ch for ch in scope if (edits_dir / ch).exists())
+
+    return {
+        "annotations": {"path": str(ann_path), "rows": ann_rows,
+                        "rows_in_scope": ann_in_scope},
+        "corrections_applied": {"path": str(corr_path), "rows": corr_rows,
+                                "rows_in_scope": corr_in_scope},
+        "reviewed": {"path": str(reviewed_path), "marked": marked,
+                     "marked_in_scope": sorted(set(marked) & scope)},
+        "epubs": epubs,
+        "alignments": {"chapters": aligned, "count": len(aligned)},
+        "evaluations": {"count": n_evals, "self_healing": True},
+        "chapters_txt": {
+            "chapters": sorted(ch for ch in scope
+                               if (project_dir / "chapters" / f"{ch}.txt").exists()),
+            "note": ("still hold the replaced translation until translate-commit "
+                     "recombines each chapter as it completes"),
+        },
+        "chunk_edits": {"chapters": edited},
+        "retranslations": {"rows": retr_rows},
+    }
+
+
+def _retranslate_warnings(downstream: dict, stale_drafts: list[dict],
+                          cleared_review_data: list[str]) -> list[str]:
+    """Human-readable warnings the skill must relay verbatim to the user."""
+    out: list[str] = []
+    if stale_drafts:
+        out.append(
+            f"{len(stale_drafts)} stale worker draft(s) are on disk. Clearing "
+            f"translated_text WITHOUT deleting these is a silent no-op: translate-fanout "
+            f"skips the chunk and translate-commit re-lands the OLD prose reporting success. "
+            f"This command deletes them."
+        )
+    n_ann = downstream["annotations"]["rows_in_scope"]
+    if n_ann:
+        out.append(
+            f"{n_ann} annotation(s) anchor to sentences in the prose being replaced. Their "
+            f"es_idx is an index into the TRANSLATION, so after a redo they are MIS-anchored, "
+            f"not merely stale. They are not touched — decide with the user."
+        )
+    n_rev = len(downstream["reviewed"]["marked_in_scope"])
+    if n_rev:
+        out.append(f"{n_rev} chapter(s) are marked reviewed and will still be marked "
+                   f"reviewed over prose nobody has read.")
+    if downstream["epubs"]:
+        out.append(f"{len(downstream['epubs'])} EPUB(s) were built from the replaced text — "
+                   f"rebuild with `epub` when the redo lands.")
+    if downstream["alignments"]["count"]:
+        out.append(f"{downstream['alignments']['count']} alignment file(s) index into the "
+                   f"replaced prose — re-run `align` after the redo or the reader shows "
+                   f"mismatched Spanish.")
+    if cleared_review_data:
+        out.append(f"{len(cleared_review_data)} chunk(s) carry in-chunk review_data, which IS "
+                   f"cleared (its offsets point into the deleted prose).")
+    return out
+
+
+def _write_retranslate_archive(project_dir: Path, *, chunk_paths: list[Path],
+                               chapter_ids: list[str], scope: dict,
+                               downstream: dict) -> dict:
+    """Snapshot everything describing the current translation. Raises OSError on failure.
+
+    Lives at ``projects/<slug>/archive/<stamp>/`` — deliberately NOT under
+    ``.harness/``, which ``setup`` wipes wholesale (``ensure_harness_dir(clean=True)``),
+    and deliberately two levels deep so no existing single-level glob can see it (the
+    project-root ``*.epub`` glob in ``status`` being the one that matters).
+    """
+    import shutil
+    from datetime import datetime
+
+    root = project_dir / "archive"
+    stamp = f"retranslate_{datetime.now():%Y%m%d_%H%M%S}"
+    dest = root / stamp
+    suffix = 2
+    while dest.exists():
+        dest = root / f"{stamp}-{suffix}"
+        suffix += 1
+    dest.mkdir(parents=True)
+
+    files: list[dict] = []
+
+    def _copy(src: Path, rel: str) -> None:
+        if not src.exists():
+            return
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)  # copy2 preserves mtime — which era the prose is from
+        st = src.stat()
+        files.append({
+            "src": str(src.relative_to(project_dir)),
+            "archived": rel,
+            "bytes": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+        })
+
+    for cp in chunk_paths:
+        _copy(cp, f"chunks/{cp.name}")
+    for ch in chapter_ids:
+        _copy(project_dir / "chapters" / f"{ch}.txt", f"chapters/{ch}.txt")
+        _copy(project_dir / "alignments" / f"{ch}.json", f"alignments/{ch}.json")
+    for p in sorted(project_dir.glob("*.epub")):
+        _copy(p, f"epubs/{p.name}")
+    for name in ("annotations.jsonl", "corrections_applied.jsonl", "reviewed.json"):
+        _copy(project_dir / name, name)
+
+    manifest = {
+        "kind": "retranslate",
+        "schema_version": 1,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "run_id": state.ensure_run_id(project_dir),
+        "project": project_dir.name,
+        "scope": scope,
+        "chunk_ids": [cp.stem for cp in chunk_paths],
+        "chapter_ids": chapter_ids,
+        "counts": {
+            "chunks": len(chunk_paths),
+            "chapters_txt": sum(1 for f in files if f["archived"].startswith("chapters/")),
+            "alignments": sum(1 for f in files if f["archived"].startswith("alignments/")),
+            "epubs": sum(1 for f in files if f["archived"].startswith("epubs/")),
+            "annotations_rows": downstream["annotations"]["rows"],
+            "corrections_rows": downstream["corrections_applied"]["rows"],
+            "reviewed_marks": len(downstream["reviewed"]["marked"]),
+            "files": len(files),
+            "bytes": sum(f["bytes"] for f in files),
+        },
+        "files": files,
+        "restore": (
+            "No restore command exists. Restoring is a manual copy back over the project — "
+            "see .claude/skills/translate-harness/references/retranslate.md, "
+            "'Restoring from an archive'."
+        ),
+    }
+    manifest_path = dest / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return {
+        "requested": True,
+        "dir": str(dest),
+        "manifest": str(manifest_path),
+        "files": len(files),
+        "total_bytes": manifest["counts"]["bytes"],
+    }
 
 
 # ── chunk / cost / translate / epub (subprocess wrappers) ──────────────────
@@ -2506,6 +3064,125 @@ def footnotes_drop(project: str) -> dict:
     }
 
 
+def combine(project: str, *, chapters: str | None = None) -> dict:
+    """Rewrite ``chapters/<chapter_id>.txt`` from the translated chunks.
+
+    ``projects/<slug>/chapters/<id>.txt`` is **dual-purpose**: the split step writes
+    the ENGLISH section text there (``book_splitter.save_chapters_to_files``), and
+    combine overwrites it with the TRANSLATION. The metered-API path reaches combine
+    through ``translate_book``'s stage chain; the workers path never did (there was no
+    ``combine`` command at all), so on a subagent/headless project that file kept the
+    English split output — or, after a redo, the *previous* translation — forever.
+
+    ``translate-commit`` now recombines each chapter as it completes; this command is
+    the explicit repair/backfill verb: for projects translated before that landed, for
+    a chapter whose recombine failed, and after any out-of-band chunk edit.
+
+    Only **fully-translated** chapters are written (a partial chapter has nothing
+    coherent to stitch) — the same rule ``stage_combine`` applies. The EPUB does not
+    read these files (``build_epub_from_chunks`` recombines into a temp dir), but the
+    web reader does: it re-derives paragraph breaks and ``[IMAGE:...]`` placement from
+    them, so this is what keeps the reader consistent with the chunks.
+    """
+    project_dir = state.resolve_project_dir(project)
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return {"error": "no chunks yet — translate first", "combined": [], "skipped": []}
+
+    if str(state.REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(state.REPO_ROOT))
+    from scripts.translate_book import discover_chapters, parse_chapter_range
+    from src.corrections_apply import recombine_chapter
+    from src.utils.file_io import load_chunk
+
+    all_discovered = discover_chapters(chunks_dir)
+    discovered = all_discovered
+    if chapters:
+        try:
+            requested = parse_chapter_range(chapters)
+        except (ValueError, TypeError) as exc:
+            return {"error": f"invalid chapters value {chapters!r}: {exc}",
+                    "combined": [], "skipped": []}
+        discovered = {k: v for k, v in all_discovered.items() if k in requested}
+        if not discovered:
+            return {
+                "combined": [],
+                "skipped": [],
+                "chapters": chapters,
+                "available_chapters": sorted(all_discovered.keys()),
+                "note": f"no matching chapters for chapters {chapters}",
+            }
+
+    combined: list[dict] = []
+    skipped: list[dict] = []
+    failed: list[dict] = []
+    for chapter_id in sorted(discovered):
+        chunk_paths = discovered[chapter_id]
+        try:
+            chunks = [load_chunk(cp) for cp in chunk_paths]
+        except (OSError, ValueError) as exc:
+            failed.append({"chapter_id": chapter_id,
+                           "error": f"{type(exc).__name__}: {exc}"[:500]})
+            continue
+        if not all(c.has_translation for c in chunks):
+            skipped.append({"chapter_id": chapter_id, "reason": "not fully translated"})
+            continue
+        out_path = project_dir / "chapters" / f"{chapter_id}.txt"
+        previous = ""
+        if out_path.exists():
+            try:
+                previous = out_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                previous = ""
+        try:
+            # Always write, even when the result is byte-identical: `status`'s
+            # combine_stale signal is mtime-based, so a "skip the write when
+            # unchanged" optimisation would leave the chapter flagged stale forever.
+            written = recombine_chapter(project_dir, chapter_id)
+        except Exception as exc:  # noqa: BLE001 - one bad chapter must not abort the batch
+            failed.append({"chapter_id": chapter_id,
+                           "error": f"{type(exc).__name__}: {exc}"[:500]})
+            continue
+        text = written.read_text(encoding="utf-8")
+        combined.append({
+            "chapter_id": chapter_id,
+            "path": str(written),
+            "chunks": len(chunk_paths),
+            "words": len(text.split()),
+            "chars": len(text),
+            "changed": text != previous,
+            "previous_bytes": len(previous.encode("utf-8")),
+        })
+
+    n_changed = sum(1 for c in combined if c["changed"])
+    instructions = (
+        f"Rewrote chapters/<id>.txt from the translated chunks for {len(combined)} chapter(s) "
+        f"({n_changed} changed). These files now hold the TRANSLATION — the split step wrote "
+        f"the English there. The EPUB builds from chunks/ and is unaffected; the web reader "
+        f"reads chapters/*.txt for paragraph breaks and [IMAGE:...] placement, so this is what "
+        f"makes the reader consistent."
+    )
+    if skipped:
+        instructions += (f" Skipped {len(skipped)} chapter(s) that are not fully translated — "
+                         f"finish translating them, then re-run.")
+    if failed:
+        instructions += f" {len(failed)} chapter(s) FAILED to combine — see `failed`."
+
+    return {
+        "combined": combined,
+        "skipped": skipped,
+        "failed": failed,
+        "chapters_dir": str(project_dir / "chapters"),
+        "counts": {
+            "combined": len(combined),
+            "changed": n_changed,
+            "skipped": len(skipped),
+            "failed": len(failed),
+        },
+        "instructions": instructions,
+    }
+
+
 def align(
     project: str,
     *,
@@ -2876,6 +3553,7 @@ def status(project: str) -> dict:
             "spawn_mode_moot": None,
             "totals": {},
             "pending_chapters": [],
+            "combine_stale": [],
             "chapters": [],
             "next": "no chunks yet — run `difficulty` then `chunk` before translating.",
             "suggested_reference": _suggested_reference(
@@ -2893,6 +3571,13 @@ def status(project: str) -> dict:
     total_chunks = translated_chunks = 0
     max_per_chapter = 0
     pending_chapters: list[str] = []
+    # Fully-translated chapters whose chapters/<id>.txt is missing or older than its
+    # chunks. That file always LOOKS fine (plausible prose — either the English split
+    # output or a previous translation), so nothing else surfaces the drift; the web
+    # reader silently mis-derives paragraph breaks and image placement from it.
+    # Kept as a top-level list rather than two booleans per chapter row: the per-chapter
+    # array is already the bulkiest part of this output on a long book.
+    combine_stale: list[str] = []
     for chapter_id in sorted(discovered):
         cps = discovered[chapter_id]
         max_per_chapter = max(max_per_chapter, len(cps))
@@ -2902,6 +3587,17 @@ def status(project: str) -> dict:
         complete = n_trans == len(cps)
         if not complete:
             pending_chapters.append(chapter_id)
+        else:
+            # Only complete chapters are eligible — `combine` refuses partial ones.
+            ch_txt = project_dir / "chapters" / f"{chapter_id}.txt"
+            try:
+                stale = (not ch_txt.exists()) or (
+                    ch_txt.stat().st_mtime < max(cp.stat().st_mtime for cp in cps)
+                )
+            except OSError:
+                stale = True  # unreadable ⇒ assume stale; never crash status
+            if stale:
+                combine_stale.append(chapter_id)
         chapters_out.append({
             "chapter_id": chapter_id,
             "chunks": len(cps),
@@ -2920,6 +3616,12 @@ def status(project: str) -> dict:
 
     if stage == "fully-translated":
         nxt = "all chunks translated — run `epub` to (re)build the book."
+        if combine_stale:
+            nxt = (
+                f"chapters/*.txt is stale for {len(combine_stale)} chapter(s) — run `combine` "
+                f"(the web reader reads that file for paragraph breaks and image placement); "
+                f"then " + nxt
+            )
     elif stage in ("untranslated", "partial"):
         nxt = ("run `translate-prepare` (optionally --chapters) to render prompts for "
                "the pending chunks, then Task-spawn or `translate-fanout`, then "
@@ -2937,8 +3639,10 @@ def status(project: str) -> dict:
             "total_chunks": total_chunks,
             "translated_chunks": translated_chunks,
             "pending_chunks": total_chunks - translated_chunks,
+            "combine_stale_chapters": len(combine_stale),
         },
         "pending_chapters": pending_chapters,
+        "combine_stale": combine_stale,
         "chapters": chapters_out,
         "next": nxt,
         "suggested_reference": _suggested_reference(
@@ -3166,9 +3870,55 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "missing": "list of chunk_ids whose draft file was absent",
         "skipped_already_translated": "list of chunk_ids already translated (idempotent skip)",
         "waived": "map of chunk_id -> waived guard problems (via --allow-problem)",
-        "counts": "dict {committed, failed, missing, skipped}",
+        "recombined": (
+            "chapter_ids whose chapters/<id>.txt was rewritten from the translated chunks "
+            "because that chapter became FULLY translated in this run. The workers path "
+            "never wrote that file before; the web reader reads it for paragraph breaks and "
+            "[IMAGE:...] placement"
+        ),
+        "combine_failed": (
+            "list of {chapter_id, error} where the recombine failed — the chunks ARE "
+            "committed, but chapters/*.txt is stale for those chapters; run "
+            "`combine --chapters <ids>`"
+        ),
+        "counts": "dict {committed, failed, missing, skipped, evaluated, recombined, combine_failed}",
         "instructions": "what to do next (re-spawn failed/missing, or proceed)",
-        "error": "present only on failure (e.g. no manifest)",
+        "error": "present only on failure (e.g. no manifest); recombined/combine_failed are absent on that path",
+    },
+    "retranslate": {
+        "dry_run": "True when --yes was omitted — the command is a PREVIEW and changed nothing on disk",
+        "scope": "dict {chapters, chunk_ids} — exactly one is non-null",
+        "chapters": "chapter_ids touched by the scope",
+        "cleared": "chunk_ids whose translation was cleared (would be cleared, in preview)",
+        "already_untranslated": "in-scope chunk_ids that had no translation to clear",
+        "cleared_review_data": "chunk_ids whose in-chunk review_data was cleared (its offsets pointed into the deleted prose)",
+        "stale_drafts": (
+            "list of {chunk_id, path, mtime, bytes} for worker drafts found on disk. A "
+            "non-empty list IS the silent-no-op hazard: without deleting these, "
+            "translate-fanout skips the chunk and translate-commit re-lands the OLD prose "
+            "reporting success"
+        ),
+        "drafts_deleted": "list of {chunk_id, path, mtime, bytes} actually removed (empty in preview)",
+        "prompts_deleted": "count of <chunk_id>.prompt.txt removed (stale context; prepare rewrites them)",
+        "bodies_deleted": "count of <chunk_id>.body.txt removed",
+        "archived": "True when a snapshot was written",
+        "archive": (
+            "dict {requested, dir, manifest, files, total_bytes, existing_archives}. There is "
+            "NO restore command — restoring is a manual copy (see references/retranslate.md). "
+            "The archive is a PRECONDITION: if it fails, nothing is cleared"
+        ),
+        "downstream": (
+            "read-only census of artifacts that will describe the replaced translation "
+            "(annotations, corrections_applied, reviewed, alignments, epubs, chapters_txt, "
+            "chunk_edits, retranslations, evaluations). NEVER mutated by this command"
+        ),
+        "warnings": "human-readable warnings to relay to the user verbatim",
+        "counts": "dict {chunks, chapters, drafts, annotations, reviewed, epubs}",
+        "instructions": "what to do next (preview: STOP and ask; execute: prepare, then PROBE one chunk)",
+        "note": "present when --chapters matched nothing",
+        "available_chapters": "all chapter ids discovered (present with note)",
+        "available_chunk_ids": "all chunk ids discovered (present when --chunk-ids had an unknown id)",
+        "error": "present only on failure (no chunks / both scope flags / invalid --chapters / archive failure)",
     },
     "chunk": {
         "command": "the harness command ('chunk')",
@@ -3266,6 +4016,26 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "instructions": "what to do next",
         "error": "present only on a per-chapter aligner failure",
     },
+    "combine": {
+        "combined": (
+            "list of {chapter_id, path, chunks, words, chars, changed, previous_bytes} — "
+            "chapters/<id>.txt rewritten from the translated chunks. Only FULLY translated "
+            "chapters are written. That file is dual-purpose: the split step puts the ENGLISH "
+            "there and combine overwrites it with the TRANSLATION, so a backfill flips the "
+            "content in place (changed=True says it did)"
+        ),
+        "skipped": "list of {chapter_id, reason} — not fully translated, so nothing to stitch",
+        "failed": (
+            "list of {chapter_id, error} — e.g. combine_chunks rejecting a chunk that carries "
+            "overlap. One bad chapter never aborts the batch"
+        ),
+        "chapters_dir": "directory the chapter .txt files were written to",
+        "counts": "dict {combined, changed, skipped, failed}",
+        "instructions": "what to do next",
+        "note": "present when --chapters matched nothing",
+        "available_chapters": "all chapter ids discovered (present with note)",
+        "error": "present only on failure (no chunks yet / invalid --chapters)",
+    },
     "show-translation": {
         "chapters": "list of {chapter_id, total_chunks, translated_chunks, chunks:[{id, position, status, has_translation, source_words, translation_words, translated_text, source_text}]}",
         "available_chapters": "all chapter ids discovered",
@@ -3287,8 +4057,14 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "headless_cli": "headless launcher family (claude | cursor); default claude",
         "stage": "one-word progress: pre-chunk | untranslated | partial | fully-translated",
         "spawn_mode_moot": "True if one chunk per chapter (else False; null pre-chunk)",
-        "totals": "dict {chapters, complete_chapters, total_chunks, translated_chunks, pending_chunks}",
+        "totals": "dict {chapters, complete_chapters, total_chunks, translated_chunks, pending_chunks, combine_stale_chapters}",
         "pending_chapters": "list of chapter_ids not yet fully translated",
+        "combine_stale": (
+            "fully-translated chapter_ids whose chapters/<id>.txt is missing or older than "
+            "its chunks — the reader will show stale paragraph/image structure. Run `combine`. "
+            "(translate-commit refreshes these automatically going forward; chapters edited in "
+            "the web UI's chunk editor can also land here — that is real drift, not a false alarm)"
+        ),
         "chapters": "list of {chapter_id, chunks, translated, complete}",
         "next": "suggested next command",
         "suggested_reference": "translate-harness references/*.md path the skill should Read next",

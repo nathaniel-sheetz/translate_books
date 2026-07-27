@@ -39,6 +39,7 @@ from src.api_translator import DEFAULT_MODEL
 from src.models import Chunk, ChunkStatus, ChunkingConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
+from src.utils.source_text import load_chapter_source_text
 
 
 # Pipeline stages in order
@@ -263,8 +264,18 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
 
     total_chunks = 0
     for chapter_file in chapter_files:
-        chapter_text = chapter_file.read_text(encoding="utf-8")
         chapter_id = chapter_file.stem  # e.g., "chapter_01"
+        # NEVER read chapters/*.txt raw here. That file is dual-purpose — the split
+        # stage writes the English there and `combine` overwrites it with the
+        # translation — so a re-chunk after a combine would store TRANSLATED prose as
+        # source_text, and the pipeline would then translate Spanish->Spanish with
+        # every guard passing (the echo guard compares against source_text, which
+        # would also be Spanish). load_chapter_source_text applies the chunks-first
+        # precedence that keeps this English; web_ui does the same for this reason.
+        chapter_text, _mtime, _kind = load_chapter_source_text(project_dir, chapter_id)
+        if not chapter_text.strip():
+            print(f"    WARNING: {chapter_id}: no source text found — skipped")
+            continue
 
         target = int(sizes_map.get(chapter_id, default_target))
         config = ChunkingConfig.from_target(

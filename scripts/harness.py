@@ -295,6 +295,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Back-compat alias for --cli-bin (Claude profile)",
     )
 
+    # retranslate (the redo verb) -------------------------------------------
+    rtp = sub.add_parser(
+        "retranslate",
+        help="Clear translations AND their stale worker drafts so a redo actually "
+             "re-translates. WITHOUT --yes this is a PREVIEW (nothing is changed).",
+    )
+    add_project(rtp)
+    add_chapters(rtp)
+    rtp.add_argument(
+        "--chunk-ids", dest="chunk_ids", default=None,
+        help="Comma-separated chunk_ids to clear (instead of --chapters)",
+    )
+    rtp.add_argument(
+        "--yes", action="store_true",
+        help="Execute the clear (omit for a preview of exactly what changes)",
+    )
+    rtp.add_argument(
+        "--archive", action="store_true",
+        help="Snapshot chunks, chapters/, alignments/, the EPUBs and the review sidecars "
+             "into archive/<stamp>/ BEFORE clearing. There is no restore command — "
+             "restoring is a manual copy.",
+    )
+
+    # combine (refresh chapters/*.txt from the translated chunks) ------------
+    cbp = sub.add_parser(
+        "combine",
+        help="Rewrite chapters/<id>.txt from the translated chunks (fully-translated "
+             "chapters only; free). translate-commit does this automatically — use this "
+             "to repair or backfill an older project.",
+    )
+    add_project(cbp)
+    add_chapters(cbp)
+
     ep = sub.add_parser("epub", help="Build EPUB from translated chunks")
     add_project(ep)
     ep.add_argument("--title", default=None)
@@ -496,6 +529,14 @@ def _dispatch(args: argparse.Namespace):
             cli_bin=args.cli_bin,
             claude_bin=args.claude_bin,
         )
+    if cmd == "retranslate":
+        chunk_ids = None
+        if args.chunk_ids:
+            chunk_ids = [c.strip() for c in args.chunk_ids.split(",") if c.strip()]
+        return flow.retranslate(args.project, chapters=args.chapters,
+                                chunk_ids=chunk_ids, yes=args.yes, archive=args.archive)
+    if cmd == "combine":
+        return flow.combine(args.project, chapters=args.chapters)
     if cmd == "epub":
         return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
     if cmd == "footnotes":
@@ -596,6 +637,9 @@ _RESULT_SUMMARY_KEYS = (
     "suggested_target_size", "usage_summary", "spawn_plan", "counts",
     "rescued_prior_drafts", "shown_chunks", "total_chunks", "error",
     "stage", "spawn_mode_moot", "totals",
+    # retranslate: two scalars only. `scope`/`cleared`/`stale_drafts` are
+    # deliberately excluded — they are unbounded and the summary stays compact.
+    "dry_run", "archived",
 )
 
 

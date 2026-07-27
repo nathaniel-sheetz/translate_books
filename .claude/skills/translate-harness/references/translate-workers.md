@@ -136,6 +136,10 @@ produced the manifest. (The backend was already logged in the translate-workers 
 
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
 
+**Never construct chunk paths by hand.** Take `chunk_path` / `chunk_id` straight from the manifest —
+the on-disk name is `chunks/<chapter_id>_chunk_<NNN>.json` and the `chunk_id` is that filename's
+stem (e.g. `chapter_01_chunk_000`), not `chunk_chapter_01_001`.
+
 ### Option [1] Task workers (default)
 
 Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
@@ -197,6 +201,14 @@ skipped).
 
 `translate-commit` also **auto-runs and persists the coded evaluators** (`length, paragraph, dictionary, glossary, completeness, blacklist, grammar`) for each newly-committed chunk, so Review-tab badges update without any separate evaluate step.
 
+It also **refreshes `chapters/<chapter_id>.txt`** for every chapter that becomes *fully* translated
+in that run (reported as `recombined`; per-chapter failures under `combine_failed`, which never fail
+the commit). That file is what the web reader reads for paragraph breaks and `[IMAGE:...]`
+placement. Before this seam existed the workers path never wrote it at all, so it still held the
+English split output. Backfill an older project — or repair a `combine_failed` chapter — with
+`python scripts/harness.py combine --project projects/<slug> [--chapters <spec>]`. `status` flags the
+drift as `combine_stale`; see `references/epub.md`.
+
 > **Waiving a confirmed guard false-positive (`--allow-problem`).** Rarely a guard flags a chunk that is
 > actually fine — e.g. the placeholder check trips on a legitimate Roman numeral heading. When you have
 > *confirmed* the `failed` problem is spurious (read the named problem and the draft), re-commit with
@@ -210,6 +222,11 @@ skipped).
 
 > **Spawning into a flaky API — probe, throttle, commit-then-check.** Worker spawns can fail when the
 > API is degraded. Handle it deterministically instead of hammering:
+> - **Probe on any non-virgin project, not only after an error.** If `status` shows any translated
+>   chunk (`stage: partial` / `fully-translated`), spawn **ONE** worker / `translate-fanout
+>   --chunk-ids <one_id>` and confirm it lands in `wrote`, **not** `skipped_existing_draft`. A
+>   skipped probe means stale drafts are on disk — stop and run `retranslate`
+>   (`references/retranslate.md`); fanning out from here re-commits the OLD prose reporting success.
 > - **Probe before a big wave.** After *any* spawn failure (or a known incident), spawn **ONE** worker
 >   (Task) or `translate-fanout --chunk-ids <one_id>` first and confirm it writes a draft before
 >   fanning out. A 1-worker probe discovers an outage at a fraction of the context/usage cost of a
@@ -275,8 +292,16 @@ translation at all* — the worker dropped prose. This is the only place such a 
 translation still reads perfectly, so the length ratio, paragraph counts, `high_confidence_pct` and the
 `translate-commit` guards all stay clean (a real case shipped with a character ratio of 1.002). Report
 every entry to the user — chapter, `chunk_id`, `position`, `sentences`, `chars`, `preview` — and
-re-translate the affected chunk (delete its `translated_text`, then re-run 4B-a → 4B-c for that chunk),
-then re-align. `position` is relative to the chunk: `tail` on a non-final chunk means the drop sits on a
+re-translate the affected chunk with the redo verb — **never by hand**:
+```bash
+python scripts/harness.py retranslate --project projects/<slug> --chunk-ids <chunk_id>        # preview
+python scripts/harness.py retranslate --project projects/<slug> --chunk-ids <chunk_id> --yes  # execute
+```
+then re-run 4B-a → 4B-c for that chunk and re-align. **Clearing `translated_text` alone is a silent
+no-op:** the chunk's old `.draft.txt` is still on disk, so `translate-fanout` skips it
+(`skipped_existing_draft`) and `translate-commit` re-lands the *old* prose reporting
+`committed: 1, failed: 0`. See `references/retranslate.md`.
+`position` is relative to the chunk: `tail` on a non-final chunk means the drop sits on a
 chunk seam, the most common shape; `full` means the entire chunk was unclaimed.
 
 To also show a sample **in chat** (a quick EN→ES gut-check before spending the rest), use the read-back
