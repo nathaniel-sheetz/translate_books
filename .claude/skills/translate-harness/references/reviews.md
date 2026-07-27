@@ -16,19 +16,21 @@ API path auto-aligns; still offer review once chapters are readable.
    ```bash
    python scripts/harness.py align --project projects/<slug> --chapters <set>
    ```
+   Read `.harness/last_output.json` from that `align` call. **Report any
+   `coverage_warnings`** before reviewing anything else: each one is a run of
+   source sentences the translation never covered (dropped prose). No judge or
+   evaluator catches these — the Spanish reads perfectly without them.
+   Re-translate the named chunk and re-align.
+
    Ensure the reader is up (`python web_ui/app.py` → `http://localhost:5000`) and
-   hand the user `reader_first` from `last_output.json`. Optional in-chat sample:
+   hand the user `reader_first` from that same align output. Optional in-chat sample:
    ```bash
    python scripts/harness.py show-translation --project projects/<slug> \
      --chapters <set> --max-chunks 4
    ```
-   Read the result from `.harness/last_output.json` — structure is
-   `chapters[] → chunks[] → translated_text` (sibling `source_text`).
-
-   **Report any `coverage_warnings`** in that output before reviewing anything
-   else: each one is a run of source sentences the translation never covered
-   (dropped prose). No judge or evaluator catches these — the Spanish reads
-   perfectly without them. Re-translate the named chunk and re-align.
+   That command overwrites `last_output.json` with a different schema
+   (`chapters[] → chunks[] → translated_text`); do not look for
+   `coverage_warnings` there.
 
 2. **Invoke the judge-review skill.** Do not re-implement dialogue/address/etc.
    judges here. Hand it the project slug and the chapter set just translated;

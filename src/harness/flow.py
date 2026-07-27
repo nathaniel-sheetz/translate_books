@@ -2565,10 +2565,12 @@ def align(
     aligned: list[dict] = []
     skipped: list[dict] = []
     # Source runs the translation never covered. The aligner finds these for free
-    # (src/sentence_aligner.py:_coverage_gaps); this is the one place all three
-    # backends (api / headless / subagent) pass through, so it is where a silently
-    # dropped paragraph becomes visible. Flattened across chapters because the agent
-    # needs to act on them, not go hunting through the per-chapter lists.
+    # (src/sentence_aligner.py:_coverage_gaps). Headless/subagent paths call this
+    # harness align step after each wave; the API path auto-aligns via
+    # translate_book.stage_align, which re-emits the translate HARNESS_RESULT with
+    # coverage_warnings so last_output.json sees them too. Flattened across
+    # chapters because the agent needs to act on them, not go hunting through
+    # the per-chapter lists.
     coverage_warnings: list[dict] = []
     # Surface a per-chapter aligner failure (e.g. embedding model unavailable)
     # without crashing the batch — keep the clean-JSON-on-stdout contract.
@@ -3202,6 +3204,11 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapters_done": "list of chapter_ids fully covered this run",
         "estimated_cost_usd": "estimated spend for this batch",
         "remaining_untranslated": "untranslated chunks left in the book after this batch",
+        "coverage_warnings": (
+            "list of {chapter_id, chunk_id, position, en_start, en_end, sentences, chars, "
+            "preview} — present after the API auto-chain reaches align; source runs with NO "
+            "translation (dropped prose). Report and re-translate before reviewing"
+        ),
         "note": "present when nothing was translated (already done / no match)",
         "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
@@ -3248,8 +3255,9 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "coverage_warnings": (
             "list of {chapter_id, chunk_id, position, en_start, en_end, sentences, chars, "
             "preview} — source runs with NO translation (dropped prose). position is "
-            "head|interior|tail relative to the chunk; a tail gap on a non-final chunk is a "
-            "chunk-seam drop. Report these and re-translate the chunk; no other metric sees them"
+            "head|interior|tail|full relative to the chunk; a tail gap on a non-final chunk is a "
+            "chunk-seam drop; full means the entire chunk was unclaimed. Report these and "
+            "re-translate the chunk; no other metric sees them"
         ),
         "alignments_dir": "directory the alignment JSON was written to",
         "reader_base": "base reader URL for this project",

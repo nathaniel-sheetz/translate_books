@@ -464,6 +464,16 @@ class TestCoverageGaps:
         assert gaps[0]["position"] == "head"
         assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (0, 1)
 
+    def test_whole_chunk_drop_is_reported_as_full(self):
+        """Empty / fully dropped translation must not be mis-bucketed as head."""
+        en = [_sent(150) for _ in range(3)]
+        gaps = _coverage_gaps(en, [])
+
+        assert len(gaps) == 1
+        assert gaps[0]["position"] == "full"
+        assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (0, 2)
+        assert gaps[0]["chars"] == 450
+
     def test_dropped_middle_is_reported_as_interior(self):
         en = [_sent(150) for _ in range(6)]
         alignments = [{"en_idx": 0}, {"en_idx": 4}, {"en_idx": 5}]

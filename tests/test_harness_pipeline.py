@@ -1735,8 +1735,9 @@ def test_align_command_surfaces_coverage_warnings(tmp_path: Path, monkeypatch):
 
     A dropped paragraph reads perfectly in the target language and leaves the
     length ratio, paragraph counts and confidence score all looking normal, so
-    align is the only place it surfaces — and the one step every translate
-    backend (api / headless / subagent) passes through.
+    harness align is where headless/subagent waves surface it. (API translate
+    auto-aligns via translate_book.stage_align, which re-emits coverage_warnings
+    onto the translate HARNESS_RESULT for last_output.json.)
     """
     import src.sentence_aligner as aligner
     from src.harness import flow

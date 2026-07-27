@@ -277,7 +277,7 @@ translation still reads perfectly, so the length ratio, paragraph counts, `high_
 every entry to the user — chapter, `chunk_id`, `position`, `sentences`, `chars`, `preview` — and
 re-translate the affected chunk (delete its `translated_text`, then re-run 4B-a → 4B-c for that chunk),
 then re-align. `position` is relative to the chunk: `tail` on a non-final chunk means the drop sits on a
-chunk seam, the most common shape.
+chunk seam, the most common shape; `full` means the entire chunk was unclaimed.
 
 To also show a sample **in chat** (a quick EN→ES gut-check before spending the rest), use the read-back
 command — never read `.harness/translate/*.draft.txt` (consumed/empty after commit) or hand-parse the

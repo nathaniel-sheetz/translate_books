@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.37.0.0] - 2026-07-27
+
+### Added
+- **Coverage-gap detection in the sentence aligner.** Reports runs of source sentences no target sentence claims (silently dropped prose) when substantive mass clears 300 chars — the omissions length ratio, paragraph counts, and `high_confidence_pct` never catch. Whole-chunk drops are labeled `position: "full"`.
+- **`coverage_warnings` on harness `align` and API `translate`.** Flattened across chapters with a loud instruction; API auto-chain re-emits the translate `HARNESS_RESULT` after align so `last_output.json` carries the gaps.
+- **Reader TOC gap badge** (`N gap` / orphan char count) so chapters with missing prose are not marked unread.
+- **Align API returns `coverage` + `gaps`** alongside the pair count.
+
+### Fixed
+- **Project align route always reported 0 pairs** — it read `result["pairs"]` from a function that only ever returns `alignments`.
+
+### Changed
+- Skill docs (`translate-workers`, `translate-api`, `reviews`) require reporting `coverage_warnings` before judge review.
+
 ## [0.36.1.0] - 2026-07-24
 
 ### Added

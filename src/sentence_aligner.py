@@ -447,7 +447,7 @@ def _coverage_gaps(
 
     Returns one record per reported run:
         {
-            "position": "head" | "interior" | "tail",
+            "position": "head" | "interior" | "tail" | "full",
             "en_start": int,   # inclusive, chunk-local
             "en_end": int,     # inclusive, chunk-local
             "sentences": int,  # span length, including junk records
@@ -477,7 +477,10 @@ def _coverage_gaps(
         chars = sum(len(en_sentences[i].strip()) for i in substantive)
         if chars < MIN_GAP_CHARS:
             return
-        if run[0] == 0:
+        if run[0] == 0 and run[-1] == last_idx:
+            # Entire chunk unclaimed (empty / fully dropped translation).
+            position = "full"
+        elif run[0] == 0:
             position = "head"
         elif run[-1] == last_idx:
             position = "tail"
@@ -602,7 +605,10 @@ def align_chapter_chunks(
     Align all chunks for a chapter and produce a single chapter-level
     alignment file suitable for the reader UI.
 
-    Loads the model once and reuses across chunks.
+    Loads the model once and reuses across chunks. Gap ``en_start``/``en_end``
+    values are offset to chapter-global indices (same treatment as alignment
+    rows); ``position`` stays chunk-relative. Return dict also includes
+    ``coverage`` and ``gaps`` — see :func:`_coverage_gaps`.
     """
     model = _get_model()
 

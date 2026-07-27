@@ -309,11 +309,13 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         if not chapters:
             print(f"  No matching chapters found for --chapters {args.chapters}")
             print(f"  Available: {', '.join(sorted(discover_chapters(chunks_dir).keys()))}")
-            emit_harness_result({
+            early = {
                 "stage": "translate",
                 "translated": 0,
                 "note": f"no matching chapters for --chapters {args.chapters}",
-            })
+            }
+            state["_harness_translate_result"] = early
+            emit_harness_result(early)
             state["stage_completed"] = "translate"
             return state
 
@@ -343,12 +345,14 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
 
     if not untranslated:
         print("  All chunks already translated!")
-        emit_harness_result({
+        early = {
             "stage": "translate",
             "translated": 0,
             "total_chunks_in_scope": total,
             "note": "all chunks already translated",
-        })
+        }
+        state["_harness_translate_result"] = early
+        emit_harness_result(early)
         state["stage_completed"] = "translate"
         return state
 
@@ -503,13 +507,18 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     if remaining > 0:
         print(f"  Remaining: {remaining} untranslated chunks (~${remaining * cost_per_chunk:.2f})")
 
-    emit_harness_result({
+    # Stash for stage_align: the API auto-chain continues through align, and
+    # _run_script keeps the *last* HARNESS_RESULT. Align re-emits this payload
+    # with coverage_warnings so agents reading last_output.json see drops.
+    translate_result = {
         "stage": "translate",
         "translated": len(untranslated),
         "chapters_done": chapter_ids_done,
         "estimated_cost_usd": round(actual_cost, 2),
         "remaining_untranslated": remaining,
-    })
+    }
+    state["_harness_translate_result"] = translate_result
+    emit_harness_result(translate_result)
 
     state["stage_completed"] = "translate"
     return state
@@ -635,6 +644,10 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
     source_lang = getattr(args, "source_lang_code", "en") or "en"
     target_lang = getattr(args, "target_lang_code", "es") or "es"
 
+    # Flattened across chapters so the final HARNESS_RESULT (and thus
+    # last_output.json after harness `translate`) carries every drop.
+    coverage_warnings: list[dict] = []
+
     for chapter_id, chunk_paths in chapters.items():
         # Check all chunks are translated
         chunks = [load_chunk(cp) for cp in chunk_paths]
@@ -661,6 +674,7 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
         # these — a dropped paragraph leaves the length ratio, the paragraph counts
         # and the confidence score all looking normal.
         for gap in result.get("gaps") or []:
+            coverage_warnings.append({"chapter_id": chapter_id, **gap})
             print(
                 f"      WARNING: {gap.get('chunk_id', chapter_id)} {gap['position']} gap: "
                 f"{gap['sentences']} sentence(s) / {gap['chars']} chars untranslated "
@@ -668,6 +682,20 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
             )
 
     print(f"  Alignments written to: {align_dir}")
+
+    # Re-emit as the final sentinel for the API auto-chain. _run_script keeps the
+    # last HARNESS_RESULT, so agents reading last_output.json after `translate`
+    # see coverage_warnings alongside the translate fields (when present).
+    payload = dict(state.get("_harness_translate_result") or {"stage": "align"})
+    payload["coverage_warnings"] = coverage_warnings
+    if coverage_warnings:
+        payload["instructions"] = (
+            f"COVERAGE WARNING: {len(coverage_warnings)} source run(s) have no "
+            "translation at all — the translator dropped prose. Report every entry "
+            "in coverage_warnings (chapter, chunk, position, sentences, chars) to "
+            "the user and re-translate the affected chunks before continuing."
+        )
+    emit_harness_result(payload)
 
     state["stage_completed"] = "align"
     return state

@@ -36,5 +36,14 @@ If you landed here with `backend` unset, do **not** persist `api` yourself — R
    `translate` refuses to run without `--yes`. The model defaults to Sonnet 5 (or whatever was
    persisted in config); pass `--model` to override, and surface the choice rather than assuming.
 
+4. **After translate returns, check `coverage_warnings` in `.harness/last_output.json`.**
+   The API run auto-chains through combine → epub → align; align re-emits the translate
+   result with a `coverage_warnings` list. Each entry is a run of source sentences with *no
+   translation at all* — the worker dropped prose. No other metric catches this (length ratio,
+   paragraph counts, and `high_confidence_pct` all stay clean). Report every entry to the user
+   (chapter, `chunk_id`, `position`, `sentences`, `chars`, `preview`) and re-translate the
+   affected chunk before continuing to review. `position` is relative to the chunk: `tail` on a
+   non-final chunk is a chunk-seam drop; `full` means the whole chunk was unclaimed.
+
 **If footnotes were imported, do `references/footnotes.md` before `references/epub.md`** to translate + embed them (the API
 `translate` run auto-chains through combine/epub/align, but not the footnote *body* translation).
