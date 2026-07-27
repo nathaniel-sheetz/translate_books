@@ -121,6 +121,41 @@ class TestReaderChapterList:
         assert ">reviewed<" in html
         assert "badge-unread" not in html
 
+    def test_coverage_gap_badge_rendered(self, client, project_with_alignment):
+        """A chapter with untranslated source runs must be badged.
+
+        The alignment can be 100% high-confidence and still be missing whole
+        paragraphs — every sentence that *was* translated matches well. Only the
+        gap count exposes that, so it needs its own badge rather than riding on
+        the confidence one.
+        """
+        align_file = project_with_alignment / "alignments" / "chapter_01.json"
+        data = json.loads(align_file.read_text(encoding="utf-8"))
+        data["coverage"] = {
+            "en_count": 12, "en_aligned": 3, "gap_count": 1,
+            "en_orphan_chars": 749, "max_gap_chars": 749,
+        }
+        align_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "1 gap" in html
+        assert "749" in html
+        # high_confidence_pct is 100 here, so the confidence badge stays away —
+        # proving the gap badge is what surfaces the omission.
+        assert "% aligned" not in html
+        # A chapter with missing prose is not "unread".
+        assert "badge-unread" not in html
+
+    def test_no_gap_badge_when_coverage_clean(self, client, project_with_alignment):
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        # Match the badge's title text — a bare "gap" also hits the CSS `gap:8px`.
+        assert "characters of source text with no translation" not in html
+        assert "badge-unread" in html
+
     def test_spanish_title_shown_when_lang_es(self, client, project_with_alignment):
         # With the UI language set to Spanish, the chapters header uses the
         # project's spanish_title rather than the English title.

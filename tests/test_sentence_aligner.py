@@ -2,7 +2,10 @@
 
 import pytest
 from src.sentence_aligner import (
+    MIN_GAP_CHARS,
+    MIN_SENTENCE_CHARS,
     split_sentences,
+    _coverage_gaps,
     _split_long_sentence,
     _normalize_for_embedding,
     _split_sentences_with_para_indices,
@@ -405,3 +408,308 @@ class TestAlignChapterChunks:
         c2 = [a for a in alignments if a["chunk_id"] == chunk_2["id"]]
         assert c2, "No alignments for chunk 2"
         assert c2[0].get("para_start") is True, "chunk 2 first sentence must be para_start"
+
+
+def _sent(length: int, marker: str = "a") -> str:
+    """A sentence whose stripped length is exactly ``length``."""
+    assert length >= 1
+    return (marker * (length - 1)) + "."
+
+
+class TestCoverageGaps:
+    """Source runs no target sentence claims — i.e. prose the translator dropped.
+
+    Regression cover for the Little Duke silent-omission bug: a translator dropped
+    the final paragraph of ``chapter_01_chunk_000`` and every existing signal stayed
+    clean (character ratio 1.002, paragraph delta 0, high_confidence_pct unchanged).
+    The only trace was three source sentences that no alignment row referenced.
+    """
+
+    def test_no_gaps_when_every_source_sentence_is_claimed(self):
+        en = [_sent(150) for _ in range(5)]
+        alignments = [{"en_idx": i} for i in range(5)]
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_no_gaps_for_empty_source(self):
+        assert _coverage_gaps([], []) == []
+
+    def test_many_to_one_rows_do_not_create_gaps(self):
+        # Spanish em-dash dialogue routinely renders one English sentence as
+        # several, so duplicate en_idx values are normal and must not read as
+        # missing coverage.
+        en = [_sent(150) for _ in range(3)]
+        alignments = [{"en_idx": 0}, {"en_idx": 0}, {"en_idx": 1}, {"en_idx": 2}]
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_dropped_tail_is_reported(self):
+        en = [_sent(150) for _ in range(5)]
+        alignments = [{"en_idx": i} for i in range(3)]  # 3 and 4 unclaimed
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert len(gaps) == 1
+        gap = gaps[0]
+        assert gap["position"] == "tail"
+        assert (gap["en_start"], gap["en_end"]) == (3, 4)
+        assert gap["sentences"] == 2
+        assert gap["chars"] == 300
+
+    def test_dropped_head_is_reported(self):
+        en = [_sent(150) for _ in range(5)]
+        alignments = [{"en_idx": i} for i in range(2, 5)]
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert len(gaps) == 1
+        assert gaps[0]["position"] == "head"
+        assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (0, 1)
+
+    def test_whole_chunk_drop_is_reported_as_full(self):
+        """Empty / fully dropped translation must not be mis-bucketed as head."""
+        en = [_sent(150) for _ in range(3)]
+        gaps = _coverage_gaps(en, [])
+
+        assert len(gaps) == 1
+        assert gaps[0]["position"] == "full"
+        assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (0, 2)
+        assert gaps[0]["chars"] == 450
+
+    def test_dropped_middle_is_reported_as_interior(self):
+        en = [_sent(150) for _ in range(6)]
+        alignments = [{"en_idx": 0}, {"en_idx": 4}, {"en_idx": 5}]
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert len(gaps) == 1
+        assert gaps[0]["position"] == "interior"
+        assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (1, 3)
+
+    def test_sub_threshold_run_is_not_reported(self):
+        """The 1-ES:N-EN merge case.
+
+        When Spanish packs two English sentences into one, the second goes
+        unclaimed even though it *was* translated — the DP maps each target
+        sentence to exactly one source sentence. Those runs are short, so the
+        character threshold suppresses them.
+        """
+        en = [_sent(150) for _ in range(5)]
+        alignments = [{"en_idx": i} for i in range(4)]  # only index 4 unclaimed
+
+        assert 150 < MIN_GAP_CHARS
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_junk_only_run_is_not_reported(self):
+        """Gutenberg rules and stray quote marks are never "translated"."""
+        en = [_sent(400), "---", '"']
+        alignments = [{"en_idx": 0}]
+
+        assert len("---") < MIN_SENTENCE_CHARS
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_junk_excluded_from_mass_but_kept_in_span(self):
+        en = [_sent(150), _sent(400), "---"]
+        alignments = [{"en_idx": 0}]
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert len(gaps) == 1
+        # Mass counts only the real sentence; the span still covers the junk record.
+        assert gaps[0]["chars"] == 400
+        assert gaps[0]["sentences"] == 2
+        assert (gaps[0]["en_start"], gaps[0]["en_end"]) == (1, 2)
+        assert gaps[0]["preview"].startswith("a")
+
+    def test_hard_wrapped_line_fragments_are_not_reported(self):
+        """Regression for projects/fabre chapter_10.
+
+        Some sources are hard-wrapped at ~70 columns, and ``is_verse_block`` reads
+        those prose paragraphs as verse and splits them per line. One translated
+        Spanish sentence then faces seven English line *fragments*, all unclaimed
+        by the 1-ES:N-EN rule — 414 chars of "missing" text that was never missing.
+        Fragments do not end like sentences, so they contribute no mass.
+        """
+        fragments = [
+            "longer drag himself along; a pig is a tottering veteran at twenty; at",
+            "fifteen at the most, a cat no longer chases mice, it says good-by to the",
+            "joys of the roof and retires to some corner of a granary to die in",
+            "peace; the goat and sheep, at ten or fifteen, touch extreme old age, the",
+            "rabbit is at the end of its skein at eight or ten; and the miserable",
+            "rat, if it lives four years, is looked upon among its own kind as a",
+        ]
+        en = [_sent(150)] + fragments + [_sent(150)]
+        alignments = [{"en_idx": 0}, {"en_idx": len(en) - 1}]
+
+        assert sum(len(f) for f in fragments) > MIN_GAP_CHARS  # would fire on mass alone
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_only_complete_sentences_contribute_mass(self):
+        en = [
+            _sent(150),
+            "a wrapped fragment that simply runs on past the column limit and",
+            _sent(400),
+        ]
+        alignments = [{"en_idx": 0}]
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert len(gaps) == 1
+        assert gaps[0]["chars"] == 400  # fragment excluded
+        assert gaps[0]["sentences"] == 2  # but still inside the reported span
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("A normal sentence.", True),
+            ("Shouted loudly!", True),
+            ("Really?", True),
+            ('He said, "go away."', True),
+            ("«Se acabó.»", True),
+            ("Trailing off…", True),
+            ("a wrapped line fragment that ends mid", False),
+            ("", False),
+            ("   ", False),
+            ('"', False),
+        ],
+    )
+    def test_complete_sentence_predicate(self, text, expected):
+        from src.sentence_aligner import _is_complete_sentence
+
+        assert _is_complete_sentence(text) is expected
+
+    def test_multiple_runs_reported_separately(self):
+        en = [_sent(200) for _ in range(8)]
+        alignments = [{"en_idx": 0}, {"en_idx": 4}]
+
+        gaps = _coverage_gaps(en, alignments)
+
+        assert [g["position"] for g in gaps] == ["interior", "tail"]
+        assert [(g["en_start"], g["en_end"]) for g in gaps] == [(1, 3), (5, 7)]
+
+    def test_preview_is_truncated(self):
+        en = [_sent(150), _sent(400)]
+        alignments = [{"en_idx": 0}]
+
+        preview = _coverage_gaps(en, alignments)[0]["preview"]
+
+        assert len(preview) == 101  # 100 chars + ellipsis
+        assert preview.endswith("…")
+
+
+class TestCoverageGapsIntegration:
+    """End-to-end: a chunk whose translation drops a paragraph."""
+
+    @pytest.fixture(scope="class")
+    def model(self):
+        try:
+            from sentence_transformers import SentenceTransformer
+            return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        except ImportError:
+            pytest.skip("sentence-transformers not installed")
+
+    SOURCE = (
+        "The cat sat on the mat beside the fire.\n\n"
+        "The dog watched from the doorway, wagging his tail slowly.\n\n"
+        "Then the old woman came into the kitchen carrying a heavy basket of apples "
+        "from the orchard, and she set it down upon the wooden table with a sigh of "
+        "relief. She had walked a long way that morning, and her arms ached from the "
+        "weight of the fruit she had gathered. The apples were red and firm, and she "
+        "meant to bake them into pies before the evening came."
+    )
+    TRANSLATION_FULL = (
+        "El gato se sentó en la alfombra junto al fuego.\n\n"
+        "El perro miraba desde la puerta, moviendo la cola lentamente.\n\n"
+        "Entonces la anciana entró en la cocina cargando una pesada cesta de manzanas "
+        "del huerto, y la dejó sobre la mesa de madera con un suspiro de alivio. Había "
+        "caminado mucho aquella mañana, y le dolían los brazos por el peso de la fruta "
+        "que había recogido. Las manzanas eran rojas y firmes, y pensaba hornearlas en "
+        "tartas antes de que llegara la noche."
+    )
+    TRANSLATION_DROPPED_TAIL = (
+        "El gato se sentó en la alfombra junto al fuego.\n\n"
+        "El perro miraba desde la puerta, moviendo la cola lentamente."
+    )
+
+    def _write_chunk(self, chunks_dir, idx, source, translation):
+        import json
+
+        chunk = {
+            "id": f"chapter_test_chunk_{idx:03d}",
+            "chapter_id": "chapter_test",
+            "position": idx,
+            "source_text": source,
+            "translated_text": translation,
+        }
+        path = chunks_dir / f"{chunk['id']}.json"
+        path.write_text(json.dumps(chunk, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_align_chunk_reports_dropped_final_paragraph(self, tmp_path, model):
+        from src.sentence_aligner import align_chunk
+
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        path = self._write_chunk(
+            chunks_dir, 0, self.SOURCE, self.TRANSLATION_DROPPED_TAIL
+        )
+
+        result = align_chunk(str(path), model=model)
+
+        assert len(result["gaps"]) == 1, result["gaps"]
+        gap = result["gaps"][0]
+        assert gap["position"] == "tail"
+        assert gap["chars"] >= MIN_GAP_CHARS
+        assert result["coverage"]["gap_count"] == 1
+        assert result["coverage"]["en_orphan_chars"] == gap["chars"]
+        assert result["coverage"]["en_aligned"] < result["coverage"]["en_count"]
+
+    def test_align_chunk_reports_no_gaps_for_complete_translation(
+        self, tmp_path, model
+    ):
+        from src.sentence_aligner import align_chunk
+
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        path = self._write_chunk(chunks_dir, 0, self.SOURCE, self.TRANSLATION_FULL)
+
+        result = align_chunk(str(path), model=model)
+
+        assert result["gaps"] == []
+        assert result["coverage"]["gap_count"] == 0
+        assert result["coverage"]["en_orphan_chars"] == 0
+
+    def test_align_chapter_chunks_offsets_gap_indices_and_stamps_chunk_id(
+        self, tmp_path, monkeypatch, model
+    ):
+        """Gaps must be offset into chapter-global indices exactly like alignment
+        rows, so a gap in a later chunk does not point at the wrong sentences."""
+        from src import sentence_aligner
+        from src.sentence_aligner import align_chapter_chunks
+
+        monkeypatch.setattr(sentence_aligner, "_get_model", lambda: model)
+
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        # Chunk 0 is complete; chunk 1 drops its final paragraph.
+        self._write_chunk(chunks_dir, 0, self.SOURCE, self.TRANSLATION_FULL)
+        self._write_chunk(
+            chunks_dir, 1, self.SOURCE, self.TRANSLATION_DROPPED_TAIL
+        )
+
+        result = align_chapter_chunks(
+            chunk_paths=sorted(str(p) for p in chunks_dir.glob("*.json")),
+            project_id="test_project",
+            chapter_id="chapter_test",
+        )
+
+        assert len(result["gaps"]) == 1, result["gaps"]
+        gap = result["gaps"][0]
+        assert gap["chunk_id"] == "chapter_test_chunk_001"
+        # Chunk 0 contributed every sentence before this gap, so the indices must
+        # have been shifted past it rather than left chunk-local.
+        chunk_0_rows = [
+            a for a in result["alignments"]
+            if a["chunk_id"] == "chapter_test_chunk_000"
+        ]
+        assert gap["en_start"] > max(a["en_idx"] for a in chunk_0_rows)
+        assert gap["en_end"] < result["en_count"]
+        assert result["coverage"]["gap_count"] == 1

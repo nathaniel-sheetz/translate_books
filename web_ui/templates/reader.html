@@ -379,9 +379,12 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                     {%- if ch.low_confidence -%}
                         <span class="badge badge-warn">{{ ch.confidence }}% {{ t.badge_aligned }}</span>
                     {%- endif -%}
+                    {%- if ch.gap_count -%}
+                        <span class="badge badge-warn" title="{{ ch.gap_chars }} {{ t.badge_gap_title }}">{{ ch.gap_count }} {{ t.badge_gap }}</span>
+                    {%- endif -%}
                     {%- if ch.reviewed -%}
                         <span class="badge badge-clean">{{ t.badge_reviewed }}</span>
-                    {%- elif ch.total_ann == 0 and not ch.low_confidence -%}
+                    {%- elif ch.total_ann == 0 and not ch.low_confidence and not ch.gap_count -%}
                         <span class="badge badge-unread">{{ t.badge_unread }}</span>
                     {%- endif -%}
                 </span>

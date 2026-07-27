@@ -29,6 +29,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.sentence_aligner import align_chunk, align_chapter_chunks
 
 
+def _print_coverage_gaps(result: dict) -> None:
+    """Report source runs the translation never covered.
+
+    These are the omissions no other metric catches: dropped prose reads perfectly
+    in the target language, so the length ratio, paragraph counts and confidence
+    score all stay in their normal ranges.
+    """
+    gaps = result.get("gaps") or []
+    if not gaps:
+        return
+    print(f"\n  COVERAGE GAPS: {len(gaps)} source run(s) with no translation")
+    for gap in gaps:
+        where = gap.get("chunk_id") or result.get("chunk_id") or "chunk"
+        print(
+            f"    !! {where} {gap['position']}: {gap['sentences']} sentence(s) / "
+            f"{gap['chars']} chars untranslated (EN {gap['en_start']}-{gap['en_end']})"
+        )
+        print(f"       {gap['preview']}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate sentence-level alignments for translated chunks"
@@ -113,6 +133,7 @@ def main():
         print(f"  High confidence: {result['high_confidence_pct']}%")
         print(f"  Avg similarity: {result['avg_similarity']}")
         print(f"  Time: {elapsed:.1f}s")
+        _print_coverage_gaps(result)
 
         if args.verbose:
             print(f"\n  Alignments:")
@@ -154,6 +175,7 @@ def main():
         print(f"  Avg similarity: {result['avg_similarity']}")
         print(f"  Time: {elapsed:.1f}s")
         print(f"  Written to: {output}")
+        _print_coverage_gaps(result)
 
         if args.verbose:
             for a in result["alignments"]:

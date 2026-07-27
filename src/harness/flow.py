@@ -2564,6 +2564,14 @@ def align(
 
     aligned: list[dict] = []
     skipped: list[dict] = []
+    # Source runs the translation never covered. The aligner finds these for free
+    # (src/sentence_aligner.py:_coverage_gaps). Headless/subagent paths call this
+    # harness align step after each wave; the API path auto-aligns via
+    # translate_book.stage_align, which re-emits the translate HARNESS_RESULT with
+    # coverage_warnings so last_output.json sees them too. Flattened across
+    # chapters because the agent needs to act on them, not go hunting through
+    # the per-chapter lists.
+    coverage_warnings: list[dict] = []
     # Surface a per-chapter aligner failure (e.g. embedding model unavailable)
     # without crashing the batch — keep the clean-JSON-on-stdout contract.
     align_error: str | None = None
@@ -2588,27 +2596,44 @@ def align(
                 align_error = f"align failed at {chapter_id}: {exc}"
                 skipped.append({"chapter_id": chapter_id, "reason": f"align error: {exc}"})
                 break
+            gaps = result.get("gaps") or []
             aligned.append({
                 "chapter_id": chapter_id,
                 "es_count": result.get("es_count"),
                 "high_confidence_pct": result.get("high_confidence_pct"),
+                "coverage": result.get("coverage"),
+                "gaps": gaps,
             })
+            for gap in gaps:
+                coverage_warnings.append({"chapter_id": chapter_id, **gap})
 
     reader_base = f"http://{reader_host}:{reader_port}/read/{slug}"
     first = aligned[0]["chapter_id"] if aligned else None
+    instructions = (
+        f"Aligned {len(aligned)} chapter(s). Ensure the reader is running "
+        f"(`python web_ui/app.py`), then open reader_first."
+        if aligned else
+        "No chapters were aligned — translate a chapter set fully first."
+    )
+    if coverage_warnings:
+        # Loud by design: a dropped paragraph reads perfectly in the target language,
+        # so nothing downstream — not length, not paragraph counts, not
+        # high_confidence_pct — will ever raise it again.
+        instructions = (
+            f"COVERAGE WARNING: {len(coverage_warnings)} source run(s) have no "
+            "translation at all — the translator dropped prose. Report every entry in "
+            "coverage_warnings (chapter, chunk, position, sentences, chars) to the user "
+            "and re-translate the affected chunks before continuing. " + instructions
+        )
     out = {
         "aligned": aligned,
         "skipped": skipped,
+        "coverage_warnings": coverage_warnings,
         "alignments_dir": str(align_dir),
         "reader_base": reader_base,
         "reader_first": f"{reader_base}/{first}" if first else None,
         "reader_links": [f"{reader_base}/{a['chapter_id']}" for a in aligned],
-        "instructions": (
-            f"Aligned {len(aligned)} chapter(s). Ensure the reader is running "
-            f"(`python web_ui/app.py`), then open reader_first."
-            if aligned else
-            "No chapters were aligned — translate a chapter set fully first."
-        ),
+        "instructions": instructions,
     }
     if align_error:
         out["error"] = align_error
@@ -3179,6 +3204,11 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapters_done": "list of chapter_ids fully covered this run",
         "estimated_cost_usd": "estimated spend for this batch",
         "remaining_untranslated": "untranslated chunks left in the book after this batch",
+        "coverage_warnings": (
+            "list of {chapter_id, chunk_id, position, en_start, en_end, sentences, chars, "
+            "preview} — present after the API auto-chain reaches align; source runs with NO "
+            "translation (dropped prose). Report and re-translate before reviewing"
+        ),
         "note": "present when nothing was translated (already done / no match)",
         "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
@@ -3220,8 +3250,15 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "sidecar_removed": "whether footnotes.json existed and was deleted",
     },
     "align": {
-        "aligned": "list of {chapter_id, es_count, high_confidence_pct}",
+        "aligned": "list of {chapter_id, es_count, high_confidence_pct, coverage, gaps}",
         "skipped": "list of {chapter_id, reason} not aligned",
+        "coverage_warnings": (
+            "list of {chapter_id, chunk_id, position, en_start, en_end, sentences, chars, "
+            "preview} — source runs with NO translation (dropped prose). position is "
+            "head|interior|tail|full relative to the chunk; a tail gap on a non-final chunk is a "
+            "chunk-seam drop; full means the entire chunk was unclaimed. Report these and "
+            "re-translate the chunk; no other metric sees them"
+        ),
         "alignments_dir": "directory the alignment JSON was written to",
         "reader_base": "base reader URL for this project",
         "reader_first": "reader URL for the first newly-aligned chapter, or null",
