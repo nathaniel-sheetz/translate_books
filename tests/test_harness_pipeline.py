@@ -1725,6 +1725,53 @@ def test_align_command_aligns_ready_chapters_and_links(tmp_path: Path, monkeypat
     assert [s["chapter_id"] for s in res["skipped"]] == ["chapter_02"]
     assert res["reader_first"].endswith(f"/read/{tmp_path.name}/chapter_01")
     assert (tmp_path / "alignments" / "chapter_01.json").exists()
+    # An aligner result without coverage keys (older payload) must not warn.
+    assert res["coverage_warnings"] == []
+    assert "COVERAGE WARNING" not in res["instructions"]
+
+
+def test_align_command_surfaces_coverage_warnings(tmp_path: Path, monkeypatch):
+    """Source runs with no translation must reach the agent via last_output.json.
+
+    A dropped paragraph reads perfectly in the target language and leaves the
+    length ratio, paragraph counts and confidence score all looking normal, so
+    align is the only place it surfaces — and the one step every translate
+    backend (api / headless / subagent) passes through.
+    """
+    import src.sentence_aligner as aligner
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A.", "B."],
+                 translations=["es A.", "es B."])
+
+    gap = {
+        "position": "tail", "en_start": 45, "en_end": 47, "sentences": 3,
+        "chars": 749, "preview": "Richard was bidden to greet them…",
+        "chunk_id": "chapter_01_chunk_000",
+    }
+
+    def fake_align(chunk_paths, project_id, chapter_id, source_lang="en",
+                   target_lang="es", output_path=None):
+        if output_path:
+            Path(output_path).write_text(
+                json.dumps({"chapter_id": chapter_id, "alignments": []}), encoding="utf-8")
+        return {
+            "chapter_id": chapter_id, "es_count": 2, "high_confidence_pct": 100.0,
+            "coverage": {"en_count": 48, "en_aligned": 44, "gap_count": 1,
+                         "en_orphan_chars": 749, "max_gap_chars": 749},
+            "gaps": [gap],
+        }
+
+    monkeypatch.setattr(aligner, "align_chapter_chunks", fake_align)
+
+    res = flow.align(str(tmp_path))
+    assert res["coverage_warnings"] == [{"chapter_id": "chapter_01", **gap}]
+    assert res["aligned"][0]["gaps"] == [gap]
+    assert res["aligned"][0]["coverage"]["gap_count"] == 1
+    # The instruction text is what the agent acts on, so the warning has to be in it.
+    assert "COVERAGE WARNING" in res["instructions"]
 
 
 def test_align_command_reports_aligner_failure_without_crashing(tmp_path: Path, monkeypatch):

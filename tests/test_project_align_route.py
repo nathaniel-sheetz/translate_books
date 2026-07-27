@@ -88,13 +88,20 @@ def project(tmp_path, monkeypatch):
     return proj_dir
 
 
-def _patch_aligner(monkeypatch, new_pairs: list[dict]):
+def _patch_aligner(monkeypatch, new_pairs: list[dict], gaps: list[dict] | None = None):
     """Patch align_chapter_chunks to write a controlled new alignment file.
 
     The endpoint calls `from src.sentence_aligner import align_chapter_chunks`
     inside the request handler, which re-resolves the attribute on the module
     each call — so patching the module attribute is sufficient.
+
+    The fake returns the same dict it writes, matching the real function. An
+    earlier version returned ``{"pairs": ...}``, which hid a bug in the endpoint:
+    it read ``result["pairs"]`` from a function that has only ever returned
+    ``alignments``, so the route always reported 0 pairs in production.
     """
+    gaps = gaps or []
+
     def fake_align(chunk_paths, project_id, chapter_id, source_lang,
                    target_lang, output_path):
         payload = {
@@ -104,12 +111,20 @@ def _patch_aligner(monkeypatch, new_pairs: list[dict]):
             "es_count": len(new_pairs),
             "high_confidence_pct": 100.0,
             "avg_similarity": 0.95,
+            "coverage": {
+                "en_count": len(new_pairs),
+                "en_aligned": len(new_pairs),
+                "gap_count": len(gaps),
+                "en_orphan_chars": sum(g["chars"] for g in gaps),
+                "max_gap_chars": max((g["chars"] for g in gaps), default=0),
+            },
+            "gaps": gaps,
             "alignments": new_pairs,
         }
         Path(output_path).write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8",
         )
-        return {"pairs": new_pairs}
+        return payload
 
     monkeypatch.setattr(sentence_aligner_module, "align_chapter_chunks", fake_align)
 
@@ -172,8 +187,31 @@ class TestRealignHappyPath:
         assert data["ok"] is True
         assert data["pairs"] == 2
         assert data["orphaned_annotations"] == 0
+        assert data["gaps"] == []
+        assert data["coverage"]["gap_count"] == 0
         # No annotations.jsonl should be created when there are no annotations.
         assert not (project / "annotations.jsonl").exists()
+
+    def test_coverage_gaps_are_surfaced(self, client, project, monkeypatch):
+        """A dropped source run must reach the caller, not just the JSON on disk."""
+        new_pairs = [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó.",
+             "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
+             "chunk_id": "chapter_01_chunk_000"},
+        ]
+        gap = {
+            "position": "tail", "en_start": 1, "en_end": 3, "sentences": 3,
+            "chars": 749, "preview": "Richard was bidden to greet them…",
+            "chunk_id": "chapter_01_chunk_000",
+        }
+        _patch_aligner(monkeypatch, new_pairs, gaps=[gap])
+
+        rv = client.post("/api/project/test-project/align/chapter_01")
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["gaps"] == [gap]
+        assert data["coverage"]["gap_count"] == 1
+        assert data["coverage"]["en_orphan_chars"] == 749
 
     def test_realign_with_no_annotations_no_orphans(
         self, client, project, monkeypatch,

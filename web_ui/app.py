@@ -1067,6 +1067,10 @@ def reader_chapters(project_id):
                 data = json.load(fh)
             ch_id = f.stem
             confidence = data.get("high_confidence_pct", 0)
+            # Source runs with no translation at all (src/sentence_aligner.py).
+            # Distinct from low confidence: those sentences ARE translated, just
+            # matched weakly. A gap means the prose is missing outright.
+            coverage = data.get("coverage") or {}
             ann = all_annotations.get(ch_id, {})
             # Fold the three review-type annotations (word choice, inconsistency,
             # and "Other"/flag) into one "to review" count; footnotes stay separate
@@ -1082,6 +1086,8 @@ def reader_chapters(project_id):
                 "kind": entry.get("kind", "chapter"),
                 "confidence": confidence,
                 "low_confidence": confidence < 90,
+                "gap_count": coverage.get("gap_count", 0),
+                "gap_chars": coverage.get("en_orphan_chars", 0),
                 "review_count": review_count,
                 "footnote_count": footnote_count,
                 "total_ann": total_ann,
@@ -4544,7 +4550,11 @@ def project_align(project_id, chapter_id):
 
         return jsonify({
             "ok": True,
-            "pairs": len(result.get("pairs", [])),
+            # align_chapter_chunks returns its rows under "alignments"; reading
+            # "pairs" here always reported 0.
+            "pairs": len(result.get("alignments", [])),
+            "coverage": result.get("coverage"),
+            "gaps": result.get("gaps", []),
             "orphaned_annotations": len(orphaned),
             "corrections_applied": corrections_applied,
         })

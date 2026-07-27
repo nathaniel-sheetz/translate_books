@@ -657,6 +657,15 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
             f"    {chapter_id}: {result['es_count']} sentences, "
             f"{result['high_confidence_pct']}% high-confidence ({elapsed:.1f}s)"
         )
+        # Source runs with no translation at all. Nothing else in the pipeline sees
+        # these — a dropped paragraph leaves the length ratio, the paragraph counts
+        # and the confidence score all looking normal.
+        for gap in result.get("gaps") or []:
+            print(
+                f"      WARNING: {gap.get('chunk_id', chapter_id)} {gap['position']} gap: "
+                f"{gap['sentences']} sentence(s) / {gap['chars']} chars untranslated "
+                f"(EN {gap['en_start']}-{gap['en_end']}): {gap['preview']}"
+            )
 
     print(f"  Alignments written to: {align_dir}")
 

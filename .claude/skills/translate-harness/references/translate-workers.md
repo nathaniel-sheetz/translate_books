@@ -270,6 +270,15 @@ start it in the background (`python web_ui/app.py`, serving `http://localhost:50
 user the `reader_first` link (e.g. `http://localhost:5000/read/<slug>/chapter_01`) so they can read the
 new chapters immediately.
 
+**Check `coverage_warnings` before you move on.** Each entry is a run of source sentences with *no
+translation at all* — the worker dropped prose. This is the only place such a drop is visible: the
+translation still reads perfectly, so the length ratio, paragraph counts, `high_confidence_pct` and the
+`translate-commit` guards all stay clean (a real case shipped with a character ratio of 1.002). Report
+every entry to the user — chapter, `chunk_id`, `position`, `sentences`, `chars`, `preview` — and
+re-translate the affected chunk (delete its `translated_text`, then re-run 4B-a → 4B-c for that chunk),
+then re-align. `position` is relative to the chunk: `tail` on a non-final chunk means the drop sits on a
+chunk seam, the most common shape.
+
 To also show a sample **in chat** (a quick EN→ES gut-check before spending the rest), use the read-back
 command — never read `.harness/translate/*.draft.txt` (consumed/empty after commit) or hand-parse the
 chunk files:

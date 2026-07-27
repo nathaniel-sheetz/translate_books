@@ -28,6 +28,17 @@ MAX_SENTENCE_WORDS = 50
 HIGH_CONFIDENCE_THRESHOLD = 0.5
 SKIP_PENALTY = 0.05
 
+# Coverage-gap reporting (see _coverage_gaps). Calibrated over 505 translated
+# chunks across 18 books: substantive orphan-run mass is 0 for 96.6% of chunks,
+# under 300 chars for another 1.6%, and there is an empty band between 300 and
+# 499 before the real omissions start. 300 flagged 10 chunks, all of them
+# genuine drops, and zero false positives.
+MIN_GAP_CHARS = 300
+# Sentence splitting emits standalone junk records for Gutenberg rules ("---"),
+# stray quote marks and verse punctuation. They are never "translated", so they
+# must not contribute to a gap's mass.
+MIN_SENTENCE_CHARS = 25
+
 
 def _get_model():
     """Lazy-load the sentence-transformers model."""
@@ -393,6 +404,97 @@ def _group_nto1(
     return alignments
 
 
+def _coverage_gaps(
+    en_sentences: list[str],
+    alignments: list[dict],
+) -> list[dict]:
+    """
+    Find runs of source sentences that no target sentence claims.
+
+    _monotonic_alignment maps every target sentence to exactly one source
+    sentence, but lets source sentences be *skipped*. So when a translator
+    silently drops a paragraph, the prose it should have produced is simply
+    absent and the source sentences it covered are never referenced by any
+    output row. That is invisible in every other metric — a dropped paragraph
+    leaves the character ratio, the sentence counts, the paragraph counts and
+    high_confidence_pct all looking normal — but it is exactly a run of missing
+    en_idx values here.
+
+    Runs are reported only when their substantive character mass clears
+    MIN_GAP_CHARS. Below that a run is nearly always a 1-ES:N-EN merge, which
+    the DP cannot represent (each ES sentence gets one EN sentence, so when
+    Spanish packs two English sentences into one, the second goes unclaimed
+    even though it *was* translated).
+
+    Returns one record per reported run:
+        {
+            "position": "head" | "interior" | "tail",
+            "en_start": int,   # inclusive, chunk-local
+            "en_end": int,     # inclusive, chunk-local
+            "sentences": int,  # span length, including junk records
+            "chars": int,      # substantive mass that cleared the threshold
+            "preview": str,
+        }
+
+    ``position`` is relative to the chunk, so a "tail" gap on a chunk that is
+    not the last in its chapter sits precisely on a chunk seam — the highest-
+    signal case, and the one the Little Duke regression was.
+    """
+    if not en_sentences:
+        return []
+
+    covered = {a["en_idx"] for a in alignments}
+    last_idx = len(en_sentences) - 1
+    gaps: list[dict] = []
+
+    def flush(run: list[int]) -> None:
+        if not run:
+            return
+        substantive = [
+            i for i in run if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
+        ]
+        chars = sum(len(en_sentences[i].strip()) for i in substantive)
+        if chars < MIN_GAP_CHARS:
+            return
+        if run[0] == 0:
+            position = "head"
+        elif run[-1] == last_idx:
+            position = "tail"
+        else:
+            position = "interior"
+        preview = en_sentences[substantive[0]].strip()
+        gaps.append({
+            "position": position,
+            "en_start": run[0],
+            "en_end": run[-1],
+            "sentences": len(run),
+            "chars": chars,
+            "preview": preview[:100] + ("…" if len(preview) > 100 else ""),
+        })
+
+    run: list[int] = []
+    for i in range(len(en_sentences)):
+        if i in covered:
+            flush(run)
+            run = []
+        else:
+            run.append(i)
+    flush(run)
+
+    return gaps
+
+
+def _coverage_summary(en_count: int, covered_count: int, gaps: list[dict]) -> dict:
+    """Roll a gap list up into the summary block callers badge and warn on."""
+    return {
+        "en_count": en_count,
+        "en_aligned": covered_count,
+        "gap_count": len(gaps),
+        "en_orphan_chars": sum(g["chars"] for g in gaps),
+        "max_gap_chars": max((g["chars"] for g in gaps), default=0),
+    }
+
+
 def align_chunk(
     chunk_path: str,
     source_lang: str = "en",
@@ -411,8 +513,13 @@ def align_chunk(
             "es_count": int,
             "high_confidence_pct": float,
             "avg_similarity": float,
+            "coverage": {...},
+            "gaps": [...],
             "alignments": [...]
         }
+
+    ``gaps`` / ``coverage`` report source runs the translation never covered —
+    see :func:`_coverage_gaps`. Indices are chunk-local.
     """
     path = Path(chunk_path)
     with open(path, encoding="utf-8") as f:
@@ -439,6 +546,8 @@ def align_chunk(
     )
     similarities = [a["similarity"] for a in alignments]
 
+    gaps = _coverage_gaps(en_sentences, alignments)
+
     return {
         "chapter_id": chunk.get("chapter_id", "unknown"),
         "chunk_id": chunk.get("id", path.stem),
@@ -452,6 +561,10 @@ def align_chunk(
         "avg_similarity": round(float(np.mean(similarities)), 3)
         if similarities
         else 0,
+        "coverage": _coverage_summary(
+            len(en_sentences), len({a["en_idx"] for a in alignments}), gaps
+        ),
+        "gaps": gaps,
         "alignments": alignments,
     }
 
@@ -473,8 +586,10 @@ def align_chapter_chunks(
     model = _get_model()
 
     all_alignments = []
+    all_gaps: list[dict] = []
     total_en = 0
     total_es = 0
+    total_covered = 0
 
     for chunk_idx, chunk_path in enumerate(sorted(chunk_paths)):
         result = align_chunk(
@@ -500,9 +615,19 @@ def align_chapter_chunks(
                 a["es_indices"] = [i + total_es for i in a["es_indices"]]
             a["chunk_id"] = result["chunk_id"]
 
+        # Same offset treatment for coverage gaps. `position` stays chunk-relative
+        # on purpose: a "tail" gap on a non-final chunk is a chunk-seam drop, which
+        # is the signal worth acting on.
+        for g in result["gaps"]:
+            g["en_start"] += total_en
+            g["en_end"] += total_en
+            g["chunk_id"] = result["chunk_id"]
+
         all_alignments.extend(result["alignments"])
+        all_gaps.extend(result["gaps"])
         total_en += result["en_count"]
         total_es += result["es_count"]
+        total_covered += result["coverage"]["en_aligned"]
 
     high_conf_sentences = sum(
         len(a.get("es_indices", [a["es_idx"]]))
@@ -522,6 +647,8 @@ def align_chapter_chunks(
         "avg_similarity": round(float(np.mean(similarities)), 3)
         if similarities
         else 0,
+        "coverage": _coverage_summary(total_en, total_covered, all_gaps),
+        "gaps": all_gaps,
         "alignments": all_alignments,
     }
 

@@ -25,6 +25,11 @@ API path auto-aligns; still offer review once chapters are readable.
    Read the result from `.harness/last_output.json` — structure is
    `chapters[] → chunks[] → translated_text` (sibling `source_text`).
 
+   **Report any `coverage_warnings`** in that output before reviewing anything
+   else: each one is a run of source sentences the translation never covered
+   (dropped prose). No judge or evaluator catches these — the Spanish reads
+   perfectly without them. Re-translate the named chunk and re-align.
+
 2. **Invoke the judge-review skill.** Do not re-implement dialogue/address/etc.
    judges here. Hand it the project slug and the chapter set just translated;
    follow that skill's ROUTER / setup precheck (address map, etc.).

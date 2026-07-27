@@ -44,6 +44,8 @@ STRINGS = {
         "badge_fn": "fn",
         "badge_flag": "flag",
         "badge_aligned": "aligned",
+        "badge_gap": "gap",
+        "badge_gap_title": "characters of source text with no translation",
         "badge_reviewed": "reviewed",
         "badge_unread": "unread",
 
@@ -269,6 +271,8 @@ STRINGS = {
         "badge_fn": "nota",
         "badge_flag": "marca",
         "badge_aligned": "alineado",
+        "badge_gap": "hueco",
+        "badge_gap_title": "caracteres del texto original sin traducción",
         "badge_reviewed": "revisado",
         "badge_unread": "sin leer",
 
