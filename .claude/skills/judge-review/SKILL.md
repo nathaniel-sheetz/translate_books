@@ -292,19 +292,29 @@ Offer this only **after** findings are relayed and **persisted** (`--persist`). 
 `translated_text` in place, so it is careful and user-gated: it only ever proposes clean,
 uniquely-locatable text swaps, and it never applies anything you didn't explicitly select.
 
+`apply` writes its JSON to **stdout only**. The recombine/realign step loads a BERT model and
+the EPUB builder prints progress; all of that is redirected to stderr, so stdout still parses
+as exactly one JSON object. Aligner chatter on stderr is not an error — read the JSON.
+
 6c. **Dry-run the plan.** Run `apply` with `--dry-run` (or just omit `--select`). Relay the
 `applicable[]` fixes as `old → new` previews and list the `manual[]` findings with their
-`reason` — those can't be auto-applied (instruction-type suggestion, or an absent/ambiguous
-excerpt); point the user to the reader / web chunk editor for them.
+`reason` — those can't be auto-applied (instruction-type suggestion, an absent/ambiguous
+excerpt, or a suggestion that restates the prose around the excerpt —
+`suggestion_restates_context`, which would duplicate that prose in the book); point the user
+to the reader / web chunk editor for them.
 ```bash
 python scripts/run_judges.py apply --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03 --dry-run
 ```
 7c. **Get an explicit selection.** The user picks which `applicable[].id`s to apply — **never
 apply without an explicit pick.** Use `AskUserQuestion` (multiSelect, **≤4 options**) when there
-are ≤4; for more, present a numbered list and have the user reply with the ids. If a listed
-suggestion still reads to you as an *instruction* rather than literal replacement text, flag it
-and leave it for manual editing even though the CLI classified it applicable.
+are ≤4; for more, present a numbered list and have the user reply with the ids. Two hand-checks
+on each listed fix before you offer it, both of which veto a fix the CLI classified applicable:
+- If the suggestion still reads to you as an *instruction* rather than literal replacement text.
+- If `new` restates words that already sit immediately before or after `old` in the chunk. Read
+  the surrounding chunk text, not just the `old → new` pair. Judges rewrite a whole dialogue
+  turn while keying the finding to a short excerpt; splicing that in prints the shared words
+  twice. The CLI now rejects these, but it measures whole words — confirm by eye.
 
 8c. **Apply the picked ids.** Pass them comma-separated; add `--rebuild-epub` if the user wants
 the book rebuilt now (recombine + realign always run either way):
@@ -315,6 +325,11 @@ python scripts/run_judges.py apply --project understood-betsy --judge dialogue \
 Relay the summary (`applied`, `chapters_realigned`, `archived_to`, `backups`). Every edit is
 logged to `corrections_applied.jsonl` (the same audit log as reader corrections) and a pre-edit
 chunk snapshot is kept under `.chunk_edits/` — so an apply is recoverable and traceable.
+
+Re-running the *same* `--select` is safe: ids whose edit is already in the chunk come back in
+`already_applied[]` with `status: "ok"` and rc 0, and nothing is re-archived or re-realigned. So
+a retry after an ambiguous-looking run is a no-op, not a double edit. An id the plan withheld
+comes back in `manual_ids[]`; `unknown_ids[]` now means only "no finding with that id in scope".
 
 9c. **Refresh the badges.** Applying stale-marks each edited chunk's `evaluations/<chunk>.json`
 (a fixed finding must not keep asserting a failure). Offer to **re-run the judge** on the

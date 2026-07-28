@@ -1,5 +1,5 @@
 # Forms-of-Address (usted/tú) Compliance Judge
-# Version: 1.1
+# Version: 1.2
 # Checks whether a Spanish translation uses the expected formal/informal address
 # per the book's address map. Variables: address_rubric, address_map,
 # source_text, translation_text, chapter_ref
@@ -91,3 +91,9 @@ Respond with ONLY a JSON object, no other text, in exactly this shape:
   ],
   "summary": "<one-sentence overall assessment>"
 }
+
+`suggestion` must be a **drop-in replacement for the excerpt alone**: it must not
+restate any words that appear before or after the excerpt in the translation. If
+the fix needs surrounding text to be moved or repunctuated, widen the `excerpt`
+to cover that text instead — a suggestion that repeats its own context is
+discarded, because splicing it in would print those words twice.

@@ -19,6 +19,8 @@ from src.judges.fixes import (
     REASON_NO_SUGGESTION,
     REASON_SUGGESTION_EQUALS_EXCERPT,
     REASON_SUGGESTION_NOT_LITERAL,
+    REASON_SUGGESTION_RESTATES_CONTEXT,
+    boundary_overlap,
     classify_fix,
     looks_like_instruction,
     to_correction_record,
@@ -96,6 +98,146 @@ class TestClassifyManual:
         assert result.excerpt == "dijo él"
         assert result.suggestion == "move to a new line"
         assert result.rule == "raya-spacing"
+
+
+class TestRestatesContext:
+    """Regression net for the 2026-07-27 duplication bug.
+
+    A judge that rewrites a whole dialogue turn but keys the finding to a short
+    excerpt produces a ``suggestion`` containing prose that already sits outside
+    that excerpt. The excerpt still locates uniquely, so every earlier check
+    passes — and splicing the suggestion in leaves the surrounding words printed
+    twice. Each case below is the *actual* old/new pair from a real corrupting
+    apply, against the real chunk text it was applied to.
+    """
+
+    def test_head_restatement_chapter_18(self):
+        """`new` prepends the 10 words of dialogue that already precede the excerpt."""
+        text = (
+            "Aun así no hubo respuesta.\n\n"
+            "—¿Te estás poniendo terco? ¿Ni siquiera me vas a contestar? —El jefe de la "
+            "pandilla, evidentemente, se estaba enojando. De pronto gritó—:\n\n"
+            "»¡Firma este papel, Hardy, o te vas a morir de hambre... tan seguro como que "
+            "me llamo Snackley!"
+        )
+        old = (
+            "—El jefe de la pandilla, evidentemente, se estaba enojando. De pronto gritó—:"
+            "\n\n»¡Firma este papel, Hardy, o te vas a morir de hambre... tan seguro como "
+            "que me llamo Snackley!"
+        )
+        new = (
+            "—¿Te estás poniendo terco? ¿Ni siquiera me vas a contestar? —El jefe de la "
+            "pandilla, evidentemente, se estaba enojando. De pronto gritó—. ¡Firma este "
+            "papel, Hardy, o te vas a morir de hambre... tan seguro como que me llamo "
+            "Snackley!"
+        )
+        result = classify_fix(_issue(old, new, rule="same-speaker-continuation"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_RESTATES_CONTEXT
+
+    def test_tail_restatement_survives_repunctuation_chapter_03(self):
+        """`new` appends 15 following words *and* repunctuates them.
+
+        The restated span is not byte-identical to the original — the suggestion
+        switches the turn to guillemets and moves a comma — so a duplicate-n-gram
+        scan over the spliced result misses it. The word-level measure does not.
+        """
+        text = (
+            "…habían aprovechado la oportunidad para gastarles una broma.\n\n"
+            "—En ese caso —murmuró para sí—, la historia va a correr por toda la "
+            "preparatoria de Bayport para el lunes, y nos van a molestar hasta el "
+            "cansancio por haber salido corriendo. Deberíamos habernos quedado.\n\n"
+            "Algo le decía, sin embargo, que no se trataba de una broma escolar cualquiera."
+        )
+        old = (
+            "—En ese caso —murmuró para sí—, la historia va a correr por toda la "
+            "preparatoria de Bayport para el lunes"
+        )
+        new = (
+            "«En ese caso —pensó—, la historia va a correr por toda la preparatoria de "
+            "Bayport para el lunes, y nos van a molestar hasta el cansancio por haber "
+            "salido corriendo. Deberíamos habernos quedado»."
+        )
+        result = classify_fix(_issue(old, new, rule="guillemets-for-thoughts"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_RESTATES_CONTEXT
+
+    def test_small_overlap_chapter_23(self):
+        """1 restated word at the head, 2 at the tail — 10 and 14 characters.
+
+        Proves a character-length threshold (`len(new) > len(old) * 1.2`, or
+        "≥15 characters of adjacent text") is not enough, and that
+        ``MIN_RESTATED_WORDS = 1`` is what catches the head-only single word.
+        """
+        text = (
+            "Arriba se seguía oyendo el alboroto mientras la policía continuaba la batalla "
+            "contra los contrabandistas.\n\n"
+            "—¡Arriba! —espetó el detective con sequedad. Sin apartar la vista de Snackley, "
+            "le dijo al hombre del catre:\n\n—Volveremos por usted más tarde... Sr. Jones."
+        )
+        old = (
+            "—espetó el detective con sequedad. Sin apartar la vista de Snackley, le dijo "
+            "al hombre del catre:\n\n—Volveremos por usted más tarde"
+        )
+        new = (
+            "—¡Arriba! —espetó el detective con sequedad.\n\nSin apartar la vista de "
+            "Snackley, le dijo al hombre del catre:\n\n—Volveremos por usted más tarde... "
+            "Sr. Jones."
+        )
+        result = classify_fix(_issue(old, new, rule="narration-separation"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_RESTATES_CONTEXT
+
+    def test_head_restatement_wonder_book_of_horses(self):
+        """The 2026-07-01 occurrence — a human deleted this duplicate five hours later."""
+        text = (
+            "—Pero —dijo el muchacho— mi padre Helios, que conduce el ardiente carro, y que…"
+            "\n\n—No me hables —lo interrumpió el insolente— , no me hables de tu padre el "
+            "cochero. Pues, te morirías de miedo de llevar el carrito de cabras de tu "
+            "hermana por el jardín."
+        )
+        old = "—lo interrumpió el insolente— , no me hables de tu padre el cochero."
+        new = "—No me hables —lo interrumpió el insolente—, no me hables de tu padre el cochero."
+        result = classify_fix(_issue(old, new, rule="inciso-punctuation"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_RESTATES_CONTEXT
+
+    def test_preserving_an_existing_boundary_overlap_stays_applicable(self):
+        """Only a *newly introduced* repetition is rejected.
+
+        Here the excerpt already opens with the two words that precede it (an
+        overlap of 2, at/over the threshold), and the suggestion keeps them —
+        so it repeats nothing the text did not already say. Without the
+        "greater than the excerpt's own overlap" guard this would be a false
+        positive even at ``MIN_RESTATED_WORDS = 1``.
+        """
+        text = "Estaba muy bien. Muy bien —dijo ella."
+        old, new = "Muy bien —dijo ella.", "Muy bien —dijo ella—."
+        assert boundary_overlap(text, text.find(old), text.find(old) + len(old), old)[0] == 2
+        result = classify_fix(_issue(old, new), text)
+        assert isinstance(result, ProposedFix)
+
+    def test_single_new_boundary_word_is_withheld(self):
+        """A newly introduced one-word head restatement is enough to withhold."""
+        text = "Dijo entonces. Entonces —respondió ella."
+        old, new = "—respondió ella.", "Entonces —respondió ella."
+        start = text.find(old)
+        assert boundary_overlap(text, start, start + len(old), new)[0] == 1
+        result = classify_fix(_issue(old, new), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_RESTATES_CONTEXT
+
+    def test_plain_inciso_repunctuation_stays_applicable(self):
+        """A real archived fix (record #0): rewrites only the excerpt's own span."""
+        text = (
+            "—Ven conmigo —y dio unos golpecitos en el banco a su lado—. Hay sitio de sobra."
+        )
+        result = classify_fix(
+            _issue("conmigo —y dio unos golpecitos", "conmigo. —Dio unos golpecitos",
+                   rule="inciso-punctuation"),
+            text,
+        )
+        assert isinstance(result, ProposedFix)
 
 
 class TestInstructionHeuristic:

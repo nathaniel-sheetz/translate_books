@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.38.1.0] - 2026-07-28
+
+### Fixed
+- **Judge apply no longer splices suggestions that restate adjacent prose.** `classify_fix` withholds findings whose replacement would duplicate words already outside the excerpt (`suggestion_restates_context`); a post-splice backstop refuses to save if a write would still introduce that duplication (including when `corrected_es` appears more than once). `MIN_RESTATED_WORDS` is 1 so a single newly introduced boundary word is enough.
+- **Re-selecting an already-applied id is a true no-op only when the edit clearly landed.** `_already_applied_edit` requires a unique `corrected_es` hit and, when the excerpt is not a substring of the suggestion, that the excerpt is gone — short common suggestions no longer false-succeed.
+- **Selecting a withheld finding reports `manual_ids` separately from `unknown_ids`**, so "don't select this" and "no such id" are distinct in the apply error payload.
+
+### Changed
+- Dialogue/address judge prompts tell the model not to restate surrounding context in `suggestion`; judge-review skill documents the restatement withhold reason.
+
 ## [0.38.0.0] - 2026-07-28
 
 ### Added
