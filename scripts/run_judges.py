@@ -562,7 +562,7 @@ def _cmd_commit(args: argparse.Namespace) -> int:
 
 
 def _find_all(haystack: str, needle: str) -> list[int]:
-    """Every start offset of ``needle`` in ``haystack`` (may be empty)."""
+    """Every start offset of ``needle`` in ``haystack`` (empty list if absent)."""
     out: list[int] = []
     i = haystack.find(needle)
     while i != -1:
@@ -572,14 +572,17 @@ def _find_all(haystack: str, needle: str) -> list[int]:
 
 
 def _restated_after_splice(text: str, records: list[dict]) -> str | None:
-    """Post-splice backstop: does ``text`` now repeat prose around a spliced fix?
+    """Post-splice backstop: does ``text`` now repeat prose at a spliced ``new``?
 
     ``classify_fix`` already rejects suggestions that restate adjacent context,
     but it judges each fix alone against the *pre-edit* text. Two things can
-    still slip past it: several selected fixes on one chunk interacting, and
-    ``_resolve_correction_span``'s anchored/first-match fallback landing on a
-    span the classifier never validated. Re-measuring the finished text closes
-    both. Returns the repeated words, or ``None`` when the result is clean.
+    still slip past it: several selected fixes on one chunk interacting at a
+    replacement *boundary*, and ``_resolve_correction_span``'s anchored/
+    first-match fallback landing on a span the classifier never validated.
+    This re-checks every occurrence of each applied ``corrected_es`` (not just
+    the one nearest the pre-edit hint), measuring boundary overlap only — it
+    does not scan for interior / between-fix duplication away from those
+    edges. Returns the repeated words, or ``None`` when the result is clean.
     """
     from src.judges.fixes import restated_context
 
@@ -588,17 +591,14 @@ def _restated_after_splice(text: str, records: list[dict]) -> str | None:
         old = rec.get("original_es") or ""
         if not new:
             continue
-        starts = _find_all(text, new)
-        if not starts:
-            continue
-        hint = rec.get("chunk_offset_start")
-        if isinstance(hint, int) and not isinstance(hint, bool):
-            start = min(starts, key=lambda s: abs(s - hint))
-        else:
-            start = starts[0]
-        repeated = restated_context(text, start, start + len(new), new, baseline=old)
-        if repeated:
-            return repeated
+        # Score every hit: the pre-edit offset hint can point at a twin of
+        # ``new`` that was already in the chunk while the real splice landed
+        # elsewhere (fallback span). Missing that occurrence would green-light
+        # a corrupt write.
+        for start in _find_all(text, new):
+            repeated = restated_context(text, start, start + len(new), new, baseline=old)
+            if repeated:
+                return repeated
     return None
 
 
@@ -607,11 +607,17 @@ def _already_applied_edit(
 ) -> bool:
     """True if this exact edit is already archived *and* already in the chunk.
 
-    Both halves matter: the archive says we made the edit, the chunk text says
-    it is still there. Together they mean the desired state already holds, so
-    re-running the same ``--select`` is a no-op rather than a failure.
+    The archive says we made the edit; the chunk must show the desired state
+    holds so a re-``--select`` is a no-op rather than a failure. A short
+    ``suggestion`` that merely occurs somewhere (``el``, ``dijo``) is not
+    enough — it must appear exactly once, and when the excerpt is not itself a
+    substring of the suggestion the excerpt must be gone.
     """
-    if not suggestion or suggestion not in chunk_text:
+    if not suggestion:
+        return False
+    if chunk_text.count(suggestion) != 1:
+        return False
+    if excerpt and excerpt not in suggestion and excerpt in chunk_text:
         return False
     return any(
         rec.get("chunk_id") == chunk_id

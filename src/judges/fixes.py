@@ -59,10 +59,12 @@ _BOUNDARY_WINDOW = 60
 
 # Smallest boundary repetition treated as a restatement. Measured by replaying
 # every archived judge fix across the local books (104 reconstructable records):
-# 99 score 0 on both sides, and the 5 known corrupting applies score 1, 2, 3, 10,
-# 14 and 15. Even a threshold of 1 is false-positive-free on that corpus; 2 is
-# the conservative default. See tests/test_applied_corrections_audit.py.
-MIN_RESTATED_WORDS = 2
+# 99 score 0 on both sides; the 5 known corrupting applies produce the six
+# side-scores 1, 2, 3, 10, 14, 15 (one corruption contributes both head and
+# tail). A threshold of 1 is false-positive-free on that corpus and catches the
+# chapter_23 head-only single-word restatement; prefer catching silent dupes
+# over sparing borderline FPs. See tests/test_applied_corrections_audit.py.
+MIN_RESTATED_WORDS = 1
 
 
 def _words(s: str) -> list[str]:
@@ -182,8 +184,9 @@ def classify_fix(issue: Mapping[str, Any] | Any, translated_text: str) -> Classi
     """Classify one persisted judge issue against the chunk's ``translated_text``.
 
     Returns a :class:`ProposedFix` only when the excerpt (``location``) occurs
-    **exactly once** and the ``suggestion`` is a concrete replacement that
-    differs from the excerpt and does not read as an instruction. Otherwise a
+    **exactly once**, the ``suggestion`` is a concrete replacement that differs
+    from the excerpt and does not read as an instruction, and splicing it would
+    not restate adjacent context (``suggestion_restates_context``). Otherwise a
     :class:`ManualFinding` explains why it was withheld.
     """
     severity = str(_issue_field(issue, "severity") or "warning")

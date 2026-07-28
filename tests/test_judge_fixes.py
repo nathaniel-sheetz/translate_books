@@ -165,8 +165,9 @@ class TestRestatesContext:
     def test_small_overlap_chapter_23(self):
         """1 restated word at the head, 2 at the tail — 10 and 14 characters.
 
-        This is the case that proves a character-length threshold (`len(new) >
-        len(old) * 1.2`, or "≥15 characters of adjacent text") is not enough.
+        Proves a character-length threshold (`len(new) > len(old) * 1.2`, or
+        "≥15 characters of adjacent text") is not enough, and that
+        ``MIN_RESTATED_WORDS = 1`` is what catches the head-only single word.
         """
         text = (
             "Arriba se seguía oyendo el alboroto mientras la policía continuaba la batalla "
@@ -205,15 +206,26 @@ class TestRestatesContext:
         """Only a *newly introduced* repetition is rejected.
 
         Here the excerpt already opens with the two words that precede it (an
-        overlap of 2, over the threshold), and the suggestion keeps them — so it
-        repeats nothing the text did not already say. Without the "greater than
-        the excerpt's own overlap" guard this would be a false positive.
+        overlap of 2, at/over the threshold), and the suggestion keeps them —
+        so it repeats nothing the text did not already say. Without the
+        "greater than the excerpt's own overlap" guard this would be a false
+        positive even at ``MIN_RESTATED_WORDS = 1``.
         """
         text = "Estaba muy bien. Muy bien —dijo ella."
         old, new = "Muy bien —dijo ella.", "Muy bien —dijo ella—."
         assert boundary_overlap(text, text.find(old), text.find(old) + len(old), old)[0] == 2
         result = classify_fix(_issue(old, new), text)
         assert isinstance(result, ProposedFix)
+
+    def test_single_new_boundary_word_is_withheld(self):
+        """A newly introduced one-word head restatement is enough to withhold."""
+        text = "Dijo entonces. Entonces —respondió ella."
+        old, new = "—respondió ella.", "Entonces —respondió ella."
+        start = text.find(old)
+        assert boundary_overlap(text, start, start + len(old), new)[0] == 1
+        result = classify_fix(_issue(old, new), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_RESTATES_CONTEXT
 
     def test_plain_inciso_repunctuation_stays_applicable(self):
         """A real archived fix (record #0): rewrites only the excerpt's own span."""
