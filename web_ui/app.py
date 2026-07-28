@@ -11,7 +11,6 @@ import json
 import math
 import re
 import secrets
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -39,7 +38,15 @@ from src.utils.file_io import (
 )
 from src.utils.source_text import load_chapter_source_text
 from src.difficulty_scorer import score_book
-from src.utils.text_utils import dialogue_instruction, image_placeholder_instruction
+from src.utils.text_utils import (
+    KWIC_WORDS,
+    dialogue_instruction,
+    find_folded,
+    fold,
+    fold_with_map,
+    image_placeholder_instruction,
+    kwic_window,
+)
 from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
     append_feedback,
@@ -1481,79 +1488,16 @@ _SEARCH_MIN_QUERY = 2
 # Anchor prefix length for result-click nav (D2: generous prefix, first-match).
 _SEARCH_ANCHOR_LEN = 80
 # Words of context on each side of a KWIC source snippet (D4).
-_SEARCH_KWIC_WORDS = 7
+_SEARCH_KWIC_WORDS = KWIC_WORDS
 
-
-def _fold(text: str) -> str:
-    """Accent/case-fold for substring matching: NFD, drop combining marks, casefold."""
-    decomposed = unicodedata.normalize("NFD", text)
-    no_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
-    return no_marks.casefold()
-
-
-def _fold_with_map(text: str) -> tuple[str, list[int]]:
-    """Fold ``text`` and return ``(folded, orig_index)`` where ``orig_index[i]``
-    is the index in the ORIGINAL ``text`` that produced folded char ``i``.
-
-    Folding can change string length (combining marks dropped, ``casefold`` can
-    expand a char to several), so match offsets in folded space cannot be reused
-    against the original. This map carries them back to the original (D5).
-    """
-    folded_chars: list[str] = []
-    orig_index: list[int] = []
-    for i, ch in enumerate(text):
-        for c in unicodedata.normalize("NFD", ch):
-            if unicodedata.combining(c):
-                continue
-            for fc in c.casefold():
-                folded_chars.append(fc)
-                orig_index.append(i)
-    return "".join(folded_chars), orig_index
-
-
-def _find_match(haystack: str, folded_query: str) -> Optional[tuple[int, int]]:
-    """First folded-substring match of ``folded_query`` in ``haystack``.
-
-    Returns ``(start, end)`` offsets into the ORIGINAL ``haystack`` (D5), or
-    ``None`` if there is no match. ``folded_query`` must be pre-folded and
-    non-empty (callers guard on min length).
-    """
-    if not folded_query:
-        return None
-    folded, orig_index = _fold_with_map(haystack)
-    pos = folded.find(folded_query)
-    if pos == -1:
-        return None
-    start = orig_index[pos]
-    end = orig_index[pos + len(folded_query) - 1] + 1
-    return start, end
-
-
-def _kwic_window(text: str, start: int, end: int,
-                 words_each_side: int = _SEARCH_KWIC_WORDS) -> tuple[str, int, int]:
-    """Slice a word-window snippet around ``[start, end)`` in ``text``.
-
-    Returns ``(snippet, match_start, match_end)`` where the offsets index into
-    ``snippet``. Trimmed to word boundaries (D4); whitespace is collapsed, and
-    an ellipsis marks truncation on either side. No sentence segmentation.
-    """
-    match = text[start:end]
-    before_words = text[:start].split()
-    after_words = text[end:].split()
-    left = " ".join(before_words[-words_each_side:]) if before_words else ""
-    right = " ".join(after_words[:words_each_side]) if after_words else ""
-
-    prefix = (left + " ") if left else ""
-    if len(before_words) > words_each_side:
-        prefix = "… " + prefix
-    snippet = prefix + match
-    if right:
-        snippet += " " + right
-    if len(after_words) > words_each_side:
-        snippet += " …"
-
-    ms = len(prefix)
-    return snippet, ms, ms + len(match)
+# The folding/KWIC primitives live in src/utils/text_utils so the annotation
+# concordance can reuse them from a CLI (importing web_ui there would cycle).
+# Aliased to their original private names to keep call sites and D5/D4 comments
+# in this module untouched.
+_fold = fold
+_fold_with_map = fold_with_map
+_find_match = find_folded
+_kwic_window = kwic_window
 
 
 def _chunk_chapter_ids(project_dir: Path) -> set[str]:

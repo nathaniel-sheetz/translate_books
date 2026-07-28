@@ -393,6 +393,12 @@ Sentences are displayed as a vertical list of Spanish text. Tap any sentence to 
 
 Annotated sentences get a subtle colored background tint. Each annotation has an optional note field.
 
+Once you have read a book and left annotations, `scripts/review_annotations.py`
+resolves them in bulk: it researches each note against the style guide, glossary and
+the whole book, writes a dated report, and — with your explicit selection — appends
+its finding back into the annotation (for `footnote` notes, it drafts the actual
+published gloss). See `docs/ANNOTATION_REVIEW.md`.
+
 ### Chunk Editor
 
 For edits that don't fit the one-sentence-at-a-time flow — stray whitespace, wrong paragraph breaks, multi-sentence rewording — tap a sentence in the reader and click **Edit chunk** in the bottom sheet. That opens a full-textarea editor (`/read/<id>/<chapter>/chunk/<chunk_id>/edit`) for the chunk containing the tapped sentence, with the caret pre-positioned near that sentence.

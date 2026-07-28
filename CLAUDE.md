@@ -25,3 +25,4 @@ Key routing rules:
 - Code quality, health check → invoke health
 - Translate a book conversationally, draft style guide/glossary in-chat → invoke translate-harness
 - Run LLM judges, check dialogue compliance, evaluate translation quality → invoke judge-review
+- Review reader annotations, resolve word-choice notes, draft footnote glosses → invoke annotation-review

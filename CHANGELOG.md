@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.0.0] - 2026-07-28
+
+### Added
+- **`scripts/review_annotations.py` — a post-human-review pass over reader annotations.** Translation and the judges both run *before* anyone reads the book; nothing helped with the notes left afterwards, which were a manual to-do list of re-reading context, grepping the book for competing terms, and drafting glosses by hand. The new pipeline reads `annotations.jsonl` and resolves each note by type: a judgement for `word_choice`, a unify-or-accept verdict for `inconsistency`, the actual endnote gloss for `footnote`, an inferred concern plus a next step for `flag`. It is note-only and never edits translated prose — that stays `run_judges.py apply`'s job.
+- **Three interchangeable backends**, mirroring the judges: `run` (API, dollar cost gate), `prepare` → `annotation-worker` Task subagents → `commit`, and `prepare` → `fanout` → `commit` (headless `claude -p` / `cursor-agent -p`). All three render through one seam and parse through one parser, so the report is identical whichever ran.
+- **Deterministic retrieval at prepare time.** Each annotation carries its aligned sentence pair, ±3 sentences of context, matching glossary entries, and — for `word_choice` / `inconsistency` — a book-wide concordance. Source-side concordance hits carry the paired translation, which is what actually exposes one English term rendered several ways. The model reasons over the evidence; it never goes looking for it.
+- **A dated markdown report** at `projects/<slug>/reports/annotations_<timestamp>.md`, in the book's target language, logging each annotation's content **as of run time, verbatim** — applying rewrites or extends that content, so the before-state has to be on record.
+- **`.claude/skills/annotation-review/SKILL.md`** and **`.claude/agents/annotation-worker.md`**, plus `docs/ANNOTATION_REVIEW.md`.
+
+### Changed
+- **Footnote resolutions replace the note's content; the other three types append to it.** A `footnote` annotation's content *is* the published endnote text (`src/endnotes.py` strips the first bracket and publishes the rest), so appending a gloss after an instruction word would print that word into the book — a note reading `[Aragón,] comillas` would publish as *"comillas Región del noreste de España…"*. Replacing drops the instruction and keeps the anchor. Nothing is lost: `annotations.jsonl` is append-only, so the original record stays on disk and the report quotes it. Appended notes (never published) carry a `— IA:` marker so model text is distinguishable from the reader's own.
+- **Multi-anchor footnotes are reviewed but never auto-written.** `[Neuve-Celle,]; [Esaú,]; [Montélimar.]` names three spans while endnotes consume only the first, so the correct fix is splitting one annotation into three — which renumbers endnotes, a human call. The report prints a drafted gloss per anchor so the split can be done by hand.
+- **The folded-search primitives moved from `web_ui/app.py` to `src/utils/text_utils.py`** (`fold`, `fold_with_map`, `find_folded`, `iter_folded`, `kwic_window`) so a CLI can reuse them without importing `web_ui` — the circular-dependency constraint `src/endnotes.py` already documents. `app.py` imports them back under their original private names; the reader's "Find in book" is unchanged.
+- **`src/annotations/store.py` is now the one implementation of the annotation tombstone rule**, replacing the copy in `src/endnotes.py`. It imports nothing from `web_ui`, so the EPUB path can share it.
+- **`src/judges/scope.py`'s `flags:` scope stays unimplemented, now on the record as a decision.** Reviewing annotations needs a different target shape (one annotation, not one chunk) and a different persistence path (the annotation itself, not `evaluations/*.json` and the dashboard badges), so it reuses the judges' plumbing instead of being forced through `JudgeTarget`.
+
+### Fixed
+- **Concordance search matches whole words.** Substring semantics are right for the reader's search-as-you-type but useless as evidence: a bare-word annotation reading `Test` matched inside *protestaba*, *detestable* and *atestiguada*, returning 11 hits that said nothing about the word. `count_folded` / `iter_folded` gained a `whole_word` flag; terms under 3 characters, hints longer than 4 words, and terms appearing more than 150 times are reported by count without quoting lines, so one common word cannot crowd the prompt.
+- **Concordance snippets are contiguous slices.** `kwic_window` splits the match out and re-joins on whitespace so the reader can highlight by offset, rendering `relámpago , sigue`; evidence read by a model has to preserve exact spelling and punctuation.
+- **`commit` merges into `results.json` by key instead of overwriting it.** Committing after each worker wave is the documented workflow, and a wholesale overwrite meant wave 2 discarded wave 1's apply plan — while a commit that found only missing drafts (the state right after a re-prepare) erased the plan entirely.
+- **Re-selecting an applied key reports `already_applied`, not `unknown_ids`.** After a re-prepare an applied note is skipped as `already_reviewed` and drops out of the plan, so a retry looked like a bad key rather than a completed write.
+- **`apply` refuses a note edited since the review.** The live content is compared against what the review saw; a mismatch is reported as `stale` and skipped rather than silently overwritten with a recommendation that no longer describes the text on disk.
+
 ## [0.38.2.0] - 2026-07-28
 
 ### Fixed
