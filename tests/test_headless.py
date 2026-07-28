@@ -139,6 +139,42 @@ def test_run_headless_wave_rejects_claude_bin_with_cursor():
     assert "only valid with cli=claude" in result["error"]
 
 
+def test_run_headless_wave_failure_reports_stdout_not_just_stderr(tmp_path: Path):
+    """A warning on stderr must not hide the real cause on stdout.
+
+    `claude -p` prints the actual reason it refused ("Credit balance is too low")
+    on stdout while stderr carries an unrelated connectors warning. Preferring
+    stderr reported the warning for every failed job and buried the one line that
+    explained the whole wave.
+    """
+    out = tmp_path / "draft.txt"
+
+    def fake_runner(cmd, *, input_text, cwd):
+        return 1, "Credit balance is too low", "⚠ claude.ai connectors are disabled"
+
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(out)}],
+        model="sonnet",
+        concurrency=1,
+        runner=fake_runner,
+    )
+    assert result["counts"]["failed"] == 1
+    error = result["failed"][0]["error"]
+    assert "Credit balance is too low" in error
+    assert "connectors are disabled" in error
+
+
+def test_run_headless_wave_failure_falls_back_to_exit_code(tmp_path: Path):
+    out = tmp_path / "draft.txt"
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(out)}],
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (3, "", ""),
+    )
+    assert result["failed"][0]["error"] == "exit 3"
+
+
 def test_run_headless_wave_cursor_error_envelope_fails_job(tmp_path: Path):
     out = tmp_path / "draft.txt"
     envelope = json.dumps({

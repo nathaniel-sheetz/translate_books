@@ -61,12 +61,21 @@ the same shape whichever ran.
 
 | Backend | Path | Spend | Gate |
 |---|---|---|---|
-| API | `run` | metered $ | dollar cost gate (`--cost-limit`, `--confirm`) |
-| Task subagents | `prepare` → spawn `annotation-worker` → `commit` | none | usage gate |
-| Headless | `prepare` → `fanout` → `commit` | none | usage gate |
+| API | `run` | metered $ on this repo's key | dollar cost gate (`--cost-limit`, `--confirm`) |
+| Task subagents | `prepare` → spawn `annotation-worker` → `commit` | none (session usage) | usage gate |
+| Headless | `prepare` → `fanout` → `commit` | whatever the local CLI's auth bills | usage gate |
 
-Headless is the better default: 6–40 annotations is one bounded wave, and it is the
-only path that uses the prompt cache.
+Headless is the better default for throughput: 6–40 annotations is one bounded
+wave, and it is the only path that uses the prompt cache.
+
+**Headless is only free on a subscription login.** `fanout` shells out to the
+user's own `claude` / `cursor-agent` binary, so it bills whatever that CLI is
+authenticated with. On an API-key login it spends metered credit and the wave
+starts failing mid-run once the balance is gone — observed on a real
+`stormy-misty-s-foal` run, where 15 of 28 jobs landed and the rest returned
+`Credit balance is too low`. That message arrives on the CLI's **stdout** while
+stderr carries an unrelated connectors warning, so `headless.py` reports both
+streams; reporting stderr alone hid the cause behind a red herring.
 
 ### The cache split
 

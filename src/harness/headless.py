@@ -586,7 +586,12 @@ def run_headless_wave(
             cmd = _build_cmd(cli_name, cli_bin, model, spf_for_cmd)
             rc, stdout, stderr = run(cmd, input_text=stdin_text, cwd=cwd)
             if rc != 0:
-                detail = (stderr or stdout or f"exit {rc}").strip()
+                # Report BOTH streams. These CLIs put the actual cause on stdout
+                # ("Credit balance is too low") while stderr carries unrelated
+                # warnings ("claude.ai connectors are disabled…"), so preferring
+                # stderr reported the warning and hid the reason every job failed.
+                parts = [p.strip() for p in (stdout, stderr) if p and p.strip()]
+                detail = " | ".join(parts) or f"exit {rc}"
                 return job_id, False, detail[:500]
             try:
                 prose = _extract_output(cli_name, stdout)

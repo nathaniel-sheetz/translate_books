@@ -6,7 +6,7 @@ description: |
   inconsistencies, an actual endnote gloss for footnote marks, and an investigation
   for "Other" notes. Produces a dated markdown report, then — only with an explicit
   selection — appends a brief version back into the annotation itself. Three
-  interchangeable backends: API (metered), Task subagents, and headless (both free).
+  interchangeable backends: API (metered), Task subagents (no dollars), and headless.
   Use when asked to "review my annotations", "resolve the notes I left", "go through
   my reader annotations", "draft the footnote glosses", or "annotation-review".
 allowed-tools:
@@ -100,9 +100,17 @@ shape whichever ran.
 
 | | Spend | Gate |
 |---|---|---|
-| **API** (`run`) | metered $ | dollar cost gate |
+| **API** (`run`) | metered $ on this repo's key | dollar cost gate |
 | **Task subagents** (`prepare` → spawn → `commit`) | none (session usage) | usage gate |
-| **Headless** (`prepare` → `fanout` → `commit`) | none (session usage) | usage gate |
+| **Headless** (`prepare` → `fanout` → `commit`) | whatever the local CLI's auth bills | usage gate |
+
+**Headless is "free" only on a subscription login.** `fanout` shells out to the
+user's own `claude` / `cursor-agent`, so it bills whatever that CLI is
+authenticated with — on an API-key login it spends metered credit, and the wave
+fails mid-run when that balance is exhausted (`Credit balance is too low`, now
+surfaced verbatim in `failed[].error`). Don't promise "no spend" for `fanout`
+without knowing how their CLI is logged in. Task workers are the genuinely
+free-of-dollars path.
 
 **Prefer headless for a whole-book run.** A book carries 6–40 annotations, which is
 one bounded wave with no per-wave turn ceremony, and it is the only path that gets
