@@ -531,7 +531,11 @@ def _dispatch(args: argparse.Namespace):
         )
     if cmd == "retranslate":
         chunk_ids = None
-        if args.chunk_ids:
+        # `is not None`, not truthiness: `--chunk-ids ""` must reach flow as an EMPTY
+        # list (an explicit scope that parsed to nothing → rejected there), not as None
+        # (the flag was never passed → the whole project). On a destructive verb those
+        # two must never collapse into each other.
+        if args.chunk_ids is not None:
             chunk_ids = [c.strip() for c in args.chunk_ids.split(",") if c.strip()]
         return flow.retranslate(args.project, chapters=args.chapters,
                                 chunk_ids=chunk_ids, yes=args.yes, archive=args.archive)

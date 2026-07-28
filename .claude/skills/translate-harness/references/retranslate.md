@@ -107,8 +107,21 @@ qualitatively. That is expected, not a failure.
 ## Restoring from an archive (manual — there is no restore command)
 
 Read `projects/<slug>/archive/<stamp>/manifest.json` first: it lists exactly what was captured and
-where each file came from. Then copy back what you want — `chunks/`, `chapters/`, `alignments/`, the
-sidecars, the EPUBs — and re-run `combine` + `align`.
+where each file came from, plus `contains` / `excludes`. Then copy back what you want and re-run
+`combine` + `align`.
+
+The snapshot is **narrower than the `downstream` census** the preview shows you — the census reports
+everything a redo affects, the archive stores only what it can meaningfully restore:
+
+| In the archive | NOT in the archive |
+|---|---|
+| `chunks/*.json` (in scope), `chapters/*.txt`, `alignments/*.json` | `.chunk_edits/` — manual per-chunk edit history |
+| `*.epub` | `retranslations.jsonl` |
+| `annotations.jsonl`, `corrections_applied.jsonl`, `reviewed.json` | `evaluations/` (self-healing), `.harness/` (rebuilt by prepare) |
+
+`retranslate` never deletes anything in the right-hand column — it is excluded from the *snapshot*,
+not destroyed. But if the user plans to hand-edit or delete those after the redo, copy them
+somewhere first: the archive will not bring them back.
 
 ## What this file deliberately does NOT do
 

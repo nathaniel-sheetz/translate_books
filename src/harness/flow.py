@@ -1618,12 +1618,29 @@ def translate_commit(
                 combine_failed.append({"chapter_id": chapter_id,
                                        "error": f"{type(exc).__name__}: {exc}"[:500]})
 
+    # A mixed run still recombines every chapter that completed, so the recombine
+    # outcome belongs in BOTH branches — reporting it only on the clean path is how a
+    # partial commit quietly leaves chapters/*.txt stale while the agent reads
+    # "re-spawn the failures" and moves on.
+    def _combine_note() -> str:
+        note = ""
+        if recombined:
+            note += f" Refreshed chapters/*.txt for {len(recombined)} completed chapter(s)."
+        if combine_failed:
+            note += (
+                f" WARNING: {len(combine_failed)} chapter(s) failed to recombine (see "
+                f"`combine_failed`) — chapters/*.txt is stale for those; fix and run "
+                f"`combine --chapters <ids>`."
+            )
+        return note
+
     if failed or missing:
         instructions = (
             "Re-spawn workers for any `failed` (fix per the named problems) and `missing` "
             "chunk_ids — write fresh prose to their draft_path — then run `translate-commit` "
             "again. Cap re-spawns ~3, then surface for manual edit."
         )
+        instructions += _combine_note()
     else:
         instructions = "All in-scope chunks committed"
         instructions += (
@@ -1892,16 +1909,16 @@ def translate_fanout(
 #   translate-prepare      → keeps non-empty drafts by design (:1296-1302); the
 #                            rescue only covers drafts NOT in the new manifest
 #                            (:1359-1360), so it reports rescued_prior_drafts: 0
-#   translate-fanout       → skips every entry that already has a draft (:1698)
+#   translate-fanout       → skips every entry that already has a draft (:1776-1778)
 #   translate-commit       → skips only chunks that already has_translation
-#                            (:1537) — just cleared, so it commits ALL the stale
+#                            (:1543) — just cleared, so it commits ALL the stale
 #                            drafts and reports "N committed, 0 failed"
 #
 # The user gets "fully re-translated, zero failures" over byte-identical old
 # prose; every guard passes because the old drafts are genuinely good
 # translations, just not new ones. This function is the supported way to break
-# that chain: it clears the chunk AND deletes the draft, atomically, with a
-# preview, an optional archive, and a run-log beat.
+# that chain: it clears the chunk AND deletes the draft (both sides of the
+# landmine), with a preview, an optional archive, and a run-log beat.
 
 def retranslate(
     project: str,
@@ -1914,13 +1931,15 @@ def retranslate(
     """Clear translations + their stale worker drafts so a redo actually re-runs.
 
     **Without ``yes`` this is a PREVIEW** — it reports exactly what would change and
-    touches nothing (``dry_run: True``). With ``yes`` it clears each in-scope chunk's
-    ``translated_text`` / ``translated_at`` / ``status`` / ``review_data`` /
-    ``last_llm_log`` / ``prompt_metadata`` and deletes that chunk's rendered
-    ``.draft.txt`` / ``.prompt.txt`` / ``.body.txt``. Chunk JSON files are never
-    deleted (``source_text`` and the chunking live there), and ``preamble.txt`` /
-    ``manifest.json`` are kept: prepare rewrites both, and leaving the manifest makes a
-    premature ``translate-commit`` fail LOUDLY with ``missing`` instead of silently.
+    touches nothing (``dry_run: True``). With ``yes`` it deletes every in-scope chunk's
+    rendered ``.draft.txt`` / ``.prompt.txt`` / ``.body.txt``, then clears translation
+    fields (``translated_text`` / ``translated_at`` / ``status`` / ``review_data`` /
+    ``last_llm_log`` / ``prompt_metadata``) only on chunks that still have a translation
+    or ``review_data`` — already-pending rows keep their JSON byte-identical. Chunk JSON
+    files are never deleted (``source_text`` and the chunking live there), and
+    ``preamble.txt`` / ``manifest.json`` are kept: prepare rewrites both, and leaving
+    the manifest makes a premature ``translate-commit`` fail LOUDLY with ``missing``
+    instead of silently.
 
     ``archive`` snapshots the chunks, ``chapters/*.txt``, ``alignments/*.json``, the
     EPUBs and the review sidecars into ``archive/<stamp>/`` **before** anything is
@@ -1946,6 +1965,27 @@ def retranslate(
         return {"error": "no chunks yet — nothing to re-translate", "cleared": []}
     if chapters and chunk_ids:
         return {"error": "pass --chapters or --chunk-ids, not both", "cleared": []}
+    # An EMPTY (not absent) chunk_ids means the caller asked to scope the run and the
+    # scope parsed to nothing — `--chunk-ids ""` or a comma typo. Falling through to
+    # the `if chunk_ids:` test below would silently widen a one-chunk redo into the
+    # whole book, and with --yes that clears every translation in the project. A
+    # scope that parsed to nothing is an error, never "everything".
+    if chunk_ids is not None and not chunk_ids:
+        return {
+            "error": "--chunk-ids parsed to an empty list (empty string or bare commas). "
+                     "Refusing to widen an explicit scope to the whole project — pass real "
+                     "chunk_ids, or omit the flag entirely to mean every chunk.",
+            "cleared": [],
+        }
+    # Same footgun, other flag: `--chapters ""` is falsy and would fall through to
+    # "all". An explicit empty scope is an error, never the whole book.
+    if chapters is not None and not str(chapters).strip():
+        return {
+            "error": "--chapters is empty (empty string or whitespace). "
+                     "Refusing to widen an explicit scope to the whole project — pass a "
+                     "real chapter range, or omit the flag entirely to mean every chapter.",
+            "cleared": [],
+        }
 
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
@@ -1994,12 +2034,13 @@ def retranslate(
 
     cleared: list[str] = []
     already_untranslated: list[str] = []
+    unreadable: list[str] = []
     cleared_review_data: list[str] = []
     for cid, cp in in_scope:
         try:
             c = load_chunk(cp)
         except (OSError, ValueError):
-            already_untranslated.append(cid)
+            unreadable.append(cid)
             continue
         if c.has_translation:
             cleared.append(cid)
@@ -2049,6 +2090,7 @@ def retranslate(
             "chapters": chapter_ids,
             "cleared": cleared,
             "already_untranslated": already_untranslated,
+            "unreadable": unreadable,
             "cleared_review_data": cleared_review_data,
             "stale_drafts": stale_drafts,
             "drafts_deleted": [],
@@ -2064,7 +2106,8 @@ def retranslate(
             "instructions": (
                 f"PREVIEW ONLY — nothing was changed. {len(cleared)} chunk(s) across "
                 f"{len(chapter_ids)} chapter(s) would be cleared and {len(stale_drafts)} stale "
-                f"draft(s) deleted. Show the user `stale_drafts`, `downstream` and `warnings`, "
+                f"draft(s) deleted. Show the user `stale_drafts`, `downstream`, `warnings`"
+                f"{', and `unreadable`' if unreadable else ''}, "
                 f"then END THE TURN and ask for approval (including whether to archive). "
                 f"Re-run with --yes (add --archive to snapshot first) in a LATER turn."
             ),
@@ -2099,20 +2142,18 @@ def retranslate(
                 "counts": {**counts, "chunks": 0, "drafts": 0},
             }
 
-    # ── execute ──────────────────────────────────────────────────────────────
-    for _cid, cp in in_scope:
-        try:
-            c = load_chunk(cp)
-        except (OSError, ValueError):
-            continue
-        c.translated_text = None
-        c.translated_at = None
-        c.status = ChunkStatus.PENDING  # the ENUM: a bare "pending" trips a pydantic
-        c.review_data = None            # serializer warning on save
-        c.last_llm_log = None
-        c.prompt_metadata = None
-        save_chunk(c, cp)
-
+    # ── execute: drafts FIRST, then the chunk JSON ───────────────────────────
+    # The order IS the safety argument. There is no atomic two-file write here, so
+    # pick the half-done state that is survivable:
+    #   drafts→chunks (this order): a crash in between leaves the chunks still
+    #     translated and the drafts gone. The redo simply did not happen — prepare
+    #     skips translated chunks, so nothing stale can land — and re-running
+    #     `retranslate` finishes the job. Idempotent.
+    #   chunks→drafts (the tempting order): a crash in between leaves cleared chunks
+    #     and surviving drafts, which is EXACTLY the silent no-op documented above:
+    #     fanout skips the chunk because a draft exists, commit re-lands the old prose
+    #     and reports "0 failed". Recreating that landmine inside the verb built to
+    #     defuse it is the one outcome this function must not have.
     drafts_deleted: list[dict] = []
     prompts_deleted = bodies_deleted = 0
     for cid in chunk_ids_in_scope:
@@ -2132,6 +2173,25 @@ def retranslate(
         if bp.exists():
             bp.unlink(missing_ok=True)
             bodies_deleted += 1
+
+    for _cid, cp in in_scope:
+        try:
+            c = load_chunk(cp)
+        except (OSError, ValueError):
+            continue
+        # Nothing to clear ⇒ do not rewrite the file. The preview promised exactly
+        # `cleared` + `cleared_review_data`; rewriting an already-PENDING row would
+        # break that promise, drop a FAILED row's last_llm_log diagnostics, and bump
+        # an mtime that `status` reads as the combine_stale signal.
+        if not c.has_translation and c.review_data is None:
+            continue
+        c.translated_text = None
+        c.translated_at = None
+        c.status = ChunkStatus.PENDING  # the ENUM: a bare "pending" trips a pydantic
+        c.review_data = None            # serializer warning on save
+        c.last_llm_log = None
+        c.prompt_metadata = None
+        save_chunk(c, cp)
 
     from src.utils.run_logger import log_run_event
     log_run_event(
@@ -2154,6 +2214,7 @@ def retranslate(
         "chapters": chapter_ids,
         "cleared": cleared,
         "already_untranslated": already_untranslated,
+        "unreadable": unreadable,
         "cleared_review_data": cleared_review_data,
         "stale_drafts": stale_drafts,
         "drafts_deleted": drafts_deleted,
@@ -2292,6 +2353,21 @@ def _retranslate_warnings(downstream: dict, stale_drafts: list[dict],
     if cleared_review_data:
         out.append(f"{len(cleared_review_data)} chunk(s) carry in-chunk review_data, which IS "
                    f"cleared (its offsets point into the deleted prose).")
+    n_txt = len(downstream["chapters_txt"]["chapters"])
+    if n_txt:
+        # Named here because `status` cannot name it: combine only runs on FULLY
+        # translated chapters, so a chapter mid-redo is neither complete (no
+        # combine_stale row) nor visibly wrong — chapters/<id>.txt still holds the
+        # whole previous translation and the web reader keeps serving it. The window
+        # closes when the chapter finishes re-translating and translate-commit
+        # recombines it. This warning is the only place the user is told it is open.
+        out.append(
+            f"{n_txt} chapters/*.txt file(s) still hold the PREVIOUS translation and keep "
+            f"serving it to the web reader for the whole redo. `status.combine_stale` will "
+            f"NOT flag them while the chapter is partially translated (combine only runs on "
+            f"complete chapters) — the window closes when translate-commit recombines each "
+            f"chapter as it completes."
+        )
     return out
 
 
@@ -2333,47 +2409,70 @@ def _write_retranslate_archive(project_dir: Path, *, chunk_paths: list[Path],
             "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
         })
 
-    for cp in chunk_paths:
-        _copy(cp, f"chunks/{cp.name}")
-    for ch in chapter_ids:
-        _copy(project_dir / "chapters" / f"{ch}.txt", f"chapters/{ch}.txt")
-        _copy(project_dir / "alignments" / f"{ch}.json", f"alignments/{ch}.json")
-    for p in sorted(project_dir.glob("*.epub")):
-        _copy(p, f"epubs/{p.name}")
-    for name in ("annotations.jsonl", "corrections_applied.jsonl", "reviewed.json"):
-        _copy(project_dir / name, name)
+    try:
+        for cp in chunk_paths:
+            _copy(cp, f"chunks/{cp.name}")
+        for ch in chapter_ids:
+            _copy(project_dir / "chapters" / f"{ch}.txt", f"chapters/{ch}.txt")
+            _copy(project_dir / "alignments" / f"{ch}.json", f"alignments/{ch}.json")
+        for p in sorted(project_dir.glob("*.epub")):
+            _copy(p, f"epubs/{p.name}")
+        for name in ("annotations.jsonl", "corrections_applied.jsonl", "reviewed.json"):
+            _copy(project_dir / name, name)
 
-    manifest = {
-        "kind": "retranslate",
-        "schema_version": 1,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "run_id": state.ensure_run_id(project_dir),
-        "project": project_dir.name,
-        "scope": scope,
-        "chunk_ids": [cp.stem for cp in chunk_paths],
-        "chapter_ids": chapter_ids,
-        "counts": {
-            "chunks": len(chunk_paths),
-            "chapters_txt": sum(1 for f in files if f["archived"].startswith("chapters/")),
-            "alignments": sum(1 for f in files if f["archived"].startswith("alignments/")),
-            "epubs": sum(1 for f in files if f["archived"].startswith("epubs/")),
-            "annotations_rows": downstream["annotations"]["rows"],
-            "corrections_rows": downstream["corrections_applied"]["rows"],
-            "reviewed_marks": len(downstream["reviewed"]["marked"]),
-            "files": len(files),
-            "bytes": sum(f["bytes"] for f in files),
-        },
-        "files": files,
-        "restore": (
-            "No restore command exists. Restoring is a manual copy back over the project — "
-            "see .claude/skills/translate-harness/references/retranslate.md, "
-            "'Restoring from an archive'."
-        ),
-    }
-    manifest_path = dest / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+        manifest = {
+            "kind": "retranslate",
+            "schema_version": 1,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "run_id": state.ensure_run_id(project_dir),
+            "project": project_dir.name,
+            "scope": scope,
+            "chunk_ids": [cp.stem for cp in chunk_paths],
+            "chapter_ids": chapter_ids,
+            "counts": {
+                "chunks": len(chunk_paths),
+                "chapters_txt": sum(1 for f in files if f["archived"].startswith("chapters/")),
+                "alignments": sum(1 for f in files if f["archived"].startswith("alignments/")),
+                "epubs": sum(1 for f in files if f["archived"].startswith("epubs/")),
+                "annotations_rows": downstream["annotations"]["rows"],
+                "corrections_rows": downstream["corrections_applied"]["rows"],
+                "reviewed_marks": len(downstream["reviewed"]["marked"]),
+                "files": len(files),
+                "bytes": sum(f["bytes"] for f in files),
+            },
+            "files": files,
+            # The census in `downstream` is deliberately WIDER than this snapshot, so
+            # spell out the gap here rather than only in the skill docs: this manifest
+            # is what a user reads months later when deciding whether the archive is
+            # enough to go back, and "copy back what you want" is a false promise for
+            # anything not in `contains`.
+            "contains": [
+                "chunks/*.json (in scope)", "chapters/*.txt", "alignments/*.json",
+                "epubs/*.epub", "annotations.jsonl", "corrections_applied.jsonl",
+                "reviewed.json",
+            ],
+            "excludes": [
+                ".chunk_edits/ (manual per-chunk edit history)",
+                "retranslations.jsonl",
+                "evaluations/ (self-healing — translate-commit re-runs the evaluators)",
+                ".harness/ (prompts, drafts, manifest — all rebuilt by translate-prepare)",
+            ],
+            "restore": (
+                "No restore command exists. Restoring is a manual copy back over the project of "
+                "the paths in `contains` — then re-run `combine` + `align`. Anything under "
+                "`excludes` is NOT in this snapshot and cannot be restored from it. See "
+                ".claude/skills/translate-harness/references/retranslate.md, "
+                "'Restoring from an archive'."
+            ),
+        }
+        manifest_path = dest / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        # Partial stamp must not linger under archive/ (preview lists existing_archives).
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     return {
         "requested": True,
         "dir": str(dest),
@@ -3469,6 +3568,7 @@ def _suggested_reference(
     artifacts: dict,
     stage: str,
     epubs: list,
+    combine_stale: list[str] | None = None,
 ) -> str:
     """Map status signals → the translate-harness reference file to load next."""
     if not (project_dir / "project.json").exists() and not artifacts.get("source"):
@@ -3483,6 +3583,14 @@ def _suggested_reference(
     backend = cfg.get("backend")
     footnotes_decision = cfg.get("footnotes_decision")
     has_footnotes = (project_dir / "footnotes.json").exists()
+
+    # SKILL.md router: non-empty combine_stale → epub.md with no stage gate.
+    # chapters/*.txt is what combine / the reader / footnotes / reviews consume; repairing
+    # drift first is the difference between applying work to current prose vs the previous
+    # translation. Check before the partial translate branch — otherwise a mid-book project
+    # with completed-but-stale chapters keeps routing to translate-workers/api.
+    if combine_stale:
+        return "references/epub.md"
 
     if stage in ("untranslated", "partial"):
         if backend == "api":
@@ -3626,6 +3734,17 @@ def status(project: str) -> dict:
         nxt = ("run `translate-prepare` (optionally --chapters) to render prompts for "
                "the pending chunks, then Task-spawn or `translate-fanout`, then "
                "`translate-commit`.")
+        # A partial book still has fully-translated chapters, and a mid-book redo puts
+        # the book BACK into `partial` — so this is exactly when stale chapters/*.txt
+        # is most likely and least visible. Reporting it only in the fully-translated
+        # branch hides it for the whole re-translation window.
+        if combine_stale:
+            nxt += (
+                f" Separately: chapters/*.txt is stale for {len(combine_stale)} "
+                f"already-complete chapter(s) (`combine_stale`) — run "
+                f"`combine --chapters <ids>`; the web reader reads that file for "
+                f"paragraph breaks and image placement."
+            )
     else:
         nxt = "no chunks yet — run `difficulty` then `chunk` before translating."
 
@@ -3646,7 +3765,7 @@ def status(project: str) -> dict:
         "chapters": chapters_out,
         "next": nxt,
         "suggested_reference": _suggested_reference(
-            project_dir, cfg, artifacts, stage, epubs
+            project_dir, cfg, artifacts, stage, epubs, combine_stale
         ),
     }
 
@@ -3891,6 +4010,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapters": "chapter_ids touched by the scope",
         "cleared": "chunk_ids whose translation was cleared (would be cleared, in preview)",
         "already_untranslated": "in-scope chunk_ids that had no translation to clear",
+        "unreadable": "in-scope chunk_ids whose JSON could not be loaded (OSError/ValueError) — not the same as already_untranslated",
         "cleared_review_data": "chunk_ids whose in-chunk review_data was cleared (its offsets pointed into the deleted prose)",
         "stale_drafts": (
             "list of {chunk_id, path, mtime, bytes} for worker drafts found on disk. A "
@@ -4063,7 +4183,9 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
             "fully-translated chapter_ids whose chapters/<id>.txt is missing or older than "
             "its chunks — the reader will show stale paragraph/image structure. Run `combine`. "
             "(translate-commit refreshes these automatically going forward; chapters edited in "
-            "the web UI's chunk editor can also land here — that is real drift, not a false alarm)"
+            "the web UI's chunk editor can also land here — that is real drift, not a false alarm). "
+            "Only COMPLETE chapters are eligible: a chapter mid-redo holds the previous "
+            "translation without appearing here — `retranslate` warns about that window"
         ),
         "chapters": "list of {chapter_id, chunks, translated, complete}",
         "next": "suggested next command",
