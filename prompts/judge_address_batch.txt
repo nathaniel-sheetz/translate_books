@@ -1,5 +1,5 @@
 # Forms-of-Address (usted/tú) Compliance Judge — batched (multiple items per prompt)
-# Version: 1.0
+# Version: 1.1
 # Checks one or more Spanish translations against the book's address map in a
 # single call. Variables: address_rubric, address_map, items
 # Each <item> carries an id plus its own <source>/<translation>/<chapter_ref>;
@@ -89,3 +89,9 @@ of `verdicts` are the item ids, one entry per <item> and nothing else:
     }
   }
 }
+
+`suggestion` must be a **drop-in replacement for the excerpt alone**: it must not
+restate any words that appear before or after the excerpt in the translation. If
+the fix needs surrounding text to be moved or repunctuated, widen the `excerpt`
+to cover that text instead — a suggestion that repeats its own context is
+discarded, because splicing it in would print those words twice.

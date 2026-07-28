@@ -15,6 +15,7 @@ This module is pure (no I/O) so it is cheap to unit-test against strings.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Union
@@ -26,6 +27,7 @@ REASON_SUGGESTION_EQUALS_EXCERPT = "suggestion_equals_excerpt"
 REASON_EXCERPT_NOT_FOUND = "excerpt_not_found"
 REASON_EXCERPT_AMBIGUOUS = "excerpt_ambiguous"
 REASON_SUGGESTION_NOT_LITERAL = "suggestion_not_literal"
+REASON_SUGGESTION_RESTATES_CONTEXT = "suggestion_restates_context"
 
 # A conservative detector for suggestions that describe *how to fix* rather than
 # giving the corrected text (e.g. "split into two paragraphs", "fold into inciso
@@ -48,6 +50,84 @@ _INSTRUCTION_RE = re.compile(
 )
 
 _RULE_RE = re.compile(r"^\s*\[([^\]]+)\]")
+
+_WORD_RE = re.compile(r"[0-9a-záéíóúüñ]+")
+
+# How far either side of the span the restatement check looks. Bounds the cost;
+# no observed corruption restated more than 15 words of context.
+_BOUNDARY_WINDOW = 60
+
+# Smallest boundary repetition treated as a restatement. Measured by replaying
+# every archived judge fix across the local books (104 reconstructable records):
+# 99 score 0 on both sides, and the 5 known corrupting applies score 1, 2, 3, 10,
+# 14 and 15. Even a threshold of 1 is false-positive-free on that corpus; 2 is
+# the conservative default. See tests/test_applied_corrections_audit.py.
+MIN_RESTATED_WORDS = 2
+
+
+def _words(s: str) -> list[str]:
+    """Lowercased word tokens, punctuation-blind.
+
+    Deliberately drops rayas, guillemets and commas: a suggestion that restates
+    surrounding prose *and* repunctuates it (the `chapter_03` guillemets case)
+    is still a restatement, and a byte-level duplicate check would miss it.
+    """
+    return _WORD_RE.findall(unicodedata.normalize("NFC", s.lower()))
+
+
+def _overlap(a: list[str], b: list[str]) -> int:
+    """Largest ``k`` where the last ``k`` of ``a`` equal the first ``k`` of ``b``."""
+    for k in range(min(len(a), len(b)), 0, -1):
+        if a[-k:] == b[:k]:
+            return k
+    return 0
+
+
+def boundary_overlap(text: str, start: int, end: int, replacement: str) -> tuple[int, int]:
+    """``(head, tail)`` word overlap between ``replacement`` and ``text``'s context.
+
+    ``head`` is how many words ``replacement`` opens with that already sit
+    immediately *before* ``start``; ``tail`` is how many it ends with that
+    already sit immediately *after* ``end``.
+    """
+    before = _words(text[:start])[-_BOUNDARY_WINDOW:]
+    after = _words(text[end:])[:_BOUNDARY_WINDOW]
+    new_words = _words(replacement)
+    return _overlap(before, new_words), _overlap(new_words, after)
+
+
+def restated_context(
+    text: str,
+    start: int,
+    end: int,
+    replacement: str,
+    *,
+    baseline: str | None = None,
+    min_words: int = MIN_RESTATED_WORDS,
+) -> str | None:
+    """Words ``replacement`` would *newly* repeat from outside ``text[start:end]``.
+
+    Splicing ``replacement`` into ``text[start:end]`` duplicates prose whenever
+    the replacement restates text that lies outside the span it replaces — the
+    judges do this when they rewrite a whole dialogue turn but key it to a short
+    excerpt. Returns the repeated words (space-joined, for a warning message) or
+    ``None`` when the splice is clean.
+
+    ``baseline`` is the text being replaced. Overlap the baseline already had is
+    subtracted, so a fix that merely preserves an existing boundary repetition is
+    not flagged — only a newly introduced one is.
+    """
+    head_new, tail_new = boundary_overlap(text, start, end, replacement)
+    head_old, tail_old = (
+        boundary_overlap(text, start, end, baseline) if baseline is not None else (0, 0)
+    )
+    new_words = _words(replacement)
+
+    if head_new > head_old and head_new >= min_words:
+        return " ".join(new_words[:head_new])
+    if tail_new > tail_old and tail_new >= min_words:
+        return " ".join(new_words[len(new_words) - tail_new:])
+    return None
 
 
 @dataclass
@@ -141,11 +221,20 @@ def classify_fix(issue: Mapping[str, Any] | Any, translated_text: str) -> Classi
         return manual(REASON_EXCERPT_AMBIGUOUS)
 
     start = translated_text.find(excerpt)
+    end = start + len(excerpt)
+
+    # The suggestion must be a drop-in for the excerpt *alone*. When it also
+    # restates the prose on either side of the excerpt, splicing it in leaves
+    # that prose duplicated in the book — the excerpt-uniqueness check above
+    # cannot see this, because the excerpt itself still located cleanly.
+    if restated_context(translated_text, start, end, suggestion, baseline=excerpt):
+        return manual(REASON_SUGGESTION_RESTATES_CONTEXT)
+
     return ProposedFix(
         excerpt=excerpt,
         suggestion=suggestion,
         char_start=start,
-        char_end=start + len(excerpt),
+        char_end=end,
         rule=rule,
         severity=severity,
         message=message,

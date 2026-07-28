@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge
-# Version: 1.3
+# Version: 1.4
 # Checks whether a Spanish translation follows the project's house dialogue
 # rules. Variables: dialogue_rules, source_text, translation_text
 
@@ -82,8 +82,14 @@ Respond with ONLY a JSON object, no other text, in exactly this shape:
       "severity": "error" | "warning" | "info",
       "excerpt": "<short verbatim Spanish snippet showing the problem>",
       "message": "<what is wrong, one sentence>",
-      "suggestion": "<the corrected Spanish snippet, or how to fix it>"
+      "suggestion": "<the corrected Spanish snippet>"
     }
   ],
   "summary": "<one-sentence overall assessment>"
 }
+
+`suggestion` must be a **drop-in replacement for the excerpt alone**: it must not
+restate any words that appear before or after the excerpt in the translation. If
+the fix needs surrounding text to be moved or repunctuated, widen the `excerpt`
+to cover that text instead — a suggestion that repeats its own context is
+discarded, because splicing it in would print those words twice.
