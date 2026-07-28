@@ -20,7 +20,9 @@ API path auto-aligns; still offer review once chapters are readable.
    `coverage_warnings`** before reviewing anything else: each one is a run of
    source sentences the translation never covered (dropped prose). No judge or
    evaluator catches these — the Spanish reads perfectly without them.
-   Re-translate the named chunk and re-align.
+   Re-translate the named chunk with the redo verb (`references/retranslate.md` —
+   `retranslate --chunk-ids <id>`, then again with `--yes`), **never by clearing
+   `translated_text` by hand**, then re-align.
 
    Ensure the reader is up (`python web_ui/app.py` → `http://localhost:5000`) and
    hand the user `reader_first` from that same align output. Optional in-chat sample:
@@ -36,8 +38,10 @@ API path auto-aligns; still offer review once chapters are readable.
    judges here. Hand it the project slug and the chapter set just translated;
    follow that skill's ROUTER / setup precheck (address map, etc.).
 
-3. **Apply fixes** the user approves (retranslate / edit / glossary tweak), then
-   re-align affected chapters if needed.
+3. **Apply fixes** the user approves — a redo (`references/retranslate.md`), a
+   chunk edit, or a glossary tweak — then re-align affected chapters if needed.
+   `translate-commit` refreshes `chapters/*.txt` on its own; an out-of-band edit
+   may leave it stale, which `status` reports as `combine_stale` (fix: `combine`).
 
 4. **Repeat** for the next wave, or continue the pipeline
    (`references/footnotes.md` if footnotes were kept, then `references/epub.md`).
@@ -48,3 +52,4 @@ API path auto-aligns; still offer review once chapters are readable.
   those live in **judge-review** and `docs/JUDGES_FRAMEWORK.md`.
 - No re-asking the translation backend or spawn mode — those are already in
   `.harness/config.json` (`backend`, spawn knobs).
+- No redo mechanics — those live in `references/retranslate.md`.

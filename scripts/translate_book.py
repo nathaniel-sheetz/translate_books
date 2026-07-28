@@ -39,6 +39,7 @@ from src.api_translator import DEFAULT_MODEL
 from src.models import Chunk, ChunkStatus, ChunkingConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
+from src.utils.source_text import load_chapter_source_text
 
 
 # Pipeline stages in order
@@ -262,9 +263,38 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
         sizes_map = json.loads(Path(sizes_path).read_text(encoding="utf-8"))
 
     total_chunks = 0
+    refused: list[str] = []
     for chapter_file in chapter_files:
-        chapter_text = chapter_file.read_text(encoding="utf-8")
         chapter_id = chapter_file.stem  # e.g., "chapter_01"
+        # NEVER read chapters/*.txt raw here. That file is dual-purpose — the split
+        # stage writes the English there and `combine` overwrites it with the
+        # translation — so a re-chunk after a combine would store TRANSLATED prose as
+        # source_text, and the pipeline would then translate Spanish->Spanish with
+        # every guard passing (the echo guard compares against source_text, which
+        # would also be Spanish). load_chapter_source_text applies the chunks-first
+        # precedence that keeps this English; web_ui does the same for this reason.
+        chapter_text, _mtime, kind = load_chapter_source_text(project_dir, chapter_id)
+        if not chapter_text.strip():
+            print(f"    WARNING: {chapter_id}: no source text found — skipped")
+            continue
+
+        # The precedence above is necessary but not sufficient. When chunk JSONs EXIST
+        # but every one of them is corrupt or carries an empty source_text, the loader
+        # falls through to chapters/*.txt — correct for the read-only callers (the
+        # difficulty scorer, the web reader), fatal here, because post-combine that
+        # file is the Spanish translation and we would write it back as source_text.
+        # Existing chunks are the only trustworthy source at this stage: if they are
+        # unreadable, refuse the chapter rather than re-chunk a translation.
+        existing_chunks = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+        if existing_chunks and kind != "chunks":
+            print(
+                f"    ERROR: {chapter_id}: {len(existing_chunks)} chunk file(s) exist but "
+                f"none yielded source_text (corrupt or empty), and chapters/{chapter_id}.txt "
+                f"may already hold the TRANSLATION — refusing to re-chunk it as source. "
+                f"Repair or delete the chunk files, then re-run."
+            )
+            refused.append(chapter_id)
+            continue
 
         target = int(sizes_map.get(chapter_id, default_target))
         config = ChunkingConfig.from_target(
@@ -280,6 +310,16 @@ def stage_chunk(args, project_dir: Path, state: dict) -> dict:
 
         total_chunks += len(chunks)
         print(f"    {chapter_id}: {len(chunks)} chunks (target {target}w)")
+
+    if refused:
+        # Soft-continue would still mark stage_completed="chunk" and exit 0 with
+        # total_chunks==0 (or a partial book) — callers/harness would treat a Spanish
+        # guard trip as success. Raise so main() records failed_stage and exits 1.
+        raise RuntimeError(
+            f"{len(refused)} chapter(s) refused (corrupt/empty chunk sources; "
+            f"would not re-chunk possible translation as source): {', '.join(refused)}. "
+            f"Repair or delete the chunk files, then re-run."
+        )
 
     print(f"  Total: {total_chunks} chunks across {len(chapter_files)} chapters")
 

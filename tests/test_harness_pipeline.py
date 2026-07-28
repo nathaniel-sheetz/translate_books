@@ -1518,7 +1518,10 @@ def test_status_reports_progress_artifacts_and_spawn_plan(tmp_path: Path):
     assert st["totals"] == {
         "chapters": 3, "complete_chapters": 1,
         "total_chunks": 4, "translated_chunks": 2, "pending_chunks": 2,
+        # chapter_01 is complete but has no chapters/chapter_01.txt at all here.
+        "combine_stale_chapters": 1,
     }
+    assert st["combine_stale"] == ["chapter_01"]
     assert st["pending_chapters"] == ["chapter_02", "chapter_03"]
     # ch2 has two chunks, so the continuity spawn modes are NOT moot here.
     assert st["spawn_mode_moot"] is False
@@ -1794,3 +1797,856 @@ def test_align_command_reports_aligner_failure_without_crashing(tmp_path: Path, 
     assert "error" in res and "embedding model unavailable" in res["error"]
     assert [s["chapter_id"] for s in res["skipped"]] == ["chapter_01"]
     assert res["reader_first"] is None
+
+
+# ── retranslate (the redo verb) + combine ────────────────────────────────────
+#
+# The headline pair below encodes the friction-log failure chain that motivated
+# `retranslate`: clearing translated_text WITHOUT deleting the worker draft makes
+# fanout skip and commit re-land the OLD prose, reporting a flawless redo.
+
+
+def _fanout_runner(prose: str):
+    """A translate-fanout runner stub that always writes ``prose``."""
+    def _runner(cmd, *, input_text, cwd):
+        return 0, prose, ""
+    return _runner
+
+
+def test_retranslate_clears_translation_and_stale_drafts_so_fanout_reruns(tmp_path: Path):
+    """The redo verb breaks the silent-no-op chain end to end.
+
+    Runs the full workers spine, retranslates, then re-runs prepare -> fanout ->
+    commit and asserts the chunk ends up carrying NEW prose. Without the draft
+    deletion this fanout would report ``skipped_existing_draft`` and the commit would
+    re-land the old translation (see the characterization test below).
+    """
+    from src.harness import flow
+    from src.models import ChunkStatus as CS
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01",
+                      sources=["One short sentence for a draft."])[0]
+
+    prep = flow.translate_prepare(str(tmp_path))
+    entry = prep["manifest"][0]
+    flow.translate_fanout(str(tmp_path), runner=_fanout_runner("es_old es_prose es_here"))
+    flow.translate_commit(str(tmp_path))
+    assert load_chunk(cp).translated_text.strip() == "es_old es_prose es_here"
+
+    tdir = tmp_path / ".harness" / "translate"
+    assert Path(entry["draft_path"]).exists()
+
+    res = flow.retranslate(str(tmp_path), yes=True)
+
+    # The chunk is fully reset — every field that describes the destroyed prose.
+    assert res["dry_run"] is False
+    assert res["cleared"] == ["chapter_01_chunk_000"]
+    c = load_chunk(cp)
+    assert c.has_translation is False
+    assert c.translated_text is None
+    assert c.status is CS.PENDING       # the ENUM, not a bare "pending" string
+    assert c.translated_at is None
+    assert c.last_llm_log is None
+    assert c.prompt_metadata is None
+    assert c.review_data is None
+    assert c.source_text, "source_text must survive — the chunking lives here"
+
+    # The rendered worker files for this chunk are gone; the rebuildable ones stay.
+    assert not Path(entry["draft_path"]).exists()
+    assert not (tdir / "chapter_01_chunk_000.prompt.txt").exists()
+    assert not (tdir / "chapter_01_chunk_000.body.txt").exists()
+    assert (tdir / "preamble.txt").exists(), "preamble is book-wide; deleting it helps nobody"
+    assert (tdir / "manifest.json").exists(), (
+        "manifest stays so a premature translate-commit fails LOUDLY with `missing`"
+    )
+    assert [d["chunk_id"] for d in res["drafts_deleted"]] == ["chapter_01_chunk_000"]
+    assert [d["chunk_id"] for d in res["stale_drafts"]] == ["chapter_01_chunk_000"]
+
+    # And the redo actually redoes: fanout writes rather than skips.
+    flow.translate_prepare(str(tmp_path))
+    out = flow.translate_fanout(str(tmp_path),
+                                runner=_fanout_runner("es_new es_prose es_here"))
+    assert out["counts"]["wrote"] == 1
+    assert out["skipped_existing_draft"] == []
+    commit = flow.translate_commit(str(tmp_path))
+    assert commit["counts"]["committed"] == 1
+    assert load_chunk(cp).translated_text.strip() == "es_new es_prose es_here"
+
+
+def test_clearing_translation_without_retranslate_still_skips_fanout(tmp_path: Path):
+    """Characterization: the hazard ``retranslate`` exists to fix, pinned so it stays visible.
+
+    Clearing ``translated_text`` by hand leaves the old ``.draft.txt`` on disk. fanout
+    then skips the chunk and commit re-lands the OLD prose reporting
+    ``committed: 1, failed: 0`` — a perfect-looking redo that changed nothing. Do NOT
+    "fix" this by changing fanout's skip: that skip is correct for RESUME. The
+    supported fix is ``flow.retranslate``.
+    """
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01",
+                      sources=["One short sentence for a draft."])[0]
+
+    flow.translate_prepare(str(tmp_path))
+    flow.translate_fanout(str(tmp_path), runner=_fanout_runner("es_old es_prose es_here"))
+    flow.translate_commit(str(tmp_path))
+
+    # The documented-but-incomplete recipe: clear the chunk, leave the draft.
+    c = load_chunk(cp)
+    c.translated_text = None
+    c.status = ChunkStatus.PENDING
+    save_chunk(c, cp)
+
+    flow.translate_prepare(str(tmp_path))
+    out = flow.translate_fanout(str(tmp_path),
+                                runner=_fanout_runner("es_new es_prose es_here"))
+    assert out["counts"]["wrote"] == 0
+    assert out["skipped_existing_draft"] == ["chapter_01_chunk_000"]
+
+    commit = flow.translate_commit(str(tmp_path))
+    assert commit["committed"] == ["chapter_01_chunk_000"]
+    assert commit["failed"] == []
+    # Reports success, lands the OLD prose. This is the landmine.
+    assert load_chunk(cp).translated_text.strip() == "es_old es_prose es_here"
+
+
+def test_retranslate_without_yes_changes_nothing(tmp_path: Path):
+    """No --yes is a PREVIEW: the full plan is reported, not a byte or mtime touched."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01",
+                      sources=["One short sentence for a draft."])[0]
+    flow.translate_prepare(str(tmp_path))
+    flow.translate_fanout(str(tmp_path), runner=_fanout_runner("es_old es_prose es_here"))
+    flow.translate_commit(str(tmp_path))
+    draft = tmp_path / ".harness" / "translate" / "chapter_01_chunk_000.draft.txt"
+    draft.write_text("es_leftover draft prose", encoding="utf-8")
+
+    before = {p: (p.read_bytes(), p.stat().st_mtime) for p in (cp, draft)}
+
+    res = flow.retranslate(str(tmp_path))
+
+    assert res["dry_run"] is True
+    assert res["cleared"] == ["chapter_01_chunk_000"]
+    assert res["counts"]["chunks"] == 1
+    assert [d["chunk_id"] for d in res["stale_drafts"]] == ["chapter_01_chunk_000"]
+    assert res["stale_drafts"][0]["bytes"] > 0 and res["stale_drafts"][0]["mtime"]
+    assert res["drafts_deleted"] == []
+    assert "END THE TURN" in res["instructions"]
+    for p, (data, mtime) in before.items():
+        assert p.read_bytes() == data, f"{p.name} was modified by a preview"
+        assert p.stat().st_mtime == mtime, f"{p.name} mtime moved during a preview"
+
+
+def test_retranslate_scope_leaves_other_chapters_alone(tmp_path: Path):
+    """--chapters and --chunk-ids clear only what they name."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    p1 = _save_chunks(chunks_dir, "chapter_01", sources=["A one."],
+                      translations=["es A."])[0]
+    p2 = _save_chunks(chunks_dir, "chapter_02", sources=["B two."],
+                      translations=["es B."])[0]
+
+    res = flow.retranslate(str(tmp_path), chapters="1", yes=True)
+    assert res["cleared"] == ["chapter_01_chunk_000"]
+    assert res["chapters"] == ["chapter_01"]
+    assert load_chunk(p1).has_translation is False
+    assert load_chunk(p2).translated_text == "es B."
+
+    res2 = flow.retranslate(str(tmp_path), chunk_ids=["chapter_02_chunk_000"], yes=True)
+    assert res2["cleared"] == ["chapter_02_chunk_000"]
+    assert load_chunk(p2).has_translation is False
+
+
+def test_retranslate_rejects_bad_scope(tmp_path: Path):
+    """Invalid / unmatched / conflicting scope is refused before anything is touched."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01", sources=["A one."],
+                      translations=["es A."])[0]
+
+    both = flow.retranslate(str(tmp_path), chapters="1", chunk_ids=["x"], yes=True)
+    assert "not both" in both["error"]
+
+    bad = flow.retranslate(str(tmp_path), chapters="not-a-range", yes=True)
+    assert "invalid chapters" in bad["error"]
+
+    nomatch = flow.retranslate(str(tmp_path), chapters="9", yes=True)
+    assert nomatch["cleared"] == [] and "no matching chapters" in nomatch["note"]
+    assert nomatch["available_chapters"] == ["chapter_01"]
+
+    unknown = flow.retranslate(str(tmp_path), chunk_ids=["nope_chunk_000"], yes=True)
+    assert "unknown chunk_ids" in unknown["error"]
+
+    assert load_chunk(cp).translated_text == "es A.", "no scope error may mutate anything"
+
+
+def test_retranslate_archive_snapshots_and_is_invisible_to_project_globs(tmp_path: Path):
+    """--archive captures the pre-clear state where no existing glob can see it."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01", sources=["A one."],
+                      translations=["es A."])[0]
+    (tmp_path / "chapters").mkdir()
+    (tmp_path / "chapters" / "chapter_01.txt").write_text("es A.", encoding="utf-8")
+    (tmp_path / "El tesoro.epub").write_bytes(b"PK\x03\x04fake")
+    (tmp_path / "reviewed.json").write_text('{"chapter_01": "2026-06-22T00:00:00"}',
+                                            encoding="utf-8")
+    original_chunk_bytes = cp.read_bytes()
+    epubs_before = sorted(p.name for p in tmp_path.glob("*.epub"))
+
+    res = flow.retranslate(str(tmp_path), yes=True, archive=True)
+
+    assert res["archived"] is True
+    adir = Path(res["archive"]["dir"])
+    assert adir.parent == tmp_path / "archive"
+    assert (adir / "chunks" / "chapter_01_chunk_000.json").read_bytes() == original_chunk_bytes
+    assert (adir / "chapters" / "chapter_01.txt").exists()
+    assert (adir / "epubs" / "El tesoro.epub").exists()
+    assert (adir / "reviewed.json").exists()
+
+    manifest = json.loads((adir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["kind"] == "retranslate"
+    assert manifest["chunk_ids"] == ["chapter_01_chunk_000"]
+    assert manifest["counts"]["chunks"] == 1
+    assert "no restore command" in manifest["restore"].lower()
+
+    # The archive must be invisible to every single-level project glob.
+    assert sorted(p.name for p in tmp_path.glob("*.epub")) == epubs_before
+    assert flow.status(str(tmp_path))["epubs"] == epubs_before
+
+
+def test_retranslate_aborts_when_archive_fails(tmp_path: Path, monkeypatch):
+    """The archive is a PRECONDITION: if the copy fails, nothing is cleared."""
+    import shutil as _shutil
+
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01", sources=["A one."],
+                      translations=["es A."])[0]
+    draft = tmp_path / ".harness" / "translate" / "chapter_01_chunk_000.draft.txt"
+    draft.parent.mkdir(parents=True)
+    draft.write_text("es_leftover", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_shutil, "copy2", boom)
+
+    res = flow.retranslate(str(tmp_path), yes=True, archive=True)
+
+    assert "archive failed, nothing was cleared" in res["error"]
+    assert res["cleared"] == []
+    assert load_chunk(cp).translated_text == "es A.", "a failed archive must not clear"
+    assert draft.exists(), "a failed archive must not delete drafts"
+    # Partial stamp must not linger — preview lists existing_archives as if real.
+    archive_root = tmp_path / "archive"
+    leftovers = list(archive_root.glob("*")) if archive_root.exists() else []
+    assert leftovers == [], f"failed archive left partial stamp(s): {leftovers}"
+
+
+def test_retranslate_reports_unreadable_chunks_separately(tmp_path: Path):
+    """Corrupt JSON is not 'already untranslated' — preview/reporting must not lie."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    good = _save_chunks(chunks_dir, "chapter_01", sources=["A."],
+                        translations=["es A."])[0]
+    bad = chunks_dir / "chapter_01_chunk_001.json"
+    bad.write_text("not valid json {{{", encoding="utf-8")
+
+    preview = flow.retranslate(str(tmp_path))
+    assert preview["cleared"] == ["chapter_01_chunk_000"]
+    assert preview["already_untranslated"] == []
+    assert preview["unreadable"] == ["chapter_01_chunk_001"]
+    assert "unreadable" in preview["instructions"]
+
+    res = flow.retranslate(str(tmp_path), yes=True)
+    assert res["unreadable"] == ["chapter_01_chunk_001"]
+    assert load_chunk(good).has_translation is False
+    assert bad.read_text(encoding="utf-8") == "not valid json {{{"
+
+
+def test_retranslate_reports_but_never_touches_downstream(tmp_path: Path):
+    """Orphaned artifacts are censused and warned about — and left byte-identical."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A one."], translations=["es A."])
+    sidecars = {
+        tmp_path / "annotations.jsonl":
+            '{"chapter_id": "chapter_01", "es_idx": 3, "content": "note"}\n',
+        tmp_path / "corrections_applied.jsonl":
+            '{"chapter_id": "chapter_01", "original": "x"}\n',
+        tmp_path / "reviewed.json": '{"chapter_01": "2026-06-22T00:00:00"}',
+    }
+    for path, body in sidecars.items():
+        path.write_text(body, encoding="utf-8")
+    (tmp_path / "El tesoro.epub").write_bytes(b"PK\x03\x04fake")
+
+    res = flow.retranslate(str(tmp_path), yes=True)
+
+    d = res["downstream"]
+    assert d["annotations"]["rows_in_scope"] == 1
+    assert d["corrections_applied"]["rows_in_scope"] == 1
+    assert d["reviewed"]["marked_in_scope"] == ["chapter_01"]
+    assert [e["name"] for e in d["epubs"]] == ["El tesoro.epub"]
+    assert d["evaluations"]["self_healing"] is True
+    joined = " ".join(res["warnings"])
+    assert "MIS-anchored" in joined and "marked reviewed" in joined and "EPUB" in joined
+
+    for path, body in sidecars.items():
+        assert path.read_text(encoding="utf-8") == body, f"{path.name} was mutated"
+    assert (tmp_path / "El tesoro.epub").read_bytes() == b"PK\x03\x04fake"
+
+
+def test_retranslate_logs_run_event_on_execute_only(tmp_path: Path, monkeypatch):
+    """A destroyed translation always leaves a trace — but a preview does not."""
+    import src.utils.run_logger as run_logger
+    from src.harness import flow
+
+    log_path = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(run_logger, "_RUNS_PATH", log_path)
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A one."], translations=["es A."])
+
+    flow.retranslate(str(tmp_path))  # preview
+    assert not log_path.exists() or "retranslate" not in log_path.read_text(encoding="utf-8")
+
+    flow.retranslate(str(tmp_path), yes=True)
+    events = [json.loads(line) for line in
+              log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    beats = [e for e in events if e.get("event") == "retranslate"]
+    assert len(beats) == 1
+    assert beats[0]["chunks"] == 1 and beats[0]["chapters"] == 1
+    assert beats[0]["archived"] is False
+
+
+def test_combine_writes_only_fully_translated_chapters(tmp_path: Path):
+    """combine backfills chapters/*.txt from the chunks, refusing partial chapters."""
+    from src.combiner import combine_chunks
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    ch1 = _save_chunks(chunks_dir, "chapter_01", sources=["A one."], translations=["es A."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B.", "C."],
+                 translations=["es B.", None])
+    chapters_dir = tmp_path / "chapters"
+    chapters_dir.mkdir()
+    # The split output: ENGLISH. This is what a workers-path project still holds.
+    (chapters_dir / "chapter_01.txt").write_text("A one.", encoding="utf-8")
+    (chapters_dir / "chapter_02.txt").write_text("B. C.", encoding="utf-8")
+
+    res = flow.combine(str(tmp_path))
+
+    assert [c["chapter_id"] for c in res["combined"]] == ["chapter_01"]
+    assert res["combined"][0]["changed"] is True
+    assert res["skipped"] == [{"chapter_id": "chapter_02", "reason": "not fully translated"}]
+    assert res["counts"] == {"combined": 1, "changed": 1, "skipped": 1, "failed": 0}
+    expected = combine_chunks([load_chunk(p) for p in ch1])
+    assert (chapters_dir / "chapter_01.txt").read_text(encoding="utf-8") == expected
+    assert (chapters_dir / "chapter_02.txt").read_text(encoding="utf-8") == "B. C."
+
+    # Re-running is a no-op contentwise but still rewrites, so the mtime-based
+    # staleness signal in `status` can always clear.
+    again = flow.combine(str(tmp_path))
+    assert again["combined"][0]["changed"] is False
+
+
+def test_combine_reports_failure_without_raising(tmp_path: Path, monkeypatch):
+    """One bad chapter is reported, never allowed to abort the batch."""
+    import src.corrections_apply as ca
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A one."], translations=["es A."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B two."], translations=["es B."])
+
+    real = ca.recombine_chapter
+
+    def flaky(project_dir, chapter_id):
+        if chapter_id == "chapter_01":
+            raise ValueError("chunk carries overlap")
+        return real(project_dir, chapter_id)
+
+    monkeypatch.setattr(ca, "recombine_chapter", flaky)
+
+    res = flow.combine(str(tmp_path))
+    assert res["failed"][0]["chapter_id"] == "chapter_01"
+    assert "chunk carries overlap" in res["failed"][0]["error"]
+    assert [c["chapter_id"] for c in res["combined"]] == ["chapter_02"]
+
+
+def test_translate_commit_recombines_completed_chapter(tmp_path: Path):
+    """The gap the friction log missed: chapters/*.txt now tracks the translation."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    chapters_dir = tmp_path / "chapters"
+    chapters_dir.mkdir()
+    ch_txt = chapters_dir / "chapter_01.txt"
+    ch_txt.write_text("One short sentence for a draft.", encoding="utf-8")  # English
+
+    flow.translate_prepare(str(tmp_path))
+    flow.translate_fanout(str(tmp_path),
+                          runner=_fanout_runner("es_one es_short es_sentence"))
+    res = flow.translate_commit(str(tmp_path))
+
+    assert res["recombined"] == ["chapter_01"]
+    assert res["combine_failed"] == []
+    assert res["counts"]["recombined"] == 1
+    assert ch_txt.read_text(encoding="utf-8").strip() == "es_one es_short es_sentence"
+    assert "refreshed chapters/*.txt" in res["instructions"]
+    assert flow.status(str(tmp_path))["combine_stale"] == []
+
+    # A no-op re-commit must not touch the file — the staleness signal is mtime-based.
+    mtime = ch_txt.stat().st_mtime
+    again = flow.translate_commit(str(tmp_path))
+    assert again["skipped_already_translated"] == ["chapter_01_chunk_000"]
+    assert again["recombined"] == []
+    assert ch_txt.stat().st_mtime == mtime
+
+
+def test_translate_commit_does_not_recombine_partial_chapter(tmp_path: Path):
+    """A chapter with an uncommitted chunk has nothing coherent to stitch yet."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01",
+                 sources=["First sentence here.", "Second sentence here."])
+    chapters_dir = tmp_path / "chapters"
+    chapters_dir.mkdir()
+    ch_txt = chapters_dir / "chapter_01.txt"
+    ch_txt.write_text("First sentence here.\n\nSecond sentence here.", encoding="utf-8")
+
+    prep = flow.translate_prepare(str(tmp_path))
+    first = next(e for e in prep["manifest"] if e["chunk_id"].endswith("_000"))
+    Path(first["draft_path"]).write_text("es_first es_sentence es_here", encoding="utf-8")
+
+    res = flow.translate_commit(str(tmp_path))
+    assert res["committed"] == ["chapter_01_chunk_000"]
+    assert res["missing"] == ["chapter_01_chunk_001"]
+    assert res["recombined"] == []
+    assert ch_txt.read_text(encoding="utf-8").startswith("First sentence")
+
+
+def test_translate_commit_recombine_failure_is_reported_not_swallowed(
+    tmp_path: Path, monkeypatch
+):
+    """A failed recombine never fails the commit — but it is never silent either."""
+    import src.corrections_apply as ca
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+
+    def boom(project_dir, chapter_id):
+        raise RuntimeError("combiner exploded")
+
+    monkeypatch.setattr(ca, "recombine_chapter", boom)
+
+    flow.translate_prepare(str(tmp_path))
+    flow.translate_fanout(str(tmp_path),
+                          runner=_fanout_runner("es_one es_short es_sentence"))
+    res = flow.translate_commit(str(tmp_path))
+
+    assert res["committed"] == ["chapter_01_chunk_000"]  # the commit is authoritative
+    assert res["recombined"] == []
+    assert res["combine_failed"][0]["chapter_id"] == "chapter_01"
+    assert "combiner exploded" in res["combine_failed"][0]["error"]
+    assert "WARNING" in res["instructions"] and "combine --chapters" in res["instructions"]
+
+
+def test_status_flags_and_clears_combine_stale(tmp_path: Path):
+    """An out-of-date chapters/*.txt is surfaced on every entry; combine clears it."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A one."], translations=["es A."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B.", "C."],
+                 translations=["es B.", None])
+    chapters_dir = tmp_path / "chapters"
+    chapters_dir.mkdir()
+    stale = chapters_dir / "chapter_01.txt"
+    stale.write_text("A one.", encoding="utf-8")
+    os.utime(stale, (1_600_000_000, 1_600_000_000))  # older than its chunks
+    # A partial chapter is never eligible: combine refuses it, so it must not be flagged.
+    partial = chapters_dir / "chapter_02.txt"
+    partial.write_text("B. C.", encoding="utf-8")
+    os.utime(partial, (1_600_000_000, 1_600_000_000))
+
+    st = flow.status(str(tmp_path))
+    assert st["combine_stale"] == ["chapter_01"]
+    assert st["totals"]["combine_stale_chapters"] == 1
+
+    flow.combine(str(tmp_path))
+    assert flow.status(str(tmp_path))["combine_stale"] == []
+
+
+def test_stage_chunk_never_reads_translated_chapters_as_source(project: Path):
+    """Re-chunking after a combine must not store Spanish as source_text.
+
+    chapters/*.txt is dual-purpose, so once combine has run it holds the translation.
+    A raw read here would make the pipeline translate Spanish->Spanish with every
+    guard passing (the echo guard compares against source_text, which would also be
+    Spanish).
+    """
+    args = _args()
+    state: dict = {}
+    for stage in ("chunk", "translate", "combine"):
+        state = tb.STAGE_FUNCTIONS[stage](args, project, state)
+
+    combined = (project / "chapters" / "chapter_01.txt").read_text(encoding="utf-8")
+    assert combined.startswith("[ES] "), "combine should have replaced the English"
+
+    tb.STAGE_FUNCTIONS["chunk"](args, project, {})
+    for cf in sorted((project / "chunks").glob("chapter_01_chunk_*.json")):
+        assert "[ES] " not in load_chunk(cf).source_text
+    assert "quiet village" in load_chunk(
+        project / "chunks" / "chapter_01_chunk_000.json").source_text
+
+
+def test_retranslate_crash_between_halves_cannot_recreate_the_no_op(tmp_path: Path):
+    """Drafts are deleted BEFORE the chunk JSON, so a mid-run crash is survivable.
+
+    There is no atomic two-file write here, so the only defence is choosing which
+    half-done state a crash can leave. Deleting drafts first means a crash leaves
+    chunks still translated and drafts gone: the redo did not happen, nothing stale
+    can land, and re-running finishes the job. The opposite order would leave cleared
+    chunks plus surviving drafts — precisely the silent no-op this verb exists to fix.
+    """
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01",
+                      sources=["One short sentence for a draft."])[0]
+
+    flow.translate_prepare(str(tmp_path))
+    flow.translate_fanout(str(tmp_path), runner=_fanout_runner("es_old es_prose es_here"))
+    flow.translate_commit(str(tmp_path))
+    draft = tmp_path / ".harness" / "translate" / "chapter_01_chunk_000.draft.txt"
+    assert draft.exists()
+
+    import src.utils.file_io as file_io
+    real_save = file_io.save_chunk
+
+    def exploding_save(chunk, path):
+        raise OSError("disk died mid-clear")
+
+    file_io.save_chunk = exploding_save
+    try:
+        with pytest.raises(OSError):
+            flow.retranslate(str(tmp_path), yes=True)
+    finally:
+        file_io.save_chunk = real_save
+
+    # The survivable half: draft gone, translation intact.
+    assert not draft.exists()
+    assert load_chunk(cp).translated_text.strip() == "es_old es_prose es_here"
+
+    # And the crash is recoverable by simply re-running — no stale prose can land.
+    flow.retranslate(str(tmp_path), yes=True)
+    assert load_chunk(cp).has_translation is False
+    flow.translate_prepare(str(tmp_path))
+    out = flow.translate_fanout(str(tmp_path),
+                                runner=_fanout_runner("es_new es_prose es_here"))
+    assert out["counts"]["wrote"] == 1 and out["skipped_existing_draft"] == []
+    flow.translate_commit(str(tmp_path))
+    assert load_chunk(cp).translated_text.strip() == "es_new es_prose es_here"
+
+
+def test_retranslate_refuses_a_scope_that_parsed_to_nothing(tmp_path: Path):
+    """An empty --chunk-ids must not widen to the whole project."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    p1 = _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])[0]
+    p2 = _save_chunks(chunks_dir, "chapter_02", sources=["B."], translations=["es B."])[0]
+
+    res = flow.retranslate(str(tmp_path), chunk_ids=[], yes=True)
+    assert "empty list" in res["error"]
+    assert res["cleared"] == []
+    assert load_chunk(p1).translated_text == "es A."
+    assert load_chunk(p2).translated_text == "es B."
+
+    # Omitting the flag entirely still means "everything" — the two must stay distinct.
+    assert set(flow.retranslate(str(tmp_path), yes=False)["cleared"]) == {
+        "chapter_01_chunk_000", "chapter_02_chunk_000"
+    }
+
+
+@pytest.mark.parametrize("raw", ["", ",,,", "  ,  ,"])
+def test_harness_cli_passes_empty_chunk_ids_through_as_empty_scope(tmp_path: Path, raw):
+    """The CLI must not collapse an empty parse into None (= the whole project)."""
+    import scripts.harness as harness
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    cp = _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])[0]
+
+    args = harness._build_parser().parse_args(
+        ["retranslate", "--project", str(tmp_path), "--chunk-ids", raw, "--yes"]
+    )
+    res = harness._dispatch(args)
+    assert "empty list" in res["error"]
+    assert load_chunk(cp).translated_text == "es A.", "a typo must never clear the book"
+
+
+def test_retranslate_does_not_rewrite_already_untranslated_chunks(tmp_path: Path):
+    """Execute must change exactly what the preview promised.
+
+    A chunk with nothing to clear keeps its bytes: rewriting it would drop a FAILED
+    row's diagnostics and bump the mtime that `status` reads as the combine_stale
+    signal, neither of which the preview announced. Its stale draft is still deleted —
+    that half of the landmine applies to every in-scope id.
+    """
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    done, pending = _save_chunks(chunks_dir, "chapter_01", sources=["A.", "B."],
+                                 translations=["es A.", None])
+
+    before_bytes = pending.read_bytes()
+    os.utime(pending, (1_600_000_000, 1_600_000_000))
+    before_mtime = pending.stat().st_mtime
+
+    pending_draft = (tmp_path / ".harness" / "translate" /
+                     "chapter_01_chunk_001.draft.txt")
+    pending_draft.parent.mkdir(parents=True)
+    pending_draft.write_text("stale pending draft", encoding="utf-8")
+
+    res = flow.retranslate(str(tmp_path), yes=True)
+    assert res["cleared"] == ["chapter_01_chunk_000"]
+    assert res["already_untranslated"] == ["chapter_01_chunk_001"]
+    assert load_chunk(done).has_translation is False
+    assert pending.read_bytes() == before_bytes
+    assert pending.stat().st_mtime == before_mtime
+    assert not pending_draft.exists(), (
+        "already-untranslated chunks must still lose their drafts so fanout re-runs"
+    )
+    assert any(d["chunk_id"] == "chapter_01_chunk_001" for d in res["drafts_deleted"])
+
+
+def test_retranslate_refuses_empty_chapters_scope(tmp_path: Path):
+    """`--chapters ""` must not widen to the whole project (sibling of empty chunk-ids)."""
+    from src.harness import flow
+    import scripts.harness as harness
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    p1 = _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])[0]
+
+    for raw in ("", "   "):
+        res = flow.retranslate(str(tmp_path), chapters=raw, yes=True)
+        assert "empty" in res["error"].lower()
+        assert load_chunk(p1).translated_text == "es A."
+
+    args = harness._build_parser().parse_args(
+        ["retranslate", "--project", str(tmp_path), "--chapters", "", "--yes"]
+    )
+    res = harness._dispatch(args)
+    assert "empty" in res["error"].lower()
+    assert load_chunk(p1).translated_text == "es A."
+
+
+def test_retranslate_warns_that_chapters_txt_serves_old_prose_mid_redo(tmp_path: Path):
+    """The window status cannot report: partial chapters are ineligible for combine."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A.", "B."],
+                 translations=["es A.", "es B."])
+    (tmp_path / "chapters").mkdir()
+    (tmp_path / "chapters" / "chapter_01.txt").write_text("es A. es B.", encoding="utf-8")
+
+    res = flow.retranslate(str(tmp_path), chunk_ids=["chapter_01_chunk_000"])
+    assert any("PREVIOUS translation" in w and "combine_stale" in w
+               for w in res["warnings"])
+
+    # And status genuinely stays quiet about it — the warning is the only signal.
+    flow.retranslate(str(tmp_path), chunk_ids=["chapter_01_chunk_000"], yes=True)
+    st = flow.status(str(tmp_path))
+    assert st["stage"] == "partial"
+    assert st["combine_stale"] == []
+
+
+def test_retranslate_archive_manifest_declares_what_it_omits(tmp_path: Path):
+    """A "copy back what you want" promise is false unless the gaps are named."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+    (tmp_path / ".chunk_edits" / "chapter_01").mkdir(parents=True)
+    (tmp_path / "retranslations.jsonl").write_text(
+        '{"chapter_id": "chapter_01"}\n', encoding="utf-8")
+
+    res = flow.retranslate(str(tmp_path), yes=True, archive=True)
+    manifest = json.loads(Path(res["archive"]["manifest"]).read_text(encoding="utf-8"))
+
+    assert any("chunks/" in c for c in manifest["contains"])
+    excludes = " ".join(manifest["excludes"])
+    assert ".chunk_edits/" in excludes and "retranslations.jsonl" in excludes
+    assert "cannot be restored from it" in manifest["restore"]
+    # The census is deliberately wider than the snapshot — that is the gap being named.
+    assert res["downstream"]["chunk_edits"]["chapters"] == ["chapter_01"]
+    assert not (Path(res["archive"]["dir"]) / "retranslations.jsonl").exists()
+
+
+def test_translate_commit_reports_recombine_on_a_partial_run(tmp_path: Path):
+    """A mixed run still recombines what completed, so it must still say so."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A one."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B two."])
+    (tmp_path / "chapters").mkdir()
+
+    prep = flow.translate_prepare(str(tmp_path))
+    # Only chapter_01's worker delivers; chapter_02's draft never appears.
+    entry = next(e for e in prep["manifest"] if e["chunk_id"] == "chapter_01_chunk_000")
+    Path(entry["draft_path"]).write_text("es uno.", encoding="utf-8")
+
+    res = flow.translate_commit(str(tmp_path))
+    assert res["missing"] == ["chapter_02_chunk_000"]
+    assert res["recombined"] == ["chapter_01"]
+    assert "Re-spawn workers" in res["instructions"]
+    assert "chapters/*.txt for 1 completed chapter" in res["instructions"], (
+        "the recombine outcome must survive the failed/missing branch"
+    )
+
+
+def test_suggested_reference_routes_to_combine_repair_before_reviews(tmp_path: Path):
+    """A stale chapters/*.txt outranks reviews even when the EPUB already exists."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+    save_glossary(Glossary(terms=[]), tmp_path / "glossary.json")
+    save_style_guide(StyleGuide(content="TONE"), tmp_path / "style.json")
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "Book.epub").write_bytes(b"PK\x03\x04fake")
+    chapters_dir = tmp_path / "chapters"
+    chapters_dir.mkdir()
+    stale = chapters_dir / "chapter_01.txt"
+    stale.write_text("es A.", encoding="utf-8")
+    os.utime(stale, (1_600_000_000, 1_600_000_000))
+
+    st = flow.status(str(tmp_path))
+    assert st["stage"] == "fully-translated"
+    assert st["combine_stale"] == ["chapter_01"]
+    assert st["suggested_reference"] == "references/epub.md"
+
+    flow.combine(str(tmp_path))
+    assert flow.status(str(tmp_path))["suggested_reference"] == "references/reviews.md"
+
+
+def test_status_partial_still_names_stale_complete_chapters(tmp_path: Path):
+    """A mid-book redo puts the book back to `partial` — the drift must stay visible."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["B."], translations=[None])
+    save_glossary(Glossary(terms=[]), tmp_path / "glossary.json")
+    save_style_guide(StyleGuide(content="TONE"), tmp_path / "style.json")
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    chapters_dir = tmp_path / "chapters"
+    chapters_dir.mkdir()
+    stale = chapters_dir / "chapter_01.txt"
+    stale.write_text("A.", encoding="utf-8")
+    os.utime(stale, (1_600_000_000, 1_600_000_000))
+
+    st = flow.status(str(tmp_path))
+    assert st["stage"] == "partial"
+    assert st["combine_stale"] == ["chapter_01"]
+    assert "translate-prepare" in st["next"]
+    assert "combine --chapters" in st["next"], (
+        "reporting stale chapters only in the fully-translated branch hides them "
+        "for the entire re-translation window"
+    )
+    assert st["suggested_reference"] == "references/epub.md", (
+        "agents prefer suggested_reference over the SKILL.md table — partial + "
+        "combine_stale must route to the combine repair, not translate-workers"
+    )
+
+
+def test_stage_chunk_refuses_unreadable_chunks_rather_than_rechunk_translation(
+    project: Path, capsys
+):
+    """The chunks-first precedence is necessary but not sufficient.
+
+    When chunk JSONs exist but none yields source_text, the loader falls back to
+    chapters/*.txt — correct for read-only callers, fatal here, because post-combine
+    that file is the translation and we would write it back as source_text.
+    """
+    args = _args()
+    state: dict = {}
+    for stage in ("chunk", "translate", "combine"):
+        state = tb.STAGE_FUNCTIONS[stage](args, project, state)
+    assert (project / "chapters" / "chapter_01.txt").read_text(
+        encoding="utf-8").startswith("[ES] ")
+
+    corrupted = sorted((project / "chunks").glob("chapter_01_chunk_*.json"))
+    for cf in corrupted:
+        cf.write_text("not valid json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="refused"):
+        tb.STAGE_FUNCTIONS["chunk"](args, project, {})
+
+    out = capsys.readouterr().out
+    assert "refusing to re-chunk it as source" in out
+    for cf in corrupted:
+        assert cf.read_text(encoding="utf-8") == "not valid json", (
+            "the corrupt chunk must be left for repair, never overwritten with Spanish"
+        )
+
+
+def test_harness_chunk_exits_nonzero_when_stage_chunk_refuses(project: Path):
+    """The Spanish→Spanish refuse must fail the harness wrapper, not look like success."""
+    from src.harness import flow, state as hstate
+
+    args = _args()
+    state: dict = {}
+    for stage in ("chunk", "translate", "combine"):
+        state = tb.STAGE_FUNCTIONS[stage](args, project, state)
+
+    for cf in (project / "chunks").glob("chapter_01_chunk_*.json"):
+        cf.write_text("not valid json", encoding="utf-8")
+
+    hstate.save_config(project, {})
+    result = flow.chunk(str(project), size=2000)
+    assert result["exit_code"] != 0
+    assert result["command"] == "chunk"
