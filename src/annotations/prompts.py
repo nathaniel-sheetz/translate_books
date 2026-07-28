@@ -108,13 +108,42 @@ def _anchor_line(target: AnnotationTarget) -> str:
 def _hint_line(target: AnnotationTarget) -> str:
     """Describe the reader's own words, and whether they are in the sentence.
 
-    A bare-word note is ambiguous on its face — ``humilde`` could be the word the
-    reader is questioning or the replacement they are proposing. Whether the word
-    actually occurs in the translated sentence settles it, so that fact is
-    computed in Python and stated here rather than left for the model to guess.
+    The framing is per type, because the same fact means different things.
+
+    For ``word_choice`` / ``inconsistency`` a bare word is ambiguous on its face —
+    ``humilde`` could be the word being questioned or the replacement being
+    proposed — and whether it occurs in the translated sentence settles it. That
+    is computed in Python rather than left for the model to guess.
+
+    For ``footnote`` the same absence means nothing of the sort: a gloss is
+    *expected* not to appear in the sentence, so "not in the sentence" must not be
+    read as "a proposed replacement". Telling a footnote worker otherwise made it
+    classify finished glosses (``Himno cristiano por George Washington Doane
+    (1848)``, ``[Meadow»] Prado de Misty``) as instructions and rewrite them.
     """
     if not target.hint:
         return "Reader's note text: (none — only the marked span, or nothing at all)."
+
+    if target.ann_type == "footnote":
+        return (
+            f"Reader's note text: {target.hint!r}\n"
+            "For a footnote this is EITHER an already-written gloss (in which case "
+            "the annotation is already_resolved and you must leave it alone) OR a "
+            "short instruction naming what to gloss. Decide which. A brief gloss "
+            "still counts as a gloss: translating or identifying the marked span — "
+            "«Pequeño sin nombre», «Prado de Misty», «Himno cristiano de 1848» — is "
+            "a finished note, not an instruction. Treat it as an instruction only "
+            "when it names a topic without saying anything about it (biblia, "
+            "comillas, poesía)."
+        )
+
+    if target.ann_type == "flag":
+        return (
+            f"Reader's note text: {target.hint!r}\n"
+            "This may name a topic, state a concern, or record a conclusion the "
+            "reader already reached. Decide which before answering."
+        )
+
     if target.hint_in_sentence:
         return (
             f"Reader's note text: {target.hint!r}\n"

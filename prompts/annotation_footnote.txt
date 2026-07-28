@@ -67,8 +67,22 @@ Set `state` to:
   `recommendation` to a one-line English restatement and leave `note_text` empty.
   Do not rewrite or improve an existing gloss.
 
-An instruction naming a topic is NOT a gloss. `biblia` means "gloss this Bible
-reference", not "the gloss is the word biblia".
+The line between the two is whether the note **says something about** the marked
+span or merely **names a subject**.
+
+An instruction names a subject and stops: `biblia` means "gloss this Bible
+reference", not "the gloss is the word biblia". Same for `comillas`, `poesía`.
+
+A gloss says something, and it does **not** have to be long. All of these are
+finished notes — return `already_resolved` and leave them alone:
+
+- `[No-Name] «Pequeño sin nombre»` — translates the marked name.
+- `[Meadow»] Prado de Misty` — identifies what the name refers to.
+- `Himno cristiano por George Washington Doane (1848)` — identifies the allusion.
+  (A gloss need not carry a bracket at all; the anchor is optional.)
+
+A short gloss is not an unfinished one. Do not "improve" a brief note into a
+longer one — the reader wrote what they wanted the book to say.
 
 ## Output
 
