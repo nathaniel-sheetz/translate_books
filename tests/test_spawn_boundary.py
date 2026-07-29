@@ -15,6 +15,7 @@ the rule.
 from __future__ import annotations
 
 import ast
+import subprocess
 from pathlib import Path
 from posixpath import splitext
 
@@ -42,9 +43,6 @@ _KNOWN_SPAWNS: frozenset[tuple[str, str]] = frozenset({
     ("src/harness/headless.py", "subprocess.run"),               # THE sanctioned CLI spawn + auth probe
     ("src/judges/runner.py", "subprocess.run"),                  # git rev-parse
     ("scripts/compare_models.py", "subprocess.check_output"),    # git rev-parse
-    ("scripts/experiments/compare_difficulty_calibration.py",
-     "subprocess.check_output"),                                 # git rev-parse
-    ("scripts/run_eval_test.py", "subprocess.run"),              # pytest
 })
 
 # argv[0] stems that mean "this is a headless CLI launch".
@@ -52,10 +50,31 @@ _HEADLESS_CLI_STEMS = frozenset({"claude", "cursor-agent", "cursor"})
 _EXE_SUFFIXES = (".cmd", ".exe", ".bat", ".ps1", ".sh")
 
 
+def _is_tracked(path: Path) -> bool:
+    """Skip gitignored / untracked local-only files so CI and local agree.
+
+    ``scripts/run_eval_test.py`` and ``scripts/experiments/`` are gitignored;
+    listing them in ``_KNOWN_SPAWNS`` passes locally and fails on CI (stale),
+    while omitting them fails locally (new). Only inventory what the repo ships.
+    """
+    try:
+        rc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", str(path)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        ).returncode
+    except OSError:
+        return True  # no git → scan everything
+    return rc == 0
+
+
 def _iter_spawn_calls():
     """Yield ``(rel_path, callee, lineno, node)`` for every process spawn."""
     for root in _SCANNED_ROOTS:
         for path in sorted((REPO_ROOT / root).rglob("*.py")):
+            if not _is_tracked(path):
+                continue
             rel = path.relative_to(REPO_ROOT).as_posix()
             # utf-8-sig: src/difficulty_scorer.py carries a BOM, and a plain
             # utf-8 read makes ast.parse choke on U+FEFF.
