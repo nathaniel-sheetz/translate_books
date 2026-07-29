@@ -16,6 +16,7 @@ from src.epub_builder import (
     _load_chapter_manifest,
     _load_toc_format,
     _apply_language_default_label,
+    _normalize_allcaps_title,
     _normalize_heading,
     _strip_image_blocks,
     build_epub,
@@ -134,6 +135,46 @@ class TestDetectChapterHeading:
         assert "[IMAGE:images/illus01.jpg]" in saved_body
         assert "The First Signpost" not in saved_body
 
+    def test_skips_header_image_before_subtitle(self):
+        """Chapter image between heading and title must not bury the subtitle."""
+        text = (
+            "Capítulo 1\n\n"
+            "[IMAGE:images/ch.jpg]\n\n"
+            "ANTES DE LA TORMENTA\n\n"
+            "El reloj del estante marcaba las cinco."
+        )
+        heading, subtitle, body = detect_chapter_heading(text)
+        assert heading == "Capítulo 1"
+        assert subtitle == "ANTES DE LA TORMENTA"
+        assert "[IMAGE:images/ch.jpg]" in body
+        assert "ANTES DE LA TORMENTA" not in body
+        assert body.startswith("[IMAGE:images/ch.jpg]")
+
+    def test_skips_multiple_header_images_before_subtitle(self):
+        text = (
+            "Chapter 2\n\n"
+            "[IMAGE:images/a.jpg]\n\n"
+            "[IMAGE:images/b.jpg]\n\n"
+            "THE TITLE\n\n"
+            "Body."
+        )
+        heading, subtitle, body = detect_chapter_heading(text)
+        assert heading == "Chapter 2"
+        assert subtitle == "THE TITLE"
+        assert "[IMAGE:images/a.jpg]" in body
+        assert "[IMAGE:images/b.jpg]" in body
+        assert "THE TITLE" not in body
+
+    def test_image_only_before_long_prose_keeps_no_subtitle(self):
+        """A long first paragraph after an image is not a subtitle."""
+        prose = "A" * 200 + " more words here."
+        text = f"Chapter 1\n\n[IMAGE:images/ch.jpg]\n\n{prose}"
+        heading, subtitle, body = detect_chapter_heading(text)
+        assert heading == "Chapter 1"
+        assert subtitle == ""
+        assert "[IMAGE:images/ch.jpg]" in body
+        assert prose in body
+
 
 # --- chapter_text_to_xhtml ---
 
@@ -186,7 +227,7 @@ class TestChapterTextToXhtml:
             heading_config={"label": "Capítulo", "numeral_style": "arabic"},
         )
         assert '<h1>Capítulo 1</h1>' in xhtml
-        assert '<h2>EL REY ALFREDO Y LOS PASTELES.</h2>' in xhtml
+        assert '<h2>El Rey Alfredo y los Pasteles.</h2>' in xhtml
         assert '<p>Muchos años atrás...</p>' in xhtml
 
     def test_synthesis_with_roman(self):
@@ -214,7 +255,7 @@ class TestChapterTextToXhtml:
             heading_config={"label": "Capítulo", "numeral_style": "arabic"},
         )
         assert '<h1>I</h1>' in xhtml
-        assert '<h2>UNA Y EL LEÓN</h2>' in xhtml
+        assert '<h2>Una y el León</h2>' in xhtml
         assert 'Capítulo' not in xhtml
 
     def test_chapter_xhtml_renders_normalized_heading(self):
@@ -407,6 +448,35 @@ class TestNormalizeHeading:
         # Defensive fallback: raw line that didn't match the regex still
         # gets a period stripped so callers can rely on idempotent output.
         assert _normalize_heading("Some Title.") == "Some Title"
+
+
+# --- _normalize_allcaps_title ---
+
+class TestNormalizeAllcapsTitle:
+    @pytest.mark.parametrize("raw,expected", [
+        ("ANTES DE LA TORMENTA", "Antes de la Tormenta"),
+        ("¡GLORIA A DIOS!", "¡Gloria a Dios!"),
+        ("OCEANUS", "Oceanus"),
+        ("EL REY ALFREDO Y LOS PASTELES.", "El Rey Alfredo y los Pasteles."),
+        ("Hay un Dios.", "Hay un Dios."),
+        ("Prólogo", "Prólogo"),
+        ("", ""),
+    ])
+    def test_variants(self, raw, expected):
+        assert _normalize_allcaps_title(raw) == expected
+
+    def test_image_between_heading_and_title_renders_h2(self):
+        text = (
+            "Capítulo 1\n\n"
+            "[IMAGE:images/ch.jpg]\n\n"
+            "ANTES DE LA TORMENTA\n\n"
+            "Body paragraph."
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<h1>Capítulo 1</h1>' in xhtml
+        assert '<h2>Antes de la Tormenta</h2>' in xhtml
+        assert '<p>ANTES DE LA TORMENTA</p>' not in xhtml
+        assert '<img src="images/ch.jpg"' in xhtml
 
 
 # --- _first_nonempty_line ---
@@ -982,6 +1052,41 @@ class TestChapterManifest:
         assert "<h1>Prólogo</h1>" in fm
         assert "Foreword" not in fm  # the stale English label is gone
 
+    def test_allcaps_front_matter_prefers_manifest_casing(self, tmp_path):
+        """DEDICATORIA in the body should render as the manifest's Dedicatoria."""
+        import json as _json
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+        (chapters_dir / "chapter_01.txt").write_text(
+            "DEDICATORIA\n\nDedicado a los niños.\nMás verso aquí.",
+            encoding="utf-8",
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "Capítulo 1\n\n[IMAGE:images/ch.jpg]\n\nANTES DE LA TORMENTA\n\nBody.",
+            encoding="utf-8",
+        )
+        (tmp_path / "images" / "ch.jpg").write_bytes(b"\xff\xd8\xff")
+        manifest = [
+            {"id": "chapter_01", "kind": "front_matter", "label": "Dedicatoria"},
+            {"id": "chapter_02", "kind": "chapter", "number": 1},
+        ]
+        (tmp_path / "project.json").write_text(
+            _json.dumps({"chapter_manifest": manifest}), encoding="utf-8"
+        )
+        output = build_epub(project_path=tmp_path, title="T", author="A", language="es")
+        with zipfile.ZipFile(output) as zf:
+            names = [n for n in zf.namelist() if n.endswith(".xhtml")]
+            fm = zf.read(next(n for n in names if n.endswith("chapter_01.xhtml"))).decode("utf-8")
+            ch = zf.read(next(n for n in names if n.endswith("chapter_02.xhtml"))).decode("utf-8")
+            ncx = zf.read(next(n for n in zf.namelist() if n.endswith(".ncx"))).decode("utf-8")
+        assert "<h1>Dedicatoria</h1>" in fm
+        assert "DEDICATORIA" not in fm
+        assert "Dedicatoria" in ncx
+        assert "<h1>Capítulo 1</h1>" in ch
+        assert "<h2>Antes de la Tormenta</h2>" in ch
+        assert "<p>ANTES DE LA TORMENTA</p>" not in ch
+
     def test_no_manifest_keeps_existing_behavior(self, tmp_path):
         """Without a manifest, build_epub falls back to today's enumeration."""
         chapters_dir = tmp_path / "chapters"
@@ -1017,6 +1122,25 @@ class TestMatterTextToXhtml:
         out = matter_text_to_xhtml(text, "Foreword")
         assert "<h1>Foreword</h1>" in out
         assert "Some opening line." in out
+
+    def test_allcaps_label_uses_title_case(self):
+        text = "DEDICATORIA\n\nDedicado a los niños.\nMás verso."
+        out = matter_text_to_xhtml(text, "Dedicatoria")
+        assert "<h1>Dedicatoria</h1>" in out
+        assert "DEDICATORIA" not in out
+        # Multi-line verse must not become an h2.
+        assert "<h2>" not in out
+
+    def test_promotes_standalone_allcaps_subtitle(self):
+        text = (
+            "Prólogo\n\n"
+            "LA TIERRA AL OTRO LADO DEL AGUA\n\n"
+            "En el océano Atlántico..."
+        )
+        out = matter_text_to_xhtml(text, "Prólogo")
+        assert "<h1>Prólogo</h1>" in out
+        assert "<h2>La Tierra al Otro Lado del Agua</h2>" in out
+        assert "<p>LA TIERRA AL OTRO LADO DEL AGUA</p>" not in out
 
 
 class TestTocFormat:
