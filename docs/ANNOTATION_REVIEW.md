@@ -63,19 +63,29 @@ the same shape whichever ran.
 |---|---|---|---|
 | API | `run` | metered $ on this repo's key | dollar cost gate (`--cost-limit`, `--confirm`) |
 | Task subagents | `prepare` → spawn `annotation-worker` → `commit` | none (session usage) | usage gate |
-| Headless | `prepare` → `fanout` → `commit` | whatever the local CLI's auth bills | usage gate |
+| Headless | `prepare` → `fanout` → `commit` | none (subscription, enforced) | usage gate |
 
 Headless is the better default for throughput: 6–40 annotations is one bounded
 wave, and it is the only path that uses the prompt cache.
 
-**Headless is only free on a subscription login.** `fanout` shells out to the
-user's own `claude` / `cursor-agent` binary, so it bills whatever that CLI is
-authenticated with. On an API-key login it spends metered credit and the wave
-starts failing mid-run once the balance is gone — observed on a real
-`stormy-misty-s-foal` run, where 15 of 28 jobs landed and the rest returned
-`Credit balance is too low`. That message arrives on the CLI's **stdout** while
-stderr carries an unrelated connectors warning, so `headless.py` reports both
-streams; reporting stderr alone hid the cause behind a red herring.
+**Headless is subscription-only by enforcement.** `fanout` shells out to the
+user's own `claude` / `cursor-agent` binary, so `src/harness/headless.py` scrubs
+every metered credential from the child environment and runs one
+`claude auth status --json` preflight per wave. Unless a subscription is
+confirmed the command returns a top-level `error`, writes nothing and spawns no
+jobs. There is no override flag — metered spend goes through `--backend api`,
+which is what that backend is for. Full rationale, and why both layers are
+load-bearing, in `docs/LLM_PROVIDERS.md`. **Caveat:** there is no verified
+`cursor-agent` auth-status command, so the Cursor profile gets the scrub but not
+the preflight.
+
+That replaced a weaker guarantee, and the failure it prevents is worth recording.
+A real `stormy-misty-s-foal` run died after 15 of 28 jobs with `Credit balance is
+too low`: the wave had been billing metered credit all along. The message arrives
+on the CLI's **stdout** while stderr carries an unrelated connectors warning, and
+`headless.py` used to report stderr alone — so every failed job showed the red
+herring. Both streams are joined now, which keeps any *other* failure cause
+legible; the preflight is what stops this particular one from occurring.
 
 ### The cache split
 

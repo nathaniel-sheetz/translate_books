@@ -6,7 +6,8 @@ description: |
   inconsistencies, an actual endnote gloss for footnote marks, and an investigation
   for "Other" notes. Produces a dated markdown report, then — only with an explicit
   selection — appends a brief version back into the annotation itself. Three
-  interchangeable backends: API (metered), Task subagents (no dollars), and headless.
+  interchangeable backends: API (metered), plus Task subagents and headless —
+  both subscription-only, no dollars.
   Use when asked to "review my annotations", "resolve the notes I left", "go through
   my reader annotations", "draft the footnote glosses", or "annotation-review".
 allowed-tools:
@@ -102,15 +103,17 @@ shape whichever ran.
 |---|---|---|
 | **API** (`run`) | metered $ on this repo's key | dollar cost gate |
 | **Task subagents** (`prepare` → spawn → `commit`) | none (session usage) | usage gate |
-| **Headless** (`prepare` → `fanout` → `commit`) | whatever the local CLI's auth bills | usage gate |
+| **Headless** (`prepare` → `fanout` → `commit`) | none (subscription, enforced) | usage gate |
 
-**Headless is "free" only on a subscription login.** `fanout` shells out to the
-user's own `claude` / `cursor-agent`, so it bills whatever that CLI is
-authenticated with — on an API-key login it spends metered credit, and the wave
-fails mid-run when that balance is exhausted (`Credit balance is too low`, now
-surfaced verbatim in `failed[].error`). Don't promise "no spend" for `fanout`
-without knowing how their CLI is logged in. Task workers are the genuinely
-free-of-dollars path.
+**Headless is subscription-only by enforcement, not convention.** `fanout` shells
+out to the user's own `claude` / `cursor-agent`, so the launcher scrubs every
+metered credential out of the child env and refuses to start the wave unless
+`claude auth status` confirms a subscription. A metered login is rejected before
+job 1: the command returns a top-level `error`, writes nothing and spawns nothing.
+Relay that error — the fix is `claude` + `/login`, or the `run` subcommand if
+metered spend was actually intended. There is no override flag. (`failed[].error`
+also reports both CLI streams now, so whatever *does* go wrong in a wave is
+legible rather than buried under a stderr warning.)
 
 **Prefer headless for a whole-book run.** A book carries 6–40 annotations, which is
 one bounded wave with no per-wave turn ceremony, and it is the only path that gets
@@ -169,6 +172,11 @@ python scripts/review_annotations.py fanout --project fabre2 \
 ```
 Cursor needs a Cursor model id (`grok-4.5`, `auto`) — `--worker-model sonnet` with
 `--cli cursor` returns a warning. On 529, re-run with a lower `--concurrency`.
+
+A top-level `error` with empty `wrote`/`failed` means the wave never started —
+either the binary is off PATH or the subscription preflight refused. Relay it
+verbatim and stop; nothing was written, so re-running after `claude` + `/login`
+is safe and idempotent.
 
 #### Option [2] Task workers
 For each manifest entry spawn one worker with the **Task** tool:
