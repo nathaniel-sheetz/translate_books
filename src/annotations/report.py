@@ -50,6 +50,11 @@ _STRINGS = {
         "reason": "Motivo",
         "failures": "Fallos",
         "no_results": "No se revisó ninguna anotación en esta ejecución.",
+        "carried_over": (
+            "Este informe cubre solo esta ejecución. `results.json` conserva "
+            "además {n} anotación(es) revisada(s) antes, que `apply` todavía "
+            "puede escribir; su informe correspondiente está en `reports/`."
+        ),
         "mode_replace": "reemplaza el contenido (el texto de una nota al pie se publica)",
         "mode_append": "se añade al final de la nota",
         "types": {
@@ -93,6 +98,11 @@ _STRINGS = {
         "reason": "Reason",
         "failures": "Failures",
         "no_results": "No annotations were reviewed in this run.",
+        "carried_over": (
+            "This report covers this run only. `results.json` also still holds "
+            "{n} annotation(s) reviewed earlier, which `apply` can still write; "
+            "their report is in `reports/`."
+        ),
         "mode_replace": "replaces the content (footnote text is published)",
         "mode_append": "appended to the end of the note",
         "types": {
@@ -166,6 +176,14 @@ def render_report(results_doc: dict[str, Any]) -> str:
         lines.append(f"- **{s['model']}:** {model}")
     lines.append(f"- **{s['scope']}:** {scope}")
     lines.append("")
+
+    # The apply plan outlives any single run, so a scoped run leaves keys in
+    # results.json that this report does not describe. Say so here rather than
+    # letting `apply --select` be the place that surprises the reader.
+    carried = results_doc.get("carried_over") or 0
+    if carried > 0:
+        lines.append(f"> {s['carried_over'].format(n=carried)}")
+        lines.append("")
 
     # --- summary table -----------------------------------------------------
     by_type: dict[str, dict[str, int]] = {}

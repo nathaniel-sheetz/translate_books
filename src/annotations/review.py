@@ -714,6 +714,13 @@ def commit(
             }
         )
 
+    # Two different documents, on purpose. results.json is the durable apply
+    # plan and accumulates across commits; the report is a dated record of *one*
+    # run and must show only what this commit reviewed. Feeding the merged plan
+    # to the report made a 3-annotation run render 15 results carried over from
+    # an earlier run, with content quoted as of that run rather than this one —
+    # which breaks the report's one hard guarantee (see src/annotations/report.py).
+    plan_results = _merge_results(project_dir, results)
     results_doc = {
         "project": Path(project_dir).name,
         "committed_at": datetime.now().isoformat(),
@@ -723,7 +730,7 @@ def commit(
         "worker_model": doc.get("worker_model"),
         "types": doc.get("types"),
         "chapters": doc.get("chapters"),
-        "results": _merge_results(project_dir, results),
+        "results": plan_results,
         "skipped": doc.get("skipped") or [],
         "failed": failed,
         "missing": missing,
@@ -733,7 +740,14 @@ def commit(
         json.dumps(results_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    report_path = write_report(project_dir, results_doc) if report else None
+    report_path = (
+        write_report(
+            project_dir,
+            {**results_doc, "results": results, "carried_over": len(plan_results) - len(results)},
+        )
+        if report
+        else None
+    )
 
     writable = sum(1 for r in results if r["writable"])
     already = sum(1 for r in results if r["state"] == "already_resolved")
@@ -889,6 +903,7 @@ def run(
         for s in skipped
     ]
 
+    plan_results = _merge_results(project_dir, results)
     results_doc = {
         "project": project_dir.name,
         "committed_at": datetime.now().isoformat(),
@@ -899,7 +914,10 @@ def run(
         "provider": provider,
         "types": sorted(set(types)) if types else list(store.ANNOTATION_TYPES),
         "chapters": sorted(set(chapters)) if chapters else None,
-        "results": results,
+        # Same split as commit(): the plan accumulates, the report is one run.
+        # This path used to overwrite, so an API run scoped to one type silently
+        # discarded the apply plan for every annotation it did not cover.
+        "results": plan_results,
         "skipped": skipped_docs,
         "failed": failed,
         "missing": [],
@@ -909,7 +927,14 @@ def run(
     results_path.write_text(
         json.dumps(results_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    report_path = write_report(project_dir, results_doc) if report else None
+    report_path = (
+        write_report(
+            project_dir,
+            {**results_doc, "results": results, "carried_over": len(plan_results) - len(results)},
+        )
+        if report
+        else None
+    )
 
     return {
         "status": "ok",

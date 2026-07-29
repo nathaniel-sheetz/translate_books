@@ -259,6 +259,80 @@ def test_commits_accumulate_across_waves(project):
     assert {r["key"] for r in out2["results"]} == {first["key"], second["key"]}
 
 
+def test_report_covers_only_this_run_while_the_plan_accumulates(project):
+    """A scoped re-run must not re-render an earlier run's results.
+
+    ``results.json`` is the durable apply plan and accumulates by key; the report
+    is a dated record of one run. Rendering the merged plan made a 3-annotation
+    word_choice run print 15 results carried over from a footnote run hours
+    earlier — with each one's content quoted as of *that* run, which is exactly
+    the guarantee the report exists to make.
+    """
+    from pathlib import Path
+
+    write_annotations(
+        project,
+        [
+            _ann(es_idx=1, content="[poyo] ¿banco?", sub_id="u1", type="word_choice"),
+            _ann(es_idx=3, content="[ostra] glosa", sub_id="u2", type="footnote"),
+        ],
+    )
+
+    # Run 1: footnotes only.
+    prep1 = review.prepare(project, types=["footnote"])
+    _draft_all(prep1)
+    out1 = review.commit(project)
+    assert out1["counts"]["committed"] == 1
+
+    # Run 2: word_choice only. Re-preparing clears run 1's drafts.
+    prep2 = review.prepare(project, types=["word_choice"])
+    _draft_all(prep2)
+    out2 = review.commit(project)
+    assert out2["counts"]["committed"] == 1
+
+    plan = json.loads(
+        (project / ".harness" / "annotations" / "results.json").read_text(encoding="utf-8")
+    )
+    assert {r["type"] for r in plan["results"]} == {"footnote", "word_choice"}
+
+    text = Path(out2["report_path"]).read_text(encoding="utf-8")
+    assert "poyo" in text
+    assert "ostra" not in text
+    assert "Nota al pie" not in text
+    assert "| **1** |" in text
+
+
+def test_report_flags_the_results_it_does_not_cover(project):
+    """Scoping the report must not make the rest of the plan invisible."""
+    from pathlib import Path
+
+    write_annotations(
+        project,
+        [
+            _ann(es_idx=1, content="[poyo] ¿banco?", sub_id="u1", type="word_choice"),
+            _ann(es_idx=3, content="[ostra] glosa", sub_id="u2", type="footnote"),
+        ],
+    )
+    _draft_all(review.prepare(project, types=["footnote"]))
+    review.commit(project)
+    prep2 = review.prepare(project, types=["word_choice"])
+    _draft_all(prep2)
+    out2 = review.commit(project)
+
+    text = Path(out2["report_path"]).read_text(encoding="utf-8")
+    assert "results.json" in text
+    assert "1 anotación(es)" in text
+
+
+def test_a_single_run_report_has_no_carried_over_notice(project):
+    from pathlib import Path
+
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    _draft_all(review.prepare(project))
+    out = review.commit(project)
+    assert "results.json" not in Path(out["report_path"]).read_text(encoding="utf-8")
+
+
 def test_commit_writes_a_dated_report(project):
     write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
     prep = review.prepare(project)
