@@ -90,6 +90,7 @@ _SCRUB_NAMES: frozenset[str] = frozenset({
     "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
     "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
     # Cursor profile.
     "CURSOR_API_KEY",
 })
@@ -174,8 +175,8 @@ def default_claude_runner(
 ) -> tuple[int, str, str]:
     """Run a headless CLI with the prompt on stdin; return (rc, stdout, stderr).
 
-    ``env`` defaults to ``subscription_env(cli)`` rather than to inheritance, so
-    there is no way to call this and hand the child a metered credential.
+    ``env`` defaults to ``subscription_env(cli)`` rather than to inheritance.
+    Callers that pass an explicit ``env=`` own that mapping unchanged.
     """
     child_env = dict(env) if env is not None else subscription_env(cli)
     try:
@@ -245,7 +246,7 @@ AuthProber = Callable[..., tuple[int, str, str]]
 
 # Argv that makes a CLI report which credential path it would use. ``None`` means
 # the family has no verified equivalent -- it gets the env scrub but not the
-# preflight, and says so at runtime.
+# preflight (see the Cursor entry below).
 _AUTH_PROBE_ARGV: dict[str, tuple[str, ...] | None] = {
     "claude": ("auth", "status", "--json"),
     # No verified `cursor-agent` auth-status command. Guessing at one risks
@@ -298,9 +299,14 @@ def subscription_auth_error(
     shape we do not recognise) blocks the wave -- unverifiable means unsafe, and
     ``--backend api`` is the supported way to spend money.
     """
-    argv_tail = _AUTH_PROBE_ARGV.get(cli)
+    if cli not in _AUTH_PROBE_ARGV:
+        return (
+            f"no auth probe registered for cli {cli!r}; "
+            f"register it in _AUTH_PROBE_ARGV (or use `--backend api`)"
+        )
+    argv_tail = _AUTH_PROBE_ARGV[cli]
     if argv_tail is None:
-        return None  # family has no probe; the scrub is its only guarantee
+        return None  # family explicitly has no probe; the scrub is its only guarantee
 
     argv = [cli_bin, *argv_tail]
     probe = prober if prober is not None else _default_auth_prober
@@ -356,12 +362,30 @@ def subscription_auth_error(
     # so the probe alone cannot tell them apart -- the scrubbed env is the
     # tiebreaker: with ANTHROPIC_AUTH_TOKEN removed, only the setup-token
     # (subscription) path can still report oauth_token.
-    if obj.get("authMethod") == "oauth_token" and "CLAUDE_CODE_OAUTH_TOKEN" in env:
+    # Case-insensitive: subscription_env preserves original key spelling, and
+    # Windows env lookups are case-insensitive — an exact `"…TOKEN" in env`
+    # would fail-close a valid setup-token login whose key survived as
+    # ``Claude_Code_Oauth_Token``.
+    if obj.get("authMethod") == "oauth_token" and any(
+        key.upper() == "CLAUDE_CODE_OAUTH_TOKEN" for key in env
+    ):
         return None
 
+    # Diagnostic keys only — never dump email/orgId/orgName from auth status.
+    safe = {
+        k: obj.get(k)
+        for k in (
+            "loggedIn",
+            "authMethod",
+            "apiProvider",
+            "apiKeySource",
+            "subscriptionType",
+        )
+        if k in obj
+    }
     return (
         f"could not confirm a subscription login for {cli_bin}: "
-        f"{json.dumps(obj, sort_keys=True)[:300]}"
+        f"{json.dumps(safe, sort_keys=True)[:300]}"
     )
 
 
@@ -485,9 +509,11 @@ def run_headless_wave(
     ``claude_bin`` is a back-compat alias for ``cli_bin`` and is only valid when
     ``cli`` is ``claude`` (mismatch returns a top-level ``error``).
 
-    The child env is always scrubbed (``subscription_env``). The auth preflight
-    runs when ``prober`` is given, or when the real runner is in use; a stub
-    ``runner`` with no ``prober`` skips it, so unit tests never spawn anything.
+    When the real runner is used, the child env is scrubbed via
+    ``subscription_env``. A custom ``runner`` never receives that scrubbed env
+    (tests pass their own). The auth preflight runs when ``prober`` is given, or
+    when the real runner is in use; a stub ``runner`` with no ``prober`` skips
+    it, so unit tests never spawn anything.
     """
     try:
         cli_name = _normalize_cli(cli)

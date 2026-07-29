@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -283,6 +284,7 @@ def test_subscription_env_drops_third_party_switches_and_cursor_key():
         "CLAUDE_CODE_USE_FOUNDRY": "1",
         "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
         "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1",
+        "CLAUDE_CODE_SKIP_FOUNDRY_AUTH": "1",
         "CURSOR_API_KEY": "cur-x",
         "PATH": "/usr/bin",
     }
@@ -411,11 +413,28 @@ def test_subscription_auth_error_accepts_setup_token_when_env_has_it():
     assert err is None
 
 
+def test_subscription_auth_error_accepts_setup_token_case_insensitive_env_key():
+    """Windows / preserved spelling must not fail-close a valid setup-token."""
+    env = {"Claude_Code_Oauth_Token": "sk-ant-oat01-x"}
+    err = headless.subscription_auth_error(
+        "claude", "claude", env, cwd=".", prober=_prober(_AUTH_OAUTH_TOKEN)
+    )
+    assert err is None
+
+
 def test_subscription_auth_error_rejects_oauth_token_without_env():
     err = headless.subscription_auth_error(
         "claude", "claude", {}, cwd=".", prober=_prober(_AUTH_OAUTH_TOKEN)
     )
     assert err and "could not confirm a subscription login" in err
+
+
+def test_subscription_auth_error_fails_closed_on_unregistered_cli():
+    err = headless.subscription_auth_error(
+        "typo-cli", "typo-cli", {}, cwd=".", prober=_exploding_prober
+    )
+    assert err and "no auth probe registered" in err
+    assert "typo-cli" in err
 
 
 def test_subscription_auth_error_fails_closed_on_nonzero_rc():
@@ -446,6 +465,47 @@ def test_subscription_auth_error_fails_closed_on_unknown_shape():
         prober=_prober({"loggedIn": True, "authMethod": "something-new"}),
     )
     assert err and "could not confirm a subscription login" in err
+
+
+def test_subscription_auth_error_fail_closed_omits_pii():
+    payload = {
+        "loggedIn": True,
+        "authMethod": "something-new",
+        "apiProvider": "firstParty",
+        "email": "someone@example.com",
+        "orgId": "org-secret",
+        "orgName": "Personal",
+    }
+    err = headless.subscription_auth_error(
+        "claude", "claude", {}, cwd=".", prober=_prober(payload)
+    )
+    assert err and "could not confirm a subscription login" in err
+    assert "someone@example.com" not in err
+    assert "org-secret" not in err
+    assert "Personal" not in err
+    assert "authMethod" in err
+
+
+def test_subscription_auth_error_fails_closed_on_timeout():
+    def boom(argv, *, env, cwd, timeout):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    err = headless.subscription_auth_error(
+        "claude", "claude", {}, cwd=".", prober=boom, timeout=1.5
+    )
+    assert err and "timed out" in err
+    assert "1.5" in err
+
+
+def test_subscription_auth_error_fails_closed_on_oserror():
+    def boom(argv, *, env, cwd, timeout):
+        raise OSError("No such file or directory")
+
+    err = headless.subscription_auth_error(
+        "claude", "claude", {}, cwd=".", prober=boom
+    )
+    assert err and "could not run" in err
+    assert "No such file or directory" in err
 
 
 def test_subscription_auth_error_skips_cursor():

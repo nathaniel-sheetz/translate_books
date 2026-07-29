@@ -40,7 +40,7 @@ layers. Neither subsumes the other:
 
 1. **Env scrub** (`subscription_env`) — the child gets `os.environ` minus the
    entire `ANTHROPIC_*` namespace, `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY}`,
-   `CLAUDE_CODE_SKIP_{BEDROCK,VERTEX}_AUTH`, and `CURSOR_API_KEY`.
+   `CLAUDE_CODE_SKIP_{BEDROCK,VERTEX,FOUNDRY}_AUTH`, and `CURSOR_API_KEY`.
    `CLAUDE_CODE_OAUTH_TOKEN` is deliberately **kept** — that *is* subscription
    auth (`claude setup-token`). This is a denylist, so `PATH`, `PATHEXT` and the
    rest of the ordinary runtime survive.

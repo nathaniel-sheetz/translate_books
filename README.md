@@ -152,9 +152,9 @@ cp .env.example .env
 # Add ANTHROPIC_API_KEY and/or OPENAI_API_KEY
 ```
 
-`ANTHROPIC_API_KEY` is for the metered API path only. The headless backend strips it — and every
-other provider credential — from the CLI it launches, so a key sitting in `.env` can never turn a
-subscription run into a billed one.
+`ANTHROPIC_API_KEY` is for the metered API path only. The headless backend strips it (and the
+other Anthropic / Claude Code / Cursor metered switches it knows about) from the CLI it launches,
+so a key sitting in `.env` can never turn a subscription run into a billed one.
 
 ### Dictionary evaluator (optional)
 
