@@ -175,6 +175,30 @@ class TestDetectChapterHeading:
         assert "[IMAGE:images/ch.jpg]" in body
         assert prose in body
 
+    def test_promote_subtitles_false_keeps_short_opening_in_body(self):
+        """Numeral-only books: short first paragraph must not become an h2."""
+        opening = (
+            "En un radiante día de otoño, allá por el año 943, había un gran "
+            "bullicio en el Castillo de Bayeux, en Normandía."
+        )
+        text = f"Capítulo I\n\n{opening}\n\nEl salón era amplio."
+        assert len(opening) < 200
+        heading, subtitle, body = detect_chapter_heading(
+            text, heading_config={"promote_subtitles": False},
+        )
+        assert heading == "Capítulo I"
+        assert subtitle == ""
+        assert opening in body
+        assert body.startswith(opening)
+
+    def test_promote_subtitles_default_still_promotes_title(self):
+        """Default (true) still lifts a short title line to subtitle."""
+        text = "Capítulo 1\n\nANTES DE LA TORMENTA\n\nBody paragraph."
+        heading, subtitle, body = detect_chapter_heading(text)
+        assert heading == "Capítulo 1"
+        assert subtitle == "ANTES DE LA TORMENTA"
+        assert "ANTES DE LA TORMENTA" not in body
+
 
 # --- chapter_text_to_xhtml ---
 
@@ -257,6 +281,35 @@ class TestChapterTextToXhtml:
         assert '<h1>I</h1>' in xhtml
         assert '<h2>Una y el León</h2>' in xhtml
         assert 'Capítulo' not in xhtml
+
+    def test_promote_subtitles_false_renders_opening_as_paragraph(self):
+        opening = (
+            "Ricardo de Normandía estaba muy ansioso por saber más del "
+            "pequeño niño que había visto entre sus vasallos."
+        )
+        text = f"Capítulo IV\n\n{opening}\n\n—¡Ah, el joven barón!"
+        xhtml = chapter_text_to_xhtml(
+            text, 4,
+            heading_config={"promote_subtitles": False},
+        )
+        assert '<h1>Capítulo IV</h1>' in xhtml
+        assert '<h2>' not in xhtml
+        assert f'<p>{opening}</p>' in xhtml
+
+    def test_promote_subtitles_true_still_renders_titled_h2(self):
+        text = (
+            "Capítulo 1\n\n"
+            "[IMAGE:images/ch.jpg]\n\n"
+            "ANTES DE LA TORMENTA\n\n"
+            "Body paragraph."
+        )
+        xhtml = chapter_text_to_xhtml(
+            text, 1,
+            heading_config={"promote_subtitles": True},
+        )
+        assert '<h1>Capítulo 1</h1>' in xhtml
+        assert '<h2>Antes de la Tormenta</h2>' in xhtml
+        assert '<p>ANTES DE LA TORMENTA</p>' not in xhtml
 
     def test_chapter_xhtml_renders_normalized_heading(self):
         # Sermon-style: all-caps label with trailing period gets canonicalized.

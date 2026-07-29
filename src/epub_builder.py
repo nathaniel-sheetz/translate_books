@@ -46,9 +46,12 @@ _ENDNOTE_SUP = (
 # via the "chapter_heading" key in project.json, e.g.:
 #   "chapter_heading": {"label": "Capítulo", "numeral_style": "arabic"}
 # Set "label" to "" (empty string) to emit just the numeral with no word.
+# Set "promote_subtitles" to false for numeral-only books (no chapter titles)
+# so a short opening paragraph is not mistaken for an <h2> subtitle.
 _DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
     "label": "Chapter",
     "numeral_style": "arabic",  # "arabic" or "roman"
+    "promote_subtitles": True,
 }
 
 # Synthesized chapter label per target language, keyed by the primary subtag of the
@@ -102,6 +105,8 @@ def _resolve_heading_config(
             merged['label'] = str(config['label'])
         if config.get('numeral_style') in ('arabic', 'roman'):
             merged['numeral_style'] = config['numeral_style']
+        if 'promote_subtitles' in config:
+            merged['promote_subtitles'] = bool(config['promote_subtitles'])
     return merged
 
 
@@ -275,10 +280,17 @@ def detect_chapter_heading(
     is provided, a heading is synthesized from ``heading_config`` (e.g.
     "Capítulo 1") and the existing first non-blank line becomes the subtitle.
 
+    Set ``heading_config["promote_subtitles"]`` to false to skip subtitle
+    promotion (numeral-only books whose short opening paragraphs would
+    otherwise become a spurious ``<h2>``).
+
     Returns:
         (heading, subtitle, body) where heading/subtitle may be ''
         if no heading was detected and synthesis was not requested.
     """
+    cfg = _resolve_heading_config(heading_config)
+    promote_subtitles = bool(cfg.get('promote_subtitles', True))
+
     lines = text.split('\n')
     if not lines:
         return ('', '', text)
@@ -291,7 +303,8 @@ def detect_chapter_heading(
         idx = 1
     elif chapter_number is not None:
         # Synthesize a heading from the chapter number; the original first
-        # non-blank line will be promoted to the subtitle below.
+        # non-blank line will be promoted to the subtitle below (unless
+        # promote_subtitles is false).
         heading = synthesize_chapter_heading(chapter_number, heading_config)
         idx = 0
     else:
@@ -314,7 +327,7 @@ def detect_chapter_heading(
             idx += 1
 
     subtitle = ''
-    if idx < len(lines):
+    if promote_subtitles and idx < len(lines):
         candidate = lines[idx].strip()
         # Subtitle should be a short text line, not a paragraph or image
         if candidate and not _IMAGE_RE.match(candidate) and len(candidate) < 200:
