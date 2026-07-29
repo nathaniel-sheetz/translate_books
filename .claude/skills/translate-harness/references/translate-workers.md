@@ -12,6 +12,8 @@ Task turns in your transcript). Never invent a binary "Metered API | Subagent wo
 Both no-API-key backends run **spawned workers on the running subscription**, so a stranger can
 translate token-free; the dollar figure from `chunk`/`cost` is the **metered-API** price and does
 **not** apply — their gate is the `usage_summary` from `translate-prepare` (4B-b), not a cost estimate.
+Headless *proves* this rather than assuming it: the launcher scrubs metered credentials from the
+child env and the wave refuses to start unless the CLI confirms a subscription login.
 
 **4B-backend. STOP — three-way backend gate (ask once, then save).** *Before* any review batch,
 spawn-mode, or translation. **Skip** only when `config.backend` is already set (resume) and the
@@ -24,7 +26,8 @@ exactly three predefined options** (include the ~$X figure in the API label):
    combine → epub → align.
 2. **Subagent (Task workers)** — subscription; you spawn one `translator` Task per chunk
    (Read→Write→`done`); workers appear in your transcript; no preamble cache across Task calls.
-3. **Headless (CLI fan-out)** — subscription; harness runs `translate-fanout` via
+3. **Headless (CLI fan-out)** — subscription, enforced (refuses to run on an API-key
+   login); harness runs `translate-fanout` via
    `claude -p` (default) or `cursor-agent -p`; preamble cache on Claude/Sonnet after
    chunk 1; stays out of orchestrator context. **Bias toward this** when the worker
    tier is Sonnet and the book has many chunks. After choosing headless, optionally
@@ -187,6 +190,14 @@ to the full prompt (no cache).
 `cursor-agent login` session — no `CURSOR_API_KEY`, no metered per-call spend. Pin
 `worker_model` to a Cursor id (`grok-4.5`, `auto`, …); a Claude alias with cursor is almost
 certainly a misconfiguration (warning only).
+
+**Subscription enforcement (both profiles).** The child env is scrubbed of every metered
+credential — the whole `ANTHROPIC_*` namespace, the `CLAUDE_CODE_USE_*` third-party switches,
+`CURSOR_API_KEY` — while `CLAUDE_CODE_OAUTH_TOKEN` survives, since that *is* subscription auth.
+On the Claude profile a `claude auth status --json` preflight then runs once per wave and blocks
+it outright unless a subscription is confirmed; there is no override flag. **Caveat:** no verified
+`cursor-agent` auth-status command exists, so the Cursor profile gets the scrub but not the
+preflight. Full rationale in `docs/LLM_PROVIDERS.md`.
 
 Headless does **not** use extended "think hard" thinking. After the wave, commit as below — the
 prepare→commit seam is unchanged (`committed`/`failed`/`missing`).

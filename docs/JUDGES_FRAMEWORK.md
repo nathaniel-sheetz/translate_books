@@ -48,7 +48,11 @@ A judge runs one of two interchangeable ways (the same split as translate-harnes
 - **Headless fan-out (opt-in)** — `run_judges.py fanout` after `prepare`, then
   `commit`. Same draft/commit seam as Task workers, but the harness shells out
   to a logged-in CLI (`claude -p` or `cursor-agent -p`) with `--cli {claude,cursor}`.
-  Cursor uses subscription auth (`cursor-agent login`); no `CURSOR_API_KEY`.
+  Cursor uses subscription auth (`cursor-agent login`); no `CURSOR_API_KEY` — now
+  enforced by the launcher's env scrub rather than by convention. The shell-out
+  runs with every metered credential stripped from the child environment, and on
+  the Claude profile a `claude auth status` preflight blocks the wave unless a
+  subscription is confirmed (`docs/LLM_PROVIDERS.md`).
   Task workers remain Claude-only.
 
 The two share one seam: every judge implements `build_prompt(target, context)` and

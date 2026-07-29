@@ -87,7 +87,7 @@ The `translate-harness` skill lets you translate a book without leaving your edi
 - A hard cost gate always shows the estimate before API spending. The harness runs `--cost-only` first, asks for approval in a separate turn, then passes `--yes` only after you confirm.
 - Intermediate state is stored in `.tmp/` and cleared at startup to prevent prior-session contamination.
 
-**Subagent backend (no API key).** Step 4B offers a second translation path that needs no `ANTHROPIC_API_KEY` — translation runs as spawned worker subagents on your Claude subscription. Use `translate-prepare` to render one prompt file per chunk and produce a manifest (no spend), then `translate-commit` to validate each draft and stamp the chunks. Pass `--chapters 1-2` to either command to work in chapter batches.
+**Subagent backend (no API key).** Step 4B offers a second translation path that needs no `ANTHROPIC_API_KEY` — translation runs as spawned worker subagents on your Claude subscription. Use `translate-prepare` to render one prompt file per chunk and produce a manifest (no spend), then `translate-commit` to validate each draft and stamp the chunks. Pass `--chapters 1-2` to either command to work in chapter batches. The same prepare/commit seam also drives a **headless** fan-out (`translate-fanout`, a `claude -p` wave), which is subscription-only by enforcement: it strips every metered credential from the CLI it launches and refuses to start unless a subscription login is confirmed. See [`docs/LLM_PROVIDERS.md`](docs/LLM_PROVIDERS.md).
 
 ```bash
 python scripts/harness.py translate-prepare --project projects/my-book --chapters 1-2
@@ -151,6 +151,10 @@ API keys (optional, for API translation):
 cp .env.example .env
 # Add ANTHROPIC_API_KEY and/or OPENAI_API_KEY
 ```
+
+`ANTHROPIC_API_KEY` is for the metered API path only. The headless backend strips it — and every
+other provider credential — from the CLI it launches, so a key sitting in `.env` can never turn a
+subscription run into a billed one.
 
 ### Dictionary evaluator (optional)
 
