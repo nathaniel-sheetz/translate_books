@@ -6,10 +6,10 @@ This guide covers how to configure LLM providers and models, add new providers (
 
 The translate-harness / judge-review **headless** backend can drive either:
 
-| CLI | Binary | Auth | Config |
-|---|---|---|---|
-| Claude Code | `claude` | `claude` login session | `headless_cli=claude` (default) |
-| Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` |
+| CLI | Binary | Auth | Config | Enforced by |
+|---|---|---|---|---|
+| Claude Code | `claude` | `claude` login session | `headless_cli=claude` (default) | env scrub + auth preflight |
+| Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` | env scrub only |
 
 ```bash
 python scripts/harness.py config-set --project projects/<slug> --key headless_cli --value cursor
@@ -25,6 +25,47 @@ Token/cost metering is unavailable on this path (same as existing `claude -p`
 headless). See `references/translate-workers.md` and `judge-review/SKILL.md`.
 
 Metered dashboard / API translation still uses the providers below.
+
+### How subscription-only is enforced
+
+This used to be a convention, and it leaked. `src/api_translator.py` calls
+`load_dotenv()` at import, every `fanout` entry point imports it transitively,
+`subprocess` inherits `os.environ` by default, and the CLI prefers
+`ANTHROPIC_API_KEY` over the subscription session — so headless waves billed
+metered credit until the balance ran out mid-run (`Credit balance is too low`).
+
+`src/harness/headless.py` is now the only module in the repo that may spawn a
+headless CLI (pinned by `tests/test_spawn_boundary.py`), and it applies two
+layers. Neither subsumes the other:
+
+1. **Env scrub** (`subscription_env`) — the child gets `os.environ` minus the
+   entire `ANTHROPIC_*` namespace, `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY}`,
+   `CLAUDE_CODE_SKIP_{BEDROCK,VERTEX,FOUNDRY}_AUTH`, and `CURSOR_API_KEY`.
+   `CLAUDE_CODE_OAUTH_TOKEN` is deliberately **kept** — that *is* subscription
+   auth (`claude setup-token`). This is a denylist, so `PATH`, `PATHEXT` and the
+   rest of the ordinary runtime survive.
+2. **Auth preflight** (`subscription_auth_error`) — once per wave, before any
+   job, the harness runs `claude auth status --json` in that same scrubbed
+   environment and from the same neutral cwd the workers use. It proceeds only
+   on a confirmed subscription. It **fails closed**: an `apiKeySource`, a
+   third-party `apiProvider`, a logged-out CLI, a non-zero exit or an output
+   shape it does not recognise all block the wave with a top-level `error` and
+   zero jobs run. There is no override flag — metered spend goes through
+   `--backend api`, which is what that backend is for.
+
+Why both: `claude auth status` reports a clean subscription even with
+`ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` set, so only the scrub catches
+endpoint redirection; and an `apiKeyHelper` in a settings file never touches the
+environment, so only the preflight catches that.
+
+**Cursor gap:** there is no verified `cursor-agent` auth-status command, so the
+Cursor profile gets the scrub but not the preflight. Guessing at a command risks
+hard-failing a working setup. The harness has no metered Cursor code path at all,
+which is what makes the gap tolerable.
+
+The scrub happens at the spawn rather than by removing the key from the parent
+process on purpose: the metered path below genuinely needs `.env`, and a boundary
+scrub is invariant to import order, shell exports and CI injection.
 
 ## Quick Start
 

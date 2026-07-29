@@ -24,7 +24,8 @@ go-ahead, never folded into an earlier approval. Notes are few and short.
     python scripts/harness.py footnotes translate --project projects/<slug> --yes
     ```
     `footnotes translate` refuses without `--yes` on the API backend.
-  - **Headless backend** — no dollars (subscription usage), so no `--yes`. One command runs a
+  - **Headless backend** — no dollars (subscription usage, enforced at launch: the wave
+    refuses to start on a metered login), so no `--yes`. One command runs a
     `claude -p` wave and writes the bodies back:
     ```bash
     python scripts/harness.py footnotes translate --project projects/<slug>

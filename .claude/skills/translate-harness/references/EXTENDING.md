@@ -64,12 +64,25 @@ the launcher binary/flags differ (Codex, Gemini CLI, …), **do not** add a four
 1. Add a profile in `src/harness/headless.py` (`_build_cmd` / `_extract_output` /
    default binary / not-found hint). Fold any Claude-only
    `--system-prompt-file` into stdin when the new CLI lacks that flag.
-2. Add the name to `_CONFIG_SET_KEYS["headless_cli"]` and `DEFAULTS["headless_cli"]`.
-3. Thread `--cli` / `--cli-bin` (already on `translate-fanout`, footnotes
+2. **Add the family's credential and routing env vars to `_SCRUB_NAMES` (or
+   `_SCRUB_PREFIXES`) in `src/harness/headless.py`.** A new family with an
+   unscrubbed API key silently re-opens metered billing — that is the exact bug
+   this enforcement exists to prevent. The scrub list is a union across all
+   families, so just add yours to it.
+3. **Add an entry to `_AUTH_PROBE_ARGV`:** either the CLI's verified auth-status
+   argv plus a branch in `subscription_auth_error`, or `None` with a comment
+   naming why no probe exists (the Cursor precedent). Do not guess at a command —
+   a wrong one hard-fails a working setup, and the preflight fails closed.
+4. Add the name to `_CONFIG_SET_KEYS["headless_cli"]` and `DEFAULTS["headless_cli"]`.
+5. Thread `--cli` / `--cli-bin` (already on `translate-fanout`, footnotes
    translate, and `run_judges.py fanout`) — no new fan-out / commit commands.
-4. Document the profile in `references/translate-workers.md` and
-   `judge-review/SKILL.md`. Task-worker paths stay Claude-only (the Task tool
-   spawns Claude subagents).
+6. Document the profile in `references/translate-workers.md`,
+   `judge-review/SKILL.md`, and the enforcement table in `docs/LLM_PROVIDERS.md`.
+   Task-worker paths stay Claude-only (the Task tool spawns Claude subagents).
+
+`tests/test_spawn_boundary.py` holds an inventory of every process spawn in the
+repo, so the new family *must* go through `run_headless_wave` — a direct
+`subprocess.run` of the CLI fails CI.
 
 Recipe used for Cursor: `headless_cli=cursor` → `cursor-agent -p --trust --mode ask`.
 

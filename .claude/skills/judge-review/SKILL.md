@@ -34,6 +34,10 @@ Judges run one of two interchangeable ways (the same split as translate-harness)
   Task subagents or run a headless `claude -p` wave, then collect the drafts.
   **Zero API spend** (runs on the session). The gate here is a **usage** check
   before spawning N workers / fanning out, not dollars.
+  Headless is subscription-only by **enforcement**, not convention: the launcher
+  scrubs every metered credential out of the child env and refuses to start the
+  wave unless `claude auth status` confirms a subscription. A metered login is
+  rejected before job 1, so a wave can never half-complete on API credit.
 
 Both backends build the *same* prompt and parse with the *same* parser, so the
 findings — and the persisted `evaluations/<chunk>.json` — are identical either way.
@@ -195,7 +199,8 @@ Relay `usage_summary` (pairs to judge, worker_model, batch_size; `estimated_api_
 is the API-equivalent price, shown for context — nothing is spent). Under grouping,
 `usage_summary.workers` (actual spawns) is fewer than `pairs` (target×judge units) —
 relay both so the saving is visible. The **usage gate** is the subagent analog of the
-cost gate: no dollars, but spawning N workers / a headless wave consumes real
+cost gate: no dollars — enforced, not assumed, since headless refuses to run on a
+metered login — but spawning N workers / a headless wave consumes real
 session/rate usage. Get approval in a separate turn before spawning.
 
 **STOP — usage gate. Ask which spawn mode** via `AskUserQuestion` (unless already chosen):
@@ -264,9 +269,13 @@ python scripts/run_judges.py fanout --project understood-betsy \
 ```
 Each process is effectively: `claude -p` with the body (or full prompt) on stdin,
 optional `--system-prompt-file <preamble_path>`, `--model <worker_model>`,
-`--tools ""`, `--output-format text` → `draft_path`. After the wave, commit as
-below — the prepare→commit seam is unchanged (`committed`/`failed`/`missing`).
-On 529, re-run with a lower `--concurrency`.
+`--tools ""`, `--output-format text` → `draft_path`. The child env is scrubbed of
+every metered credential first, and one `claude auth status --json` preflight runs
+per wave; if it cannot confirm a subscription the command returns a top-level
+`error`, writes nothing, and spawns no jobs (relay that error — the fix is
+`claude` + `/login`, or `--backend api` if metered spend was actually intended).
+After the wave, commit as below — the prepare→commit seam is unchanged
+(`committed`/`failed`/`missing`). On 529, re-run with a lower `--concurrency`.
 
 Committing after each wave is fine for recovery; a single final `commit` after all
 waves is also fine. Either way, never start wave N+1 until wave N has finished
