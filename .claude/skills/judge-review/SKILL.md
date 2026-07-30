@@ -303,7 +303,14 @@ uniquely-locatable text swaps, and it never applies anything you didn't explicit
 
 `apply` writes its JSON to **stdout only**. The recombine/realign step loads a BERT model and
 the EPUB builder prints progress; all of that is redirected to stderr, so stdout still parses
-as exactly one JSON object. Aligner chatter on stderr is not an error — read the JSON.
+as exactly one JSON object. Aligner chatter on stderr is not an error — read the JSON. A
+`[apply] <chunk_id>: N fix(es) written + archived` line lands on stderr per chunk, so an
+interrupted run still shows how far it got.
+
+> **Run `apply` backgrounded for anything past a few chapters** (`run_in_background: true`).
+> Recombine + realign loads a BERT model **per chapter**, so a whole-book apply runs well over
+> the Bash tool's 2-minute foreground limit and gets killed mid-write. That is survivable now
+> (see the recovery note in 8c) but it costs a repair round-trip. Scope, then background.
 
 6c. **Dry-run the plan.** Run `apply` with `--dry-run` (or just omit `--select`). Relay the
 `applicable[]` fixes as `old → new` previews and list the `manual[]` findings with their
@@ -314,6 +321,19 @@ to the reader / web chunk editor for them.
 ```bash
 python scripts/run_judges.py apply --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03 --dry-run
+```
+`--scope` takes `chunk:<id>`, `chapter:<id>` or **`book`** (the whole project) and is
+repeatable. Use `book` for a full-book pass — never a shell loop building 32 `--scope
+chapter:` flags, where one missing chapter silently drops its findings out of scope.
+
+`--judge` is **repeatable**, and both judges in one invocation is the right way to run them:
+realign is paid once instead of twice, and each judge's excerpts are re-checked against the
+text the previous judge left behind. Findings then carry a `qualified_id`
+(`<judge>:<chunk_id>#<i>`) as well as the bare `id`; `--select` takes either, but a bare id
+both judges have comes back in `ambiguous_ids[]` rather than being guessed at.
+```bash
+python scripts/run_judges.py apply --project pollyanna \
+    --judge dialogue --judge address --scope book --dry-run
 ```
 7c. **Get an explicit selection.** The user picks which `applicable[].id`s to apply — **never
 apply without an explicit pick.** Use `AskUserQuestion` (multiSelect, **≤4 options**) when there
@@ -331,18 +351,43 @@ the book rebuilt now (recombine + realign always run either way):
 python scripts/run_judges.py apply --project understood-betsy --judge dialogue \
     --scope chapter:chapter_03 --select chapter_03_chunk_000#0,chapter_03_chunk_001#2 [--rebuild-epub]
 ```
-Relay the summary (`applied`, `chapters_realigned`, `archived_to`, `backups`). Every edit is
-logged to `corrections_applied.jsonl` (the same audit log as reader corrections) and a pre-edit
-chunk snapshot is kept under `.chunk_edits/` — so an apply is recoverable and traceable.
+Relay the summary (`applied`, `chapters_realigned`, `archived_to`, `backups`). Each chunk's
+pre-edit snapshot (`.chunk_edits/`), its edit, its rows in `corrections_applied.jsonl` (the same
+audit log as reader corrections) and its stale stamp are written **together, before the next
+chunk is touched** — so an apply is traceable, and an interrupted one leaves a consistent prefix
+rather than edits nothing recorded.
 
-Re-running the *same* `--select` is safe: ids whose edit is already in the chunk come back in
-`already_applied[]` with `status: "ok"` and rc 0, and nothing is re-archived or re-realigned. So
-a retry after an ambiguous-looking run is a no-op, not a double edit. An id the plan withheld
-comes back in `manual_ids[]`; `unknown_ids[]` now means only "no finding with that id in scope".
+**Re-running the same `--select` is safe, including after an interrupted run.** Ids whose edit is
+already in the chunk come back in `already_applied[]` with `status: "ok"` and rc 0; nothing is
+re-applied and nothing is re-archived. The proof that an edit is ours is an audit row *or* a
+`.chunk_edits/` snapshot, so a run killed before it wrote the audit log still resumes. When the
+retry also finds a chapter whose alignment is older than its chunks — the signature of a run that
+died before its realign step — it finishes that work: recombine, realign, re-stale-mark, and
+recover the missing audit rows (appended with `"recovered": true`). Both repairs are named in
+`warnings[]`. An id the plan withheld comes back in `manual_ids[]`; `unknown_ids[]` means only
+"no finding with that id in scope".
+
+**Deferring the expensive tail.** `--no-realign` applies the edits and skips recombine+realign,
+returning what is owed in `chapters_pending_realign[]`; settle it later with `--realign-only`,
+which changes no text and realigns every chapter in scope whose alignment is stale
+(`--realign-only --dry-run` just reports). `--realign-only` is also the repair command when an
+apply was interrupted and you no longer have its `--select` string:
+```bash
+python scripts/run_judges.py apply --project pollyanna --scope book --realign-only --rebuild-epub
+```
+
+**A plan goes stale the moment anything is applied to its chunks.** Across separate invocations,
+re-run the dry run between them — one judge's fix can rewrite the text another judge's excerpt
+quotes, and a plan is not revalidated by `--select`. Passing both judges to *one* invocation
+avoids the problem entirely; within a run, a fix an earlier judge superseded is reported in
+`failed[]` with a warning rather than forced into an approximate span.
 
 9c. **Refresh the badges.** Applying stale-marks each edited chunk's `evaluations/<chunk>.json`
-(a fixed finding must not keep asserting a failure). Offer to **re-run the judge** on the
-affected chunks; a fresh run clears the stale flag.
+(a fixed finding must not keep asserting a failure). The marker is written at the **top level** of
+that file — `stale`, `stale_since`, `stale_reason`, *not* inside `judges[<judge>]` next to the
+`score`/`issues` it invalidates — and `stale_reason` is single-valued, so a chunk both judges
+edited names only the most recent. Offer to **re-run the judge** on the affected chunks; a fresh
+run clears the stale flag.
 
 ### Feedback (optional, either backend)
 
@@ -358,8 +403,10 @@ later: `append_feedback(project_dir, chunk_id, "dialogue", issue_index,
   CLI injects them) plus the universal detection rubric in
   `prompts/address_forms.txt`. It needs the address-map setup beat first; the CLI
   errors clearly if the map is missing. `apply` also works on it (`--judge address`).
-- Only chunk-scoped results persist (one file per chunk). A `chapter:` scope expands
-  to one chunk-target per chunk, so persistence + badges work for both backends.
+- Only chunk-scoped results persist (one file per chunk). A `chapter:` or `book` scope
+  expands to one chunk-target per chunk, so persistence + badges work for both backends.
+  `book` works on `run` and `prepare` too — on `run` it is a large metered call, so the
+  cost gate will ask for `--confirm`.
 - Both backends persist via `merge_judge_result`, so the dashboard badge lights up
   identically regardless of which one ran. The persisted result records the backend
   (and `worker_model` for the subagent path) in its metadata / run header.
@@ -370,3 +417,6 @@ later: `append_feedback(project_dir, chunk_id, "dialogue", issue_index,
   the reader's own `corrections.jsonl` queue — it applies only the ids you selected, archives to
   `corrections_applied.jsonl`, and stale-marks the edited evaluations. Re-running the judge with
   `--persist` clears that stale marker.
+- Never hand-restore chunks from `.chunk_edits/` to recover an interrupted apply — re-running the
+  same `--select` (or `--realign-only`) is the supported path and does it without discarding the
+  edits that did land. Those snapshots are still the last resort if the text itself is wrong.

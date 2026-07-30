@@ -55,6 +55,49 @@ def test_chapter_scope_sorted_by_position(tmp_path):
     ]
 
 
+def test_book_scope_covers_every_chapter_in_reading_order(tmp_path):
+    """The whole project, so a full-book apply is one --scope instead of 32."""
+    _write(tmp_path, _chunk("chapter_02_chunk_000", "chapter_02", 0))
+    _write(tmp_path, _chunk("chapter_01_chunk_001", "chapter_01", 1))
+    _write(tmp_path, _chunk("chapter_01_chunk_000", "chapter_01", 0))
+
+    for scope in ("book", "book:", "BOOK"):
+        targets = build_targets(tmp_path, scope)
+        assert [t.id for t in targets] == [
+            "chapter_01_chunk_000",
+            "chapter_01_chunk_001",
+            "chapter_02_chunk_000",
+        ], scope
+
+
+def test_book_scope_skips_untranslated_chunks(tmp_path):
+    _write(tmp_path, _chunk("chapter_01_chunk_000", "chapter_01", 0))
+    _write(tmp_path, _chunk("chapter_02_chunk_000", "chapter_02", 0, translated=None))
+
+    targets = build_targets(tmp_path, "book")
+    assert [t.id for t in targets] == ["chapter_01_chunk_000"]
+
+
+def test_book_scope_all_untranslated_raises(tmp_path):
+    _write(tmp_path, _chunk("chapter_01_chunk_000", "chapter_01", 0, translated=None))
+    with pytest.raises(ScopeError, match="none are translated"):
+        build_targets(tmp_path, "book")
+
+
+def test_book_scope_no_chunks_raises(tmp_path):
+    with pytest.raises(ScopeError, match="No chunks/ directory"):
+        build_targets(tmp_path, "book")
+    (tmp_path / "chunks").mkdir()
+    with pytest.raises(ScopeError, match="No chunks found"):
+        build_targets(tmp_path, "book")
+
+
+def test_book_scope_rejects_an_id(tmp_path):
+    """'book:pollyanna' is a mistake worth naming — --project already said which."""
+    with pytest.raises(ScopeError, match="takes no id"):
+        build_targets(tmp_path, "book:pollyanna")
+
+
 def test_untranslated_chunk_raises(tmp_path):
     _write(tmp_path, _chunk("chapter_01_chunk_000", "chapter_01", 0, translated=None))
     with pytest.raises(ScopeError):

@@ -2,13 +2,19 @@
 Scope / addressing layer for judges.
 
 Turns a ``--scope`` string into a list of :class:`JudgeTarget`. v1 implements
-the two scopes the dialogue judge needs:
+the three scopes the dialogue judge needs:
 
 - ``chunk:<chunk_id>``      — a single chunk.
 - ``chapter:<chapter_id>``  — every translated chunk in a chapter, one target
                               each (keeps results keyed per chunk so the
                               existing ``evaluations/<chunk>.json`` persistence
                               and dashboard badges work).
+- ``book`` / ``book:``      — every translated chunk in the project, in reading
+                              order. Added so a whole-book ``run_judges.py
+                              apply`` is one invocation instead of one
+                              ``--scope chapter:`` flag per chapter built by a
+                              shell loop (a missing chapter there silently drops
+                              findings out of scope).
 
 Designed-for, not yet implemented (clear ``NotImplementedError`` stubs):
 ``sentences:<chapter>:<es_idx,...>`` (alignments), ``flags:<chapter>``
@@ -99,21 +105,52 @@ def _build_chapter_targets(project_dir: Path, chapter_id: str) -> list[JudgeTarg
     return targets
 
 
+def _build_book_targets(project_dir: Path) -> list[JudgeTarget]:
+    """Every translated chunk in the project, in reading order."""
+    chunks_dir = _chunks_dir(project_dir)
+    if not chunks_dir.exists():
+        raise ScopeError(f"No chunks/ directory in {project_dir}")
+
+    paths = sorted(chunks_dir.glob("*_chunk_*.json"))
+    if not paths:
+        raise ScopeError(f"No chunks found in {chunks_dir}")
+
+    targets: list[JudgeTarget] = []
+    for path in paths:
+        target = _target_from_chunk_path(path)
+        if target is not None:
+            targets.append(target)
+
+    if not targets:
+        raise ScopeError(f"{project_dir} has chunks but none are translated yet.")
+
+    targets.sort(
+        key=lambda t: (t.context.get("chapter_id") or "", t.context.get("position", 0))
+    )
+    return targets
+
+
 def build_targets(project_dir: Path, scope: str) -> list[JudgeTarget]:
     """Resolve a ``--scope`` string into JudgeTargets.
 
     Args:
         project_dir: ``projects/<id>/`` directory.
-        scope: e.g. ``"chunk:chapter_01_chunk_000"`` or ``"chapter:chapter_03"``.
+        scope: e.g. ``"chunk:chapter_01_chunk_000"``, ``"chapter:chapter_03"``,
+            or ``"book"`` / ``"book:"`` for the whole project.
 
     Raises:
         ScopeError: For unknown/malformed scopes or empty resolutions.
     """
+    # ``book`` is the one scope with no id after it, so it is matched before the
+    # '<kind>:<id>' split — both bare and trailing-colon forms are accepted.
+    if scope.strip().lower().rstrip(":") == "book":
+        return _build_book_targets(Path(project_dir))
+
     kind, sep, rest = scope.partition(":")
     if not sep:
         raise ScopeError(
             f"Malformed scope {scope!r}; expected '<kind>:<id>' "
-            "(e.g. 'chapter:chapter_03')."
+            "(e.g. 'chapter:chapter_03') or 'book'."
         )
     kind = kind.strip().lower()
     rest = rest.strip()
@@ -122,11 +159,16 @@ def build_targets(project_dir: Path, scope: str) -> list[JudgeTarget]:
         return _build_chunk_targets(Path(project_dir), rest)
     if kind == "chapter":
         return _build_chapter_targets(Path(project_dir), rest)
+    if kind == "book":
+        raise ScopeError(
+            f"Scope 'book' takes no id (got {rest!r}); the project is already "
+            "named by --project. Use 'book' or 'book:'."
+        )
     if kind in {"sentences", "flags", "findings"}:
         raise NotImplementedError(
             f"Scope {kind!r} is designed for but not implemented in v1. "
-            "Use 'chunk:<id>' or 'chapter:<id>'."
+            "Use 'chunk:<id>', 'chapter:<id>' or 'book'."
         )
     raise ScopeError(
-        f"Unknown scope kind {kind!r}; expected one of: chunk, chapter."
+        f"Unknown scope kind {kind!r}; expected one of: chunk, chapter, book."
     )

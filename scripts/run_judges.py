@@ -98,26 +98,40 @@ _RUN_SCHEMA = {
 
 _APPLY_SCHEMA = {
     "status": "'ok' | 'error' | 'partial'",
-    "mode": "'plan' (nothing changed) | 'applied'",
+    "mode": "'plan' (nothing changed) | 'applied' | 'realign' (--realign-only: no text changed)",
     "project": "resolved project directory",
-    "judge": "judge whose persisted findings were considered",
-    "scopes": "the --scope args resolved",
-    "applicable": "plan mode: {id, chunk_id, chapter_id, rule, severity, old, new, char_start, char_end} "
-    "for each finding that is a clean, uniquely-locatable text swap",
-    "manual": "plan mode: {id, chunk_id, chapter_id, rule, severity, reason, excerpt, suggestion, message} "
-    "for findings withheld from auto-apply (reason: no_suggestion | no_excerpt | "
-    "suggestion_equals_excerpt | suggestion_not_literal | excerpt_not_found | excerpt_ambiguous | "
-    "suggestion_restates_context)",
-    "chunks_without_findings": "target chunks with no persisted findings for this judge",
+    "judge": "the single judge considered, or null when --judge was repeated (see judges)",
+    "judges": "every judge whose persisted findings were considered, in the order applied",
+    "scopes": "the --scope args resolved ('chunk:<id>' | 'chapter:<id>' | 'book')",
+    "applicable": "plan mode: {id, judge, qualified_id, chunk_id, chapter_id, rule, severity, "
+    "old, new, char_start, char_end} for each finding that is a clean, uniquely-locatable text "
+    "swap. 'id' is bare ('<chunk_id>#<i>'); 'qualified_id' prefixes the judge and is what "
+    "--select needs when both judges have a finding with the same bare id",
+    "manual": "plan mode: {id, judge, qualified_id, chunk_id, chapter_id, rule, severity, reason, "
+    "excerpt, suggestion, message} for findings withheld from auto-apply (reason: no_suggestion | "
+    "no_excerpt | suggestion_equals_excerpt | suggestion_not_literal | excerpt_not_found | "
+    "excerpt_ambiguous | suggestion_restates_context)",
+    "chunks_without_findings": "target chunks with no persisted findings for any requested judge",
     "applied": "applied mode: fix ids that were actually applied",
-    "already_applied": "applied mode: selected ids whose exact edit is already in the chunk and "
-    "in corrections_applied.jsonl — re-running a selection is a no-op, not a failure",
+    "already_applied": "applied mode: selected ids whose exact edit is already in the chunk, "
+    "proved by a corrections_applied.jsonl row OR by a .chunk_edits/ snapshot. The snapshot path "
+    "is what makes a retry after an interrupted run resume (the audit log may not have been "
+    "written yet) instead of reporting the applied ids as manual/excerpt_not_found",
     "manual_ids": "error: selected ids the plan classified as manual (see manual[].reason)",
     "unknown_ids": "error: selected ids that match no finding in scope",
+    "ambiguous_ids": "error: bare selected ids that exist for more than one requested judge — "
+    "re-select them as '<judge>:<chunk_id>#<i>'",
     "failed": "applied mode: selected fix ids that did not locate (omitted when empty)",
-    "chapters_realigned": "applied mode: chapters recombined + realigned",
+    "chapters_realigned": "applied mode: chapters recombined + realigned. Includes chapters "
+    "realigned as *repair* — an already-applied edit whose alignment is older than its chunks "
+    "means an earlier run was interrupted before its realign step (see warnings)",
+    "chapters_pending_realign": "--no-realign: chapters whose chapters/*.txt and alignment are "
+    "now stale and must be realigned later ('apply --realign-only'), else null",
     "epub": "applied mode: rebuilt EPUB path, or null if not requested / nothing changed",
-    "stale_marked": "applied mode: chunks whose persisted evaluation was stale-stamped",
+    "stale_marked": "applied mode: chunks whose persisted evaluation was stale-stamped. The flag "
+    "is written at the TOP LEVEL of evaluations/<chunk>.json (stale, stale_since, stale_reason) — "
+    "not inside judges[<judge>] beside that judge's score/issues — and stale_reason is "
+    "single-valued, so a chunk edited by two judges' applies names only the most recent",
     "archived_to": "applied mode: corrections_applied.jsonl path (shared reader/judge audit log)",
     "backups": "applied mode: pre-edit chunk backup paths under .chunk_edits/",
     "warnings": "applied mode: non-fatal notes (e.g. a fix that no longer located), else null",
@@ -360,27 +374,52 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--project", required=True, help="Project id (under projects/) or path")
     ap.add_argument(
         "--judge",
-        default="dialogue",
-        help="Judge whose persisted findings to apply (default: dialogue)",
+        action="append",
+        default=None,
+        metavar="JUDGE",
+        help="Judge whose persisted findings to apply (default: dialogue). Repeatable: pass "
+        "--judge twice to apply both judges in one run, which realigns once and re-checks each "
+        "judge's excerpts against the text the earlier judge left behind. With more than one "
+        "judge, --select needs the '<judge>:<chunk_id>#<i>' form for any bare id both judges "
+        "have.",
     )
     ap.add_argument(
         "--scope",
         required=True,
         action="append",
         metavar="SCOPE",
-        help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'. Repeatable.",
+        help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book' (the whole "
+        "project). Repeatable.",
     )
     ap.add_argument(
         "--select",
         default=None,
-        help="Comma-separated fix ids (from the plan's applicable[].id) to apply. "
-        "Omit to preview the plan without changing anything.",
+        help="Comma-separated fix ids (from the plan's applicable[].id or .qualified_id) to "
+        "apply. Omit to preview the plan without changing anything.",
     )
     ap.add_argument(
         "--rebuild-epub",
         dest="rebuild_epub",
         action="store_true",
         help="Rebuild the EPUB after applying (recombine + realign always run)",
+    )
+    ap.add_argument(
+        "--no-realign",
+        dest="no_realign",
+        action="store_true",
+        help="Apply the edits but skip recombine + realign, which loads a BERT model per "
+        "chapter. The owed chapters come back in chapters_pending_realign; settle them with "
+        "--realign-only. Cannot be combined with --rebuild-epub (the EPUB builds from "
+        "chapters/).",
+    )
+    ap.add_argument(
+        "--realign-only",
+        dest="realign_only",
+        action="store_true",
+        help="Change no text: recombine + realign every chapter in scope whose alignment is "
+        "older than its chunks. The repair path for an apply that was interrupted before its "
+        "realign step, and the way to settle a --no-realign debt. Add --dry-run to see what "
+        "would be realigned.",
     )
     ap.add_argument(
         "--dry-run",
@@ -602,16 +641,15 @@ def _restated_after_splice(text: str, records: list[dict]) -> str | None:
     return None
 
 
-def _already_applied_edit(
-    archived: list[dict], chunk_id: str, excerpt: str, suggestion: str, chunk_text: str
-) -> bool:
-    """True if this exact edit is already archived *and* already in the chunk.
+def _desired_state_holds(chunk_text: str, excerpt: str, suggestion: str) -> bool:
+    """True if the chunk already reads the way this fix wants it to.
 
-    The archive says we made the edit; the chunk must show the desired state
-    holds so a re-``--select`` is a no-op rather than a failure. A short
-    ``suggestion`` that merely occurs somewhere (``el``, ``dijo``) is not
+    A short ``suggestion`` that merely occurs somewhere (``el``, ``dijo``) is not
     enough — it must appear exactly once, and when the excerpt is not itself a
-    substring of the suggestion the excerpt must be gone.
+    substring of the suggestion the excerpt must be gone. On its own this cannot
+    distinguish "the edit was made" from "the judge's excerpt was never in the
+    text and the suggestion happens to occur once", which is why callers also
+    require proof that the excerpt once existed.
     """
     if not suggestion:
         return False
@@ -619,12 +657,112 @@ def _already_applied_edit(
         return False
     if excerpt and excerpt not in suggestion and excerpt in chunk_text:
         return False
+    return True
+
+
+def _archive_has_edit(
+    archived: list[dict], chunk_id: str, excerpt: str, suggestion: str
+) -> bool:
+    """True if ``corrections_applied.jsonl`` records this exact swap."""
     return any(
         rec.get("chunk_id") == chunk_id
         and (rec.get("original_es") or "").strip() == excerpt
         and (rec.get("corrected_es") or "").strip() == suggestion
         for rec in archived
     )
+
+
+def _snapshot_proves_edit(
+    project_dir: Path, chunk_id: str, excerpt: str, suggestion: str
+) -> bool:
+    """True if a pre-edit snapshot shows this edit had not been made yet.
+
+    ``.chunk_edits/<chapter>/<chunk>/<ts>.json`` is a verbatim copy of the chunk
+    file taken *before* each edit, so a snapshot holding ``excerpt`` but not
+    ``suggestion`` proves the excerpt really was in the book and that whatever
+    now stands in its place got there by an edit. That is the same thing an
+    archive row proves — but the snapshot is written *before* the chunk is saved,
+    whereas the archive row is written after, so this is the proof that survives
+    a run killed mid-apply. Recovering that case by hand is what the 2026-07-29
+    pollyanna friction log (item 1) was about.
+    """
+    if not excerpt or not suggestion:
+        return False
+    for snap in sorted((project_dir / ".chunk_edits").glob(f"*/{chunk_id}/*.json")):
+        try:
+            payload = json.loads(snap.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        text = payload.get("translated_text") if isinstance(payload, dict) else None
+        if isinstance(text, str) and excerpt in text and suggestion not in text:
+            return True
+    return False
+
+
+def _already_applied_edit(
+    archived: list[dict],
+    chunk_id: str,
+    excerpt: str,
+    suggestion: str,
+    chunk_text: str,
+    *,
+    snapshot_proof: bool = False,
+) -> bool:
+    """True if this exact edit is already in the chunk *and* provably ours.
+
+    Two proofs are accepted, because either one alone answers "did an edit put
+    this text here": an archive row, or (``snapshot_proof``) a ``.chunk_edits/``
+    snapshot — see :func:`_snapshot_proves_edit`.
+    """
+    if not _desired_state_holds(chunk_text, excerpt, suggestion):
+        return False
+    return snapshot_proof or _archive_has_edit(archived, chunk_id, excerpt, suggestion)
+
+
+def _alignment_is_stale(project_dir: Path, chapter_id: str, chunk_ids: list[str]) -> bool:
+    """True if ``alignments/<chapter>.json`` is missing or older than these chunks.
+
+    ``realign_chapter`` writes that file last, so its mtime is the receipt that
+    an apply's expensive tail (recombine -> realign) actually ran. A chunk file
+    newer than the alignment means an edit landed and the tail did not — either
+    because the run was killed, or because it was told ``--no-realign``.
+    """
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    if not align_path.exists():
+        return True
+    try:
+        aligned_at = align_path.stat().st_mtime
+    except OSError:
+        return True
+    for chunk_id in chunk_ids:
+        chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
+        try:
+            if chunk_path.stat().st_mtime > aligned_at:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _write_chunk_snapshot(
+    project_dir: Path, chapter_id: str, chunk_id: str, chunk_path: Path, ts: str
+) -> Path:
+    """Copy the pre-edit chunk into ``.chunk_edits/`` (web-UI editor convention).
+
+    Must be called before the edited chunk is saved: these snapshots are the only
+    complete record of the pre-edit text, and the sole reason an interrupted
+    apply is recoverable. Keeps the last 10 per chunk.
+    """
+    backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_root / f"{ts}.json"
+    backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
+    for old_backup in sorted(backup_root.glob("*.json"))[:-10]:
+        try:
+            old_backup.unlink()
+        except OSError:
+            pass
+    return backup_path
 
 
 def _load_archived_records(project_dir: Path) -> list[dict]:
@@ -653,10 +791,17 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     which persisted findings are a clean, uniquely-locatable text swap
     (``applicable``) and which are withheld (``manual``) — nothing is written.
     With ``--select`` it applies only the chosen ids, reusing the reader-
-    corrections pipeline (backup -> edit -> recombine -> realign -> archive) so
+    corrections pipeline (backup -> edit -> archive -> recombine -> realign) so
     the edit is logged exactly like other chunk edits, then stale-marks the
     edited chunks' evaluations. The reader's ``corrections.jsonl`` queue is never
     touched.
+
+    Crash consistency: each chunk's snapshot, edit, audit rows and stale stamp
+    are written together, before the next chunk is touched, so a run killed
+    part-way through leaves a consistent *prefix* rather than edits nothing
+    recorded. What a kill can still skip is the per-chapter tail (recombine ->
+    realign -> EPUB); a later run detects that from the alignment mtime and
+    finishes it. See ``_alignment_is_stale`` and ``_snapshot_proves_edit``.
     """
     project_dir = _resolve_project(args.project)
 
@@ -671,11 +816,30 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     from src.utils.file_io import load_chunk, save_chunk
     from web_ui.evaluations import load_chunk_evaluation, mark_evaluation_stale
 
-    judge = args.judge
+    judges: list[str] = list(dict.fromkeys(args.judge or ["dialogue"]))
+
+    # 0. Flag combinations that cannot mean anything. These are emitted as JSON
+    #    rather than raised through argparse, which would print usage to stderr
+    #    and exit 2 — breaking the one-JSON-object contract every caller parses.
+    conflict = None
+    if args.no_realign and args.rebuild_epub:
+        conflict = (
+            "--no-realign cannot be combined with --rebuild-epub: the EPUB is built from "
+            "chapters/, which recombine writes. Apply with --no-realign, then run "
+            "'apply --realign-only --rebuild-epub'."
+        )
+    elif args.realign_only and args.select:
+        conflict = "--realign-only changes no text, so it cannot take --select."
+    elif args.realign_only and args.no_realign:
+        conflict = "--realign-only and --no-realign are opposites; pass neither or one."
+    if conflict:
+        _emit({"status": "error", "error": conflict, "scopes": args.scope}, _APPLY_SCHEMA)
+        return 1
 
     # 1. Resolve scopes -> unique, translated chunk targets (preserve order).
     targets: dict[str, object] = {}
     order: list[str] = []
+    chapter_of: dict[str, str] = {}
     try:
         for scope in args.scope:
             for target in build_targets(project_dir, scope):
@@ -683,25 +847,82 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                     continue
                 targets[target.id] = target
                 order.append(target.id)
+                chapter_of[target.id] = (
+                    target.context.get("chapter_id") or target.id.rsplit("_chunk_", 1)[0]
+                )
     except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
         _emit({"status": "error", "error": str(exc), "scopes": args.scope}, _APPLY_SCHEMA)
         return 1
 
-    # 2. Classify each chunk's persisted findings against its current text.
-    applicable: dict[str, tuple[str, str, ProposedFix]] = {}
+    def _chapters_in_order(chunk_ids: list[str]) -> dict[str, list[str]]:
+        """chapter_id -> its chunk_ids, in scope order."""
+        grouped: dict[str, list[str]] = {}
+        for cid in chunk_ids:
+            grouped.setdefault(chapter_of.get(cid, ""), []).append(cid)
+        return grouped
+
+    # 1b. ``--realign-only``: no findings needed, no text touched. This is the
+    #     repair verb — for an apply interrupted before its realign step, and for
+    #     settling a --no-realign debt.
+    if args.realign_only:
+        stale_chapters = [
+            chapter_id
+            for chapter_id, chunk_ids in _chapters_in_order(order).items()
+            if _alignment_is_stale(project_dir, chapter_id, chunk_ids)
+        ]
+        if args.dry_run:
+            _emit(
+                {
+                    "status": "ok", "mode": "realign", "project": str(project_dir),
+                    "judge": None, "judges": [], "scopes": args.scope,
+                    "chapters_realigned": [], "chapters_pending_realign": stale_chapters,
+                    "epub": None, "warnings": None,
+                },
+                _APPLY_SCHEMA,
+            )
+            return 0
+        epub_path = None
+        with contextlib.redirect_stdout(sys.stderr):
+            for i, chapter_id in enumerate(stale_chapters, start=1):
+                print(f"[apply] realigning {chapter_id} ({i}/{len(stale_chapters)})")
+                recombine_chapter(project_dir, chapter_id)
+                realign_chapter(project_dir, chapter_id, args.source_lang, args.target_lang)
+            if args.rebuild_epub and stale_chapters:
+                epub_path = rebuild_epub(project_dir)
+        _emit(
+            {
+                "status": "ok", "mode": "realign", "project": str(project_dir),
+                "judge": None, "judges": [], "scopes": args.scope,
+                "chapters_realigned": stale_chapters,
+                "chapters_pending_realign": None,
+                "epub": str(epub_path) if epub_path else None,
+                "warnings": None if stale_chapters else ["Every chapter in scope was already "
+                                                        "aligned; nothing to repair."],
+            },
+            _APPLY_SCHEMA,
+        )
+        return 0
+
+    # 2. Classify every requested judge's persisted findings against the chunk's
+    #    current text. Fix ids stay bare (``<chunk_id>#<i>``) so single-judge runs
+    #    and every documented example are unchanged, and each finding also carries
+    #    a ``qualified_id`` (``<judge>:<chunk_id>#<i>``) — with two judges the same
+    #    bare id routinely exists for both, and guessing which one was meant is
+    #    not something a text-rewriting command should do.
+    applicable: dict[str, tuple[str, str, str, ProposedFix]] = {}
     applicable_list: list[dict] = []
     manual_list: list[dict] = []
-    manual_ids_seen: set[str] = set()
-    # id -> (chunk_id, excerpt, suggestion, chunk_text), for classifying a
-    # selected id that is neither applicable nor a live manual finding.
-    seen_issues: dict[str, tuple[str, str, str, str]] = {}
+    manual_qids: set[str] = set()
+    # qualified_id -> everything needed to re-classify it later, to decide whether
+    # a selected id is already applied, and to rebuild a lost audit row.
+    seen_issues: dict[str, dict] = {}
+    bare_index: dict[str, list[str]] = {}
     chunks_without: list[str] = []
-    any_findings = False
+    judges_with_findings: set[str] = set()
     warnings_out: list[str] = []
 
     for chunk_id in order:
-        target = targets[chunk_id]
-        chapter_id = target.context.get("chapter_id") or chunk_id.rsplit("_chunk_", 1)[0]
+        chapter_id = chapter_of[chunk_id]
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
         if not chunk_path.exists():
             chunks_without.append(chunk_id)
@@ -714,43 +935,59 @@ def _cmd_apply(args: argparse.Namespace) -> int:
             continue
         translated_text = chunk.translated_text or ""
         payload = load_chunk_evaluation(project_dir, chunk_id)
-        judges = payload.get("judges") if isinstance(payload, dict) else None
-        judge_entry = judges.get(judge) if isinstance(judges, dict) else None
-        issues = judge_entry.get("issues") if isinstance(judge_entry, dict) else None
-        if not issues:
+        persisted = payload.get("judges") if isinstance(payload, dict) else None
+        found_any = False
+        for judge in judges:
+            judge_entry = persisted.get(judge) if isinstance(persisted, dict) else None
+            issues = judge_entry.get("issues") if isinstance(judge_entry, dict) else None
+            if not issues:
+                continue
+            found_any = True
+            judges_with_findings.add(judge)
+            for i, issue in enumerate(issues):
+                fid = f"{chunk_id}#{i}"
+                qid = f"{judge}:{fid}"
+                result = classify_fix(issue, translated_text)
+                seen_issues[qid] = {
+                    "id": fid, "judge": judge, "chunk_id": chunk_id,
+                    "chapter_id": chapter_id, "issue": issue,
+                    "excerpt": result.excerpt or "", "suggestion": result.suggestion or "",
+                    "text": translated_text, "rule": result.rule,
+                    "severity": result.severity, "message": result.message,
+                }
+                bare_index.setdefault(fid, []).append(qid)
+                entry = {
+                    "id": fid, "judge": judge, "qualified_id": qid,
+                    "chunk_id": chunk_id, "chapter_id": chapter_id,
+                    "rule": result.rule, "severity": result.severity,
+                }
+                if isinstance(result, ProposedFix):
+                    applicable[qid] = (judge, chunk_id, chapter_id, result)
+                    applicable_list.append(
+                        {
+                            **entry,
+                            "old": result.excerpt, "new": result.suggestion,
+                            "char_start": result.char_start, "char_end": result.char_end,
+                        }
+                    )
+                else:
+                    manual_qids.add(qid)
+                    manual_list.append(
+                        {
+                            **entry,
+                            "reason": result.reason, "excerpt": result.excerpt,
+                            "suggestion": result.suggestion, "message": result.message,
+                        }
+                    )
+        if not found_any:
             chunks_without.append(chunk_id)
-            continue
-        any_findings = True
-        for i, issue in enumerate(issues):
-            fid = f"{chunk_id}#{i}"
-            result = classify_fix(issue, translated_text)
-            seen_issues[fid] = (chunk_id, result.excerpt or "", result.suggestion or "", translated_text)
-            if isinstance(result, ProposedFix):
-                applicable[fid] = (chunk_id, chapter_id, result)
-                applicable_list.append(
-                    {
-                        "id": fid, "chunk_id": chunk_id, "chapter_id": chapter_id,
-                        "rule": result.rule, "severity": result.severity,
-                        "old": result.excerpt, "new": result.suggestion,
-                        "char_start": result.char_start, "char_end": result.char_end,
-                    }
-                )
-            else:
-                manual_ids_seen.add(fid)
-                manual_list.append(
-                    {
-                        "id": fid, "chunk_id": chunk_id, "chapter_id": chapter_id,
-                        "rule": result.rule, "severity": result.severity,
-                        "reason": result.reason, "excerpt": result.excerpt,
-                        "suggestion": result.suggestion, "message": result.message,
-                    }
-                )
 
-    if not any_findings:
+    if not judges_with_findings:
+        named = "'" + "', '".join(judges) + "'"
         _emit(
             {
                 "status": "error",
-                "error": f"No persisted '{judge}' findings for the given scope. Run the "
+                "error": f"No persisted {named} findings for the given scope. Run the "
                 "judge with --persist first (run/commit) before applying.",
                 "scopes": args.scope,
                 "chunks_without_findings": chunks_without,
@@ -759,12 +996,25 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         )
         return 1
 
+    single_judge = judges[0] if len(judges) == 1 else None
+
+    def _report_id(value: str) -> str:
+        """Echo an id back in the form the operator can re-select with.
+
+        Bare while one judge is in play (unchanged for every existing caller),
+        judge-qualified once more than one is, because that is then the only form
+        that unambiguously names a finding.
+        """
+        if single_judge and value in seen_issues:
+            return seen_issues[value]["id"]
+        return value
+
     # 3. Plan mode — report, change nothing.
     if args.dry_run or not args.select:
         _emit(
             {
                 "status": "ok", "mode": "plan", "project": str(project_dir),
-                "judge": judge, "scopes": args.scope,
+                "judge": single_judge, "judges": judges, "scopes": args.scope,
                 "applicable": applicable_list, "manual": manual_list,
                 "chunks_without_findings": chunks_without,
             },
@@ -774,167 +1024,286 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 
     # 4. Apply mode — only the explicitly-selected, applicable ids.
     #
+    # Resolve each selected token to one finding first. A qualified id names its
+    # judge; a bare id is only usable while it belongs to exactly one of the
+    # requested judges.
+    selected_tokens = list(dict.fromkeys(s.strip() for s in args.select.split(",") if s.strip()))
+    selected_qids: list[str] = []
+    ambiguous_ids: list[str] = []
+    unknown_ids: list[str] = []
+    for token in selected_tokens:
+        if token in seen_issues:  # already qualified — qids always contain ':'
+            selected_qids.append(token)
+            continue
+        matches = bare_index.get(token, [])
+        if len(matches) == 1:
+            selected_qids.append(matches[0])
+        elif matches:
+            ambiguous_ids.append(token)
+        else:
+            unknown_ids.append(token)
+
     # A selected id that isn't applicable is one of three different situations,
     # and only two of them are errors. Check "already applied" first: an id whose
     # edit already landed classifies as ``excerpt_not_found`` (its old text is
     # gone, by design), so a plain manual-list test would report a completed
     # apply as a failure and invite the operator to re-do it.
-    selected_ids = list(dict.fromkeys(s.strip() for s in args.select.split(",") if s.strip()))
     archived = _load_archived_records(project_dir)
     already_applied: list[str] = []
+    # Already-applied ids the archive has no row for: the edit is in the book and
+    # a snapshot proves we made it, but the run that made it died before writing
+    # the audit log. Recover the row rather than leave the edit untraceable.
+    recovered_qids: list[str] = []
     manual_ids: list[str] = []
-    unknown_ids: list[str] = []
-    for fid in selected_ids:
-        if fid in applicable:
+    for qid in selected_qids:
+        if qid in applicable:
             continue
-        known = seen_issues.get(fid)
-        if known and _already_applied_edit(archived, known[0], known[1], known[2], known[3]):
-            already_applied.append(fid)
-        elif fid in manual_ids_seen:
-            manual_ids.append(fid)
+        known = seen_issues[qid]
+        excerpt, suggestion = known["excerpt"], known["suggestion"]
+        if _desired_state_holds(known["text"], excerpt, suggestion):
+            if _archive_has_edit(archived, known["chunk_id"], excerpt, suggestion):
+                already_applied.append(qid)
+                continue
+            if _snapshot_proves_edit(project_dir, known["chunk_id"], excerpt, suggestion):
+                already_applied.append(qid)
+                recovered_qids.append(qid)
+                continue
+        if qid in manual_qids:
+            manual_ids.append(qid)
         else:
-            unknown_ids.append(fid)
+            unknown_ids.append(qid)
 
-    if manual_ids or unknown_ids:
+    if manual_ids or unknown_ids or ambiguous_ids:
         _emit(
             {
                 "status": "error",
-                "error": "Selected id(s) are not in the applicable set (unknown, or "
-                "classified as manual). Re-check the plan's applicable[].id.",
-                "unknown_ids": unknown_ids,
-                "manual_ids": manual_ids,
-                "already_applied": already_applied,
-                "applicable_ids": list(applicable.keys()),
+                "error": "Selected id(s) are not in the applicable set (unknown, ambiguous "
+                "across judges, or classified as manual). Re-check the plan's "
+                "applicable[].id / .qualified_id.",
+                "unknown_ids": [_report_id(v) for v in unknown_ids],
+                "manual_ids": [_report_id(v) for v in manual_ids],
+                "ambiguous_ids": ambiguous_ids,
+                "already_applied": [_report_id(qid) for qid in already_applied],
+                "applicable_ids": [_report_id(qid) for qid in applicable],
             },
             _APPLY_SCHEMA,
         )
         return 1
 
-    pending_ids = [fid for fid in selected_ids if fid in applicable]
-    if not pending_ids:
-        # Every selected id is already in the chunk: the desired state holds, so
-        # a retry is a no-op. Nothing is re-archived and nothing is re-realigned.
-        _emit(
-            {
-                "status": "ok", "mode": "applied", "project": str(project_dir),
-                "judge": judge, "scopes": args.scope,
-                "applied": [], "already_applied": already_applied,
-                "failed": None, "chapters_realigned": [], "epub": None,
-                "stale_marked": [], "archived_to": None, "backups": [],
-                "warnings": warnings_out or None,
-            },
-            _APPLY_SCHEMA,
-        )
-        return 0
+    pending_ids = [qid for qid in selected_qids if qid in applicable]
 
-    # Group selected fixes by chunk (keep their ids for reporting).
+    # Group selected fixes by chunk, then by judge in the order the judges were
+    # requested — one judge's edit can invalidate the next judge's excerpt in the
+    # same chunk, so each judge's fixes are re-classified against the text the
+    # previous judge left behind rather than against the plan's text.
     by_chunk: dict[str, dict] = {}
-    for fid in pending_ids:
-        chunk_id, chapter_id, fix = applicable[fid]
-        entry = by_chunk.setdefault(chunk_id, {"chapter_id": chapter_id, "items": []})
-        entry["items"].append((fid, fix))
+    for qid in pending_ids:
+        judge, chunk_id, chapter_id, _fix = applicable[qid]
+        entry = by_chunk.setdefault(chunk_id, {"chapter_id": chapter_id, "by_judge": {}})
+        entry["by_judge"].setdefault(judge, []).append(qid)
 
     ts = time.strftime("%Y%m%dT%H%M%S")
+    applied_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     applied_ids: list[str] = []
     failed_ids: list[str] = []
-    edited_chunks: list[str] = []
     affected_chapters: list[str] = []
-    all_records: list[dict] = []
+    archive_path: Path | None = None
+    stale_marked: list[str] = []
     backups: list[str] = []
 
     for chunk_id, entry in by_chunk.items():
         chapter_id = entry["chapter_id"]
+        # Judge order comes from the --judge flags, never from the order ids were
+        # pasted into --select: which judge edits the chunk first decides whose
+        # excerpt can be superseded, so it must be a property of the command.
+        judge_batches = [(j, entry["by_judge"][j]) for j in judges if j in entry["by_judge"]]
+        chunk_qids = [qid for _judge, qids in judge_batches for qid in qids]
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
         if not chunk_path.exists():
-            failed_ids.extend(fid for fid, _ in entry["items"])
+            failed_ids.extend(chunk_qids)
             warnings_out.append(f"{chunk_id}: chunk file missing")
             continue
         try:
             chunk = load_chunk(chunk_path)
         except Exception as exc:
-            failed_ids.extend(fid for fid, _ in entry["items"])
+            failed_ids.extend(chunk_qids)
             warnings_out.append(f"{chunk_id}: failed to load chunk ({exc})")
             continue
 
-        items: list[tuple[str, ProposedFix]] = entry["items"]
-        records = [
-            to_correction_record(
-                fix, chunk_id=chunk_id, chapter_id=chapter_id,
-                project_id=project_dir.name, judge_name=judge,
-            )
-            for _fid, fix in items
-        ]
-        updated, applied_count, applied_indices = apply_to_chunk(chunk, records)
-        applied_set = set(applied_indices)
+        chunk_records: list[dict] = []
+        chunk_applied: list[str] = []
+        judges_that_edited: list[str] = []
 
-        chunk_failed = [items[i][0] for i in range(len(items)) if i not in applied_set]
-        chunk_applied = [items[i][0] for i in applied_indices]
-        if chunk_failed:
-            failed_ids.extend(chunk_failed)
-            warnings_out.append(
-                f"{chunk_id}: {applied_count}/{len(records)} selected fixes located"
-            )
+        for judge, qids in judge_batches:
+            text = chunk.translated_text or ""
+            items: list[tuple[str, ProposedFix]] = []
+            for qid in qids:
+                result = classify_fix(seen_issues[qid]["issue"], text)
+                if isinstance(result, ProposedFix):
+                    items.append((qid, result))
+                else:
+                    # Only reachable when an earlier judge in this same run
+                    # rewrote the text this fix was keyed to. Never fall back to
+                    # a loose search: that is how a fix lands on the wrong span.
+                    failed_ids.append(qid)
+                    warnings_out.append(
+                        f"{chunk_id}: {_report_id(qid)} ({judge}) no longer applies "
+                        f"({result.reason}) — an earlier judge's edit in this run "
+                        "superseded it; re-plan and re-select if it is still wanted"
+                    )
+            if not items:
+                continue
 
-        if applied_count > 0:
-            repeated = _restated_after_splice(
-                updated.translated_text or "", [records[i] for i in applied_indices]
-            )
-            if repeated is not None:
-                # Never write a chunk whose spliced text duplicates prose. This
-                # should be unreachable now that classify_fix rejects restating
-                # suggestions; it exists so that if it ever isn't, the book is
-                # not the thing that finds out.
-                failed_ids.extend(chunk_applied)
+            records = [
+                to_correction_record(
+                    fix, chunk_id=chunk_id, chapter_id=chapter_id,
+                    project_id=project_dir.name, judge_name=judge,
+                )
+                for _qid, fix in items
+            ]
+            updated, applied_count, applied_indices = apply_to_chunk(chunk, records)
+            applied_set = set(applied_indices)
+
+            batch_failed = [items[i][0] for i in range(len(items)) if i not in applied_set]
+            batch_applied = [items[i][0] for i in applied_indices]
+            if batch_failed:
+                failed_ids.extend(batch_failed)
                 warnings_out.append(
-                    f"{chunk_id}: refused to save — the result repeats adjacent text "
-                    f"({repeated!r}); no change was written to this chunk"
+                    f"{chunk_id}: {applied_count}/{len(records)} selected {judge} fixes located"
+                )
+            if applied_count == 0:
+                continue
+
+            # Never keep a chunk whose spliced text duplicates prose. Checked
+            # against every record applied to this chunk so far, so a later
+            # judge's batch cannot create a duplication at an earlier one's
+            # boundary. Should be unreachable now that classify_fix rejects
+            # restating suggestions; it exists so that if it ever isn't, the book
+            # is not the thing that finds out.
+            candidate = list(chunk_records) + [records[i] for i in applied_indices]
+            repeated = _restated_after_splice(updated.translated_text or "", candidate)
+            if repeated is not None:
+                failed_ids.extend(batch_applied)
+                warnings_out.append(
+                    f"{chunk_id}: refused to save the {judge} fixes — the result repeats "
+                    f"adjacent text ({repeated!r}); those fixes were dropped"
                 )
                 continue
 
-            # Pre-edit backup (reuse the web-UI editor convention; keep last 10).
-            backup_root = project_dir / ".chunk_edits" / chapter_id / chunk_id
-            backup_root.mkdir(parents=True, exist_ok=True)
-            backup_path = backup_root / f"{ts}.json"
-            backup_path.write_text(chunk_path.read_text(encoding="utf-8"), encoding="utf-8")
-            for old_backup in sorted(backup_root.glob("*.json"))[:-10]:
-                try:
-                    old_backup.unlink()
-                except OSError:
-                    pass
-            backups.append(str(backup_path))
+            chunk = updated
+            chunk_records.extend(records[i] for i in applied_indices)
+            chunk_applied.extend(batch_applied)
+            judges_that_edited.append(judge)
 
-            save_chunk(updated, chunk_path)
-            all_records.extend(records[i] for i in applied_indices)
-            applied_ids.extend(chunk_applied)
-            edited_chunks.append(chunk_id)
-            if chapter_id not in affected_chapters:
-                affected_chapters.append(chapter_id)
+        if not chunk_records:
+            continue
 
-    # Steps 5-7 load the aligner and the EPUB builder, which print progress to
-    # stdout. ``_emit`` runs after this block, so stdout stays exactly one JSON
-    # object and the chatter is still visible on stderr.
-    with contextlib.redirect_stdout(sys.stderr):
-        # 5. Recombine + realign the touched chapters (always).
-        for chapter_id in affected_chapters:
-            recombine_chapter(project_dir, chapter_id)
-            realign_chapter(project_dir, chapter_id, args.source_lang, args.target_lang)
+        # Everything this chunk needs, written before the next chunk is touched:
+        # snapshot (pre-edit, the only complete record of the old text) -> the
+        # edit -> its audit rows -> the stale stamp. A kill after this point
+        # leaves a consistent prefix; a kill *inside* it can only lose this one
+        # chunk's rows, and the snapshot still proves what happened.
+        backups.append(
+            str(_write_chunk_snapshot(project_dir, chapter_id, chunk_id, chunk_path, ts))
+        )
+        save_chunk(chunk, chunk_path)
+        archive_path = archive_applied_records(project_dir, chunk_records, applied_at=applied_at)
+        if mark_evaluation_stale(
+            project_dir, chunk_id,
+            "translated_text edited by judge-review apply "
+            f"({', '.join(judges_that_edited)})",
+        ) is not None:
+            stale_marked.append(chunk_id)
 
-        # 6. Archive (shared audit log) + stale-guard the edited evaluations.
-        archive_path = archive_applied_records(project_dir, all_records) if all_records else None
-        stale_marked: list[str] = []
-        for chunk_id in edited_chunks:
+        applied_ids.extend(chunk_applied)
+        if chapter_id not in affected_chapters:
+            affected_chapters.append(chapter_id)
+        # A killed run used to leave no trace at all on stdout (the JSON is
+        # emitted only at the end). This is how far it got.
+        print(
+            f"[apply] {chunk_id}: {len(chunk_applied)} fix(es) written + archived",
+            file=sys.stderr,
+        )
+
+    # 5. Repair pass. An id that was *already* applied, in a chapter whose
+    #    alignment is older than its chunks, is the signature of a run that died
+    #    between the edit and the recombine/realign tail — so finish that run's
+    #    work instead of reporting a no-op over a half-finished book.
+    resume_chapters: dict[str, list[str]] = {}
+    for qid in already_applied:
+        info = seen_issues[qid]
+        resume_chapters.setdefault(info["chapter_id"], []).append(info["chunk_id"])
+    for chapter_id, chunk_ids in resume_chapters.items():
+        if chapter_id in affected_chapters:
+            continue
+        if not _alignment_is_stale(project_dir, chapter_id, chunk_ids):
+            continue
+        affected_chapters.append(chapter_id)
+        warnings_out.append(
+            f"{chapter_id}: the selected edits are already in the chunks, but the alignment is "
+            "older than them — the recombine/realign tail never ran for this chapter (an "
+            "interrupted apply, or --no-realign). Finishing it now: recombine, realign, "
+            "re-stale-mark."
+        )
+        for chunk_id in dict.fromkeys(chunk_ids):
+            evaluation = load_chunk_evaluation(project_dir, chunk_id)
+            if isinstance(evaluation, dict) and evaluation.get("stale"):
+                continue
             if mark_evaluation_stale(
                 project_dir, chunk_id,
-                f"translated_text edited by judge-review apply ({judge})",
+                "translated_text edited by judge-review apply "
+                f"({', '.join(judges)}); stamped by a resumed run",
             ) is not None:
                 stale_marked.append(chunk_id)
 
-        # 7. Optional EPUB rebuild.
-        epub_path = None
+    # Recover audit rows for edits whose run died before writing them. Only for
+    # ids the archive has no row for, so this can never duplicate a row.
+    recovered_rows = [
+        {
+            "chunk_id": seen_issues[qid]["chunk_id"],
+            "chapter_id": seen_issues[qid]["chapter_id"],
+            "project_id": project_dir.name,
+            "original_es": seen_issues[qid]["excerpt"],
+            "corrected_es": seen_issues[qid]["suggestion"],
+            "chunk_offset_start": None,
+            "chunk_offset_end": None,
+            "es_idx": None,
+            "timestamp": applied_at,
+            "source": f"judge:{seen_issues[qid]['judge']}",
+            "rule": seen_issues[qid]["rule"],
+            "severity": seen_issues[qid]["severity"],
+            "message": seen_issues[qid]["message"],
+            "recovered": True,
+        }
+        for qid in recovered_qids
+    ]
+    if recovered_rows:
+        archive_path = archive_applied_records(project_dir, recovered_rows, applied_at=applied_at)
+        warnings_out.append(
+            f"{len(recovered_rows)} already-applied edit(s) had no audit row — an earlier run "
+            "was interrupted before writing one. Recovered from the .chunk_edits/ snapshots and "
+            "appended with \"recovered\": true: "
+            + ", ".join(_report_id(qid) for qid in recovered_qids)
+        )
+
+    # 6-7. The aligner and the EPUB builder print progress to stdout. ``_emit``
+    # runs after this block, so stdout stays exactly one JSON object and the
+    # chatter is still visible on stderr.
+    pending_realign: list[str] = []
+    epub_path = None
+    if args.no_realign:
+        pending_realign = list(affected_chapters)
+        affected_chapters = []
+    with contextlib.redirect_stdout(sys.stderr):
+        for i, chapter_id in enumerate(affected_chapters, start=1):
+            print(f"[apply] realigning {chapter_id} ({i}/{len(affected_chapters)})")
+            recombine_chapter(project_dir, chapter_id)
+            realign_chapter(project_dir, chapter_id, args.source_lang, args.target_lang)
+
         if args.rebuild_epub and affected_chapters:
             epub_path = rebuild_epub(project_dir)
 
-    if not applied_ids:
+    if not applied_ids and pending_ids:
         _emit(
             {
                 "status": "error",
@@ -942,16 +1311,18 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                 "error": "None of the selected fixes were applied — they did not locate in the "
                 "current chunk text, or the result was rejected. See warnings.",
                 "project": str(project_dir),
-                "judge": judge,
+                "judge": single_judge,
+                "judges": judges,
                 "scopes": args.scope,
                 "applied": [],
-                "already_applied": already_applied,
-                "failed": failed_ids,
-                "chapters_realigned": [],
-                "epub": None,
-                "stale_marked": [],
-                "archived_to": None,
-                "backups": [],
+                "already_applied": [_report_id(qid) for qid in already_applied],
+                "failed": [_report_id(qid) for qid in failed_ids],
+                "chapters_realigned": affected_chapters,
+                "chapters_pending_realign": pending_realign or None,
+                "epub": str(epub_path) if epub_path else None,
+                "stale_marked": stale_marked,
+                "archived_to": str(archive_path) if archive_path else None,
+                "backups": backups,
                 "warnings": warnings_out or None,
             },
             _APPLY_SCHEMA,
@@ -962,11 +1333,12 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     _emit(
         {
             "status": apply_status, "mode": "applied", "project": str(project_dir),
-            "judge": judge, "scopes": args.scope,
-            "applied": applied_ids,
-            "already_applied": already_applied,
-            "failed": failed_ids or None,
+            "judge": single_judge, "judges": judges, "scopes": args.scope,
+            "applied": [_report_id(qid) for qid in applied_ids],
+            "already_applied": [_report_id(qid) for qid in already_applied],
+            "failed": [_report_id(qid) for qid in failed_ids] or None,
             "chapters_realigned": affected_chapters,
+            "chapters_pending_realign": pending_realign or None,
             "epub": str(epub_path) if epub_path else None,
             "stale_marked": stale_marked,
             "archived_to": str(archive_path) if archive_path else None,

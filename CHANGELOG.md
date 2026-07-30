@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.2.0] - 2026-07-29
+
+### Fixed
+- **An interrupted `run_judges.py apply` is recoverable by re-running it.** The audit log was written once, after every chunk had been edited, so the window in which a long apply gets killed was exactly the window in which the edits exist and nothing records them. Re-running the same `--select` then reclassified every applied id as `manual`/`excerpt_not_found` with `already_applied: []` and rc 1 — the inverse of the documented guarantee, over a half-edited book with no audit trail. On a 54-fix pollyanna apply that hit the 2-minute foreground limit, recovery took ~10 tool calls of hand forensics and only worked because the `.chunk_edits/` snapshots happened to be complete. Now each chunk's snapshot, edit, audit rows and stale stamp are written together before the next chunk is touched, so a kill leaves a consistent prefix.
+- **`already_applied` no longer depends on the audit log alone.** A `.chunk_edits/` snapshot holding the excerpt but not the suggestion proves an edit happened just as well as an archive row does — and it is written *before* the chunk is saved, where the row is written after, so it is the proof that survives a kill. Rows missing for such an edit are re-appended with `"recovered": true` rather than left untraceable.
+- **A retry finishes the tail a killed run skipped.** `realign_chapter` writes `alignments/<chapter>.json` last, so its mtime is the receipt that recombine+realign ran. An already-applied edit in a chapter whose alignment is older than its chunks means an earlier run died before realigning; the retry recombines, realigns and re-stale-marks, naming the repair in `warnings[]`. A retry after a *complete* apply still realigns nothing — the alignment is newer than the chunks, so it stays the no-op it was.
+
+### Added
+- **`--scope book`** (on `apply`, and free for `run`/`prepare`) — every translated chunk in the project, in reading order. A full-book apply was 32 `--scope chapter:` flags built by a shell loop, where one missing chapter silently dropped its findings out of scope.
+- **`--judge` is repeatable on `apply`.** Both judges in one invocation realigns once instead of twice, and re-checks each judge's excerpts against the text the previous judge left behind — the case where a dialogue fix rewrote `—Él se detuvo` and invalidated an address excerpt quoting it. Findings now carry `qualified_id` (`<judge>:<chunk_id>#<i>`) beside the bare `id`; `--select` takes either, and a bare id both judges have is rejected into `ambiguous_ids[]` instead of being guessed at. A fix an earlier judge superseded is reported in `failed[]` with a warning, never forced through `_resolve_correction_span`'s first-match fallback.
+- **`--no-realign` and `--realign-only`.** Recombine+realign loads a BERT model per chapter, which is what pushes a whole-book apply past the 2-minute foreground limit. `--no-realign` applies the edits and reports what is owed in `chapters_pending_realign[]`; `--realign-only` changes no text and settles it (also the repair command when the original `--select` string is gone). `--realign-only --dry-run` just reports.
+- **A `[apply] <chunk_id>: N fix(es) written + archived` line per chunk on stderr.** A killed run used to leave zero bytes of output, since the JSON is emitted only at the end.
+
+### Changed
+- **`apply`'s `_schema` says where the stale flag lands** — top level of `evaluations/<chunk>.json` (`stale`, `stale_since`, `stale_reason`), not inside `judges[<judge>]` beside the `score`/`issues` it invalidates, and `stale_reason` is single-valued so a chunk both judges edited names only the most recent. Two friction logs in a row spent a wrong probe plus a source read finding that out.
+- **The judge-review skill says to run `apply` backgrounded** for anything past a few chapters, documents the recovery path, the new flags, and that a plan is invalidated by any apply to the same chunks (re-plan between invocations, or pass both judges to one).
+
 ## [0.39.0.0] - 2026-07-29
 
 ### Added
