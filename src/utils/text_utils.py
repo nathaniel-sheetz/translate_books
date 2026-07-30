@@ -6,14 +6,17 @@ This module provides utilities for processing chapter text, including:
 - Detecting and extracting paragraphs
 - Counting words and paragraphs consistently with evaluators
 - Detecting and stripping [IMAGE:...] placeholders embedded by source ingestion
+- Accent/case-folded substring search + KWIC windowing (reader concordance and
+  the annotation-review book-wide term search share these)
 
 All functions handle edge cases like empty text, single paragraphs,
 and mixed newline conventions.
 """
 
 import re
+import unicodedata
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 
 # Matches [IMAGE:filename.ext] or [IMAGE:filename.ext:description].
@@ -324,6 +327,148 @@ def image_placeholder_instruction(source_text: str, *, always_include: bool = Fa
         return _IMAGE_INSTRUCTION_WITH_DESCRIPTION
 
     return _IMAGE_INSTRUCTION_FILENAME_ONLY
+
+
+# ---------------------------------------------------------------------------
+# Accent/case-folded substring search
+#
+# Moved here from web_ui/app.py so non-web callers can reuse it: the annotation
+# concordance runs from a CLI and must not import web_ui (same circular-dependency
+# constraint src/endnotes.py documents). web_ui/app.py imports these back under
+# its old private names, so the reader's "Find in book" behavior is unchanged.
+# ---------------------------------------------------------------------------
+
+# Words of context on each side of a KWIC snippet.
+KWIC_WORDS = 7
+
+
+def fold(text: str) -> str:
+    """Accent/case-fold for substring matching: NFD, drop combining marks, casefold."""
+    decomposed = unicodedata.normalize("NFD", text)
+    no_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return no_marks.casefold()
+
+
+def fold_with_map(text: str) -> Tuple[str, List[int]]:
+    """Fold ``text`` and return ``(folded, orig_index)`` where ``orig_index[i]``
+    is the index in the ORIGINAL ``text`` that produced folded char ``i``.
+
+    Folding can change string length (combining marks dropped, ``casefold`` can
+    expand a char to several), so match offsets in folded space cannot be reused
+    against the original. This map carries them back to the original.
+    """
+    folded_chars: List[str] = []
+    orig_index: List[int] = []
+    for i, ch in enumerate(text):
+        for c in unicodedata.normalize("NFD", ch):
+            if unicodedata.combining(c):
+                continue
+            for fc in c.casefold():
+                folded_chars.append(fc)
+                orig_index.append(i)
+    return "".join(folded_chars), orig_index
+
+
+def find_folded(haystack: str, folded_query: str) -> Optional[Tuple[int, int]]:
+    """First folded-substring match of ``folded_query`` in ``haystack``.
+
+    Returns ``(start, end)`` offsets into the ORIGINAL ``haystack``, or ``None``
+    if there is no match. ``folded_query`` must be pre-folded and non-empty
+    (callers guard on min length).
+    """
+    if not folded_query:
+        return None
+    folded, orig_index = fold_with_map(haystack)
+    pos = folded.find(folded_query)
+    if pos == -1:
+        return None
+    start = orig_index[pos]
+    end = orig_index[pos + len(folded_query) - 1] + 1
+    return start, end
+
+
+def _at_word_boundary(folded: str, start: int, end: int) -> bool:
+    """True when ``folded[start:end]`` is not glued to an adjacent word character.
+
+    Applied in folded space, where combining marks are already gone, so
+    ``isalnum`` is a sound test for "part of the same word" in Latin scripts.
+    """
+    before = folded[start - 1] if start > 0 else ""
+    after = folded[end] if end < len(folded) else ""
+    return not (before.isalnum() or before == "_") and not (
+        after.isalnum() or after == "_"
+    )
+
+
+def count_folded(folded_haystack: str, folded_query: str, *, whole_word: bool = False) -> int:
+    """Count matches of an already-folded query in already-folded text.
+
+    Takes pre-folded input so a caller searching many terms against the same
+    corpus folds each sentence once rather than once per term.
+    """
+    if not folded_query or not folded_haystack:
+        return 0
+    if not whole_word:
+        return folded_haystack.count(folded_query)
+    total = 0
+    pos = folded_haystack.find(folded_query)
+    while pos != -1:
+        if _at_word_boundary(folded_haystack, pos, pos + len(folded_query)):
+            total += 1
+        pos = folded_haystack.find(folded_query, pos + len(folded_query))
+    return total
+
+
+def iter_folded(haystack: str, folded_query: str, *, whole_word: bool = False):
+    """Yield every non-overlapping ``(start, end)`` folded match in ``haystack``.
+
+    Offsets index the ORIGINAL ``haystack``. :func:`find_folded` returns only the
+    first match; the concordance needs all of them to count per-chapter usage.
+
+    ``whole_word`` rejects matches glued to an adjacent word character — without
+    it, searching "test" also hits *protestaba* and *detestable*, which is right
+    for search-as-you-type but useless as evidence about a word's usage.
+    """
+    if not folded_query:
+        return
+    folded, orig_index = fold_with_map(haystack)
+    search_from = 0
+    while True:
+        pos = folded.find(folded_query, search_from)
+        if pos == -1:
+            return
+        end = pos + len(folded_query)
+        if not whole_word or _at_word_boundary(folded, pos, end):
+            yield orig_index[pos], orig_index[end - 1] + 1
+        search_from = end
+
+
+def kwic_window(
+    text: str, start: int, end: int, words_each_side: int = KWIC_WORDS
+) -> Tuple[str, int, int]:
+    """Slice a word-window snippet around ``[start, end)`` in ``text``.
+
+    Returns ``(snippet, match_start, match_end)`` where the offsets index into
+    ``snippet``. Trimmed to word boundaries; whitespace is collapsed, and an
+    ellipsis marks truncation on either side. No sentence segmentation.
+    """
+    match = text[start:end]
+    before_words = text[:start].split()
+    after_words = text[end:].split()
+    left = " ".join(before_words[-words_each_side:]) if before_words else ""
+    right = " ".join(after_words[:words_each_side]) if after_words else ""
+
+    prefix = (left + " ") if left else ""
+    if len(before_words) > words_each_side:
+        prefix = "… " + prefix
+    snippet = prefix + match
+    if right:
+        snippet += " " + right
+    if len(after_words) > words_each_side:
+        snippet += " …"
+
+    ms = len(prefix)
+    return snippet, ms, ms + len(match)
 
 
 # ---------------------------------------------------------------------------

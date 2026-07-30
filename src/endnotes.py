@@ -29,6 +29,8 @@ from html import escape
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from src.annotations import store
+
 logger = logging.getLogger(__name__)
 
 # First [...] token anywhere in the note text. The captured group is the
@@ -50,43 +52,23 @@ class Endnote(NamedTuple):
 def _load_footnote_annotations(project_path: Path, chapter_id: str) -> Dict[int, List[str]]:
     """Return ``{es_idx: [content, ...]}`` for active ``footnote`` annotations.
 
-    Applies the same append-only / tombstone / latest-wins rule used by the web
-    UI (``web_ui/app.py:_load_annotations``), but keyed by ``(es_idx, sub_id)``
-    so more than one footnote can share a sentence: the most recent record per
-    key wins, ``{"removed": true}`` deletes, and the *final* type at a key
-    decides whether it is still a footnote (a later non-footnote edit
-    supersedes an earlier footnote). A hand-authored annotation has no
-    ``sub_id`` (``None``), giving one note per sentence exactly as before;
-    imported footnotes carry a stable ``sub_id`` so several coexist.
-    """
-    path = project_path / "annotations.jsonl"
-    if not path.exists():
-        return {}
+    The append-only / tombstone / latest-wins rule lives in
+    ``src.annotations.store`` (shared with the web UI's reader and the
+    annotation-review CLI). That module has no ``web_ui`` import, so this
+    module's no-circular-dependency constraint still holds.
 
-    by_key: Dict[Tuple[Optional[int], Optional[str]], dict] = {}
-    for line in path.read_text(encoding="utf-8").strip().split("\n"):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("chapter_id") != chapter_id:
-            continue
-        key = (record.get("es_idx"), record.get("sub_id"))
-        if record.get("removed"):
-            by_key.pop(key, None)
-        else:
-            if record.get("es_idx") is None:
-                continue
-            by_key[key] = record
+    Ordering within a sentence is by ``(es_idx, sub_id)`` rather than the store's
+    default ``timestamp`` ordering: endnote numbering must be stable across runs
+    and independent of when each note happened to be written.
+    """
+    records = store.load_active(project_path, chapter_id=chapter_id, types=("footnote",))
 
     out: Dict[int, List[str]] = {}
-    # Sort by (es_idx, sub_id) for a stable, deterministic order within a
-    # sentence; ``str()`` keeps ``None`` (legacy single notes) comparable.
-    for (es_idx, _sub), rec in sorted(by_key.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
-        if rec.get("type") == "footnote":
-            out.setdefault(es_idx, []).append(rec.get("content") or "")
+    for rec in sorted(
+        records,
+        key=lambda r: (r.get("es_idx"), str(store.storage_sub_id(r.get("sub_id")))),
+    ):
+        out.setdefault(rec["es_idx"], []).append(rec.get("content") or "")
     return out
 
 

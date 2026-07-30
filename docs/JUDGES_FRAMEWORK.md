@@ -131,6 +131,13 @@ Designed-for but not yet implemented (clear `NotImplementedError`):
 `findings:<chapter>:<evaluator>` (from prior `evaluations/*.json`). These build
 on `alignments/chapter_XX.json` (es_idx ↔ en/es ↔ chunk_id).
 
+`flags:` stays unimplemented on purpose. Reviewing reader annotations turned out
+to need a different target shape (one annotation, not one chunk) and a different
+persistence path (the annotation itself, not `evaluations/*.json` and the badges),
+so it lives in its own pipeline — see `docs/ANNOTATION_REVIEW.md`. That pipeline
+reuses this one's plumbing (`llm_io`, the cache-split marker, the headless wave
+launcher) rather than being forced through `JudgeTarget`.
+
 ## Suites
 
 A suite is a named list of judges. Built-in: `default = ["dialogue"]` and
