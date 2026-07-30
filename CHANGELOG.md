@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.39.0.0] - 2026-07-28
+## [0.39.0.0] - 2026-07-29
 
 ### Added
 - **`scripts/review_annotations.py` — a post-human-review pass over reader annotations.** Translation and the judges both run *before* anyone reads the book; nothing helped with the notes left afterwards, which were a manual to-do list of re-reading context, grepping the book for competing terms, and drafting glosses by hand. The new pipeline reads `annotations.jsonl` and resolves each note by type: a judgement for `word_choice`, a unify-or-accept verdict for `inconsistency`, the actual endnote gloss for `footnote`, an inferred concern plus a next step for `flag`. It is note-only and never edits translated prose — that stays `run_judges.py apply`'s job.
@@ -33,6 +33,10 @@ All notable changes to this project will be documented in this file.
 - **Re-selecting an applied key reports `already_applied`, not `unknown_ids`.** After a re-prepare an applied note is skipped as `already_reviewed` and drops out of the plan, so a retry looked like a bad key rather than a completed write.
 - **`apply` refuses a note edited since the review.** The live content is compared against what the review saw; a mismatch is reported as `stale` and skipped rather than silently overwritten with a recommendation that no longer describes the text on disk.
 - **A footnote definition is never resolved to an ancestor of its own reference.** In a book with a list of illustrations (PG 48420), a link like `<a href="#il004">4</a>` points at an anchor with no paragraph-ish ancestor, so `_note_block` fell through to its coarse-container fallback and kept walking up to `<body>`. `apply_import` then decomposed that "definition" — the whole document — and the chapter imported empty. A definition that contains its own reference is not a footnote in any layout, so `find_footnotes` now skips those candidates outright.
+- **A draft that echoes the wrong annotation key is a hard failure, not a writable plan.** `parse_verdict` already flagged `key_mismatch` when a worker answered about a different key (mis-split batch), but `commit`/`run` still marked the outcome writable and `apply` would write it. Both backends now fail the entry so a mis-routed gloss cannot land on the wrong note.
+- **Headless `fanout` confines paths the same way `commit` does.** A hand-edited manifest could point `draft_path` / `prompt_path` / preamble / body outside `.harness/annotations/`; those entries are now rejected into `failed` instead of being read or written. Malformed entries missing those fields are collected the same way rather than raising `KeyError` and aborting the wave.
+- **Short glossary needles no longer flood the prompt.** Matching ignored the concordance `MIN_TERM_LEN=3` floor, so a 2-character hint like `de` substring-matched most of the glossary; `_format_glossary_hits` also bypassed `MAX_GLOSSARY_TERMS` by passing `limit=len(hits)`. Needles under three folded characters are ignored, and hit dumps use the shared cap.
+- **`--batch-size 0` no longer silently becomes the default of 5.** `int(batch_size or default)` treated `0` as unset; prepare now floors at 1.
 
 ## [0.38.2.0] - 2026-07-28
 

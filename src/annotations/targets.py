@@ -128,9 +128,17 @@ def _match_glossary(terms: list[dict], needles: Iterable[str]) -> list[dict]:
     """Glossary entries whose English or Spanish side touches any needle.
 
     Matched on folded substrings in both directions so ``muserola`` hits a
-    ``muserón`` entry and vice versa.
+    ``muserón`` entry and vice versa. Needles shorter than
+    :data:`concordance.MIN_TERM_LEN` are ignored — ``de`` / ``en`` would
+    otherwise substring-match most of the glossary.
     """
-    folded_needles = [fold(n) for n in needles if n and n.strip()]
+    from src.annotations.concordance import MIN_TERM_LEN
+
+    folded_needles = [
+        fold(n)
+        for n in needles
+        if n and n.strip() and len(fold(n)) >= MIN_TERM_LEN
+    ]
     if not folded_needles:
         return []
     out: list[dict] = []

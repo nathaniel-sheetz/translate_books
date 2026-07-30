@@ -69,7 +69,6 @@ _STRINGS = {
             "orphaned": "la oración anclada ya no existe en la alineación",
             "multi_anchor": "la nota marca varios términos; dividirla a mano",
             "no_note_text": "el modelo no propuso texto para añadir",
-            "content_changed": "la anotación cambió después de la revisión",
         },
     },
     "english": {
@@ -117,7 +116,6 @@ _STRINGS = {
             "orphaned": "the anchored sentence no longer exists in the alignment",
             "multi_anchor": "the note marks several terms; split it by hand",
             "no_note_text": "the model proposed no text to add",
-            "content_changed": "the annotation changed after the review",
         },
     },
 }

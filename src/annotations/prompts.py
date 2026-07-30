@@ -87,7 +87,8 @@ def format_glossary(terms: list[dict], limit: int = MAX_GLOSSARY_TERMS) -> str:
 def _format_glossary_hits(hits: list[dict]) -> str:
     if not hits:
         return "(no glossary entry matches this annotation's terms)"
-    return format_glossary(hits, limit=len(hits))
+    # Bound by MAX_GLOSSARY_TERMS — never dump an uncapped match list into the body.
+    return format_glossary(hits)
 
 
 def _anchor_line(target: AnnotationTarget) -> str:

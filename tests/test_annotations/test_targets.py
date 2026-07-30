@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from src.annotations import store
 from src.annotations.targets import (
     MANUAL_MULTI_ANCHOR,
@@ -165,6 +167,24 @@ def test_glossary_hits_match_either_side(project):
     write_annotations(project, [_ann(es_idx=3, content="[ostra]", sub_id="u1")])
     targets, _ = build_targets(project)
     assert [g["spanish"] for g in targets[0].glossary_hits] == ["ostión"]
+
+
+def test_short_glossary_needles_are_ignored(project):
+    """Function-word needles like ``de`` must not flood the prompt with hits."""
+    glossary = project / "glossary.json"
+    data = json.loads(glossary.read_text(encoding="utf-8"))
+    data["terms"].extend(
+        [
+            {"english": "of", "spanish": "de", "type": "other", "context": "", "alternatives": []},
+            {"english": "desk", "spanish": "escritorio de madera", "type": "noun", "context": "", "alternatives": []},
+            {"english": "day", "spanish": "día de fiesta", "type": "noun", "context": "", "alternatives": []},
+        ]
+    )
+    glossary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    write_annotations(project, [_ann(es_idx=1, content="[de]", sub_id="u1")])
+    targets, _ = build_targets(project)
+    assert targets[0].glossary_hits == []
 
 
 def test_type_and_chapter_filters(project):

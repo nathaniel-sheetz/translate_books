@@ -70,6 +70,35 @@ def test_parse_verdict_flags_a_key_mismatch():
     assert parsed["key_mismatch"] is True
 
 
+def test_commit_rejects_a_key_mismatch(project):
+    """A mis-routed draft must not become writable apply fodder."""
+    from pathlib import Path
+
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    entry = prep["manifest"][0]
+    Path(entry["draft_path"]).write_text(_verdict("someone-else"), encoding="utf-8")
+    out = review.commit(project)
+
+    assert out["counts"]["failed"] == 1
+    assert out["counts"]["committed"] == 0
+    assert "key_mismatch" in out["failed"][0]["problem"]
+    assert out["results"] == []
+
+
+def test_run_rejects_a_key_mismatch(project, monkeypatch):
+    """API backend must fail the same way commit does on a mis-routed key."""
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    monkeypatch.setattr(review, "call_judge", lambda *a, **kw: _verdict("someone-else"))
+    out = review.run(project, cost_limit=9.99)
+
+    assert out["status"] == "ok"
+    assert out["counts"]["failed"] == 1
+    assert out["counts"]["committed"] == 0
+    assert "key_mismatch" in out["failed"][0]["problem"]
+    assert out["results"] == []
+
+
 def test_unknown_confidence_falls_back_to_medium():
     assert parse_verdict(_verdict("k", confidence="certain"), key="k")["confidence"] == "medium"
 
@@ -129,6 +158,17 @@ def test_prepare_carries_skips_into_the_manifest(project):
     prep = review.prepare(project)
     assert prep["manifest"] == []
     assert [s["reason"] for s in prep["skipped"]] == ["orphaned"]
+
+
+def test_prepare_batch_size_zero_becomes_one(project):
+    """``0`` must not collapse to the default via ``or`` — treat it as unset floor."""
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project, batch_size=0)
+    assert prep["batch_size"] == 1
+    manifest = json.loads(
+        (project / ".harness/annotations/manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["batch_size"] == 1
 
 
 # --- commit ----------------------------------------------------------------

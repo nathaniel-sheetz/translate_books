@@ -52,9 +52,9 @@ _DEFAULT_COST_LIMIT = 0.50
 VALID_STATES = ("needs_help", "already_resolved")
 
 # Withheld-from-write reasons decided at commit time (targets.py owns the ones
-# decided at prepare time).
+# decided at prepare time). Content drift at apply time is reported as ``stale``,
+# not as a manual_reason.
 MANUAL_NO_NOTE_TEXT = "no_note_text"
-MANUAL_CONTENT_CHANGED = "content_changed"
 
 # Marker prefixed to appended notes so the reader can tell model text from their
 # own at a glance. Footnotes never get one — that text is published.
@@ -117,8 +117,8 @@ def parse_verdict(raw: str, *, key: str) -> dict[str, Any]:
         evidence = []
 
     # The model echoes the key back; a mismatch means a worker answered about the
-    # wrong annotation (seen when a batch prompt is mis-split). Trust the key we
-    # asked about, but keep the disagreement visible.
+    # wrong annotation (seen when a batch prompt is mis-split). commit/run treat
+    # this as a hard failure so a mis-routed gloss cannot be applied.
     echoed = str(data.get("key") or "").strip()
 
     return {
@@ -203,7 +203,9 @@ def prepare(
     """
     project_dir = Path(project_dir)
     worker_model = worker_model or _DEFAULT_WORKER_MODEL
-    batch_size = int(batch_size or _DEFAULT_BATCH_SIZE)
+    batch_size = (
+        _DEFAULT_BATCH_SIZE if batch_size is None else max(1, int(batch_size))
+    )
 
     targets, skipped = build_targets(project_dir, types=types, chapters=chapters)
     context = annprompts.build_context(project_dir, target_language=target_language)
@@ -421,13 +423,57 @@ def fanout(
     skipped: list[str] = []
     ready: list[dict[str, Any]] = []
     pre_failed: list[dict[str, str]] = []
+    adir = annotations_dir(project_dir).resolve()
 
     for entry in entries:
         key = entry.get("key")
         if not key:
             pre_failed.append({"id": "?", "error": "malformed manifest entry: no key"})
             continue
-        draft_path = Path(entry["draft_path"])
+
+        draft_raw = entry.get("draft_path")
+        prompt_raw = entry.get("prompt_path")
+        if not draft_raw or not prompt_raw:
+            pre_failed.append(
+                {
+                    "id": key,
+                    "error": "malformed manifest entry: missing draft_path or prompt_path",
+                }
+            )
+            continue
+
+        draft_path = Path(draft_raw)
+        prompt_path = Path(prompt_raw)
+        preamble = entry.get("preamble_path")
+        body = entry.get("body_path")
+
+        # Same confinement commit enforces: a hand-edited manifest must not
+        # point the launcher at paths outside `.harness/annotations/`.
+        path_candidates = [draft_path, prompt_path]
+        if preamble:
+            path_candidates.append(Path(preamble))
+        if body:
+            path_candidates.append(Path(body))
+        try:
+            escaped = [
+                str(p)
+                for p in path_candidates
+                if not p.resolve().is_relative_to(adir)
+            ]
+        except (OSError, RuntimeError, ValueError) as exc:
+            pre_failed.append(
+                {"id": key, "error": f"unresolvable path: {type(exc).__name__}: {exc}"[:500]}
+            )
+            continue
+        if escaped:
+            pre_failed.append(
+                {
+                    "id": key,
+                    "error": f"path escapes annotations dir: {escaped[0]}",
+                }
+            )
+            continue
+
         if draft_path.exists():
             try:
                 if draft_path.read_text(encoding="utf-8").strip():
@@ -436,9 +482,6 @@ def fanout(
             except (OSError, UnicodeDecodeError):
                 pass
 
-        preamble = entry.get("preamble_path")
-        body = entry.get("body_path")
-        prompt_path = Path(entry["prompt_path"])
         try:
             if preamble and body and Path(preamble).exists() and Path(body).exists():
                 ready.append(
@@ -474,18 +517,27 @@ def fanout(
     if model_warning:
         base["warning"] = model_warning
 
-    if not ready and not pre_failed:
+    if not ready:
         return {
             **base,
             "wrote": [],
-            "failed": [],
+            "failed": list(pre_failed),
             "skipped": skipped,
             "cwd": None,
-            "counts": {"wrote": 0, "failed": 0, "skipped": len(skipped), "todo": 0},
+            "counts": {
+                "wrote": 0,
+                "failed": len(pre_failed),
+                "skipped": len(skipped),
+                "todo": len(pre_failed),
+            },
             "instructions": (
-                "Run `commit` to land drafts."
-                if skipped
-                else "Nothing to fan out — no matching manifest entries."
+                "Fix the failed entries, then re-run `fanout`."
+                if pre_failed
+                else (
+                    "Run `commit` to land drafts."
+                    if skipped
+                    else "Nothing to fan out — no matching manifest entries."
+                )
             ),
         }
 
@@ -535,6 +587,9 @@ def fanout(
 # commit
 # ---------------------------------------------------------------------------
 
+# Describes the CLI projection from :func:`relay_view` (adds ``instructions`` and
+# ``counts.skipped``). The raw :func:`commit` return has ``skipped`` as a list and
+# no ``instructions``.
 _COMMIT_SCHEMA = {
     "status": "'ok' | 'error'",
     "committed": "list of {key, type, state, writable, confidence}",
@@ -697,6 +752,18 @@ def commit(
             )
             continue
 
+        if verdict.get("key_mismatch"):
+            failed.append(
+                {
+                    "key": key,
+                    "type": ann_type,
+                    "problem": (
+                        f"key_mismatch: draft echoed {verdict.get('echoed_key')!r}"
+                    ),
+                }
+            )
+            continue
+
         outcome = _outcome(entry, verdict)
         if outcome["writable"]:
             mode, new_content = _planned_content(entry, outcome["note_text"], marker)
@@ -781,6 +848,7 @@ def commit(
 # run (API backend)
 # ---------------------------------------------------------------------------
 
+# Same as ``_COMMIT_SCHEMA``: documents the :func:`relay_view` projection.
 _RUN_SCHEMA = {
     "status": "'ok' | 'cost_exceeded' | 'error'",
     "estimated_cost": "USD estimate for the whole scope",
@@ -874,6 +942,18 @@ def run(
             logger.error("annotation-run: %s failed: %s", target.key, exc)
             failed.append(
                 {"key": target.key, "type": target.ann_type, "problem": f"{type(exc).__name__}: {exc}"}
+            )
+            continue
+
+        if verdict.get("key_mismatch"):
+            failed.append(
+                {
+                    "key": target.key,
+                    "type": target.ann_type,
+                    "problem": (
+                        f"key_mismatch: draft echoed {verdict.get('echoed_key')!r}"
+                    ),
+                }
             )
             continue
 

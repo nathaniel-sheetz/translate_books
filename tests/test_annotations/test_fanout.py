@@ -153,6 +153,33 @@ def test_a_nonzero_exit_is_reported_as_failed(project):
     assert "boom" in out["failed"][0]["error"]
 
 
+def test_fanout_rejects_paths_outside_the_annotations_dir(project):
+    write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
+    review.prepare(project)
+    manifest_path = project / ".harness/annotations/manifest.json"
+    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    doc["entries"][0]["draft_path"] = str(project / "escape.draft.json")
+    manifest_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    out = review.fanout(project, runner=_recording_runner([]))
+    assert out["counts"]["wrote"] == 0
+    assert out["counts"]["failed"] == 1
+    assert any("escapes annotations dir" in f["error"] for f in out["failed"])
+
+
+def test_fanout_collects_malformed_entries_instead_of_crashing(project):
+    write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
+    review.prepare(project)
+    manifest_path = project / ".harness/annotations/manifest.json"
+    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    doc["entries"][0].pop("draft_path", None)
+    doc["entries"][0].pop("prompt_path", None)
+    manifest_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    out = review.fanout(project, runner=_recording_runner([]))
+    assert any("missing draft_path or prompt_path" in f["error"] for f in out["failed"])
+
+
 def test_cursor_paired_with_a_claude_alias_warns(project):
     write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
     review.prepare(project, worker_model="sonnet")

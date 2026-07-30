@@ -63,6 +63,23 @@ def test_style_guide_and_glossary_live_above_the_split():
     assert "REGISTER" not in body
 
 
+def test_glossary_hits_are_capped_in_the_prompt_body():
+    """Matched hits must not bypass MAX_GLOSSARY_TERMS via limit=len(hits)."""
+    hits = [
+        {
+            "english": f"term-{i}",
+            "spanish": f"término-{i}",
+            "type": "noun",
+            "context": "",
+            "alternatives": [],
+        }
+        for i in range(annprompts.MAX_GLOSSARY_TERMS + 50)
+    ]
+    rendered = annprompts._format_glossary_hits(hits)
+    assert rendered.count("→") == annprompts.MAX_GLOSSARY_TERMS
+    assert "further terms not listed" in rendered
+
+
 def test_word_choice_hint_uses_the_questioned_vs_proposed_framing():
     _, present = annprompts.build_prompt_parts(
         _target(content="poyo", hint="poyo", hint_in_sentence=True), _context()
