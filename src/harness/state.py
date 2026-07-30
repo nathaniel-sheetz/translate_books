@@ -20,6 +20,7 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Mapping
 
 _log = logging.getLogger(__name__)
 
@@ -47,6 +48,17 @@ DEFAULTS: dict[str, object] = {
     # Which CLI family the headless backend drives (``claude -p`` vs ``cursor-agent``).
     # Backend stays ``headless``; this only selects the launcher profile.
     "headless_cli": "claude",
+    # Extra argv appended to every ``claude -p`` job in a headless wave, to trim
+    # what the child loads into its system prompt (``--strict-mcp-config``,
+    # ``--setting-sources ""``, ``--safe-mode`` …). A list of strings. Ignored on
+    # the Cursor profile. Each wave records the flags it ran under in
+    # ``.harness/*/usage.jsonl``, so this doubles as the A/B knob: change the
+    # list, run a wave, compare ``overhead_ratio`` in the log.
+    #
+    # NEVER put ``--bare`` here. Its auth is strictly ANTHROPIC_API_KEY or an
+    # apiKeyHelper — "OAuth and keychain are never read" — which is exactly what
+    # ``subscription_auth_error`` exists to guarantee against.
+    "headless_extra_flags": [],
 }
 
 # Config keys a command may override (CLI flag -> config key); used by setup.
@@ -188,6 +200,25 @@ def load_config(project_dir: Path) -> dict:
     if path.exists():
         cfg.update(json.loads(path.read_text(encoding="utf-8")))
     return cfg
+
+
+def headless_extra_flags(cfg: Mapping[str, object]) -> list[str]:
+    """``headless_extra_flags`` as a clean argv list (never raises on bad config).
+
+    Accepts a list (``["--effort", "low"]``) or a whitespace-separated string
+    (``"--effort low"``), because ``config-set --value`` can only deliver a
+    string and a key that silently did nothing when set the documented way would
+    be worse than no key at all.
+
+    A mistyped value must not take a wave down, so anything else comes back empty
+    and the wave runs on today's argv.
+    """
+    raw = cfg.get("headless_extra_flags")
+    if isinstance(raw, str):
+        return raw.split()
+    if not isinstance(raw, list):
+        return []
+    return [str(flag) for flag in raw if isinstance(flag, (str, int, float))]
 
 
 def save_config(project_dir: Path, cfg: dict) -> None:

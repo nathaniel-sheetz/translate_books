@@ -21,8 +21,46 @@ python scripts/harness.py translate-prepare --project projects/<slug> --worker-m
 There is **no** `CURSOR_API_KEY` path for the harness — subscription login only,
 mirroring how `claude -p` uses the Claude subscription. Install the Cursor CLI
 separately (`https://cursor.com/install`) and run `cursor-agent login` once.
-Token/cost metering is unavailable on this path (same as existing `claude -p`
-headless). See `references/translate-workers.md` and `judge-review/SKILL.md`.
+See `references/translate-workers.md` and `judge-review/SKILL.md`.
+
+### Wave telemetry (Claude profile)
+
+Every `fanout` returns a `usage` rollup — `input`/`output`, the `cache_creation`
+vs `cache_read` split, `prompt_sent` (the content we meant to send) and
+`overhead` / `overhead_ratio` (the per-process context each job pays before
+reading anything). Per-job rows are appended to
+`.harness/{judges,translate,footnotes,annotations}/usage.jsonl`, which stays on
+disk rather than entering an agent's context.
+
+This exists because the numbers were being computed and thrown away: the
+launcher asked for `--output-format text`, which discards the `usage` block, so a
+2026-07-30 judge wave spent ~56% of its input tokens on fixed per-process
+overhead with nothing able to report it. The Claude profile now asks for `json`
+and unwraps the envelope; anything that is not an envelope still passes through
+as prose, so a CLI that ignores the flag degrades to the old behavior.
+
+**Cursor stays on `--output-format text`**, so Cursor waves report no `usage` —
+its envelope keys are unverified and guessing at them would produce confident
+wrong numbers. `headless_extra_flags` (config) is likewise Claude-only.
+
+#### `headless_extra_flags`
+
+Argv appended to every `claude -p` job, recorded on each usage row so a wave is
+self-describing. Takes a list or a whitespace-separated string:
+
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+    --key headless_extra_flags --value "--effort low"
+```
+
+Measured 2026-07-30 (dialogue judge, Sonnet, CLI 2.1.220):
+
+| flags | effect |
+|---|---|
+| `--effort low` | output tokens **−95%**, wall time **−93%** — *and it missed the one finding the default run made on a 3-chunk sample.* A real cost/recall trade, not a free win. Not the default; measure recall on a chunk set with known findings before leaning on it. |
+| `--strict-mcp-config`, `--safe-mode` | **no measurable effect.** `--tools ""` already keeps MCP definitions out of the job's system prompt. |
+| `--bare` | **never.** Auth becomes strictly `ANTHROPIC_API_KEY`/`apiKeyHelper` — "OAuth and keychain are never read" — defeating the subscription preflight. |
+| `--max-turns` | does not exist in CLI 2.1.220. |
 
 Metered dashboard / API translation still uses the providers below.
 

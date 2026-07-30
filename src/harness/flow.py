@@ -1847,6 +1847,8 @@ def translate_fanout(
         cli_bin=cli_bin,
         claude_bin=claude_bin,
         runner=runner,
+        usage_log=hdir / "translate" / "usage.jsonl",
+        extra_flags=state.headless_extra_flags(cfg),
     )
 
     # Fail-fast when the CLI binary is missing (no jobs ran).
@@ -1894,6 +1896,8 @@ def translate_fanout(
             "Nothing to fan out — no matching manifest entries."
         ),
     }
+    if wave_out.get("usage"):
+        out["usage"] = wave_out["usage"]
     if model_warning:
         out["warning"] = model_warning
     return out
@@ -3051,6 +3055,8 @@ def _footnotes_headless(
     wave = run_headless_wave(
         jobs, model=worker_model, concurrency=concurrency,
         cli=cli_name, cli_bin=cli_bin, claude_bin=claude_bin, runner=runner,
+        usage_log=state.harness_dir(project_dir) / "footnotes" / "usage.jsonl",
+        extra_flags=state.headless_extra_flags(cfg),
     )
     # Fail fast when the CLI is missing (no jobs ran) — never silently fall back to spend.
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
@@ -3067,6 +3073,8 @@ def _footnotes_headless(
     result["backend"] = "headless"
     result["cli"] = cli_name
     result["wave"] = {"wrote": wave.get("wrote") or [], "failed": wave.get("failed") or []}
+    if wave.get("usage"):
+        result["wave"]["usage"] = wave["usage"]
     if model_warning:
         result["warning"] = model_warning
     return result

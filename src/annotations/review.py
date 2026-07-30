@@ -548,6 +548,8 @@ def fanout(
         cli=cli_name,
         cli_bin=cli_bin,
         runner=runner,
+        usage_log=annotations_dir(project_dir) / "usage.jsonl",
+        extra_flags=hstate.headless_extra_flags(cfg),
     )
 
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
@@ -564,7 +566,7 @@ def fanout(
 
     failed = list(pre_failed) + list(wave.get("failed") or [])
     wrote = list(wave.get("wrote") or [])
-    return {
+    out = {
         **base,
         "wrote": wrote,
         "failed": failed,
@@ -581,6 +583,9 @@ def fanout(
             "--target-ids) for any failed/missing, then commit again."
         ),
     }
+    if wave.get("usage"):
+        out["usage"] = wave["usage"]
+    return out
 
 
 # ---------------------------------------------------------------------------

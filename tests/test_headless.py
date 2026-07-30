@@ -21,8 +21,27 @@ def test_build_cmd_claude_with_system_prompt_file(tmp_path: Path):
     assert str(spf.resolve()) in cmd
     assert "--tools" in cmd
     assert cmd[cmd.index("--tools") + 1] == ""
-    assert "--output-format" in cmd and "text" in cmd
+    # json, not text: `text` discards the `usage` block the CLI already computed,
+    # which is the whole reason per-job overhead was invisible.
+    assert cmd[cmd.index("--output-format") + 1] == "json"
     assert "--model" in cmd and "sonnet" in cmd
+    assert not [f for f in cmd if f.startswith("--strict")]  # no extra_flags by default
+
+
+def test_build_cmd_claude_appends_extra_flags(tmp_path: Path):
+    cmd = headless._build_cmd(
+        "claude", "claude", "sonnet", None, extra_flags=["--strict-mcp-config"]
+    )
+    assert cmd[-1] == "--strict-mcp-config"
+
+
+def test_build_cmd_cursor_ignores_extra_flags():
+    """Claude argv on a Cursor wave would fail every job; silently drop it."""
+    cmd = headless._build_cmd(
+        "cursor", "cursor-agent", "grok-4.5", None, extra_flags=["--strict-mcp-config"]
+    )
+    assert "--strict-mcp-config" not in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "text"
 
 
 def test_build_cmd_cursor_has_no_system_prompt_or_tools():
@@ -59,7 +78,7 @@ def test_fold_system_prompt_cursor_folds_into_stdin(tmp_path: Path):
     assert stdin == "PREAMBLE\nBODY"
 
 
-def test_extract_output_cursor_unwraps_json_result_envelope():
+def test_extract_output_unwraps_json_result_envelope():
     raw = json.dumps({
         "type": "result",
         "subtype": "success",
@@ -67,9 +86,57 @@ def test_extract_output_cursor_unwraps_json_result_envelope():
         "result": "  final answer  ",
         "session_id": "abc",
     })
+    # Both families now: claude asks for --output-format json, and cursor still
+    # gets the hardening it always had in case a run produces an envelope.
     assert headless._extract_output("cursor", raw) == "final answer"
+    assert headless._extract_output("claude", raw) == "final answer"
     assert headless._extract_output("cursor", "  plain prose  ") == "plain prose"
-    assert headless._extract_output("claude", raw) == raw.strip()
+
+
+def test_extract_result_passes_non_envelope_json_through():
+    """A judge verdict is JSON but not an envelope — it must not be unwrapped.
+
+    This is also the fallback that keeps every stubbed-runner test (and a CLI
+    build that ignores --output-format json) working: no envelope, no usage,
+    same draft as before.
+    """
+    verdict = json.dumps({"compliant": False, "findings": [], "summary": "x"})
+    prose, usage = headless._extract_result("claude", verdict)
+    assert json.loads(prose)["compliant"] is False
+    assert usage is None
+
+    prose, usage = headless._extract_result("claude", "  plain prose  ")
+    assert (prose, usage) == ("plain prose", None)
+
+
+def test_extract_result_returns_usage_from_envelope():
+    raw = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "answer",
+        "total_cost_usd": 0.0363,
+        "duration_ms": 4120,
+        "num_turns": 1,
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 12,
+            "cache_creation_input_tokens": 5778,
+            "cache_read_input_tokens": 3289,
+        },
+        "modelUsage": {
+            "claude-sonnet-4-5-20250929": {"inputTokens": 4, "outputTokens": 12},
+            "claude-haiku-4-5-20251001": {"inputTokens": 523, "outputTokens": 12},
+        },
+    })
+    prose, usage = headless._extract_result("claude", raw, model="sonnet")
+    assert prose == "answer"
+    assert usage["input"] == 4
+    assert usage["cache_creation"] == 5778
+    assert usage["cache_read"] == 3289
+    assert usage["cost_usd"] == 0.0363
+    # The Haiku call every job fires, attributed away from the requested model.
+    assert usage["side_calls"] == {"claude-haiku-4-5-20251001": 535}
 
 
 def test_extract_output_cursor_rejects_error_envelope():
@@ -632,3 +699,165 @@ def test_run_headless_wave_skips_probe_when_there_are_no_jobs():
     )
     assert result["counts"]["todo"] == 0
     assert "error" not in result
+
+
+# ---------------------------------------------------------------------------
+# Usage telemetry (src/harness/usage.py)
+#
+# The 2026-07-30 friction log's finding was not that the wave was expensive but
+# that nothing could see it: `--output-format text` threw the numbers away. These
+# assert the numbers survive, that the detail stays out of the return value, and
+# that every degraded path still writes a draft.
+# ---------------------------------------------------------------------------
+
+
+def _envelope(result: str, **usage) -> str:
+    base = {"input_tokens": 10, "output_tokens": 20,
+            "cache_creation_input_tokens": 5000, "cache_read_input_tokens": 3000}
+    base.update(usage)
+    return json.dumps(
+        {"type": "result", "subtype": "success", "is_error": False,
+         "result": result, "total_cost_usd": 0.03, "usage": base}
+    )
+
+
+def _jobs(tmp_path: Path, n: int, body: str = "x" * 400) -> list[dict]:
+    return [
+        {"id": f"c{i}", "input_text": body, "output_path": str(tmp_path / f"d{i}.txt")}
+        for i in range(n)
+    ]
+
+
+def test_wave_reports_usage_rollup_and_writes_job_log(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 2),
+        model="sonnet",
+        concurrency=2,
+        runner=lambda *a, **k: (0, _envelope('{"compliant": true}'), ""),
+        usage_log=log,
+    )
+    assert result["counts"]["wrote"] == 2
+
+    usage = result["usage"]
+    assert usage["jobs"] == 2
+    assert usage["cache_creation"] == 10_000
+    assert usage["cache_read"] == 6_000
+    # 400 chars / 4 = 100 tokens of real content per job; everything else billed
+    # is per-process overhead, and the ratio is what makes that self-reporting.
+    assert usage["prompt_sent"] == 200
+    assert usage["overhead"] == 16_020 - 200
+    assert usage["overhead_ratio"] == round((16_020 - 200) / 16_020, 3)
+    assert "per_job" not in usage  # detail belongs on disk, not in context
+
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert {r["id"] for r in rows} == {"c0", "c1"}
+    assert all(r["rc"] == 0 and r["prompt_sent"] == 100 for r in rows)
+
+
+def test_wave_omits_usage_when_the_cli_reports_none(tmp_path: Path):
+    """Cursor waves and stubbed runners must not grow an empty `usage` key."""
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (0, "plain prose", ""),
+    )
+    assert result["counts"]["wrote"] == 1
+    assert "usage" not in result
+    assert (tmp_path / "d0.txt").read_text(encoding="utf-8") == "plain prose\n"
+
+
+def test_wave_logs_failed_jobs_too(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (1, "", "Credit balance is too low"),
+        usage_log=log,
+    )
+    row = json.loads(log.read_text(encoding="utf-8").strip())
+    assert row["rc"] == 1
+    assert "Credit balance" in row["error"]
+
+
+def test_unwritable_usage_log_does_not_fail_the_wave(tmp_path: Path):
+    """Telemetry that can take a wave down is worse than no telemetry."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (0, _envelope("ok"), ""),
+        usage_log=blocker / "usage.jsonl",
+    )
+    assert result["counts"]["wrote"] == 1
+    assert result["usage"]["jobs"] == 1
+
+
+def test_warm_first_runs_job_one_alone_then_fans_out(tmp_path: Path):
+    """One job warms the shared prefix so its siblings read it instead of re-creating it."""
+    assert headless._wave_batches(list(range(8)), 5, True) == [[0], [1, 2, 3, 4, 5], [6, 7]]
+    assert headless._wave_batches(list(range(8)), 5, False) == [[0, 1, 2, 3, 4], [5, 6, 7]]
+    # Nothing to warm: a single job, or a serial wave, is unchanged.
+    assert headless._wave_batches([0], 5, True) == [[0]]
+    assert headless._wave_batches(list(range(3)), 1, True) == [[0], [1], [2]]
+
+
+def test_warm_flag_is_recorded_per_job(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 3),
+        model="sonnet",
+        concurrency=2,
+        runner=lambda *a, **k: (0, _envelope("ok"), ""),
+        usage_log=log,
+    )
+    rows = {
+        json.loads(line)["id"]: json.loads(line)["warm"]
+        for line in log.read_text(encoding="utf-8").splitlines()
+    }
+    assert rows == {"c0": True, "c1": False, "c2": False}
+
+
+def test_extra_flags_are_recorded_with_the_job(tmp_path: Path):
+    """The log is the A/B corpus: a row must say which argv produced it."""
+    log = tmp_path / "usage.jsonl"
+    seen: list[list[str]] = []
+
+    def runner(cmd, *, input_text, cwd):
+        seen.append(list(cmd))
+        return 0, _envelope("ok"), ""
+
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=runner,
+        usage_log=log,
+        extra_flags=["--strict-mcp-config"],
+    )
+    assert seen[0][-1] == "--strict-mcp-config"
+    assert json.loads(log.read_text(encoding="utf-8"))["flags"] == ["--strict-mcp-config"]
+
+
+def test_failed_job_reports_the_cause_not_the_envelope(tmp_path: Path):
+    """Under --output-format json the reason a job died arrives wrapped."""
+    envelope = json.dumps({
+        "type": "result", "subtype": "error_during_execution", "is_error": True,
+        "result": "Credit balance is too low",
+        "session_id": "abc", "duration_ms": 12, "usage": {"input_tokens": 0},
+    })
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (1, envelope, "claude.ai connectors are disabled"),
+    )
+    error = result["failed"][0]["error"]
+    assert error.startswith("Credit balance is too low")
+    assert "session_id" not in error  # the envelope itself stays out of the report
+    assert "connectors are disabled" in error  # stderr still reported alongside

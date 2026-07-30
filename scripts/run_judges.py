@@ -69,6 +69,11 @@ warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.
 # source; ``_cmd_apply`` additionally redirects that block's stdout to stderr.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+# ``Warning: You are sending unauthenticated requests to the HF Hub`` on stderr
+# during realign. Harmless, but it is the third distinct "stderr noise that isn't
+# an error" the judge-review skill has to pre-warn about, and every such line
+# trains a reader to skim stderr — which is where the real apply progress goes.
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 from src.judges import (  # noqa: E402
     ScopeError,
@@ -92,7 +97,9 @@ _RUN_SCHEMA = {
     "run_header": "reproducibility metadata: judge versions, prompt hashes, model, git_commit",
     "summary": "aggregate_results() rollup across all (judge x target) results",
     "results": "per (target, judge): target_id, judge, passed, score, issues[], metadata",
-    "persisted": "evaluations/*.json paths written when --persist is set, else null",
+    "persisted_dir": "directory the --persist files were written to, else null",
+    "persisted": "evaluations/*.json FILENAMES (join with persisted_dir) written when "
+    "--persist is set, else null",
     "persist_errors": "list of '<chunk>/<judge>: <error>' strings for any failed persists, else null",
 }
 
@@ -316,6 +323,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Don't clear existing worker drafts (re-prepare is otherwise destructive). "
         "Use when re-preparing to recover a manifest without re-spawning workers.",
     )
+    pp.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Omit the manifest echo from stdout, keeping manifest_path + usage_summary. "
+        "The manifest was just written to disk and `fanout` reads it from there, so the "
+        "echo (4 absolute paths per entry) is pure duplication on the headless path. Task "
+        "workers need the paths — don't use --quiet for that branch.",
+    )
     pp.add_argument("--verbose", action="store_true", help="Debug logging")
 
     # fanout — subagent backend, headless wave (opt-in) ---------------------
@@ -355,6 +370,13 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="claude_bin",
         default=None,
         help="Back-compat alias for --cli-bin (Claude profile)",
+    )
+    fp.add_argument(
+        "--estimate",
+        action="store_true",
+        help="Project the wave's token cost from the measured per-job baseline and "
+        "print the argv, without spawning anything. Use it to make the usage gate "
+        "quote the headless path rather than the API price of the path declined.",
     )
     fp.add_argument("--verbose", action="store_true", help="Debug logging")
 
@@ -443,12 +465,46 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--verbose", action="store_true", help="Debug logging")
 
+    # --schema on every subcommand. The blocks cost real tokens on every call
+    # (_APPLY_SCHEMA alone is ~910), so they are opt-in on success — and, per
+    # _emit, automatic on any error, where the caller most needs the shape.
+    for subparser in sub.choices.values():
+        subparser.add_argument(
+            "--schema",
+            action="store_true",
+            help="Include the _schema block documenting every output key (omitted "
+            "from successful output by default; always present on errors)",
+        )
+
     return parser
 
 
+# Set from ``--schema`` in main(). Off by default: see _emit.
+_SHOW_SCHEMA = False
+
+
 def _emit(payload: dict, schema: dict | None = None) -> None:
-    if schema is not None:
+    """Print exactly one JSON object, with ``_schema`` only where it earns its keep.
+
+    The schema blocks are the CLI's self-documentation and they are not free:
+    ``_APPLY_SCHEMA`` is ~910 tokens and used to be re-sent on every invocation —
+    twice per apply session (plan, then the real run), where it was ~52% of the
+    payload an agent had to read. So it is emitted on ``--schema``, and on any
+    error, where a caller most needs to know the shape it is looking at. Success
+    payloads carry a one-line pointer instead.
+
+    Some payloads arrive with ``_schema`` already embedded by the subagent layer;
+    that is normalized here so there is one rule, not two.
+    """
+    embedded = payload.pop("_schema", None)
+    schema = schema if schema is not None else embedded
+    if schema is None:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    if _SHOW_SCHEMA or payload.get("status") == "error" or payload.get("error"):
         payload["_schema"] = schema
+    else:
+        payload["_schema_hint"] = "re-run with --schema for per-key documentation"
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -534,7 +590,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "run_header": outcome["run_header"],
             "summary": outcome["aggregated"],
             "results": serialized,
-            "persisted": persisted,
+            # Basenames + one directory, matching `commit` — N absolute paths
+            # sharing a 95-char prefix is duplication the caller pays for.
+            "persisted_dir": str(project_dir / "evaluations") if args.persist else None,
+            "persisted": [Path(p).name for p in persisted] if persisted is not None else None,
             "persist_errors": persist_errors,
         },
         _RUN_SCHEMA,
@@ -574,6 +633,8 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         return 1
 
     payload["project"] = str(project_dir)
+    if args.quiet:
+        payload["manifest_entries"] = len(payload.pop("manifest", []))
     _emit(payload)
     return 0
 
@@ -591,6 +652,7 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
         cli=args.cli,
         cli_bin=args.cli_bin,
         claude_bin=args.claude_bin,
+        estimate=args.estimate,
     )
     payload["project"] = str(project_dir)
     _emit(payload)
@@ -1373,9 +1435,12 @@ _DISPATCH = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _SHOW_SCHEMA
+
     args = _build_parser().parse_args(argv)
     if getattr(args, "verbose", False):
         logging.basicConfig(level=logging.DEBUG)
+    _SHOW_SCHEMA = bool(getattr(args, "schema", False))
     return _DISPATCH[args.command](args)
 
 
