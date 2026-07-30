@@ -1,5 +1,5 @@
 # Forms-of-Address (usted/tú) Compliance Judge
-# Version: 1.2
+# Version: 1.3
 # Checks whether a Spanish translation uses the expected formal/informal address
 # per the book's address map. Variables: address_rubric, address_map,
 # source_text, translation_text, chapter_ref
@@ -55,11 +55,19 @@ For each violation choose the single most specific `rule` id from this list:
 - "wrong-form-tu-expected": an explicit pair expects tú in this direction/
   situation, but usted was used.
 - "inconsistent-address": the same speaker→addressee mixes tú and usted within
-  this passage with no story-justified switch.
+  this passage with no story-justified switch. Before reporting one, find EVERY
+  line in the passage where that speaker addresses that person; `message` must
+  list them and say which is the outlier. Normalize toward the form the ADDRESS
+  MAP expects for the pair — not toward whichever form happens to appear more
+  often. If more than one line must change, widen `excerpt` to cover them or emit
+  one finding per line: leaving an unflagged line in the form you are replacing
+  creates the inconsistency you are reporting.
 - "global-rule-violation": no explicit pair covers this addressee, but the map's
   GLOBAL RULES make the used form clearly wrong (e.g. a stranger addressed with tú).
 - "ambiguous": the relationship or addressee is unclear enough that the form is
-  only possibly wrong — surface it for a human to check.
+  only possibly wrong — surface it for a human to check. State the unresolved
+  question in `message`; `suggestion` is still one clean Spanish rewrite, never a
+  conditional.
 - "other": a clear address violation none of the above describes.
 
 Severity guidance:
@@ -97,3 +105,21 @@ restate any words that appear before or after the excerpt in the translation. If
 the fix needs surrounding text to be moved or repunctuated, widen the `excerpt`
 to cover that text instead — a suggestion that repeats its own context is
 discarded, because splicing it in would print those words twice.
+
+Three more rules on `suggestion`, each of which is checked mechanically and gets
+the finding discarded:
+
+- **Never a placeholder.** If you have no concrete replacement, you have no
+  finding — leave it out entirely. Never write "N/A", "none", a dash, an ellipsis
+  or an empty string. A passage you inspected and decided is correct is not a
+  finding, however much you want to note it.
+- **Nothing but book text.** No commentary, conditions, alternatives, English, or
+  parentheticals: `suggestion` is spliced verbatim into the printed book. Anything
+  you need to explain — including which reading of a relationship you assumed —
+  goes in `message`.
+- **No elision, no cross-references.** Never join passages with "..." and never
+  quote or discuss a different line than the one in `excerpt`. If several lines
+  must change, widen `excerpt` to cover them or emit one finding per line.
+
+Changing a form of address rewrites the excerpt in place; it does not grow or
+shrink it much.

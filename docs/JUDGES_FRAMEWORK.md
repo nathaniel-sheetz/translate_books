@@ -111,13 +111,20 @@ python scripts/run_judges.py commit  --project understood-betsy --persist
 |---|---|---|---|
 | all | `--project` | — | Project id (under `projects/`) or path |
 | `run`, `prepare` | `--judge` / `--suite` | — | One required; a judge name or suite name |
-| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>` or `chapter:<chapter_id>` |
+| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>`, `chapter:<chapter_id>` or `book` |
 | `run`, `prepare` | `--model` / `--provider` | config | Judge LLM overrides |
 | `run` | `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
 | `run` | `--confirm` | false | Proceed past the cost gate |
 | `prepare` | `--worker-model` | `sonnet` | Tier to pin spawned `judge-worker`s to |
 | `prepare` | `--batch-size` | `5` | Recommended workers to spawn per wave |
 | `run`, `commit` | `--persist` | false | Write findings into `evaluations/<chunk>.json` |
+| `apply` | `--judge` | `dialogue` | Repeatable: both judges in one run, realigned once |
+| `apply` | `--scope` | — | Repeatable; same three kinds as above |
+| `apply` | `--select` | — | Comma-separated `applicable[].id` / `.qualified_id` to apply |
+| `apply` | `--dry-run` | false | Preview the plan, change nothing |
+| `apply` | `--rebuild-epub` | false | Rebuild the EPUB after applying |
+| `apply` | `--no-realign` | false | Apply, but defer recombine+realign (see `chapters_pending_realign`) |
+| `apply` | `--realign-only` | false | Change no text; realign chapters in scope whose alignment is stale |
 | all | `--verbose` | false | Enable debug logging |
 
 ## Scopes
@@ -125,6 +132,11 @@ python scripts/run_judges.py commit  --project understood-betsy --persist
 - `chunk:<chunk_id>` — one chunk.
 - `chapter:<chapter_id>` — every translated chunk in the chapter, one target
   each (results stay keyed per chunk so persistence + badges work).
+- `book` (or `book:`) — every translated chunk in the project, in reading order.
+  Added for `apply`, where a full-book pass otherwise meant one `--scope
+  chapter:` flag per chapter built by a shell loop, and a chapter missing from
+  that loop silently dropped its findings out of scope. Takes no id — `--project`
+  already named the book.
 
 Designed-for but not yet implemented (clear `NotImplementedError`):
 `sentences:<chapter>:<es_idx,...>`, `flags:<chapter>` (from `annotations.jsonl`),
@@ -161,6 +173,33 @@ the same per-chunk badge totals, so a judged chunk lights up in the dashboard.
 False positives can be recorded with `web_ui.evaluations.append_feedback`
 (`feedback_type` ∈ `false_positive` | `bad_message` | `missing_context_gap`),
 the same loop the coded evaluators use — useful for tuning a judge's prompt.
+
+`apply` stale-stamps every chunk whose text it rewrote: `stale`, `stale_since`
+and `stale_reason` at the **top level** of `evaluations/<chunk>.json`, not inside
+`judges.<judge_name>` — a fixed finding must not keep asserting a failure, and
+`merge_judge_result` clears the stamp on the next run.
+
+## Crash consistency in `apply`
+
+`apply` finishes each chunk's pre-edit snapshot (`.chunk_edits/`), its edit, its
+`corrections_applied.jsonl` rows and its stale stamp **before the next chunk is
+touched** — sequential steps, not one atomic write; the snapshot (first) is the
+recovery proof if a kill lands mid-sequence. A kill after a chunk finishes
+leaves a consistent prefix, and the only thing a finished chunk can still skip
+is the per-chapter tail (recombine → realign → EPUB).
+
+Re-running the same `--select` resumes rather than fails. Two independent proofs
+are accepted that a selected edit is already ours: a matching audit row, or a
+`.chunk_edits/` snapshot holding the excerpt but not the suggestion. The snapshot
+is written *before* the chunk is saved and the audit row after, so the snapshot is
+the proof that survives a kill — the case where the archive is exactly what is
+missing. Rows missing for such an edit are re-appended with `"recovered": true`.
+
+`alignments/<chapter>.json` is written last by `realign_chapter`, so its mtime is
+the receipt that the tail ran. An already-applied edit in a chapter whose
+alignment is older than its chunks means an earlier run died before realigning,
+and the retry finishes it. That same signal is what `--realign-only` acts on, and
+what makes `--no-realign` safe to defer.
 
 ## Reproducibility & cost
 

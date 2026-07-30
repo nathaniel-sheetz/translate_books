@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.judges.fixes import restated_context
+from src.judges.fixes import ProposedFix, classify_fix, restated_context
 
 PROJECTS = Path(__file__).resolve().parent.parent / "projects"
 
@@ -42,6 +42,23 @@ KNOWN_HISTORICAL = {
     ("the-house-on-the-cliff", "chapter_18_chunk_000", "same-speaker-continuation", "2026-07-27T19:38:36"),
     ("the-house-on-the-cliff", "chapter_23_chunk_000", "narration-separation", "2026-07-27T19:38:36"),
     ("wonder-book-of-horses", "chapter_02_chunk_000", "inciso-punctuation", "2026-07-01T17:36:10"),
+}
+
+# Applied fixes that left an unpaired closing raya in the book — found by the
+# raya-balance guard when it was added (2026-07-30) by replaying this archive.
+# Both are the shape the 2026-07-29 friction log (item 6) caught in pollyanna
+# *before* applying: a second action inciso written with a closing raya only,
+# where prompts/dialogue.txt requires an action inciso to be framed on both sides.
+#
+#   —¡De vuelta en casa! —exclamó Frank con una sonrisa—. Luego se volvió,
+#   inquieto, hacia su tía—. ¿Hay ya noticias de papá?
+#
+# Unlike KNOWN_HISTORICAL these are **still in the book**: the prose needs the
+# missing opening raya (or the sentence split), after which these entries go away.
+# Nothing may be added here without a friction-log or TODO entry to repair it.
+KNOWN_UNBALANCED_RAYA = {
+    ("the-missing-chums", "chapter_09_chunk_000", "inciso-punctuation", "2026-07-28T08:29:30"),
+    ("the-missing-chums", "chapter_23_chunk_000", "inciso-punctuation", "2026-07-28T08:29:30"),
 }
 
 
@@ -142,3 +159,60 @@ def test_no_archived_judge_fix_duplicated_adjacent_prose():
     # The known five must still be detectable, or the measure has gone blind.
     missing = KNOWN_HISTORICAL - set(offenders)
     assert not missing, f"known corrupting applies no longer detected: {sorted(missing)}"
+
+
+def test_every_archived_judge_fix_would_still_be_offered():
+    """The false-positive net for the whole classifier, not just one measure.
+
+    Each archived fix landed in a book, so any guard that would now withhold it is
+    costing throughput on correct work — unless it is one of the five corruptions,
+    which every guard is welcome to catch. This is what calibrated the length
+    thresholds (legitimate fixes grow by at most 13 characters here; the
+    corruptions by 25 to 89) and what will catch the next guard that overreaches.
+    """
+    records = _judge_records()
+    if not records:
+        pytest.skip("no judge-sourced corrections archived on this machine")
+
+    replayed = 0
+    withheld: dict[tuple, str] = {}
+    for project_dir, index, record in records:
+        text = _pre_edit_text(project_dir, record)
+        if text is None:
+            continue
+        replayed += 1
+        rule = record.get("rule") or "other"
+        result = classify_fix(
+            {
+                "severity": record.get("severity") or "warning",
+                "message": f"[{rule}] {record.get('message') or ''}",
+                "location": record["original_es"],
+                "suggestion": record["corrected_es"],
+            },
+            text,
+        )
+        if isinstance(result, ProposedFix):
+            continue
+        key = (
+            project_dir.name, record.get("chunk_id"),
+            record.get("rule"), record.get("applied_at"),
+        )
+        withheld[key] = (
+            f"{project_dir.name} #{index} {key[1]} (rule={key[2]}): {result.reason}, "
+            f"{len(record['original_es'])} -> {len(record['corrected_es'])} chars"
+        )
+
+    assert replayed, "no archived judge fix could be replayed — reconstruction is broken"
+
+    expected = KNOWN_HISTORICAL | KNOWN_UNBALANCED_RAYA
+    regressions = [msg for key, msg in withheld.items() if key not in expected]
+    assert not regressions, (
+        "a guard now withholds archived fixes that landed correctly:\n" + "\n".join(regressions)
+    )
+    # The two live raya defects must stay visible: if the prose is repaired, the
+    # replay stops flagging them and this pin comes out with the same commit.
+    missing = KNOWN_UNBALANCED_RAYA - set(withheld)
+    assert not missing, (
+        "these applied fixes no longer read as unbalanced — if the prose was "
+        f"repaired, drop them from KNOWN_UNBALANCED_RAYA: {sorted(missing)}"
+    )
