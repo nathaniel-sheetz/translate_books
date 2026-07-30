@@ -46,9 +46,12 @@ _ENDNOTE_SUP = (
 # via the "chapter_heading" key in project.json, e.g.:
 #   "chapter_heading": {"label": "Capítulo", "numeral_style": "arabic"}
 # Set "label" to "" (empty string) to emit just the numeral with no word.
+# Set "promote_subtitles" to false for numeral-only books (no chapter titles)
+# so a short opening paragraph is not mistaken for an <h2> subtitle.
 _DEFAULT_HEADING_CONFIG: Dict[str, Any] = {
     "label": "Chapter",
     "numeral_style": "arabic",  # "arabic" or "roman"
+    "promote_subtitles": True,
 }
 
 # Synthesized chapter label per target language, keyed by the primary subtag of the
@@ -102,6 +105,8 @@ def _resolve_heading_config(
             merged['label'] = str(config['label'])
         if config.get('numeral_style') in ('arabic', 'roman'):
             merged['numeral_style'] = config['numeral_style']
+        if 'promote_subtitles' in config:
+            merged['promote_subtitles'] = bool(config['promote_subtitles'])
     return merged
 
 
@@ -177,6 +182,63 @@ def _normalize_heading(matched_line: str) -> str:
     return numeral.upper()
 
 
+# Small words left lowercase in the middle of a title-cased all-caps line.
+_TITLE_SMALL_WORDS = frozenset({
+    'a', 'al', 'an', 'and', 'at', 'con', 'de', 'del', 'e', 'el', 'en', 'for',
+    'from', 'in', 'la', 'las', 'los', 'o', 'of', 'on', 'or', 'para', 'por',
+    'sin', 'sobre', 'the', 'to', 'u', 'un', 'una', 'unas', 'unos', 'with', 'y',
+})
+
+# Standard Roman numerals only (avoids treating words like CIVIL as numerals).
+_ROMAN_NUMERAL_RE = re.compile(
+    r'^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$',
+    re.IGNORECASE,
+)
+
+
+def _is_roman_numeral(token: str) -> bool:
+    """True when ``token`` is a well-formed Roman numeral (I..MMMCMXCIX)."""
+    return bool(token) and bool(_ROMAN_NUMERAL_RE.fullmatch(token))
+
+
+def _normalize_allcaps_title(text: str) -> str:
+    """Title-case an ALL-CAPS subtitle; leave mixed-/lower-case text alone.
+
+    'ANTES DE LA TORMENTA' -> 'Antes de la Tormenta'
+    '¡GLORIA A DIOS!' -> '¡Gloria a Dios!'
+    'OCEANUS' -> 'Oceanus'
+    'EPISODE IV' -> 'Episode IV'  (Roman numerals stay uppercase)
+    'Hay un Dios.' -> 'Hay un Dios.'  (unchanged)
+    """
+    if not text:
+        return text
+    letters = [c for c in text if c.isalpha()]
+    if not letters or not all(c.isupper() for c in letters):
+        return text
+
+    words = text.split(' ')
+    out: List[str] = []
+    for i, word in enumerate(words):
+        if not word:
+            out.append(word)
+            continue
+        core = ''.join(c for c in word if c.isalpha()).lower()
+        if _is_roman_numeral(core):
+            out.append(''.join(c.upper() if c.isalpha() else c for c in word))
+            continue
+        lowered = word.lower()
+        if i > 0 and core in _TITLE_SMALL_WORDS:
+            out.append(lowered)
+            continue
+        chars = list(lowered)
+        for j, c in enumerate(chars):
+            if c.isalpha():
+                chars[j] = c.upper()
+                break
+        out.append(''.join(chars))
+    return ' '.join(out)
+
+
 _DEFAULT_CSS = """\
 img { max-width: 100%; height: auto; }
 div.image { text-align: center; margin: 1em 0; }
@@ -231,12 +293,21 @@ def detect_chapter_heading(
 
     When the first line is not a recognizable numeral and ``chapter_number``
     is provided, a heading is synthesized from ``heading_config`` (e.g.
-    "Capítulo 1") and the existing first non-blank line becomes the subtitle.
+    "Capítulo 1"). Leading blank lines and ``[IMAGE:...]`` ornaments are
+    skipped; the next short non-image line becomes the subtitle when
+    ``promote_subtitles`` is true (default).
+
+    Set ``heading_config["promote_subtitles"]`` to false to skip subtitle
+    promotion (numeral-only books whose short opening paragraphs would
+    otherwise become a spurious ``<h2>``).
 
     Returns:
         (heading, subtitle, body) where heading/subtitle may be ''
         if no heading was detected and synthesis was not requested.
     """
+    cfg = _resolve_heading_config(heading_config)
+    promote_subtitles = bool(cfg.get('promote_subtitles', True))
+
     lines = text.split('\n')
     if not lines:
         return ('', '', text)
@@ -248,19 +319,32 @@ def detect_chapter_heading(
         heading = first_line
         idx = 1
     elif chapter_number is not None:
-        # Synthesize a heading from the chapter number; the original first
-        # non-blank line will be promoted to the subtitle below.
+        # Synthesize a heading from the chapter number; after skipping blanks
+        # and leading [IMAGE:...] ornaments, the next short line is promoted
+        # to subtitle below (unless promote_subtitles is false).
         heading = synthesize_chapter_heading(chapter_number, heading_config)
         idx = 0
     else:
         return ('', '', text)
 
-    # Look for subtitle: skip blank lines, take next non-blank line.
+    # Skip blank lines, then any leading [IMAGE:...] header ornaments.
+    # Gutenberg often puts a decorative chapter image between "Chapter N"
+    # and the chapter title; those images must not block subtitle detection.
     while idx < len(lines) and not lines[idx].strip():
         idx += 1
 
+    leading_images: List[str] = []
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if not _IMAGE_RE.match(stripped):
+            break
+        leading_images.append(stripped)
+        idx += 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+
     subtitle = ''
-    if idx < len(lines):
+    if promote_subtitles and idx < len(lines):
         candidate = lines[idx].strip()
         # Subtitle should be a short text line, not a paragraph or image
         if candidate and not _IMAGE_RE.match(candidate) and len(candidate) < 200:
@@ -271,7 +355,12 @@ def detect_chapter_heading(
     while idx < len(lines) and not lines[idx].strip():
         idx += 1
 
-    body = '\n'.join(lines[idx:])
+    rest = '\n'.join(lines[idx:])
+    if leading_images:
+        img_block = '\n\n'.join(leading_images)
+        body = f'{img_block}\n\n{rest}' if rest else img_block
+    else:
+        body = rest
     return (heading, subtitle, body)
 
 
@@ -372,7 +461,10 @@ def chapter_text_to_xhtml(
     if heading:
         parts.append(f'<h1>{escape(_normalize_heading(heading))}</h1>')
     if subtitle:
-        parts.append(f'<h2>{_EM_RE.sub(_EM_REPL, escape(subtitle))}</h2>')
+        display_subtitle = _normalize_allcaps_title(subtitle)
+        parts.append(
+            f'<h2>{_EM_RE.sub(_EM_REPL, escape(display_subtitle))}</h2>'
+        )
 
     parts.extend(_render_body_blocks(body))
 
@@ -431,6 +523,63 @@ def note_text_to_xhtml(heading: str, body: str) -> str:
     return '\n'.join(parts)
 
 
+def _matter_subtitle_from_text(
+    text: str, label: str,
+) -> Tuple[int, str, List[str]]:
+    """Return ``(body_start_index, subtitle, leading_images)``.
+
+    ``body_start_index`` is the line index where the body begins (after the
+    optional heading, skipped ``[IMAGE:...]`` ornaments, and optional short
+    subtitle). ``leading_images`` holds those ornaments so the caller can
+    re-insert them at the start of the body. ``subtitle`` is '' when none
+    is found.
+    """
+    lines = text.split('\n')
+    body_start = 0
+    if lines:
+        first = lines[0].strip().strip(".:!?,;").strip().casefold()
+        norm_label = label.strip().strip(".:!?,;").strip().casefold()
+        if first and norm_label and first == norm_label:
+            body_start = 1
+            while body_start < len(lines) and not lines[body_start].strip():
+                body_start += 1
+
+    # Skip leading [IMAGE:...] ornaments the same way chapters do, so a
+    # decorative header image between "Prólogo" and the section title does
+    # not block subtitle promotion.
+    leading_images: List[str] = []
+    while body_start < len(lines):
+        stripped = lines[body_start].strip()
+        if not _IMAGE_RE.match(stripped):
+            break
+        leading_images.append(stripped)
+        body_start += 1
+        while body_start < len(lines) and not lines[body_start].strip():
+            body_start += 1
+
+    subtitle = ''
+    if body_start < len(lines):
+        candidate = lines[body_start].strip()
+        next_blank = (
+            body_start + 1 >= len(lines)
+            or not lines[body_start + 1].strip()
+        )
+        if (
+            candidate
+            and next_blank
+            and not _IMAGE_RE.match(candidate)
+            and len(candidate) <= 100
+            and len(candidate.split()) <= 12
+            and re.search(r'[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]', candidate)
+        ):
+            subtitle = candidate
+            body_start += 1
+            while body_start < len(lines) and not lines[body_start].strip():
+                body_start += 1
+
+    return body_start, subtitle, leading_images
+
+
 def matter_text_to_xhtml(text: str, label: str) -> str:
     """
     Convert front- or back-matter text to XHTML.
@@ -440,18 +589,23 @@ def matter_text_to_xhtml(text: str, label: str) -> str:
     If the first line of ``text`` matches the label (case-insensitive,
     ignoring punctuation), it is consumed as the heading; otherwise the
     label is added on top and the original text becomes the body.
+
+    A short standalone line immediately after the heading (e.g. an all-caps
+    section title under "Prólogo") is promoted to ``<h2>``. Leading
+    ``[IMAGE:...]`` ornaments between the heading and that title are
+    skipped for detection and re-inserted at the start of the body.
     """
     lines = text.split('\n')
-    body_start = 0
-    if lines:
-        first = lines[0].strip().strip(".:!?,;").strip().casefold()
-        norm_label = label.strip().strip(".:!?,;").strip().casefold()
-        if first and norm_label and first == norm_label:
-            body_start = 1
-            # also skip following blank lines
-            while body_start < len(lines) and not lines[body_start].strip():
-                body_start += 1
-    body = '\n'.join(lines[body_start:])
+    body_start, subtitle, leading_images = _matter_subtitle_from_text(
+        text, label,
+    )
+    rest = '\n'.join(lines[body_start:])
+    if leading_images:
+        img_block = '\n\n'.join(leading_images)
+        body = f'{img_block}\n\n{rest}' if rest else img_block
+    else:
+        body = rest
+    display_label = _normalize_allcaps_title(label)
 
     parts = []
     parts.append('<?xml version="1.0" encoding="utf-8"?>')
@@ -460,11 +614,16 @@ def matter_text_to_xhtml(text: str, label: str) -> str:
     parts.append(
         '<head><title>{}</title>'
         '<link rel="stylesheet" type="text/css" href="style.css"/>'
-        '</head>'.format(escape(label))
+        '</head>'.format(escape(display_label))
     )
     parts.append('<body>')
-    if label:
-        parts.append(f'<h1>{escape(label)}</h1>')
+    if display_label:
+        parts.append(f'<h1>{escape(display_label)}</h1>')
+    if subtitle:
+        display_subtitle = _normalize_allcaps_title(subtitle)
+        parts.append(
+            f'<h2>{_EM_RE.sub(_EM_REPL, escape(display_subtitle))}</h2>'
+        )
     parts.extend(_render_body_blocks(body))
     parts.append('</body>')
     parts.append('</html>')
@@ -676,9 +835,10 @@ def build_epub(
         chapter_heading_config: Optional override for synthesized chapter
                       headings (used when a chapter does not begin with a
                       numeral line). Shape: {"label": str, "numeral_style":
-                      "arabic"|"roman"}. If omitted, falls back to
-                      project.json's "chapter_heading" key, then to a label
-                      derived from ``language``, then defaults.
+                      "arabic"|"roman", "promote_subtitles": bool}. If
+                      omitted, falls back to project.json's "chapter_heading"
+                      key, then to a label derived from ``language``, then
+                      defaults.
         translator_note_heading: Heading for the optional "Note from the
                      Translator" final chapter. Falls back to a default constant
                      if blank/whitespace.
@@ -838,7 +998,7 @@ def build_epub(
             toc_label = norm_heading or f'Chapter {display_number}'
             section_heading = toc_label
             if subtitle and toc_format != 'heading_only':
-                toc_label = f'{toc_label}: {subtitle}'
+                toc_label = f'{toc_label}: {_normalize_allcaps_title(subtitle)}'
         else:
             # Front- or back-matter section: never synthesize "Chapter N".
             # Prefer the section's own first line (the heading the splitter
@@ -847,20 +1007,30 @@ def build_epub(
             # language. This stops an English "Foreword" being stacked on top of
             # a Spanish "Prólogo" body. Guard against promoting a body paragraph
             # by only trusting a short, heading-like first line.
+            # When the translated first line matches the manifest label
+            # case-insensitively, keep the manifest's casing ("Dedicatoria"
+            # rather than "DEDICATORIA").
             label = (manifest_entry.get('label') or '').strip()
-            heading, subtitle, _ = detect_chapter_heading(
+            heading, _, _ = detect_chapter_heading(
                 text, chapter_number=None, heading_config=chapter_heading_config,
             )
             first_line = _first_nonempty_line(text)
             if len(first_line) > 80:
                 first_line = ''
-            display_label = heading or first_line or label \
-                or chapter_id.replace('_', ' ').title()
+            if label and first_line and label.casefold() == first_line.casefold():
+                display_label = label
+            else:
+                display_label = heading or first_line or label \
+                    or chapter_id.replace('_', ' ').title()
+                display_label = _normalize_allcaps_title(display_label)
+            # One source of truth with matter_text_to_xhtml: stricter matter
+            # heuristics (not detect_chapter_heading's looser <200 rule).
+            _, subtitle, _ = _matter_subtitle_from_text(text, display_label)
             xhtml_content = matter_text_to_xhtml(text, display_label)
             toc_label = display_label
             section_heading = display_label
-            if subtitle and subtitle != display_label:
-                toc_label = f'{display_label}: {subtitle}'
+            if subtitle and subtitle.casefold() != display_label.casefold():
+                toc_label = f'{display_label}: {_normalize_allcaps_title(subtitle)}'
 
         file_name = f'chapter_{i:02d}.xhtml'
         chapter_item = epub.EpubHtml(
