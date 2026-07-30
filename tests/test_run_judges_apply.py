@@ -22,8 +22,9 @@ from web_ui.evaluations import load_chunk_evaluation, merge_judge_result
 
 CHUNK_ID = "chapter_01_chunk_000"
 # One clean swap (— Hola), one instruction suggestion (dijo él), one ambiguous
-# excerpt ("bien bien" twice), and one whose suggestion restates the words that
-# already precede the excerpt. Only the first should be applicable.
+# excerpt ("bien bien" twice), one whose suggestion restates the words that
+# already precede the excerpt, and one whose suggestion is the placeholder "N/A".
+# Only the first should be applicable.
 TRANSLATED = "— Hola, dijo él. Aquí hay bien bien y más bien bien al final."
 
 
@@ -69,6 +70,11 @@ def project(tmp_path):
                 # would duplicate those words in the book.
                 {"severity": "warning", "message": "[narration-separation] turn",
                  "location": "al final", "suggestion": "más bien bien al final."},
+                # The judge decided this passage was actually fine and hung a note
+                # on it instead of a fix. Applying it would splice "N/A" over the
+                # line and delete it.
+                {"severity": "error", "message": "[other] note, not a fix",
+                 "location": "Aquí hay", "suggestion": "N/A"},
             ],
         },
     )
@@ -112,6 +118,7 @@ def test_plan_lists_applicable_and_manual(project, capsys):
     assert payload["applicable"][0]["new"] == "—Hola"
     assert {m["reason"] for m in payload["manual"]} == {
         "suggestion_not_literal", "excerpt_ambiguous", "suggestion_restates_context",
+        "suggestion_placeholder",
     }
     # Plan mode writes nothing.
     assert not (project / "corrections_applied.jsonl").exists()
@@ -135,6 +142,32 @@ def test_restating_suggestion_is_withheld_and_cannot_be_selected(project, capsys
     # The book is untouched — no duplicated "más bien bien".
     chunk = load_chunk(project / "chunks" / f"{CHUNK_ID}.json")
     assert chunk.translated_text == TRANSLATED
+
+
+def test_placeholder_suggestion_is_withheld_and_cannot_be_selected(project, capsys):
+    """A judge note dressed as a fix ("N/A") must never reach the applicable set.
+
+    Three of these were classified applicable on the 2026-07-29 pollyanna
+    whole-book apply; a swap deletes the line it is keyed to. Short enough that the
+    `old → new` preview does not make it obvious, so the CLI has to refuse it.
+    """
+    rc, payload = _run(capsys, ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}"])
+    assert rc == 0
+    placeholder = [m for m in payload["manual"] if m["id"] == f"{CHUNK_ID}#4"]
+    assert len(placeholder) == 1
+    assert placeholder[0]["reason"] == "suggestion_placeholder"
+    # The operator still sees what the judge actually said.
+    assert placeholder[0]["suggestion"] == "N/A"
+
+    rc, payload = _run(
+        capsys,
+        ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}", "--select", f"{CHUNK_ID}#4"],
+    )
+    assert rc == 1
+    assert payload["manual_ids"] == [f"{CHUNK_ID}#4"]
+    chunk = load_chunk(project / "chunks" / f"{CHUNK_ID}.json")
+    assert chunk.translated_text == TRANSLATED
+    assert "N/A" not in chunk.translated_text
 
 
 def test_reapplying_an_already_applied_id_is_a_no_op(project, capsys, monkeypatch):
@@ -213,6 +246,130 @@ def test_interrupted_run_is_resumed_by_the_same_select(project, capsys, monkeypa
     # The edit itself is untouched — resuming never re-applies.
     assert load_chunk(project / "chunks" / f"{CHUNK_ID}.json").translated_text.count("—Hola") == 1
     assert len(list((project / ".chunk_edits" / "chapter_01" / CHUNK_ID).glob("*.json"))) == 1
+
+
+def _simulate_kill_after_edit(project, chunk_id=CHUNK_ID):
+    """Leave the post-edit / pre-tail state a killed apply leaves on disk."""
+    archive = project / "corrections_applied.jsonl"
+    if archive.exists():
+        archive.unlink()
+    align = project / "alignments" / "chapter_01.json"
+    if align.exists():
+        align.unlink()
+    evaluation = load_chunk_evaluation(project, chunk_id)
+    for key in ("stale", "stale_since", "stale_reason"):
+        evaluation.pop(key, None)
+    (project / "evaluations" / f"{chunk_id}.json").write_text(
+        json.dumps(evaluation, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_mixed_select_still_repairs_already_applied(project, capsys, monkeypatch):
+    """A bad id in --select must not skip audit recovery / resume realign.
+
+    Mixed ``already_applied`` + ``manual`` used to early-return before the repair
+    path, so the recovery contract only held on a perfectly clean select.
+    """
+    calls = _stub_realign(monkeypatch)
+    argv_ok = ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}", "--select", f"{CHUNK_ID}#0"]
+    assert _run(capsys, argv_ok)[0] == 0
+    _simulate_kill_after_edit(project)
+    calls.clear()
+
+    rc, payload = _run(
+        capsys,
+        [
+            "apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}",
+            "--select", f"{CHUNK_ID}#0,{CHUNK_ID}#1",
+        ],
+    )
+    assert rc == 1
+    assert payload["status"] == "error"
+    assert payload["manual_ids"] == [f"{CHUNK_ID}#1"]
+    assert payload["already_applied"] == [f"{CHUNK_ID}#0"]
+    assert payload["chapters_realigned"] == ["chapter_01"]
+    assert calls == ["chapter_01"]
+    rows = [
+        json.loads(line)
+        for line in (project / "corrections_applied.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["recovered"] is True
+
+
+def test_resume_with_no_realign_defers_honestly(project, capsys, monkeypatch):
+    """Resume under --no-realign must not claim it is finishing the tail now."""
+    calls = _stub_realign(monkeypatch)
+    argv = ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}", "--select", f"{CHUNK_ID}#0"]
+    assert _run(capsys, argv)[0] == 0
+    _simulate_kill_after_edit(project)
+    calls.clear()
+
+    rc, payload = _run(
+        capsys,
+        [
+            "apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}",
+            "--select", f"{CHUNK_ID}#0", "--no-realign",
+        ],
+    )
+    assert rc == 0
+    assert payload["status"] == "ok"
+    assert payload["already_applied"] == [f"{CHUNK_ID}#0"]
+    assert payload["chapters_realigned"] == []
+    assert payload["chapters_pending_realign"] == ["chapter_01"]
+    assert calls == []
+    assert any("Deferred again under --no-realign" in w for w in payload["warnings"])
+    assert not any("Finishing it now" in w for w in payload["warnings"])
+
+
+def test_already_applied_plus_all_pending_fail_is_partial_not_error(
+    project, capsys, monkeypatch
+):
+    """Resume-worthy already_applied work must not be reported as a blank failure.
+
+    When every still-pending id fails to locate, but at least one selected id was
+    already applied, the run is ``partial`` (rc 0) — not ``status: error``.
+    """
+    _stub_realign(monkeypatch)
+    assert _run(
+        capsys,
+        ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}", "--select", f"{CHUNK_ID}#0"],
+    )[0] == 0
+
+    # Keep #0 as the already-applied finding; add a second applicable span.
+    merge_judge_result(
+        project,
+        CHUNK_ID,
+        "dialogue",
+        {
+            "eval_name": "dialogue",
+            "issues": [
+                {"severity": "error", "message": "[raya-spacing] space after raya",
+                 "location": "— Hola", "suggestion": "—Hola"},
+                {"severity": "error", "message": "[other] rename",
+                 "location": "dijo él", "suggestion": "dijo ella"},
+            ],
+        },
+    )
+
+    def _apply_none(chunk, records):
+        return chunk, 0, []
+
+    monkeypatch.setattr("src.corrections_apply.apply_to_chunk", _apply_none)
+
+    rc, payload = _run(
+        capsys,
+        [
+            "apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}",
+            "--select", f"{CHUNK_ID}#0,{CHUNK_ID}#1",
+        ],
+    )
+    assert rc == 0
+    assert payload["status"] == "partial"
+    assert payload["already_applied"] == [f"{CHUNK_ID}#0"]
+    assert payload["applied"] == []
+    assert payload["failed"] == [f"{CHUNK_ID}#1"]
 
 
 def test_resume_needs_snapshot_proof_not_just_the_desired_state(project, capsys):
@@ -364,8 +521,12 @@ def test_already_applied_rejects_when_unique_suggestion_but_excerpt_remains():
     chunk_text = "lead OLD_UNIQUE_PHRASE mid NEW_UNIQUE_PHRASE tail"
     assert chunk_text.count("NEW_UNIQUE_PHRASE") == 1
     assert "OLD_UNIQUE_PHRASE" in chunk_text
-    assert not run_judges._already_applied_edit(
-        archived, CHUNK_ID, "OLD_UNIQUE_PHRASE", "NEW_UNIQUE_PHRASE", chunk_text
+    # Desired state requires the excerpt gone; unique suggestion alone is not enough.
+    assert not run_judges._desired_state_holds(
+        chunk_text, "OLD_UNIQUE_PHRASE", "NEW_UNIQUE_PHRASE"
+    )
+    assert run_judges._archive_has_edit(
+        archived, CHUNK_ID, "OLD_UNIQUE_PHRASE", "NEW_UNIQUE_PHRASE"
     )
 
 
@@ -822,7 +983,7 @@ def test_second_judge_fix_superseded_by_the_first_is_reported_not_forced(
     assert payload["status"] == "partial"
     assert payload["applied"] == [f"dialogue:{CHUNK_ID}#0"]
     assert payload["failed"] == [f"address:{CHUNK_ID}#0"]
-    assert any("superseded it" in w for w in payload["warnings"])
+    assert any("superseded by another edit" in w for w in payload["warnings"])
 
     text = load_chunk(project / "chunks" / f"{CHUNK_ID}.json").translated_text
     assert text == TRANSLATED.replace("— Hola", "—Hola")

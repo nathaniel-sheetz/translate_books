@@ -100,10 +100,11 @@ subagents; Cursor is offered only on the headless `fanout` path.
 `commit` (subagent backend) takes only `--project` and `--persist`.
 
 `apply` (turn approved findings into chunk edits) adds:
-- `--judge <name>` (default `dialogue`) — whose **persisted** findings to consider.
-- `--scope chunk:<id>` / `--scope chapter:<id>` — **repeatable**.
-- `--select <id,id,...>` — the `applicable[].id`s to apply. **Omit for a plan-only dry-run.**
-- `--rebuild-epub` — rebuild the EPUB after applying (recombine + realign always run).
+- `--judge <name>` (default `dialogue`; **repeatable**) — whose **persisted** findings to consider.
+- `--scope chunk:<id>` / `--scope chapter:<id>` / `--scope book` — **repeatable**.
+- `--select <id,id,...>` — the `applicable[].id`s (or `qualified_id`s) to apply. **Omit for a plan-only dry-run.**
+- `--rebuild-epub` — rebuild the EPUB after applying (implies recombine + realign; incompatible with `--no-realign`).
+- `--no-realign` / `--realign-only` — defer or settle the expensive recombine+realign tail.
 - `--dry-run` — force plan mode even when `--select` is given.
 
 `apply` reads the findings you already persisted, so run/commit with `--persist` **first**.
@@ -314,10 +315,17 @@ interrupted run still shows how far it got.
 
 6c. **Dry-run the plan.** Run `apply` with `--dry-run` (or just omit `--select`). Relay the
 `applicable[]` fixes as `old → new` previews and list the `manual[]` findings with their
-`reason` — those can't be auto-applied (instruction-type suggestion, an absent/ambiguous
-excerpt, or a suggestion that restates the prose around the excerpt —
-`suggestion_restates_context`, which would duplicate that prose in the book); point the user
-to the reader / web chunk editor for them.
+`reason` — those can't be auto-applied. The reasons split into three families: the suggestion
+isn't replacement text (`suggestion_not_literal`, `suggestion_placeholder` — a literal `N/A`,
+meaning the judge decided the passage was fine, so a swap would delete the line), the excerpt
+doesn't locate (`excerpt_not_found`, `excerpt_ambiguous` — the biggest bucket for the address
+judge), or the splice itself would damage the text (`suggestion_restates_context` duplicates the
+prose around the excerpt, `suggestion_adds_ellipsis` elides text it isn't replacing,
+`suggestion_too_long`/`suggestion_too_short` are quoting or dropping prose rather than rewriting
+the span, `suggestion_unbalanced_raya` would leave a closing inciso raya with nothing opened, and
+`mixed_register_remains` is an `inconsistent-address` fix that leaves the form it replaces standing
+elsewhere in the chunk — applying it *creates* the inconsistency it reports). Point the user to the
+reader / web chunk editor for all of them.
 ```bash
 python scripts/run_judges.py apply --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03 --dry-run
@@ -337,25 +345,32 @@ python scripts/run_judges.py apply --project pollyanna \
 ```
 7c. **Get an explicit selection.** The user picks which `applicable[].id`s to apply — **never
 apply without an explicit pick.** Use `AskUserQuestion` (multiSelect, **≤4 options**) when there
-are ≤4; for more, present a numbered list and have the user reply with the ids. Two hand-checks
-on each listed fix before you offer it, both of which veto a fix the CLI classified applicable:
-- If the suggestion still reads to you as an *instruction* rather than literal replacement text.
-- If `new` restates words that already sit immediately before or after `old` in the chunk. Read
-  the surrounding chunk text, not just the `old → new` pair. Judges rewrite a whole dialogue
-  turn while keying the finding to a short excerpt; splicing that in prints the shared words
-  twice. The CLI now rejects these, but it measures whole words — confirm by eye.
+are ≤4; for more, present a numbered list and have the user reply with the ids.
+
+The *mechanical* hazards are the CLI's job now, and it withholds them: placeholder and
+instruction-shaped suggestions, ones that restate adjacent prose, elide with `...`, swing far in
+length, unbalance the paragraph's rayas, or normalize a register the rest of the chunk still uses
+(see the reasons in 6c). Don't re-derive those by hand. What no guard can decide is **semantic**, so
+these two veto a fix the CLI classified applicable:
+- **Is the direction right?** Check the fix against `address_map.json` yourself. A blanket clause
+  ("tú among peers") can swallow a relationship the map names specifically — two non-intimate adults
+  use usted in both directions, and a character the map calls ceremonious keeps usted even with a
+  child. The judge reads those as violations; they are not.
+- **Is the fix complete?** A speech that mixes registers, where the judge flagged only one clause,
+  leaves a half-corrected line if applied. Read the whole turn, not the `old → new` pair.
 
 8c. **Apply the picked ids.** Pass them comma-separated; add `--rebuild-epub` if the user wants
-the book rebuilt now (recombine + realign always run either way):
+the book rebuilt now (that path recombines + realigns; use `--no-realign` to defer the tail):
 ```bash
 python scripts/run_judges.py apply --project understood-betsy --judge dialogue \
     --scope chapter:chapter_03 --select chapter_03_chunk_000#0,chapter_03_chunk_001#2 [--rebuild-epub]
 ```
 Relay the summary (`applied`, `chapters_realigned`, `archived_to`, `backups`). Each chunk's
 pre-edit snapshot (`.chunk_edits/`), its edit, its rows in `corrections_applied.jsonl` (the same
-audit log as reader corrections) and its stale stamp are written **together, before the next
-chunk is touched** — so an apply is traceable, and an interrupted one leaves a consistent prefix
-rather than edits nothing recorded.
+audit log as reader corrections) and its stale stamp are finished **before the next chunk is
+touched** (sequential steps; the pre-edit snapshot is the recovery proof if a kill lands
+mid-sequence) — so an apply is traceable, and an interrupted one leaves a consistent prefix of
+finished chunks rather than edits nothing recorded.
 
 **Re-running the same `--select` is safe, including after an interrupted run.** Ids whose edit is
 already in the chunk come back in `already_applied[]` with `status: "ok"` and rc 0; nothing is

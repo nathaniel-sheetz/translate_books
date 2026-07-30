@@ -8,6 +8,8 @@ when it is a *uniquely-locatable text swap*. These tests pin each branch of
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.judges.fixes import (
@@ -15,15 +17,22 @@ from src.judges.fixes import (
     ProposedFix,
     REASON_EXCERPT_AMBIGUOUS,
     REASON_EXCERPT_NOT_FOUND,
+    REASON_MIXED_REGISTER_REMAINS,
     REASON_NO_EXCERPT,
     REASON_NO_SUGGESTION,
+    REASON_SUGGESTION_ADDS_ELLIPSIS,
     REASON_SUGGESTION_EQUALS_EXCERPT,
     REASON_SUGGESTION_NOT_LITERAL,
+    REASON_SUGGESTION_PLACEHOLDER,
     REASON_SUGGESTION_RESTATES_CONTEXT,
+    REASON_SUGGESTION_TOO_LONG,
+    REASON_SUGGESTION_TOO_SHORT,
+    REASON_SUGGESTION_UNBALANCED_RAYA,
     boundary_overlap,
     classify_fix,
     looks_like_instruction,
     to_correction_record,
+    unopened_rayas,
 )
 
 
@@ -237,6 +246,281 @@ class TestRestatesContext:
                    rule="inciso-punctuation"),
             text,
         )
+        assert isinstance(result, ProposedFix)
+
+
+class TestPlaceholderSuggestion:
+    """Regression net for the 2026-07-29 pollyanna friction log, item 0.
+
+    Three address findings reached ``applicable[]`` with ``"suggestion": "N/A"``.
+    The judge writes that to mean "this is a note, not a fix" — it had inspected
+    each passage and decided the form was actually correct — but the classifier
+    treated any non-empty, non-equal suggestion as literal replacement text, so a
+    swap would have spliced the string ``N/A`` over a line of dialogue and deleted
+    it. Short enough to survive a skim of the ``old → new`` preview, which is what
+    makes it worse than the duplication bug it followed.
+    """
+
+    def test_bare_na_is_withheld(self):
+        text = "—Sí; soy su sobrina. Ella me ha tomado para criarme..."
+        result = classify_fix(
+            _issue("—Sí; soy su sobrina. Ella me ha tomado para criarme...", "N/A",
+                   rule="wrong-form-tu-expected"),
+            text,
+        )
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_PLACEHOLDER
+        # The suggestion is preserved so the operator sees what the judge said.
+        assert result.suggestion == "N/A"
+
+    @pytest.mark.parametrize("placeholder", ["N/A", "n/a", "na", "None", "null", "-", "--", "…",
+                                            "...", " N/A "])
+    def test_every_placeholder_spelling(self, placeholder):
+        result = classify_fix(_issue("me parece que debes de ser una personita", placeholder), "x")
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_PLACEHOLDER
+
+    def test_placeholder_beats_excerpt_not_found(self):
+        """"There is no fix here" is the more useful diagnosis of the two.
+
+        The excerpt of the third pollyanna case does not occur in its chunk
+        either, but sending the operator to the web editor to hand-apply a fix the
+        judge never wrote would waste the trip.
+        """
+        result = classify_fix(_issue("texto que no está en el capítulo", "N/A"), "otra cosa")
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_PLACEHOLDER
+
+    def test_a_real_short_suggestion_is_not_a_placeholder(self):
+        result = classify_fix(_issue("— Hola", "—Hola"), "x — Hola y")
+        assert isinstance(result, ProposedFix)
+
+
+class TestSpliceGuards:
+    """The length/ellipsis shape checks — 2026-07-29 item 2, and 07-27's open fix.
+
+    Every pair below is real. The thresholds are calibrated against the 239
+    archived judge fixes in ``projects/*/corrections_applied.jsonl`` (see
+    ``tests/test_applied_corrections_audit.py``): legitimate fixes grow by at most
+    13 characters, the known corruptions by 25 to 89.
+    """
+
+    def test_ellipsis_joined_passages_pollyanna_chapter_03(self):
+        """The finding that got past ``suggestion_restates_context`` (item 2).
+
+        ``new`` is three passages ellipsis-joined, spanning text well outside the
+        excerpt. The boundary measure cannot see it: the reused prose
+        ("Deseo que vaya a recibirla a la estación") sits a sentence downstream, so
+        it never touches the span, and the ``...`` fragments break any contiguous
+        comparison.
+        """
+        text = (
+            "He mandado pedir mosquiteros, pero hasta que lleguen espero que usted se encargue "
+            "de que las ventanas permanezcan cerradas. Mi sobrina llegará mañana a las cuatro. "
+            "Deseo que usted vaya a recibirla a la estación."
+        )
+        old = "espero que usted se encargue de que las ventanas permanezcan cerradas"
+        new = (
+            "espero que te encargues de que las ventanas permanezcan cerradas... Deseo que "
+            "vayas a recibirla a la estación... pero creo que es suficiente para tu propósito."
+        )
+        result = classify_fix(_issue(old, new, rule="wrong-form-tu-expected"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_ADDS_ELLIPSIS
+
+    def test_stray_trailing_ellipsis_gaudenzia(self):
+        """A near-zero growth whose only defect is a truncation marker.
+
+        Reduced from the real gaudenzia pair, which grew 213 → 214 characters: no
+        ratio or delta can catch the stray ` …` that suggestion would print into
+        the book, so the ellipsis check is not a length check in disguise.
+        """
+        text = (
+            "—¡Para los dos! —el hombre se encogió de hombros—. ¿Quién puede entenderlo?\n\n"
+            "Movió la mano en un ritmo entrecortado.\n\n—¡Es guerra!"
+        )
+        old = "Movió la mano en un ritmo entrecortado."
+        new = "—Movió la mano en un ritmo entrecortado— …"
+        result = classify_fix(_issue(old, new, rule="narration-separation"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_ADDS_ELLIPSIS
+
+    def test_an_excerpt_that_already_elides_stays_applicable(self):
+        """Only a *newly introduced* ellipsis counts — real prose is full of them."""
+        text = "—Volveremos por usted más tarde... Sr. Jones."
+        result = classify_fix(
+            _issue("Volveremos por usted más tarde...", "Volveremos por ti más tarde...",
+                   rule="wrong-form-tu-expected"),
+            text,
+        )
+        assert isinstance(result, ProposedFix)
+
+    def test_suggestion_quoting_the_following_passage_fabre2(self):
+        """The whole paragraph after the excerpt, restated (really 67 → 513 chars).
+
+        ``restated_context`` misses this one by construction — it aligns a
+        *suffix* of the replacement against a *prefix* of the following text, and
+        here the duplicated block is wholly contained in the replacement, ending
+        mid-passage. The length guard is the net that catches that shape.
+        """
+        text = (
+            "—Las palas, las tenazas, las parrillas, las estufas, son de hierro. Estos "
+            "diversos objetos, siempre en contacto con el fuego, no se funden, sin embargo; "
+            "ni siquiera se ablandan."
+        )
+        old = "—Las palas, las tenazas, las parrillas, las estufas, son de hierro."
+        new = (
+            "»Las palas, las tenazas, las parrillas, las estufas, son de hierro. Estos "
+            "diversos objetos, siempre en contacto con el fuego, no se funden, sin embargo; "
+            "ni siquiera se ablandan. Para ablandar el hierro, el herrero necesita todo el "
+            "calor de su fragua."
+        )
+        result = classify_fix(_issue(old, new, rule="same-speaker-continuation"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_TOO_LONG
+
+    def test_suggestion_dropping_a_narration_paragraph_stormy_misty(self):
+        """45 → 13 characters: the excerpt spans narration + speech, `new` is the speech.
+
+        Applying it deletes ``Paul le dio un codazo al abuelo.`` — the deletion
+        class the friction log's second item-0 fix asked for, found in a second
+        book while calibrating.
+        """
+        text = (
+            "¿y yo tuviera que jalarte como costal de papas?\n\n"
+            "Paul le dio un codazo al abuelo.\n\n—Díselo ya.\n\n—Así que ya ves, Idy."
+        )
+        old = "Paul le dio un codazo al abuelo.\n\n—Díselo ya."
+        result = classify_fix(_issue(old, "—Dígaselo ya.", rule="wrong-form-usted-expected"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_TOO_SHORT
+
+    def test_english_conditional_parenthetical_is_not_literal(self):
+        """The judge hedging in the field that gets spliced into the book.
+
+        Two `ambiguous`-rule findings carried one of these. It is caught as
+        ``suggestion_not_literal`` rather than by a length threshold because that
+        is what it is — the instruction detector just never opened with a verb.
+        """
+        text = "—Está equivocado, Klein —dijo—. Yo sé cuál gorra dicen."
+        new = "Estás equivocado, Klein (if the two are meant to be familiar accomplices)"
+        result = classify_fix(_issue("Está equivocado, Klein", new, rule="ambiguous"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_NOT_LITERAL
+
+    @pytest.mark.parametrize(
+        "old,new",
+        [
+            ("Te equivocas.", "Se equivoca usted."),
+            ("Nadie te acusará de glotón", "Nadie lo acusará a usted de glotón"),
+            ("A lo mejor lo conoces.", "A lo mejor lo conoce usted."),
+        ],
+    )
+    def test_short_address_fixes_stay_applicable(self, old, new):
+        """The three archived fixes a bare ``len(new) > len(old) * 1.2`` would break.
+
+        Adding *usted* to a short line swings the ratio to 1.23-1.38 while adding
+        5 to 8 characters, which is why the growth guard requires an absolute
+        delta as well. These landed in books and are correct.
+        """
+        text = f"—{old} El resto de la línea sigue igual."
+        result = classify_fix(_issue(old, new, rule="wrong-form-usted-expected"), text)
+        assert isinstance(result, ProposedFix)
+
+
+class TestRayaBalance:
+    """2026-07-29 item 6: a malformed suggestion nothing was checking.
+
+    ``chapter_09_chunk_000#0`` gave a second inciso a closing raya with no opening
+    one — mechanically checkable, and the classifier was not checking it.
+    """
+
+    def test_unopened_rayas_reads_the_turn_opener_as_speech(self):
+        # Turn-opening raya, then a balanced inciso: nothing unopened.
+        assert unopened_rayas("—¡Vaya! —fue todo lo que dijo—. Pero, oiga.") == 0
+        # A » continuation marker in front of the turn raya is still a turn opener.
+        assert unopened_rayas("»—Bueno —dijo ella—. Ya veremos.") == 0
+        # A closing raya with no inciso open.
+        assert unopened_rayas("—¡Vaya! —fue todo lo que dijo—. Luego continuó—.") == 1
+        # Unclassifiable rayas (spaced both sides, glued both sides) are left alone.
+        assert unopened_rayas("Ella — dijo — algo raro.") == 0
+
+    def test_newly_unbalanced_suggestion_is_withheld_pollyanna_chapter_09(self):
+        text = (
+            "Pollyanna, vieron algo que impidió que esas palabras se pronunciaran.\n\n"
+            "—¡Vaya! —fue todo lo que dijo. Luego, mostrando su antiguo interés, continuó—: "
+            "Pero, oiga, es raro que le hable a usted, de veras, señorita Pollyanna."
+        )
+        old = "—fue todo lo que dijo. Luego, mostrando su antiguo interés, continuó—: Pero, oiga,"
+        new = "—fue todo lo que dijo—. Luego, mostrando su antiguo interés, continuó—. Pero, oiga,"
+        result = classify_fix(_issue(old, new, rule="inciso-punctuation"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_SUGGESTION_UNBALANCED_RAYA
+
+    def test_a_preexisting_imbalance_does_not_withhold_an_unrelated_fix(self):
+        """Baseline discipline: a malformed paragraph is often the finding itself.
+
+        Withholding on the *state* rather than the *change* would refuse to fix
+        exactly the paragraphs the dialogue judge exists to report.
+        """
+        text = "—Bueno —dijo ella—. Ya lo veremos—."
+        assert unopened_rayas(text) == 1
+        result = classify_fix(_issue("Bueno", "Bien", rule="other"), text)
+        assert isinstance(result, ProposedFix)
+
+
+class TestInconsistentAddress:
+    """2026-07-29 item 6: normalization in the wrong direction.
+
+    ``inconsistent-address`` asserts that one speaker→addressee pair mixes tú and
+    usted *within the passage*, which makes any single-line fix partial by
+    construction. The judge normalized Nancy's ``usted le dijo`` to tú while the
+    next, unflagged line still read ``Usted le dijo que podía estar contenta`` —
+    applying it would have created the inconsistency it claimed to fix.
+    """
+
+    def test_fix_leaving_the_replaced_form_standing_is_withheld(self):
+        text = (
+            "—Ah, ya sé —rió por lo bajo—. Es justo lo contrario de lo que usted le dijo a la "
+            "señora Snow.\n\n—¿Lo contrario? —repitió Pollyanna, evidentemente desconcertada."
+            "\n\n—Sí. Usted le dijo que podía estar contenta porque los demás no eran como "
+            "ella... todos enfermos, ¿sabe?"
+        )
+        old = (
+            "—Ah, ya sé —rió por lo bajo—. Es justo lo contrario de lo que usted le dijo a la "
+            "señora Snow."
+        )
+        new = (
+            "—Ah, ya sé —rió por lo bajo—. Es justo lo contrario de lo que tú le dijiste a la "
+            "señora Snow."
+        )
+        result = classify_fix(_issue(old, new, rule="inconsistent-address"), text)
+        assert isinstance(result, ManualFinding)
+        assert result.reason == REASON_MIXED_REGISTER_REMAINS
+
+    def test_fix_that_resolves_the_whole_mixture_stays_applicable(self):
+        text = (
+            "—Ah, ya sé —rió—. Es justo lo contrario de lo que usted le dijo.\n\n"
+            "—Sí —asintió Pollyanna."
+        )
+        old = "Es justo lo contrario de lo que usted le dijo."
+        new = "Es justo lo contrario de lo que tú le dijiste."
+        result = classify_fix(_issue(old, new, rule="inconsistent-address"), text)
+        assert isinstance(result, ProposedFix)
+
+    def test_the_guard_is_scoped_to_inconsistent_address(self):
+        """``wrong-form-*`` names one direction the map dictates, not a mixture.
+
+        Other characters in the chunk legitimately use the other register, so the
+        same text must stay applicable under a different rule id.
+        """
+        text = (
+            "—Ah, ya sé —rió—. Es justo lo contrario de lo que usted le dijo.\n\n"
+            "—Sí. Usted ya lo sabía —dijo el doctor."
+        )
+        old = "Es justo lo contrario de lo que usted le dijo."
+        new = "Es justo lo contrario de lo que tú le dijiste."
+        result = classify_fix(_issue(old, new, rule="wrong-form-tu-expected"), text)
         assert isinstance(result, ProposedFix)
 
 

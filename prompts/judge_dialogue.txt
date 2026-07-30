@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge
-# Version: 1.4
+# Version: 1.5
 # Checks whether a Spanish translation follows the project's house dialogue
 # rules. Variables: dialogue_rules, source_text, translation_text
 
@@ -93,3 +93,22 @@ restate any words that appear before or after the excerpt in the translation. If
 the fix needs surrounding text to be moved or repunctuated, widen the `excerpt`
 to cover that text instead — a suggestion that repeats its own context is
 discarded, because splicing it in would print those words twice.
+
+Four more rules on `suggestion`, each of which is checked mechanically and gets
+the finding discarded:
+
+- **Never a placeholder.** If you have no concrete replacement, you have no
+  finding — leave it out entirely. Never write "N/A", "none", a dash, an ellipsis
+  or an empty string.
+- **Nothing but book text.** No commentary, conditions, alternatives, English, or
+  parentheticals: `suggestion` is spliced verbatim into the printed book. Anything
+  you need to explain goes in `message`.
+- **No elision, no cross-references.** Never join passages with "..." and never
+  quote or discuss a different line than the one in `excerpt`. If the fix spans
+  intervening text, widen `excerpt` to cover it or emit one finding per span.
+- **Balanced rayas.** Every inciso raya you open (`—dijo él—`) must be closed.
+  Count the rayas in your suggestion before answering: after the turn's own
+  opening raya they alternate open, close, open, close, and a closing raya with
+  nothing opened is rejected.
+
+A dialogue fix repunctuates its excerpt; it does not grow or shrink it much.

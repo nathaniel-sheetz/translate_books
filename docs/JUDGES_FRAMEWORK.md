@@ -181,11 +181,12 @@ and `stale_reason` at the **top level** of `evaluations/<chunk>.json`, not insid
 
 ## Crash consistency in `apply`
 
-`apply` writes each chunk's pre-edit snapshot (`.chunk_edits/`), its edit, its
-`corrections_applied.jsonl` rows and its stale stamp **together, before the next
-chunk is touched**. A run killed part-way through therefore leaves a consistent
-prefix, and the only thing it can skip is the per-chapter tail (recombine →
-realign → EPUB).
+`apply` finishes each chunk's pre-edit snapshot (`.chunk_edits/`), its edit, its
+`corrections_applied.jsonl` rows and its stale stamp **before the next chunk is
+touched** — sequential steps, not one atomic write; the snapshot (first) is the
+recovery proof if a kill lands mid-sequence. A kill after a chunk finishes
+leaves a consistent prefix, and the only thing a finished chunk can still skip
+is the per-chapter tail (recombine → realign → EPUB).
 
 Re-running the same `--select` resumes rather than fails. Two independent proofs
 are accepted that a selected edit is already ours: a matching audit row, or a

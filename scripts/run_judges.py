@@ -109,8 +109,13 @@ _APPLY_SCHEMA = {
     "--select needs when both judges have a finding with the same bare id",
     "manual": "plan mode: {id, judge, qualified_id, chunk_id, chapter_id, rule, severity, reason, "
     "excerpt, suggestion, message} for findings withheld from auto-apply (reason: no_suggestion | "
-    "no_excerpt | suggestion_equals_excerpt | suggestion_not_literal | excerpt_not_found | "
-    "excerpt_ambiguous | suggestion_restates_context)",
+    "no_excerpt | suggestion_equals_excerpt | suggestion_not_literal | suggestion_placeholder ('N/A' "
+    "and friends — the judge means 'no fix', so a swap would delete the line) | excerpt_not_found | "
+    "excerpt_ambiguous | suggestion_restates_context | suggestion_adds_ellipsis (elides text it is "
+    "not replacing) | suggestion_too_long | suggestion_too_short (a span rewrite does not grow or "
+    "shrink that far — it is quoting or dropping prose) | suggestion_unbalanced_raya (the splice "
+    "would leave a closing inciso raya with nothing opened) | mixed_register_remains (an "
+    "inconsistent-address fix that leaves the form it replaces standing elsewhere in the chunk))",
     "chunks_without_findings": "target chunks with no persisted findings for any requested judge",
     "applied": "applied mode: fix ids that were actually applied",
     "already_applied": "applied mode: selected ids whose exact edit is already in the chunk, "
@@ -241,7 +246,7 @@ def _build_parser() -> argparse.ArgumentParser:
                 required=True,
                 action="append",
                 metavar="SCOPE",
-                help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'. "
+                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'. "
                 "Repeatable — pass --scope multiple times to stage several chapters "
                 "in one manifest for a single commit.",
             )
@@ -249,7 +254,7 @@ def _build_parser() -> argparse.ArgumentParser:
             p.add_argument(
                 "--scope",
                 required=True,
-                help="Target scope: 'chunk:<chunk_id>' or 'chapter:<chapter_id>'",
+                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'",
             )
         p.add_argument("--model", default=None, help="Judge model id override")
         p.add_argument("--provider", default=None, help="Judge provider override")
@@ -401,7 +406,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rebuild-epub",
         dest="rebuild_epub",
         action="store_true",
-        help="Rebuild the EPUB after applying (recombine + realign always run)",
+        help="Rebuild the EPUB after applying (implies recombine + realign; "
+        "incompatible with --no-realign)",
     )
     ap.add_argument(
         "--no-realign",
@@ -699,26 +705,6 @@ def _snapshot_proves_edit(
     return False
 
 
-def _already_applied_edit(
-    archived: list[dict],
-    chunk_id: str,
-    excerpt: str,
-    suggestion: str,
-    chunk_text: str,
-    *,
-    snapshot_proof: bool = False,
-) -> bool:
-    """True if this exact edit is already in the chunk *and* provably ours.
-
-    Two proofs are accepted, because either one alone answers "did an edit put
-    this text here": an archive row, or (``snapshot_proof``) a ``.chunk_edits/``
-    snapshot — see :func:`_snapshot_proves_edit`.
-    """
-    if not _desired_state_holds(chunk_text, excerpt, suggestion):
-        return False
-    return snapshot_proof or _archive_has_edit(archived, chunk_id, excerpt, suggestion)
-
-
 def _alignment_is_stale(project_dir: Path, chapter_id: str, chunk_ids: list[str]) -> bool:
     """True if ``alignments/<chapter>.json`` is missing or older than these chunks.
 
@@ -797,11 +783,13 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     touched.
 
     Crash consistency: each chunk's snapshot, edit, audit rows and stale stamp
-    are written together, before the next chunk is touched, so a run killed
-    part-way through leaves a consistent *prefix* rather than edits nothing
-    recorded. What a kill can still skip is the per-chapter tail (recombine ->
-    realign -> EPUB); a later run detects that from the alignment mtime and
-    finishes it. See ``_alignment_is_stale`` and ``_snapshot_proves_edit``.
+    are finished for that chunk before the next is touched (sequential steps —
+    not one fsync/transaction; the pre-edit snapshot is the recovery proof if a
+    kill lands mid-sequence). A kill after a chunk finishes leaves a consistent
+    *prefix* rather than edits nothing recorded. What a kill can still skip is
+    the per-chapter tail (recombine -> realign -> EPUB); a later run detects
+    that from the alignment mtime and finishes it. See ``_alignment_is_stale``
+    and ``_snapshot_proves_edit``.
     """
     project_dir = _resolve_project(args.project)
 
@@ -1073,24 +1061,13 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         else:
             unknown_ids.append(qid)
 
-    if manual_ids or unknown_ids or ambiguous_ids:
-        _emit(
-            {
-                "status": "error",
-                "error": "Selected id(s) are not in the applicable set (unknown, ambiguous "
-                "across judges, or classified as manual). Re-check the plan's "
-                "applicable[].id / .qualified_id.",
-                "unknown_ids": [_report_id(v) for v in unknown_ids],
-                "manual_ids": [_report_id(v) for v in manual_ids],
-                "ambiguous_ids": ambiguous_ids,
-                "already_applied": [_report_id(qid) for qid in already_applied],
-                "applicable_ids": [_report_id(qid) for qid in applicable],
-            },
-            _APPLY_SCHEMA,
-        )
-        return 1
-
-    pending_ids = [qid for qid in selected_qids if qid in applicable]
+    # A mixed select (good already_applied + one bad id) must still run the
+    # repair path below — that is how an interrupted apply recovers. New edits
+    # wait for a clean select; do not apply applicable ids alongside bad ones.
+    bad_select = bool(manual_ids or unknown_ids or ambiguous_ids)
+    pending_ids = (
+        [] if bad_select else [qid for qid in selected_qids if qid in applicable]
+    )
 
     # Group selected fixes by chunk, then by judge in the order the judges were
     # requested — one judge's edit can invalidate the next judge's excerpt in the
@@ -1142,14 +1119,14 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                 if isinstance(result, ProposedFix):
                     items.append((qid, result))
                 else:
-                    # Only reachable when an earlier judge in this same run
-                    # rewrote the text this fix was keyed to. Never fall back to
-                    # a loose search: that is how a fix lands on the wrong span.
+                    # Usually an earlier judge in this same run rewrote the span;
+                    # can also fire if the chunk changed on disk mid-run. Never
+                    # fall back to a loose search: that is how a fix lands wrong.
                     failed_ids.append(qid)
                     warnings_out.append(
                         f"{chunk_id}: {_report_id(qid)} ({judge}) no longer applies "
-                        f"({result.reason}) — an earlier judge's edit in this run "
-                        "superseded it; re-plan and re-select if it is still wanted"
+                        f"({result.reason}) — the excerpt is gone (superseded by "
+                        "another edit); re-plan and re-select if it is still wanted"
                     )
             if not items:
                 continue
@@ -1198,11 +1175,11 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         if not chunk_records:
             continue
 
-        # Everything this chunk needs, written before the next chunk is touched:
-        # snapshot (pre-edit, the only complete record of the old text) -> the
-        # edit -> its audit rows -> the stale stamp. A kill after this point
-        # leaves a consistent prefix; a kill *inside* it can only lose this one
-        # chunk's rows, and the snapshot still proves what happened.
+        # Everything this chunk needs, before the next chunk is touched:
+        # snapshot (pre-edit) -> edit -> audit rows -> stale stamp. Sequential,
+        # not atomic: a kill mid-sequence can leave this one chunk partial, but
+        # the snapshot (written first) still proves the edit. A kill after this
+        # block leaves a consistent prefix of finished chunks.
         backups.append(
             str(_write_chunk_snapshot(project_dir, chapter_id, chunk_id, chunk_path, ts))
         )
@@ -1239,12 +1216,20 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         if not _alignment_is_stale(project_dir, chapter_id, chunk_ids):
             continue
         affected_chapters.append(chapter_id)
-        warnings_out.append(
-            f"{chapter_id}: the selected edits are already in the chunks, but the alignment is "
-            "older than them — the recombine/realign tail never ran for this chapter (an "
-            "interrupted apply, or --no-realign). Finishing it now: recombine, realign, "
-            "re-stale-mark."
-        )
+        if args.no_realign:
+            warnings_out.append(
+                f"{chapter_id}: the selected edits are already in the chunks, but the alignment "
+                "is older than them — the recombine/realign tail never ran (an interrupted "
+                "apply, or a prior --no-realign). Deferred again under --no-realign; settle "
+                "with --realign-only (see chapters_pending_realign)."
+            )
+        else:
+            warnings_out.append(
+                f"{chapter_id}: the selected edits are already in the chunks, but the alignment "
+                "is older than them — the recombine/realign tail never ran for this chapter "
+                "(an interrupted apply, or --no-realign). Finishing it now: recombine, "
+                "realign, re-stale-mark."
+            )
         for chunk_id in dict.fromkeys(chunk_ids):
             evaluation = load_chunk_evaluation(project_dir, chunk_id)
             if isinstance(evaluation, dict) and evaluation.get("stale"):
@@ -1303,7 +1288,35 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         if args.rebuild_epub and affected_chapters:
             epub_path = rebuild_epub(project_dir)
 
-    if not applied_ids and pending_ids:
+    if bad_select:
+        _emit(
+            {
+                "status": "error",
+                "error": "Selected id(s) are not in the applicable set (unknown, ambiguous "
+                "across judges, or classified as manual). Re-check the plan's "
+                "applicable[].id / .qualified_id. Already-applied ids still ran the "
+                "repair path (audit recovery / resume realign) when owed.",
+                "unknown_ids": [_report_id(v) for v in unknown_ids],
+                "manual_ids": [_report_id(v) for v in manual_ids],
+                "ambiguous_ids": ambiguous_ids,
+                "already_applied": [_report_id(qid) for qid in already_applied],
+                "applicable_ids": [_report_id(qid) for qid in applicable],
+                "chapters_realigned": affected_chapters,
+                "chapters_pending_realign": pending_realign or None,
+                "epub": str(epub_path) if epub_path else None,
+                "stale_marked": stale_marked,
+                "archived_to": str(archive_path) if archive_path else None,
+                "warnings": warnings_out or None,
+            },
+            _APPLY_SCHEMA,
+        )
+        return 1
+
+    # Hard error only when nothing was already done and nothing newly applied.
+    # A resume that realigned (or deferred) for already_applied ids is useful
+    # work even if every still-pending id failed to locate — report that as
+    # partial/ok below, not as a blank failure.
+    if not applied_ids and pending_ids and not already_applied:
         _emit(
             {
                 "status": "error",
