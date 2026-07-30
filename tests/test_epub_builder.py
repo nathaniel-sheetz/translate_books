@@ -511,6 +511,10 @@ class TestNormalizeAllcapsTitle:
         ("¡GLORIA A DIOS!", "¡Gloria a Dios!"),
         ("OCEANUS", "Oceanus"),
         ("EL REY ALFREDO Y LOS PASTELES.", "El Rey Alfredo y los Pasteles."),
+        ("EPISODE IV", "Episode IV"),
+        ("CHAPTER XVII", "Chapter XVII"),
+        ("SERMÓN III.", "Sermón III."),
+        ("CIVIL WAR", "Civil War"),
         ("Hay un Dios.", "Hay un Dios."),
         ("Prólogo", "Prólogo"),
         ("", ""),
@@ -1140,6 +1144,80 @@ class TestChapterManifest:
         assert "<h2>Antes de la Tormenta</h2>" in ch
         assert "<p>ANTES DE LA TORMENTA</p>" not in ch
 
+    def test_matter_image_subtitle_matches_toc_and_body(self, tmp_path):
+        """Header image between Prólogo and title: NCX and <h2> agree."""
+        import json as _json
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+        (chapters_dir / "chapter_01.txt").write_text(
+            "Prólogo\n\n"
+            "[IMAGE:images/front.jpg]\n\n"
+            "LA TIERRA AL OTRO LADO DEL AGUA\n\n"
+            "En el océano Atlántico...",
+            encoding="utf-8",
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "Capítulo 1\n\nBody.", encoding="utf-8",
+        )
+        (tmp_path / "images" / "front.jpg").write_bytes(b"\xff\xd8\xff")
+        manifest = [
+            {"id": "chapter_01", "kind": "front_matter", "label": "Prólogo"},
+            {"id": "chapter_02", "kind": "chapter", "number": 1},
+        ]
+        (tmp_path / "project.json").write_text(
+            _json.dumps({"chapter_manifest": manifest}), encoding="utf-8"
+        )
+        output = build_epub(project_path=tmp_path, title="T", author="A", language="es")
+        with zipfile.ZipFile(output) as zf:
+            fm = zf.read(next(
+                n for n in zf.namelist() if n.endswith("chapter_01.xhtml")
+            )).decode("utf-8")
+            ncx = zf.read(next(
+                n for n in zf.namelist() if n.endswith(".ncx")
+            )).decode("utf-8")
+        assert "<h2>La Tierra al Otro Lado del Agua</h2>" in fm
+        assert '<img src="images/front.jpg"' in fm
+        assert "Prólogo: La Tierra al Otro Lado del Agua" in ncx
+
+    def test_matter_long_opening_stays_out_of_toc(self, tmp_path):
+        """13-word opening must not become a TOC subtitle or <h2>."""
+        import json as _json
+        opening = (
+            "En un radiante día de otoño allá por el año novecientos "
+            "cuarenta y tres había un gran bullicio."
+        )
+        assert len(opening.split()) > 12
+        chapters_dir = tmp_path / "chapters"
+        chapters_dir.mkdir()
+        (tmp_path / "images").mkdir()
+        (chapters_dir / "chapter_01.txt").write_text(
+            f"Prólogo\n\n{opening}\n\nMás texto.",
+            encoding="utf-8",
+        )
+        (chapters_dir / "chapter_02.txt").write_text(
+            "Capítulo 1\n\nBody.", encoding="utf-8",
+        )
+        manifest = [
+            {"id": "chapter_01", "kind": "front_matter", "label": "Prólogo"},
+            {"id": "chapter_02", "kind": "chapter", "number": 1},
+        ]
+        (tmp_path / "project.json").write_text(
+            _json.dumps({"chapter_manifest": manifest}), encoding="utf-8"
+        )
+        output = build_epub(project_path=tmp_path, title="T", author="A", language="es")
+        with zipfile.ZipFile(output) as zf:
+            fm = zf.read(next(
+                n for n in zf.namelist() if n.endswith("chapter_01.xhtml")
+            )).decode("utf-8")
+            ncx = zf.read(next(
+                n for n in zf.namelist() if n.endswith(".ncx")
+            )).decode("utf-8")
+        assert "<h2>" not in fm
+        assert f"<p>{opening}</p>" in fm
+        assert "Prólogo:" not in ncx
+        assert "Prólogo" in ncx
+
     def test_no_manifest_keeps_existing_behavior(self, tmp_path):
         """Without a manifest, build_epub falls back to today's enumeration."""
         chapters_dir = tmp_path / "chapters"
@@ -1194,6 +1272,32 @@ class TestMatterTextToXhtml:
         assert "<h1>Prólogo</h1>" in out
         assert "<h2>La Tierra al Otro Lado del Agua</h2>" in out
         assert "<p>LA TIERRA AL OTRO LADO DEL AGUA</p>" not in out
+
+    def test_skips_header_image_before_subtitle(self):
+        text = (
+            "Prólogo\n\n"
+            "[IMAGE:images/front.jpg]\n\n"
+            "LA TIERRA AL OTRO LADO DEL AGUA\n\n"
+            "En el océano Atlántico..."
+        )
+        out = matter_text_to_xhtml(text, "Prólogo")
+        assert "<h1>Prólogo</h1>" in out
+        assert "<h2>La Tierra al Otro Lado del Agua</h2>" in out
+        assert "<p>LA TIERRA AL OTRO LADO DEL AGUA</p>" not in out
+        assert '<img src="images/front.jpg"' in out
+
+    def test_long_opening_after_image_is_not_subtitle(self):
+        """13+ word line after an image must stay a paragraph (TOC/body agree)."""
+        opening = (
+            "En un radiante día de otoño allá por el año novecientos "
+            "cuarenta y tres había un gran bullicio."
+        )
+        assert len(opening.split()) > 12
+        text = f"Prólogo\n\n[IMAGE:images/front.jpg]\n\n{opening}\n\nMás."
+        out = matter_text_to_xhtml(text, "Prólogo")
+        assert "<h2>" not in out
+        assert f"<p>{opening}</p>" in out
+        assert '<img src="images/front.jpg"' in out
 
 
 class TestTocFormat:

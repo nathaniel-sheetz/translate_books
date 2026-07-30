@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.1.0] - 2026-07-29
+
+### Fixed
+- **EPUB chapter titles no longer stay buried after header images.** Gutenberg often puts a decorative `[IMAGE:…]` between `Chapter N` and the chapter title; subtitle detection stopped at the image and left the title as a body paragraph. Leading image ornaments are now skipped for detection and re-inserted at the start of the body, for both chapters and front/back matter.
+- **Matter TOC and body agree on subtitles.** Front-matter used `detect_chapter_heading`'s loose `<200` rule for the NCX label while `matter_text_to_xhtml` used stricter heuristics for `<h2>`, so a borderline opening could appear in the TOC with no matching heading in the file. Both sides now share `_matter_subtitle_from_text`.
+
+### Changed
+- **ALL-CAPS chapter and matter subtitles are title-cased for display and TOC** (`ANTES DE LA TORMENTA` → `Antes de la Tormenta`). Mixed-/lower-case lines are left alone; well-formed Roman numerals stay uppercase (`EPISODE IV` → `Episode IV`). When a translated first line matches the manifest label case-insensitively, the manifest's casing wins (`DEDICATORIA` → `Dedicatoria`).
+
+### Added
+- **`chapter_heading.promote_subtitles`** (default `true`). Set to `false` for numeral-only books so a short opening paragraph is not promoted to a spurious `<h2>`.
+
 ## [0.39.0.0] - 2026-07-29
 
 ### Added
