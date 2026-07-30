@@ -167,6 +167,16 @@ def _within_note_block(node) -> bool:
     return False
 
 
+def _encloses(block, node) -> bool:
+    """True when *block* is *node* itself or one of its ancestors."""
+    cur = node
+    while cur is not None:
+        if cur is block:
+            return True
+        cur = getattr(cur, "parent", None)
+    return False
+
+
 def _note_block(target):
     """The block that holds the note text: nearest paragraph-ish ancestor of the
     definition anchor, else nearest coarse container, else the anchor's parent."""
@@ -326,6 +336,12 @@ def find_footnotes(root) -> List[FootnoteMatch]:
 
         def_block = _note_block(target)
         if def_block is None or id(def_block) in seen_defs:
+            continue
+        if _encloses(def_block, a):
+            # A definition never contains its own reference. This is the
+            # coarse-fallback case (e.g. a list-of-illustrations link whose
+            # target has no paragraph-ish ancestor, so _note_block lands on
+            # <body>); importing it would decompose the whole document.
             continue
 
         refid, landing = _landing_anchor(a)

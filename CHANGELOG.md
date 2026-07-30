@@ -29,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - **The API `run` path no longer wipes the apply plan.** The merge landed on `commit` but not on `run`, so `run --type word_choice` silently discarded the plan for every annotation outside that scope — the exact failure the merge was written to prevent, on the other backend. Both paths now share the split.
 - **Re-selecting an applied key reports `already_applied`, not `unknown_ids`.** After a re-prepare an applied note is skipped as `already_reviewed` and drops out of the plan, so a retry looked like a bad key rather than a completed write.
 - **`apply` refuses a note edited since the review.** The live content is compared against what the review saw; a mismatch is reported as `stale` and skipped rather than silently overwritten with a recommendation that no longer describes the text on disk.
+- **A footnote definition is never resolved to an ancestor of its own reference.** In a book with a list of illustrations (PG 48420), a link like `<a href="#il004">4</a>` points at an anchor with no paragraph-ish ancestor, so `_note_block` fell through to its coarse-container fallback and kept walking up to `<body>`. `apply_import` then decomposed that "definition" — the whole document — and the chapter imported empty. A definition that contains its own reference is not a footnote in any layout, so `find_footnotes` now skips those candidates outright.
 
 ## [0.38.2.0] - 2026-07-28
 

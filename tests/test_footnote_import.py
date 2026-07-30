@@ -47,6 +47,23 @@ def test_detect_format_b_collected():
     assert "Bernard was founder of the family" in matches[1].source_body
 
 
+def test_enclosing_container_is_never_a_definition():
+    """A list-of-illustrations link ("4") whose target has no paragraph-ish
+    ancestor must not resolve its definition to <body> — importing that would
+    decompose the whole document (regression: PG 48420)."""
+    soup = BeautifulSoup(
+        "<body>"
+        '<p><a href="#il004" class="pginternal">4</a></p>'
+        '<div><a id="il004"></a><img src="p4.jpg"/></div>'
+        '<p>Body text with <a href="#il004">another internal link</a>.</p>'
+        "</body>",
+        "html.parser",
+    )
+    assert find_footnotes(soup) == []
+    apply_import(find_footnotes(soup))
+    assert "Body text" in soup.get_text()
+
+
 def test_detect_generic_is_class_independent():
     soup = _soup("footnotes_generic.html")
     matches = find_footnotes(soup)
