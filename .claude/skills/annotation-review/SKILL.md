@@ -74,6 +74,14 @@ Scope flags (`prepare`, `run`):
 
 `apply` takes `--select <key,key,...>` and `--dry-run`.
 
+**`commit`, `run` and `apply` print a summary, not the content.** Each annotation's
+recommendation, gloss and evidence goes to the dated report and to `results.json`
+once; stdout carries keys, states and counts. `--full` (on those three) prints the
+untrimmed payload — for debugging, not for relaying. A real `commit` used to return
+29.4KB by echoing `prepare`'s skip list verbatim and re-stating every verdict the
+report already rendered; it overflowed the tool-output limit and had to be read back
+off disk anyway.
+
 Keys look like `chapter_04__37__u72399176` (`<chapter>__<es_idx>__<sub_id>`).
 
 ## What gets skipped before any LLM call
@@ -192,7 +200,9 @@ then spawn the next wave. On 529, step down `batch_size → 3 → 1`.
 ```bash
 python scripts/review_annotations.py commit --project fabre2
 ```
-Relay `committed` / `failed` / `missing`. Re-spawn any `failed` (bad JSON) or
+Relay `committed` / `failed` / `missing` and `counts`; `skipped` arrives as
+`{reason: [keys]}` (the text is in `prepare`'s output and the report's `Omitidas`
+section — `orphaned` is still the one to raise with the user). Re-spawn any `failed` (bad JSON) or
 `missing` (no draft) — headless: `fanout --target-ids <keys>` — then re-run
 `commit`. Trust `commit`'s lists, not a spawn or fanout error string. Cap re-spawns
 at ~3 per entry, then surface for manual review.
@@ -203,8 +213,9 @@ so wave 2's commit does not discard wave 1's plan.
 ### Relaying the report
 
 `commit` and `run` write a dated report to
-`projects/<slug>/reports/annotations_<timestamp>.md` and print the same data as
-`results[]`. `Read` the report and relay, grouped by type:
+`projects/<slug>/reports/annotations_<timestamp>.md`. That file is the relay
+artifact and the only place the per-annotation content appears — `Read`
+`report_path` and relay it, grouped by type:
 
 - the recommendation for each annotation, with its confidence;
 - for footnotes, the drafted gloss itself — that text gets published, so the user
@@ -243,7 +254,10 @@ keys. Hand-check each footnote gloss you offer: it is going into the book.
 ```bash
 python scripts/review_annotations.py apply --project fabre2 --select chapter_09__2__legacy,chapter_02__48__legacy
 ```
-Relay `applied`, `already_applied`, `stale`, `unknown_ids`.
+Relay `applied`, `already_applied`, `stale`, `unknown_ids`. The real apply does not
+repeat step 6c's `old → new` previews — the selection is already locked in — except
+for keys that diverged, which come back with their full `applicable` entry so the
+mismatch is legible. `counts.applicable` still reports the whole plan's size.
 
 `stale` means the note changed between the review and the apply — the review no
 longer describes what is on disk, so it was skipped rather than overwritten.

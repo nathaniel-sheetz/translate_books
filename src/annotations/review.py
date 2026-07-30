@@ -540,12 +540,15 @@ _COMMIT_SCHEMA = {
     "committed": "list of {key, type, state, writable, confidence}",
     "failed": "list of {key, type, problem} — re-spawn these (capped ~3x)",
     "missing": "list of {key, type} whose draft file was absent — re-spawn",
-    "counts": "{committed, failed, missing, writable, already_resolved, manual}",
-    "report_path": "the dated markdown report written for this run",
-    "results_path": "results.json — what `apply` reads",
-    "results": "per-annotation outcome: content at run time, state, recommendation, note_text, "
-    "the exact new_content apply would write, and manual_reason when it may not",
-    "skipped": "annotations gated out before any LLM call (carried from the manifest)",
+    "counts": "{committed, failed, missing, writable, already_resolved, manual, skipped}",
+    "report_path": "the dated markdown report written for this run — READ THIS to relay the run",
+    "results_path": "results.json — the full apply plan, what `apply` reads",
+    "results": "not on stdout — each annotation's content, recommendation, note_text and the "
+    "new_content apply would write are in report_path (prose) and results_path (JSON); --full "
+    "or --no-report prints them inline",
+    "skipped": "{reason: [key, ...]} — gated out before any LLM call; `prepare` and the report's "
+    "Omitidas section carry their text; --full restores the full list",
+    "instructions": "what to relay and what to re-run",
 }
 
 
@@ -784,11 +787,14 @@ _RUN_SCHEMA = {
     "cost_limit": "the limit that gated this run",
     "committed": "list of {key, type, state, writable, confidence}",
     "failed": "list of {key, type, problem}",
-    "counts": "{committed, failed, writable, already_resolved, manual}",
-    "report_path": "the dated markdown report written for this run",
-    "results_path": "results.json — what `apply` reads",
-    "results": "per-annotation outcome (same shape as commit)",
-    "skipped": "annotations gated out before any LLM call",
+    "counts": "{committed, failed, writable, already_resolved, manual, skipped}",
+    "report_path": "the dated markdown report written for this run — READ THIS to relay the run",
+    "results_path": "results.json — the full apply plan, what `apply` reads",
+    "results": "not on stdout (same rule as commit): the per-annotation outcome is in report_path "
+    "and results_path; --full or --no-report prints it inline",
+    "skipped": "{reason: [key, ...]} — annotations gated out before any LLM call; --full restores "
+    "the full list",
+    "instructions": "what to relay and what to re-run",
 }
 
 
@@ -964,8 +970,11 @@ def run(
 _APPLY_SCHEMA = {
     "status": "'ok' | 'error'",
     "dry_run": "true when nothing was written (no --select, or --dry-run)",
-    "applicable": "fixes that can be written: {key, type, mode, old, new, confidence}",
-    "manual": "reviewed but not auto-writable: {key, type, reason, recommendation}",
+    "applicable": "every writable fix on a dry run: {key, type, mode, old, new, confidence, "
+    "recommendation}. On a real apply, only keys that diverged from that plan (`stale`) — the "
+    "rest are reported by `applied`/`already_applied`; --full prints them all",
+    "manual": "reviewed but not auto-writable: {key, type, reason, recommendation}; a real apply "
+    "drops the recommendation (the report has it), --full keeps it",
     "applied": "keys actually written this run",
     "already_applied": "keys whose annotation already holds the planned text (no-op)",
     "stale": "keys whose annotation changed since the review — re-run prepare for these",
@@ -1153,3 +1162,103 @@ def apply(
             "already_reviewed. Rebuild the EPUB if footnotes changed."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Printed-payload projections
+# ---------------------------------------------------------------------------
+#
+# The functions above return everything a programmatic caller could want. The CLI
+# prints a summary instead, because every field trimmed here is already on disk in
+# a form built to be relayed. A real `commit` returned 29.4KB — the 17 imported
+# footnote bodies `prepare` had already printed, echoed byte-identically, plus a
+# third rendering of every verdict the report renders in prose — which overflowed
+# the tool-output limit, got truncated to a side file, and had to be re-read from
+# the report anyway. `--full` restores the untrimmed payload for debugging.
+
+def relay_view(payload: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    """Project a :func:`commit` / :func:`run` payload down to stdout's share.
+
+    Drops ``results`` (the content is in ``report_path`` and ``results_path``) and
+    reduces ``skipped`` to keys grouped by reason — the key already encodes
+    ``chapter_id__es_idx__sub_id``, so nothing locatable is lost, and ``orphaned``,
+    the one skip the skill tells the agent to relay, stays readable at a glance.
+
+    ``results`` survives when there is no report: ``--no-report`` leaves no artifact
+    to read, so trimming it there would drop the run's findings on the floor.
+    """
+    if full or payload.get("status") != "ok":
+        return payload
+
+    out = dict(payload)
+    schema = out.pop("_schema", None)
+
+    skipped = payload.get("skipped")
+    if isinstance(skipped, list):
+        by_reason: dict[str, list[str]] = {}
+        for item in skipped:
+            if isinstance(item, dict):
+                by_reason.setdefault(str(item.get("reason") or "unknown"), []).append(
+                    item.get("key")
+                )
+        out["skipped"] = by_reason
+        counts = dict(payload.get("counts") or {})
+        counts["skipped"] = len(skipped)
+        out["counts"] = counts
+
+    if payload.get("report_path"):
+        out.pop("results", None)
+
+    hints = [
+        "Read report_path for each annotation's recommendation, gloss and evidence — "
+        "stdout is a summary, the report is the relay artifact."
+    ]
+    if payload.get("failed") or payload.get("missing"):
+        hints.append(
+            "Re-spawn the failed/missing keys (headless: `fanout --target-ids <keys>`), "
+            "then commit again."
+        )
+    hints.append("results_path holds the full apply plan; --full prints it inline.")
+    out["instructions"] = " ".join(hints)
+
+    if schema is not None:
+        out["_schema"] = schema
+    return out
+
+
+def apply_relay_view(payload: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    """Project an :func:`apply` payload; the dry-run preview is left intact.
+
+    The dry run's full ``old``/``new`` block is the entire product of that call. The
+    real apply used to repeat it verbatim — the same ~4KB re-sent to confirm a
+    selection that was already locked in — so here it survives only for the keys
+    that diverged from the plan (``stale``), where seeing ``old``/``new`` again is
+    what makes the divergence legible. ``counts.applicable`` still reports the true
+    plan size, so the trim never hides how much was planned.
+    """
+    if full or payload.get("status") != "ok" or payload.get("dry_run"):
+        return payload
+
+    out = dict(payload)
+    diverged = {
+        item.get("key")
+        for item in (payload.get("stale") or [])
+        if isinstance(item, dict)
+    }
+
+    applicable = payload.get("applicable")
+    if isinstance(applicable, list):
+        out["applicable"] = [
+            item
+            for item in applicable
+            if isinstance(item, dict) and item.get("key") in diverged
+        ]
+
+    manual = payload.get("manual")
+    if isinstance(manual, list):
+        out["manual"] = [
+            {"key": item.get("key"), "type": item.get("type"), "reason": item.get("reason")}
+            for item in manual
+            if isinstance(item, dict)
+        ]
+    return out

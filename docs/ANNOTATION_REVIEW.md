@@ -37,19 +37,37 @@ python scripts/review_annotations.py fanout --project fabre2 \
 # … OR spawn annotation-worker Task subagents against the manifest's paths.
 
 # Parse the drafts, write results.json and the dated report.
-python scripts/review_annotations.py commit --project fabre2 [--no-report]
+python scripts/review_annotations.py commit --project fabre2 [--no-report] [--full]
 
 # Or skip all of that and use the API backend (metered, cost-gated).
-python scripts/review_annotations.py run --project fabre2 [--cost-limit 0.50] [--confirm]
+python scripts/review_annotations.py run --project fabre2 [--cost-limit 0.50] [--confirm] [--full]
 
 # Write reviewed notes back. The only writer to annotations.jsonl.
 python scripts/review_annotations.py apply --project fabre2 --dry-run
-python scripts/review_annotations.py apply --project fabre2 --select <key,key,...>
+python scripts/review_annotations.py apply --project fabre2 --select <key,key,...> [--full]
 ```
 
 Every subcommand prints exactly one JSON object with a `_schema` block. Keys are
 `<chapter_id>__<es_idx>__<sub_id>`, e.g. `chapter_04__37__u72399176` (`legacy` for
 rows with no `sub_id`).
+
+### stdout is a summary
+
+`commit`, `run` and the real `apply` print keys, states and counts. The
+per-annotation content lives in two artifacts built for it — the dated markdown
+report (what a human or an agent relays) and `results.json` (what `apply` reads) —
+and is not echoed a third time. `review.relay_view` / `review.apply_relay_view` do
+the projection at the CLI's emit boundary, so the Python functions still return
+everything to an in-process caller; `--full` prints that untrimmed payload.
+
+The measured case: a 2-target `commit` on a book with 25 gated annotations went
+19.3KB → 3.1KB. The run this came from returned **29.4KB** — `prepare`'s 17
+imported-footnote bodies echoed byte-identically, plus every verdict the report was
+rendering in prose at that same moment — which overflowed the agent's tool-output
+limit, got truncated to a side file, and had to be read back off disk to be relayed
+at all. Three exceptions keep the trim from hiding anything: `--no-report` prints
+`results[]` (no artifact exists to read), a real `apply` re-prints the full plan
+entry for any key that came back `stale`, and `counts` always reports true totals.
 
 The conversational front end is `.claude/skills/annotation-review/SKILL.md`.
 

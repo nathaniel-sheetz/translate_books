@@ -17,6 +17,11 @@ Subcommands, each printing exactly one JSON object with a ``_schema`` block:
     run       the API backend, behind a dollar cost gate       (metered)
     apply     write reviewed notes back into annotations.jsonl (the only writer)
 
+``commit``, ``run`` and ``apply`` print a *summary*: the per-annotation
+recommendations and glosses stay in the dated markdown report and in
+``results.json`` rather than being echoed a second time. ``--full`` prints the
+untrimmed payload.
+
 Typical no-spend flow:
 
     python scripts/review_annotations.py prepare --project fabre2
@@ -145,6 +150,16 @@ def _add_select(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_full(parser: argparse.ArgumentParser) -> None:
+    """The escape hatch out of the trimmed stdout summary."""
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="print the untrimmed payload; by default stdout is a summary and the "
+        "per-annotation content stays in the report / results.json",
+    )
+
+
 def _cmd_prepare(args: argparse.Namespace) -> int:
     out = review.prepare(
         _resolve_project(args.project),
@@ -178,7 +193,7 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
 
 def _cmd_commit(args: argparse.Namespace) -> int:
     out = review.commit(_resolve_project(args.project), report=not args.no_report)
-    _emit(out)
+    _emit(review.relay_view(out, full=args.full))
     return 0 if out.get("status") == "ok" else 1
 
 
@@ -194,7 +209,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         target_language=args.target_language,
         report=not args.no_report,
     )
-    _emit(out)
+    _emit(review.relay_view(out, full=args.full))
     if out.get("status") == "cost_exceeded":
         return 2
     return 0 if out.get("status") == "ok" else 1
@@ -209,7 +224,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         select=select,
         dry_run=args.dry_run,
     )
-    _emit(out)
+    _emit(review.apply_relay_view(out, full=args.full))
     return 0 if out.get("status") == "ok" else 1
 
 
@@ -256,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_commit = sub.add_parser("commit", help="parse drafts, write results.json + the dated report")
     p_commit.add_argument("--project", required=True, help="project id or path")
     p_commit.add_argument("--no-report", action="store_true", help="skip writing the markdown report")
+    _add_full(p_commit)
 
     p_run = sub.add_parser("run", help="API backend: review every annotation directly (metered)")
     _add_select(p_run)
@@ -265,11 +281,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="refuse to spend more than this without --confirm (default: 0.50)")
     p_run.add_argument("--confirm", action="store_true", help="proceed past the cost gate")
     p_run.add_argument("--no-report", action="store_true", help="skip writing the markdown report")
+    _add_full(p_run)
 
     p_apply = sub.add_parser("apply", help="write reviewed notes back into annotations.jsonl")
     p_apply.add_argument("--project", required=True, help="project id or path")
     p_apply.add_argument("--select", help="comma-separated keys to apply; omit for a plan-only dry run")
     p_apply.add_argument("--dry-run", action="store_true", help="force plan mode even with --select")
+    _add_full(p_apply)
 
     return parser
 
