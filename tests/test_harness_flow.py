@@ -968,3 +968,133 @@ def test_cli_retranslate_preview_is_nonmutating(project: Path, monkeypatch):
     assert out["dry_run"] is True
     assert out["cleared"] == ["chapter_01_chunk_000"]
     assert cp.read_bytes() == before
+
+
+# ── style-guide → glossary carry-forward ────────────────────────────────────
+#
+# A style guide states rules, not term→translation pairs (two sources of truth
+# disagree). So when style-guide drafting surfaces a term needing a fixed
+# translation, it hands it forward instead of defining it, and the glossary beat
+# injects it as a candidate — frequency-ranked extraction can bury a
+# rare-but-critical term.
+
+def test_prepare_draft_reports_carryforward_path(project: Path):
+    prep = flow.style_guide_prepare_questions(str(project))
+    Path(prep["answers_path"]).write_text(json.dumps({}), encoding="utf-8")
+    draft = flow.style_guide_prepare_draft(str(project))
+    assert draft["carryforward_path"].endswith("glossary_carryforward.json")
+    assert Path(draft["carryforward_path"]).parent.name == ".harness"
+
+
+def test_glossary_prepare_injects_carryforward_terms(project: Path):
+    save_style_guide(StyleGuide(content="Warm register."), project / "style.json")
+    hdir = state.ensure_harness_dir(project)
+    (hdir / "glossary_carryforward.json").write_text(json.dumps([
+        {"term": "gobbler", "why": "pavo macho vs guajolote — dialect call", "type_guess": "other"},
+        {"term": "the game", "why": "central motif; lock one phrasing", "type_guess": "concept"},
+    ]), encoding="utf-8")
+
+    prep = flow.glossary_prepare(str(project))
+    assert prep["carryforward_count"] == 2
+    prompt = Path(prep["prompt_path"]).read_text(encoding="utf-8")
+    # Both the terms and the rationale reach the drafting prompt.
+    assert "gobbler" in prompt and "the game" in prompt
+    assert "dialect call" in prompt
+    assert "central motif" in prompt
+
+
+def test_carryforward_term_already_extracted_is_not_duplicated(project: Path):
+    """A term extraction already found keeps its note but adds no second candidate."""
+    save_style_guide(StyleGuide(content="Warm register."), project / "style.json")
+    hdir = state.ensure_harness_dir(project)
+    baseline = flow.glossary_prepare(str(project))["candidate_count"]
+
+    (hdir / "glossary_carryforward.json").write_text(json.dumps([
+        {"term": "Old Thomas", "why": "already extracted; note still applies"},
+    ]), encoding="utf-8")
+    prep = flow.glossary_prepare(str(project))
+
+    assert prep["carryforward_count"] == 0          # no duplicate candidate
+    assert prep["candidate_count"] == baseline
+    assert "already extracted" in Path(prep["prompt_path"]).read_text(encoding="utf-8")
+
+
+def test_glossary_prepare_survives_malformed_carryforward(project: Path):
+    """A bad hand-off must not take down the glossary beat."""
+    save_style_guide(StyleGuide(content="Warm register."), project / "style.json")
+    hdir = state.ensure_harness_dir(project)
+    (hdir / "glossary_carryforward.json").write_text("{not json", encoding="utf-8")
+
+    prep = flow.glossary_prepare(str(project))
+    assert prep["carryforward_count"] == 0
+    assert Path(prep["prompt_path"]).exists()
+
+
+# ── address map → style guide summary ───────────────────────────────────────
+
+def test_prepare_draft_injects_address_summary(project: Path):
+    from src.models import AddressMap
+    from src.utils.file_io import save_address_map
+
+    save_address_map(
+        AddressMap(content="full prose the judge reads",
+                   style_guide_summary="Children use usted to adults; adults use tú to children."),
+        project / "address_map.json",
+    )
+    prep = flow.style_guide_prepare_questions(str(project))
+    Path(prep["answers_path"]).write_text(json.dumps({}), encoding="utf-8")
+
+    draft = flow.style_guide_prepare_draft(str(project))
+    assert draft["address_summary_loaded"] is True
+    prompt = Path(draft["prompt_path"]).read_text(encoding="utf-8")
+    assert "Children use usted to adults" in prompt
+    # The judge-facing prose is a different audience and must NOT leak in.
+    assert "full prose the judge reads" not in prompt
+
+
+def test_prepare_draft_without_address_map_falls_back(project: Path):
+    prep = flow.style_guide_prepare_questions(str(project))
+    Path(prep["answers_path"]).write_text(json.dumps({}), encoding="utf-8")
+    draft = flow.style_guide_prepare_draft(str(project))
+    assert draft["address_summary_loaded"] is False
+    assert "no address map for this book" in Path(draft["prompt_path"]).read_text(encoding="utf-8")
+
+
+def test_glossary_commit_flags_stale_address_map_names(project: Path):
+    """The reconcile hand-off: the map was drafted before the glossary existed."""
+    from src.models import AddressMap, AddressPair, AddressRule
+    from src.utils.file_io import save_address_map
+
+    save_address_map(
+        AddressMap(
+            content="Pollyanna addresses Aunt Polly with usted.",
+            pairs=[AddressPair(a="Pollyanna", b="Aunt Polly", directions={
+                "a_to_b": [AddressRule(form="usted", when="default")],
+            })],
+        ),
+        project / "address_map.json",
+    )
+    state.ensure_harness_dir(project)
+    (project / ".harness" / "glossary_draft.json").write_text(json.dumps([
+        {"english": "Aunt Polly", "translation": "la tía Polly", "type": "character"},
+    ]), encoding="utf-8")
+
+    out = flow.glossary_commit(str(project))
+    assert any("address_map.json still uses English cast names" in w for w in out["warnings"])
+    assert any("la tía Polly" in w for w in out["warnings"])
+
+
+def test_glossary_commit_surfaces_convention_reviews(project: Path):
+    """REVIEW: flags reach the approval gate without blocking the commit."""
+    state.ensure_harness_dir(project)
+    (project / ".harness" / "glossary_draft.json").write_text(json.dumps([
+        {"english": "Beldingsville", "translation": "Beldingsville", "type": "place",
+         "alternatives": ["el pueblo de Beldingsville"]},
+        {"english": "Aunt Polly", "translation": "tía Polly", "type": "character"},
+    ]), encoding="utf-8")
+
+    out = flow.glossary_commit(str(project))
+    reviews = [w for w in out["warnings"] if w.startswith("REVIEW:")]
+    assert len(reviews) == 2
+    assert out["term_count"] == 2          # advisory: the glossary still committed
+    assert (project / "glossary.json").exists()

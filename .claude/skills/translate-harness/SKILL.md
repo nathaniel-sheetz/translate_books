@@ -95,15 +95,24 @@ gate (API / subagent / headless) — never invent a binary "API vs subagent."
 ## Pipeline overview
 
 ```
-ingest/split ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► difficulty ─► chunk ─► [COST beat] ─►
- (setup;         agent drafts          agent drafts      (det.; sizes  (det.)   translate ─►
-  [FN keep/drop]) + refine + approval   + approval         chunks)               combine ─► align ─►
-                                                                    [FN translate+apply beat] ─► epub
+ingest/split ─► [ADDRESS MAP beat] ─► [STYLE GUIDE beat] ─► [GLOSSARY beat] ─► difficulty ─► chunk ─►
+ (setup;         OPTIONAL; gated on    agent drafts         agent drafts      (det.; sizes  (det.)
+  [FN keep/drop]) a dialogue precheck   + refine + approval  + approval         chunks)
+                  + approval                                                                  │
+                                                                                              ▼
+                                          [COST beat] ─► translate ─► combine ─► align ─►
+                                                    [FN translate+apply beat] ─► epub
 ```
 
-Style guide first (locale/register steer the glossary). Glossary before chunking (difficulty
+Address map first, and only when the book has dialogue: it emits a `style_guide_summary` that
+becomes the guide's FORMS OF ADDRESS section, so it has to precede the guide to inform it.
+Style guide next (locale/register steer the glossary). Glossary before chunking (difficulty
 excludes glossary terms; book difficulty sets default chunk size). Ingest/split in `setup`
 is the only deterministic prep that runs up front.
+
+**The address map never blocks translation.** It is skippable at every step, and the decision
+(`built` / `skipped` / `no_dialogue`) is recorded in `address_map_decision` so the router stops
+offering it. A project that already has a style guide is never routed backwards to this beat.
 
 **`combine` is automatic**: the API path chains it, and on the workers path `translate-commit` runs
 it per chapter as each chapter completes (rewriting `chapters/<id>.txt` from the translated chunks).
@@ -116,7 +125,7 @@ needed. **Redoing chapters that already have translations is NOT a re-run of the
 1. `python scripts/harness.py status --project <slug>` (or omit `--project` only when
    starting fresh — then there is no project yet → `references/setup.md`).
 2. `Read` `.harness/last_output.json` — note `stage`, `next`, `artifacts`, `backend`,
-   `footnotes_decision`, `suggested_reference`, `spawn_plan`, `epubs`.
+   `footnotes_decision`, `address_map_decision`, `suggested_reference`, `spawn_plan`, `epubs`.
 3. Consult the ROUTER table; **Read only the matching reference file(s)**.
 4. Never hand-roll a loop over `chunks/*.json` — `status` / `translate-prepare` answer
    what's left. Past runs: `runs --project <slug>`.
@@ -126,8 +135,10 @@ needed. **Redoing chapters that already have translations is NOT a re-run of the
 | You want to… | Signal (`status` / config / files) | Load |
 |---|---|---|
 | Start / ingest a book | no `project.json` / no project yet | `references/setup.md` |
+| Offer / draft the address map | `style.json` missing **and** `address_map_decision` unset | `references/address-map.md` |
 | Draft or revise the style guide | `style.json` missing/stale | `references/style-guide.md` |
-| Draft or revise the glossary / address map | `glossary.json` missing | `references/glossary.md` |
+| Draft or revise the glossary | `glossary.json` missing | `references/glossary.md` |
+| Build the address map **later** (user asks, or judge-review needs it) | `address_map.json` missing, any stage | `references/address-map.md` |
 | Chunk / estimate size | `stage: pre-chunk` | `references/chunk.md` |
 | Translate (metered) | `config.backend == api` | `references/translate-api.md` |
 | Translate (workers) | `config.backend in {subagent, headless}` **or backend unset** (run 4B-backend three-way gate first) | `references/translate-workers.md` |

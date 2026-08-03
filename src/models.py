@@ -589,8 +589,19 @@ class AddressMap(BaseModel):
     ``content`` is the human-readable prose the judge actually reads (it must
     state the asymmetric/contextual rules plainly); ``pairs`` / ``global_rules``
     are the structured mirror for future UI / deterministic use.
+
+    ``style_guide_summary`` is a different audience from ``content``: it is the
+    condensed version folded into the style guide, and therefore read by a
+    translator who sees ONE chunk and does not know which chapter it came from.
+    It states the general rules plus only the high-frequency exceptions, and must
+    never reference a chapter, a mid-book transition, or the map itself. Optional
+    so address maps written before this field remain valid.
     """
     content: str = Field(default="", description="Prose the judge reads")
+    style_guide_summary: Optional[str] = Field(
+        default=None,
+        description="Chunk-local condensation folded into the style guide",
+    )
     pairs: list[AddressPair] = Field(default_factory=list)
     global_rules: str = Field(
         default="", description="Fallback rules when no pair matches (seeded from style guide)"

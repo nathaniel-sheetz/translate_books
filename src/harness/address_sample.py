@@ -169,6 +169,45 @@ def _stratified_pick(
     return sorted(chosen.values(), key=lambda s: s.chapter_id)
 
 
+def _score_all_chapters(project_dir: Path) -> list[ChapterAddressScore]:
+    """Score every eligible chapter's English source. Shared by sampling + precheck."""
+    scores: list[ChapterAddressScore] = []
+    for chapter_id in _chapter_ids_in_order(Path(project_dir)):
+        text, _mtime, _kind = load_chapter_source_text(Path(project_dir), chapter_id)
+        if not text.strip():
+            continue
+        scores.append(score_chapter_text(chapter_id, text))
+    return scores
+
+
+def dialogue_precheck(project_dir: Path, *, min_turns: int = _MIN_TURNS) -> dict:
+    """Report whether the book has enough dialogue for a forms-of-address map.
+
+    The address map only describes how characters address *each other*, so a book
+    with no interpersonal dialogue has nothing for it to say — and the later
+    ``address`` judge would have nothing to check. This is the gate
+    :func:`select_address_sample_chapters` deliberately does not apply: that
+    function falls back to the densest chapters regardless of the turn threshold
+    (``pool = qualifying or scores``) so a dialogue-*light* book that opts in
+    anyway still gets a usable sample. Here we want the honest yes/no instead.
+
+    ``dialogue_present`` is True when at least one chapter clears ``min_turns``
+    quoted turns — i.e. somewhere in the book two people actually talk.
+    """
+    scores = _score_all_chapters(project_dir)
+    qualifying = [s for s in scores if s.turns >= min_turns]
+    return {
+        "chapters_scored": len(scores),
+        "qualifying_chapters": len(qualifying),
+        "total_turns": sum(s.turns for s in scores),
+        "max_density": round(max((s.density for s in scores), default=0.0), 2),
+        "min_turns": min_turns,
+        "dialogue_present": bool(qualifying),
+        "top_chapters": [s.to_dict() for s in
+                         sorted(qualifying, key=lambda s: s.density, reverse=True)[:3]],
+    }
+
+
 def select_address_sample_chapters(
     project_dir: Path,
     *,
@@ -184,12 +223,7 @@ def select_address_sample_chapters(
     dialogue-light book still gets a sample).
     """
     project_dir = Path(project_dir)
-    scores: list[ChapterAddressScore] = []
-    for chapter_id in _chapter_ids_in_order(project_dir):
-        text, _mtime, _kind = load_chapter_source_text(project_dir, chapter_id)
-        if not text.strip():
-            continue
-        scores.append(score_chapter_text(chapter_id, text))
+    scores = _score_all_chapters(project_dir)
 
     if not scores:
         return []

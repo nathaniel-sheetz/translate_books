@@ -144,13 +144,21 @@ loads it automatically; if it's missing, `run`/`prepare` return
 **Before running the address judge, check for the map** (`Read` or
 `ls projects/<slug>/address_map.json`). If it's absent, build it with the
 translate-harness address-map beat (a short, approval-gated drafting flow) and
-only then run the judge:
+only then run the judge. The beat lives in
+`.claude/skills/translate-harness/references/address-map.md` — **Read it first**;
+it carries the drafting rules (the `when:"default"` requirement, the cast-naming
+rule, and the `style_guide_summary` field) that the raw commands below assume:
 
 ```bash
-python scripts/harness.py address-map prepare --project understood-betsy   # samples dialogue-heavy chapters, renders a prompt
+python scripts/harness.py address-map precheck --project understood-betsy   # does the book even have dialogue?
+python scripts/harness.py address-map prepare  --project understood-betsy   # samples dialogue-heavy chapters, renders a prompt
 # (draft the map JSON to the printed draft_path, refine with the user)
-python scripts/harness.py address-map commit  --project understood-betsy   # validates + writes address_map.json
+python scripts/harness.py address-map commit   --project understood-betsy   # validates + writes address_map.json
 ```
+
+Building it here, after translation, means `glossary.json` already exists — so
+`prepare` reports `characters_loaded > 0` and the prompt carries the approved
+cast. Use those target-language names, not the English source ones.
 
 Everything else (scope, backends, persistence, apply) works exactly as for the
 dialogue judge — just pass `--judge address`.

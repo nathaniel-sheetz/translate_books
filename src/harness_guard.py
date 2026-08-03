@@ -141,6 +141,154 @@ def diacritic_warning(proposals: list[dict], language_code: str | None) -> str |
     )
 
 
+# Spanish title words that precede a personal name ("el tío Antony", "la señora Banks").
+# Used to tell a *bare* personal name (one canonical form, no alternatives) apart from a
+# title+name (narration form with article primary, bare vocative as the alternative).
+SPANISH_TITLE_WORDS: frozenset[str] = frozenset({
+    "tío", "tía", "señor", "señora", "señorita", "don", "doña",
+    "doctor", "doctora", "profesor", "profesora", "padre", "madre",
+    "hermano", "hermana", "capitán", "sargento", "coronel", "general",
+    "reverendo", "primo", "prima", "abuelo", "abuela", "maestro", "maestra",
+})
+
+# Definite articles that mark the narration form of a title+name.
+_SPANISH_ARTICLES: tuple[str, ...] = ("el ", "la ", "los ", "las ")
+
+
+def _strip_article(text: str) -> tuple[str, str]:
+    """Split a leading definite article off a translation. Returns (article, rest)."""
+    lowered = text.lower()
+    for art in _SPANISH_ARTICLES:
+        if lowered.startswith(art):
+            return text[: len(art)].strip(), text[len(art):].strip()
+    return "", text.strip()
+
+
+def _first_word(text: str) -> str:
+    return text.split()[0].strip(".,;:").lower() if text.split() else ""
+
+
+def glossary_convention_warnings(proposals: list[dict]) -> list[str]:
+    """Advisory checks on the glossary's ``alternatives`` conventions.
+
+    Alternatives are the one glossary field that lets a translator worker pick a
+    *different* rendering per chunk — ``prompts/translation.txt`` tells it only
+    "you may use them when appropriate". That freedom is right for a term genuinely
+    rendered differently by context and wrong for a name, where it silently
+    licenses book-wide inconsistency. The conventions checked here:
+
+    * a **place** has one name — no alternatives (the rare exception being two
+      interchangeable full/short forms of the *same* name, e.g. "Atlántico" /
+      "océano Atlántico", which is why this warns rather than raises);
+    * a **bare personal name** has one form — no alternatives;
+    * a **title + personal name** leads with the narration form *including* the
+      article ("el tío Antony") and offers the bare vocative ("tío Antony") as its
+      single alternative, matching the style guide's narration-vs-address rule.
+
+    Advisory by design, like :func:`diacritic_warning`: it NEVER raises and NEVER
+    blocks. Every message is prefixed ``REVIEW:`` so the approval gate can present
+    these as human judgement calls, distinct from draft bugs. Returns [] when the
+    draft is clean or unparseable (the structural guard owns that failure).
+    """
+    if not isinstance(proposals, list):
+        return []
+
+    warnings: list[str] = []
+    for p in proposals:
+        if not isinstance(p, dict):
+            continue
+        english = str(p.get("english") or "").strip()
+        translation = str(p.get("translation") or p.get("spanish") or "").strip()
+        if not english or not translation:
+            continue  # guard_glossary_proposals owns this failure
+        term_type = str(p.get("type") or "other").strip().lower()
+        raw_alts = p.get("alternatives") or []
+        alts = [str(a).strip() for a in raw_alts if str(a).strip()] if isinstance(raw_alts, list) else []
+
+        article, without_article = _strip_article(translation)
+        has_title = _first_word(without_article) in SPANISH_TITLE_WORDS
+
+        if term_type == "place" and alts:
+            warnings.append(
+                f"REVIEW: '{english}' is a place with alternatives {alts}. Place names should "
+                "have none — confirm these are interchangeable full/short forms of the same "
+                "name (e.g. 'Atlántico' / 'océano Atlántico'), not variants, and drop them if not."
+            )
+            continue
+
+        if term_type != "place" and has_title:
+            if not article:
+                warnings.append(
+                    f"REVIEW: '{english}' is a title + name whose primary is '{translation}'. "
+                    f"The narration form with the article ('el/la {translation}') should be the "
+                    f"primary and the bare vocative ('{translation}') the alternative."
+                )
+            elif not alts:
+                warnings.append(
+                    f"REVIEW: '{english}' has the narration form '{translation}' but no vocative "
+                    f"alternative. Add '{without_article}' for direct address."
+                )
+            continue
+
+        if term_type == "character" and alts and not has_title:
+            warnings.append(
+                f"REVIEW: '{english}' is a bare personal name with alternatives {alts}. "
+                "One person, one name — drop the alternatives unless there is a stated reason "
+                "in 'context' for a human to review."
+            )
+
+    return warnings
+
+
+def address_map_name_warnings(glossary, address_map) -> list[str]:
+    """Warn when an address map's cast predates the approved glossary.
+
+    The address map is drafted before the glossary exists (it is the first beat),
+    so its pairs carry the **English** source names. Once the glossary fixes the
+    target-language forms, the map should be updated to match — otherwise the
+    ``address`` judge reads "Aunt Polly" while the translation says "la tía Polly"
+    and has to bridge the gap on every call.
+
+    Flags each ``character`` term whose English form appears in the map but whose
+    approved translation does not. Advisory: never raises, and silently returns []
+    once the map has been reconciled (or when either artifact is missing).
+    """
+    if glossary is None or address_map is None:
+        return []
+
+    haystack = " ".join([
+        address_map.content or "",
+        address_map.global_rules or "",
+        address_map.style_guide_summary or "",
+        *[f"{p.a} {p.b} {p.relationship or ''}" for p in address_map.pairs],
+    ]).casefold()
+    if not haystack.strip():
+        return []
+
+    stale: list[tuple[str, str]] = []
+    for term in glossary.terms:
+        if getattr(term.type, "value", term.type) != "character":
+            continue
+        english = (term.english or "").strip()
+        spanish = (term.spanish or "").strip()
+        if not english or not spanish or english.casefold() == spanish.casefold():
+            continue
+        if english.casefold() in haystack and spanish.casefold() not in haystack:
+            stale.append((english, spanish))
+
+    if not stale:
+        return []
+
+    listed = "; ".join(f"'{en}' → '{es}'" for en, es in stale[:8])
+    more = f" (+{len(stale) - 8} more)" if len(stale) > 8 else ""
+    return [
+        f"REVIEW: address_map.json still uses English cast names for {len(stale)} approved "
+        f"character term(s): {listed}{more}. The map was drafted before the glossary. Re-run "
+        "`address-map prepare` (the cast list now loads) and re-commit with the approved "
+        "target-language names so the address judge reads the names that appear in the prose."
+    ]
+
+
 def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
     """Validate a worker-produced translation draft before it is stamped.
 

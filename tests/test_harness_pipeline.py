@@ -1755,6 +1755,63 @@ def test_suggested_reference_footnotes_route_advances_after_apply(tmp_path: Path
     ) == "references/epub.md"
 
 
+def test_suggested_reference_routes_to_address_map_before_style_guide(tmp_path: Path):
+    """Step 0B is reachable on a resume, and only inside the pre-style-guide window.
+
+    The address map used to live at the end of glossary.md with no routing of its
+    own, so on a resume it was unreachable. It now routes — but only while the
+    style guide is still missing, because it feeds that guide its FORMS OF ADDRESS
+    section. Once a decision is recorded, the offer stops.
+    """
+    from src.harness import flow
+
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    fresh = {"source": True, "chapters": True, "style_guide": False,
+             "glossary": False, "chunks": False, "address_map": False}
+
+    # No map, no decision -> offer the beat.
+    assert flow._suggested_reference(
+        tmp_path, {}, fresh, "pre-chunk", []
+    ) == "references/address-map.md"
+
+    # Each recorded decision releases the router to the style guide.
+    for decision in ("built", "skipped", "no_dialogue"):
+        assert flow._suggested_reference(
+            tmp_path, {"address_map_decision": decision}, fresh, "pre-chunk", []
+        ) == "references/style-guide.md"
+
+    # A committed map also releases it, even if the decision key never landed.
+    assert flow._suggested_reference(
+        tmp_path, {}, {**fresh, "address_map": True}, "pre-chunk", []
+    ) == "references/style-guide.md"
+
+
+def test_suggested_reference_never_routes_mid_flight_project_backwards(tmp_path: Path):
+    """Regression: an existing project must not be dragged back to a new early beat.
+
+    Projects created before the address-map beat have neither address_map.json nor
+    address_map_decision. Nesting the new branch under the missing-style-guide test
+    is what keeps them on their old path.
+    """
+    from src.harness import flow
+
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    mid_flight = {"source": True, "chapters": True, "style_guide": True,
+                  "glossary": True, "chunks": True, "address_map": False}
+
+    assert flow._suggested_reference(
+        tmp_path, {}, mid_flight, "pre-chunk", []
+    ) == "references/chunk.md"
+    assert flow._suggested_reference(
+        tmp_path, {"backend": "api"}, mid_flight, "partial", []
+    ) == "references/translate-api.md"
+
+    # Glossary still missing -> glossary.md, not back to the address map.
+    assert flow._suggested_reference(
+        tmp_path, {}, {**mid_flight, "glossary": False}, "pre-chunk", []
+    ) == "references/glossary.md"
+
+
 def test_runs_summarizes_latest_run_from_log(tmp_path: Path, monkeypatch):
     """runs() reads the write-only run log back into a per-run retro (friction-log #11)."""
     from src.harness import flow

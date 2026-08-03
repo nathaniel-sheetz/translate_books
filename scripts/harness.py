@@ -191,8 +191,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # address-map <action> --------------------------------------------------
     am = sub.add_parser("address-map",
-                        help="Forms-of-address (usted/tú) map beat for the address judge (prepare/commit)")
+                        help="Forms-of-address (usted/tú) map beat (precheck/prepare/commit/skip)")
     am_sub = am.add_subparsers(dest="action", required=True)
+    ampc = am_sub.add_parser("precheck",
+                             help="Does this book have dialogue? Gates whether to offer the beat")
+    add_project(ampc)
+    ams = am_sub.add_parser("skip", help="Record that the user declined the address map")
+    add_project(ams)
     amp = am_sub.add_parser("prepare")
     add_project(amp)
     amp.add_argument("--max-chapters", dest="max_chapters", type=_positive_int, default=6,
@@ -522,6 +527,10 @@ def _dispatch(args: argparse.Namespace):
         if args.action == "commit":
             return flow.glossary_commit(args.project, draft=args.draft)
     if cmd == "address-map":
+        if args.action == "precheck":
+            return flow.address_map_precheck(args.project)
+        if args.action == "skip":
+            return flow.address_map_skip(args.project)
         if args.action == "prepare":
             return flow.address_map_prepare(args.project, max_chapters=args.max_chapters)
         if args.action == "commit":

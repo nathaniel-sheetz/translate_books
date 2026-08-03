@@ -15,7 +15,11 @@ from pathlib import Path
 import pytest
 
 from src.harness import flow, state
-from src.harness.address_sample import score_chapter_text, select_address_sample_chapters
+from src.harness.address_sample import (
+    dialogue_precheck,
+    score_chapter_text,
+    select_address_sample_chapters,
+)
 from src.harness_guard import HarnessValidationError, validate_address_map_file
 from src.models import AddressMap, AddressPair, AddressRule
 from src.utils.file_io import load_address_map, save_address_map
@@ -258,3 +262,147 @@ def test_address_map_prepare_errors_without_chapters(tmp_path: Path):
     state.save_config(proj, {})
     with pytest.raises(FileNotFoundError):
         flow.address_map_prepare(str(proj))
+
+
+# ── dialogue gate (precheck) ────────────────────────────────────────────────
+#
+# The sampler deliberately falls back to the densest chapters when nothing clears
+# the turn threshold, so a dialogue-*light* book that opts in still gets a usable
+# sample. `dialogue_precheck` is the honest yes/no the beat needs *before* it is
+# offered: a book with no interpersonal dialogue has nothing for a map to say.
+
+def test_dialogue_precheck_detects_dialogue(sample_project: Path):
+    r = dialogue_precheck(sample_project)
+    assert r["dialogue_present"] is True
+    assert r["qualifying_chapters"] == 5   # densities fixture: ch 1,3,5,7,9
+    assert r["chapters_scored"] == 9
+    assert r["total_turns"] > 0
+    assert len(r["top_chapters"]) == 3     # capped, densest first
+
+
+def test_dialogue_precheck_false_for_pure_narration(tmp_path: Path):
+    proj = tmp_path / "narrationbook"
+    (proj / "chapters").mkdir(parents=True)
+    for n in (1, 2, 3):
+        (proj / "chapters" / f"chapter_{n:02d}.txt").write_text(
+            _narration_chapter(f"Char{n}"), encoding="utf-8"
+        )
+    r = dialogue_precheck(proj)
+    assert r["dialogue_present"] is False
+    assert r["qualifying_chapters"] == 0
+    assert r["chapters_scored"] == 3
+
+
+def test_precheck_records_no_dialogue_decision(tmp_path: Path):
+    """A dialogue-free book must stop the router from re-offering the beat."""
+    proj = tmp_path / "narrationbeat"
+    (proj / "chapters").mkdir(parents=True)
+    (proj / "chapters" / "chapter_01.txt").write_text(_narration_chapter("A"), encoding="utf-8")
+    state.save_config(proj, {"target_language": "Spanish", "locale": "mx"})
+
+    r = flow.address_map_precheck(str(proj))
+    assert r["dialogue_present"] is False
+    assert r["address_map_decision"] == "no_dialogue"
+    assert "SKIP" in r["recommendation"]
+    assert state.load_config(proj).get("address_map_decision") == "no_dialogue"
+
+
+def test_precheck_leaves_decision_unset_when_dialogue_present(beat_project: Path):
+    """With dialogue, the decision stays the user's — precheck must not pre-empt it."""
+    r = flow.address_map_precheck(str(beat_project))
+    assert r["dialogue_present"] is True
+    assert r["address_map_decision"] is None
+    assert state.load_config(beat_project).get("address_map_decision") is None
+
+
+def test_precheck_errors_without_chapters(tmp_path: Path):
+    proj = tmp_path / "emptyprecheck"
+    (proj / "chapters").mkdir(parents=True)
+    state.save_config(proj, {})
+    with pytest.raises(FileNotFoundError):
+        flow.address_map_precheck(str(proj))
+
+
+def test_address_map_skip_records_decision(beat_project: Path):
+    r = flow.address_map_skip(str(beat_project))
+    assert r["address_map_decision"] == "skipped"
+    assert state.load_config(beat_project).get("address_map_decision") == "skipped"
+
+
+# ── style_guide_summary + register threading ────────────────────────────────
+
+def test_style_guide_summary_is_optional_and_roundtrips(tmp_path: Path):
+    """Maps written before the field must stay valid; the field must survive a save."""
+    legacy = AddressMap.model_validate({"content": "x", "pairs": [_asymmetric_pair()]})
+    assert legacy.style_guide_summary is None
+
+    legacy.style_guide_summary = "Children use usted to adults; adults use tú to children."
+    out = tmp_path / "address_map.json"
+    save_address_map(legacy, out)
+    assert load_address_map(out).style_guide_summary.startswith("Children use usted")
+
+
+def test_commit_warns_when_summary_missing(beat_project: Path):
+    """Without the summary the beat informs nothing downstream — say so, don't block."""
+    draft = state.ensure_harness_dir(beat_project) / "address_map_draft.json"
+    draft.write_text(
+        json.dumps({"content": "Ricardo↔Astrida use tú.", "pairs": [_asymmetric_pair()],
+                    "global_rules": "tú in family."}),
+        encoding="utf-8",
+    )
+    result = flow.address_map_commit(str(beat_project))
+    assert result["style_guide_summary"] == ""
+    assert any("style_guide_summary" in w for w in result["warnings"])
+    # Advisory only: the map still committed, and the decision is recorded.
+    assert Path(result["address_map_path"]).exists()
+    assert result["address_map_decision"] == "built"
+
+
+def test_commit_is_clean_with_summary(beat_project: Path):
+    draft = state.ensure_harness_dir(beat_project) / "address_map_draft.json"
+    draft.write_text(
+        json.dumps({"content": "Ricardo↔Astrida use tú.", "pairs": [_asymmetric_pair()],
+                    "global_rules": "tú in family.",
+                    "style_guide_summary": "Use tú among family; usted to strangers."}),
+        encoding="utf-8",
+    )
+    result = flow.address_map_commit(str(beat_project))
+    assert result["warnings"] == []
+    assert result["style_guide_summary"].startswith("Use tú")
+
+
+def test_prepare_threads_forms_of_address_answer(beat_project: Path):
+    """The one question pulled forward must reach the drafting prompt."""
+    hdir = state.ensure_harness_dir(beat_project)
+    (hdir / "style_questions.json").write_text(json.dumps([{
+        "id": "forms_of_address",
+        "question": "How should forms of address be handled?",
+        "options": [
+            {"label": "Tú dominates (informal)", "style_guide_effect": "USTED_IS_RARE_MARKER"},
+            {"label": "Usted dominates (formal)", "style_guide_effect": "USTED_DOMINATES_MARKER"},
+        ],
+    }]), encoding="utf-8")
+    (hdir / "style_answers.json").write_text(
+        json.dumps({"forms_of_address": "usted_dominates_formal"}), encoding="utf-8"
+    )
+    result = flow.address_map_prepare(str(beat_project), max_chapters=3)
+    assert result["forms_of_address_loaded"] is True
+    prompt = Path(result["prompt_path"]).read_text(encoding="utf-8")
+    assert "USTED_DOMINATES_MARKER" in prompt
+    assert "{{" not in prompt
+
+
+def test_prepare_without_answer_still_renders(beat_project: Path):
+    result = flow.address_map_prepare(str(beat_project), max_chapters=3)
+    assert result["forms_of_address_loaded"] is False
+    prompt = Path(result["prompt_path"]).read_text(encoding="utf-8")
+    assert "not answered" in prompt
+    assert "{{" not in prompt
+
+
+def test_prepare_without_glossary_demands_english_names(beat_project: Path):
+    """Step 0B runs before the glossary; a guessed Spanish name would strand the judge."""
+    result = flow.address_map_prepare(str(beat_project), max_chapters=3)
+    assert result["characters_loaded"] == 0
+    prompt = Path(result["prompt_path"]).read_text(encoding="utf-8")
+    assert "ENGLISH source names" in prompt

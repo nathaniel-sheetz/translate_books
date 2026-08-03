@@ -7,11 +7,47 @@ The translator answered these questions about their preferences:
 SOURCE TEXT SAMPLE (for reference):
 {{source_text}}
 
+APPROVED FORMS-OF-ADDRESS SUMMARY:
+{{address_summary}}
+
 Write a style guide with labeled sections. Rules:
 - One section per topic (DIALECT AND REGISTER, FORMS OF ADDRESS, DIALOGUE FORMATTING, etc.)
 - 1-3 sentences per section. Be specific and prescriptive, not descriptive.
 - Include concrete examples from the source text where helpful.
+- Target 300–400 words total.
 - No filler, no preamble, no explanations of why the guide exists.
 - The guide should be directly usable as instructions to a translator or LLM.
+- If an approved forms-of-address summary is supplied above, reproduce it as the FORMS OF ADDRESS section, lightly edited to fit the guide's voice. Do not expand it with pairs or rules it does not mention, and do not mention where it came from.
+
+WHO READS THIS GUIDE — this constrains every rule you write:
+The reader is a translator working on ONE excerpt of the book and nothing else.
+They do not know which chapter it is from, what happened before or after it, what
+other books exist, or that a glossary or a forms-of-address map was ever built.
+Every rule must be decidable from the excerpt alone. Never write:
+- "see the address map", "per the glossary", "as established elsewhere"
+- "if the relationship shifts later in the book", "after chapter N", "by the end"
+- "consistent with the other books in the series"
+- "keep this consistent with earlier chapters"
+Rewrite any such rule so it can be applied to a single excerpt — usually by stating
+the form that holds for most of the book — or drop it entirely. A rule the
+translator cannot act on is worse than no rule: it invites improvisation.
+
+DO NOT PUT GLOSSARY PAIRS IN THIS GUIDE:
+Never list individual term→translation pairs. Terms are delivered to the translator
+separately, as a glossary. A guide that also names terms creates two sources of
+truth that will disagree. Write rules; let the glossary carry the words. (The
+"concrete examples" rule above means illustrating a rule, as in the example below —
+not fixing a term's translation.)
+
+HIGH-FREQUENCY WORD-CHOICE RULES — this is what the guide is FOR:
+When a class of term recurs constantly and its correct form depends on the sentence,
+give a GENERIC rule the translator can apply to any occurrence, naming no specific
+term. This is what tells them which glossary entry or which listed alternative to
+reach for. For example:
+  "For a title + personal name, use the form with the definite article in narration
+   (el tío Manuel llegó tarde) and the bare vocative form in direct address
+   (Oye, tío Manuel, quiero...)."
+That rule resolves every such name in the book. A list of specific names would not.
+Include a rule like this whenever the source shows a recurring choice of this kind.
 
 Output ONLY the style guide text, no JSON wrapping or metadata.

@@ -14,7 +14,9 @@ import pytest
 from src.harness_guard import (
     MIN_TERMS_FOR_DIACRITIC_CHECK,
     HarnessValidationError,
+    address_map_name_warnings,
     diacritic_warning,
+    glossary_convention_warnings,
     guard_glossary_proposals,
     guard_translation_draft,
     validate_chunk_file,
@@ -22,7 +24,16 @@ from src.harness_guard import (
     validate_style_guide_file,
 )
 from src.glossary_bootstrap import glossary_terms_from_proposals
-from src.models import Chunk, ChunkMetadata, Glossary, GlossaryTerm, StyleGuide
+from src.models import (
+    AddressMap,
+    AddressPair,
+    AddressRule,
+    Chunk,
+    ChunkMetadata,
+    Glossary,
+    GlossaryTerm,
+    StyleGuide,
+)
 from src.utils.file_io import save_chunk, save_glossary, save_style_guide
 
 
@@ -285,3 +296,128 @@ class TestGuardTranslationDraft:
         monkeypatch.setattr(harness_guard, "CompletenessEvaluator", lambda: bad_eval)
         problems = guard_translation_draft(_chunk(_SRC), _OK)
         assert any("boom evaluator failed" in p for p in problems)
+
+
+# ── glossary alternatives conventions (advisory) ────────────────────────────
+#
+# `alternatives` is the one glossary field that lets a worker pick a different
+# rendering per chunk. Right for a term genuinely rendered several ways; wrong
+# for a name, where it silently licenses book-wide inconsistency. These checks
+# are advisory — a real exception (Atlántico / océano Atlántico) trips one
+# legitimately — so they must never raise.
+
+def _prop(english, translation, type_="other", alternatives=None):
+    return {"english": english, "translation": translation, "type": type_,
+            "alternatives": alternatives or []}
+
+
+class TestGlossaryConventionWarnings:
+    def test_place_with_alternatives_flagged(self):
+        w = glossary_convention_warnings(
+            [_prop("Beldingsville", "Beldingsville", "place", ["el pueblo de Beldingsville"])]
+        )
+        assert len(w) == 1
+        assert w[0].startswith("REVIEW:")
+        assert "Beldingsville" in w[0] and "place" in w[0]
+
+    def test_place_without_alternatives_clean(self):
+        assert glossary_convention_warnings([_prop("Boston", "Boston", "place")]) == []
+
+    def test_bare_personal_name_with_alternatives_flagged(self):
+        w = glossary_convention_warnings([_prop("Pollyanna", "Pollyanna", "character", ["Poli"])])
+        assert len(w) == 1
+        assert "bare personal name" in w[0]
+
+    def test_bare_personal_name_without_alternatives_clean(self):
+        assert glossary_convention_warnings([_prop("Pollyanna", "Pollyanna", "character")]) == []
+
+    def test_title_name_missing_article_flagged(self):
+        w = glossary_convention_warnings([_prop("Aunt Polly", "tía Polly", "character")])
+        assert len(w) == 1
+        assert "narration form with the article" in w[0]
+
+    def test_title_name_missing_vocative_alternative_flagged(self):
+        w = glossary_convention_warnings([_prop("Uncle Antony", "el tío Antony", "character")])
+        assert len(w) == 1
+        assert "no vocative alternative" in w[0]
+        assert "tío Antony" in w[0]
+
+    def test_title_name_done_correctly_is_clean(self):
+        """Narration form with article primary, bare vocative as the single alternative."""
+        assert glossary_convention_warnings([
+            _prop("Uncle Antony", "el tío Antony", "character", ["tío Antony"]),
+            _prop("Mrs. Banks", "la señora Banks", "character", ["señora Banks"]),
+            _prop("Doctor Hernández", "el doctor Hernández", "character", ["doctor Hernández"]),
+        ]) == []
+
+    def test_non_name_term_may_carry_alternatives(self):
+        assert glossary_convention_warnings([
+            _prop("the game", "el juego de alegrarse", "concept", ["el juego"]),
+            _prop("stall", "establo", "technical", ["casilla"]),
+        ]) == []
+
+    def test_never_raises_on_malformed_input(self):
+        """The structural guard owns malformed drafts; this must stay advisory."""
+        assert glossary_convention_warnings("not a list") == []
+        assert glossary_convention_warnings([None, 42, {}, {"english": "x"}]) == []
+
+    def test_flags_are_prefixed_for_triage(self):
+        """The skill splits REVIEW: judgement calls from draft bugs by this prefix."""
+        w = glossary_convention_warnings([
+            _prop("Beldingsville", "Beldingsville", "place", ["pueblo"]),
+            _prop("Aunt Polly", "tía Polly", "character"),
+        ])
+        assert len(w) == 2
+        assert all(x.startswith("REVIEW:") for x in w)
+
+
+# ── address-map cast reconciliation (advisory) ──────────────────────────────
+
+def _glossary(*pairs):
+    return Glossary(terms=[
+        GlossaryTerm(english=en, spanish=es, type="character") for en, es in pairs
+    ])
+
+
+def _map(content, *, pairs=(), summary=None):
+    return AddressMap(
+        content=content,
+        style_guide_summary=summary,
+        pairs=[AddressPair(a=a, b=b, directions={
+            "a_to_b": [AddressRule(form="tú", when="default")],
+        }) for a, b in pairs],
+    )
+
+
+class TestAddressMapNameWarnings:
+    def test_english_names_flagged_after_glossary_approval(self):
+        w = address_map_name_warnings(
+            _glossary(("Aunt Polly", "la tía Polly"), ("Pollyanna", "Pollyanna")),
+            _map("Pollyanna uses usted to Aunt Polly.", pairs=[("Pollyanna", "Aunt Polly")]),
+        )
+        assert len(w) == 1
+        assert w[0].startswith("REVIEW:")
+        assert "Aunt Polly" in w[0] and "la tía Polly" in w[0]
+        # Pollyanna is unchanged by translation, so it is not drift.
+        assert "1 approved character" in w[0]
+
+    def test_reconciled_map_is_silent(self):
+        assert address_map_name_warnings(
+            _glossary(("Aunt Polly", "la tía Polly")),
+            _map("Pollyanna uses usted to la tía Polly.", pairs=[("Pollyanna", "la tía Polly")]),
+        ) == []
+
+    def test_name_found_in_summary_counts_as_reconciled(self):
+        assert address_map_name_warnings(
+            _glossary(("Aunt Polly", "la tía Polly")),
+            _map("...", summary="Everyone addresses la tía Polly with usted."),
+        ) == []
+
+    def test_missing_artifacts_are_not_an_error(self):
+        assert address_map_name_warnings(None, _map("x")) == []
+        assert address_map_name_warnings(_glossary(("A", "B")), None) == []
+        assert address_map_name_warnings(_glossary(("A", "B")), _map("")) == []
+
+    def test_only_character_terms_are_checked(self):
+        g = Glossary(terms=[GlossaryTerm(english="Boston", spanish="Bostón", type="place")])
+        assert address_map_name_warnings(g, _map("A scene set in Boston.")) == []
