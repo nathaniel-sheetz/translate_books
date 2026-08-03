@@ -61,6 +61,18 @@ def test_claude_gets_the_preamble_as_a_system_prompt_file(project):
     assert not calls[0]["input_text"].startswith(preamble)
 
 
+def test_fanout_records_prompt_cache_mode(project):
+    """--prompt-cache / cache= threads through to the usage JSONL row."""
+    write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
+    review.prepare(project)
+    review.fanout(
+        project, cli="claude", cache="1h", runner=_recording_runner([]),
+    )
+    log = project / ".harness" / "annotations" / "usage.jsonl"
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["cache"] == "1h"
+
+
 def test_cursor_gets_the_preamble_folded_into_stdin(project):
     """cursor-agent has no --system-prompt-file, so the launcher folds it in."""
     write_annotations(project, [_ann(es_idx=1, sub_id="u1")])

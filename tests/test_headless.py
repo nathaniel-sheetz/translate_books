@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.harness import headless
+from src.harness import headless, usage
 
 
 def test_build_cmd_claude_with_system_prompt_file(tmp_path: Path):
@@ -783,6 +783,50 @@ def test_wave_logs_failed_jobs_too(tmp_path: Path):
     assert "Credit balance" in row["error"]
 
 
+def _error_envelope(message: str, **usage) -> str:
+    base = {"input_tokens": 5, "output_tokens": 9000,
+            "cache_creation_input_tokens": 6000, "cache_read_input_tokens": 0}
+    base.update(usage)
+    return json.dumps(
+        {"type": "result", "subtype": "error_during_execution", "is_error": True,
+         "result": message, "total_cost_usd": 0.4, "usage": base}
+    )
+
+
+def test_failed_job_still_reports_the_tokens_it_burned(tmp_path: Path):
+    """A job that died after 9k output tokens cost real money; the wave must say so."""
+    log = tmp_path / "usage.jsonl"
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (1, _error_envelope("Credit balance is too low"), ""),
+        usage_log=log,
+    )
+    assert result["counts"]["failed"] == 1
+    # Before this, `usage` came back None on a wave whose every job failed.
+    assert result["usage"]["jobs"] == 1
+    assert result["usage"]["output"] == 9000
+    assert result["usage"]["cache_creation"] == 6000
+    row = json.loads(log.read_text(encoding="utf-8").strip())
+    assert row["rc"] == 1 and row["output"] == 9000
+
+
+def test_failed_job_usage_does_not_move_the_baseline(tmp_path: Path):
+    """Failures still burn tokens, but they are not what a healthy job costs."""
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 3),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (1, _error_envelope("boom"), ""),
+        usage_log=log,
+    )
+    # Three logged jobs, but all rc != 0, so the estimate stays on its default.
+    _, provenance = usage.baseline_tokens(log)
+    assert provenance.startswith("default:")
+
+
 def test_unwritable_usage_log_does_not_fail_the_wave(tmp_path: Path):
     """Telemetry that can take a wave down is worse than no telemetry."""
     blocker = tmp_path / "blocker"
@@ -861,3 +905,178 @@ def test_failed_job_reports_the_cause_not_the_envelope(tmp_path: Path):
     assert error.startswith("Credit balance is too low")
     assert "session_id" not in error  # the envelope itself stays out of the report
     assert "connectors are disabled" in error  # stderr still reported alongside
+
+
+def test_failure_detail_names_the_cli_that_actually_failed(tmp_path: Path):
+    """A failing Cursor job used to be reported as a 'claude result envelope error'."""
+    envelope = json.dumps({
+        "type": "result", "subtype": "error", "is_error": True, "result": "",
+    })
+    assert headless._failure_detail("cursor", envelope).startswith("cursor")
+    assert headless._failure_detail("claude", envelope).startswith("claude")
+    # Non-envelope stdout is still passed through untouched.
+    assert headless._failure_detail("cursor", "  plain failure  ") == "plain failure"
+
+
+# ---------------------------------------------------------------------------
+# Prompt-cache TTL control
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_cache_env_clears_an_inherited_contradiction():
+    """An inherited knob would win over the resolved mode while the row logged the mode."""
+    inherited = {"PATH": "/usr/bin", headless.DISABLE_PROMPT_CACHING: "1"}
+    # Resolved 5m must actually be 5m, not "off with a 5m label on the usage row".
+    assert headless.prompt_cache_env(inherited, mode="5m") == {
+        "PATH": "/usr/bin", headless.FORCE_PROMPT_CACHING_5M: "1",
+    }
+    # 1h is the CLI default: both knobs gone, not "whatever was exported".
+    assert headless.prompt_cache_env(inherited, mode="1h") == {"PATH": "/usr/bin"}
+    assert headless.prompt_cache_env(
+        {"PATH": "/usr/bin", headless.FORCE_PROMPT_CACHING_5M: "1"}, mode="off",
+    ) == {"PATH": "/usr/bin", headless.DISABLE_PROMPT_CACHING: "1"}
+    # Does not mutate the caller's mapping.
+    assert inherited[headless.DISABLE_PROMPT_CACHING] == "1"
+
+
+def test_prompt_cache_env_sets_exactly_one_var_per_mode():
+    base = {"PATH": "/usr/bin", "FOO": "bar"}
+    assert headless.prompt_cache_env(base, mode="1h") == base
+    assert headless.prompt_cache_env(base, mode="5m") == {
+        **base, headless.FORCE_PROMPT_CACHING_5M: "1",
+    }
+    assert headless.prompt_cache_env(base, mode="off") == {
+        **base, headless.DISABLE_PROMPT_CACHING: "1",
+    }
+    # Does not mutate the input mapping.
+    assert "FORCE_PROMPT_CACHING_5M" not in base
+    with pytest.raises(ValueError, match="unknown prompt-cache mode"):
+        headless.prompt_cache_env(base, mode="auto")
+
+
+def test_resolve_cache_mode_picks_off_when_bodies_dominate():
+    """Large U/P: plain input beats writing every body at 1.25×."""
+    # P = 4k spf + 3.9k baseline; U ≈ 30k → U/P ≈ 3.8, above the N=5 threshold.
+    spf = "preamble.txt"
+    jobs = [
+        {"input_text": "u" * (30_000 * 4), "system_prompt_file": spf}
+        for _ in range(5)
+    ]
+    assert headless.resolve_cache_mode(
+        jobs, {spf: 4_000}, baseline=3_900, warm_wall_s=None
+    ) == "off"
+
+
+def test_resolve_cache_mode_picks_5m_when_prefix_dominates():
+    """Annotation-shaped: small bodies, large shared prefix → 5m."""
+    spf = "preamble.txt"
+    jobs = [
+        {"input_text": "u" * (1_000 * 4), "system_prompt_file": spf}
+        for _ in range(5)
+    ]
+    assert headless.resolve_cache_mode(
+        jobs, {spf: 4_000}, baseline=3_900, warm_wall_s=None
+    ) == "5m"
+    # Just under the off threshold still stays on 5m.
+    assert headless.resolve_cache_mode(
+        jobs, {spf: 4_000}, baseline=3_900, warm_wall_s=100.0
+    ) == "5m"
+
+
+def test_resolve_cache_mode_slow_warmup_keeps_1h():
+    """A warm-up over ~270 s risks expiring the 5-minute entry before followers."""
+    spf = "preamble.txt"
+    jobs = [
+        {"input_text": "u" * (1_000 * 4), "system_prompt_file": spf}
+        for _ in range(5)
+    ]
+    assert headless.resolve_cache_mode(
+        jobs, {spf: 4_000}, baseline=3_900, warm_wall_s=300.0
+    ) == "1h"
+    # But off still wins when bodies dominate, even with a slow warm-up.
+    big = [
+        {"input_text": "u" * (30_000 * 4), "system_prompt_file": spf}
+        for _ in range(5)
+    ]
+    assert headless.resolve_cache_mode(
+        big, {spf: 4_000}, baseline=3_900, warm_wall_s=300.0
+    ) == "off"
+
+
+def test_resolve_cache_mode_no_spf_wave_uses_baseline_as_prefix():
+    """Grouped judge entries have no --system-prompt-file; P is still the CLI baseline."""
+    jobs = [{"input_text": "u" * 400} for _ in range(5)]
+    assert headless.resolve_cache_mode(
+        jobs, {}, baseline=3_900, warm_wall_s=None
+    ) == "5m"
+
+
+def test_resolve_cache_mode_no_history_assumes_fast():
+    """No prior wall times → assume warm-up fits in the 5-minute window."""
+    spf = "preamble.txt"
+    jobs = [
+        {"input_text": "u" * 400, "system_prompt_file": spf} for _ in range(3)
+    ]
+    assert headless.resolve_cache_mode(
+        jobs, {spf: 4_000}, baseline=3_900, warm_wall_s=None
+    ) == "5m"
+
+
+def test_cache_off_collapses_warm_first_batches(tmp_path: Path):
+    """off has nothing to warm — skip the serialized job-1 warm-up."""
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 3),
+        model="sonnet",
+        concurrency=2,
+        runner=lambda *a, **k: (0, _envelope("ok"), ""),
+        usage_log=log,
+        cache="off",
+    )
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert all(r["cache"] == "off" for r in rows)
+    assert all(r["warm"] is False for r in rows)
+
+
+def test_resolved_cache_mode_lands_in_usage_rows(tmp_path: Path):
+    """Stub runners never see the child env; the mode is still on every JSONL row."""
+    log = tmp_path / "usage.jsonl"
+    # Annotation-shaped bodies → auto resolves to 5m.
+    spf = tmp_path / "preamble.txt"
+    spf.write_text("p" * (4_000 * 4), encoding="utf-8")
+    jobs = [
+        {
+            "id": f"c{i}",
+            "input_text": "u" * (1_000 * 4),
+            "output_path": str(tmp_path / f"d{i}.txt"),
+            "system_prompt_file": str(spf),
+        }
+        for i in range(3)
+    ]
+    headless.run_headless_wave(
+        jobs,
+        model="sonnet",
+        concurrency=2,
+        runner=lambda *a, **k: (0, _envelope("ok"), ""),
+        usage_log=log,
+        cache="auto",
+    )
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert {r["cache"] for r in rows} == {"5m"}
+    assert rows[0]["warm"] is True  # warm-up still runs under 5m
+
+
+def test_cursor_records_cache_none(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        cli="cursor",
+        runner=lambda *a, **k: (0, "ok", ""),
+        usage_log=log,
+        cache="5m",
+    )
+    row = json.loads(log.read_text(encoding="utf-8"))
+    assert row["cache"] is None
+    assert row["effort"] is None

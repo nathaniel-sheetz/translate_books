@@ -819,6 +819,9 @@ def test_prepare_reports_headless_tokens_beside_the_api_price(tmp_path):
     )
     # The API figure is still there — it just no longer stands alone.
     assert "estimated_api_cost" in summary
+    # Effort is visible at the usage gate, not only after a wave.
+    assert summary["headless_effort"] == "medium"
+    assert summary["headless_effort_source"] == "default:judges"
 
 
 def test_prepare_baseline_self_calibrates_from_the_usage_log(tmp_path):
@@ -851,10 +854,57 @@ def test_fanout_estimate_spawns_nothing(tmp_path):
     # The argv is included so a bad headless_extra_flags entry is visible before
     # a wave commits to it, not after N jobs have failed.
     assert "--output-format" in out["estimate"]["argv"]
+    # Auto default for judges is medium — exactly one --effort, plus the fields.
+    assert out["estimate"]["effort"] == "medium"
+    assert out["estimate"]["effort_source"] == "default:judges"
+    argv = out["estimate"]["argv"]
+    assert argv.count("--effort") == 1
+    assert "--effort" in argv and argv[argv.index("--effort") + 1] == "medium"
+    # Solo dialogue entry: N=1 → auto picks off (1.0× beats 1.25× with no followers).
+    assert out["estimate"]["cache"] == "off"
     # And no draft was written.
     draft = json.loads((subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
     assert not Path(draft["entries"][0]["draft_path"]).exists()
 
+
+def test_fanout_estimate_cli_effort_override(tmp_path):
+    """--effort on fanout flips the estimate without touching config."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    out = subagent.fanout(
+        project, estimate=True, effort="low",
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert out["estimate"]["effort"] == "low"
+    assert out["estimate"]["effort_source"] == "cli"
+    argv = out["estimate"]["argv"]
+    assert argv.count("--effort") == 1
+    assert argv[argv.index("--effort") + 1] == "low"
+
+
+def test_fanout_estimate_reports_resolved_cache_mode(tmp_path):
+    """--estimate prices the projection under the resolved prompt-cache mode."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    out = subagent.fanout(
+        project, estimate=True, cache="off",
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert out["estimate"]["cache"] == "off"
+    # off = prompt + N*baseline (same as the pre-cache formula for a single job).
+    assert out["estimate"]["projected_tokens"] == (
+        out["estimate"]["prompt_tokens"] + out["estimate"]["baseline_tokens"]
+    )
+
+    pinned = subagent.fanout(
+        project, estimate=True, cache="1h",
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert pinned["estimate"]["cache"] == "1h"
+    # 1h writes at 2×, so a single-job wave costs 2*(P+U) > off's (P+U).
+    assert pinned["estimate"]["projected_tokens"] > out["estimate"]["projected_tokens"]
 
 def test_fanout_records_usage_and_writes_the_job_log(tmp_path):
     project, cid = _project_with_chunk(tmp_path)

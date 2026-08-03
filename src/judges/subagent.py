@@ -169,6 +169,8 @@ _PREPARE_SCHEMA = {
     "cache}. Grouped (targets-per-worker > 1): "
     "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count}]} "
     "(no preamble/body — cache is solo-only)",
+    "manifest_entries": "--quiet only: entry count, replacing the 'manifest' echo "
+    "(fanout reads the manifest from disk, so echoing it here is duplication)",
     "manifest_path": "path to the written manifest.json (commit reads this)",
     "scopes": "the list of --scope values resolved into this one manifest",
     "judges": "judge names rendered",
@@ -176,12 +178,14 @@ _PREPARE_SCHEMA = {
     "batch_size": "recommended workers to spawn per wave",
     "usage_summary": "{pairs, targets, workers, targets_per_worker, source_words, worker_model, "
     "batch_size, estimated_api_cost, estimated_prompt_tokens, headless_baseline_tokens, "
-    "headless_baseline_source, estimated_headless_tokens}. The two estimates price DIFFERENT "
+    "headless_baseline_source, estimated_headless_tokens, headless_effort, "
+    "headless_effort_source}. The two estimates price DIFFERENT "
     "backends and neither bounds the other: 'estimated_api_cost' is USD **if you choose the API "
     "backend** and says nothing about the headless path, which on the 2026-07-30 measurement "
     "consumed ~2.4x the tokens. 'estimated_headless_tokens' is the subscription cost of the "
     "headless path = prompt tokens + workers x per-job fixed overhead; that overhead is real "
-    "context every process pays before reading a word of the book. Relay the one matching the "
+    "context every process pays before reading a word of the book. 'headless_effort' is the "
+    "resolved --effort level the wave will run at (null = CLI default). Relay the one matching the "
     "backend the user is choosing",
     "instructions": "what to do with the manifest (spawn workers, then commit)",
 }
@@ -204,7 +208,9 @@ _FANOUT_SCHEMA = {
     "(Cursor runs on --output-format text). Per-job detail goes to "
     ".harness/judges/usage.jsonl, never into this payload",
     "estimate": "--estimate only: {jobs, prompt_tokens, baseline_tokens, baseline_source, "
-    "projected_tokens, argv} — projected, nothing spawned",
+    "projected_tokens, argv, effort, effort_source, cache} — projected, nothing spawned. "
+    "'cache' is the resolved prompt-cache mode (5m|1h|off; null on Cursor); "
+    "projected_tokens is priced under that mode",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
 
@@ -401,6 +407,10 @@ def prepare(
     # wave). Quoting only the API figure understated the chosen path ~2.4x at the
     # exact moment consent was given.
     baseline, baseline_source = baseline_tokens(usage_log_path(project_dir))
+    from src.harness import state as hstate
+    _effort_argv, headless_effort, headless_effort_source = hstate.resolve_headless_argv(
+        hstate.load_config(project_dir), command="judges",
+    )
 
     manifest_doc = {
         "scopes": scope_list,
@@ -438,6 +448,8 @@ def prepare(
             "headless_baseline_tokens": baseline,
             "headless_baseline_source": baseline_source,
             "estimated_headless_tokens": total_prompt_tokens + len(entries) * baseline,
+            "headless_effort": headless_effort,
+            "headless_effort_source": headless_effort_source,
         },
         "instructions": (
             "For each manifest entry (one target, or a small group of low-density "
@@ -484,6 +496,8 @@ def fanout(
     cli_bin: str | None = None,
     claude_bin: str | None = None,
     estimate: bool = False,
+    effort: str | None = None,
+    cache: str | None = None,
     runner=None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave for judge-prepare manifest entries.
@@ -506,19 +520,27 @@ def fanout(
     ``estimate=True`` renders the argv and projects the token cost from the
     measured per-job baseline, then returns without spawning anything — so the
     usage gate can quote the path being taken rather than the API price of the
-    path that was declined.
+    path that was declined. ``effort`` is a per-run override of
+    ``headless_effort_judges`` (see :func:`~src.harness.state.resolve_headless_argv`).
+    ``cache`` is a per-run override of ``headless_prompt_cache``.
     """
     from src.harness.headless import (
         _build_cmd,
+        effective_wave_tokens,
+        resolve_cache_mode,
         run_headless_wave,
         warn_cursor_claude_model,
     )
     from src.harness import state as hstate
+    from src.harness.usage import median_wall_s
 
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
     cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
-    extra_flags = hstate.headless_extra_flags(cfg)
+    extra_flags, resolved_effort, effort_source = hstate.resolve_headless_argv(
+        cfg, command="judges", effort_override=effort,
+    )
+    requested_cache = hstate.resolve_prompt_cache(cfg, cache_override=cache)
     jdir = _judges_dir(project_dir)
     manifest_path = jdir / "manifest.json"
     if not manifest_path.exists():
@@ -657,16 +679,38 @@ def fanout(
         return out
 
     if estimate:
-        baseline, baseline_source = baseline_tokens(usage_log_path(project_dir))
-        prompt_tokens = sum(
-            approx_tokens(job["input_text"])
-            + approx_tokens(
-                Path(job["system_prompt_file"]).read_text(encoding="utf-8")
-                if job.get("system_prompt_file")
-                else ""
+        log_path = usage_log_path(project_dir)
+        baseline, baseline_source = baseline_tokens(log_path)
+        spf_tokens: dict[str, int] = {}
+        prompt_tokens = 0
+        for job in ready:
+            body_tok = approx_tokens(job["input_text"])
+            spf = job.get("system_prompt_file")
+            spf_tok = 0
+            if spf:
+                if spf not in spf_tokens:
+                    try:
+                        spf_tokens[spf] = approx_tokens(
+                            Path(spf).read_text(encoding="utf-8")
+                        )
+                    except (OSError, UnicodeDecodeError):
+                        spf_tokens[spf] = 0
+                spf_tok = spf_tokens[spf]
+            prompt_tokens += body_tok + spf_tok
+        if cli_name == "claude":
+            if requested_cache == "auto":
+                resolved_cache = resolve_cache_mode(
+                    ready, spf_tokens, baseline, median_wall_s(log_path)
+                )
+            else:
+                resolved_cache = requested_cache
+            projected = effective_wave_tokens(
+                ready, spf_tokens, baseline, resolved_cache
             )
-            for job in ready
-        )
+            cache_for_estimate: str | None = resolved_cache
+        else:
+            projected = prompt_tokens + len(ready) * baseline
+            cache_for_estimate = None
         est_out = {
             "wrote": [],
             "failed": list(pre_failed),
@@ -686,7 +730,7 @@ def fanout(
                 "prompt_tokens": prompt_tokens,
                 "baseline_tokens": baseline,
                 "baseline_source": baseline_source,
-                "projected_tokens": prompt_tokens + len(ready) * baseline,
+                "projected_tokens": projected,
                 # The argv is here so a bad --headless-extra-flags entry is
                 # visible before a wave commits to it, not after N jobs fail.
                 "argv": _build_cmd(
@@ -696,6 +740,9 @@ def fanout(
                     ready[0].get("system_prompt_file") if ready else None,
                     extra_flags=extra_flags,
                 ),
+                "effort": resolved_effort,
+                "effort_source": effort_source,
+                "cache": cache_for_estimate,
             },
             "instructions": (
                 "Projection only — nothing was spawned. Re-run `fanout` without "
@@ -717,6 +764,8 @@ def fanout(
         runner=runner,
         usage_log=usage_log_path(project_dir),
         extra_flags=extra_flags,
+        effort=resolved_effort,
+        cache=requested_cache,
     )
 
     if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):

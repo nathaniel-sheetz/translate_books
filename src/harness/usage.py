@@ -178,14 +178,24 @@ def job_record(
     warm: bool = False,
     usage: Mapping[str, Any] | None = None,
     error: str | None = None,
+    effort: str | None = None,
+    cache: str | None = None,
 ) -> dict[str, Any]:
-    """One JSONL row: what we sent, what was billed, and under which argv."""
+    """One JSONL row: what we sent, what was billed, and under which argv.
+
+    ``cache`` is the prompt-cache mode we *requested* of the CLI (``5m`` /
+    ``1h`` / ``off``, or ``None`` on Cursor). An account in overage is silently
+    downgraded to the 5-minute TTL, so rows are only comparable within the same
+    account state — do not infer the TTL from billed rates.
+    """
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "id": job_id,
         "cli": cli,
         "model": model,
         "flags": list(flags),
+        "effort": effort,
+        "cache": cache,
         "warm": warm,
         "wall_s": round(wall_s, 2),
         "rc": rc,
@@ -247,6 +257,9 @@ def rollup(records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
         "overhead_ratio": round(overhead / billed, 3) if billed else None,
         "cost_equiv_usd": round(cost, 4),
     }
+    # Wave-level mode: every job in a wave shares one requested cache setting.
+    if "cache" in rows[0]:
+        out["cache"] = rows[0].get("cache")
     side_total: dict[str, int] = {}
     for row in rows:
         for model, tokens in (row.get("side_calls") or {}).items():
@@ -297,3 +310,19 @@ def baseline_tokens(
         return default, f"default: {default} (2026-07-30 baseline probe)"
     measured = int(statistics.median(overheads))
     return measured, f"measured: median of {len(overheads)} logged jobs"
+
+
+def median_wall_s(path: Path | str | None) -> float | None:
+    """Median ``wall_s`` of recent successful jobs, or ``None`` with no history.
+
+    Feeds the prompt-cache auto picker: a warm-up that routinely runs past ~270 s
+    risks expiring a 5-minute TTL entry before any follower can read it.
+    """
+    walls = [
+        float(row["wall_s"])
+        for row in read_recent(path)
+        if row.get("rc") == 0 and isinstance(row.get("wall_s"), (int, float))
+    ]
+    if not walls:
+        return None
+    return float(statistics.median(walls))

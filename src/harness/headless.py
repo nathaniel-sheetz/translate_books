@@ -52,7 +52,9 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from src.harness.usage import (
     append_usage,
     approx_tokens,
+    baseline_tokens,
     job_record,
+    median_wall_s,
     rollup,
     usage_from_envelope,
 )
@@ -111,6 +113,136 @@ _SCRUB_KEEP: frozenset[str] = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
 
 # Not scrubbed, on purpose: AWS_* / GOOGLE_APPLICATION_CREDENTIALS are only read
 # when the CLAUDE_CODE_USE_* switch above is set, and that switch is gone.
+
+# ---------------------------------------------------------------------------
+# Prompt-cache TTL control (Claude profile only)
+# ---------------------------------------------------------------------------
+#
+# The CLI defaults to a 1-hour ephemeral cache TTL, billed at 2× base input.
+# FORCE_PROMPT_CACHING_5M=1 switches to the 5-minute TTL at 1.25×; reads still
+# work at 0.1×. DISABLE_PROMPT_CACHING=1 turns caching off entirely (plain 1×
+# input, no reads). Every wave in this repo finishes in seconds-to-minutes, so
+# the 1-hour premium is usually wasted — see docs/LLM_PROVIDERS.md.
+#
+# Known-but-unused siblings (per-model DISABLE_PROMPT_CACHING_{SONNET,OPUS,
+# HAIKU,FABLE,MYTHOS} and ENABLE_PROMPT_CACHING_1H): the bare names covered
+# Sonnet in the 2026-08-01 probe; leave them alone rather than guess.
+
+FORCE_PROMPT_CACHING_5M = "FORCE_PROMPT_CACHING_5M"
+DISABLE_PROMPT_CACHING = "DISABLE_PROMPT_CACHING"
+
+CACHE_MODES = frozenset({"auto", "5m", "1h", "off"})
+# Concrete modes the CLI env can express (auto resolves to one of these).
+CACHE_CONCRETE = frozenset({"5m", "1h", "off"})
+# Write multipliers in plain-input-equivalent tokens.
+_CACHE_WRITE_MULT = {"1h": 2.0, "5m": 1.25}
+_CACHE_READ_MULT = 0.1
+# 5-minute TTL with ~30 s margin: a warm-up longer than this risks expiring
+# before any follower reads the entry.
+CACHE_WARM_RISK_S = 270.0
+
+
+def prompt_cache_env(
+    env: Mapping[str, str], *, mode: str
+) -> dict[str, str]:
+    """Return ``env`` with the Claude prompt-cache TTL knob for ``mode``.
+
+    Deliberately separate from :func:`subscription_env`: that function is a
+    billing-safety boundary and must not grow cost knobs. ``1h`` is the CLI
+    default and sets nothing; ``5m`` sets ``FORCE_PROMPT_CACHING_5M=1``; ``off``
+    sets ``DISABLE_PROMPT_CACHING=1``.
+
+    Both names are cleared first, so the resolved mode is the one that actually
+    takes effect. An inherited ``DISABLE_PROMPT_CACHING`` left over from a probe
+    would otherwise silently win over a resolved ``5m`` while every usage row
+    recorded ``"cache": "5m"`` — turning the A/B corpus this log exists to be
+    into a quietly wrong one.
+    """
+    out = dict(env)
+    out.pop(FORCE_PROMPT_CACHING_5M, None)
+    out.pop(DISABLE_PROMPT_CACHING, None)
+    if mode == "1h":
+        return out
+    if mode == "5m":
+        out[FORCE_PROMPT_CACHING_5M] = "1"
+        return out
+    if mode == "off":
+        out[DISABLE_PROMPT_CACHING] = "1"
+        return out
+    raise ValueError(
+        f"unknown prompt-cache mode {mode!r}; expected one of "
+        f"{sorted(CACHE_CONCRETE)}"
+    )
+
+
+def _cache_group_cost(
+    jobs: Sequence[Mapping[str, Any]],
+    spf_tokens: Mapping[str, int],
+    baseline: int,
+    mode: str,
+) -> float:
+    """Plain-input-equivalent token cost of ``jobs`` under ``mode``.
+
+    Jobs are grouped by ``system_prompt_file`` so a mixed dialogue+address wave
+    is priced honestly (first job of each group writes; the rest read). ``P`` is
+    the shared prefix (``spf_tokens[spf] + baseline``), including the CLI's own
+    fixed context — cacheable even when a job has no ``--system-prompt-file``.
+    """
+    groups: dict[Any, list[int]] = {}
+    for job in jobs:
+        spf = job.get("system_prompt_file")
+        groups.setdefault(spf, []).append(approx_tokens(job.get("input_text")))
+
+    total = 0.0
+    for spf, bodies in groups.items():
+        prefix = (spf_tokens.get(spf, 0) if spf else 0) + baseline
+        if mode == "off":
+            total += sum(prefix + body for body in bodies)
+            continue
+        write = _CACHE_WRITE_MULT[mode]
+        total += write * (prefix + bodies[0])
+        for body in bodies[1:]:
+            total += _CACHE_READ_MULT * prefix + write * body
+    return total
+
+
+def resolve_cache_mode(
+    jobs: Sequence[Mapping[str, Any]],
+    spf_tokens: Mapping[str, int],
+    baseline: int,
+    warm_wall_s: float | None,
+) -> str:
+    """Pick ``5m`` / ``1h`` / ``off`` from job shapes and warm-up history.
+
+    Pure and unit-testable. Compares the off vs 5m wave totals directly (not a
+    U/P ratio heuristic). A measured warm-up longer than
+    :data:`CACHE_WARM_RISK_S` keeps ``1h`` reachable — the one case where a
+    favorable ratio plus a slow warm-up makes the 1-hour TTL win. No history
+    assumes a fast warm-up (``5m``).
+    """
+    if not jobs:
+        return "5m"
+    cost_5m = _cache_group_cost(jobs, spf_tokens, baseline, "5m")
+    cost_off = _cache_group_cost(jobs, spf_tokens, baseline, "off")
+    if cost_off < cost_5m:
+        return "off"
+    if warm_wall_s is not None and warm_wall_s > CACHE_WARM_RISK_S:
+        return "1h"
+    return "5m"
+
+
+def effective_wave_tokens(
+    jobs: Sequence[Mapping[str, Any]],
+    spf_tokens: Mapping[str, int],
+    baseline: int,
+    mode: str,
+) -> int:
+    """Projected plain-input-equivalent tokens for a wave under ``mode``."""
+    if mode not in CACHE_CONCRETE:
+        raise ValueError(
+            f"effective_wave_tokens needs a concrete mode, got {mode!r}"
+        )
+    return int(round(_cache_group_cost(jobs, spf_tokens, baseline, mode)))
 
 
 def subscription_env(
@@ -522,11 +654,29 @@ def _extract_result(
 
 
 def _extract_output(cli: str, stdout: str) -> str:
-    """``_extract_result`` without the usage half (kept for callers/tests)."""
+    """``_extract_result`` without the usage half (kept for tests)."""
     return _extract_result(cli, stdout)[0]
 
 
-def _failure_detail(stdout: str) -> str:
+def _usage_from_stdout(stdout: str, *, model: str | None = None) -> dict[str, Any] | None:
+    """The usage block from a job's stdout, or ``None``. Never raises.
+
+    A job that failed still consumed tokens, and ``--output-format json`` reports
+    them on the error envelope exactly as on a successful one. Reading them here
+    is what stops a wave whose jobs died mid-flight from reporting no spend at
+    all — the failure case is precisely when the operator wants the number.
+    """
+    text = (stdout or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return usage_from_envelope(obj, model=model)
+
+
+def _failure_detail(cli: str, stdout: str) -> str:
     """The human-readable cause from a non-zero job's stdout.
 
     ``--output-format json`` wraps the reason a job failed ("Credit balance is
@@ -542,7 +692,7 @@ def _failure_detail(stdout: str) -> str:
     except json.JSONDecodeError:
         return text
     if isinstance(obj, dict) and obj.get("type") == "result":
-        return _envelope_error("claude", obj)
+        return _envelope_error(cli, obj)
     return text
 
 
@@ -553,12 +703,14 @@ def _wave_batches(
 
     Every job in a wave shares a prefix — the CLI's own system prompt plus, for
     solo judge entries, the per-judge preamble passed via ``--system-prompt-file``
-    — and that prefix is cacheable with a 1-hour TTL. Launching ``concurrency``
-    jobs simultaneously means the whole wave front starts before any of them has
-    written a cache entry, so all of them pay ``cache_creation`` and only the
-    stragglers can read it. The 2026-07-30 baseline probe put that prefix at
-    ~5.8k tokens per job, so on an eight-job wave the difference is most of the
-    overhead, for the price of one job's latency.
+    — and that prefix is cacheable. Cache *writes* bill at **2×** base input on
+    the CLI's default 1-hour TTL, or **1.25×** under ``FORCE_PROMPT_CACHING_5M``;
+    cache *reads* bill at **0.1×**. Launching ``concurrency`` jobs simultaneously
+    means the whole wave front starts before any of them has written a cache
+    entry, so all of them pay ``cache_creation`` and only the stragglers can
+    read it. The 2026-07-30 baseline probe put that prefix at ~5.8k tokens per
+    job, so on an eight-job wave the difference is most of the overhead, for the
+    price of one job's latency.
     """
     if warm_first and len(jobs) > 1 and concurrency > 1:
         rest = jobs[1:]
@@ -580,7 +732,9 @@ def run_headless_wave(
     prober: Optional[AuthProber] = None,
     usage_log: Path | str | None = None,
     extra_flags: Sequence[str] = (),
+    effort: str | None = None,
     warm_first: bool = True,
+    cache: str = "auto",
 ) -> dict[str, Any]:
     """Run one headless CLI wave for the given jobs.
 
@@ -601,8 +755,15 @@ def run_headless_wave(
 
     ``usage_log`` (a JSONL path) receives one row per job — the detail stays on
     disk rather than in the orchestrator's context. ``extra_flags`` is appended
-    to the Claude argv and recorded in each row. ``warm_first`` runs job 1 alone
-    so the rest read the shared prefix from cache instead of each re-creating it.
+    to the Claude argv and recorded in each row. ``effort`` is a telemetry label
+    only (the flag is already composed into ``extra_flags`` by
+    :func:`~src.harness.state.resolve_headless_argv`); recorded as ``None`` on
+    the Cursor profile. ``warm_first`` runs job 1 alone so the rest read the
+    shared prefix from cache instead of each re-creating it. ``cache``
+    (``auto`` | ``5m`` | ``1h`` | ``off``) selects the Claude prompt-cache TTL;
+    ``auto`` resolves from job shapes and prior wall times. Cursor ignores it
+    and records ``cache=None``. When the resolved mode is ``off``, warm-up is
+    forced off — nothing to warm.
     """
     try:
         cli_name = _normalize_cli(cli)
@@ -622,9 +783,18 @@ def run_headless_wave(
     if concurrency < 1:
         return _error_result(f"invalid concurrency {concurrency!r}; must be >= 1")
 
+    requested_cache = (cache or "auto").strip().lower()
+    if requested_cache not in CACHE_MODES:
+        return _error_result(
+            f"invalid cache mode {cache!r}; expected one of {sorted(CACHE_MODES)}"
+        )
+
     cwd = neutral_claude_cwd()
     job_timeout = _CLI_JOB_TIMEOUT_S.get(cli_name)
     # Computed once, so the preflight probes the exact env the workers get.
+    # Cache TTL knobs are applied after the spf_tokens pass below — auth does
+    # not read them, and the run() closure looks up wave_env by name at call
+    # time, so the reassignment is visible to every worker.
     wave_env = subscription_env(cli_name)
     if runner is None:
         def run(cmd: list[str], *, input_text: str, cwd: Path) -> tuple[int, str, str]:
@@ -680,6 +850,26 @@ def run_headless_wave(
         except (OSError, UnicodeDecodeError):
             spf_tokens[spf_path] = 0
 
+    # Resolve the prompt-cache mode and (for Claude) apply it to the child env.
+    # Cursor has no equivalent knob — record None so A/Bs stay honest.
+    use_warm_first = warm_first
+    if cli_name == "claude":
+        if requested_cache == "auto":
+            baseline, _ = baseline_tokens(usage_log)
+            resolved_cache = resolve_cache_mode(
+                jobs, spf_tokens, baseline, median_wall_s(usage_log)
+            )
+        else:
+            resolved_cache = requested_cache
+        wave_env = prompt_cache_env(wave_env, mode=resolved_cache)
+        if resolved_cache == "off":
+            # A warm-up with nothing to warm is pure serialized latency
+            # (90–330 s on judge waves).
+            use_warm_first = False
+        cache_label: str | None = resolved_cache
+    else:
+        cache_label = None
+
     def _run_one(job: dict[str, Any], warm: bool) -> tuple[str, bool, str, dict[str, Any]]:
         job_id = str(job["id"])
         started = time.monotonic()
@@ -699,6 +889,8 @@ def run_headless_wave(
                 warm=warm,
                 usage=usage,
                 error=detail,
+                effort=effort if cli_name == "claude" else None,
+                cache=cache_label,
             )
 
         try:
@@ -720,12 +912,14 @@ def run_headless_wave(
                 # stderr reported the warning and hid the reason every job failed.
                 # Under --output-format json that cause arrives wrapped, so unwrap
                 # it rather than reporting a JSON blob as the failure reason.
-                parts = [_failure_detail(stdout), (stderr or "").strip()]
+                parts = [_failure_detail(cli_name, stdout), (stderr or "").strip()]
                 detail = " | ".join(p for p in parts if p) or f"exit {rc}"
+                usage = _usage_from_stdout(stdout, model=model)
                 return job_id, False, detail[:500], _record(detail)
             try:
                 prose, usage = _extract_result(cli_name, stdout, model=model)
             except ValueError as exc:
+                usage = _usage_from_stdout(stdout, model=model)
                 return job_id, False, str(exc)[:500], _record(str(exc))
             if not prose:
                 detail = f"empty stdout from {cli_label}"
@@ -739,9 +933,9 @@ def run_headless_wave(
 
     records: list[dict[str, Any]] = []
     wave_started = time.monotonic()
-    batches = _wave_batches(jobs, concurrency, warm_first)
+    batches = _wave_batches(jobs, concurrency, use_warm_first)
     for batch_index, wave in enumerate(batches):
-        warm = warm_first and batch_index == 0 and len(batches) > 1
+        warm = use_warm_first and batch_index == 0 and len(batches) > 1
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
             futures = {pool.submit(_run_one, j, warm): j for j in wave}
             for fut in as_completed(futures):

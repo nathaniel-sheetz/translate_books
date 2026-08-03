@@ -294,6 +294,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--claude-bin", dest="claude_bin", default=None,
         help="Back-compat alias for --cli-bin (Claude profile)",
     )
+    tfp.add_argument(
+        "--effort", dest="effort", default=None,
+        choices=["low", "medium", "high", "xhigh", "default"],
+        help="Per-run Claude --effort override (default: config "
+             "headless_effort_translate, else high; 'default' emits no --effort flag)",
+    )
+    tfp.add_argument(
+        "--prompt-cache", dest="prompt_cache", default=None,
+        choices=["auto", "5m", "1h", "off"],
+        help="Per-run Claude prompt-cache TTL (default: config headless_prompt_cache / "
+             "auto). auto picks 5m|1h|off from job shapes; off disables caching",
+    )
 
     # retranslate (the redo verb) -------------------------------------------
     rtp = sub.add_parser(
@@ -359,6 +371,18 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Headless CLI binary override (default: claude or cursor-agent)")
     fnt.add_argument("--claude-bin", dest="claude_bin", default=None,
                      help="Back-compat alias for --cli-bin (Claude profile)")
+    fnt.add_argument(
+        "--effort", dest="effort", default=None,
+        choices=["low", "medium", "high", "xhigh", "default"],
+        help="Per-run Claude --effort override (default: config "
+             "headless_effort_footnotes, else high; 'default' emits no --effort flag)",
+    )
+    fnt.add_argument(
+        "--prompt-cache", dest="prompt_cache", default=None,
+        choices=["auto", "5m", "1h", "off"],
+        help="Per-run Claude prompt-cache TTL (default: config headless_prompt_cache / "
+             "auto). auto picks 5m|1h|off from job shapes; off disables caching",
+    )
     fnt.add_argument("--provider", default=None)
     fnt.add_argument("--model", default=None)
     fnt.add_argument("--retranslate", action="store_true",
@@ -439,11 +463,16 @@ def _build_parser() -> argparse.ArgumentParser:
     add_project(csp)
     csp.add_argument("--key", required=True, choices=sorted(flow._CONFIG_SET_KEYS),
                      help="Config key to set")
-    csp.add_argument("--value", required=True,
-                     choices=sorted({v for vals in flow._CONFIG_SET_KEYS.values()
-                                     for v in vals}),
-                     help="Value to persist (backend: api|subagent|headless; "
-                          "footnotes_decision: keep|drop|none)")
+    csp.add_argument(
+        "--value", required=True,
+        help="Value to persist. Per key: backend=api|subagent|headless; "
+             "footnotes_decision=keep|drop|none; headless_cli=claude|cursor; "
+             "headless_effort_{judges,annotations,translate,footnotes}="
+             "auto|default|low|medium|high|xhigh; "
+             "headless_prompt_cache=auto|5m|1h|off; "
+             "headless_extra_flags=<free text, whitespace-split into argv — "
+             "never --bare or --effort>",
+    )
 
     return parser
 
@@ -528,6 +557,8 @@ def _dispatch(args: argparse.Namespace):
             cli=args.cli,
             cli_bin=args.cli_bin,
             claude_bin=args.claude_bin,
+            effort=getattr(args, "effort", None),
+            cache=getattr(args, "prompt_cache", None),
         )
     if cmd == "retranslate":
         chunk_ids = None
@@ -553,6 +584,8 @@ def _dispatch(args: argparse.Namespace):
                 cli=getattr(args, "cli", None),
                 cli_bin=getattr(args, "cli_bin", None),
                 claude_bin=getattr(args, "claude_bin", None),
+                effort=getattr(args, "effort", None),
+                cache=getattr(args, "prompt_cache", None),
             )
         if args.action == "translate-prepare":
             return flow.footnotes_translate_prepare(args.project, retranslate=args.retranslate)

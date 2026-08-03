@@ -186,6 +186,8 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
         concurrency=args.concurrency,
         cli=args.cli,
         cli_bin=args.cli_bin,
+        effort=getattr(args, "effort", None),
+        cache=getattr(args, "prompt_cache", None),
     )
     _emit(out)
     return 1 if out.get("error") else 0
@@ -267,6 +269,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_fanout.add_argument("--cli", choices=("claude", "cursor"), default=None,
                           help="headless CLI (default: .harness/config.json headless_cli, else claude)")
     p_fanout.add_argument("--cli-bin", default=None, help="path to the CLI binary if not on PATH")
+    p_fanout.add_argument(
+        "--effort", default=None,
+        choices=["low", "medium", "high", "xhigh", "default"],
+        help="Per-run Claude --effort override (default: config "
+             "headless_effort_annotations, else medium; 'default' emits no --effort flag)",
+    )
+    p_fanout.add_argument(
+        "--prompt-cache", default=None,
+        choices=["auto", "5m", "1h", "off"],
+        help="Per-run Claude prompt-cache TTL (default: config headless_prompt_cache / "
+             "auto). auto picks 5m|1h|off from job shapes; off disables caching",
+    )
 
     p_commit = sub.add_parser("commit", help="parse drafts, write results.json + the dated report")
     p_commit.add_argument("--project", required=True, help="project id or path")

@@ -176,7 +176,8 @@ _PREPARE_SCHEMA = {
     "skipped": "annotations gated out before any LLM call: {key, type, reason, content}",
     "worker_model": "model tier to pin each spawned annotation-worker to (default sonnet)",
     "batch_size": "recommended workers per wave / default headless concurrency",
-    "usage_summary": "{targets, workers, skipped, by_type, worker_model, batch_size, estimated_api_cost}",
+    "usage_summary": "{targets, workers, skipped, by_type, worker_model, batch_size, "
+    "estimated_api_cost, headless_effort, headless_effort_source}",
     "instructions": "what to do with the manifest (spawn workers or fanout, then commit)",
 }
 
@@ -305,6 +306,11 @@ def prepare(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    from src.harness import state as hstate
+    _effort_argv, headless_effort, headless_effort_source = hstate.resolve_headless_argv(
+        hstate.load_config(project_dir), command="annotations",
+    )
+
     return {
         "status": "ok",
         "manifest": entries,
@@ -323,6 +329,8 @@ def prepare(
             "worker_model": worker_model,
             "batch_size": batch_size,
             "estimated_api_cost": round(estimated_cost, 4),
+            "headless_effort": headless_effort,
+            "headless_effort_source": headless_effort_source,
         },
         "instructions": (
             "For each manifest entry spawn one `annotation-worker` subagent pinned to "
@@ -351,6 +359,13 @@ _FANOUT_SCHEMA = {
     "cli": "headless CLI used (claude|cursor)",
     "warning": "optional non-fatal notice (e.g. Cursor paired with a Claude model alias)",
     "counts": "{wrote, failed, skipped, todo}",
+    "usage": "what the wave actually consumed: {jobs, input, output, cache_creation, "
+    "cache_read, prompt_sent, overhead, overhead_ratio, cost_equiv_usd, wall_s, "
+    "side_calls}. 'prompt_sent' is the annotation content we meant to send; 'overhead' is "
+    "billed input minus that (per-process context the jobs pay before reading a word of "
+    "the book) and 'overhead_ratio' is its share. Absent when the CLI reported no usage "
+    "(Cursor runs on --output-format text). Per-job detail goes to "
+    ".harness/annotations/usage.jsonl, never into this payload",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
 
@@ -375,6 +390,8 @@ def fanout(
     concurrency: Optional[int] = None,
     cli: Optional[str] = None,
     cli_bin: Optional[str] = None,
+    effort: Optional[str] = None,
+    cache: Optional[str] = None,
     runner=None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave over prepared entries.
@@ -385,6 +402,8 @@ def fanout(
     Cursor has no such flag so the launcher folds the preamble into stdin.
 
     ``runner`` is a test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+    ``effort`` is a per-run override of ``headless_effort_annotations``.
+    ``cache`` is a per-run override of ``headless_prompt_cache``.
     """
     from src.harness import state as hstate
     from src.harness.headless import run_headless_wave, warn_cursor_claude_model
@@ -392,6 +411,10 @@ def fanout(
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
     cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    extra_flags, resolved_effort, _effort_source = hstate.resolve_headless_argv(
+        cfg, command="annotations", effort_override=effort,
+    )
+    requested_cache = hstate.resolve_prompt_cache(cfg, cache_override=cache)
 
     manifest_path = _manifest_path(project_dir)
     if not manifest_path.exists():
@@ -549,7 +572,9 @@ def fanout(
         cli_bin=cli_bin,
         runner=runner,
         usage_log=annotations_dir(project_dir) / "usage.jsonl",
-        extra_flags=hstate.headless_extra_flags(cfg),
+        extra_flags=extra_flags,
+        effort=resolved_effort,
+        cache=requested_cache,
     )
 
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):

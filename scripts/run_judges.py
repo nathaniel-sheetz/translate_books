@@ -378,6 +378,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "print the argv, without spawning anything. Use it to make the usage gate "
         "quote the headless path rather than the API price of the path declined.",
     )
+    fp.add_argument(
+        "--effort",
+        dest="effort",
+        default=None,
+        choices=["low", "medium", "high", "xhigh", "default"],
+        help="Per-run Claude --effort override (default: config "
+        "headless_effort_judges, else medium; 'default' emits no --effort flag)",
+    )
+    fp.add_argument(
+        "--prompt-cache",
+        dest="prompt_cache",
+        default=None,
+        choices=["auto", "5m", "1h", "off"],
+        help="Per-run Claude prompt-cache TTL (default: config headless_prompt_cache / "
+        "auto). auto picks 5m|1h|off from job shapes; off disables caching",
+    )
     fp.add_argument("--verbose", action="store_true", help="Debug logging")
 
     # commit — subagent backend, phase 2 ------------------------------------
@@ -653,6 +669,8 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
         cli_bin=args.cli_bin,
         claude_bin=args.claude_bin,
         estimate=args.estimate,
+        effort=getattr(args, "effort", None),
+        cache=getattr(args, "prompt_cache", None),
     )
     payload["project"] = str(project_dir)
     _emit(payload)

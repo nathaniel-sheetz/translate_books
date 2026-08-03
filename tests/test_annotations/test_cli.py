@@ -88,6 +88,35 @@ def _prepared(project, capsys, extra=()):
     return entry
 
 
+def test_fanout_forwards_effort_and_prompt_cache(project, capsys, monkeypatch):
+    """`--effort` / `--prompt-cache` reach review.fanout as the per-run overrides.
+
+    Argparse-to-callable wiring only — the resolver itself is covered in
+    tests/test_harness_usage.py. Without this, a renamed kwarg would go unnoticed
+    until a real wave silently ran at the wrong effort.
+    """
+    seen = {}
+
+    def _capture(project_dir, **kw):
+        seen.update(kw)
+        return {"wrote": []}
+
+    monkeypatch.setattr(review, "fanout", _capture)
+
+    rc, _ = _run(
+        capsys,
+        ["fanout", "--project", str(project), "--effort", "low", "--prompt-cache", "off"],
+    )
+    assert rc == 0
+    assert seen["effort"] == "low"
+    assert seen["cache"] == "off"
+
+    # Omitted flags forward None so the book's config keys decide.
+    seen.clear()
+    _run(capsys, ["fanout", "--project", str(project)])
+    assert seen["effort"] is None and seen["cache"] is None
+
+
 def test_prepare_prints_one_json_object_with_a_schema(project, capsys):
     write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
     rc, payload = _run(capsys, ["prepare", "--project", str(project)])

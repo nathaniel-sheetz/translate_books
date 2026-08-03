@@ -28,8 +28,15 @@ go-ahead, never folded into an earlier approval. Notes are few and short.
     refuses to start on a metered login), so no `--yes`. One command runs a
     `claude -p` wave and writes the bodies back:
     ```bash
-    python scripts/harness.py footnotes translate --project projects/<slug>
+    python scripts/harness.py footnotes translate --project projects/<slug> \
+      [--effort low|medium|high|xhigh|default] [--prompt-cache auto|5m|1h|off]
     ```
+    Footnote waves run at `--effort high` by default, from their own key
+    `headless_effort_footnotes` (`config-set` to persist, `--effort` for one
+    run). Separate from the judge/annotation keys, and separate from
+    `headless_effort_translate` — notes are short, so this is the cheapest
+    place to try a lower level, but it is still book prose and still
+    unmeasured. See `docs/LLM_PROVIDERS.md`.
   - **Subagent (Task) backend** — spawn workers exactly like the chapters:
     ```bash
     python scripts/harness.py footnotes translate-prepare --project projects/<slug>

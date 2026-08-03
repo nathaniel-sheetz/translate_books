@@ -209,9 +209,11 @@ re-`prepare` is destructive — so grouping cannot be revised after the fact.
   (~37% of that job's billed input), which grouping attacks by cutting the process count.
   But the 2026-07-30 measurements found the bigger cost is on the *output* side: a default
   wave spent 23k output tokens producing a 90-token verdict, i.e. thinking, which grouping
-  does not reduce. Read `usage.overhead_ratio` **and** `usage.output` from the last wave
-  before recommending either mode — the numbers are in `.harness/judges/usage.jsonl`, so
-  this no longer has to be argued from first principles.
+  does not reduce. Both numbers come back in the `usage` rollup `fanout` returns — read
+  `usage.overhead_ratio` **and** `usage.output` from the last wave you ran before
+  recommending either mode, so this no longer has to be argued from first principles.
+  (Per-job rows land in `.harness/judges/usage.jsonl`, but the rollup is computed, not
+  stored — do not go looking for `overhead_ratio` in that file.)
 
 Then run `prepare`, passing the chosen `--targets-per-worker` (omit it for conservative).
 Add `--quiet` on the headless path — `fanout` reads the manifest from disk, so echoing it
@@ -229,6 +231,8 @@ bounds the other:**
   `estimated_prompt_tokens + workers × headless_baseline_tokens`. Name the split: how much
   is judging content and how much is per-job fixed overhead. `headless_baseline_source`
   says whether that baseline was measured on this machine or is the documented default.
+  Also relay `usage_summary.headless_effort` (the resolved `--effort` level; `null` means
+  the CLI's own default) so the user consents knowing the level, not just the token count.
 
 Do **not** relay `estimated_api_cost` as "the price, and nothing is spent" when the user is
 choosing headless. No *metered dollars* is true and enforced (headless refuses to run on a
@@ -306,11 +310,30 @@ per wave; if it cannot confirm a subscription the command returns a top-level
 After the wave, commit as below — the prepare→commit seam is unchanged
 (`committed`/`failed`/`missing`). On 529, re-run with a lower `--concurrency`.
 
-**A cheaper wave exists, and it costs recall.** `headless_extra_flags: "--effort low"`
-(harness config) cut output tokens 95% and wall time 15× in the 2026-07-30 measurements —
-and missed the only finding the default run made on a three-chunk sample. Offer it only if
-the user asks for a faster/cheaper pass and say what it trades; never switch to it silently.
-See `docs/LLM_PROVIDERS.md`.
+**Effort is a first-class knob.** Judge/annotation waves default to `--effort medium`
+under `headless_effort_judges: auto` (2026-07-31: output −66%, wall −66%, cost −55%,
+quality confirmed by hand). The ladder, cheapest first:
+
+| level | measured trade |
+|---|---|
+| `low` | output −95%, wall −93%; *missed the only finding* on a 3-chunk sample (2026-07-30) |
+| `medium` | output −66%, wall −66%, cost −55%; quality OK on the measured wave; **recall still uncontrolled** |
+| CLI default / `high` / `xhigh` | full effort — use when you need maximum recall |
+
+```bash
+# Judge waves on this book (persists):
+python scripts/harness.py config-set --project <slug> --key headless_effort_judges --value low
+# Per-run (does not persist):
+python scripts/run_judges.py fanout --project <slug> --effort low
+```
+
+`headless_effort_judges` moves judge waves only. Translation and footnotes read
+`headless_effort_translate` / `headless_effort_footnotes` and are untouched by
+anything you set here — never offer a cheaper judge pass as though it also made
+the book cheaper to translate.
+
+Offer a cheaper level only when the user asks for a faster/cheaper pass, and say what it
+trades; **never switch silently**. See `docs/LLM_PROVIDERS.md`.
 
 **Relay `usage` after every wave.** `fanout` now reports what the wave actually consumed:
 `input`/`output`, the `cache_creation` vs `cache_read` split, `prompt_sent` (the judging
@@ -374,6 +397,13 @@ whether a swap would damage the text — not structural, so "this fix merges two
 will surely be withheld" is wrong: a paragraph merge is still a literal, uniquely-locatable
 swap. Dialogue findings in particular come back close to 100% `applicable`. Read the actual
 plan before telling the user what it will say.
+
+**`applicable` ≠ correct.** `applicable` means *mechanically safe to splice* (unique location,
+literal swap, no structural damage the guards catch) — not that the suggestion is the right
+fix. The 2026-07-31 stormy-misty dialogue wave was 100% applicable and 78% correct: two of
+nine `applicable` fixes were semantically wrong (one deleted source content; one proposed a
+fresh dialogue-rule violation). Always skim `old → new` against the source and the rulebook
+before presenting the plan as a quality guarantee.
 ```bash
 python scripts/run_judges.py apply --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03 --dry-run
@@ -399,13 +429,25 @@ The *mechanical* hazards are the CLI's job now, and it withholds them: placehold
 instruction-shaped suggestions, ones that restate adjacent prose, elide with `...`, swing far in
 length, unbalance the paragraph's rayas, or normalize a register the rest of the chunk still uses
 (see the reasons in 6c). Don't re-derive those by hand. What no guard can decide is **semantic**, so
-these two veto a fix the CLI classified applicable:
+these veto a fix the CLI classified applicable:
+
+**Address judge:**
 - **Is the direction right?** Check the fix against `address_map.json` yourself. A blanket clause
   ("tú among peers") can swallow a relationship the map names specifically — two non-intimate adults
   use usted in both directions, and a character the map calls ceremonious keeps usted even with a
   child. The judge reads those as violations; they are not.
 - **Is the fix complete?** A speech that mixes registers, where the judge flagged only one clause,
   leaves a half-corrected line if applied. Read the whole turn, not the `old → new` pair.
+
+**Dialogue judge:**
+- **Does the suggestion delete content that is in the source?** Read `source_text`, not just
+  `translated_text`. A 2026-07-31 fix (`chapter_03_chunk_000#0`) merged two paragraphs by deleting
+  the inciso `—continuó, secándose la cara—`, which renders "as he mopped his face". `new` was 89%
+  of `old`'s length, so no length guard could ever have caught it.
+- **Does the suggestion itself obey `prompts/dialogue.txt`?** Check the rewrite against the
+  rulebook, especially rule 25's capitalization for a non-speech inciso between two complete
+  sentences. The same wave proposed `—la voz del abuelo retumbó—` (`retumbar` is not in rule 20's
+  speech-verb list, so rule 25 demands `La`) while *enforcing* rule 25 twice on another chapter.
 
 8c. **Apply the picked ids.** Pass them comma-separated; add `--rebuild-epub` if the user wants
 the book rebuilt now (that path recombines + realigns; use `--no-realign` to defer the tail):

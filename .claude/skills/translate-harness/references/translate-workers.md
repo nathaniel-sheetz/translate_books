@@ -167,20 +167,34 @@ fan out every still-undrafted manifest entry (all-parallel batches):
 ```bash
 python scripts/harness.py translate-fanout --project projects/<slug> \
   [--chunk-ids <id1,id2,...>] [--concurrency <batch_size>] \
-  [--cli {claude,cursor}] [--cli-bin <bin>]
+  [--cli {claude,cursor}] [--cli-bin <bin>] \
+  [--effort low|medium|high|xhigh|default] [--prompt-cache auto|5m|1h|off]
 ```
 Persist the CLI family once per book (optional; default `claude`):
 ```bash
 python scripts/harness.py config-set --project projects/<slug> \
   --key headless_cli --value cursor
 ```
+
+**Effort (Claude only).** Translate waves run at `--effort high` by default —
+the band `claude -p` already used, now named so it shows up in argv, the usage
+rows and `status`. Persist a different level for this book's translate waves
+with `config-set --key headless_effort_translate --value <level>`, or pass
+`--effort` for one run. It is a **separate key from the judge/annotation
+waves** (`headless_effort_judges` / `_annotations`, which default to `medium`):
+a cheaper judge pass is a cheaper review of prose that already exists, while a
+cheaper translate pass changes the prose itself. Reduced effort on literary
+prose is **unmeasured** — the measured `low`/`medium` numbers in
+`docs/LLM_PROVIDERS.md` are judge-wave data and do not transfer. Never lower
+this silently; if the user wants a cheaper run, say what is untested about it.
 Pin a Cursor model id at prepare time (manifest `worker_model`), e.g.
 `translate-prepare --worker-model grok-4.5` or `--worker-model auto`. Or pass
 `--cli cursor` on the fan-out itself (worker model still comes from the manifest).
 
 **Claude profile (default):** each process is effectively
 `claude -p` with the body (or full prompt) on stdin, optional `--system-prompt-file <preamble_path>`,
-`--model <worker_model>`, `--tools ""`, `--output-format text` → `draft_path`. The system-prompt
+`--model <worker_model>`, `--tools ""`, `--output-format json` (the envelope is unwrapped, and
+carries the usage the wave reports) → `draft_path`. The system-prompt
 split is used only when `preamble + body` still equals `prompt.txt`; otherwise fan-out falls back
 to the full prompt (no cache).
 
