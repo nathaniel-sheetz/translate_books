@@ -65,8 +65,24 @@ run header records `backend` (`"api"` | `"subagent"`) and, for the subagent path
 API path can retry while the subagent `commit` marks the draft failed for re-spawn.
 
 Subagent files live under `<project>/.harness/judges/` (`<target>.<judge>.prompt.txt`,
-`.draft.json`, `manifest.json`). The `judge-worker` agent is
+`.draft.json`, `manifest.json`, `usage.jsonl`). The `judge-worker` agent is
 `.claude/agents/judge-worker.md` (Read+Write only, `model: sonnet`).
+
+### What a headless wave cost
+
+`fanout` returns a `usage` rollup — `input`/`output`, `cache_creation` vs
+`cache_read`, `prompt_sent` (the judging content) and `overhead` /
+`overhead_ratio` (everything billed beyond it, i.e. the context each child
+process loads before reading anything). Per-job rows go to
+`.harness/judges/usage.jsonl` and stay out of the orchestrator's context.
+
+This is `src/harness/usage.py`, shared by all four fan-outs and deliberately
+isolated so it can be removed in one commit. It exists because the numbers were
+being computed and discarded: the launcher asked for `--output-format text`, and
+a 2026-07-30 wave paid a large fixed per-process cost that nothing could report.
+`prepare`'s `usage_summary` uses the same log to self-calibrate
+`estimated_headless_tokens`, so the usage gate quotes the backend being chosen
+rather than the API price of the one declined.
 
 ## Layout
 
@@ -88,7 +104,9 @@ scripts/run_judges.py
 ## CLI
 
 Three subcommands: `run` (API backend), `prepare` + `commit` (subagent backend).
-Each prints one JSON object with a `_schema` block.
+Each prints exactly one JSON object. Pass `--schema` for the block documenting
+every output key — it is opt-in on success (`apply`'s alone is ~910 tokens, and
+it used to be re-sent on every call) and automatic on any error.
 
 ```bash
 # API backend — single judge over a chapter (cost dry-run; refuses to spend over $0.50)

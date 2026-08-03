@@ -21,8 +21,144 @@ python scripts/harness.py translate-prepare --project projects/<slug> --worker-m
 There is **no** `CURSOR_API_KEY` path for the harness — subscription login only,
 mirroring how `claude -p` uses the Claude subscription. Install the Cursor CLI
 separately (`https://cursor.com/install`) and run `cursor-agent login` once.
-Token/cost metering is unavailable on this path (same as existing `claude -p`
-headless). See `references/translate-workers.md` and `judge-review/SKILL.md`.
+See `references/translate-workers.md` and `judge-review/SKILL.md`.
+
+### Wave telemetry (Claude profile)
+
+Every `fanout` returns a `usage` rollup — `input`/`output`, the `cache_creation`
+vs `cache_read` split, `prompt_sent` (the content we meant to send) and
+`overhead` / `overhead_ratio` (the per-process context each job pays before
+reading anything). Per-job rows are appended to
+`.harness/{judges,translate,footnotes,annotations}/usage.jsonl`, which stays on
+disk rather than entering an agent's context.
+
+This exists because the numbers were being computed and thrown away: the
+launcher asked for `--output-format text`, which discards the `usage` block, so a
+2026-07-30 judge wave spent ~56% of its input tokens on fixed per-process
+overhead with nothing able to report it. The Claude profile now asks for `json`
+and unwraps the envelope; anything that is not an envelope still passes through
+as prose, so a CLI that ignores the flag degrades to the old behavior.
+
+**Cursor stays on `--output-format text`**, so Cursor waves report no `usage` —
+its envelope keys are unverified and guessing at them would produce confident
+wrong numbers. `headless_extra_flags` / `headless_effort_<type>` (config) are
+likewise Claude-only.
+
+#### `headless_effort_<type>`
+
+Named Claude `--effort` level for headless waves — **one key per wave type**:
+
+| key | wave |
+|---|---|
+| `headless_effort_judges` | `run_judges.py fanout` |
+| `headless_effort_annotations` | `review_annotations.py fanout` |
+| `headless_effort_translate` | `harness.py translate-fanout` |
+| `headless_effort_footnotes` | `harness.py footnotes translate` |
+
+Effort is deliberately *not* a book-wide setting. Dropping a judge wave to `low`
+buys a faster, cheaper review of prose that already exists; dropping a translate
+wave to `low` changes the prose itself. A single knob would have made the second
+a silent side effect of the first, so each wave type reads only its own key.
+
+Values, same for every key: `auto` (default) | `default` | `low` | `medium` |
+`high` | `xhigh`.
+
+- **`auto`** defers to the per-type table in `state.COMMAND_EFFORT_DEFAULTS`:
+  **judges** and **annotations** → `medium`; **translate** and **footnotes** →
+  `high`. Medium is measured only on judge waves — literary prose at reduced
+  effort is untested, so the prose types name the band the CLI was already using
+  rather than a cheaper one.
+- **`default`** means emit no `--effort` at all (whatever the CLI does natively).
+- Any level pins that one wave type.
+
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+    --key headless_effort_judges --value medium
+```
+
+Per-run override (does not persist): `--effort low|medium|high|xhigh|default` on
+`run_judges.py fanout`, `review_annotations.py fanout`, `harness.py translate-fanout`,
+and `harness.py footnotes translate`. Omitting the flag defers to the book's key,
+so `auto` is a config value only and is not accepted on the command line.
+
+Resolution order for a wave, highest first: per-run `--effort` → that type's
+config key (when not `auto`) → the per-type table. A mistyped value falls through
+to the next tier rather than taking the wave down.
+
+Measured arms (dialogue judge, Sonnet):
+
+| level | effect |
+|---|---|
+| `low` (2026-07-30, 3-chunk sample) | output **−95%**, wall **−93%** — *and it missed the only finding the default run made.* A real cost/recall trade, not a free win. |
+| `medium` (2026-07-31, 4-chunk wave) | output **−66%**, wall **−66%**, cost **−55%**, quality confirmed by hand (9 findings incl. the wave's only `error`). **Recall is still uncontrolled** — that run judged different chapters than the baseline; the ~$1 recall sweep over ch 16/12/8/7 is still owed. Default for judge/annotation waves under `auto`. |
+
+`status` echoes a `headless_effort` block carrying the raw `config` value and the
+`resolved` level for each of the four types; `prepare`'s `usage_summary` and
+`fanout --estimate` surface `effort` / `effort_source` before any spawn.
+
+#### `headless_prompt_cache`
+
+Claude prompt-cache TTL for headless waves. The CLI's default is a **1-hour**
+ephemeral TTL billed at **2×** base input; every wave in this repo finishes in
+seconds-to-minutes, so that premium is usually wasted. Values:
+
+| mode | env | write rate | when |
+|---|---|---|---|
+| `auto` (default) | resolved below | — | pick `5m` / `1h` / `off` from job shapes |
+| `5m` | `FORCE_PROMPT_CACHING_5M=1` | **1.25×** | shared prefix dominates (annotations, translate) |
+| `1h` | *(CLI default)* | **2×** | slow warm-up (>~270 s) would expire a 5-minute entry |
+| `off` | `DISABLE_PROMPT_CACHING=1` | **1×** (no reads) | single-entry waves, or bodies far larger than the shared prefix |
+
+Cache *reads* still bill at **0.1×** under `5m` and `1h`. `auto` compares the
+plain-input-equivalent wave totals directly (grouping jobs by
+`--system-prompt-file` so a mixed dialogue+address wave is priced honestly) and
+only keeps `1h` when prior successful jobs in `.harness/*/usage.jsonl` show a
+median wall time over ~270 s — otherwise a 5-minute entry written by the
+warm-up can expire before any follower reads it. An account in overage is
+silently downgraded to the 5-minute TTL by the CLI, so usage JSONL rows record
+the *requested* mode and are only comparable within the same account state.
+
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+    --key headless_prompt_cache --value 5m
+```
+
+Per-run override: `--prompt-cache auto|5m|1h|off` on `run_judges.py fanout`,
+`review_annotations.py fanout`, `harness.py translate-fanout`, and
+`harness.py footnotes translate`. Cursor ignores the knob and records
+`cache=null`. `run_judges.py fanout --estimate` (the only fan-out with
+`--estimate`) surfaces the resolved mode and prices `projected_tokens` under it.
+
+Measured rates (Sonnet, subscription login, 2026-08-01 probe):
+
+| TTL | `cache_creation` rate | `cache_read` rate |
+|---|---|---|
+| 1-hour (CLI default) | $6.00/MTok = 2× input | $0.30/MTok = 0.1× |
+| 5-minute | $3.75/MTok = 1.25× input | $0.30/MTok = 0.1× |
+| off | plain input ($3.00/MTok) | none |
+
+#### `headless_extra_flags`
+
+Free-text argv appended to every `claude -p` job (Claude-only), recorded on each
+usage row so a wave is self-describing. Takes a list or a whitespace-separated
+string.
+
+`config-set` rejects two tokens here, closed: `--bare` (see above) and
+`--effort`. This key applies to every wave type at once and so cannot express an
+effort level — use `headless_effort_<type>`, or `--effort` for a single run. A
+stray `--effort` hand-edited into `config.json` is discarded by the resolver, not
+honored, so argv can never carry two `--effort` pairs.
+
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+    --key headless_extra_flags --value "--strict-mcp-config"
+```
+
+| flags | effect |
+|---|---|
+| `--strict-mcp-config`, `--safe-mode` | **no measurable effect.** `--tools ""` already keeps MCP definitions out of the job's system prompt. |
+| `--bare` | **never** — `config-set` rejects it. Auth becomes strictly `ANTHROPIC_API_KEY`/`apiKeyHelper` — "OAuth and keychain are never read" — defeating the subscription preflight. |
+| `--max-turns` | does not exist in CLI 2.1.220. |
 
 Metered dashboard / API translation still uses the providers below.
 

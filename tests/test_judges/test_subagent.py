@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from src.harness import usage
 from src.judges import llm_io, subagent
 from src.judges.base import JudgeTarget
 from src.judges.dialogue_judge import DialogueComplianceJudge
@@ -719,7 +720,7 @@ def test_fanout_writes_drafts_via_runner_seam(tmp_path):
         assert input_text == Path(entry["body_path"]).read_text(encoding="utf-8")
         assert Path(cwd).name == "claude-headless-empty"
         assert "--tools" in cmd
-        assert "text" in cmd
+        assert cmd[cmd.index("--output-format") + 1] == "json"
         return 0, _GOOD_VERDICT, ""
 
     out = subagent.fanout(project, runner=fake_runner)
@@ -792,3 +793,152 @@ def test_fanout_cursor_warns_on_claude_worker_model(tmp_path, capsys):
     assert "headless_cli=cursor" in fan["warning"]
     err = capsys.readouterr().err
     assert "headless_cli=cursor" in err
+
+
+# ---------------------------------------------------------------------------
+# The usage gate (2026-07-30 friction log, items 0 + 1)
+#
+# `estimated_api_cost` priced the API backend while the user approved the
+# headless one, which consumed ~2.4x the tokens. Both figures are reported now,
+# and the headless one self-calibrates off the measured per-job overhead.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_reports_headless_tokens_beside_the_api_price(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    summary = out["usage_summary"]
+
+    assert summary["estimated_prompt_tokens"] > 0
+    # Untouched machine: the documented baseline probe, not a silent zero.
+    assert summary["headless_baseline_tokens"] == usage.DEFAULT_BASELINE_TOKENS
+    assert summary["headless_baseline_source"].startswith("default:")
+    assert summary["estimated_headless_tokens"] == (
+        summary["estimated_prompt_tokens"]
+        + summary["workers"] * usage.DEFAULT_BASELINE_TOKENS
+    )
+    # The API figure is still there — it just no longer stands alone.
+    assert "estimated_api_cost" in summary
+    # Effort is visible at the usage gate, not only after a wave.
+    assert summary["headless_effort"] == "medium"
+    assert summary["headless_effort_source"] == "default:judges"
+
+
+def test_prepare_baseline_self_calibrates_from_the_usage_log(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    log = subagent.usage_log_path(project)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    row = json.dumps(
+        {"input": 0, "cache_creation": 4200, "cache_read": 0, "prompt_sent": 0, "rc": 0}
+    )
+    log.write_text((row + "\n") * 4, encoding="utf-8")
+
+    summary = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")["usage_summary"]
+    assert summary["headless_baseline_tokens"] == 4200
+    assert summary["headless_baseline_source"].startswith("measured:")
+
+
+def test_fanout_estimate_spawns_nothing(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    def exploding_runner(*args, **kwargs):
+        raise AssertionError("--estimate must not spawn")
+
+    out = subagent.fanout(project, estimate=True, runner=exploding_runner)
+    assert out["wrote"] == []
+    assert out["estimate"]["jobs"] == 1
+    assert out["estimate"]["projected_tokens"] == (
+        out["estimate"]["prompt_tokens"] + usage.DEFAULT_BASELINE_TOKENS
+    )
+    # The argv is included so a bad headless_extra_flags entry is visible before
+    # a wave commits to it, not after N jobs have failed.
+    assert "--output-format" in out["estimate"]["argv"]
+    # Auto default for judges is medium — exactly one --effort, plus the fields.
+    assert out["estimate"]["effort"] == "medium"
+    assert out["estimate"]["effort_source"] == "default:judges"
+    argv = out["estimate"]["argv"]
+    assert argv.count("--effort") == 1
+    assert "--effort" in argv and argv[argv.index("--effort") + 1] == "medium"
+    # Solo dialogue entry: N=1 → auto picks off (1.0× beats 1.25× with no followers).
+    assert out["estimate"]["cache"] == "off"
+    # And no draft was written.
+    draft = json.loads((subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
+    assert not Path(draft["entries"][0]["draft_path"]).exists()
+
+
+def test_fanout_estimate_cli_effort_override(tmp_path):
+    """--effort on fanout flips the estimate without touching config."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    out = subagent.fanout(
+        project, estimate=True, effort="low",
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert out["estimate"]["effort"] == "low"
+    assert out["estimate"]["effort_source"] == "cli"
+    argv = out["estimate"]["argv"]
+    assert argv.count("--effort") == 1
+    assert argv[argv.index("--effort") + 1] == "low"
+
+
+def test_fanout_estimate_reports_resolved_cache_mode(tmp_path):
+    """--estimate prices the projection under the resolved prompt-cache mode."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    out = subagent.fanout(
+        project, estimate=True, cache="off",
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert out["estimate"]["cache"] == "off"
+    # off = prompt + N*baseline (same as the pre-cache formula for a single job).
+    assert out["estimate"]["projected_tokens"] == (
+        out["estimate"]["prompt_tokens"] + out["estimate"]["baseline_tokens"]
+    )
+
+    pinned = subagent.fanout(
+        project, estimate=True, cache="1h",
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert pinned["estimate"]["cache"] == "1h"
+    # 1h writes at 2×, so a single-job wave costs 2*(P+U) > off's (P+U).
+    assert pinned["estimate"]["projected_tokens"] > out["estimate"]["projected_tokens"]
+
+def test_fanout_records_usage_and_writes_the_job_log(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    envelope = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": _GOOD_VERDICT, "total_cost_usd": 0.02,
+        "usage": {"input_tokens": 3, "output_tokens": 40,
+                  "cache_creation_input_tokens": 5778, "cache_read_input_tokens": 3289},
+    })
+
+    out = subagent.fanout(project, runner=lambda *a, **k: (0, envelope, ""))
+    assert out["counts"]["wrote"] == 1
+    assert out["usage"]["cache_creation"] == 5778
+    assert 0 < out["usage"]["overhead_ratio"] < 1
+
+    rows = subagent.usage_log_path(project).read_text(encoding="utf-8").strip().splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["id"] == cid
+
+    # The draft is the verdict, not the envelope — commit must still parse it.
+    committed = subagent.commit(project)
+    assert committed["counts"]["committed"] == 1
+
+
+def test_commit_drops_the_unattributable_evaluator_results_array(tmp_path):
+    """N same-named entries with no target_id could never be used for reporting."""
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    Path(out["manifest"][0]["draft_path"]).write_text(_GOOD_VERDICT, encoding="utf-8")
+
+    committed = subagent.commit(project, persist=True)
+    assert "evaluator_results" not in committed["summary"]
+    assert committed["summary"]["total_issues"] >= 1  # the usable numbers stay
+    # Paths collapse to one directory plus basenames.
+    assert committed["persisted"] == [f"{cid}.json"]
+    assert committed["persisted_dir"].endswith("evaluations")

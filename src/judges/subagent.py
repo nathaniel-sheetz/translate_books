@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.evaluators import aggregate_results
+from src.harness.usage import approx_tokens, baseline_tokens
 from src.judges.base import Judge, JudgeTarget
 from src.judges.llm_io import JudgeParseError, parse_judge_json
 from src.judges.registry import get_judge
@@ -168,13 +169,24 @@ _PREPARE_SCHEMA = {
     "cache}. Grouped (targets-per-worker > 1): "
     "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count}]} "
     "(no preamble/body — cache is solo-only)",
+    "manifest_entries": "--quiet only: entry count, replacing the 'manifest' echo "
+    "(fanout reads the manifest from disk, so echoing it here is duplication)",
     "manifest_path": "path to the written manifest.json (commit reads this)",
     "scopes": "the list of --scope values resolved into this one manifest",
     "judges": "judge names rendered",
     "worker_model": "model tier to pin each spawned judge-worker to (default sonnet)",
     "batch_size": "recommended workers to spawn per wave",
     "usage_summary": "{pairs, targets, workers, targets_per_worker, source_words, worker_model, "
-    "batch_size, estimated_api_cost}",
+    "batch_size, estimated_api_cost, estimated_prompt_tokens, headless_baseline_tokens, "
+    "headless_baseline_source, estimated_headless_tokens, headless_effort, "
+    "headless_effort_source}. The two estimates price DIFFERENT "
+    "backends and neither bounds the other: 'estimated_api_cost' is USD **if you choose the API "
+    "backend** and says nothing about the headless path, which on the 2026-07-30 measurement "
+    "consumed ~2.4x the tokens. 'estimated_headless_tokens' is the subscription cost of the "
+    "headless path = prompt tokens + workers x per-job fixed overhead; that overhead is real "
+    "context every process pays before reading a word of the book. 'headless_effort' is the "
+    "resolved --effort level the wave will run at (null = CLI default). Relay the one matching the "
+    "backend the user is choosing",
     "instructions": "what to do with the manifest (spawn workers, then commit)",
 }
 
@@ -188,6 +200,17 @@ _FANOUT_SCHEMA = {
     "cli": "headless CLI used (claude|cursor)",
     "warning": "optional non-fatal notice (e.g. Cursor Claude-model alias)",
     "counts": "{wrote, failed, skipped, todo}",
+    "usage": "what the wave actually consumed: {jobs, input, output, cache_creation, "
+    "cache_read, prompt_sent, overhead, overhead_ratio, cost_equiv_usd, wall_s, "
+    "side_calls}. 'prompt_sent' is the judging content we meant to send; 'overhead' is "
+    "billed input minus that (per-process context the jobs pay before reading a word of "
+    "the book) and 'overhead_ratio' is its share. Absent when the CLI reported no usage "
+    "(Cursor runs on --output-format text). Per-job detail goes to "
+    ".harness/judges/usage.jsonl, never into this payload",
+    "estimate": "--estimate only: {jobs, prompt_tokens, baseline_tokens, baseline_source, "
+    "projected_tokens, argv, effort, effort_source, cache} — projected, nothing spawned. "
+    "'cache' is the resolved prompt-cache mode (5m|1h|off; null on Cursor); "
+    "projected_tokens is priced under that mode",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
 
@@ -197,10 +220,16 @@ _COMMIT_SCHEMA = {
     "failed": "list of {target_id, judge, problem} — re-spawn these (capped ~3x)",
     "missing": "list of {target_id, judge} whose draft file was absent — re-spawn",
     "counts": "{committed, failed, missing}",
-    "summary": "aggregate_results() rollup across committed results",
+    "summary": "aggregate_results() rollup across committed results. Note "
+    "'issues_by_evaluator' is keyed by JUDGE name, so in a multi-target run it reports one "
+    "entry per judge, not per target — use results[] for per-target counts. The parallel "
+    "'evaluator_results' array is omitted here: it carries no target_id, so N same-named "
+    "entries could not be attributed and results[] already has everything in it",
     "run_header": "reproducibility metadata: judge versions, prompt hashes, backend=subagent, worker_model, git_commit",
     "results": "per committed (target, judge): serialized EvalResult",
-    "persisted": "evaluations/*.json paths written when --persist is set, else null",
+    "persisted_dir": "directory the --persist files were written to, else null",
+    "persisted": "evaluations/*.json FILENAMES (join with persisted_dir) written when "
+    "--persist is set, else null",
     "persist_errors": "list of '<target>/<judge>: <error>' strings for failed persists, else null",
 }
 
@@ -287,12 +316,15 @@ def prepare(
     judge_instances = {name: get_judge(name) for name in judge_names}
 
     def _write_prompt(prompt: str, prompt_path: Path, draft_path: Path) -> None:
+        nonlocal total_prompt_tokens
+        total_prompt_tokens += approx_tokens(prompt)
         prompt_path.write_text(prompt, encoding="utf-8")
         if not keep_drafts:
             draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
 
     entries: list[dict[str, Any]] = []
     total_words = 0
+    total_prompt_tokens = 0  # what a worker actually receives, solo or grouped
     total_pairs = 0  # (target, judge) pairs — the batch-invariant unit of work
     batch_seq = 0
     # Per-judge shared preamble established by the first solo entry that splits.
@@ -368,6 +400,17 @@ def prepare(
                 )
 
     estimated_api_cost = estimate_suite_cost(judge_names, targets, context)
+    # The other half of the gate. `estimated_api_cost` prices the API backend; on
+    # the headless path what binds is subscription tokens, and the dominant term
+    # is not the prompt but the fixed context every child process loads before it
+    # reads anything (~9.1k tokens in the 2026-07-30 baseline probe — ~56% of that
+    # wave). Quoting only the API figure understated the chosen path ~2.4x at the
+    # exact moment consent was given.
+    baseline, baseline_source = baseline_tokens(usage_log_path(project_dir))
+    from src.harness import state as hstate
+    _effort_argv, headless_effort, headless_effort_source = hstate.resolve_headless_argv(
+        hstate.load_config(project_dir), command="judges",
+    )
 
     manifest_doc = {
         "scopes": scope_list,
@@ -401,6 +444,12 @@ def prepare(
             "worker_model": worker_model,
             "batch_size": batch_size,
             "estimated_api_cost": estimated_api_cost,
+            "estimated_prompt_tokens": total_prompt_tokens,
+            "headless_baseline_tokens": baseline,
+            "headless_baseline_source": baseline_source,
+            "estimated_headless_tokens": total_prompt_tokens + len(entries) * baseline,
+            "headless_effort": headless_effort,
+            "headless_effort_source": headless_effort_source,
         },
         "instructions": (
             "For each manifest entry (one target, or a small group of low-density "
@@ -433,6 +482,11 @@ def _read_draft_text(path: Path) -> str | None:
         return None
 
 
+def usage_log_path(project_dir: Path) -> Path:
+    """Where per-job headless telemetry accumulates for this project's judges."""
+    return _judges_dir(Path(project_dir)) / "usage.jsonl"
+
+
 def fanout(
     project_dir: Path,
     *,
@@ -441,6 +495,9 @@ def fanout(
     cli: str | None = None,
     cli_bin: str | None = None,
     claude_bin: str | None = None,
+    estimate: bool = False,
+    effort: str | None = None,
+    cache: str | None = None,
     runner=None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave for judge-prepare manifest entries.
@@ -459,13 +516,31 @@ def fanout(
     the wave. ``runner`` is a test seam:
     ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
     ``claude_bin`` is a back-compat alias for ``cli_bin``.
+
+    ``estimate=True`` renders the argv and projects the token cost from the
+    measured per-job baseline, then returns without spawning anything — so the
+    usage gate can quote the path being taken rather than the API price of the
+    path that was declined. ``effort`` is a per-run override of
+    ``headless_effort_judges`` (see :func:`~src.harness.state.resolve_headless_argv`).
+    ``cache`` is a per-run override of ``headless_prompt_cache``.
     """
-    from src.harness.headless import run_headless_wave, warn_cursor_claude_model
+    from src.harness.headless import (
+        _build_cmd,
+        effective_wave_tokens,
+        resolve_cache_mode,
+        run_headless_wave,
+        warn_cursor_claude_model,
+    )
     from src.harness import state as hstate
+    from src.harness.usage import median_wall_s
 
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
     cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    extra_flags, resolved_effort, effort_source = hstate.resolve_headless_argv(
+        cfg, command="judges", effort_override=effort,
+    )
+    requested_cache = hstate.resolve_prompt_cache(cfg, cache_override=cache)
     jdir = _judges_dir(project_dir)
     manifest_path = jdir / "manifest.json"
     if not manifest_path.exists():
@@ -603,6 +678,82 @@ def fanout(
             out["warning"] = model_warning
         return out
 
+    if estimate:
+        log_path = usage_log_path(project_dir)
+        baseline, baseline_source = baseline_tokens(log_path)
+        spf_tokens: dict[str, int] = {}
+        prompt_tokens = 0
+        for job in ready:
+            body_tok = approx_tokens(job["input_text"])
+            spf = job.get("system_prompt_file")
+            spf_tok = 0
+            if spf:
+                if spf not in spf_tokens:
+                    try:
+                        spf_tokens[spf] = approx_tokens(
+                            Path(spf).read_text(encoding="utf-8")
+                        )
+                    except (OSError, UnicodeDecodeError):
+                        spf_tokens[spf] = 0
+                spf_tok = spf_tokens[spf]
+            prompt_tokens += body_tok + spf_tok
+        if cli_name == "claude":
+            if requested_cache == "auto":
+                resolved_cache = resolve_cache_mode(
+                    ready, spf_tokens, baseline, median_wall_s(log_path)
+                )
+            else:
+                resolved_cache = requested_cache
+            projected = effective_wave_tokens(
+                ready, spf_tokens, baseline, resolved_cache
+            )
+            cache_for_estimate: str | None = resolved_cache
+        else:
+            projected = prompt_tokens + len(ready) * baseline
+            cache_for_estimate = None
+        est_out = {
+            "wrote": [],
+            "failed": list(pre_failed),
+            "skipped": skipped,
+            "worker_model": worker_model,
+            "cli": cli_name,
+            "concurrency": concurrency,
+            "cwd": None,
+            "counts": {
+                "wrote": 0,
+                "failed": len(pre_failed),
+                "skipped": len(skipped),
+                "todo": len(ready),
+            },
+            "estimate": {
+                "jobs": len(ready),
+                "prompt_tokens": prompt_tokens,
+                "baseline_tokens": baseline,
+                "baseline_source": baseline_source,
+                "projected_tokens": projected,
+                # The argv is here so a bad --headless-extra-flags entry is
+                # visible before a wave commits to it, not after N jobs fail.
+                "argv": _build_cmd(
+                    cli_name if cli_name in ("claude", "cursor") else "claude",
+                    cli_bin or claude_bin or cli_name,
+                    worker_model,
+                    ready[0].get("system_prompt_file") if ready else None,
+                    extra_flags=extra_flags,
+                ),
+                "effort": resolved_effort,
+                "effort_source": effort_source,
+                "cache": cache_for_estimate,
+            },
+            "instructions": (
+                "Projection only — nothing was spawned. Re-run `fanout` without "
+                "--estimate to run the wave."
+            ),
+            "_schema": _FANOUT_SCHEMA,
+        }
+        if model_warning:
+            est_out["warning"] = model_warning
+        return est_out
+
     wave_out = run_headless_wave(
         ready,
         model=worker_model,
@@ -611,6 +762,10 @@ def fanout(
         cli_bin=cli_bin,
         claude_bin=claude_bin,
         runner=runner,
+        usage_log=usage_log_path(project_dir),
+        extra_flags=extra_flags,
+        effort=resolved_effort,
+        cache=requested_cache,
     )
 
     if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):
@@ -662,6 +817,8 @@ def fanout(
         ),
         "_schema": _FANOUT_SCHEMA,
     }
+    if wave_out.get("usage"):
+        out["usage"] = wave_out["usage"]
     if model_warning:
         out["warning"] = model_warning
     return out
@@ -873,6 +1030,17 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
         worker_model=worker_model,
     )
 
+    # `evaluator_results` is one entry per (target, judge) with no target_id on
+    # it, so eight parallel `{"name": "dialogue", "score": …}` rows cannot be
+    # attributed to anything — unusable for reporting, and `results[]` already
+    # carries the same numbers keyed by target. Dropped from the payload rather
+    # than from `aggregate_results`, which the evaluator reporting stack shares.
+    summary = aggregate_results(results)
+    summary.pop("evaluator_results", None)
+
+    # One directory plus basenames, not N absolute paths that share a long prefix.
+    persisted_dir = str(project_dir / "evaluations") if persist else None
+
     return {
         "status": "ok",
         "committed": committed,
@@ -883,10 +1051,11 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
             "failed": len(failed),
             "missing": len(missing),
         },
-        "summary": aggregate_results(results),
+        "summary": summary,
         "run_header": run_header,
         "results": [r.model_dump(mode="json") for r in results],
-        "persisted": persisted,
+        "persisted_dir": persisted_dir,
+        "persisted": [Path(p).name for p in persisted] if persisted is not None else None,
         "persist_errors": persist_errors,
         "_schema": _COMMIT_SCHEMA,
     }

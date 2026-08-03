@@ -1701,6 +1701,8 @@ def translate_fanout(
     cli: str | None = None,
     cli_bin: str | None = None,
     claude_bin: str | None = None,
+    effort: str | None = None,
+    cache: str | None = None,
     runner=None,
 ) -> dict:
     """Run one headless CLI wave for translate-prepare manifest entries.
@@ -1724,12 +1726,18 @@ def translate_fanout(
     sequential re-prepare loops pass only the current wave). ``runner`` is a
     test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
     ``claude_bin`` is a back-compat alias for ``cli_bin``.
+    ``effort`` is a per-run override of ``headless_effort_translate``;
+    ``cache`` a per-run override of ``headless_prompt_cache``.
     """
     from src.harness.headless import run_headless_wave
 
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
     cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    extra_flags, resolved_effort, _effort_source = state.resolve_headless_argv(
+        cfg, command="translate", effort_override=effort,
+    )
+    requested_cache = state.resolve_prompt_cache(cfg, cache_override=cache)
     hdir = state.harness_dir(project_dir)
     manifest_path = hdir / "translate" / "manifest.json"
     if not manifest_path.exists():
@@ -1847,6 +1855,10 @@ def translate_fanout(
         cli_bin=cli_bin,
         claude_bin=claude_bin,
         runner=runner,
+        usage_log=hdir / "translate" / "usage.jsonl",
+        extra_flags=extra_flags,
+        effort=resolved_effort,
+        cache=requested_cache,
     )
 
     # Fail-fast when the CLI binary is missing (no jobs ran).
@@ -1894,6 +1906,8 @@ def translate_fanout(
             "Nothing to fan out — no matching manifest entries."
         ),
     }
+    if wave_out.get("usage"):
+        out["usage"] = wave_out["usage"]
     if model_warning:
         out["warning"] = model_warning
     return out
@@ -2812,6 +2826,8 @@ def footnotes_translate(
     cli: str | None = None,
     cli_bin: str | None = None,
     claude_bin: str | None = None,
+    effort: str | None = None,
+    cache: str | None = None,
 ) -> int | dict:
     """Translate the imported footnote bodies on the book's chosen backend.
 
@@ -2860,6 +2876,7 @@ def footnotes_translate(
         hres = _footnotes_headless(
             project, retranslate=retranslate, runner=runner,
             cli=cli, cli_bin=cli_bin, claude_bin=claude_bin,
+            effort=effort, cache=cache,
         )
         # A hard wave failure (e.g. CLI off PATH) is a real failure, not a no-op —
         # exit non-zero so it is never mistaken for success. Partial misses stay rc 0
@@ -3009,6 +3026,8 @@ def _footnotes_headless(
     cli: str | None = None, cli_bin: str | None = None,
     claude_bin: str | None = None,
     concurrency: int | None = None,
+    effort: str | None = None,
+    cache: str | None = None,
 ) -> dict:
     """Headless backend: render batches, run one CLI wave, commit the drafts.
 
@@ -3021,6 +3040,10 @@ def _footnotes_headless(
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
     cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    extra_flags, resolved_effort, _effort_source = state.resolve_headless_argv(
+        cfg, command="footnotes", effort_override=effort,
+    )
+    requested_cache = state.resolve_prompt_cache(cfg, cache_override=cache)
     entries, meta = _render_footnote_batches(project_dir, retranslate=retranslate)
     _write_footnote_manifest(project_dir, entries, meta)
 
@@ -3051,6 +3074,10 @@ def _footnotes_headless(
     wave = run_headless_wave(
         jobs, model=worker_model, concurrency=concurrency,
         cli=cli_name, cli_bin=cli_bin, claude_bin=claude_bin, runner=runner,
+        usage_log=state.harness_dir(project_dir) / "footnotes" / "usage.jsonl",
+        extra_flags=extra_flags,
+        effort=resolved_effort,
+        cache=requested_cache,
     )
     # Fail fast when the CLI is missing (no jobs ran) — never silently fall back to spend.
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
@@ -3067,6 +3094,8 @@ def _footnotes_headless(
     result["backend"] = "headless"
     result["cli"] = cli_name
     result["wave"] = {"wrote": wave.get("wrote") or [], "failed": wave.get("failed") or []}
+    if wave.get("usage"):
+        result["wave"]["usage"] = wave["usage"]
     if model_warning:
         result["warning"] = model_warning
     return result
@@ -3513,10 +3542,21 @@ def show_translation(
 
 # ── config-set (persist once-per-book skill decisions) ──────────────────────
 
+# Sentinel: this key accepts free text (whitespace-split into argv by
+# ``state.headless_extra_flags``). Enum keys keep a frozenset of legal values.
+FREE_TEXT = object()
+
 _CONFIG_SET_KEYS = {
     "backend": frozenset({"api", "subagent", "headless"}),
     "footnotes_decision": frozenset({"keep", "drop", "none"}),
     "headless_cli": frozenset({"claude", "cursor"}),
+    "headless_prompt_cache": frozenset(state.CACHE_VALUES),
+    "headless_extra_flags": FREE_TEXT,
+    # One effort key per wave type (headless_effort_judges, …_translate, …).
+    **{
+        state.effort_config_key(cmd): frozenset(state.EFFORT_VALUES)
+        for cmd in state.COMMAND_EFFORT_DEFAULTS
+    },
 }
 
 
@@ -3524,24 +3564,72 @@ def config_set(project: str, *, key: str, value: str) -> dict:
     """Persist one once-per-book skill decision into ``.harness/config.json``.
 
     Thin wrapper over ``state.load_config`` / ``state.save_config`` so the skill
-    can record ``backend``, ``footnotes_decision``, and ``headless_cli`` at
-    decision time (before any translate run) and later sessions stop re-asking.
+    can record ``backend``, ``footnotes_decision``, ``headless_cli``,
+    ``headless_effort_<type>``, ``headless_prompt_cache``, and
+    ``headless_extra_flags`` at decision time and later sessions stop re-asking.
     Unknown keys / values fail closed with a clear error rather than poisoning
     the config.
     """
+    from src.harness_guard import HarnessValidationError
+
     if key not in _CONFIG_SET_KEYS:
         allowed = ", ".join(sorted(_CONFIG_SET_KEYS))
-        raise ValueError(f"unknown config key {key!r}; allowed: {allowed}")
+        raise HarnessValidationError(f"unknown config key {key!r}; allowed: {allowed}")
     allowed_values = _CONFIG_SET_KEYS[key]
-    if value not in allowed_values:
-        allowed = ", ".join(sorted(allowed_values))
-        raise ValueError(f"invalid value {value!r} for {key}; allowed: {allowed}")
+    if allowed_values is FREE_TEXT:
+        # Free-text guard, fails closed: ``--bare`` defeats the subscription
+        # preflight (auth becomes strictly ANTHROPIC_API_KEY / apiKeyHelper).
+        try:
+            tokens = state.split_extra_flags(value)
+        except ValueError as exc:
+            raise HarnessValidationError(
+                f"headless_extra_flags is not parseable ({exc}); check the quoting"
+            ) from None
+        # Every token is appended verbatim to a child argv, and on Windows that
+        # argv goes through the ``claude.CMD`` shim — i.e. ``cmd.exe``, which
+        # re-parses &, |, >, ^ and %VAR% regardless of shell=False. Reject
+        # anything that is not plainly a flag or a plain value.
+        unsafe = state.unsafe_extra_flag_tokens(tokens)
+        if unsafe:
+            shown = ", ".join(repr(t) for t in unsafe)
+            raise HarnessValidationError(
+                f"headless_extra_flags contains token(s) that are not a plain "
+                f"flag or value: {shown} — these are appended to the headless "
+                "CLI's argv, which on Windows is re-parsed by cmd.exe, so shell "
+                "metacharacters (& | < > ^ % \") are refused"
+            )
+        if "--bare" in tokens:
+            raise HarnessValidationError(
+                "headless_extra_flags must not contain --bare "
+                "(its auth is strictly ANTHROPIC_API_KEY/apiKeyHelper — "
+                "OAuth and keychain are never read)"
+            )
+        # Effort is per wave type; a book-wide flag list cannot express that, and
+        # the resolver discards any --effort found here rather than honoring it.
+        # Reject loudly instead of accepting a setting that would do nothing.
+        if any(t == "--effort" or t.startswith("--effort=") for t in tokens):
+            keys = ", ".join(
+                state.effort_config_key(cmd) for cmd in state.COMMAND_EFFORT_DEFAULTS
+            )
+            raise HarnessValidationError(
+                "headless_extra_flags must not contain --effort (it applies to "
+                f"every wave type at once); set one of: {keys} — or pass "
+                "--effort on the individual fanout command for a single run"
+            )
+        stored: object = value
+    else:
+        if value not in allowed_values:
+            allowed = ", ".join(sorted(allowed_values))
+            raise HarnessValidationError(
+                f"invalid value {value!r} for {key}; allowed: {allowed}"
+            )
+        stored = value
 
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
-    cfg[key] = value
+    cfg[key] = stored
     state.save_config(project_dir, cfg)
-    return {"project": project_dir.name, "key": key, "value": value, "config": cfg}
+    return {"project": project_dir.name, "key": key, "value": stored, "config": cfg}
 
 
 def _footnotes_applied(project_dir: Path) -> bool:
@@ -3622,8 +3710,9 @@ def status(project: str) -> dict:
     exist, per-chapter translated-vs-pending counts (via ``chunk.has_translation``),
     the saved spawn plan, and whether the book is single-chunk-per-chapter (so the
     spawn-mode choice is moot). ``stage`` is the one-word summary the agent leads with.
-    Also echoes ``backend`` / ``footnotes_decision`` / ``headless_cli`` and a
-    ``suggested_reference`` so the skill router does not re-derive the mapping in prose.
+    Also echoes ``backend`` / ``footnotes_decision`` / ``headless_cli`` /
+    ``headless_effort`` and a ``suggested_reference`` so the skill router does not
+    re-derive the mapping in prose.
     """
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
@@ -3640,6 +3729,18 @@ def status(project: str) -> dict:
     spawn_plan, _ = _spawn_plan_from_cfg(cfg)
     backend = cfg.get("backend")
     footnotes_decision = cfg.get("footnotes_decision")
+    # Resolve effort per wave type so a book carrying --effort medium is not
+    # indistinguishable from one that isn't (status is what the skill router runs).
+    effort_config: dict[str, str] = {}
+    effort_resolved: dict[str, str | None] = {}
+    for cmd_name in state.COMMAND_EFFORT_DEFAULTS:
+        _argv, level, _src = state.resolve_headless_argv(cfg, command=cmd_name)
+        effort_resolved[cmd_name] = level
+        raw = cfg.get(state.effort_config_key(cmd_name))
+        effort_config[cmd_name] = raw if isinstance(raw, str) else "auto"
+    _effort_in_flags, residual_flags = state._split_effort_from_flags(
+        state.headless_extra_flags(cfg)
+    )
     base = {
         "project": project_dir.name,
         "artifacts": artifacts,
@@ -3650,6 +3751,12 @@ def status(project: str) -> dict:
         "backend": backend,
         "footnotes_decision": footnotes_decision,
         "headless_cli": cfg.get("headless_cli") or "claude",
+        "headless_effort": {
+            "config": effort_config,
+            "resolved": effort_resolved,
+            "extra_flags": residual_flags,
+        },
+        "headless_prompt_cache": cfg.get("headless_prompt_cache") or "auto",
     }
 
     chunks_dir = project_dir / "chunks"

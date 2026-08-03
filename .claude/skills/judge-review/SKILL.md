@@ -45,7 +45,12 @@ findings — and the persisted `evaluations/<chunk>.json` — are identical eith
 ## The CLI (read first)
 
 `python scripts/run_judges.py <run|prepare|fanout|commit|apply>` is non-interactive and prints
-one JSON object with a `_schema` block documenting every key.
+one JSON object.
+
+**`_schema` is opt-in.** Every subcommand takes `--schema` to include the block documenting
+each output key; **errors always carry it**, successes carry a `_schema_hint` pointer instead.
+It is omitted by default because it isn't free — `apply`'s block alone was ~52% of a real
+run's payload, re-sent on every invocation. Add `--schema` when you need the key docs.
 
 **Windows / UTF-8 — force it on every Python you run.** `run_judges.py` reconfigures stdout
 to UTF-8, but **your own** ad-hoc `python -c` probes default to the Windows console codepage
@@ -83,11 +88,15 @@ Shared flags (`run`, `prepare`):
   Solo entries may also carry `preamble_path` / `body_path` (shared per-judge
   rubric cache for headless fan-out). Grouped entries do not — cache OR group,
   don't stack.
+- `--quiet` — omit the manifest echo, keeping `manifest_path` + `usage_summary`.
+  `fanout` reads the manifest from disk, so use this on the headless path. Task
+  workers need the per-entry paths, so don't use it there.
 
 `fanout` (subagent backend, opt-in headless wave) takes `--project`, optional
 `--target-ids` (comma-separated solo `target_id` or `batch_id`), `--concurrency`
 (default: manifest `batch_size`), `--cli {claude,cursor}` (default: config
-`headless_cli`, else `claude`), and `--cli-bin` (back-compat alias: `--claude-bin`).
+`headless_cli`, else `claude`), `--cli-bin` (back-compat alias: `--claude-bin`),
+and `--estimate` (project the token cost and print the argv without spawning).
 
 **Cursor headless:** `fanout --cli cursor` (or
 `config-set --key headless_cli --value cursor`) drives `cursor-agent` under a
@@ -177,46 +186,70 @@ request, stage **every** chapter in one `prepare` by repeating `--scope` — the
 land in one manifest, one `commit` collects them all, and `usage_summary` is a
 single rollup (no manual summing across calls).
 
-**First, pick a worker-grouping mode** (subagent-only — the API path always judges
-one target per call). Offer the choice with `AskUserQuestion` unless the user already
-said which they want:
-- **Conservative — one chunk per worker** (`--targets-per-worker 1`, the default).
-  Every chunk is judged in full isolation — the known-good path. Most spawns, so the
-  highest session/rate usage. Recommend this when in doubt.
-- **Grouped — up to 3 chunks per worker** (`--targets-per-worker 3`, cheaper). Packs
-  up to three *low-dialogue-density* chunks into one worker prompt (dialogue-dense
-  chunks are always judged solo), amortizing per-worker overhead → **fewer, cheaper
-  spawns**. In testing the findings track the solo path closely, but the full A/B
-  quality gate isn't cleared yet — present it as the cheaper option with a small,
-  bounded quality risk, not a free win.
+**Ask spawn mode and grouping together, in that order, in ONE `AskUserQuestion` call**
+(skip whichever the user already chose). Order matters and the old order was wrong: the
+right grouping *depends on* the spawn mode, `prepare` bakes the grouping in, and
+re-`prepare` is destructive — so grouping cannot be revised after the fact.
 
-Then run `prepare`, passing the chosen `--targets-per-worker` (omit it for conservative):
+- **Q1 — spawn mode.** (1) **Task workers** — spawn `judge-worker` Task subagents
+  (Read→Write→`done`). (2) **Headless fan-out** — run `fanout` (`claude -p`, one generate
+  turn per entry; uses the per-judge preamble cache when `preamble_path`/`body_path` are on
+  the manifest). (3) **Abort**.
+- **Q2 — grouping** (subagent-only; the API path always judges one target per call):
+  - **Conservative — one chunk per worker** (`--targets-per-worker 1`, the default). Every
+    chunk judged in full isolation — the known-good path, and the most spawns.
+  - **Grouped — up to 3 chunks per worker** (`--targets-per-worker 3`). Packs up to three
+    *low-dialogue-density* chunks into one worker prompt (dialogue-dense chunks always stay
+    solo) → **fewer spawns**. Findings track the solo path closely in testing, but the full
+    A/B quality gate isn't cleared — a cheaper option with a small bounded quality risk, not
+    a free win.
+
+  **Advise from the log, not from theory.** Each `claude -p` process pays a fixed context
+  cost before it reads a word of the book — measured at ~3.9k tokens on a solo judge job
+  (~37% of that job's billed input), which grouping attacks by cutting the process count.
+  But the 2026-07-30 measurements found the bigger cost is on the *output* side: a default
+  wave spent 23k output tokens producing a 90-token verdict, i.e. thinking, which grouping
+  does not reduce. Both numbers come back in the `usage` rollup `fanout` returns — read
+  `usage.overhead_ratio` **and** `usage.output` from the last wave you ran before
+  recommending either mode, so this no longer has to be argued from first principles.
+  (Per-job rows land in `.harness/judges/usage.jsonl`, but the rollup is computed, not
+  stored — do not go looking for `overhead_ratio` in that file.)
+
+Then run `prepare`, passing the chosen `--targets-per-worker` (omit it for conservative).
+Add `--quiet` on the headless path — `fanout` reads the manifest from disk, so echoing it
+into the conversation is pure duplication:
 ```bash
 python scripts/run_judges.py prepare --project understood-betsy --judge dialogue \
     --scope chapter:chapter_05 --scope chapter:chapter_06 \
-    [--targets-per-worker 3] [--worker-model sonnet] [--batch-size 5]
+    [--targets-per-worker 3] [--worker-model sonnet] [--batch-size 5] [--quiet]
 ```
-Relay `usage_summary` (pairs to judge, worker_model, batch_size; `estimated_api_cost`
-is the API-equivalent price, shown for context — nothing is spent). Under grouping,
-`usage_summary.workers` (actual spawns) is fewer than `pairs` (target×judge units) —
-relay both so the saving is visible. The **usage gate** is the subagent analog of the
-cost gate: no dollars — enforced, not assumed, since headless refuses to run on a
-metered login — but spawning N workers / a headless wave consumes real
-session/rate usage. Get approval in a separate turn before spawning.
 
-**STOP — usage gate. Ask which spawn mode** via `AskUserQuestion` (unless already chosen):
+**Relay the figure for the backend being chosen — they price different things and neither
+bounds the other:**
+- **API backend** → `usage_summary.estimated_api_cost` (USD, metered).
+- **Headless / Task workers** → `usage_summary.estimated_headless_tokens`, which is
+  `estimated_prompt_tokens + workers × headless_baseline_tokens`. Name the split: how much
+  is judging content and how much is per-job fixed overhead. `headless_baseline_source`
+  says whether that baseline was measured on this machine or is the documented default.
+  Also relay `usage_summary.headless_effort` (the resolved `--effort` level; `null` means
+  the CLI's own default) so the user consents knowing the level, not just the token count.
 
-1. **Task workers (default)** — spawn `judge-worker` Task subagents (Read→Write→`done`).
-2. **Headless fan-out** — run `fanout` (`claude -p`, one generate turn per entry; uses
-   the per-judge preamble cache when `preamble_path`/`body_path` are on the manifest).
-3. **Abort**
+Do **not** relay `estimated_api_cost` as "the price, and nothing is spent" when the user is
+choosing headless. No *metered dollars* is true and enforced (headless refuses to run on a
+metered login); "nothing is spent" is false in the currency that actually binds, and on the
+2026-07-30 wave the API figure understated the chosen path by ~2.4× in tokens. Under
+grouping also relay `workers` (spawns) alongside `pairs` (target×judge units) so the saving
+is visible. Get approval in a separate turn before spawning.
 
-**Worker-model / cache note (fold into this confirmation, not a new gate):** the shared
+**Want the real number first?** `fanout --estimate` projects the wave from the measured
+baseline and prints the argv without spawning anything.
+
+**Worker-model / cache note (fold into the confirmation, not a new gate):** the shared
 preamble (dialogue rules ≈1.7k tok; address rubric+map ≈1.3–1.8k) clears **Sonnet's**
-1024-token cache minimum (caches for free on the headless path after entry 1) but
-**not** Opus/Haiku's 4096. Prefer a **Sonnet** worker for headless caching. Headless
-users should keep `--targets-per-worker 1` (cache instead of group — don't stack).
-Task workers do not get cross-invocation prompt caching either way.
+1024-token cache minimum but **not** Opus/Haiku's 4096, so prefer a **Sonnet** worker on
+headless. The wave runs its first job alone so the rest read the shared prefix from cache
+instead of each re-creating it. Task workers get no cross-invocation prompt caching either
+way.
 
 **End your turn and wait.** Do not spawn workers or run `fanout` in the same turn that
 produced the manifest.
@@ -262,21 +295,53 @@ Wave contract (fan-out width = `batch_size`, default 5; throttle down on 529):
 
 Run one wave via the CLI (bounded parallelism, neutral cwd, no Task turns). Pass
 `--target-ids` when recovering a subset; omit it to fan out every still-undrafted
-manifest entry. Prefer `--targets-per-worker 1` at prepare time so solo entries get
-the preamble cache:
+manifest entry. `--estimate` projects the cost and spawns nothing:
 ```bash
 python scripts/run_judges.py fanout --project understood-betsy \
-  [--target-ids <id1,id2,...>] [--concurrency <batch_size>]
+  [--target-ids <id1,id2,...>] [--concurrency <batch_size>] [--estimate]
 ```
 Each process is effectively: `claude -p` with the body (or full prompt) on stdin,
 optional `--system-prompt-file <preamble_path>`, `--model <worker_model>`,
-`--tools ""`, `--output-format text` → `draft_path`. The child env is scrubbed of
+`--tools ""`, `--output-format json` → `draft_path`. The child env is scrubbed of
 every metered credential first, and one `claude auth status --json` preflight runs
 per wave; if it cannot confirm a subscription the command returns a top-level
 `error`, writes nothing, and spawns no jobs (relay that error — the fix is
 `claude` + `/login`, or `--backend api` if metered spend was actually intended).
 After the wave, commit as below — the prepare→commit seam is unchanged
 (`committed`/`failed`/`missing`). On 529, re-run with a lower `--concurrency`.
+
+**Effort is a first-class knob.** Judge/annotation waves default to `--effort medium`
+under `headless_effort_judges: auto` (2026-07-31: output −66%, wall −66%, cost −55%,
+quality confirmed by hand). The ladder, cheapest first:
+
+| level | measured trade |
+|---|---|
+| `low` | output −95%, wall −93%; *missed the only finding* on a 3-chunk sample (2026-07-30) |
+| `medium` | output −66%, wall −66%, cost −55%; quality OK on the measured wave; **recall still uncontrolled** |
+| CLI default / `high` / `xhigh` | full effort — use when you need maximum recall |
+
+```bash
+# Judge waves on this book (persists):
+python scripts/harness.py config-set --project <slug> --key headless_effort_judges --value low
+# Per-run (does not persist):
+python scripts/run_judges.py fanout --project <slug> --effort low
+```
+
+`headless_effort_judges` moves judge waves only. Translation and footnotes read
+`headless_effort_translate` / `headless_effort_footnotes` and are untouched by
+anything you set here — never offer a cheaper judge pass as though it also made
+the book cheaper to translate.
+
+Offer a cheaper level only when the user asks for a faster/cheaper pass, and say what it
+trades; **never switch silently**. See `docs/LLM_PROVIDERS.md`.
+
+**Relay `usage` after every wave.** `fanout` now reports what the wave actually consumed:
+`input`/`output`, the `cache_creation` vs `cache_read` split, `prompt_sent` (the judging
+content) and `overhead` / `overhead_ratio` (everything else — the per-process context each
+job pays before reading a word of the book). A ratio near 0.5+ means the wave spent more on
+being a process than on judging, and the answer is fewer, larger jobs. Per-job detail lands
+in `.harness/judges/usage.jsonl`; **read that file only if asked** — it exists so the detail
+does *not* have to enter the conversation.
 
 Committing after each wave is fine for recovery; a single final `commit` after all
 waves is also fine. Either way, never start wave N+1 until wave N has finished
@@ -326,6 +391,19 @@ the span, `suggestion_unbalanced_raya` would leave a closing inciso raya with no
 `mixed_register_remains` is an `inconsistent-address` fix that leaves the form it replaces standing
 elsewhere in the chunk — applying it *creates* the inconsistency it reports). Point the user to the
 reader / web chunk editor for all of them.
+
+**Don't predict what `manual[]` will hold.** The guards above are *semantic* — they ask
+whether a swap would damage the text — not structural, so "this fix merges two paragraphs, it
+will surely be withheld" is wrong: a paragraph merge is still a literal, uniquely-locatable
+swap. Dialogue findings in particular come back close to 100% `applicable`. Read the actual
+plan before telling the user what it will say.
+
+**`applicable` ≠ correct.** `applicable` means *mechanically safe to splice* (unique location,
+literal swap, no structural damage the guards catch) — not that the suggestion is the right
+fix. The 2026-07-31 stormy-misty dialogue wave was 100% applicable and 78% correct: two of
+nine `applicable` fixes were semantically wrong (one deleted source content; one proposed a
+fresh dialogue-rule violation). Always skim `old → new` against the source and the rulebook
+before presenting the plan as a quality guarantee.
 ```bash
 python scripts/run_judges.py apply --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03 --dry-run
@@ -351,13 +429,25 @@ The *mechanical* hazards are the CLI's job now, and it withholds them: placehold
 instruction-shaped suggestions, ones that restate adjacent prose, elide with `...`, swing far in
 length, unbalance the paragraph's rayas, or normalize a register the rest of the chunk still uses
 (see the reasons in 6c). Don't re-derive those by hand. What no guard can decide is **semantic**, so
-these two veto a fix the CLI classified applicable:
+these veto a fix the CLI classified applicable:
+
+**Address judge:**
 - **Is the direction right?** Check the fix against `address_map.json` yourself. A blanket clause
   ("tú among peers") can swallow a relationship the map names specifically — two non-intimate adults
   use usted in both directions, and a character the map calls ceremonious keeps usted even with a
   child. The judge reads those as violations; they are not.
 - **Is the fix complete?** A speech that mixes registers, where the judge flagged only one clause,
   leaves a half-corrected line if applied. Read the whole turn, not the `old → new` pair.
+
+**Dialogue judge:**
+- **Does the suggestion delete content that is in the source?** Read `source_text`, not just
+  `translated_text`. A 2026-07-31 fix (`chapter_03_chunk_000#0`) merged two paragraphs by deleting
+  the inciso `—continuó, secándose la cara—`, which renders "as he mopped his face". `new` was 89%
+  of `old`'s length, so no length guard could ever have caught it.
+- **Does the suggestion itself obey `prompts/dialogue.txt`?** Check the rewrite against the
+  rulebook, especially rule 25's capitalization for a non-speech inciso between two complete
+  sentences. The same wave proposed `—la voz del abuelo retumbó—` (`retumbar` is not in rule 20's
+  speech-verb list, so rule 25 demands `La`) while *enforcing* rule 25 twice on another chapter.
 
 8c. **Apply the picked ids.** Pass them comma-separated; add `--rebuild-epub` if the user wants
 the book rebuilt now (that path recombines + realigns; use `--no-realign` to defer the tail):

@@ -1039,3 +1039,42 @@ def test_plan_carries_judge_and_qualified_id(project, capsys):
     assert by_qid[f"address:{CHUNK_ID}#0"]["judge"] == "address"
     assert by_qid[f"address:{CHUNK_ID}#0"]["id"] == f"{CHUNK_ID}#0"
     assert by_qid[f"dialogue:{CHUNK_ID}#0"]["new"] == "—Hola"
+
+
+# ---------------------------------------------------------------------------
+# Payload economy (2026-07-30 friction log, section 6)
+#
+# The CLI's own output was a measurable share of what an agent had to read:
+# _APPLY_SCHEMA alone is ~910 tokens and was re-sent on every invocation, twice
+# per apply session, where it was ~52% of the real run's payload.
+# ---------------------------------------------------------------------------
+
+
+def test_schema_is_omitted_from_successful_output(project, capsys):
+    rc, payload = _run(capsys, ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}"])
+    assert rc == 0
+    assert "_schema" not in payload
+    assert "--schema" in payload["_schema_hint"]
+    # The plan itself is untouched — only its documentation moved behind a flag.
+    assert payload["applicable"] and payload["manual"]
+
+
+def test_schema_flag_brings_it_back(project, capsys):
+    rc, payload = _run(
+        capsys,
+        ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}", "--schema"],
+    )
+    assert rc == 0
+    assert "manual" in payload["_schema"]
+    assert "_schema_hint" not in payload
+
+
+def test_errors_always_carry_the_schema(project, capsys):
+    """An error is exactly where a caller needs to know the shape it is reading."""
+    rc, payload = _run(
+        capsys,
+        ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}",
+         "--select", "no_such_id#9"],
+    )
+    assert rc == 1
+    assert "unknown_ids" in payload["_schema"]
