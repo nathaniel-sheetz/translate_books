@@ -110,13 +110,16 @@ def _build_parser() -> argparse.ArgumentParser:
                     action=argparse.BooleanOptionalAction, default=None,
                     help="Put the DIALOGUE FORMATTING block on every chunk (not just "
                          "dialogue-bearing ones) so it caches in the fixed prompt prefix. "
-                         "Per-book; default off. Use --no-always-dialogue to force off.")
+                         "Per-book; absent means auto (on when any chunk has dialogue). "
+                         "Use --no-always-dialogue to force off. Also settable later "
+                         "with `config-set --key always_include_dialogue`.")
     sp.add_argument("--always-images", dest="always_include_image_instructions",
                     action=argparse.BooleanOptionalAction, default=None,
                     help="Put the image-placeholder instruction on every chunk so it "
                          "caches in the fixed prompt prefix. Per-book; absent means auto "
                          "(on when any chunk has [IMAGE:...]). Use --no-always-images to "
-                         "force off.")
+                         "force off. Also settable later with `config-set --key "
+                         "always_include_image_instructions`.")
     sp.add_argument("--front-matter-title", dest="front_matter_titles", action="append",
                     help="Heading to force-tag as front matter (repeatable)")
     sp.add_argument("--back-matter-title", dest="back_matter_titles", action="append",
@@ -191,8 +194,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # address-map <action> --------------------------------------------------
     am = sub.add_parser("address-map",
-                        help="Forms-of-address (usted/tú) map beat for the address judge (prepare/commit)")
+                        help="Forms-of-address (usted/tú) map beat "
+                             "(precheck/prepare/commit/rename/skip)")
     am_sub = am.add_subparsers(dest="action", required=True)
+    ampc = am_sub.add_parser("precheck",
+                             help="Does this book have dialogue? Gates whether to offer the beat")
+    add_project(ampc)
+    ams = am_sub.add_parser("skip", help="Record that the user declined the address map")
+    add_project(ams)
     amp = am_sub.add_parser("prepare")
     add_project(amp)
     amp.add_argument("--max-chapters", dest="max_chapters", type=_positive_int, default=6,
@@ -200,6 +209,12 @@ def _build_parser() -> argparse.ArgumentParser:
     amc = am_sub.add_parser("commit")
     add_project(amc)
     amc.add_argument("--draft", default=None, help="Map JSON (default: .harness/address_map_draft.json)")
+    amr = am_sub.add_parser("rename",
+                            help="Apply the approved glossary cast to the committed map "
+                                 "(writes a draft; review, then commit)")
+    add_project(amr)
+    amr.add_argument("--draft", default=None,
+                     help="Where to write the renamed map (default: .harness/address_map_draft.json)")
 
     # difficulty ------------------------------------------------------------
     dp = sub.add_parser("difficulty", help="Score difficulty; suggest a chunk target size")
@@ -458,7 +473,7 @@ def _build_parser() -> argparse.ArgumentParser:
     csp = sub.add_parser(
         "config-set",
         help="Persist a once-per-book skill decision into .harness/config.json "
-             "(backend, footnotes_decision)",
+             "(backend, footnotes_decision, prompt-prefix opt-ins)",
     )
     add_project(csp)
     csp.add_argument("--key", required=True, choices=sorted(flow._CONFIG_SET_KEYS),
@@ -470,6 +485,11 @@ def _build_parser() -> argparse.ArgumentParser:
              "headless_effort_{judges,annotations,translate,footnotes}="
              "auto|default|low|medium|high|xhigh; "
              "headless_prompt_cache=auto|5m|1h|off; "
+             "always_include_dialogue=on|off|auto; "
+             "always_include_image_instructions=on|off|auto "
+             "(both stored as true/false/null; auto = on when the book needs it. "
+             "Safe to change mid-book — re-run translate-prepare and only "
+             "untranslated chunks are re-rendered); "
              "headless_extra_flags=<free text, whitespace-split into argv — "
              "never --bare or --effort>",
     )
@@ -522,10 +542,16 @@ def _dispatch(args: argparse.Namespace):
         if args.action == "commit":
             return flow.glossary_commit(args.project, draft=args.draft)
     if cmd == "address-map":
+        if args.action == "precheck":
+            return flow.address_map_precheck(args.project)
+        if args.action == "skip":
+            return flow.address_map_skip(args.project)
         if args.action == "prepare":
             return flow.address_map_prepare(args.project, max_chapters=args.max_chapters)
         if args.action == "commit":
             return flow.address_map_commit(args.project, draft=args.draft)
+        if args.action == "rename":
+            return flow.address_map_rename(args.project, draft=args.draft)
     if cmd == "difficulty":
         return flow.difficulty(args.project)
     if cmd == "chunk":

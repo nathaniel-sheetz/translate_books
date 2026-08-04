@@ -14,7 +14,13 @@ inventing a new shape.
 4. Persist any once-per-book decision via
    `python scripts/harness.py config-set --project <p> --key <k> --value <v>`
    (thin wrapper over `state.load_config` / `state.save_config` — no new state
-   machinery).
+   machinery). Register the key in `flow._CONFIG_SET_KEYS` with the frozenset of
+   words it accepts. If the value is not a string on disk, add a coercion table in
+   `flow._CONFIG_SET_COERCE` keyed the same way (the prompt-prefix opt-ins do this:
+   `on|true|off|false|auto` in, `True|False|None` out) so the file looks identical
+   whether it was written by `config-set` or by a `setup` flag. Remember that
+   `state.save_config` drops `None`, so a `None` value resolves to the key's
+   `DEFAULTS` entry — make that the same "unset" meaning.
 
 **Template to copy:** the footnotes surface —
 `scripts/harness.py` `footnotes {translate, apply, drop}` →

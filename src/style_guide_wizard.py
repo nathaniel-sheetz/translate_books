@@ -274,8 +274,15 @@ def build_style_guide_prompt(
     source_text: str,
     target_lang: str,
     locale: str,
+    address_summary: str = "",
 ) -> str:
-    """Build the prompt for LLM to generate a style guide from Q&A."""
+    """Build the prompt for LLM to generate a style guide from Q&A.
+
+    ``address_summary`` is the approved address map's ``style_guide_summary`` when
+    the address-map beat ran first. It is already written for a chunk-local reader,
+    so the template reproduces it as the FORMS OF ADDRESS section rather than
+    re-deriving that section from the single ``forms_of_address`` answer.
+    """
     template = _resolve_prompt_path("style_guide_generate.txt").read_text(encoding="utf-8")
     qa_text = format_answered_questions(questions, answers, include_effects=True)
     variables = {
@@ -283,6 +290,10 @@ def build_style_guide_prompt(
         "locale": locale,
         "questions_and_answers": qa_text,
         "source_text": source_text[:10000],
+        "address_summary": address_summary.strip() or (
+            "(no address map for this book — derive FORMS OF ADDRESS from the "
+            "questionnaire answer above)"
+        ),
     }
     return render_prompt(template, variables)
 

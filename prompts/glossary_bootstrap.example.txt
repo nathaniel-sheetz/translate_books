@@ -15,7 +15,11 @@ For each candidate, return a JSON object with:
 - "english": the original English term (exactly as given)
 - "spanish": your proposed translation
 - "type": one of "character", "place", "concept", "technical", "other" — infer from how the term is used in the excerpts/source (person → character, location → place, abstract idea → concept, domain/technical word → technical, else other)
-- "context": a brief note (1 sentence) on usage or disambiguation
-- "alternatives": leave this an empty array by default. A personal or character name in particular should typically have exactly ONE translation and NO alternatives. Only add an alternative (max 2) for a title or a term that is genuinely rendered different ways in different contexts.
+- "context": a brief note (1 sentence) on usage or disambiguation. IMPORTANT: this field is displayed in the editor GUI only. It is NOT sent to the translator and has NO effect on the translation. Never put a usage rule the translator needs into "context" — word-level guidance that must reach the translation belongs in the style guide.
+- "alternatives": an empty array by default. An alternative lets the translator pick a different rendering in a different chunk, which is right for a term genuinely rendered different ways and wrong for a name. Rules by type:
+  * PLACE NAMES (type "place"): alternatives MUST be empty. A place has one name. The only exception is two genuinely interchangeable forms of the SAME name — a full and short form such as "océano Atlántico" / "Atlántico" — never a variant, a re-translation, or a descriptive paraphrase. If you use that exception, say so in "context" so a human reviews it.
+  * BARE PERSONAL NAMES (type "character", no title word): alternatives MUST be empty. One person, one name. If you believe an exception is warranted, state the reason in "context" so a human reviews it.
+  * TITLE + PERSONAL NAME ("Uncle Antony", "Mrs. Banks", "Doctor Hernández"): the PRIMARY "spanish" value is the NARRATION form, WITH the definite article — "el tío Antony", "la señora Banks", "el doctor Hernández". Give the DIRECT-ADDRESS (vocative) form, WITHOUT the article, as the single alternative — "tío Antony", "señora Banks", "doctor Hernández". The style guide tells the translator which of the two to use where.
+  * EVERYTHING ELSE: add an alternative (max 2) only when the term is genuinely rendered different ways in different contexts.
 
 Return ONLY a JSON array of these objects, no other text.

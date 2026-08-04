@@ -40,11 +40,22 @@ DEFAULTS: dict[str, object] = {
     "author": "",
     # When true, the DIALOGUE FORMATTING block is placed on every chunk's prompt
     # (not only dialogue-bearing chunks) so it sits in the byte-identical, cacheable
-    # fixed prefix. Per-book opt-in; see build_translation_prompt / prompts/translation.txt.
-    "always_include_dialogue": False,
+    # fixed prefix. See build_translation_prompt / prompts/translation.txt.
+    #
+    # Tri-state, like its image sibling below. None / absent means auto: on when
+    # any chunk in the book has dialogue and the target is Spanish. Auto is the
+    # right default because it only fires where it pays — a book whose chunks ALL
+    # have dialogue (or none do) already renders a stable prefix, and forcing the
+    # block on there would be pure token overhead for no cache gain. It is the
+    # MIXED book whose prefix diverges chunk to chunk and runs uncached.
+    # Explicitly persisted True/False (from `setup --always-dialogue` or
+    # `config-set`) always wins, so a book mid-translation never changes rendering
+    # underneath itself.
+    "always_include_dialogue": None,
     # When true, the constant image-placeholder bullet is placed on every chunk.
     # None / absent means auto (on when any chunk has [IMAGE:...] placeholders).
-    # Stored as bool when the user sets --always-images / --no-always-images at setup.
+    # Stored as bool when the user sets --always-images / --no-always-images at
+    # setup, or `config-set --key always_include_image_instructions`.
     "always_include_image_instructions": None,
     # Which CLI family the headless backend drives (``claude -p`` vs ``cursor-agent``).
     # Backend stays ``headless``; this only selects the launcher profile.

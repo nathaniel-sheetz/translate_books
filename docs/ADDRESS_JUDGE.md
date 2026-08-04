@@ -23,6 +23,7 @@ There are two artifacts:
 ```json
 {
   "content": "<prose the judge reads — states every pair's expectation plainly>",
+  "style_guide_summary": "<60–90 words folded into the style guide — general rules plus high-frequency exceptions only>",
   "pairs": [
     {
       "a": "Ricardo",
@@ -60,13 +61,28 @@ The judge reads the human-readable `content` prose (so it must state the
 asymmetric/contextual rules plainly); `pairs` / `global_rules` are the structured
 mirror for future UI / deterministic checks.
 
+**`content` and `style_guide_summary` have different readers.** `content` is read
+by the judge, which sees the whole picture. `style_guide_summary` is injected into
+the style guide as its FORMS OF ADDRESS section, and is therefore read by a
+translator working on **one chunk** — no chapter identity, no book context (the
+rendered translation prompt carries neither). So the summary states the general
+rules plus only the high-frequency exceptions, and must never cite a chapter, a
+mid-book transition, or the map itself. It is optional in the schema, so maps
+written before it remain valid; `address-map commit` warns when it is missing.
+
 ### Building the map (harness beat)
 
-The map is drafted and approved once, like the style guide and glossary. It is an
-**optional, non-blocking** beat in the translate-harness — translation proceeds
-without it — and can also be built standalone whenever you want to run the judge:
+The map is drafted and approved once, like the style guide and glossary. In the
+translate-harness it is **Step 0B** — first, before the style guide, because its
+`style_guide_summary` feeds that guide. It is **optional and non-blocking** at
+every step (translation proceeds without it), and can equally be built standalone
+later, whenever you want to run the judge:
 
 ```bash
+# Gate: does this book have interpersonal dialogue at all? A book with none has
+# nothing for a map to describe. Records address_map_decision="no_dialogue" if not.
+python scripts/harness.py address-map precheck --project <slug>
+
 # Samples the book's highest interpersonal-dialogue chapters (a spread across the
 # whole book) and renders a drafting prompt.
 python scripts/harness.py address-map prepare --project <slug>
@@ -75,12 +91,26 @@ python scripts/harness.py address-map prepare --project <slug>
 
 # Validates the draft against the AddressMap schema and writes address_map.json.
 python scripts/harness.py address-map commit --project <slug>
+
+# Or: record that the user declined, so the router stops offering the beat.
+python scripts/harness.py address-map skip --project <slug>
 ```
 
 `prepare` seeds the prompt from the glossary's cast, the full style guide
-(`style.json` content), and a whole-book spread of dialogue-dense chapters
-(chosen by `src/harness/address_sample.py`), so the map reflects relationships as
-they actually play out — including how they change — not just the opening chapters.
+(`style.json` content), the translator's `forms_of_address` preference, and a
+whole-book spread of dialogue-dense chapters (chosen by
+`src/harness/address_sample.py`), so the map reflects relationships as they
+actually play out — including how they change — not just the opening chapters.
+
+**Cast naming.** Run as Step 0B, the glossary does not exist yet, so `prepare`
+reports `characters_loaded: 0` and the prompt instructs the drafter to use the
+**English source names verbatim** rather than guessing target-language forms. Once
+the glossary is approved, `glossary commit` emits a `REVIEW:` warning naming every
+character term whose approved translation is missing from the map — run
+`address-map rename` (it writes a draft applying the approved cast across all map
+fields), review it, then re-commit, so the judge reads the names that actually
+appear in the prose. Built standalone after translation, this does not arise: the
+glossary is already there.
 
 ## Running the judge
 
@@ -121,8 +151,10 @@ Scoring reuses the shared severity-weighted, per-rule-capped compliance score in
 |---|---|
 | Data model | `src/models.py` (`AddressMap` / `AddressPair` / `AddressRule`) |
 | Load/save + validate | `src/utils/file_io.py`, `src/harness_guard.py` (`validate_address_map_file`) |
-| Chapter sampler | `src/harness/address_sample.py` |
-| Harness beat | `src/harness/flow.py` (`address_map_prepare` / `address_map_commit`), `scripts/harness.py` |
+| Chapter sampler + dialogue gate | `src/harness/address_sample.py` (`select_address_sample_chapters`, `dialogue_precheck`) |
+| Harness beat | `src/harness/flow.py` (`address_map_precheck` / `_prepare` / `_commit` / `_rename` / `_skip`), `scripts/harness.py` |
+| Cast rename | `src/harness/address_rename.py` (`rename_map`, shared with stale-cast warnings) |
+| Skill beat (Step 0B) | `.claude/skills/translate-harness/references/address-map.md` |
 | Drafting prompt | `prompts/address_map_generate.txt` |
 | Judge | `src/judges/address_judge.py`, `src/judges/registry.py` |
 | Judge prompts | `prompts/address_forms.txt` (rubric), `prompts/judge_address.txt`, `prompts/judge_address_batch.txt` |

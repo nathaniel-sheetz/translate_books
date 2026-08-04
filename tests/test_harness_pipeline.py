@@ -1031,6 +1031,136 @@ def test_translate_prepare_omits_split_paths_when_prefix_diverges(tmp_path: Path
     assert Path(first["prompt_path"]).exists()
     assert Path(second["prompt_path"]).exists()
 
+    # ...and the shortfall is reported rather than left to be spotted by eye across
+    # a long manifest. A 28-chunk book once cached exactly one chunk unnoticed.
+    split = prep["cache_split"]
+    assert (split["entries"], split["split"], split["full_prompt"]) == (2, 1, 1)
+    assert split["always_include_dialogue"] is False
+    assert split["source"]["always_include_dialogue"] == "config"
+    assert "config-set" in split["hint"]
+
+
+def test_translate_prepare_auto_enables_dialogue_on_a_mixed_book(tmp_path: Path):
+    """The default (auto) puts the dialogue block on every chunk of a MIXED book, so
+    the prefix stops diverging and the whole book caches with no user action.
+
+    This is the Bambi shape: 27 of 28 chunks with dialogue, one without, and the
+    lone plain chunk sorted first — so it won the preamble election and the
+    dialogue-bearing majority fell back to the full prompt.
+    """
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=[
+            "The meadow was quiet in the afternoon sun.",     # no dialogue, sorts first
+            'She said, "Hello there," and waved.',
+            '"Good morning," he answered from the thicket.',
+        ],
+    )
+    # No config written at all — this is the out-of-the-box behaviour.
+    prep = flow.translate_prepare(str(tmp_path))
+
+    assert len(prep["manifest"]) == 3
+    for entry in prep["manifest"]:
+        assert "preamble_path" in entry and "body_path" in entry
+        preamble = Path(entry["preamble_path"]).read_text(encoding="utf-8")
+        body = Path(entry["body_path"]).read_text(encoding="utf-8")
+        assert preamble + body == Path(entry["prompt_path"]).read_text(encoding="utf-8")
+
+    split = prep["cache_split"]
+    assert split["split"] == split["entries"] == 3
+    assert split["full_prompt"] == 0
+    assert split["always_include_dialogue"] is True
+    assert split["source"]["always_include_dialogue"] == "auto"
+    assert "hint" not in split
+
+
+def test_translate_prepare_auto_stays_off_for_a_dialogue_free_book(tmp_path: Path):
+    """Auto must not fire where it cannot pay: a book with no dialogue anywhere
+    already has a stable prefix, so forcing the block on is pure token overhead."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=[
+            "The meadow was quiet in the afternoon sun.",
+            "Autumn came, and the leaves fell without a sound.",
+        ],
+    )
+    prep = flow.translate_prepare(str(tmp_path))
+
+    split = prep["cache_split"]
+    assert split["always_include_dialogue"] is False
+    assert split["source"]["always_include_dialogue"] == "auto"
+    # Still fully cacheable — the prefix was never the problem on this book shape.
+    assert split["split"] == split["entries"] == 2
+    assert "hint" not in split
+
+
+def test_flipping_the_cache_flag_mid_book_is_not_destructive(tmp_path: Path):
+    """The claim the Bambi friction log got wrong, pinned.
+
+    always_include_dialogue is read at prompt-render time and never baked into
+    chunks/*.json, so changing it after chunks are committed re-renders only the
+    chunks that still need work. Committed prose is untouched. (Re-running `setup`
+    IS destructive — but that is setup, not this flag.)
+    """
+    from src.harness import flow, state as hstate
+    from src.utils.file_io import load_chunk
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    paths = _save_chunks(
+        chunks_dir, "chapter_01",
+        sources=[
+            '"Good morning," said the magpie.',                 # committed
+            "The meadow was quiet in the afternoon sun.",       # no dialogue
+            'She said, "Hello there," and waved.',              # dialogue
+        ],
+        translations=["-Buenos días -dijo la urraca.", None, None],
+    )
+    hstate.save_config(tmp_path, {"always_include_dialogue": False})
+
+    before = load_chunk(paths[0]).translated_text
+    prep_before = flow.translate_prepare(str(tmp_path))
+    assert [e["chunk_id"] for e in prep_before["manifest"]] == [
+        "chapter_01_chunk_001", "chapter_01_chunk_002",
+    ]
+    # Pinned off, the two remaining chunks render different prefixes, so only the
+    # first can use the preamble — the shape that ran a whole book uncached.
+    assert prep_before["cache_split"]["split"] == 1
+    assert prep_before["cache_split"]["full_prompt"] == 1
+    prompts_before = [
+        Path(e["prompt_path"]).read_text(encoding="utf-8")
+        for e in prep_before["manifest"]
+    ]
+
+    flow.config_set(str(tmp_path), key="always_include_dialogue", value="on")
+    prep_after = flow.translate_prepare(str(tmp_path))
+
+    # The committed chunk is byte-identical and still out of scope: no re-translation,
+    # no lost prose. This is what makes the setting safe to change at any time.
+    assert load_chunk(paths[0]).translated_text == before
+    assert [e["chunk_id"] for e in prep_after["manifest"]] == [
+        "chapter_01_chunk_001", "chapter_01_chunk_002",
+    ]
+    # The still-untranslated chunks were re-rendered, and now share one prefix.
+    prompts_after = [
+        Path(e["prompt_path"]).read_text(encoding="utf-8")
+        for e in prep_after["manifest"]
+    ]
+    assert prompts_after[0] != prompts_before[0]  # the no-dialogue chunk gained the block
+    for entry in prep_after["manifest"]:
+        assert "preamble_path" in entry and "body_path" in entry
+    assert prep_after["cache_split"]["split"] == 2
+    assert prep_after["cache_split"]["always_include_dialogue"] is True
+    assert "hint" not in prep_after["cache_split"]
+
 
 def test_translate_fanout_writes_drafts_via_runner_seam(tmp_path: Path):
     """translate-fanout invokes the runner with --system-prompt-file when split paths exist."""
@@ -1656,6 +1786,50 @@ def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
         flow.config_set(str(tmp_path), key="headless_cli", value="codex")
 
 
+def test_config_set_coerces_the_tristate_prefix_keys(tmp_path: Path):
+    """The prompt-prefix opt-ins take a word and store True/False/None, so config.json
+    looks the same whether it was written here or by `setup --always-dialogue`."""
+    from src.harness import flow, state
+    from src.harness_guard import HarnessValidationError
+
+    for key in ("always_include_dialogue", "always_include_image_instructions"):
+        for word, expected in (("on", True), ("true", True),
+                               ("off", False), ("false", False)):
+            result = flow.config_set(str(tmp_path), key=key, value=word)
+            assert result["value"] is expected
+            assert state.load_config(tmp_path)[key] is expected
+
+        # auto stores None. save_config drops None, so the key falls back to its
+        # DEFAULTS value -- which is None for both. Pin the round-trip: this is
+        # what lets a book that was pinned off go back to auto.
+        flow.config_set(str(tmp_path), key=key, value="auto")
+        assert state.load_config(tmp_path)[key] is None
+        assert json.loads(
+            (tmp_path / ".harness" / "config.json").read_text(encoding="utf-8")
+        )[key] is None
+
+        with pytest.raises(HarnessValidationError, match="invalid value"):
+            flow.config_set(str(tmp_path), key=key, value="yes")
+        assert state.load_config(tmp_path)[key] is None  # reject persisted nothing
+
+
+def test_status_echoes_prompt_prefix_opt_ins(tmp_path: Path):
+    """The cache setting must be inspectable without re-running setup or reading
+    config.json by hand -- the friction this whole surface exists to remove."""
+    from src.harness import flow
+
+    (tmp_path / "source.txt").write_text("hello", encoding="utf-8")
+
+    prefix = flow.status(str(tmp_path))["prompt_prefix"]
+    assert prefix == {
+        "always_include_dialogue": None,          # auto by default
+        "always_include_image_instructions": None,
+    }
+
+    flow.config_set(str(tmp_path), key="always_include_dialogue", value="on")
+    assert flow.status(str(tmp_path))["prompt_prefix"]["always_include_dialogue"] is True
+
+
 def test_status_echoes_backend_and_suggested_reference(tmp_path: Path):
     """status surfaces persisted backend + a router hint for the skill."""
     from src.harness import flow, state
@@ -1753,6 +1927,105 @@ def test_suggested_reference_footnotes_route_advances_after_apply(tmp_path: Path
     assert flow._suggested_reference(
         tmp_path, {"footnotes_decision": "drop"}, artifacts, "fully-translated", []
     ) == "references/epub.md"
+
+
+def test_suggested_reference_routes_to_address_map_before_style_guide(tmp_path: Path):
+    """Step 0B is reachable on a resume, and only inside the pre-style-guide window.
+
+    The address map used to live at the end of glossary.md with no routing of its
+    own, so on a resume it was unreachable. It now routes — but only while the
+    style guide is still missing, because it feeds that guide its FORMS OF ADDRESS
+    section. Once a decision is recorded, the offer stops.
+    """
+    from src.harness import flow
+
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    fresh = {"source": True, "chapters": True, "style_guide": False,
+             "glossary": False, "chunks": False, "address_map": False}
+
+    # No map, no decision -> offer the beat.
+    assert flow._suggested_reference(
+        tmp_path, {}, fresh, "pre-chunk", []
+    ) == "references/address-map.md"
+
+    # Each recorded decision releases the router to the style guide.
+    for decision in ("built", "skipped", "no_dialogue"):
+        assert flow._suggested_reference(
+            tmp_path, {"address_map_decision": decision}, fresh, "pre-chunk", []
+        ) == "references/style-guide.md"
+
+    # A committed map also releases it, even if the decision key never landed.
+    assert flow._suggested_reference(
+        tmp_path, {}, {**fresh, "address_map": True}, "pre-chunk", []
+    ) == "references/style-guide.md"
+
+
+def test_address_map_rename_is_reachable_from_the_cli(tmp_path: Path):
+    """The reconcile hand-off has to be one blessed command, not a bespoke script.
+
+    Friction log 2026-08-03 §3: with no rename verb, carrying the approved cast
+    into the map was a hand-written ordered substitution over nine fields, and
+    confirming it worked meant re-running `glossary commit` for its warning.
+    """
+    from src.harness import state as hstate
+    from src.models import AddressMap, Glossary, GlossaryTerm
+    from src.utils.file_io import save_address_map, save_glossary
+
+    hstate.save_config(tmp_path, {})
+    save_address_map(
+        AddressMap.model_validate({"content": "Aunt Polly is stern.", "pairs": []}),
+        tmp_path / "address_map.json",
+    )
+    save_glossary(
+        Glossary(terms=[GlossaryTerm(english="Aunt Polly", spanish="la tía Polly",
+                                     type="character")]),
+        tmp_path / "glossary.json",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "scripts/harness.py", "address-map", "rename",
+         "--project", str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+    payload = json.loads(result.stdout.decode("utf-8"))
+    assert payload["remaining_warnings"] == []
+    assert payload["renamed"][0]["target"] == "la tía Polly"
+    # Every key self-documents (friction-log #19), and the artifact mirrors it.
+    assert not sorted(set(payload) - set(payload["_schema"]) - {"_schema"})
+    mirrored = json.loads((tmp_path / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert mirrored["draft_path"] == payload["draft_path"]
+
+    # The committed map is untouched: `commit` is still the only path into it.
+    assert "Aunt Polly" in (tmp_path / "address_map.json").read_text(encoding="utf-8")
+
+
+def test_suggested_reference_never_routes_mid_flight_project_backwards(tmp_path: Path):
+    """Regression: an existing project must not be dragged back to a new early beat.
+
+    Projects created before the address-map beat have neither address_map.json nor
+    address_map_decision. Nesting the new branch under the missing-style-guide test
+    is what keeps them on their old path.
+    """
+    from src.harness import flow
+
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    mid_flight = {"source": True, "chapters": True, "style_guide": True,
+                  "glossary": True, "chunks": True, "address_map": False}
+
+    assert flow._suggested_reference(
+        tmp_path, {}, mid_flight, "pre-chunk", []
+    ) == "references/chunk.md"
+    assert flow._suggested_reference(
+        tmp_path, {"backend": "api"}, mid_flight, "partial", []
+    ) == "references/translate-api.md"
+
+    # Glossary still missing -> glossary.md, not back to the address map.
+    assert flow._suggested_reference(
+        tmp_path, {}, {**mid_flight, "glossary": False}, "pre-chunk", []
+    ) == "references/glossary.md"
 
 
 def test_runs_summarizes_latest_run_from_log(tmp_path: Path, monkeypatch):

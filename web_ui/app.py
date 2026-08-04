@@ -3645,15 +3645,19 @@ def project_chunk_translate(project_id, chunk_id):
 
 
 def _load_harness_translate_flags(project_dir: Path) -> dict:
-    """Read per-book always_include_* defaults from ``.harness/config.json``."""
+    """Read per-book always_include_* defaults from ``.harness/config.json``.
+
+    Both are tri-state and returned raw: ``None`` means "auto" (derive from the
+    selected chunks), so callers must resolve it rather than coercing with
+    ``bool()`` — that would report a book running auto-on as off.
+    """
     try:
         from src.harness import state as harness_state
         cfg = harness_state.load_config(project_dir)
     except Exception:
         cfg = {}
     return {
-        "always_include_dialogue": bool(cfg.get("always_include_dialogue", False)),
-        # None means "auto" (derive from selected chunks via _book_has_images).
+        "always_include_dialogue": cfg.get("always_include_dialogue"),
         "always_include_image_instructions": cfg.get("always_include_image_instructions"),
     }
 
@@ -3734,6 +3738,10 @@ def project_translate_cost_estimate(project_id):
         suggested_images = (
             bool(always_images) if always_images is not None else image_count > 0
         )
+        suggested_dialogue = (
+            bool(always_dialogue) if always_dialogue is not None
+            else features["dialogue"] > 0
+        )
         return jsonify({
             "chunk_count": len(chunks),
             "estimated_cost": result.get("cost_usd", 0),
@@ -3742,7 +3750,7 @@ def project_translate_cost_estimate(project_id):
             "total_chunks": features["total"],
             "dialogue_chunk_count": features["dialogue"],
             "image_chunk_count": image_count,
-            "suggested_always_dialogue": always_dialogue,
+            "suggested_always_dialogue": suggested_dialogue,
             "suggested_always_images": suggested_images,
         })
     except Exception as e:
@@ -3792,6 +3800,13 @@ def project_translate_realtime(project_id):
         always_images = flags["always_include_image_instructions"]
         if always_images is None:
             always_images = _book_has_images([chunk])
+        if always_dialogue is None:
+            # Auto over a one-chunk scope is "on iff this chunk has dialogue",
+            # which is exactly what dialogue_instruction does when the opt-in is
+            # off — so False here renders the same prompt. Kept explicit because
+            # the cacheable-prefix reason for the opt-in does not apply to a
+            # single realtime call.
+            always_dialogue = False
 
         translated = translate_chunk_realtime(
             chunk=chunk,
@@ -3877,12 +3892,16 @@ def project_translate_batch(project_id):
             pass
 
     flags = _load_harness_translate_flags(project_dir)
-    from src.api_translator import _book_has_images
+    from src.api_translator import _book_has_images, summarize_chunk_features
 
     if "always_include_dialogue" in data:
         always_dialogue = bool(data.get("always_include_dialogue"))
     else:
-        always_dialogue = flags["always_include_dialogue"]
+        cfg_dialogue = flags["always_include_dialogue"]
+        always_dialogue = (
+            bool(cfg_dialogue) if cfg_dialogue is not None
+            else summarize_chunk_features(selected_chunks)["dialogue"] > 0
+        )
 
     if "always_include_image_instructions" in data:
         always_images = bool(data.get("always_include_image_instructions"))

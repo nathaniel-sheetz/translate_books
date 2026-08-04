@@ -29,7 +29,17 @@ python scripts/harness.py setup \
   --title "<Title>" --author "<Author>"
 # add --url <gutenberg-url> if there is no local source.txt yet.
 # add --project <slug> only to re-run on / target a specific existing project folder.
+# --always-dialogue / --always-images pin the prompt-prefix opt-ins (see below);
+#   omit them unless the user asks — they default to auto, which is usually right.
 ```
+
+`setup` also accepts `--always-dialogue` / `--always-images`, which force the dialogue block and
+image bullet onto every chunk so the cacheable prompt prefix stays byte-identical book-wide. Both
+default to **auto** (on when the book needs it), and **`setup` is no longer the only place to set
+them** — `config-set --key always_include_dialogue --value on|off|auto` changes either at any point
+in the book, including after chunks are translated. Prefer that; never re-run `setup` to change a
+prompt-rendering preference, because `setup` re-splits from `source.txt` and rewrites `chunks/`.
+See `references/chunk.md` §3c.
 
 `--chapter-pattern` now **defaults to `auto`**, which detects the best-fit pattern from the
 source text itself — you rarely need to set it. The named patterns are still selectable:

@@ -31,6 +31,25 @@ size, the metered-API price framed as *conditional* ("If translated via the mete
 a reminder that the **no-API workers backends** (subagent / headless) use your subscription (no
 API $). Do **not** ask a binary "API vs subagent" question here.
 
+**3c — Read the prompt-prefix line (headless caching).** The `chunk` output carries
+`dialogue_chunk_count` / `image_chunk_count` next to `always_include_dialogue` /
+`always_include_image_instructions`. Those two opt-ins decide whether the headless preamble cache can
+engage: the dialogue block and image bullet live in the *fixed* prompt prefix, so if they appear on
+some chunks and not others the prefix diverges chunk to chunk and every mismatched chunk sends the
+full prompt uncached.
+
+Both default to **auto** — on when the book needs it — so a mixed book (most fiction) caches with no
+action from you. You only need to do something if the book **pins one off**, which shows up as a
+`cache_prefix_hint` on the `chunk` result carrying the exact command:
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+  --key always_include_dialogue --value auto     # on | off | auto
+```
+**This is not a now-or-never decision.** These are read at prompt-render time and are never baked
+into `chunks/*.json`, so changing one later and re-running `translate-prepare` re-renders only the
+chunks that still need a translation — committed prose is untouched. Do not re-run `setup` to change
+them; `setup` re-splits the book and *that* is destructive.
+
 **After chunking — hand off to the three-way backend gate.** If `config.backend` is unset, Read
 `references/translate-workers.md` and run **4B-backend** (AskUserQuestion with exactly three
 options: Metered API / Subagent / Headless). Carry the dollar figure into the

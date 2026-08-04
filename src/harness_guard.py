@@ -141,6 +141,217 @@ def diacritic_warning(proposals: list[dict], language_code: str | None) -> str |
     )
 
 
+# Spanish title words that precede a personal name ("el tío Antony", "la señora Banks").
+# Used to tell a *bare* personal name (one canonical form, no alternatives) apart from a
+# title+name (narration form with article primary, bare vocative as the alternative).
+SPANISH_TITLE_WORDS: frozenset[str] = frozenset({
+    "tío", "tía", "señor", "señora", "señorita", "don", "doña",
+    "doctor", "doctora", "profesor", "profesora", "padre", "madre",
+    "hermano", "hermana", "capitán", "sargento", "coronel", "general",
+    "reverendo", "primo", "prima", "abuelo", "abuela", "maestro", "maestra",
+})
+
+# Definite articles that mark the narration form of a title+name.
+def _first_word(text: str) -> str:
+    return text.split()[0].strip(".,;:").lower() if text.split() else ""
+
+
+def glossary_convention_warnings(proposals: list[dict]) -> list[str]:
+    """Advisory checks on the glossary's ``alternatives`` conventions.
+
+    Alternatives are the one glossary field that lets a translator worker pick a
+    *different* rendering per chunk — ``prompts/translation.txt`` tells it only
+    "you may use them when appropriate". That freedom is right for a term genuinely
+    rendered differently by context and wrong for a name, where it silently
+    licenses book-wide inconsistency. The conventions checked here:
+
+    * a **place** has one name — no alternatives (the rare exception being two
+      interchangeable full/short forms of the *same* name, e.g. "Atlántico" /
+      "océano Atlántico", which is why this warns rather than raises);
+    * a **bare personal name** has one form — no alternatives;
+    * a **title + personal name** leads with the narration form *including* the
+      article ("el tío Antony") and offers the bare vocative ("tío Antony") as its
+      single alternative, matching the style guide's narration-vs-address rule.
+      Checked for ``character`` terms only — a *concept* that happens to open with
+      a title word ("la madre superiora") is not a person being addressed.
+
+    Advisory by design, like :func:`diacritic_warning`: it NEVER raises and NEVER
+    blocks. Every message is prefixed ``REVIEW:`` so the approval gate can present
+    these as human judgement calls, distinct from draft bugs. Returns [] when the
+    draft is clean or unparseable (the structural guard owns that failure).
+    """
+    if not isinstance(proposals, list):
+        return []
+
+    from src.harness.address_rename import strip_article
+
+    warnings: list[str] = []
+    for p in proposals:
+        if not isinstance(p, dict):
+            continue
+        english = str(p.get("english") or "").strip()
+        translation = str(p.get("translation") or p.get("spanish") or "").strip()
+        if not english or not translation:
+            continue  # guard_glossary_proposals owns this failure
+        term_type = str(p.get("type") or "other").strip().lower()
+        raw_alts = p.get("alternatives") or []
+        alts = [str(a).strip() for a in raw_alts if str(a).strip()] if isinstance(raw_alts, list) else []
+
+        article, without_article = strip_article(translation)
+        has_title = _first_word(without_article) in SPANISH_TITLE_WORDS
+
+        if term_type == "place" and alts:
+            warnings.append(
+                f"REVIEW: '{english}' is a place with alternatives {alts}. Place names should "
+                "have none — confirm these are interchangeable full/short forms of the same "
+                "name (e.g. 'Atlántico' / 'océano Atlántico'), not variants, and drop them if not."
+            )
+            continue
+
+        # Characters only: a `concept` rendered "la madre superiora" or "el padre
+        # nuestro" opens with a title word without being a title + personal name,
+        # and narration-vs-address does not apply to it. This matches the
+        # bare-name check below, which has always been character-only.
+        if term_type == "character" and has_title:
+            if not article:
+                warnings.append(
+                    f"REVIEW: '{english}' is a title + name whose primary is '{translation}'. "
+                    f"The narration form with the article ('el/la {translation}') should be the "
+                    f"primary and the bare vocative ('{translation}') the alternative."
+                )
+            elif not alts:
+                warnings.append(
+                    f"REVIEW: '{english}' has the narration form '{translation}' but no vocative "
+                    f"alternative. Add '{without_article}' for direct address."
+                )
+            continue
+
+        if term_type == "character" and alts and not has_title:
+            warnings.append(
+                f"REVIEW: '{english}' is a bare personal name with alternatives {alts}. "
+                "One person, one name — drop the alternatives unless there is a stated reason "
+                "in 'context' for a human to review."
+            )
+
+    return warnings
+
+
+def address_map_name_warnings(glossary, address_map) -> list[str]:
+    """Warn when an address map's cast predates the approved glossary.
+
+    The address map is drafted before the glossary exists (it is the first beat),
+    so its pairs carry the **English** source names. Once the glossary fixes the
+    target-language forms, the map should be updated to match — otherwise the
+    ``address`` judge reads "Aunt Polly" while the translation says "la tía Polly"
+    and has to bridge the gap on every call.
+
+    Advisory: never raises, and silently returns [] once the map has been
+    reconciled (or when either artifact is missing).
+
+    **Everything it knows, it reads from the rename.** The surfaces come from
+    ``address_rename.iter_surfaces`` and the sites from
+    ``address_rename.classify_occurrences``, over the rules ``rename_rules``
+    derives — so the check and the fix cannot disagree about which fields count,
+    which *forms* count (article-stripped variants included), or which sites a
+    machine may touch. Re-deriving any of that here is what produced warnings
+    whose prescribed fix was a no-op (``Thor`` inside *authority*) and silences
+    where a rename would have acted (a bare ``screech-owl``).
+
+    Two warnings, because there are two different fixes:
+
+    * **Stale** — sites ``address-map rename`` will rewrite. Reported per field,
+      because a reconcile that updated only the pair names left ``content``
+      saying "Aunt Polly" while the pairs said "la tía Polly"; a whole-map
+      haystack saw the approved form *somewhere* and fell silent, so the judge
+      went on reading English with nothing reporting it (real case:
+      ``Redhead's wife`` in ``projects/the-house-on-the-cliff``).
+    * **Hand-edit** — sites the rename deliberately leaves in English: edged by a
+      hyphen or apostrophe (``a 1920s boys' adventure``, the quoted vocative
+      ``'I'm sorry, Uncle Dock'``), or sitting inside another term's approved
+      form. Re-running the rename cannot clear these, so the message says so and
+      quotes the text instead of prescribing a command that would do nothing.
+
+    A form that already reads the target is never reported: an approved form may
+    contain its own English source (``Detective Smuff`` → ``el detective Smuff``),
+    and flagging those books would be unclearable.
+    """
+    if glossary is None or address_map is None:
+        return []
+
+    from src.harness.address_rename import (
+        MANUAL_KINDS,
+        REWRITTEN_KINDS,
+        classify_occurrences,
+        context_snippet,
+        iter_surfaces,
+        rename_rules,
+    )
+
+    rules = rename_rules(glossary)
+    if not rules:
+        return []
+    surfaces = [s for s in iter_surfaces(address_map) if s.text.strip()]
+    if not surfaces:
+        return []
+
+    # source_english -> {target, paths, contexts}; insertion order == order of
+    # first appearance in the map, so the message is stable across runs.
+    stale: dict[str, dict] = {}
+    manual: dict[str, dict] = {}
+    for surface in surfaces:
+        for occ in classify_occurrences(surface.text, rules):
+            if occ.kind in REWRITTEN_KINDS:
+                bucket = stale
+            elif occ.kind in MANUAL_KINDS:
+                bucket = manual
+            else:
+                continue  # already the approved form
+            rule = rules[occ.rule_index]
+            entry = bucket.setdefault(
+                rule.source_english, {"target": rule.target, "paths": [], "contexts": []}
+            )
+            if surface.path not in entry["paths"]:
+                entry["paths"].append(surface.path)
+            entry["contexts"].append(
+                (surface.path, context_snippet(surface.text, occ.start, occ.end))
+            )
+
+    def _sites(paths: list[str]) -> str:
+        shown = ", ".join(paths[:3])
+        return f"{shown}, +{len(paths) - 3} more" if len(paths) > 3 else shown
+
+    warnings: list[str] = []
+    if stale:
+        listed = "; ".join(
+            f"'{en}' → '{e['target']}' ({_sites(e['paths'])})"
+            for en, e in list(stale.items())[:8]
+        )
+        more = f" (+{len(stale) - 8} more)" if len(stale) > 8 else ""
+        warnings.append(
+            f"REVIEW: address_map.json still uses English cast names for {len(stale)} approved "
+            f"character term(s): {listed}{more}. The map was drafted before the glossary. Run "
+            "`address-map rename` to apply the approved forms across the map (it writes a draft "
+            "and reports every substitution), review it, then `address-map commit` — so the "
+            "address judge reads the names that appear in the prose."
+        )
+    if manual:
+        sites = sum(len(e["contexts"]) for e in manual.values())
+        listed = "; ".join(
+            f"'{en}' → '{e['target']}' at {e['contexts'][0][0]}: \"{e['contexts'][0][1]}\""
+            for en, e in list(manual.items())[:5]
+        )
+        more = f" (+{len(manual) - 5} more)" if len(manual) > 5 else ""
+        warnings.append(
+            f"REVIEW: {sites} site(s) across {len(manual)} approved character term(s) still read "
+            "English where `address-map rename` will FLAG but deliberately NOT rewrite them — the "
+            "match is edged by a hyphen or apostrophe (part of a longer name, a possessive "
+            "adjective, or a quoted vocative wanting the glossary's bare-vocative alternative), "
+            "or it sits inside another term's approved form. Re-running the rename will not clear "
+            f"these; edit the map text by hand or accept them as written: {listed}{more}."
+        )
+    return warnings
+
+
 def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
     """Validate a worker-produced translation draft before it is stamped.
 
