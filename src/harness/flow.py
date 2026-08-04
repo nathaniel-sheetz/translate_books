@@ -951,7 +951,6 @@ def glossary_commit(project: str, *, draft: str | None = None) -> dict:
     hdir = state.harness_dir(project_dir)
 
     from src.harness_guard import (
-        address_map_name_warnings,
         diacritic_warning,
         glossary_convention_warnings,
         guard_glossary_proposals,
@@ -977,13 +976,7 @@ def glossary_commit(project: str, *, draft: str | None = None) -> dict:
 
     # The address map is drafted before the glossary and carries English cast
     # names; now that the target-language forms are approved, flag the drift.
-    address_map_path = project_dir / "address_map.json"
-    if address_map_path.exists():
-        from src.utils.file_io import load_address_map
-        try:
-            warnings.extend(address_map_name_warnings(glossary, load_address_map(address_map_path)))
-        except (OSError, ValueError) as exc:
-            _log.warning("Could not check address map names at %s: %s", address_map_path, exc)
+    warnings.extend(_stale_cast_warnings(project_dir, glossary=glossary))
 
     return {
         "glossary_path": str(out),
@@ -1029,6 +1022,35 @@ def _format_characters_block(project_dir: Path) -> tuple[str, int]:
         note = f" — {t.context}" if t.context else ""
         lines.append(f"- {t.spanish} (English: {t.english}){note}")
     return "\n".join(lines), len(chars)
+
+
+def _stale_cast_warnings(project_dir: Path, address_map=None, glossary=None) -> list[str]:
+    """Cross-check the map's cast against the approved glossary, either direction.
+
+    The map is drafted before the glossary, so whichever of the two is committed
+    *second* is the one that can first see the drift. Both commit paths call this
+    with the artifact they just built; the other side is loaded from disk, and a
+    missing or unreadable one means there is nothing to compare (advisory only —
+    never blocks a commit).
+    """
+    from src.harness_guard import address_map_name_warnings
+    from src.utils.file_io import load_address_map, load_glossary
+
+    try:
+        if glossary is None:
+            path = project_dir / "glossary.json"
+            if not path.exists():
+                return []
+            glossary = load_glossary(path)
+        if address_map is None:
+            path = project_dir / "address_map.json"
+            if not path.exists():
+                return []
+            address_map = load_address_map(path)
+    except (OSError, ValueError) as exc:
+        _log.warning("Could not cross-check the address-map cast in %s: %s", project_dir, exc)
+        return []
+    return address_map_name_warnings(glossary, address_map)
 
 
 def _format_sample_chapters_block(project_dir: Path, scores: list) -> str:
@@ -1083,6 +1105,13 @@ def address_map_precheck(project: str) -> dict:
     later ``address`` judge to check. Records ``address_map_decision="no_dialogue"``
     when the gate fails, so the router stops offering the beat on every resume.
     Read-only otherwise — offering and declining stay the skill's job.
+
+    **Only writes into an unset decision.** A book already ``built`` keeps that:
+    the map exists and the judge reads it, so overwriting it would hide a
+    finished artifact from the router. A book already ``skipped`` keeps that too
+    — the user declined the beat in as many words, and precheck is re-runnable at
+    any time, so rewriting their answer as a machine inference would quietly
+    falsify the one record of it.
     """
     project_dir = state.resolve_project_dir(project)
     state.ensure_harness_dir(project_dir)
@@ -1095,7 +1124,30 @@ def address_map_precheck(project: str) -> dict:
             "No chapter source text found to score for dialogue. Run `setup` + `split` first."
         )
 
-    if result["dialogue_present"]:
+    decided = state.load_config(project_dir).get("address_map_decision")
+    # An explicit prior decision wins over the score — including when dialogue is
+    # present. Re-running precheck must not re-offer a beat the user already built
+    # or declined (the no-dialogue branch already protected those; the dialogue-
+    # present path used to say "Offer" anyway).
+    if decided in ("built", "skipped"):
+        kept = (
+            "this book already has a committed address map — the map is what the address judge "
+            "reads; leave it in place."
+            if decided == "built" else
+            "the address map was already declined for this book — that is the user's answer, not "
+            "something to re-derive from the score."
+        )
+        score_note = (
+            f"{result['qualifying_chapters']} of {result['chapters_scored']} chapters carry "
+            "real back-and-forth dialogue, but "
+            if result["dialogue_present"] else
+            f"no chapter clears {result['min_turns']} quoted turns, but "
+        )
+        result["recommendation"] = (
+            f"{score_note}{kept} The decision stays '{decided}' and nothing was recorded. "
+            "Do not offer the beat."
+        )
+    elif result["dialogue_present"]:
         result["recommendation"] = (
             f"Offer the address map: {result['qualifying_chapters']} of "
             f"{result['chapters_scored']} chapters carry real back-and-forth dialogue."
@@ -1115,10 +1167,26 @@ def address_map_precheck(project: str) -> dict:
 
 
 def address_map_skip(project: str) -> dict:
-    """Record that the user declined the address map. Never blocks translation."""
+    """Record that the user declined the address map. Never blocks translation.
+
+    Refuses to overwrite a ``built`` decision. "Skip" is offered on every resume
+    where the beat is unfinished, so a misread answer is one keystroke from
+    discarding the record of a map the user approved — while the artifact itself
+    stays on disk, leaving the config and the project disagreeing.
+    """
     project_dir = state.resolve_project_dir(project)
     state.ensure_harness_dir(project_dir)
     cfg = state.load_config(project_dir)
+    if cfg.get("address_map_decision") == "built":
+        from src.harness_guard import HarnessValidationError
+
+        raise HarnessValidationError(
+            "This book already has a committed address map (address_map_decision='built'), so "
+            "there is nothing to skip — the map is built and the address judge reads it. If you "
+            f"really mean to discard it, delete {project_dir / 'address_map.json'} and clear "
+            "`address_map_decision` from `.harness/config.json` (skip only refuses while the "
+            "decision is still 'built'), then re-run `address-map skip`."
+        )
     cfg["address_map_decision"] = "skipped"
     state.save_config(project_dir, cfg)
     return {
@@ -1135,8 +1203,9 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
     """Build the address-map drafting prompt (you are the LLM that drafts the map).
 
     Samples the book's highest interpersonal-dialogue chapters (a spread across
-    beginning/middle/end), plus the glossary's cast and the style guide, and
-    renders the prompt for the agent to draft ``address_map.json``.
+    beginning/middle/end). Glossary cast and style guide are optional — at Step
+    0B both are usually absent, so the prompt defaults to English names from the
+    sample; later rebuilds can include them when present.
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
@@ -1208,7 +1277,8 @@ def address_map_commit(project: str, *, draft: str | None = None) -> dict:
     except (json.JSONDecodeError, FileNotFoundError, OSError) as exc:
         raise HarnessValidationError(
             f"Address map draft at {draft_path} is not readable JSON: {exc}\n"
-            "Re-draft it as a JSON object {content, pairs, global_rules}."
+            "Re-draft it as a JSON object "
+            "{content, pairs, global_rules, style_guide_summary}."
         ) from exc
     try:
         address_map = AddressMap.model_validate(data)
@@ -1242,6 +1312,7 @@ def address_map_commit(project: str, *, draft: str | None = None) -> dict:
             "as its FORMS OF ADDRESS section; without it the guide falls back to the "
             "questionnaire answer alone and the map informs nothing. Add it and re-commit."
         )
+    warnings.extend(_stale_cast_warnings(project_dir, address_map))
     return {
         "address_map_path": str(out),
         "pair_count": len(address_map.pairs),
@@ -1256,6 +1327,97 @@ def address_map_commit(project: str, *, draft: str | None = None) -> dict:
                             for k, v in p.directions.items()}}
             for p in address_map.pairs
         ],
+    }
+
+
+def address_map_rename(project: str, *, draft: str | None = None) -> dict:
+    """Reconcile the committed map's cast with the approved glossary.
+
+    The map is drafted at Step 0B with the **English** source names because the
+    glossary does not exist yet; once it does, every ``character`` term's approved
+    form has to be carried into the map, or the ``address`` judge reads
+    "Aunt Polly" while the prose says "la tía Polly". Doing that by hand is an
+    ordered-substitution problem across nine fields, so this applies it in one
+    deterministic pass (see ``src/harness/address_rename.py``).
+
+    Writes a **draft** — ``address_map.json`` is untouched, and `address-map
+    commit` remains the only path into it, so a bad rename cannot land on the
+    artifact the user approved. Idempotent: a reconciled map renames to itself
+    and reports ``renamed: []``.
+
+    Sites a substitution cannot decide are reported in ``flags`` and left in
+    English rather than rewritten, so ``remaining_warnings`` can carry a second
+    line naming them — those need a hand edit, and re-running the rename will not
+    clear them.
+    """
+    project_dir = state.resolve_project_dir(project)
+    hdir = state.ensure_harness_dir(project_dir)
+
+    from src.harness.address_rename import rename_map, rename_rules
+    from src.utils.file_io import load_address_map, load_glossary
+
+    map_path = project_dir / "address_map.json"
+    if not map_path.exists():
+        raise FileNotFoundError(
+            f"No committed address map at {map_path}. Build it first: "
+            "`address-map prepare` then `address-map commit`."
+        )
+    glossary_path = project_dir / "glossary.json"
+    if not glossary_path.exists():
+        raise FileNotFoundError(
+            f"No approved glossary at {glossary_path}. The rename applies the glossary's "
+            "cast to the map, so run the glossary beat first (`glossary prepare` / "
+            "`glossary commit`)."
+        )
+
+    address_map = load_address_map(map_path)
+    glossary = load_glossary(glossary_path)
+    rules = rename_rules(glossary)
+
+    renamed_map = address_map.model_copy(deep=True)
+    hits, flags = rename_map(renamed_map, rules)
+
+    # Same shape/encoding as save_address_map, so the draft reads like the artifact
+    # it will become — a human reviews this file, and ensure_ascii would mangle the
+    # accented names it exists to introduce.
+    draft_path = Path(draft) if draft else hdir / "address_map_draft.json"
+    draft_path.write_text(
+        json.dumps(renamed_map.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    # Group the hits by term so the approval gate reads "6 pairs renamed", not 40 sites.
+    by_term: dict[str, dict] = {}
+    for hit in hits:
+        entry = by_term.setdefault(
+            hit.english, {"english": hit.english, "target": hit.target, "count": 0, "surfaces": []}
+        )
+        entry["count"] += 1
+        if hit.group not in entry["surfaces"]:
+            entry["surfaces"].append(hit.group)
+    renamed = sorted(by_term.values(), key=lambda e: (-e["count"], e["english"]))
+    touched = {e["english"] for e in renamed}
+
+    remaining = _stale_cast_warnings(project_dir, address_map=renamed_map, glossary=glossary)
+    return {
+        "source_path": str(map_path),
+        "draft_path": str(draft_path),
+        "rules_applied": len(rules),
+        "renamed": renamed,
+        "unchanged": sorted({r.source_english for r in rules} - touched),
+        "flags": flags,
+        "remaining_warnings": remaining,
+        "next": f"python scripts/harness.py address-map commit --project {project}",
+        "instructions": (
+            "Read draft_path and check every substitution before committing — this rewrote "
+            "prose, not just the pair names. `flags` marks the sites that need a human: "
+            "'possessive' (substituted, but an English 's now trails a target-language name — "
+            "reword it), 'compound' (NOT substituted: the match is edged by a hyphen or "
+            "apostrophe, so it may belong to a longer name or be a quoted vocative wanting the "
+            "glossary's bare-vocative alternative) and 'shadowed' (NOT substituted: it sits "
+            "inside another term's approved form, so the glossary contradicts itself). Fix "
+            "those in the draft by hand, then run `address-map commit`."
+        ),
     }
 
 
@@ -1432,7 +1594,7 @@ def translate_prepare(
     from src.api_translator import build_translation_prompt_parts
     from src.translator import extract_previous_chapter_context
     from src.utils.file_io import load_chunk, load_glossary, load_style_guide
-    from src.utils.text_utils import image_filenames
+    from src.utils.text_utils import image_filenames, source_has_dialogue
 
     chunks_dir = project_dir / "chunks"
     if not chunks_dir.exists():
@@ -1466,20 +1628,29 @@ def translate_prepare(
 
     # Book-level prompt-prefix opt-ins (see build_translation_prompt): forcing the
     # dialogue block / image bullet onto every chunk keeps the fixed prompt prefix
-    # byte-identical across the book so it stays cacheable. always_include_dialogue is
-    # a per-book config flag; always_include_image_instructions is optional (None =
-    # auto from whole-book image presence) so the constant is stable regardless of
-    # which wave runs.
-    always_include_dialogue = bool(cfg.get("always_include_dialogue", False))
+    # byte-identical across the book so it stays cacheable. Both are tri-state —
+    # None (the default) means auto-derive from the WHOLE book, never from the
+    # --chapters scope, so the constant is stable regardless of which wave runs.
+    # Read fresh here every run: nothing about these is baked into chunks/*.json,
+    # which is what makes `config-set` safe to use mid-book.
+    cfg_dialogue = cfg.get("always_include_dialogue")
     cfg_images = cfg.get("always_include_image_instructions")
-    if cfg_images is None:
-        book_has_images = any(
-            image_filenames(load_chunk(cp).source_text)
-            for cps in all_discovered.values()
-            for cp in cps
-        )
-    else:
-        book_has_images = bool(cfg_images)
+    book_dialogue = book_images = False
+    if cfg_dialogue is None or cfg_images is None:
+        # One pass for both — either alone is a whole-book scan that re-loads
+        # every chunk off disk, so do not run two.
+        for cp in (c for cps in all_discovered.values() for c in cps):
+            if book_dialogue and book_images:
+                break  # nothing left to learn from the rest of the book
+            text = load_chunk(cp).source_text
+            book_dialogue = book_dialogue or source_has_dialogue(text, target_lang)
+            book_images = book_images or bool(image_filenames(text))
+    always_include_dialogue = book_dialogue if cfg_dialogue is None else bool(cfg_dialogue)
+    book_has_images = book_images if cfg_images is None else bool(cfg_images)
+    prefix_source = {
+        "always_include_dialogue": "auto" if cfg_dialogue is None else "config",
+        "always_include_image_instructions": "auto" if cfg_images is None else "config",
+    }
 
     translate_dir = hdir / "translate"
     translate_dir.mkdir(parents=True, exist_ok=True)
@@ -1671,12 +1842,37 @@ def translate_prepare(
         len(cps) <= 1 for cps in discovered.values()
     )
 
+    # Whether the cacheable split actually engaged. Without this the only signal is
+    # the presence of preamble_path on individual manifest entries, which means
+    # eyeballing a long list to notice a book is running uncached (friction log
+    # 2026-08-03 #1/#2: a 28-chunk book cached exactly one chunk, unnoticed).
+    split_count = sum(1 for e in entries if e.get("preamble_path"))
+    cache_split = {
+        "entries": len(entries),
+        "split": split_count,
+        "full_prompt": len(entries) - split_count,
+        "preamble_path": str(preamble_path) if shared_preamble is not None else None,
+        "always_include_dialogue": always_include_dialogue,
+        "always_include_image_instructions": book_has_images,
+        "source": prefix_source,
+    }
+    if entries and split_count < len(entries):
+        cache_split["hint"] = (
+            f"{len(entries) - split_count} of {len(entries)} chunks fall back to the "
+            "full prompt (no preamble cache) because their prefix diverges. Usual "
+            "cause: a prompt-prefix opt-in pinned off. Fix with "
+            + _config_set_cmd(project_dir.name, "always_include_dialogue", "auto")
+            + " then re-run translate-prepare — safe mid-book, committed chunks are "
+            "not touched."
+        )
+
     manifest_doc = {
         "worker_model": worker_model,
         "worker_thinking": worker_thinking,
         "chapters": chapters or "all",
         "spawn_plan": spawn_plan,
         "spawn_mode_moot": spawn_mode_moot,
+        "cache_split": cache_split,
         "entries": entries,
     }
     (translate_dir / "manifest.json").write_text(
@@ -1690,6 +1886,7 @@ def translate_prepare(
         "worker_thinking": worker_thinking,
         "spawn_plan": spawn_plan,
         "spawn_mode_moot": spawn_mode_moot,
+        "cache_split": cache_split,
         "usage_summary": {
             "chunks": len(entries),
             "source_words": total_words,
@@ -2735,6 +2932,18 @@ def _write_retranslate_archive(project_dir: Path, *, chunk_paths: list[Path],
 
 # ── chunk / cost / translate / epub (subprocess wrappers) ──────────────────
 
+def _config_set_cmd(project: str, key: str, value: str) -> str:
+    """The literal command an agent should run, for embedding in a hint string.
+
+    Hints that merely name a setting cost a round trip to look up the verb; the
+    friction log this exists for spent five calls establishing one knob's syntax.
+    """
+    return (
+        f"python scripts/harness.py config-set --project {project} "
+        f"--key {key} --value {value}"
+    )
+
+
 def chunk(
     project: str,
     *,
@@ -2793,23 +3002,48 @@ def chunk(
 
     if chapters:
         cmd += ["--chapters", chapters]
-    return _stream_result("chunk", *_run_script(cmd))
+    _append_always_include_flags(cmd, cfg)
+    result = _stream_result("chunk", *_run_script(cmd))
+    # This is the one beat that prints dialogue_chunk_count beside the book's own
+    # setting, so it is where a prefix that will run uncached is cheapest to spot.
+    # Only an explicit off can get here — auto (the default) already covers the
+    # mixed case — so the hint fires exactly for books that pinned it off.
+    dialogue_count = result.get("dialogue_chunk_count")
+    total = result.get("total_chunks_in_scope")
+    if (
+        cfg.get("always_include_dialogue") is False
+        and isinstance(dialogue_count, int)
+        and isinstance(total, int)
+        and 0 < dialogue_count < total
+    ):
+        result["cache_prefix_hint"] = (
+            f"{dialogue_count} of {total} chunks carry dialogue but this book pins "
+            "always_include_dialogue=off, so the cacheable prompt prefix diverges "
+            "chunk to chunk and a headless run will not cache it. Fix with: "
+            + _config_set_cmd(project_dir.name, "always_include_dialogue", "auto")
+            + " — safe at any time, including after chunks are translated."
+        )
+    return result
 
 
 def _append_always_include_flags(cmd: list[str], cfg: dict) -> None:
-    """Append --always-dialogue / --always-images flags from harness config."""
-    if cfg.get("always_include_dialogue"):
+    """Append --always-dialogue / --always-images flags from harness config.
+
+    Both keys are tri-state. Only an explicit True/False becomes a flag; None
+    (auto, the default) is left unset so ``translate_book.py`` derives it from the
+    chunks the same way ``translate_prepare`` does. Passing an explicit ``--no-``
+    for auto would silently pin the estimate to a prompt nobody will send.
+    """
+    dialogue = cfg.get("always_include_dialogue")
+    if dialogue is True:
         cmd.append("--always-dialogue")
-    else:
-        # Explicit off so translate_book.py does not inherit a stale env/default
-        # and so the preflight summary matches the book's saved preference.
+    elif dialogue is False:
         cmd.append("--no-always-dialogue")
     images = cfg.get("always_include_image_instructions")
     if images is True:
         cmd.append("--always-images")
     elif images is False:
         cmd.append("--no-always-images")
-    # None / absent → leave unset so translate_book.py auto-derives from chunks.
 
 
 def cost(project: str, *, chapters: str | None = None) -> dict:
@@ -3783,12 +4017,32 @@ def show_translation(
 # ``state.headless_extra_flags``). Enum keys keep a frozenset of legal values.
 FREE_TEXT = object()
 
+# The prompt-prefix opt-ins are tri-state, not strings: the CLI takes a word and
+# config.json stores the same True/False/None shape ``setup --always-dialogue``
+# writes, so both entry points agree on disk. ``true``/``false`` are accepted
+# alongside ``on``/``off`` because that is what an agent reads out of config.json
+# and will type back.
+_TRISTATE: dict[str, object] = {
+    "on": True, "true": True,
+    "off": False, "false": False,
+    "auto": None,
+}
+_CONFIG_SET_COERCE: dict[str, dict[str, object]] = {
+    "always_include_dialogue": _TRISTATE,
+    "always_include_image_instructions": _TRISTATE,
+}
+
 _CONFIG_SET_KEYS = {
     "backend": frozenset({"api", "subagent", "headless"}),
     "footnotes_decision": frozenset({"keep", "drop", "none"}),
     "headless_cli": frozenset({"claude", "cursor"}),
     "headless_prompt_cache": frozenset(state.CACHE_VALUES),
     "headless_extra_flags": FREE_TEXT,
+    # Prompt-prefix opt-ins. Read at render time by ``translate_prepare`` (never
+    # baked into chunks/*.json), so these stay adjustable mid-book: change one and
+    # re-run ``translate-prepare`` and only the chunks that still need a
+    # translation are re-rendered. Committed prose is untouched.
+    **{key: frozenset(table) for key, table in _CONFIG_SET_COERCE.items()},
     # One effort key per wave type (headless_effort_judges, …_translate, …).
     **{
         state.effort_config_key(cmd): frozenset(state.EFFORT_VALUES)
@@ -3802,10 +4056,16 @@ def config_set(project: str, *, key: str, value: str) -> dict:
 
     Thin wrapper over ``state.load_config`` / ``state.save_config`` so the skill
     can record ``backend``, ``footnotes_decision``, ``headless_cli``,
-    ``headless_effort_<type>``, ``headless_prompt_cache``, and
-    ``headless_extra_flags`` at decision time and later sessions stop re-asking.
-    Unknown keys / values fail closed with a clear error rather than poisoning
-    the config.
+    ``headless_effort_<type>``, ``headless_prompt_cache``,
+    ``headless_extra_flags``, and the prompt-prefix opt-ins at decision time and
+    later sessions stop re-asking. Unknown keys / values fail closed with a clear
+    error rather than poisoning the config.
+
+    Keys in ``_CONFIG_SET_COERCE`` are stored as the coerced value (``on`` ->
+    ``True``, ``auto`` -> ``None``) rather than the word, so the file looks the
+    same whether it was written here or by ``setup``. ``save_config`` filters
+    caller ``None`` out of the update, then re-merges ``DEFAULTS`` — so both
+    tri-state keys land on disk as JSON ``null`` (auto), not as an absent key.
     """
     from src.harness_guard import HarnessValidationError
 
@@ -3860,7 +4120,8 @@ def config_set(project: str, *, key: str, value: str) -> dict:
             raise HarnessValidationError(
                 f"invalid value {value!r} for {key}; allowed: {allowed}"
             )
-        stored = value
+        coerce = _CONFIG_SET_COERCE.get(key)
+        stored = coerce[value] if coerce else value
 
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
@@ -4002,6 +4263,14 @@ def status(project: str) -> dict:
             "extra_flags": residual_flags,
         },
         "headless_prompt_cache": cfg.get("headless_prompt_cache") or "auto",
+        # Raw tri-state values (null = auto). Without these the only way to learn
+        # which prefix mode a book is in was to re-run setup or read config.json.
+        "prompt_prefix": {
+            "always_include_dialogue": cfg.get("always_include_dialogue"),
+            "always_include_image_instructions": cfg.get(
+                "always_include_image_instructions"
+            ),
+        },
     }
 
     chunks_dir = project_dir / "chunks"
@@ -4296,8 +4565,53 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "glossary commit": {
         "glossary_path": "path to the written glossary.json",
         "term_count": "number of committed terms",
-        "warnings": "advisory, non-blocking flags for the approval gate: accent-stripping, REVIEW: alternatives-convention violations, and stale address-map cast names; empty when clean",
+        "warnings": "advisory, non-blocking flags for the approval gate: accent-stripping, REVIEW: alternatives-convention violations, and up to two address-map cast lines (stale names the rename will fix, and sites it will flag but not rewrite); empty when clean",
         "terms": "list of {english, translation, type, context}",
+    },
+    "address-map precheck": {
+        "chapters_scored": "chapters whose English source was scored for dialogue",
+        "qualifying_chapters": "chapters clearing the min_turns gate (real back-and-forth dialogue)",
+        "total_turns": "quoted turns summed across every scored chapter",
+        "max_density": "highest per-chapter dialogue density found (turns per 1k words, rounded)",
+        "min_turns": "quoted-turn threshold a chapter must clear to qualify",
+        "dialogue_present": "whether ANY chapter qualifies — the gate for offering the beat",
+        "top_chapters": "up to 3 densest qualifying chapters: {chapter_id, turns, attributions, second_person, words, density}",
+        "recommendation": "what to do with the beat, in prose (offer it, or skip it and why)",
+        "address_map_decision": "recorded decision: null (undecided), 'no_dialogue' (written here when the gate fails), or an existing 'built'/'skipped' this leaves untouched",
+    },
+    "address-map skip": {
+        "address_map_decision": "recorded decision ('skipped')",
+        "instructions": "what to do next",
+    },
+    "address-map prepare": {
+        "prompt_path": "path to the address-map drafting prompt to read",
+        "draft_path": "path to write the drafted map JSON to",
+        "sample_chapters": "list of sampled chapters: {chapter_id, turns, attributions, second_person, words, density}",
+        "characters_loaded": "approved character terms fed into the prompt (0 before the glossary exists — draft with the ENGLISH source names)",
+        "style_guide_loaded": "whether style.json was fed into the prompt",
+        "forms_of_address_loaded": "whether the answered forms_of_address preference was found",
+        "instructions": "what to do next",
+    },
+    "address-map commit": {
+        "address_map_path": "path to the written address_map.json",
+        "pair_count": "number of committed character pairs",
+        "has_content": "whether the judge-facing `content` prose is non-empty",
+        "chars": "character length of `content`",
+        "style_guide_summary": "the chunk-local condensation the style-guide beat injects (empty string when absent)",
+        "warnings": "advisory, non-blocking flags for the approval gate: a missing style_guide_summary, a REVIEW: line when the cast still uses English names an approved glossary has translated, and a second REVIEW: line for sites `address-map rename` flags but will not rewrite (those need a hand edit); empty when clean",
+        "address_map_decision": "recorded decision ('built')",
+        "pairs": "list of {a, b, relationship, directions}",
+    },
+    "address-map rename": {
+        "source_path": "the committed address_map.json the rename read (never modified)",
+        "draft_path": "path to the renamed map, for review then `address-map commit`",
+        "rules_applied": "number of English -> approved-form substitution rules derived from the glossary",
+        "renamed": "list of {english, target, count, surfaces} — one entry per glossary term actually substituted",
+        "unchanged": "glossary character terms this rename never substituted — absent from the map, or present only at flagged sites it deliberately left alone",
+        "flags": "sites needing a human, as {kind, english, target, path, context}; 'possessive' WAS substituted but an English 's now trails a target-language name (reword it); 'compound' (edged by a hyphen/apostrophe: a longer name, a possessive adjective, or a quoted vocative) and 'shadowed' (sits inside another term's approved form, so the glossary contradicts itself) were left in English for a human to resolve",
+        "remaining_warnings": "address-map cast warnings recomputed against the renamed map; the first line (stale names) empty means the rename is complete, and a second line, if present, names the flagged sites a hand edit must clear",
+        "next": "the next command to run",
+        "instructions": "what to do next",
     },
     "difficulty": {
         "book_difficulty": "overall difficulty score (0-1, rounded)",
@@ -4317,6 +4631,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "worker_model": "model each worker should be pinned to",
         "spawn_plan": "dict {parallelism, window, batch_size}",
         "spawn_mode_moot": "True when every in-scope chapter is a single chunk (skip the spawn-mode question)",
+        "cache_split": (
+            "dict {entries, split, full_prompt, preamble_path, always_include_dialogue, "
+            "always_include_image_instructions, source} — did the headless preamble cache "
+            "engage. split < entries means those chunks send the full prompt uncached; a "
+            "'hint' key is then present with the config-set command that fixes it"
+        ),
         "usage_summary": "dict {chunks, source_words, worker_model, parallelism, window, batch_size, spawn_mode_moot}",
         "rescued_prior_drafts": "count of uncommitted drafts carried over from a prior prepare or discovered on disk (even out of the current --chapters scope)",
         "chapters": "the --chapters scope echoed back ('all' when omitted)",
@@ -4406,6 +4726,15 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "provider": "provider used for the estimate",
         "model": "model used for the estimate",
         "cost_only": "always True — this command never spends",
+        "dialogue_chunk_count": "chunks whose source has dialogue (Spanish targets only)",
+        "image_chunk_count": "chunks carrying [IMAGE:...] placeholders",
+        "always_include_dialogue": "the value the estimate rendered with (auto-derived when unset)",
+        "always_include_image_instructions": "the value the estimate rendered with (auto-derived when unset)",
+        "cache_prefix_hint": (
+            "present only when the book pins always_include_dialogue off AND has a mixed "
+            "dialogue/no-dialogue split — the prompt prefix will diverge and headless will "
+            "run uncached; carries the config-set command that fixes it"
+        ),
         "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "cost": {
@@ -4419,6 +4748,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "provider": "provider used for the estimate",
         "model": "model used for the estimate",
         "cost_only": "always True — this command never spends",
+        "dialogue_chunk_count": "chunks whose source has dialogue (Spanish targets only)",
+        "image_chunk_count": "chunks carrying [IMAGE:...] placeholders",
+        "always_include_dialogue": "the value the estimate rendered with (auto-derived when unset)",
+        "always_include_image_instructions": "the value the estimate rendered with (auto-derived when unset)",
         "error": "present only on failure (scraped from the wrapped script's last ERROR line, or from a sentinel)",
     },
     "translate": {
@@ -4531,6 +4864,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "footnotes_decision": "persisted footnotes choice (keep | drop | none), or null if unset",
         "address_map_decision": "address-map beat outcome (built | skipped | no_dialogue), or null if not yet offered",
         "headless_cli": "headless launcher family (claude | cursor); default claude",
+        "prompt_prefix": (
+            "dict {always_include_dialogue, always_include_image_instructions} — the raw "
+            "tri-state prompt-prefix opt-ins (true | false | null, where null = auto: on "
+            "when the book needs it). These decide whether the headless preamble cache can "
+            "engage; change either with config-set at any time"
+        ),
         "stage": "one-word progress: pre-chunk | untranslated | partial | fully-translated",
         "spawn_mode_moot": "True if one chunk per chapter (else False; null pre-chunk)",
         "totals": "dict {chapters, complete_chapters, total_chunks, translated_chunks, pending_chunks, combine_stale_chapters}",
@@ -4550,7 +4889,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "config-set": {
         "project": "project slug",
         "key": "config key that was set",
-        "value": "value that was persisted",
+        "value": (
+            "value that was persisted — the tri-state prefix keys store the coerced "
+            "value, so on|true -> true, off|false -> false, auto -> null"
+        ),
         "config": "full .harness/config.json after the write",
     },
     "runs": {

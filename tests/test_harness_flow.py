@@ -513,7 +513,7 @@ def test_chunk_and_cost_pass_configured_model_and_provider(project: Path, monkey
 
 def test_append_always_include_flags_emits_expected_combinations():
     """_append_always_include_flags maps harness config to explicit translate_book.py
-    flags: dialogue is always forced on/off; images stays unset when config is None."""
+    flags. Both keys are tri-state: only True/False become a flag, None stays unset."""
     cmd: list[str] = []
     flow._append_always_include_flags(
         cmd, {"always_include_dialogue": True, "always_include_image_instructions": True}
@@ -526,11 +526,66 @@ def test_append_always_include_flags_emits_expected_combinations():
     )
     assert cmd == ["--no-always-dialogue", "--no-always-images"]
 
-    # images None / absent → no image flag emitted (translate_book.py auto-derives);
-    # dialogue absent still forces an explicit off so no stale env/default leaks in.
+    # Absent / None → no flag at all for either key, so translate_book.py runs the
+    # same auto-derivation translate_prepare does. Forcing an explicit --no- here
+    # would pin the estimate to a prompt that will never be sent.
     cmd = []
     flow._append_always_include_flags(cmd, {})
-    assert cmd == ["--no-always-dialogue"]
+    assert cmd == []
+
+    cmd = []
+    flow._append_always_include_flags(
+        cmd,
+        {"always_include_dialogue": None, "always_include_image_instructions": None},
+    )
+    assert cmd == []
+
+
+def test_chunk_threads_always_include_flags_from_config(project: Path, monkeypatch):
+    """chunk() must forward the flags too. It was the one wrapper that did not, so its
+    preflight reported always_include_dialogue: false for every book regardless of
+    config, and estimated against a prompt nobody would send."""
+    state.save_config(
+        project,
+        {"always_include_dialogue": True, "always_include_image_instructions": False},
+    )
+    captured: dict = {}
+
+    def _capture(cmd):
+        captured["cmd"] = cmd
+        return 0, None
+
+    monkeypatch.setattr(flow, "_run_script", _capture)
+
+    flow.chunk(str(project), size=2000)
+    cmd = captured["cmd"]
+    assert "--always-dialogue" in cmd
+    assert "--no-always-images" in cmd
+
+
+def test_chunk_hints_at_the_cache_fix_only_when_pinned_off(project: Path, monkeypatch):
+    """A book that pins dialogue off AND has a mixed split runs uncached on headless.
+    chunk is the beat that prints both numbers, so it carries the fix command."""
+    def _mixed(_cmd):
+        return 0, {"dialogue_chunk_count": 27, "total_chunks_in_scope": 28}
+
+    monkeypatch.setattr(flow, "_run_script", _mixed)
+
+    state.save_config(project, {"always_include_dialogue": False})
+    hint = flow.chunk(str(project), size=2000).get("cache_prefix_hint")
+    assert hint and "config-set" in hint and "always_include_dialogue" in hint
+
+    # Auto (the default) already handles the mixed case — no hint to give.
+    state.save_config(project, {"always_include_dialogue": None})
+    assert "cache_prefix_hint" not in flow.chunk(str(project), size=2000)
+
+    # Uniform book: the prefix is stable either way, so off is not a problem.
+    def _uniform(_cmd):
+        return 0, {"dialogue_chunk_count": 28, "total_chunks_in_scope": 28}
+
+    monkeypatch.setattr(flow, "_run_script", _uniform)
+    state.save_config(project, {"always_include_dialogue": False})
+    assert "cache_prefix_hint" not in flow.chunk(str(project), size=2000)
 
 
 def test_cost_threads_always_include_flags_from_config(project: Path, monkeypatch):

@@ -114,6 +114,12 @@ translation, so resume is free. The shared preamble lives at `.harness/translate
 per-chunk bodies at `.harness/translate/<id>.body.txt` — `preamble + body` is byte-identical to
 `<id>.prompt.txt` when those paths are present.
 
+**Read `cache_split` before you spawn.** It answers "did the cache actually engage" in one field
+instead of making you scan the manifest for `preamble_path`: `{entries, split, full_prompt, …}`. When
+`split < entries` those chunks send the full prompt uncached, and a `hint` appears with the command
+that fixes it. Do not skip this on a headless run — a 28-chunk book once cached exactly one chunk and
+nobody noticed until the usage log was read afterwards.
+
 **4B-b. STOP — usage gate. END THE TURN.** The subagent analog of the cost gate: no dollars, but
 spawning N workers consumes real subscription/rate usage. Show the `usage_summary` ("N workers on
 `<model>`, mode `<parallelism>`, **thinking: on/off**" — read the thinking state from
@@ -126,10 +132,19 @@ preamble clears **Sonnet's** 1024-token cache minimum (caches for free on the he
 chunk 1) but **not** Opus/Haiku's 4096. Prefer a **Sonnet** worker for headless caching; Haiku/Opus
 cache only if the preamble is later enlarged (full glossary in the prefix — follow-on). Task workers
 do not get cross-invocation prompt caching either way. **Stable prefix:** headless caching needs
-`preamble_path`/`body_path` on the manifest — prefer `always_include_dialogue` (and
-`always_include_image_instructions` when the book has images) so dialogue/image opt-ins don't make
-the prefix diverge across chunks. Without those, mixed chapters silently fall back to the full
-`prompt.txt` (correct, just uncached). Headless puts the preamble in `--system-prompt-file`
+`preamble_path`/`body_path` on the manifest, which needs the dialogue/image opt-ins to be constant
+across chunks rather than varying with each chunk's content. Both default to **auto** — on when the
+book needs it — so this is usually already handled; check `cache_split` above rather than assuming.
+If a book pins one off, mixed chapters silently fall back to the full `prompt.txt` (correct, just
+uncached), and the fix is a normal setting change, safe at any point in the book:
+```bash
+python scripts/harness.py config-set --project projects/<slug> \
+  --key always_include_dialogue --value auto     # on | off | auto
+python scripts/harness.py translate-prepare --project projects/<slug> --chapters <set>
+```
+Re-running `translate-prepare` re-renders only chunks that still need a translation; committed prose
+is untouched. **Never re-run `setup` for this** — `setup` re-splits from `source.txt` and rewrites
+`chunks/`, discarding committed translations. Headless puts the preamble in `--system-prompt-file`
 (system role) for Claude Code caching; Task/API keep prefix+suffix as one user prompt — intentional
 divergence, not a bug.
 

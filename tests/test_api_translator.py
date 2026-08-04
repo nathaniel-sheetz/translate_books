@@ -1873,6 +1873,31 @@ def test_estimate_cost_image_auto_and_feature_counts():
     assert info["input_tokens"] >= info_off["input_tokens"]
 
 
+def test_estimate_cost_dialogue_auto_matches_translate_time():
+    """None means auto: on when any chunk has dialogue, matching translate_prepare."""
+    dialogue_text = (
+        chr(34) + "We must leave at once," + chr(34) + " she said.\n\n"
+        "He nodded and reached for his coat."
+    )
+    dialogue = _mk_chunk("c_dlg", dialogue_text)
+    plain = _mk_chunk("c_plain", "He walked slowly down the lane.\n\nThe trees were silent.")
+    info = estimate_cost(
+        [dialogue, plain],
+        provider="anthropic",
+        model="claude-3-5-sonnet-20241022",
+        always_include_dialogue=None,
+    )
+    assert info["dialogue_chunk_count"] == 1
+    info_off = estimate_cost(
+        [dialogue, plain],
+        provider="anthropic",
+        model="claude-3-5-sonnet-20241022",
+        always_include_dialogue=False,
+    )
+    # Auto-on puts the dialogue block on the plain chunk too, so the estimate grows.
+    assert info["input_tokens"] > info_off["input_tokens"]
+
+
 def test_apply_translation_stamps(sample_chunk):
     """apply_translation strips + stamps text/status/timestamp; last_llm_log is
     set only when a log path is given and preserved (not cleared) when None."""

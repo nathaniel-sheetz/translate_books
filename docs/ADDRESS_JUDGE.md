@@ -106,10 +106,11 @@ actually play out — including how they change — not just the opening chapter
 reports `characters_loaded: 0` and the prompt instructs the drafter to use the
 **English source names verbatim** rather than guessing target-language forms. Once
 the glossary is approved, `glossary commit` emits a `REVIEW:` warning naming every
-character term whose approved translation is missing from the map — re-run
-`prepare` (the cast now loads) and re-commit with the approved names, so the judge
-reads the names that actually appear in the prose. Built standalone after
-translation, this does not arise: the glossary is already there.
+character term whose approved translation is missing from the map — run
+`address-map rename` (it writes a draft applying the approved cast across all map
+fields), review it, then re-commit, so the judge reads the names that actually
+appear in the prose. Built standalone after translation, this does not arise: the
+glossary is already there.
 
 ## Running the judge
 
@@ -151,7 +152,8 @@ Scoring reuses the shared severity-weighted, per-rule-capped compliance score in
 | Data model | `src/models.py` (`AddressMap` / `AddressPair` / `AddressRule`) |
 | Load/save + validate | `src/utils/file_io.py`, `src/harness_guard.py` (`validate_address_map_file`) |
 | Chapter sampler + dialogue gate | `src/harness/address_sample.py` (`select_address_sample_chapters`, `dialogue_precheck`) |
-| Harness beat | `src/harness/flow.py` (`address_map_precheck` / `_prepare` / `_commit` / `_skip`), `scripts/harness.py` |
+| Harness beat | `src/harness/flow.py` (`address_map_precheck` / `_prepare` / `_commit` / `_rename` / `_skip`), `scripts/harness.py` |
+| Cast rename | `src/harness/address_rename.py` (`rename_map`, shared with stale-cast warnings) |
 | Skill beat (Step 0B) | `.claude/skills/translate-harness/references/address-map.md` |
 | Drafting prompt | `prompts/address_map_generate.txt` |
 | Judge | `src/judges/address_judge.py`, `src/judges/registry.py` |

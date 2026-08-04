@@ -63,9 +63,10 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
     `Atlántico` will trip one legitimately. Show each one and say whether you think it is a real
     fix or a justified exception, and let the user decide.
   - If a `REVIEW:` line says `address_map.json` still uses English cast names, that is the
-    reconcile hand-off: after this gate, re-run `address-map prepare` (the cast list now loads),
-    update the pair names to the approved forms, and re-commit the map. Nothing else in it changes.
-    See `references/address-map.md`.
+    reconcile hand-off, and it is mechanical: after this gate, run `address-map rename` (it
+    applies every approved form across the whole map and reports each substitution), read the
+    draft it writes, then `address-map commit`. Do **not** hand-write the substitutions — the
+    ordering is load-bearing (`Bambi's mother` before `Bambi`). See `references/address-map.md`.
 - **AskUserQuestion with exactly two predefined options** — **"Approve all"** (accept the list as-is
   and continue) and **"Reject & talk it through"** (open-ended: END the turn, discuss, then re-draft /
   re-run `commit` and re-present this gate). **In the question text, remind the user that to approve

@@ -114,10 +114,50 @@ the excerpt in front of them is worse than no rule.
 
 ---
 
+## Reconciling the cast after the glossary (Step 2 hand-off)
+
+The map is drafted here with English names; the glossary fixes the target-language forms three
+beats later. When `glossary commit` prints a `REVIEW:` line saying the map still uses English
+cast names, come back and run:
+
+```bash
+python scripts/harness.py address-map rename --project projects/<slug>
+```
+
+This applies every approved `character` form across all nine text fields of the map — the judge
+prose, the global rules, the style-guide summary, the pair names, and the rule
+`when`/`after_event`/`notes` — in one deterministic pass. It writes a **draft** and leaves
+`address_map.json` untouched, so read `draft_path` before committing. What to check:
+
+- **`renamed`** — one entry per term actually substituted, with a count and the fields it
+  touched. The **first** `remaining_warnings` line (stale English cast names) must be gone; that
+  is the confirmation the substitution pass is complete, so you never need to re-run
+  `glossary commit` just to see the warning clear.
+- **`flags`** — the sites needing a human, each with a `context` snippet. Only one of the three
+  kinds was rewritten:
+  - `possessive` — **substituted**, but an English `'s` now trails a target-language name
+    (`la señorita Polly's coldness`). Reword the phrase.
+  - `compound` — **left in English**: the match is edged by a hyphen or apostrophe, so it is
+    usually a **quoted vocative** (`'I'm sorry, Uncle Dock'`) wanting the bare vocative from the
+    glossary's `alternatives` rather than the article-led narration form, part of a longer name
+    (`Great-aunt Harriet`), or a possessive adjective (`a 1920s boys' adventure`) that should not
+    be translated at all. Type the right form in yourself.
+  - `shadowed` — **left in English**: the name sits inside *another* term's approved form, which
+    means the glossary contradicts itself (`Aunt Harriet` → `la tía Harriet` beside `Harriet` →
+    `Enriqueta`). Fix the glossary, or pick a form in the map by hand.
+- **A second `remaining_warnings` line**, when those flagged sites exist. It names them and says
+  plainly that re-running the rename will not clear them — that is expected, not a failure. Edit
+  `draft_path` directly (nothing is committed yet), or accept them as written.
+
+Then re-commit — it re-checks the cast, and the stale-names warning is gone when the reconcile is
+done (a hand-edit line may remain if you accepted a flagged site as written):
+
+```bash
+python scripts/harness.py address-map commit --project projects/<slug>
+```
+
 ## Building the map later (out of band)
 
 Same commands, one difference: if `glossary.json` already exists, `prepare` reports
 `characters_loaded > 0` and the prompt carries the approved cast — use those target-language
-names, not the English ones. This is also the path for reconciling a map drafted before the
-glossary: re-run `prepare`, update the names to the approved forms, re-commit. Nothing else in
-the map needs to change.
+names, not the English ones, and no rename is needed afterwards.

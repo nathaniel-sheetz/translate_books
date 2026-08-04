@@ -479,7 +479,7 @@ def estimate_cost(
     batch_mode: bool = False,
     glossary: Optional[Glossary] = None,
     style_guide: Optional[StyleGuide] = None,
-    always_include_dialogue: bool = False,
+    always_include_dialogue: bool | None = None,
     always_include_image_instructions: bool | None = None,
     target_language: str = "Spanish",
 ) -> dict:
@@ -494,7 +494,8 @@ def estimate_cost(
         glossary: Optional glossary (affects prompt length)
         style_guide: Optional style guide (affects prompt length)
         always_include_dialogue: Match the book-level dialogue opt-in used at
-            translate time so the estimate reflects what is actually sent.
+            translate time so the estimate reflects what is actually sent;
+            ``None`` auto-derives (on when any chunk has dialogue).
         always_include_image_instructions: Match the book-level image opt-in;
             ``None`` auto-derives via ``_book_has_images(chunks)``.
         target_language: Target language for dialogue gating / feature counts.
@@ -519,6 +520,11 @@ def estimate_cost(
         always_include_image_instructions = _book_has_images(chunks)
 
     features = summarize_chunk_features(chunks, target_language=target_language)
+
+    # Same book-level constant for the dialogue block: on when the book needs it,
+    # so the estimate matches what translate time will actually render.
+    if always_include_dialogue is None:
+        always_include_dialogue = features["dialogue"] > 0
 
     # Estimate tokens per chunk
     total_input_tokens = 0

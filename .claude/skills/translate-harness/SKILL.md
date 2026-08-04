@@ -139,6 +139,7 @@ needed. **Redoing chapters that already have translations is NOT a re-run of the
 | Draft or revise the style guide | `style.json` missing/stale | `references/style-guide.md` |
 | Draft or revise the glossary | `glossary.json` missing | `references/glossary.md` |
 | Build the address map **later** (user asks, or judge-review needs it) | `address_map.json` missing, any stage | `references/address-map.md` |
+| Reconcile the map's cast with the glossary | a `REVIEW:` warning about English cast names from `glossary commit` or `address-map commit` | `references/address-map.md` |
 | Chunk / estimate size | `stage: pre-chunk` | `references/chunk.md` |
 | Translate (metered) | `config.backend == api` | `references/translate-api.md` |
 | Translate (workers) | `config.backend in {subagent, headless}` **or backend unset** (run 4B-backend three-way gate first) | `references/translate-workers.md` |

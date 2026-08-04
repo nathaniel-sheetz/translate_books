@@ -350,6 +350,19 @@ class TestGlossaryConventionWarnings:
             _prop("Doctor Hernández", "el doctor Hernández", "character", ["doctor Hernández"]),
         ]) == []
 
+    def test_title_pressure_applies_only_to_characters(self):
+        """A concept opening with a title word is not a person being addressed.
+
+        'la madre superiora' and 'el padre nuestro' start with SPANISH_TITLE_WORDS
+        without being title + personal name, so narration-vs-address does not
+        apply and demanding a bare vocative alternative is noise.
+        """
+        assert glossary_convention_warnings([
+            _prop("the mother superior", "la madre superiora", "concept"),
+            _prop("the Lord's Prayer", "el padre nuestro", "concept"),
+            _prop("the general store", "la tienda general", "technical"),
+        ]) == []
+
     def test_non_name_term_may_carry_alternatives(self):
         assert glossary_convention_warnings([
             _prop("the game", "el juego de alegrarse", "concept", ["el juego"]),
@@ -407,11 +420,45 @@ class TestAddressMapNameWarnings:
             _map("Pollyanna uses usted to la tía Polly.", pairs=[("Pollyanna", "la tía Polly")]),
         ) == []
 
-    def test_name_found_in_summary_counts_as_reconciled(self):
+    def test_a_field_carrying_only_the_approved_form_is_reconciled(self):
         assert address_map_name_warnings(
             _glossary(("Aunt Polly", "la tía Polly")),
             _map("...", summary="Everyone addresses la tía Polly with usted."),
         ) == []
+
+    def test_a_partial_reconcile_is_flagged_and_the_field_named(self):
+        """The approved form living *elsewhere* is not evidence this field was updated.
+
+        A reconcile that renamed the pairs and stopped left the judge-facing
+        prose in English while the whole-map haystack saw 'la tía Polly' in the
+        pairs and fell silent — real case: `Redhead's wife` in
+        projects/the-house-on-the-cliff, still English in `content`.
+        """
+        w = address_map_name_warnings(
+            _glossary(("Aunt Polly", "la tía Polly")),
+            _map("Pollyanna uses usted to Aunt Polly.", pairs=[("Pollyanna", "la tía Polly")]),
+        )
+        assert len(w) == 1
+        assert "Aunt Polly" in w[0] and "content" in w[0]
+
+    def test_an_approved_form_containing_its_english_is_not_reported_forever(self):
+        """'Detective Smuff' matches inside 'el detective Smuff' — the reconciled form.
+
+        Flagging it would be unclearable: no edit to a correctly reconciled map
+        could silence it, and references/address-map.md advertises an empty
+        result as the signal that the reconcile is complete.
+        """
+        assert address_map_name_warnings(
+            _glossary(("Detective Smuff", "el detective Smuff")),
+            _map("Frank distrusts el detective Smuff.", pairs=[("Frank", "el detective Smuff")]),
+        ) == []
+
+    def test_a_self_nested_name_still_flagged_while_genuinely_english(self):
+        w = address_map_name_warnings(
+            _glossary(("Detective Smuff", "el detective Smuff")),
+            _map("Frank distrusts Detective Smuff.", pairs=[("Frank", "el detective Smuff")]),
+        )
+        assert len(w) == 1 and "content" in w[0]
 
     def test_missing_artifacts_are_not_an_error(self):
         assert address_map_name_warnings(None, _map("x")) == []
@@ -421,3 +468,86 @@ class TestAddressMapNameWarnings:
     def test_only_character_terms_are_checked(self):
         g = Glossary(terms=[GlossaryTerm(english="Boston", spanish="Bostón", type="place")])
         assert address_map_name_warnings(g, _map("A scene set in Boston.")) == []
+
+    def test_a_name_appearing_only_in_a_rule_note_is_flagged(self):
+        """The haystack walks every field the rename touches, not just four of them.
+
+        Notes routinely name a *third* character the pair fields never mention —
+        real case: 'Miss Polly' in projects/pollyanna lived only in a rule note,
+        so the old content+global_rules+summary+pair-names haystack reported 4 of
+        the 5 stale terms and the rename it prescribed left one behind.
+        """
+        m = AddressMap(content="Pollyanna uses usted with Nancy.", pairs=[AddressPair(
+            a="Pollyanna", b="Nancy",
+            directions={"a_to_b": [AddressRule(
+                form="usted", when="default", notes="Miss Polly imposes the formality")]},
+        )])
+        w = address_map_name_warnings(_glossary(("Miss Polly", "la señorita Polly")), m)
+        assert len(w) == 1 and "Miss Polly" in w[0]
+
+    def test_names_are_matched_on_word_boundaries(self):
+        """'Thor' inside *authority* used to raise a warning whose fix was a no-op.
+
+        The rename is word-bounded, so a substring hit told the agent to run a
+        command that would then correctly change nothing — a loop with no exit.
+        """
+        assert address_map_name_warnings(
+            _glossary(("Thor", "Tor"), ("Eric", "Érico")),
+            _map("Ricardo asserts authority over Alberico."),
+        ) == []
+
+    def test_the_fix_it_prescribes_is_the_rename_verb(self):
+        w = address_map_name_warnings(
+            _glossary(("Aunt Polly", "la tía Polly")), _map("Aunt Polly is stern."))
+        assert "address-map rename" in w[0]
+
+    def test_an_article_stripped_bare_form_is_flagged(self):
+        """The warning reads the rename's rules, not just the glossary's English.
+
+        `rename_rules` derives 'screech-owl' from 'the screech-owl', so the rename
+        rewrites a bare occurrence — while the warning, testing only the full form,
+        reported the map clean. The gate said 'reconciled' over English prose.
+        """
+        w = address_map_name_warnings(
+            _glossary(("the screech-owl", "el tecolote")),
+            _map("A screech-owl always uses usted with the elders."),
+        )
+        assert len(w) == 1 and "screech-owl" in w[0] and "address-map rename" in w[0]
+
+    def test_a_name_inside_another_terms_approved_form_is_not_stale(self):
+        """A contradictory glossary must not make a reconciled map look unreconciled.
+
+        'Harriet' → 'Enriqueta' matches inside 'la tía Harriet', the approved form
+        of a different term. The rename refuses to rewrite it, so reporting it as
+        stale would prescribe a command that changes nothing.
+        """
+        w = address_map_name_warnings(
+            _glossary(("Aunt Harriet", "la tía Harriet"), ("Harriet", "Enriqueta")),
+            _map("Betsy obeys la tía Harriet."),
+        )
+        assert len(w) == 1
+        assert "will not clear these" in w[0] and "address-map rename` to apply" not in w[0]
+
+    def test_a_compound_site_asks_for_a_hand_edit_not_the_rename(self):
+        """The rename flags these and leaves them; the warning must say so.
+
+        Live on 3 of the 12 books ('a 1920s boys' adventure', the quoted vocatives).
+        Prescribing `address-map rename` here would be a loop with no exit.
+        """
+        w = address_map_name_warnings(
+            _glossary(("boys", "los muchachos")),
+            _map("The map describes a 1920s boys' adventure."),
+        )
+        assert len(w) == 1
+        assert "will not clear these" in w[0]
+        assert "boys" in w[0] and "adventure" in w[0]  # quotes the text, so it is actionable
+
+    def test_both_lines_are_reported_when_both_apply(self):
+        """Two different fixes, two warnings — neither hides the other."""
+        w = address_map_name_warnings(
+            _glossary(("Aunt Polly", "la tía Polly"), ("boys", "los muchachos")),
+            _map("Aunt Polly is stern in this 1920s boys' adventure."),
+        )
+        assert len(w) == 2
+        assert "address-map rename` to apply" in w[0] and "Aunt Polly" in w[0]
+        assert "will not clear these" in w[1] and "boys" in w[1]

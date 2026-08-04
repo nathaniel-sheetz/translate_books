@@ -408,7 +408,13 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
 
     always_dialogue_arg = getattr(args, "always_dialogue", None)
     always_images_arg = getattr(args, "always_images", None)
-    always_include_dialogue = bool(always_dialogue_arg) if always_dialogue_arg is not None else False
+    # Absent means auto for both: on when the book needs it, so a mixed book gets
+    # a stable (cacheable) prefix and a uniform one pays nothing for the block it
+    # would never vary. Matches flow.translate_prepare's resolution.
+    always_include_dialogue = (
+        bool(always_dialogue_arg) if always_dialogue_arg is not None
+        else features["dialogue"] > 0
+    )
     always_include_image_instructions = (
         bool(always_images_arg) if always_images_arg is not None else book_has_images
     )
@@ -416,8 +422,11 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     print(
         f"  {features['total']} chunks: {features['dialogue']} with dialogue, "
         f"{features['images']} with images | dialogue-block-all: "
-        f"{'on' if always_include_dialogue else 'off'}, image-instructions: "
+        f"{'on' if always_include_dialogue else 'off'}"
+        f"{' (auto)' if always_dialogue_arg is None else ''}"
+        f", image-instructions: "
         f"{'on' if always_include_image_instructions else 'off'}"
+        f"{' (auto)' if always_images_arg is None else ''}"
     )
 
     # Cost estimation
@@ -931,7 +940,8 @@ def main():
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Put the DIALOGUE FORMATTING block on every chunk so it "
                              "caches in the fixed prompt prefix (--always-dialogue / "
-                             "--no-always-dialogue). Absent defaults off.")
+                             "--no-always-dialogue). Absent auto-enables when any "
+                             "in-scope chunk has dialogue.")
     parser.add_argument("--always-images", dest="always_images",
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Put the image-placeholder instruction on every chunk "

@@ -89,8 +89,42 @@ class TestTranslateCostEstimateFeatures:
         assert data["total_chunks"] == 3
         assert data["dialogue_chunk_count"] == 1
         assert data["image_chunk_count"] == 1
-        assert "suggested_always_dialogue" in data
+        # No harness config → DEFAULTS leave both flags null (auto); book has both.
+        assert data["suggested_always_dialogue"] is True
         assert data["suggested_always_images"] is True
+
+    def test_null_dialogue_flag_suggests_true_when_book_has_dialogue(self, client, project):
+        """bool(None) would report auto-on as off — resolve auto the way images do."""
+        from src.harness import state as harness_state
+
+        harness_state.save_config(project, {"always_include_dialogue": None})
+        rv = client.post(
+            "/api/project/cacheproj/translate/cost-estimate",
+            json={
+                "chapter_ids": ["chapter_001"],
+                "provider": "anthropic",
+                "model": "claude-3-5-sonnet-20241022",
+                "include_translated": True,
+            },
+        )
+        assert rv.status_code == 200, rv.get_json()
+        assert rv.get_json()["suggested_always_dialogue"] is True
+
+    def test_explicit_dialogue_off_stays_suggested_false(self, client, project):
+        from src.harness import state as harness_state
+
+        harness_state.save_config(project, {"always_include_dialogue": False})
+        rv = client.post(
+            "/api/project/cacheproj/translate/cost-estimate",
+            json={
+                "chapter_ids": ["chapter_001"],
+                "provider": "anthropic",
+                "model": "claude-3-5-sonnet-20241022",
+                "include_translated": True,
+            },
+        )
+        assert rv.status_code == 200, rv.get_json()
+        assert rv.get_json()["suggested_always_dialogue"] is False
 
 
 class TestTranslateBatchFlags:
