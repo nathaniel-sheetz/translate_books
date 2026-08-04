@@ -1967,6 +1967,7 @@ def test_address_map_rename_is_reachable_from_the_cli(tmp_path: Path):
     into the map was a hand-written ordered substitution over nine fields, and
     confirming it worked meant re-running `glossary commit` for its warning.
     """
+    from src.harness import flow
     from src.harness import state as hstate
     from src.models import AddressMap, Glossary, GlossaryTerm
     from src.utils.file_io import save_address_map, save_glossary
@@ -1993,10 +1994,18 @@ def test_address_map_rename_is_reachable_from_the_cli(tmp_path: Path):
     payload = json.loads(result.stdout.decode("utf-8"))
     assert payload["remaining_warnings"] == []
     assert payload["renamed"][0]["target"] == "la tía Polly"
-    # Every key self-documents (friction-log #19), and the artifact mirrors it.
-    assert not sorted(set(payload) - set(payload["_schema"]) - {"_schema"})
+    # Every result key is documented in OUTPUT_SCHEMAS (friction-log #19); transport
+    # is the sidecar, so completeness is checked against the registry, not the payload.
+    schema = flow.OUTPUT_SCHEMAS["address-map rename"]
+    assert not sorted(set(payload) - set(schema) - {"_schema", "_schema_path"})
     mirrored = json.loads((tmp_path / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert mirrored["draft_path"] == payload["draft_path"]
+    assert "_schema" not in mirrored
+    assert mirrored["_schema_path"].endswith("last_output_schema.json")
+    sidecar = json.loads(
+        (tmp_path / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == schema
 
     # The committed map is untouched: `commit` is still the only path into it.
     assert "Aunt Polly" in (tmp_path / "address_map.json").read_text(encoding="utf-8")

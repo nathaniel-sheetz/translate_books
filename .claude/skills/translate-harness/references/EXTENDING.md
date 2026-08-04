@@ -10,7 +10,9 @@ inventing a new shape.
    (commands, STOP gates, what to Read from `last_output.json`).
 2. Add a ROUTER row in the core `SKILL.md` (signal → load that file).
 3. If it needs a new CLI command: add a subparser in `scripts/harness.py` and a
-   function in `src/harness/flow.py`, then register an `OUTPUT_SCHEMAS` entry.
+   function in `src/harness/flow.py`, then register an `OUTPUT_SCHEMAS` entry
+   (same as today — only the transport changed: the schema is written to
+   `.harness/last_output_schema.json` by default, inlined on `--schema` / errors).
 4. Persist any once-per-book decision via
    `python scripts/harness.py config-set --project <p> --key <k> --value <v>`
    (thin wrapper over `state.load_config` / `state.save_config` — no new state

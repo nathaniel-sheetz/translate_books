@@ -646,7 +646,13 @@ def test_streaming_command_refreshes_last_output(project: Path, monkeypatch):
     assert fresh["command"] == "chunk" and fresh["exit_code"] == 0
     assert fresh["total_chunks_in_scope"] == 7
     assert "book_difficulty" not in fresh, "the stale difficulty result must be gone"
-    assert "total_chunks_in_scope" in fresh["_schema"]  # self-documents its keys (#19)
+    assert "_schema" not in fresh
+    assert fresh["_schema_path"].endswith("last_output_schema.json")
+    sidecar = json.loads(
+        (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert "total_chunks_in_scope" in sidecar
+    assert sidecar == flow.OUTPUT_SCHEMAS["chunk"]
 
 
 def test_streaming_refusal_still_refreshes_artifact(project: Path, monkeypatch):
@@ -667,18 +673,95 @@ def test_streaming_refusal_still_refreshes_artifact(project: Path, monkeypatch):
     assert "book_difficulty" not in fresh
 
 
-def test_dict_command_artifact_carries_schema(project: Path, monkeypatch):
-    """Friction-log #19: every artifact self-documents its keys under _schema, so the agent
-    reads the schema instead of guessing field names."""
+def test_dict_command_artifact_uses_schema_sidecar(project: Path, monkeypatch):
+    """Friction-log #19 / bambi #4: successful artifacts point at a schema sidecar
+    instead of inlining ``_schema``, so a Read of last_output.json stays cheap."""
     import scripts.harness as harness
 
     monkeypatch.setattr(sys, "argv", ["harness.py", "difficulty", "--project", str(project)])
     harness.main()  # a dict command returns normally (no SystemExit)
 
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
-    assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"]
+    assert "_schema" not in out
+    assert list(out.keys())[0] == "_schema_path"  # pointer first so a stray tail lands on results
+    assert out["_schema_path"].endswith("last_output_schema.json")
+    sidecar = json.loads(
+        (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == flow.OUTPUT_SCHEMAS["difficulty"]
     for key in ("book_difficulty", "suggested_target_size", "chapters"):
-        assert key in out and key in out["_schema"]
+        assert key in out and key in sidecar
+
+
+def test_schema_flag_inlines_schema(project: Path, monkeypatch):
+    """``--schema`` restores the old inline ``_schema`` block on success."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["harness.py", "difficulty", "--project", str(project), "--schema"],
+    )
+    harness.main()
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"]
+    assert "_schema_path" not in out
+    # Sidecar is still written so a later Read of it stays valid.
+    sidecar = json.loads(
+        (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == flow.OUTPUT_SCHEMAS["difficulty"]
+
+
+def test_error_payload_inlines_schema_without_flag(project: Path, monkeypatch):
+    """Soft-error dicts always carry ``_schema`` inline — never ask the agent to re-run."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["harness.py", "translate-prepare", "--project", str(project)],
+    )
+    harness.main()
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out.get("error")
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["translate-prepare"]
+    assert "_schema_path" not in out
+
+
+def test_nested_subparser_accepts_schema_flag(project: Path, monkeypatch):
+    """Nested groups (address-map / footnotes / …) must accept ``--schema`` on the leaf."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["harness.py", "address-map", "precheck", "--project", str(project), "--schema"],
+    )
+    harness.main()
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["address-map precheck"]
+
+
+def test_streaming_nonzero_exit_inlines_schema(project: Path, monkeypatch):
+    """A streaming command that fails still inlines ``_schema`` (shape needed most)."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(
+        flow, "_run_script",
+        lambda cmd: (1, None, "Template file not found: prompts/translation.txt"),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["harness.py", "cost", "--project", str(project)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        harness.main()
+    assert exc.value.code == 1
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["exit_code"] == 1
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["cost"]
+    assert "_schema_path" not in out
 
 
 def test_stream_result_keeps_harness_authoritative_keys():
@@ -862,7 +945,11 @@ def test_footnotes_translate_yes_invokes_translator(project: Path, monkeypatch):
 
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert (out["total"], out["translated"], out["pending"]) == (2, 1, 1)
-    assert out["_schema"] == flow.OUTPUT_SCHEMAS["footnotes translate"]
+    assert "_schema" not in out
+    sidecar = json.loads(
+        (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == flow.OUTPUT_SCHEMAS["footnotes translate"]
 
 
 def test_footnotes_apply_invokes_footnotes_stage(project: Path, monkeypatch):
@@ -892,7 +979,11 @@ def test_footnotes_apply_invokes_footnotes_stage(project: Path, monkeypatch):
 
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert out["footnotes_written"] == 4 and out["epub_path"].endswith("b.epub")
-    assert out["_schema"] == flow.OUTPUT_SCHEMAS["footnotes apply"]
+    assert "_schema" not in out
+    sidecar = json.loads(
+        (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == flow.OUTPUT_SCHEMAS["footnotes apply"]
 
 
 def test_footnotes_drop_strips_tokens_and_removes_sidecar(project: Path):
@@ -1008,7 +1099,7 @@ def test_retranslate_and_combine_are_not_streaming_commands():
 
 
 def test_cli_retranslate_preview_is_nonmutating(project: Path, monkeypatch):
-    """The CLI preview path stamps _schema, writes last_output.json, and changes nothing."""
+    """The CLI preview path stamps ``_schema_path``, writes last_output.json, and changes nothing."""
     import scripts.harness as harness
 
     cp = _translated_chunk(project)
@@ -1019,7 +1110,12 @@ def test_cli_retranslate_preview_is_nonmutating(project: Path, monkeypatch):
     harness.main()  # a dict command returns normally (no SystemExit)
 
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
-    assert out["_schema"] == flow.OUTPUT_SCHEMAS["retranslate"]
+    assert "_schema" not in out
+    assert out["_schema_path"].endswith("last_output_schema.json")
+    sidecar = json.loads(
+        (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == flow.OUTPUT_SCHEMAS["retranslate"]
     assert out["dry_run"] is True
     assert out["cleared"] == ["chapter_01_chunk_000"]
     assert cp.read_bytes() == before

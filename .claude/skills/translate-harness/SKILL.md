@@ -54,8 +54,11 @@ truncates).
 **Windows / UTF-8:** run ad-hoc probes as `python -X utf8 -c "..."` (or `PYTHONUTF8=1`).
 Open project files with `encoding="utf-8"`. Prefer `Read` on `last_output.json`.
 
-**Don't guess field names — read the `_schema`.** Every `last_output.json` carries a
-`_schema` block mapping each result key to a one-line description. That is the contract.
+**Don't guess field names — read the schema sidecar when a key is unfamiliar.** Successful
+payloads carry `_schema_path` pointing at `.harness/last_output_schema.json` (same shape as
+the old inline `_schema`). `Read` that sidecar only when you need a key you don't already
+know — it is deliberately *not* inlined on every beat. Errors always carry `_schema` inline;
+`--schema` forces it on success too.
 
 **Run logging:** every command appends to `logs/harness_runs.jsonl` automatically. Log
 conversational beats the CLI can't see with `log-event` (fire-and-forget — never gate the

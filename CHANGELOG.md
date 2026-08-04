@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.3.0] - 2026-08-04
+
+### Changed
+- **Harness `_schema` is opt-in, with a sidecar for the default path.** Successful `last_output.json` payloads no longer inline the per-key documentation block (median ~30% of the artifact; `status` alone was ~2KB). They carry `_schema_path` pointing at `.harness/last_output_schema.json` instead, stamped *first* so a stray `tail` lands on result fields. `--schema` forces the old inline block; soft-error dicts and non-zero streaming exits always carry it (no "re-run with `--schema`" hint — many harness commands mutate). Ports the 0.39.4.0 `run_judges` contract without its unsafe re-run advice (bambi friction #4).
+
+### Fixed
+- **Read-back tax on every harness beat.** Agents were writing bespoke `python -X utf8` probes because a plain `Read` of `last_output.json` was dominated by schema they already knew. The artifact is now cheap enough that the documented contract (Bash + `Read`) holds without off-contract probes.
+
 ## [0.40.2.0] - 2026-08-04
 
 ### Added
