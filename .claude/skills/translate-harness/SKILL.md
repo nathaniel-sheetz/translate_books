@@ -54,11 +54,21 @@ truncates).
 **Windows / UTF-8:** run ad-hoc probes as `python -X utf8 -c "..."` (or `PYTHONUTF8=1`).
 Open project files with `encoding="utf-8"`. Prefer `Read` on `last_output.json`.
 
-**Don't guess field names — read the schema sidecar when a key is unfamiliar.** Successful
-payloads carry `_schema_path` pointing at `.harness/last_output_schema.json` (same shape as
-the old inline `_schema`). `Read` that sidecar only when you need a key you don't already
-know — it is deliberately *not* inlined on every beat. Errors always carry `_schema` inline;
-`--schema` forces it on success too.
+**Don't guess field names.** Successful payloads carry two meta keys, first, before any
+result field: `_schema_keys` — every key that command can return, in schema order — and
+`_schema_path`, pointing at `.harness/last_output_schema.json` for the *descriptions*. The
+per-item list is named differently per verb (`translate-prepare` → `manifest`,
+`show-translation` → `chapters`, `align` → `aligned`), so **read the name off
+`_schema_keys` instead of assuming** — a guessed key is a `KeyError` and a wasted call.
+`Read` the sidecar only when a key's *meaning* is unfamiliar; it is deliberately not
+inlined on every beat. Errors always carry `_schema` inline; `--schema` forces it on
+success too.
+
+**Keep the payload small so a full `Read` stays the cheap option.** `translate-prepare
+--brief` returns `chunk_ids` + a `path_template` instead of a per-entry manifest echo
+(~180 lines on a 22-chunk scope, mostly absolute paths already on disk). Use it. A payload
+you feel the need to truncate is a payload that wanted `--brief` — never reach for
+`| tail`.
 
 **Run logging:** every command appends to `logs/harness_runs.jsonl` automatically. Log
 conversational beats the CLI can't see with `log-event` (fire-and-forget — never gate the

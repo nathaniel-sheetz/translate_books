@@ -683,7 +683,8 @@ def test_dict_command_artifact_uses_schema_sidecar(project: Path, monkeypatch):
 
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert "_schema" not in out
-    assert list(out.keys())[0] == "_schema_path"  # pointer first so a stray tail lands on results
+    # Pointer + key names first, so a stray tail lands on result fields.
+    assert list(out.keys())[:2] == ["_schema_path", "_schema_keys"]
     assert out["_schema_path"].endswith("last_output_schema.json")
     sidecar = json.loads(
         (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
@@ -691,6 +692,22 @@ def test_dict_command_artifact_uses_schema_sidecar(project: Path, monkeypatch):
     assert sidecar == flow.OUTPUT_SCHEMAS["difficulty"]
     for key in ("book_difficulty", "suggested_target_size", "chapters"):
         assert key in out and key in sidecar
+
+
+def test_schema_keys_names_every_documented_key(project: Path, monkeypatch):
+    """Bambi §3b: result keys differ per verb (manifest / chapters / aligned), and the
+    agent guessed one rather than Read a whole schema file. The NAMES ride along free."""
+    import scripts.harness as harness
+
+    monkeypatch.setattr(sys, "argv", ["harness.py", "status", "--project", str(project)])
+    harness.main()
+
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert out["_schema_keys"] == list(flow.OUTPUT_SCHEMAS["status"])
+    # Descriptions stay in the sidecar — names only, or this re-inlines the schema.
+    assert all(isinstance(k, str) for k in out["_schema_keys"])
+    # Covers keys this payload does not carry, which is the part a payload can't self-report.
+    assert set(out["_schema_keys"]) >= set(out) - {"_schema_path", "_schema_keys"}
 
 
 def test_schema_flag_inlines_schema(project: Path, monkeypatch):
@@ -706,6 +723,8 @@ def test_schema_flag_inlines_schema(project: Path, monkeypatch):
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"]
     assert "_schema_path" not in out
+    # No _schema_keys either — the inline block already names every key.
+    assert "_schema_keys" not in out
     # Sidecar is still written so a later Read of it stays valid.
     sidecar = json.loads(
         (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
@@ -726,7 +745,7 @@ def test_error_payload_inlines_schema_without_flag(project: Path, monkeypatch):
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert out.get("error")
     assert out["_schema"] == flow.OUTPUT_SCHEMAS["translate-prepare"]
-    assert "_schema_path" not in out
+    assert "_schema_path" not in out and "_schema_keys" not in out
 
 
 def test_nested_subparser_accepts_schema_flag(project: Path, monkeypatch):
@@ -1088,6 +1107,89 @@ def test_translate_commit_and_status_schemas_document_the_recombine_keys():
     assert "recombined" in commit and "combine_failed" in commit
     assert "recombined" in commit["counts"]
     assert "combine_stale" in flow.OUTPUT_SCHEMAS["status"]
+
+
+# ── OUTPUT_SCHEMAS completeness, statically ────────────────────────────────
+#
+# Since 0.40.4.0 the schema is not documentation: ``_schema_keys`` is derived from
+# it and SKILL.md tells the agent to read key names off that index INSTEAD of
+# guessing. An undocumented key is therefore a lie the agent is instructed to
+# trust — `translate-commit` returned `evaluated` for four releases while its entry
+# named it only inside the `counts` description string.
+#
+# Four hand-audits in a row missed a verb each time, so this reads the source
+# instead. It is static on purpose: the runtime check below can only see branches
+# its fixture reaches, which is exactly how `combine` shipped an undocumented
+# `chapters` on its no-match branch while a runtime completeness test for `combine`
+# sat green two functions away.
+
+# Commands whose flow function is not the mechanical `-`/space -> `_` transform.
+_SCHEMA_FUNC_ALIASES = {"split": "split_apply"}
+
+
+def _literal_return_keys(fn) -> set[str]:
+    """String keys of every ``return {...}`` literal in ``fn``'s OWN body.
+
+    Nested ``def``/``lambda`` bodies are skipped: helper closures inside
+    ``retranslate`` and ``combine`` return per-item dicts (``path``/``mtime``/
+    ``bytes``) that are not the command's payload, and counting them would make
+    this fail on correct code.
+    """
+    import ast
+
+    keys: set[str] = set()
+    stack = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            keys.update(
+                k.value for k in node.value.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            )
+        stack.extend(ast.iter_child_nodes(node))
+    return keys
+
+
+def test_output_schemas_document_every_returned_key():
+    """No verb may return a key its OUTPUT_SCHEMAS entry omits (bambi friction §2).
+
+    Covers EVERY branch of the 23 commands whose flow function returns dict
+    literals — including the error and no-match paths no fixture reaches. The
+    remaining commands build their payload through a variable (`translate-prepare`,
+    `align`, `status`, `translate-fanout`, `address-map precheck`) or through
+    `_stream_result` (`chunk`, `cost`, `translate`, `epub`, `footnotes
+    translate`/`apply`); their literal returns are still checked, but their
+    variable-built keys need the hand-check EXTENDING.md asks for.
+    """
+    import ast
+
+    tree = ast.parse(Path(flow.__file__).read_text(encoding="utf-8"))
+    funcs = {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    checked, undocumented = [], {}
+    for command, schema in flow.OUTPUT_SCHEMAS.items():
+        name = _SCHEMA_FUNC_ALIASES.get(
+            command, command.replace("-", "_").replace(" ", "_"))
+        fn = funcs.get(name)
+        if fn is None:
+            continue  # streaming/dispatched elsewhere — nothing static to read
+        checked.append(command)
+        missing = sorted(_literal_return_keys(fn) - set(schema))
+        if missing:
+            undocumented[command] = missing
+
+    assert not undocumented, (
+        "verbs return keys their OUTPUT_SCHEMAS entry never documents, so "
+        f"_schema_keys under-reports them: {undocumented}"
+    )
+    # A rename that silently stops matching function names would otherwise turn
+    # this into a vacuously green test.
+    assert len(checked) >= 20, f"audit only reached {len(checked)} commands: {checked}"
 
 
 def test_retranslate_and_combine_are_not_streaming_commands():

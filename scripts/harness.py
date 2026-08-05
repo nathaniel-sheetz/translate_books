@@ -13,9 +13,9 @@ paid stage (``chunk``/``cost``/``translate``/``epub``) stream the wrapped CLI's 
 output and exit with its code, but ALSO mirror a fresh structured result to
 ``last_output.json`` (friction-log #18 — they used to leave the previous command's result
 in place). Per-key documentation lives in ``.harness/last_output_schema.json``; the
-payload carries ``_schema_path`` (or inlines ``_schema`` on ``--schema`` / errors) so
-the agent never has to guess field names without paying the schema on every Read
-(friction-log #19 / bambi #4).
+payload carries ``_schema_path`` + ``_schema_keys`` (or inlines ``_schema`` on
+``--schema`` / errors) so the agent never has to guess field names without paying the
+schema on every Read (friction-log #19 / bambi #4, §3b).
 
 Cost-gate safety (unchanged from the wrapped CLI):
   * ``chunk`` and ``cost`` always pass ``--cost-only`` — they physically cannot spend.
@@ -274,6 +274,13 @@ def _build_parser() -> argparse.ArgumentParser:
     tpp.add_argument("--batch-size", dest="batch_size", type=int, default=None,
                      help="Recommended workers to spawn per wave (default 3); persisted. "
                           "Ramp from this; throttle back to ~1 on a 529 (overloaded)")
+    tpp.add_argument("--brief", action="store_true",
+                     help="Omit the per-entry manifest echo; return chunk_ids + a "
+                          "path_template instead (a 22-chunk manifest is ~180 lines of "
+                          "mostly-derivable absolute paths). manifest.json on disk is "
+                          "unchanged and still carries every field — translate-fanout and "
+                          "translate-commit read it from there. Serves both backends: "
+                          "--chunk-ids takes the ids, a Task spawn fills the template.")
 
     tcp = sub.add_parser("translate-commit",
                          help="Validate worker drafts and stamp the chunks (idempotent)")
@@ -598,7 +605,7 @@ def _dispatch(args: argparse.Namespace):
                                       worker_model=args.worker_model,
                                       worker_thinking=args.worker_thinking,
                                       parallelism=args.parallelism, window=args.window,
-                                      batch_size=args.batch_size)
+                                      batch_size=args.batch_size, brief=args.brief)
     if cmd == "translate-commit":
         return flow.translate_commit(args.project, worker_model=args.worker_model,
                                      allow_problems=args.allow_problems)
@@ -714,6 +721,14 @@ def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
     ``tail`` lands on result fields. ``--schema`` and error payloads still inline
     ``_schema`` — unlike ``run_judges``, we never tell the agent to re-run, because many
     harness commands mutate.
+
+    The sidecar path also stamps ``_schema_keys`` — the schema's key NAMES, no
+    descriptions. Bambi §3b: result keys differ per verb (``manifest`` / ``chapters`` /
+    ``aligned``), and reading a whole schema file to learn one name feels heavier than
+    guessing, which is how a probe got burned on a ``KeyError``. The names are ~5% of the
+    inline block and cover keys the payload itself can never show (``error``, ``note``),
+    so the guess has no excuse left. Derived from the registry, so it needs no maintenance
+    of its own. Not added to the inline branch — ``_schema`` already carries them.
     """
     if not isinstance(result, dict):
         return
@@ -737,10 +752,13 @@ def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
         result["_schema"] = schema
         return
 
-    # Pointer first; drop any prior meta keys so a rebuild stays clean.
-    rebuilt = {"_schema_path": str(harness / _SCHEMA_SIDECAR)}
+    # Pointer + key names first; drop any prior meta keys so a rebuild stays clean.
+    rebuilt = {
+        "_schema_path": str(harness / _SCHEMA_SIDECAR),
+        "_schema_keys": list(schema),
+    }
     for key, value in result.items():
-        if key in ("_schema", "_schema_path"):
+        if key in ("_schema", "_schema_path", "_schema_keys"):
             continue
         rebuilt[key] = value
     result.clear()

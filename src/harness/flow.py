@@ -1481,6 +1481,7 @@ def translate_prepare(
     parallelism: str | None = None,
     window: int | None = None,
     batch_size: int | None = None,
+    brief: bool = False,
 ) -> dict:
     """Render per-chunk prompts + a manifest for the subagent backend (no spend).
 
@@ -1535,6 +1536,15 @@ def translate_prepare(
 
     ``window`` is clamped to ``batch_size`` when it would exceed the fan-out throttle
     (chapter-parallel first-position waves spawn one worker per chapter in the window).
+
+    ``brief`` drops the per-entry ``manifest`` echo in favour of ``chunk_ids`` +
+    ``path_template`` (bambi friction §3a: a 22-entry manifest is ~180 lines, and five of
+    its eight fields are absolute paths mechanically derivable from ``chunk_id`` that were
+    *just* written to ``manifest.json``). Both worker backends are still served — the
+    headless path takes ``chunk_ids`` straight to ``translate-fanout --chunk-ids``, and a
+    Task spawn fills ``path_template`` with ``translate_dir`` + ``chunk_id``. The manifest
+    written to disk is unaffected; ``translate-fanout`` / ``translate-commit`` read it from
+    there and never see this payload.
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
@@ -1879,7 +1889,7 @@ def translate_prepare(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    return {
+    result = {
         "manifest": entries,
         "manifest_path": str(translate_dir / "manifest.json"),
         "worker_model": worker_model,
@@ -1909,6 +1919,53 @@ def translate_prepare(
             "Nothing to translate — all chunks in scope already have translations."
         ),
     }
+    return _brief_prepare_payload(result, translate_dir) if brief else result
+
+
+def _brief_prepare_payload(result: dict, translate_dir: Path) -> dict:
+    """Swap ``translate-prepare``'s per-entry manifest for ids + a path template.
+
+    Everything the usage gate reads (``cache_split``, ``usage_summary``, ``spawn_plan``,
+    ``worker_thinking``, ``rescued_prior_drafts``) is preserved verbatim — only the
+    entry list goes, because it is a near-verbatim copy of the ``manifest.json`` that was
+    written to disk two statements earlier.
+
+    The template is not a new naming convention: ``translate_prepare`` writes those two
+    files as ``translate_dir / f"{chunk_id}.prompt.txt"`` / ``.draft.txt`` on both the
+    fresh-render and the draft-rescue path, so the template *is* the code's own rule.
+    ``chunk_ids`` is in document order and chapter-contiguous (chunk ids are
+    ``f"{chapter_id}_chunk_{position:03d}"``, see ``src/chunker.py``), so chapter-parallel
+    wave planning works off the ids alone.
+    """
+    entries = result.get("manifest") or []
+    # Built through Path so the template carries the platform's separator: formatting it
+    # then reproduces the manifest's own path STRING, not merely an equivalent one — an
+    # agent pastes this into a worker prompt verbatim.
+    def _template(suffix: str) -> str:
+        return str(Path("{translate_dir}") / f"{{chunk_id}}{suffix}")
+
+    brief = {
+        "brief": True,
+        "chunk_ids": [e["chunk_id"] for e in entries],
+        "translate_dir": str(translate_dir),
+        "path_template": {
+            "prompt": _template(".prompt.txt"),
+            "draft": _template(".draft.txt"),
+        },
+    }
+    brief.update({k: v for k, v in result.items() if k != "manifest"})
+    if entries:
+        brief["instructions"] = (
+            "Per-entry paths come from path_template: format it with translate_dir and a "
+            "chunk_id (do not invent a different shape). For each chunk_id, either "
+            "(1) spawn a Task worker pinned to worker_model that reads the prompt path and "
+            "writes ONLY the translated prose to the draft path, or (2) run "
+            "`translate-fanout --chunk-ids <ids>` for the headless CLI path. Then run "
+            "`translate-commit`. The full manifest (incl. chunk_path and the "
+            "preamble/body cache split) is at manifest_path; re-run without --brief to "
+            "echo it. Nothing here spends or calls an API."
+        )
+    return brief
 
 
 def translate_commit(
@@ -4558,6 +4615,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "prompt_path": "path to the glossary-proposal prompt to read",
         "candidate_count": "number of extracted candidate terms (including carry-forwards)",
         "carryforward_count": "terms injected from the style-guide beat's hand-off",
+        "source_kind": (
+            "what the candidate sample was extracted from: 'chunks'/'chapters' (front "
+            "matter excluded) or 'source' (not excluded)"
+        ),
         "style_guide_loaded": "whether style.json was fed into the prompt",
         "draft_path": "path to write the drafted proposals JSON to",
         "instructions": "what to do next",
@@ -4626,9 +4687,18 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "next": "the next command to run",
     },
     "translate-prepare": {
-        "manifest": "list of work entries: {chunk_id, chapter_id, chunk_path, prompt_path, draft_path, source_word_count, optional preamble_path/body_path}",
-        "manifest_path": "path to the written manifest.json",
+        "manifest": "list of work entries: {chunk_id, chapter_id, chunk_path, prompt_path, draft_path, source_word_count, optional preamble_path/body_path}. ABSENT under --brief — read manifest_path for the same list",
+        "manifest_path": "path to the written manifest.json (always the FULL manifest, --brief or not)",
+        "brief": "present only with --brief: always True, so a payload is self-identifying",
+        "chunk_ids": "--brief only: every manifest entry's chunk_id, in document order (chapter-contiguous). Feed straight to `translate-fanout --chunk-ids`",
+        "translate_dir": "--brief only: directory holding the rendered prompts/bodies/drafts — the {translate_dir} in path_template",
+        "path_template": (
+            "--brief only: dict {prompt, draft} of format strings taking {translate_dir} + "
+            "{chunk_id}. This is how translate-prepare itself names those files; fill them "
+            "in rather than re-running without --brief for a Task spawn"
+        ),
         "worker_model": "model each worker should be pinned to",
+        "worker_thinking": "whether workers should get the 'think hard' trigger (false unless persisted AND the worker model supports it)",
         "spawn_plan": "dict {parallelism, window, batch_size}",
         "spawn_mode_moot": "True when every in-scope chapter is a single chunk (skip the spawn-mode question)",
         "cache_split": (
@@ -4664,6 +4734,11 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "missing": "list of chunk_ids whose draft file was absent",
         "skipped_already_translated": "list of chunk_ids already translated (idempotent skip)",
         "waived": "map of chunk_id -> waived guard problems (via --allow-problem)",
+        "evaluated": (
+            "count of committed chunks the auto-evaluator scored and persisted this run. "
+            "An evaluation that raises is swallowed (the chunk is still committed), so "
+            "evaluated < len(committed) is possible and means those chunks carry no scores"
+        ),
         "recombined": (
             "chapter_ids whose chapters/<id>.txt was rewritten from the translated chunks "
             "because that chapter became FULLY translated in this run. The workers path "
@@ -4822,6 +4897,9 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "reader_first": "reader URL for the first newly-aligned chapter, or null",
         "reader_links": "reader URLs for every aligned chapter",
         "instructions": "what to do next",
+        "chapters": "present when no chapters matched: the --chapters value echoed back",
+        "available_chapters": "present with note: chapter ids that do exist",
+        "note": "present when no chapters matched the requested scope",
         "error": "present only on a per-chapter aligner failure",
     },
     "combine": {
@@ -4840,6 +4918,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapters_dir": "directory the chapter .txt files were written to",
         "counts": "dict {combined, changed, skipped, failed}",
         "instructions": "what to do next",
+        "chapters": "present when no chapters matched: the --chapters value echoed back",
         "note": "present when --chapters matched nothing",
         "available_chapters": "all chapter ids discovered (present with note)",
         "error": "present only on failure (no chunks yet / invalid --chapters)",
@@ -4852,6 +4931,9 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "total_chunks": "total chunks in scope",
         "truncated": "True when --max-chunks capped the sample",
         "fields": "key aliases: {translation: 'translated_text', source: 'source_text'}",
+        "requested": "present when no chapters matched: the --chapters value echoed back",
+        "note": "present when no chapters matched the requested scope",
+        "error": "present only on failure (e.g. no chunks yet, bad --chapters)",
     },
     "status": {
         "project": "project slug",
@@ -4864,6 +4946,13 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "footnotes_decision": "persisted footnotes choice (keep | drop | none), or null if unset",
         "address_map_decision": "address-map beat outcome (built | skipped | no_dialogue), or null if not yet offered",
         "headless_cli": "headless launcher family (claude | cursor); default claude",
+        "headless_effort": (
+            "dict {config, resolved, extra_flags} — per-wave-type effort. `config` is the "
+            "raw headless_effort_<type> setting ('auto' when unset), `resolved` the level "
+            "each wave will actually run at (null = no --effort flag emitted), "
+            "`extra_flags` whatever headless_extra_flags carries once --effort is split out"
+        ),
+        "headless_prompt_cache": "persisted prompt-cache TTL for headless waves (auto | 5m | 1h | off); default auto",
         "prompt_prefix": (
             "dict {always_include_dialogue, always_include_image_instructions} — the raw "
             "tri-state prompt-prefix opt-ins (true | false | null, where null = auto: on "
