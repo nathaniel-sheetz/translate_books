@@ -55,11 +55,14 @@ truncates).
 Open project files with `encoding="utf-8"`. Prefer `Read` on `last_output.json`.
 
 **Don't guess field names.** Successful payloads carry two meta keys, first, before any
-result field: `_schema_keys` — every key that command can return, in schema order — and
-`_schema_path`, pointing at `.harness/last_output_schema.json` for the *descriptions*. The
-per-item list is named differently per verb (`translate-prepare` → `manifest`,
-`show-translation` → `chapters`, `align` → `aligned`), so **read the name off
-`_schema_keys` instead of assuming** — a guessed key is a `KeyError` and a wasted call.
+result field: `_schema_path`, pointing at `.harness/last_output_schema.json` for the
+*descriptions*, and `_schema_keys` — every key that command **can** return, in schema
+order. The per-item list is named differently per verb (`show-translation` → `chapters`,
+`align` → `aligned`, `translate-prepare` → `chunk_ids` under the `--brief` below, or
+`manifest` without it), so **read the name off `_schema_keys` instead of assuming** — a
+guessed key is a `KeyError` and a wasted call. `_schema_keys` is a *superset* of one
+payload's keys: conditionals (`error`, `note`) and flag-gated keys are listed whether or
+not this run emitted them, so cross-check the payload's own keys before indexing.
 `Read` the sidecar only when a key's *meaning* is unfamiliar; it is deliberately not
 inlined on every beat. Errors always carry `_schema` inline; `--schema` forces it on
 success too.

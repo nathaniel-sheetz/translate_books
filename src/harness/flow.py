@@ -1544,11 +1544,22 @@ def translate_prepare(
     headless path takes ``chunk_ids`` straight to ``translate-fanout --chunk-ids``, and a
     Task spawn fills ``path_template`` with ``translate_dir`` + ``chunk_id``. The manifest
     written to disk is unaffected; ``translate-fanout`` / ``translate-commit`` read it from
-    there and never see this payload.
+    there and never see this payload. Error and no-match returns are shaped the same way
+    (``chunk_ids: []``), so the flag yields ONE payload shape on every outcome.
     """
     project_dir = state.resolve_project_dir(project)
     hdir = state.ensure_harness_dir(project_dir)
     cfg = state.load_config(project_dir)
+
+    def _bail(payload: dict) -> dict:
+        """Shape an error / no-match return the way ``--brief`` shapes the happy path.
+
+        The schema promises ``brief`` is present on any ``--brief`` payload ("so a
+        payload is self-identifying"); returning a bare ``manifest: []`` here would make
+        that a lie on exactly the paths an agent is least sure about. ``chunk_ids: []``
+        also means a caller that always passes the flag reads one key on every outcome.
+        """
+        return _brief_prepare_payload(payload, hdir / "translate") if brief else payload
 
     # Persist the spawn knobs the agent passes (the "save that response" beat).
     persist: dict = {}
@@ -1558,31 +1569,31 @@ def translate_prepare(
         persist["worker_thinking"] = bool(worker_thinking)
     if parallelism is not None:
         if parallelism not in _PARALLELISM_MODES:
-            return {
+            return _bail({
                 "error": f"invalid parallelism {parallelism!r}; "
                          f"use one of {sorted(_PARALLELISM_MODES)}",
                 "manifest": [],
-            }
+            })
         persist["parallelism"] = parallelism
     if window is not None:
         try:
             window_int = int(window)
         except (TypeError, ValueError):
-            return {"error": f"invalid window {window!r}; must be a positive integer",
-                    "manifest": []}
+            return _bail({"error": f"invalid window {window!r}; must be a positive integer",
+                          "manifest": []})
         if window_int < 1:
-            return {"error": f"invalid window {window!r}; must be a positive integer",
-                    "manifest": []}
+            return _bail({"error": f"invalid window {window!r}; must be a positive integer",
+                          "manifest": []})
         persist["parallel_window"] = window_int
     if batch_size is not None:
         try:
             batch_int = int(batch_size)
         except (TypeError, ValueError):
-            return {"error": f"invalid batch_size {batch_size!r}; must be a positive integer",
-                    "manifest": []}
+            return _bail({"error": f"invalid batch_size {batch_size!r}; must be a positive integer",
+                          "manifest": []})
         if batch_int < 1:
-            return {"error": f"invalid batch_size {batch_size!r}; must be a positive integer",
-                    "manifest": []}
+            return _bail({"error": f"invalid batch_size {batch_size!r}; must be a positive integer",
+                          "manifest": []})
         persist["batch_size"] = batch_int
     if persist:
         cfg.update(persist)
@@ -1608,7 +1619,7 @@ def translate_prepare(
 
     chunks_dir = project_dir / "chunks"
     if not chunks_dir.exists():
-        return {"error": "no chunks yet — run `chunk` first", "manifest": []}
+        return _bail({"error": "no chunks yet — run `chunk` first", "manifest": []})
 
     all_discovered = discover_chapters(chunks_dir)
     discovered = all_discovered
@@ -1616,15 +1627,16 @@ def translate_prepare(
         try:
             requested = parse_chapter_range(chapters)
         except (ValueError, TypeError) as exc:
-            return {"error": f"invalid --chapters value {chapters!r}: {exc}", "manifest": []}
+            return _bail({"error": f"invalid --chapters value {chapters!r}: {exc}",
+                          "manifest": []})
         discovered = {k: v for k, v in all_discovered.items() if k in requested}
         if not discovered:
-            return {
+            return _bail({
                 "manifest": [],
                 "chapters": chapters,
                 "available_chapters": sorted(all_discovered.keys()),
                 "note": f"no matching chapters for --chapters {chapters}",
-            }
+            })
 
     glossary = None
     if (project_dir / "glossary.json").exists():
@@ -1936,6 +1948,10 @@ def _brief_prepare_payload(result: dict, translate_dir: Path) -> dict:
     ``chunk_ids`` is in document order and chapter-contiguous (chunk ids are
     ``f"{chapter_id}_chunk_{position:03d}"``, see ``src/chunker.py``), so chapter-parallel
     wave planning works off the ids alone.
+
+    Also shapes ``translate_prepare``'s early error / no-match returns (via its ``_bail``),
+    which have no entries: those come back as ``chunk_ids: []`` plus ``error`` / ``note``,
+    never a bare ``manifest: []``.
     """
     entries = result.get("manifest") or []
     # Built through Path so the template carries the platform's separator: formatting it

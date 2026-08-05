@@ -1662,6 +1662,15 @@ def test_translate_prepare_brief_swaps_manifest_for_ids_and_template(tmp_path: P
         assert brief[key] == full[key], f"--brief must not alter {key}"
     assert brief["usage_summary"]["chunks"] == len(brief["chunk_ids"])
 
+    # The runtime half of test_output_schemas_document_every_returned_key, which is
+    # static and so can only read this function's `return {...}` literals — both of
+    # these payloads are built in a variable, and its docstring names them as needing
+    # the hand-check. An undocumented key never reaches `_schema_keys`, which is the
+    # index SKILL.md tells the agent to trust INSTEAD of guessing (bambi §2).
+    schema = set(flow.OUTPUT_SCHEMAS["translate-prepare"])
+    assert set(full) <= schema, f"undocumented: {sorted(set(full) - schema)}"
+    assert set(brief) <= schema, f"undocumented: {sorted(set(brief) - schema)}"
+
 
 def test_translate_prepare_brief_path_template_resolves_to_real_files(tmp_path: Path):
     """The template has to name the files translate-prepare actually wrote — this is
@@ -1719,6 +1728,47 @@ def test_translate_prepare_brief_no_work_keeps_the_full_instructions(tmp_path: P
     assert "already have translations" in brief["instructions"]
 
 
+def test_translate_prepare_brief_bails_keep_the_brief_shape(tmp_path: Path):
+    """Error and no-match returns are brief too, so the flag yields ONE payload shape.
+
+    The schema says `brief` is "present only with --brief: always True, so a payload is
+    self-identifying" — a bare `manifest: []` on the failure paths made that a promise the
+    code broke on exactly the calls an agent is least sure about, and a caller that always
+    passes the flag would `KeyError` on `chunk_ids` the moment something went wrong.
+    """
+    from src.harness import flow
+
+    schema = set(flow.OUTPUT_SCHEMAS["translate-prepare"])
+
+    # Every bail-out: before chunking, bad scope, no matching scope, and each rejected
+    # spawn knob (which return before the chunks dir is even looked at).
+    no_chunks = flow.translate_prepare(str(tmp_path), brief=True)
+    assert "error" in no_chunks and "chunks" in no_chunks["error"]
+
+    _brief_fixture(tmp_path)
+    bails = {
+        "no_chunks": no_chunks,
+        "no_match": flow.translate_prepare(str(tmp_path), chapters="99", brief=True),
+        "bad_chapters": flow.translate_prepare(str(tmp_path), chapters="oops", brief=True),
+        "bad_parallelism": flow.translate_prepare(str(tmp_path), parallelism="sideways",
+                                                  brief=True),
+        "bad_window": flow.translate_prepare(str(tmp_path), window=0, brief=True),
+        "bad_batch": flow.translate_prepare(str(tmp_path), batch_size="x", brief=True),
+    }
+    for name, payload in bails.items():
+        assert payload["brief"] is True, f"{name} is not self-identifying"
+        assert payload["chunk_ids"] == [], name
+        assert "manifest" not in payload, f"{name} still echoes the key --brief drops"
+        assert "error" in payload or "note" in payload, f"{name} says nothing went wrong"
+        assert set(payload) <= schema, f"{name} undocumented: {sorted(set(payload) - schema)}"
+
+    assert bails["no_match"]["available_chapters"] == ["chapter_01", "chapter_02"]
+
+    # Without the flag the failure paths are unchanged — `manifest: []`, no brief keys.
+    plain = flow.translate_prepare(str(tmp_path), chapters="99")
+    assert plain["manifest"] == [] and "brief" not in plain
+
+
 def test_cli_translate_prepare_brief_writes_a_brief_artifact(tmp_path: Path, monkeypatch):
     """The flag reaches flow through the CLI, so last_output.json is brief too."""
     import scripts.harness as harness
@@ -1742,6 +1792,37 @@ def test_cli_translate_prepare_brief_writes_a_brief_artifact(tmp_path: Path, mon
     )
     for key in ("brief", "chunk_ids", "translate_dir", "path_template"):
         assert key in sidecar
+
+
+def test_cli_translate_prepare_brief_error_keeps_brief_shape_and_inlines_schema(
+    tmp_path: Path, monkeypatch,
+):
+    """CLI --brief + soft-error: one brief shape AND inline _schema (no pointer).
+
+    Flow-level bail tests cover the shape; the success CLI test covers the flag wiring.
+    This is the seam of the two 0.40.4.2 fixes — an agent that always passes --brief
+    must still KeyError-free on chunk_ids when prepare fails, and must get _schema
+    inline rather than a _schema_path that would ask them to re-run.
+    """
+    from src.harness import flow
+    import scripts.harness as harness
+
+    # No chunks dir — the earliest bail.
+    monkeypatch.setattr(
+        sys, "argv",
+        ["harness.py", "translate-prepare", "--project", str(tmp_path), "--brief"],
+    )
+    harness.main()
+
+    out = json.loads(
+        (tmp_path / ".harness" / "last_output.json").read_text(encoding="utf-8")
+    )
+    assert out["brief"] is True and out["chunk_ids"] == []
+    assert "manifest" not in out
+    assert "error" in out and "chunks" in out["error"]
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["translate-prepare"]
+    assert list(out.keys())[0] == "_schema"
+    assert "_schema_path" not in out and "_schema_keys" not in out
 
 
 def test_status_reports_progress_artifacts_and_spawn_plan(tmp_path: Path):

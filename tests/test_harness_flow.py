@@ -722,6 +722,7 @@ def test_schema_flag_inlines_schema(project: Path, monkeypatch):
 
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"]
+    assert list(out.keys())[0] == "_schema", "inline meta must lead so a stray tail keeps results"
     assert "_schema_path" not in out
     # No _schema_keys either — the inline block already names every key.
     assert "_schema_keys" not in out
@@ -730,6 +731,36 @@ def test_schema_flag_inlines_schema(project: Path, monkeypatch):
         (project / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
     )
     assert sidecar == flow.OUTPUT_SCHEMAS["difficulty"]
+
+
+def test_sidecar_write_failure_falls_back_to_inline_schema(project: Path, monkeypatch, capsys):
+    """A pointer is only stamped when THIS call wrote the file it points at.
+
+    Stamping `_schema_path` before the best-effort write meant a failed write left the
+    payload naming a missing file — or the PREVIOUS command's sidecar, still on disk and
+    describing a different verb, which an agent would Read and believe.
+    """
+    import scripts.harness as harness
+
+    real_write_text = Path.write_text
+
+    def flaky_write(self, *args, **kwargs):
+        if self.name == "last_output_schema.json":
+            raise OSError("no space left on device")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write)
+    monkeypatch.setattr(sys, "argv", ["harness.py", "difficulty", "--project", str(project)])
+    harness.main()
+
+    assert not (project / ".harness" / "last_output_schema.json").exists()
+    out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
+    assert "_schema_path" not in out and "_schema_keys" not in out
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["difficulty"], "self-docs dropped entirely"
+    assert list(out.keys())[0] == "_schema"
+    assert out["book_difficulty"] is not None, "the command itself still succeeded"
+    # The artifact wrote fine, so its stderr pointer must survive a schema-only failure.
+    assert "OUTPUT_JSON:" in capsys.readouterr().err
 
 
 def test_error_payload_inlines_schema_without_flag(project: Path, monkeypatch):
@@ -745,6 +776,7 @@ def test_error_payload_inlines_schema_without_flag(project: Path, monkeypatch):
     out = json.loads((project / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert out.get("error")
     assert out["_schema"] == flow.OUTPUT_SCHEMAS["translate-prepare"]
+    assert list(out.keys())[0] == "_schema", "inline meta must lead so a stray tail keeps results"
     assert "_schema_path" not in out and "_schema_keys" not in out
 
 
