@@ -10,7 +10,17 @@ inventing a new shape.
    (commands, STOP gates, what to Read from `last_output.json`).
 2. Add a ROUTER row in the core `SKILL.md` (signal → load that file).
 3. If it needs a new CLI command: add a subparser in `scripts/harness.py` and a
-   function in `src/harness/flow.py`, then register an `OUTPUT_SCHEMAS` entry.
+   function in `src/harness/flow.py`, then register an `OUTPUT_SCHEMAS` entry
+   (same as today — only the transport changed: the schema is written to
+   `.harness/last_output_schema.json` by default, inlined on `--schema` / errors).
+   Two consequences of the entry now being the agent's index of key *names*
+   (`_schema_keys` is derived from it): **document every key the function can
+   return**, including the conditional ones (`error`, `note`) — an undocumented
+   key makes `_schema_keys` a lie the agent is told to trust — and **author the
+   primary result first**, since that ordering is what an agent scans.
+   If a command's payload is dominated by a per-item echo of something it just
+   wrote to disk, give it a `--brief` (see `translate-prepare`): ids plus a path
+   template, never a truncation the caller has to reconstruct.
 4. Persist any once-per-book decision via
    `python scripts/harness.py config-set --project <p> --key <k> --value <v>`
    (thin wrapper over `state.load_config` / `state.save_config` — no new state
@@ -113,6 +123,12 @@ invokes judge-review after align.
 - [ ] Reference file has no "see Step N above" — only file pointers
 - [ ] Once-per-book choices written with `config-set` (and echoed by `status`
       via `backend` / `suggested_reference` when relevant)
-- [ ] New CLI command has an `OUTPUT_SCHEMAS` entry
+- [ ] New CLI command has an `OUTPUT_SCHEMAS` entry naming **every** key it can
+      return (conditionals included), primary result first.
+      `test_output_schemas_document_every_returned_key` in
+      `tests/test_harness_flow.py` enforces this by reading the source, but only
+      for keys in a literal `return {...}`. If your function builds its payload
+      in a variable (`out["k"] = ...`, `return {**base, ...}`) or streams through
+      `_stream_result`, the test cannot see those keys — hand-check them
 - [ ] Pipeline Python behavior unchanged unless the extension intentionally
       adds a stage (this skill refactor itself is docs-only for the pipeline)

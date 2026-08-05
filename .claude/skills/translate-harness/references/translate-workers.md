@@ -103,16 +103,24 @@ thinking --data '{"worker_thinking":true|false}'`.
 **4B-a. Prepare (no spend).** Render one prompt per untranslated chunk in the set + a manifest, saving
 the spawn mode:
 ```bash
-python scripts/harness.py translate-prepare --project projects/<slug> --chapters <set> \
+python scripts/harness.py translate-prepare --project projects/<slug> --chapters <set> --brief \
   --parallelism <mode> [--window <X>] [--worker-model sonnet] [--worker-thinking]
 ```
-This prints a `manifest` (each entry: `chunk_id`, `chapter_id`, `prompt_path`, `draft_path`, and when
-the cacheable prefix is stable across chunks also `preamble_path` + `body_path`), a `usage_summary`,
-the `worker_model`, and the saved `spawn_plan` (`parallelism` + `window`). It does **not** call an
-API. (Omit `--chapters` for the whole book.) Re-running only fills chunks that still need a
-translation, so resume is free. The shared preamble lives at `.harness/translate/preamble.txt`;
-per-chunk bodies at `.harness/translate/<id>.body.txt` — `preamble + body` is byte-identical to
-`<id>.prompt.txt` when those paths are present.
+This prints `chunk_ids` (every entry in document order), `translate_dir` + `path_template`, a
+`usage_summary`, the `worker_model` / `worker_thinking`, the saved `spawn_plan` (`parallelism` +
+`window`), `cache_split`, and `manifest_path`. It does **not** call an API. (Omit `--chapters` for
+the whole book.) Re-running only fills chunks that still need a translation, so resume is free.
+The shared preamble lives at `.harness/translate/preamble.txt`; per-chunk bodies at
+`.harness/translate/<id>.body.txt` — `preamble + body` is byte-identical to `<id>.prompt.txt` when
+`cache_split.split` counts that chunk.
+
+**Keep `--brief`.** Without it the payload echoes a full manifest entry per chunk — `chunk_id`,
+`chapter_id`, `chunk_path`, `prompt_path`, `draft_path`, `source_word_count`, and the two split
+paths — which on a 22-chunk scope is ~180 lines of mostly absolute paths that were *just* written
+to `manifest_path`. Both worker options below are fully served by the brief payload. Drop the flag
+only when you actually want to inspect per-entry `chunk_path` / `preamble_path` / `body_path`;
+`translate-fanout` and `translate-commit` read `manifest.json` off disk either way and never see
+this payload.
 
 **Read `cache_split` before you spawn.** It answers "did the cache actually engage" in one field
 instead of making you scan the manifest for `preamble_path`: `{entries, split, full_prompt, …}`. When
@@ -154,17 +162,22 @@ produced the manifest. (The backend was already logged in the translate-workers 
 
 **4B-c. Spawn workers per the chosen mode, then commit.** Only after the user approves in a later turn.
 
-**Never construct chunk paths by hand.** Take `chunk_path` / `chunk_id` straight from the manifest —
-the on-disk name is `chunks/<chapter_id>_chunk_<NNN>.json` and the `chunk_id` is that filename's
-stem (e.g. `chapter_01_chunk_000`), not `chunk_chapter_01_001`.
+**Never construct chunk paths by hand.** Take `chunk_id` straight from the prepare payload — the
+on-disk name is `chunks/<chapter_id>_chunk_<NNN>.json` and the `chunk_id` is that filename's stem
+(e.g. `chapter_01_chunk_000`), not `chunk_chapter_01_001`. **The two `.harness/translate/` paths are
+the one exception, and only via `path_template`:** format its `prompt` / `draft` strings with
+`translate_dir` and a `chunk_id` — that template is prepare's own naming rule, not a guess. Anything
+it does not cover (`chunk_path`, `preamble_path`, `body_path`) comes from `manifest_path`, never
+from your head.
 
 ### Option [1] Task workers (default)
 
 Each worker uses the **Task** tool with `subagent_type: translator` (`.claude/agents/translator.md`),
-`model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt:
+`model:` the approved `worker_model` (how the worker is pinned cheaper than you), and the prompt
+below, with `<prompt_path>` / `<draft_path>` filled in from `path_template`:
 *"Translate one chunk. Read `<prompt_path>`. Write ONLY the translated prose to `<draft_path>`. Then
 reply with exactly `done <chunk_id>` and nothing else — no summary, no list of choices."* **When the
-manifest's `worker_thinking` is `true`, add the "think hard" trigger** so the worker engages extended
+payload's `worker_thinking` is `true`, add the "think hard" trigger** so the worker engages extended
 thinking: *"Translate one chunk. Read `<prompt_path>`. **Think hard** about the tricky passages, then
 write ONLY the translated prose to `<draft_path>`. Then reply with exactly `done <chunk_id>` and nothing
 else — no summary, no list of choices."* When `worker_thinking` is `false` (the default), use the plain
@@ -290,8 +303,9 @@ for the wave's entries; pass `--concurrency` when throttling):
   `translate-commit`, then **re-run `translate-prepare`** (so the just-committed Spanish is baked into
   the next chunk's prompt) and repeat until the set is done.
 - **Chapter-parallel (default):** work in windows of **X** chapters. For the current window:
-  1. From the manifest, group entries by `chapter_id`; the **next wave** is the lowest-position
-     still-untranslated chunk of each chapter in the window.
+  1. Group `chunk_ids` by chapter — they are ordered and chapter-contiguous, and a chunk id *is*
+     `<chapter_id>_chunk_<NNN>`, so the grouping reads straight off the list. The **next wave** is
+     the lowest-position still-untranslated chunk of each chapter in the window.
   2. Spawn those workers **in parallel** (multiple `Task` calls in one message, or one
      `translate-fanout --chunk-ids ...`), then `translate-commit`.
   3. **Re-run `translate-prepare --chapters <window>`** so each committed chunk's translation flows
@@ -304,7 +318,7 @@ for the wave's entries; pass `--concurrency` when throttling):
   the new manifest (reported as `rescued_prior_drafts`), so `translate-commit` can still land
   them. Prefer committing a wave before re-preparing; unmappable or unreadable drafts stay on
   disk untouched. `window` is clamped to `batch_size` when it would exceed the fan-out throttle.
-- **All-parallel:** spawn workers for **all** manifest entries in bounded batches of `batch_size`
+- **All-parallel:** spawn workers for **every** `chunk_id` in bounded batches of `batch_size`
   (the saved fan-out width; rate limits), `translate-commit` after each batch. No re-prepare (this mode
   has no cross-chunk Spanish context). This is also the mode to use whenever `spawn_mode_moot` is true.
   Headless: one `translate-fanout` call already waves at `batch_size`; then commit.

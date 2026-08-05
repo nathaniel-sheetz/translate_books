@@ -12,8 +12,10 @@ agent should relay print a JSON object to stdout. Commands that wrap a determini
 paid stage (``chunk``/``cost``/``translate``/``epub``) stream the wrapped CLI's live
 output and exit with its code, but ALSO mirror a fresh structured result to
 ``last_output.json`` (friction-log #18 — they used to leave the previous command's result
-in place). Every artifact additionally carries a ``_schema`` block documenting its keys
-(friction-log #19), so the agent never has to guess field names.
+in place). Per-key documentation lives in ``.harness/last_output_schema.json``; the
+payload carries ``_schema_path`` + ``_schema_keys`` (or inlines ``_schema`` on
+``--schema`` / errors) so the agent never has to guess field names without paying the
+schema on every Read (friction-log #19 / bambi #4, §3b).
 
 Cost-gate safety (unchanged from the wrapped CLI):
   * ``chunk`` and ``cost`` always pass ``--cost-only`` — they physically cannot spend.
@@ -272,6 +274,13 @@ def _build_parser() -> argparse.ArgumentParser:
     tpp.add_argument("--batch-size", dest="batch_size", type=int, default=None,
                      help="Recommended workers to spawn per wave (default 3); persisted. "
                           "Ramp from this; throttle back to ~1 on a 529 (overloaded)")
+    tpp.add_argument("--brief", action="store_true",
+                     help="Omit the per-entry manifest echo; return chunk_ids + a "
+                          "path_template instead (a 22-chunk manifest is ~180 lines of "
+                          "mostly-derivable absolute paths). manifest.json on disk is "
+                          "unchanged and still carries every field — translate-fanout and "
+                          "translate-commit read it from there. Serves both backends: "
+                          "--chunk-ids takes the ids, a Task spawn fills the template.")
 
     tcp = sub.add_parser("translate-commit",
                          help="Validate worker drafts and stamp the chunks (idempotent)")
@@ -494,7 +503,35 @@ def _build_parser() -> argparse.ArgumentParser:
              "never --bare or --effort>",
     )
 
+    # --schema on every leaf subcommand. The blocks cost real tokens on every
+    # call (status alone is ~2KB), so they are opt-in on success — and, per
+    # _stamp_schema, automatic on any error, where the caller most needs the
+    # shape. Nested groups (style-guide / glossary / address-map / footnotes)
+    # need a recursive walk; adding the flag to a parent *and* a child would
+    # conflict on dest="schema".
+    _add_schema_flags(parser)
+
     return parser
+
+
+def _add_schema_flags(parser: argparse.ArgumentParser) -> None:
+    """Add ``--schema`` to every leaf subparser (recursive for nested groups)."""
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for subparser in action.choices.values():
+            has_nested = any(
+                isinstance(a, argparse._SubParsersAction) for a in subparser._actions
+            )
+            if has_nested:
+                _add_schema_flags(subparser)
+                continue
+            subparser.add_argument(
+                "--schema",
+                action="store_true",
+                help="Include the _schema block documenting every output key (omitted "
+                     "from successful output by default; always present on errors)",
+            )
 
 
 def _dispatch(args: argparse.Namespace):
@@ -568,7 +605,7 @@ def _dispatch(args: argparse.Namespace):
                                       worker_model=args.worker_model,
                                       worker_thinking=args.worker_thinking,
                                       parallelism=args.parallelism, window=args.window,
-                                      batch_size=args.batch_size)
+                                      batch_size=args.batch_size, brief=args.brief)
     if cmd == "translate-commit":
         return flow.translate_commit(args.project, worker_model=args.worker_model,
                                      allow_problems=args.allow_problems)
@@ -648,13 +685,61 @@ def _dispatch(args: argparse.Namespace):
 _STREAMING_COMMANDS = ("chunk", "cost", "translate", "epub", "footnotes")
 
 
-def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
-    """Stamp the command's documented output schema into ``result`` under ``_schema``.
+_SCHEMA_SIDECAR = "last_output_schema.json"
 
-    Friction-log #19: the agent reads ``last_output.json`` but had to guess key names and
-    burn round-trips introspecting them. The registry lives in ``flow.OUTPUT_SCHEMAS``; this
-    mutates the result in place so both the printed JSON and the mirrored artifact carry it.
-    No-op when the command has no registered schema.
+
+def _artifact_harness_dir(args: argparse.Namespace, result: dict) -> Path | None:
+    """Resolve ``.harness/`` for the output artifacts, or None when it can't be known."""
+    project = getattr(args, "project", None)
+    if not project:
+        # setup --title (no --project) resolves the dir itself; carry it in result.
+        project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
+        if not project_dir_str:
+            return None
+        project_dir = Path(project_dir_str)
+    else:
+        project_dir = state.resolve_project_dir(project)
+    return state.harness_dir(project_dir)
+
+
+def _should_inline_schema(args: argparse.Namespace, result: dict) -> bool:
+    """Inline ``_schema`` on ``--schema``, soft errors, or a non-zero streaming exit."""
+    if getattr(args, "schema", False):
+        return True
+    if result.get("error"):
+        return True
+    exit_code = result.get("exit_code")
+    return isinstance(exit_code, int) and exit_code != 0
+
+
+def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
+    """Write the schema sidecar and stamp the payload's pointer to it.
+
+    Friction-log #19 (self-documenting keys) vs bambi #4 (read-back tax): the registry
+    still lives in ``flow.OUTPUT_SCHEMAS``, but the default transport is a sidecar file
+    (``last_output_schema.json``) with ``_schema_path`` / ``_schema_keys`` stamped
+    *first* so a stray ``tail`` lands on result fields. ``--schema`` and error
+    payloads still inline ``_schema`` (also first) — unlike ``run_judges``, we never
+    tell the agent to re-run, because many harness commands mutate.
+
+    **The write lives here, not in ``_write_output_artifact``, so the pointer can never
+    outlive the file.** Stamping first and writing later meant a failed write left
+    ``_schema_path`` naming a file that was missing — or, worse, the PREVIOUS command's
+    sidecar, which is a wrong answer rather than no answer. The file is refreshed for
+    every schema-bearing command (inline branch included, so a later Read of it is never
+    stale), but the *pointer* is stamped only when this call's write succeeded; otherwise
+    the payload falls back to inlining ``_schema`` and stays self-documenting.
+
+    The pointer branch also stamps ``_schema_keys`` — the schema's key NAMES, no
+    descriptions. Bambi §3b: result keys differ per verb (``manifest`` / ``chunk_ids`` /
+    ``chapters`` / ``aligned``), and reading a whole schema file to learn one name feels
+    heavier than guessing, which is how a probe got burned on a ``KeyError``. The names
+    are ~5% of the inline block and cover keys the payload itself can never show
+    (``error``, ``note``), so the guess has no excuse left. It is the schema's full key
+    set, not this payload's: conditionals and flag-gated keys (``--brief``) are listed
+    whether or not this run emitted them. Derived from the registry, so it needs no
+    maintenance of its own. Not added to the inline branch — ``_schema`` already carries
+    them.
     """
     if not isinstance(result, dict):
         return
@@ -662,30 +747,59 @@ def _stamp_schema(args: argparse.Namespace, result: dict) -> None:
     if not cmd:
         return
     schema = flow.schema_for(cmd, getattr(args, "action", None))
-    if schema:
-        result["_schema"] = schema
+    if not schema:
+        return
+
+    # Refresh the sidecar for EVERY schema-bearing command, inline branch included: the
+    # file on disk should always describe the command that just ran, and a leftover from
+    # the previous one is a wrong answer rather than a missing one.
+    sidecar: Path | None = None
+    try:
+        harness = _artifact_harness_dir(args, result)
+        if harness is not None:
+            state.ensure_harness_dir(harness.parent)
+            path = harness / _SCHEMA_SIDECAR
+            path.write_text(json.dumps(schema, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+            sidecar = path
+    except Exception:  # noqa: BLE001 - unresolvable or unwritable; inline below instead
+        sidecar = None
+
+    # Meta keys first (inline `_schema`, or sidecar path + key names) so a stray
+    # `tail` lands on result fields. Drop any prior meta so a rebuild stays clean.
+    # Only point at a sidecar THIS call wrote — otherwise keep the self-docs inline.
+    meta: dict
+    if sidecar is None or _should_inline_schema(args, result):
+        meta = {"_schema": schema}
+    else:
+        meta = {"_schema_path": str(sidecar), "_schema_keys": list(schema)}
+
+    rebuilt = dict(meta)
+    for key, value in result.items():
+        if key in ("_schema", "_schema_path", "_schema_keys"):
+            continue
+        rebuilt[key] = value
+    result.clear()
+    result.update(rebuilt)
 
 
 def _write_output_artifact(args: argparse.Namespace, result: dict) -> None:
     """Mirror a command's JSON result to ``.harness/last_output.json`` (UTF-8).
 
     The agent reads this file instead of capturing stdout, sidestepping Windows console
-    encoding entirely (friction-log #4); it carries a ``_schema`` block documenting its keys
-    (friction-log #19). Best-effort: the artifact must never break a command, so any
-    resolution/write failure is swallowed.
+    encoding entirely (friction-log #4). Schema docs live beside it in
+    ``last_output_schema.json`` (bambi #4), written by ``_stamp_schema`` — which is what
+    keeps ``_schema_path`` honest, and keeps the ``OUTPUT_JSON`` pointer below from
+    depending on a schema write that has nothing to do with it. Best-effort: the artifact
+    must never break a command, so any resolution/write failure is swallowed.
     """
     try:
-        project = getattr(args, "project", None)
-        if not project:
-            # setup --title (no --project) resolves the dir itself; carry it in result.
-            project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
-            if not project_dir_str:
-                return
-            project_dir = Path(project_dir_str)
-        else:
-            project_dir = state.resolve_project_dir(project)
+        harness = _artifact_harness_dir(args, result)
+        if harness is None:
+            return
+        project_dir = harness.parent
         state.ensure_harness_dir(project_dir)
-        out = state.harness_dir(project_dir) / "last_output.json"
+        out = harness / "last_output.json"
         out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"OUTPUT_JSON: {out}", file=sys.stderr)
     except Exception:  # noqa: BLE001 - the artifact is a convenience, never a hard dependency

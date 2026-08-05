@@ -1625,6 +1625,206 @@ def test_translate_prepare_rejects_nonpositive_window(tmp_path: Path):
         )
 
 
+# ── --brief: ids + a path template instead of the manifest echo (bambi §3a) ──
+
+
+def _brief_fixture(tmp_path: Path) -> Path:
+    """Two chapters, four chunks — enough to exercise order AND chapter grouping."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Alpha one.", "Alpha two."])
+    _save_chunks(chunks_dir, "chapter_02", sources=["Beta one.", "Beta two."])
+    return chunks_dir
+
+
+def test_translate_prepare_brief_swaps_manifest_for_ids_and_template(tmp_path: Path):
+    """--brief drops the per-entry echo but keeps every usage-gate field, and the ids
+    it returns are the manifest's chunk_ids in the same document order."""
+    from src.harness import flow
+
+    _brief_fixture(tmp_path)
+
+    full = flow.translate_prepare(str(tmp_path))
+    brief = flow.translate_prepare(str(tmp_path), brief=True)
+
+    assert "manifest" not in brief, "the per-entry echo is the whole point of --brief"
+    assert brief["brief"] is True
+    assert brief["chunk_ids"] == [e["chunk_id"] for e in full["manifest"]]
+    assert brief["chunk_ids"] == [
+        "chapter_01_chunk_000", "chapter_01_chunk_001",
+        "chapter_02_chunk_000", "chapter_02_chunk_001",
+    ], "document order + chapter contiguity is what wave planning reads"
+
+    # The 4B-b gate reads these — trimming any of them would break the approval beat.
+    for key in ("cache_split", "usage_summary", "spawn_plan", "spawn_mode_moot",
+                "worker_model", "worker_thinking", "rescued_prior_drafts",
+                "manifest_path", "chapters"):
+        assert brief[key] == full[key], f"--brief must not alter {key}"
+    assert brief["usage_summary"]["chunks"] == len(brief["chunk_ids"])
+
+    # The runtime half of test_output_schemas_document_every_returned_key, which is
+    # static and so can only read this function's `return {...}` literals — both of
+    # these payloads are built in a variable, and its docstring names them as needing
+    # the hand-check. An undocumented key never reaches `_schema_keys`, which is the
+    # index SKILL.md tells the agent to trust INSTEAD of guessing (bambi §2).
+    schema = set(flow.OUTPUT_SCHEMAS["translate-prepare"])
+    assert set(full) <= schema, f"undocumented: {sorted(set(full) - schema)}"
+    assert set(brief) <= schema, f"undocumented: {sorted(set(brief) - schema)}"
+
+
+def test_translate_prepare_brief_path_template_resolves_to_real_files(tmp_path: Path):
+    """The template has to name the files translate-prepare actually wrote — this is
+    the test that fails loudly if the .prompt.txt/.draft.txt naming ever moves."""
+    from src.harness import flow
+
+    _brief_fixture(tmp_path)
+    full = flow.translate_prepare(str(tmp_path))
+    brief = flow.translate_prepare(str(tmp_path), brief=True)
+
+    by_id = {e["chunk_id"]: e for e in full["manifest"]}
+    for chunk_id in brief["chunk_ids"]:
+        filled = {
+            kind: template.format(translate_dir=brief["translate_dir"], chunk_id=chunk_id)
+            for kind, template in brief["path_template"].items()
+        }
+        # String equality, not Path equality: the agent pastes this into a worker prompt
+        # verbatim, so the separators have to match the platform too.
+        assert filled["prompt"] == by_id[chunk_id]["prompt_path"]
+        assert filled["draft"] == by_id[chunk_id]["draft_path"]
+        assert Path(filled["prompt"]).exists(), "a Task worker would Read a missing file"
+
+
+def test_translate_prepare_brief_leaves_the_disk_manifest_full(tmp_path: Path):
+    """--brief trims the payload, never the artifact: translate-fanout and
+    translate-commit read manifest.json and must still see every field."""
+    from src.harness import flow
+
+    _brief_fixture(tmp_path)
+    flow.translate_prepare(str(tmp_path))
+    manifest_path = tmp_path / ".harness" / "translate" / "manifest.json"
+    after_full = manifest_path.read_text(encoding="utf-8")
+
+    flow.translate_prepare(str(tmp_path), brief=True)
+    assert manifest_path.read_text(encoding="utf-8") == after_full
+
+    doc = json.loads(after_full)
+    for entry in doc["entries"]:
+        for key in ("chunk_id", "chapter_id", "chunk_path", "prompt_path",
+                    "draft_path", "source_word_count"):
+            assert key in entry
+
+
+def test_translate_prepare_brief_no_work_keeps_the_full_instructions(tmp_path: Path):
+    """An empty scope keeps the 'nothing to translate' wording — the brief spawn
+    instructions would be nonsense with no ids to spawn for."""
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+
+    brief = flow.translate_prepare(str(tmp_path), brief=True)
+    assert brief["chunk_ids"] == []
+    assert "already have translations" in brief["instructions"]
+
+
+def test_translate_prepare_brief_bails_keep_the_brief_shape(tmp_path: Path):
+    """Error and no-match returns are brief too, so the flag yields ONE payload shape.
+
+    The schema says `brief` is "present only with --brief: always True, so a payload is
+    self-identifying" — a bare `manifest: []` on the failure paths made that a promise the
+    code broke on exactly the calls an agent is least sure about, and a caller that always
+    passes the flag would `KeyError` on `chunk_ids` the moment something went wrong.
+    """
+    from src.harness import flow
+
+    schema = set(flow.OUTPUT_SCHEMAS["translate-prepare"])
+
+    # Every bail-out: before chunking, bad scope, no matching scope, and each rejected
+    # spawn knob (which return before the chunks dir is even looked at).
+    no_chunks = flow.translate_prepare(str(tmp_path), brief=True)
+    assert "error" in no_chunks and "chunks" in no_chunks["error"]
+
+    _brief_fixture(tmp_path)
+    bails = {
+        "no_chunks": no_chunks,
+        "no_match": flow.translate_prepare(str(tmp_path), chapters="99", brief=True),
+        "bad_chapters": flow.translate_prepare(str(tmp_path), chapters="oops", brief=True),
+        "bad_parallelism": flow.translate_prepare(str(tmp_path), parallelism="sideways",
+                                                  brief=True),
+        "bad_window": flow.translate_prepare(str(tmp_path), window=0, brief=True),
+        "bad_batch": flow.translate_prepare(str(tmp_path), batch_size="x", brief=True),
+    }
+    for name, payload in bails.items():
+        assert payload["brief"] is True, f"{name} is not self-identifying"
+        assert payload["chunk_ids"] == [], name
+        assert "manifest" not in payload, f"{name} still echoes the key --brief drops"
+        assert "error" in payload or "note" in payload, f"{name} says nothing went wrong"
+        assert set(payload) <= schema, f"{name} undocumented: {sorted(set(payload) - schema)}"
+
+    assert bails["no_match"]["available_chapters"] == ["chapter_01", "chapter_02"]
+
+    # Without the flag the failure paths are unchanged — `manifest: []`, no brief keys.
+    plain = flow.translate_prepare(str(tmp_path), chapters="99")
+    assert plain["manifest"] == [] and "brief" not in plain
+
+
+def test_cli_translate_prepare_brief_writes_a_brief_artifact(tmp_path: Path, monkeypatch):
+    """The flag reaches flow through the CLI, so last_output.json is brief too."""
+    import scripts.harness as harness
+
+    _brief_fixture(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["harness.py", "translate-prepare", "--project", str(tmp_path), "--brief"],
+    )
+    harness.main()
+
+    out = json.loads(
+        (tmp_path / ".harness" / "last_output.json").read_text(encoding="utf-8")
+    )
+    assert "manifest" not in out and out["brief"] is True
+    assert len(out["chunk_ids"]) == 4
+    assert out["path_template"]["prompt"].endswith(".prompt.txt")
+    # The schema documents the brief-only keys, so the sidecar answers "what is this?"
+    sidecar = json.loads(
+        (tmp_path / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    for key in ("brief", "chunk_ids", "translate_dir", "path_template"):
+        assert key in sidecar
+
+
+def test_cli_translate_prepare_brief_error_keeps_brief_shape_and_inlines_schema(
+    tmp_path: Path, monkeypatch,
+):
+    """CLI --brief + soft-error: one brief shape AND inline _schema (no pointer).
+
+    Flow-level bail tests cover the shape; the success CLI test covers the flag wiring.
+    This is the seam of the two 0.40.4.2 fixes — an agent that always passes --brief
+    must still KeyError-free on chunk_ids when prepare fails, and must get _schema
+    inline rather than a _schema_path that would ask them to re-run.
+    """
+    from src.harness import flow
+    import scripts.harness as harness
+
+    # No chunks dir — the earliest bail.
+    monkeypatch.setattr(
+        sys, "argv",
+        ["harness.py", "translate-prepare", "--project", str(tmp_path), "--brief"],
+    )
+    harness.main()
+
+    out = json.loads(
+        (tmp_path / ".harness" / "last_output.json").read_text(encoding="utf-8")
+    )
+    assert out["brief"] is True and out["chunk_ids"] == []
+    assert "manifest" not in out
+    assert "error" in out and "chunks" in out["error"]
+    assert out["_schema"] == flow.OUTPUT_SCHEMAS["translate-prepare"]
+    assert list(out.keys())[0] == "_schema"
+    assert "_schema_path" not in out and "_schema_keys" not in out
+
+
 def test_status_reports_progress_artifacts_and_spawn_plan(tmp_path: Path):
     """status answers 'where is this project / what's left?' without a chunk-file loop."""
     from src.harness import flow
@@ -1967,6 +2167,7 @@ def test_address_map_rename_is_reachable_from_the_cli(tmp_path: Path):
     into the map was a hand-written ordered substitution over nine fields, and
     confirming it worked meant re-running `glossary commit` for its warning.
     """
+    from src.harness import flow
     from src.harness import state as hstate
     from src.models import AddressMap, Glossary, GlossaryTerm
     from src.utils.file_io import save_address_map, save_glossary
@@ -1993,10 +2194,20 @@ def test_address_map_rename_is_reachable_from_the_cli(tmp_path: Path):
     payload = json.loads(result.stdout.decode("utf-8"))
     assert payload["remaining_warnings"] == []
     assert payload["renamed"][0]["target"] == "la tía Polly"
-    # Every key self-documents (friction-log #19), and the artifact mirrors it.
-    assert not sorted(set(payload) - set(payload["_schema"]) - {"_schema"})
+    # Every result key is documented in OUTPUT_SCHEMAS (friction-log #19); transport
+    # is the sidecar, so completeness is checked against the registry, not the payload.
+    schema = flow.OUTPUT_SCHEMAS["address-map rename"]
+    _meta = {"_schema", "_schema_path", "_schema_keys"}
+    assert not sorted(set(payload) - set(schema) - _meta)
+    assert payload["_schema_keys"] == list(schema)
     mirrored = json.loads((tmp_path / ".harness" / "last_output.json").read_text(encoding="utf-8"))
     assert mirrored["draft_path"] == payload["draft_path"]
+    assert "_schema" not in mirrored
+    assert mirrored["_schema_path"].endswith("last_output_schema.json")
+    sidecar = json.loads(
+        (tmp_path / ".harness" / "last_output_schema.json").read_text(encoding="utf-8")
+    )
+    assert sidecar == schema
 
     # The committed map is untouched: `commit` is still the only path into it.
     assert "Aunt Polly" in (tmp_path / "address_map.json").read_text(encoding="utf-8")
