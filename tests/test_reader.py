@@ -107,6 +107,34 @@ class TestReaderChapterList:
         assert "badge-flag" not in html
         assert "3 to review" in html
 
+    def test_footnote_and_review_note_on_one_sentence_both_count(self, client, project_with_alignment):
+        # Two annotations at the same es_idx are distinct records (distinct
+        # sub_ids). Keying the badge counts on (chapter_id, es_idx) alone
+        # collapsed them into one and let whichever was written last decide the
+        # badge, so both badges undercounted.
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote", "sub_id": "gb1"},
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice", "sub_id": "u1"},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "1 to review" in html
+        assert "1 fn" in html
+
+    def test_unparseable_annotation_line_does_not_break_chapter_list(self, client, project_with_alignment):
+        # A half-written line must never 500 the whole chapter list.
+        path = project_with_alignment / "annotations.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice"}) + "\n")
+            f.write('{"chapter_id": "chapter_01", "es_idx"\n')
+            f.write(json.dumps({"chapter_id": "chapter_01", "es_idx": 1, "type": "footnote"}) + "\n")
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "1 to review" in html
+        assert "1 fn" in html
+
     def test_reviewed_chapter_always_shows_reviewed_badge(self, client, project_with_alignment):
         # A reviewed chapter shows the "reviewed" badge even with outstanding
         # annotations (previously gated on total_ann == 0).

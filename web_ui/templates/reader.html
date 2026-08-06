@@ -532,7 +532,32 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <line x1="21" y1="12" x2="14" y2="12"/>
             </svg>
         </button>
-        <span class="reader-stats" id="reader-stats"></span>
+        <!-- Two independent counters/tours: review notes (word choice,
+             inconsistency, Other) and footnotes. The numbers are annotation
+             records, so they match the chapter-list badges. JS unhides each one
+             when its count is non-zero. -->
+        <button class="topbar-icon-btn topbar-count-btn" id="btn-ann-nav"
+                title="{{ t.js.nav_annotations }}"
+                aria-label="{{ t.js.nav_annotations }}" hidden>
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none"
+                 stroke="currentColor" stroke-width="1.2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+                <path d="M2 2h12v8l-4 4H2z"/>
+                <path d="M10 10v4"/>
+            </svg>
+            <span class="topbar-count" id="ann-nav-count"></span>
+        </button>
+        <button class="topbar-icon-btn topbar-count-btn" id="btn-fn-nav"
+                title="{{ t.js.nav_footnotes }}"
+                aria-label="{{ t.js.nav_footnotes }}" hidden>
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="none"
+                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+                <text x="3" y="16" font-size="14" font-family="Georgia, serif" fill="currentColor" stroke="none">a</text>
+                <text x="12" y="10" font-size="9" font-family="-apple-system, sans-serif" fill="currentColor" stroke="none">1</text>
+            </svg>
+            <span class="topbar-count" id="fn-nav-count"></span>
+        </button>
     </div>
 
     <!-- Main reading area -->
@@ -850,7 +875,7 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
 <script>window.READER_UI_VERSION = {{ reader_ui_version | default('classic') | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=24"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=25"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
 <script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=9"></script>

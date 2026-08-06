@@ -68,7 +68,10 @@
     const sheetClose = document.getElementById('sheet-close');
     const sheetEditChunk = document.getElementById('sheet-edit-chunk');
     const sheetHandle = document.getElementById('sheet-handle');
-    const readerStats = document.getElementById('reader-stats');
+    const btnAnnNav = document.getElementById('btn-ann-nav');
+    const annNavCount = document.getElementById('ann-nav-count');
+    const btnFnNav = document.getElementById('btn-fn-nav');
+    const fnNavCount = document.getElementById('fn-nav-count');
 
     // Annotation elements
     const annTypeButtons = document.querySelectorAll('.ann-type-btn');
@@ -695,6 +698,15 @@
         sheetTabAnnotate.textContent = i.review_tab_annotate || 'Annotate';
     }
 
+    // Transient highlight on a sentence we just jumped to — never .active, so
+    // the annotate/edit bottom sheet stays closed. (D3) The keyframes and the
+    // prefers-reduced-motion fallback live in reader.css.
+    function flashLanded(el) {
+        if (!el) return;
+        el.classList.add('search-landed');
+        setTimeout(() => el.classList.remove('search-landed'), 1800);
+    }
+
     // After the initial load (or after returning from the chunk editor),
     // scroll to the alignment whose es starts with ?anchor=<prefix>. This is
     // keyed by text instead of es_idx because realign can renumber sentences.
@@ -746,12 +758,7 @@
         setTimeout(() => {
             const top = el.getBoundingClientRect().top + window.scrollY - 60;
             window.scrollTo({ top, behavior: 'instant' });
-            // Transient highlight only — never .active, so the annotate/edit
-            // bottom sheet stays closed. (D3)
-            if (flash) {
-                el.classList.add('search-landed');
-                setTimeout(() => el.classList.remove('search-landed'), 1800);
-            }
+            if (flash) flashLanded(el);
         }, 0);
     }
 
@@ -905,28 +912,69 @@
         doRemoveAnnotation(activeIdx, activeRepSubId);
     });
 
-    const STICKY_NOTE_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M2 2h12v8l-4 4H2z"/><path d="M10 10v4"/></svg>';
-
-    let annotatedIndices = [];
-    let annCyclePos = -1;
+    // --- Top-bar tours: review notes and footnotes walk separately ---
+    //
+    // Footnotes feed the endnote pipeline; word choice / inconsistency / Other
+    // are things to resolve. One shared tour walking both drowned the review
+    // notes on footnote-heavy books, so each class gets its own counter+button.
+    // `match` for the annotations tour is "not a footnote" rather than an
+    // allowlist so an unknown or legacy type still shows up somewhere — the same
+    // fallback ANN_RANK and app.py's type coercion make.
+    const tours = [
+        { btn: btnAnnNav, out: annNavCount, stops: [], pos: -1, match: a => a.type !== 'footnote' },
+        { btn: btnFnNav,  out: fnNavCount,  stops: [], pos: -1, match: a => a.type === 'footnote' },
+    ];
 
     function updateStats() {
-        if (!readerStats) return;
-        const annCount = Object.keys(annotationsMap).length;
-        readerStats.innerHTML = annCount > 0 ? STICKY_NOTE_SVG + annCount : '';
-        annotatedIndices = Object.keys(annotationsMap).map(Number).sort((a, b) => a - b);
-        annCyclePos = -1;
+        for (const tour of tours) {
+            if (!tour.btn || !tour.out) continue;
+            // The count is matching *records* (mirroring the chapter-list badge);
+            // a stop is a sentence, so two footnotes on one sentence count 2 and
+            // stop once.
+            let count = 0;
+            const stops = [];
+            for (const idx of Object.keys(annotationsMap)) {
+                const hits = (annotationsMap[idx] || []).filter(tour.match).length;
+                if (!hits) continue;
+                count += hits;
+                stops.push(Number(idx));
+            }
+            stops.sort((a, b) => a - b);
+
+            // Keep the reader's place across a save or delete: re-derive pos from
+            // the sentence last landed on rather than restarting the tour.
+            const landed = tour.pos >= 0 ? tour.stops[tour.pos] : undefined;
+            tour.stops = stops;
+            if (landed === undefined) {
+                tour.pos = -1;
+            } else {
+                const exact = stops.indexOf(landed);
+                if (exact !== -1) {
+                    tour.pos = exact;
+                } else {
+                    const after = stops.findIndex(i => i > landed);
+                    // No later stop: park at the end so the next tap wraps to the top.
+                    tour.pos = after === -1 ? stops.length - 1 : after - 1;
+                }
+            }
+
+            tour.out.textContent = count ? String(count) : '';
+            tour.btn.hidden = count === 0;
+        }
     }
 
-    if (readerStats) {
-        readerStats.addEventListener('click', () => {
-            if (annotatedIndices.length === 0) return;
-            annCyclePos = (annCyclePos + 1) % annotatedIndices.length;
-            const idx = annotatedIndices[annCyclePos];
-            const el = content.querySelector(`[data-es-idx="${idx}"]`);
-            if (!el) return;
-            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
+    function jumpTour(tour) {
+        if (!tour.stops.length) return;
+        tour.pos = (tour.pos + 1) % tour.stops.length;
+        const el = content.querySelector(`[data-es-idx="${tour.stops[tour.pos]}"]`);
+        if (!el) return;
+        // .sentence carries scroll-margin-top, so the fixed top bar is cleared.
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        flashLanded(el);
+    }
+
+    for (const tour of tours) {
+        if (tour.btn) tour.btn.addEventListener('click', () => jumpTour(tour));
     }
 
     // --- Toast (used by the realign flow; minimal, no deps) ---
