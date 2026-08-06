@@ -86,6 +86,10 @@ class TestTopbarMarkup:
         assert "Recorrer las anotaciones" in html
         assert "Recorrer las notas al pie" in html
 
+    def test_css_cache_bust_present(self, client, project_with_alignment):
+        html = client.get(READ_URL).get_data(as_text=True)
+        assert "reader.css?v=" in html
+
 
 class TestReaderJsSource:
     def test_js_drives_both_buttons(self):
@@ -104,3 +108,49 @@ class TestReaderJsSource:
         js = READER_JS.read_text(encoding="utf-8")
         assert "a.type !== 'footnote'" in js
         assert "a.type === 'footnote'" in js
+
+    def test_js_exposes_rederive_helper(self):
+        js = READER_JS.read_text(encoding="utf-8")
+        assert "function rederiveTourPos(" in js
+        assert "rederiveTourPos(tour.stops, tour.pos, stops)" in js
+
+
+def rederive_tour_pos(prev_stops, prev_pos, new_stops):
+    """Mirror of reader.js ``rederiveTourPos`` — keep in lockstep with that helper."""
+    landed = prev_stops[prev_pos] if prev_pos >= 0 else None
+    if landed is None:
+        return -1
+    try:
+        return new_stops.index(landed)
+    except ValueError:
+        pass
+    after = next((i for i, s in enumerate(new_stops) if s > landed), None)
+    if after is None:
+        return len(new_stops) - 1
+    return after - 1
+
+
+class TestTourPosRederive:
+    """Behaviour of the tour cursor across save/delete (no JS runner)."""
+
+    def test_untouched_tour_stays_unstarted(self):
+        assert rederive_tour_pos([0, 5, 9], -1, [0, 5, 9]) == -1
+
+    def test_landed_sentence_still_present_keeps_exact_index(self):
+        # Was on es_idx 5 (pos 1); a different stop vanished — stay on 5.
+        assert rederive_tour_pos([0, 5, 9], 1, [5, 9]) == 0
+
+    def test_delete_landed_advances_to_next_stop_not_restart(self):
+        # Landed on 5; 5 deleted → park just before the next stop (9) so the
+        # following tap lands on 9 rather than wrapping back to 0.
+        assert rederive_tour_pos([0, 5, 9], 1, [0, 9]) == 0
+        # Next tap: (0 + 1) % 2 → index 1 → es_idx 9.
+        assert [0, 9][0 + 1] == 9
+
+    def test_delete_last_stop_parks_at_end_so_next_tap_wraps(self):
+        assert rederive_tour_pos([0, 5, 9], 2, [0, 5]) == 1
+        # Next tap wraps: (1 + 1) % 2 → 0.
+        assert (1 + 1) % 2 == 0
+
+    def test_delete_all_stops_yields_unstarted(self):
+        assert rederive_tour_pos([0, 5], 0, []) == -1

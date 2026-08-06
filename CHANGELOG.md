@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.41.0.0] - 2026-08-06
+
+### Added
+- **Reader top-bar annotation/footnote tours.** The single sticky-note counter that walked every annotated sentence is replaced by two independent buttons — review notes and footnotes — each cycling only its own class and hidden while its count is zero. Footnote-heavy chapters no longer drown the review notes in one shared tour.
+
+### Fixed
+- **Chapter-list badge counts collapsed co-located annotations.** Counts were keyed on `(chapter_id, es_idx)`, so a footnote and a review note on the same sentence undercounted both badges (last write won). Loading now goes through `src.annotations.load_active`, which keys on `sub_id` too and skips unparseable JSONL lines so a half-written record cannot 500 the chapter list.
+- **Top-bar count digits clipped under cached CSS.** `.topbar-icon-btn` sets `line-height: 0`; the new count buttons need `line-height: 1`. `reader.css` is now cache-busted so returning clients pick up the fix.
+
 ## [0.40.4.2] - 2026-08-05
 
 ### Fixed

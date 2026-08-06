@@ -122,6 +122,18 @@ class TestReaderChapterList:
         assert "1 to review" in html
         assert "1 fn" in html
 
+    def test_two_footnotes_on_one_sentence_count_as_two(self, client, project_with_alignment):
+        # Badge counts are annotation *records*, not unique sentences — the same
+        # contract the top-bar footnote tour displays (two stops still one stop).
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote", "sub_id": "fn1"},
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote", "sub_id": "fn2"},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "2 fn" in html
+
     def test_unparseable_annotation_line_does_not_break_chapter_list(self, client, project_with_alignment):
         # A half-written line must never 500 the whole chapter list.
         path = project_with_alignment / "annotations.jsonl"

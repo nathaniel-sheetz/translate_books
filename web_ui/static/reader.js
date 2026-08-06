@@ -925,6 +925,20 @@
         { btn: btnFnNav,  out: fnNavCount,  stops: [], pos: -1, match: a => a.type === 'footnote' },
     ];
 
+    // Keep the reader's place across a save or delete: re-derive pos from the
+    // sentence last landed on rather than restarting the tour. Pure — mirrored
+    // by tests/test_web_ui/test_reader_topbar_nav.py::rederive_tour_pos.
+    function rederiveTourPos(prevStops, prevPos, newStops) {
+        const landed = prevPos >= 0 ? prevStops[prevPos] : undefined;
+        if (landed === undefined) return -1;
+        const exact = newStops.indexOf(landed);
+        if (exact !== -1) return exact;
+        const after = newStops.findIndex(i => i > landed);
+        // No later stop (or empty): park at the end so the next tap wraps to the
+        // top. Empty → length-1 === -1, which jumpTour treats as "not started".
+        return after === -1 ? newStops.length - 1 : after - 1;
+    }
+
     function updateStats() {
         for (const tour of tours) {
             if (!tour.btn || !tour.out) continue;
@@ -941,22 +955,8 @@
             }
             stops.sort((a, b) => a - b);
 
-            // Keep the reader's place across a save or delete: re-derive pos from
-            // the sentence last landed on rather than restarting the tour.
-            const landed = tour.pos >= 0 ? tour.stops[tour.pos] : undefined;
+            tour.pos = rederiveTourPos(tour.stops, tour.pos, stops);
             tour.stops = stops;
-            if (landed === undefined) {
-                tour.pos = -1;
-            } else {
-                const exact = stops.indexOf(landed);
-                if (exact !== -1) {
-                    tour.pos = exact;
-                } else {
-                    const after = stops.findIndex(i => i > landed);
-                    // No later stop: park at the end so the next tap wraps to the top.
-                    tour.pos = after === -1 ? stops.length - 1 : after - 1;
-                }
-            }
 
             tour.out.textContent = count ? String(count) : '';
             tour.btn.hidden = count === 0;
