@@ -949,14 +949,6 @@ body {
     white-space: nowrap;
 }
 
-.reader-stats {
-    font-size: 14px;
-    color: var(--text-muted2);
-    white-space: nowrap;
-    margin-left: 8px;
-    cursor: pointer;
-}
-
 .topbar-icon-btn {
     background: transparent;
     border: none;
@@ -987,6 +979,16 @@ body {
 
 .topbar-icon-btn:disabled {
     cursor: wait;
+}
+
+/* Icon + count. `.topbar-icon-btn` sets `line-height: 0`, which clips digits. */
+.topbar-count-btn {
+    gap: 3px;
+    line-height: 1;
+}
+
+.topbar-count {
+    font-size: 14px;
 }
 
 .topbar-icon-btn.aligning {

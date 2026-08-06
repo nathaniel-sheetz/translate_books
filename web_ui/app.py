@@ -23,6 +23,7 @@ from web_ui.i18n import get_strings
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.annotations import load_active
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
@@ -1021,27 +1022,17 @@ def reader_chapters(project_id):
     if not align_dir.exists():
         return render_template("reader.html", mode="not_found", project_id=project_id, t=t, lang=_get_ui_lang()), 404
 
-    # Load all annotations for this project
+    # Load all annotations for this project. src.annotations.load_active owns the
+    # append-only / tombstone / latest-wins rule keyed on
+    # (chapter_id, es_idx, sub_id) — keying on sub_id too is what lets one
+    # sentence hold both a footnote and a review note — and skips unparseable
+    # lines so a half-written record can't 500 the chapter list.
     project_dir = _resolve_project_dir(project_id)
-    all_annotations = {}  # chapter_id -> {type -> count}
-    ann_path = project_dir / "annotations.jsonl"
-    if ann_path.exists():
-        live = {}  # es_idx -> record (latest wins, removed deletes)
-        for line in ann_path.read_text(encoding="utf-8").strip().split("\n"):
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            ch = r.get("chapter_id", "")
-            key = (ch, r.get("es_idx"))
-            if r.get("removed"):
-                live.pop(key, None)
-            else:
-                live[key] = r
-        from collections import defaultdict
-        ann_counts = defaultdict(lambda: defaultdict(int))
-        for (ch, _), r in live.items():
-            ann_counts[ch][r.get("type", "flag")] += 1
-        all_annotations = dict(ann_counts)
+    from collections import defaultdict
+    ann_counts = defaultdict(lambda: defaultdict(int))
+    for rec in load_active(project_dir):
+        ann_counts[rec.get("chapter_id", "")][rec.get("type", "flag")] += 1
+    all_annotations = dict(ann_counts)  # chapter_id -> {type -> count}
 
     # Check for pending corrections (file must exist AND contain at least one
     # non-blank line — a stale file with only whitespace shouldn't trigger the banner).
