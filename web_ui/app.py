@@ -23,7 +23,7 @@ from web_ui.i18n import get_strings
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.annotations import load_active
+from src.annotations import REVIEW_ANNOTATION_TYPES, load_active
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
@@ -50,6 +50,9 @@ from src.utils.text_utils import (
 )
 from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
+    REVIEW_CODED_TYPES,
+    REVIEW_JUDGE_TYPES,
+    REVIEW_TYPES,
     append_feedback,
     evaluate_and_persist_chunk,
     load_all_feedback_by_chunk,
@@ -59,6 +62,7 @@ from web_ui.evaluations import (
     merge_llm_judge_result,
     run_coded_evaluators,
 )
+from web_ui.project_cards import build_project_card
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # For session management
@@ -342,6 +346,44 @@ def set_ui_version():
         version = "classic"
     resp = make_response(jsonify({"version": version}))
     resp.set_cookie("reader_ui_version", version, max_age=365 * 24 * 3600, samesite="Lax")
+    return resp
+
+
+# Which evaluator/judge categories count as "errors I care about". Global, not
+# per project: the same six categories mean the same thing in every book, and
+# the home page needs the selection before you have picked a book. Mirrors the
+# two cookies above. The review-mode *on/off* switch stays per project in
+# localStorage — that one is a per-book reading preference.
+_REVIEW_TYPES_COOKIE = "reader_review_types"
+
+
+def _get_review_types() -> list[str]:
+    """Read the selected review categories from cookie, default to all six.
+
+    Order follows :data:`REVIEW_TYPES`, not the cookie, so the UI is stable.
+    An absent, empty, or fully unrecognized cookie means "show everything" —
+    the same thing the checkboxes show on a first visit.
+    """
+    raw = request.cookies.get(_REVIEW_TYPES_COOKIE, "")
+    selected = [t for t in REVIEW_TYPES if t in set(raw.split(","))]
+    return selected or list(REVIEW_TYPES)
+
+
+@app.route("/api/set-review-types", methods=["POST"])
+def set_review_types():
+    """Persist the selected review categories via cookie."""
+    raw = (request.json or {}).get("types")
+    if not isinstance(raw, list):
+        return jsonify({"error": "types must be a list"}), 400
+    unknown = [t for t in raw if t not in REVIEW_TYPES]
+    if unknown:
+        return jsonify({"error": f"Unknown review types: {', '.join(map(str, unknown))}"}), 400
+    types = [t for t in REVIEW_TYPES if t in set(raw)]
+    resp = make_response(jsonify({"ok": True, "types": types}))
+    resp.set_cookie(
+        _REVIEW_TYPES_COOKIE, ",".join(types),
+        max_age=365 * 24 * 3600, samesite="Lax",
+    )
     return resp
 
 
@@ -954,53 +996,7 @@ def reader_projects():
             )
             continue
         seen_ids[proj_dir.name] = proj_dir
-
-        # Count alignment chapters (for Read link)
-        align_dir = proj_dir / "alignments"
-        alignment_count = len(list(align_dir.glob("*.json"))) if align_dir.exists() else 0
-
-        # Style guide status
-        has_style_guide = (proj_dir / "style.json").exists()
-
-        # Glossary status
-        glossary_count = 0
-        glossary_path = proj_dir / "glossary.json"
-        if glossary_path.exists():
-            try:
-                with open(glossary_path, "r", encoding="utf-8") as f:
-                    gdata = json.load(f)
-                glossary_count = len(gdata.get("terms", []))
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        # Translation progress
-        total_chunks = 0
-        translated_chunks = 0
-        chunks_dir = proj_dir / "chunks"
-        if chunks_dir.exists():
-            for cf in chunks_dir.glob("*_chunk_*.json"):
-                total_chunks += 1
-                try:
-                    with open(cf, "r", encoding="utf-8") as f:
-                        cdata = json.load(f)
-                    if cdata.get("translated_text"):
-                        translated_chunks += 1
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-        proj_config = _load_project_config(proj_dir.name)
-        projects.append({
-            "id": proj_dir.name,
-            "title": proj_config.get("title") or proj_dir.name,
-            "spanish_title": proj_config.get("spanish_title", ""),
-            "status": proj_config.get("status", "pending"),
-            "chapter_count": alignment_count,
-            "has_style_guide": has_style_guide,
-            "glossary_count": glossary_count,
-            "total_chunks": total_chunks,
-            "translated_chunks": translated_chunks,
-            "has_alignments": alignment_count > 0,
-        })
+        projects.append(build_project_card(proj_dir, proj_dir.name))
 
     return render_template(
         "reader.html",
@@ -1009,6 +1005,8 @@ def reader_projects():
         t=t,
         lang=_get_ui_lang(),
         reader_ui_version=_get_reader_ui_version(),
+        review_types=list(REVIEW_TYPES),
+        review_types_selected=_get_review_types(),
     )
 
 
@@ -1072,8 +1070,9 @@ def reader_chapters(project_id):
             ann = all_annotations.get(ch_id, {})
             # Fold the three review-type annotations (word choice, inconsistency,
             # and "Other"/flag) into one "to review" count; footnotes stay separate
-            # because they feed endnotes.
-            review_count = ann.get("word_choice", 0) + ann.get("inconsistency", 0) + ann.get("flag", 0)
+            # because they feed endnotes. Same list the home-page card rolls up
+            # (src/annotations/summary.py), so the two can't drift.
+            review_count = sum(ann.get(t, 0) for t in REVIEW_ANNOTATION_TYPES)
             footnote_count = ann.get("footnote", 0)
             total_ann = sum(ann.values())
 
@@ -1100,6 +1099,8 @@ def reader_chapters(project_id):
         project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
         chapters=chapters,
         has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
+        review_types=list(REVIEW_TYPES),
+        review_types_selected=_get_review_types(),
     )
 
 
@@ -1149,6 +1150,8 @@ def reader_view(project_id, chapter):
         display_label=display_label,
         has_pending_corrections=has_pending_corrections,
         reader_ui_version=ui_version,
+        review_types=list(REVIEW_TYPES),
+        review_types_selected=_get_review_types(),
     ))
     if ui_override is not None:
         resp.set_cookie(
@@ -5245,12 +5248,9 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
 
 # ── Reader "Review Mode" — overlay evaluator findings on the reader ───────────
 
-# Coded evaluators whose target-side issues carry a highlightable char span.
-_REVIEW_CODED_TYPES = frozenset(
-    {"blacklist", "grammar", "dictionary", "completeness"}
-)
-# Tailored judges whose issues can be anchored to a sentence by text search.
-_REVIEW_JUDGE_TYPES = frozenset({"dialogue", "address"})
+# Membership-test forms of the shared category lists (web_ui/evaluations.py).
+_REVIEW_CODED_TYPES = frozenset(REVIEW_CODED_TYPES)
+_REVIEW_JUDGE_TYPES = frozenset(REVIEW_JUDGE_TYPES)
 
 
 def _row_containing_offset(rows_sorted: list[dict], offset: int) -> Optional[dict]:

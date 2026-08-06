@@ -55,7 +55,6 @@
     --status-archived-bg: #e6ddd0;
     --status-archived-color: #7a6a52;
     --status-archived-border: #d8cbb5;
-    --status-ok: #2d8a4e;
     --status-missing: #b33;
     --btn-new-bg: #4f46e5;
     --btn-card-border: #ccc;
@@ -134,7 +133,6 @@
     --status-archived-bg: rgba(180, 140, 60, 0.12);
     --status-archived-color: #b0906a;
     --status-archived-border: rgba(180, 140, 60, 0.3);
-    --status-ok: #6ab87f;
     --status-missing: #e06060;
     --btn-new-bg: #6366f1;
     --btn-card-border: #555;
@@ -401,34 +399,59 @@ body {
     opacity: 0.6;
 }
 
-.project-status {
+/* Card body: chips (setup gaps + work remaining) and the progress bar. Both
+   rows are progressively disclosed, so either may be absent entirely. Chips
+   reuse the chapter-list .badge palette. */
+
+.project-chips {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.project-chips a.badge {
+    text-decoration: none;
+}
+
+.project-chips a.badge:hover {
+    filter: brightness(0.95);
+}
+
+.badge[hidden] {
+    display: none;
+}
+
+.project-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 12px;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 14px;
-}
-
-.status-row {
-    display: flex;
-    justify-content: space-between;
-}
-
-.status-label {
+    font-size: 13px;
     color: var(--text-muted3);
 }
 
-.status-value {
-    color: var(--text-link-hover);
+.project-progress-track {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border-light);
+    overflow: hidden;
 }
 
-.status-ok {
-    color: var(--status-ok);
+.project-progress-fill {
+    height: 100%;
+    background: var(--accent);
 }
 
-.status-missing {
-    color: var(--status-missing);
+.project-progress-label {
+    white-space: nowrap;
+}
+
+/* Category picker sits at the far right of the status filter row. */
+.filter-categories {
+    margin-left: auto;
 }
 
 .project-card-actions {

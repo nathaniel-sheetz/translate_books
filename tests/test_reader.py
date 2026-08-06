@@ -82,6 +82,32 @@ class TestReaderProjectList:
         rv = client.get("/read/")
         assert rv.status_code == 200
 
+    def test_card_shows_setup_gaps_not_the_old_status_rows(self, client, project_with_alignment):
+        # The fixture project has neither a style guide nor a glossary and has
+        # no chunks, so all three "something is missing" chips show and the
+        # retired ✓/✗ status table is gone.
+        html = client.get("/read/").data.decode("utf-8")
+        assert "No style guide" in html
+        assert "No glossary" in html
+        assert "Not chunked" in html
+        assert 'class="project-status"' not in html
+        assert 'class="status-row"' not in html
+
+    def test_card_hides_work_chips_before_translation(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert "project-work-chips" not in html
+        assert "Nothing pending" not in html
+
+    def test_category_picker_rendered_in_filter_bar(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert 'id="review-types-popup"' in html
+        assert html.count('class="review-type-cb"') == 6
+
+    def test_home_page_js_is_external(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert "reader_projects.js" in html
+        assert "btn-create-project').addEventListener" not in html
+
 
 class TestReaderChapterList:
     def test_chapters_page_renders(self, client, project_with_alignment):

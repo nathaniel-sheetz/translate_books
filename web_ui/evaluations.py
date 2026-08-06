@@ -448,8 +448,95 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
     return out
 
 
+def load_project_type_counts(project_dir: Path) -> dict[str, int]:
+    """Walk ``evaluations/*.json`` and count live findings per review category.
+
+    Same shape of walk as :func:`load_project_summary`, but bucketed by
+    category rather than severity, and gated exactly the way the reader's
+    Review Mode gates them (``web_ui/app.py:project_chapter_review``): stale
+    chunks are skipped, dismissed findings (``_feedback.jsonl``) are subtracted,
+    coded findings must be target-side with a ``char_start``, and only the six
+    :data:`REVIEW_TYPES` categories are counted.
+
+    One deliberate divergence from the reader: the reader additionally drops
+    any finding it cannot anchor to a sentence (``_anchor_judge_excerpt``),
+    which needs the alignments plus the chunk text — far too expensive for a
+    list page. So this count is an **upper bound**, and the gap is almost
+    entirely judge findings whose excerpt has drifted from the current prose.
+
+    Returns:
+        All six :data:`REVIEW_TYPES` keys, zero-filled.
+    """
+    counts: dict[str, int] = {name: 0 for name in REVIEW_TYPES}
+    eval_dir = _eval_results_dir(project_dir)
+    if not eval_dir.exists():
+        return counts
+
+    coded_types = frozenset(REVIEW_CODED_TYPES)
+    judge_types = frozenset(REVIEW_JUDGE_TYPES)
+    feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+
+    for path in sorted(eval_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug("Skipping unreadable evaluation %s: %s", path, e)
+            continue
+        if not isinstance(data, dict) or data.get("stale"):
+            continue
+
+        chunk_id = data.get("chunk_id") or path.stem
+        dismissed = {
+            (fb.get("eval_name"), fb.get("issue_index"))
+            for fb in feedback_by_chunk.get(chunk_id, [])
+        }
+
+        for ni in data.get("normalized_issues") or []:
+            if not isinstance(ni, dict):
+                continue
+            eval_name = ni.get("eval_name")
+            if eval_name not in coded_types:
+                continue
+            loc = ni.get("location") or {}
+            if loc.get("side") != "target" or loc.get("char_start") is None:
+                continue
+            if (eval_name, ni.get("issue_index")) in dismissed:
+                continue
+            counts[eval_name] += 1
+
+        judges = data.get("judges")
+        if not isinstance(judges, dict):
+            continue
+        for judge_name, jres in judges.items():
+            if judge_name not in judge_types or not isinstance(jres, dict):
+                continue
+            for issue_index, issue in enumerate(jres.get("issues") or []):
+                if not isinstance(issue, dict):
+                    continue
+                if (judge_name, issue_index) in dismissed:
+                    continue
+                counts[judge_name] += 1
+
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # High-level evaluation runner
+
+
+# The finding categories the reader's Review Mode can paint, and the home-page
+# card can count. Single source of truth: ``web_ui/app.py`` builds its
+# frozensets from these, the Jinja pickers loop over them, and ``reader.js``
+# receives them as ``window.REVIEW_TYPES``.
+#
+# Coded evaluators whose target-side issues carry a highlightable char span.
+REVIEW_CODED_TYPES: tuple[str, ...] = ("blacklist", "grammar", "dictionary", "completeness")
+# Tailored judges whose issues can be anchored to a sentence by text search.
+REVIEW_JUDGE_TYPES: tuple[str, ...] = ("dialogue", "address")
+REVIEW_TYPES: tuple[str, ...] = REVIEW_CODED_TYPES + REVIEW_JUDGE_TYPES
 
 
 # The seven coded evaluators; ``llm_judge`` is deliberately excluded here and

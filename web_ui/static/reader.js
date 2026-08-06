@@ -115,19 +115,25 @@
     }
 
     // --- Review mode (opt-in overlay of evaluator findings) ---
-    // Selection is chosen on the chapter-list page and persisted per project;
-    // the reader only reads it. When off, the reader behaves exactly as before.
-    const REVIEW_TYPES = ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
+    // Two halves, deliberately stored differently: the on/off switch is a
+    // per-book reading preference (localStorage, set on the chapter list), the
+    // category selection is global (cookie, rendered into the page by the
+    // server). When off, the reader behaves exactly as before.
+    const REVIEW_TYPES = window.REVIEW_TYPES ||
+        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
 
     function loadReviewConfig() {
+        const types = Array.isArray(window.REVIEW_TYPES_SELECTED) && window.REVIEW_TYPES_SELECTED.length
+            ? window.REVIEW_TYPES_SELECTED
+            : REVIEW_TYPES;
+        let on = false;
         try {
             const raw = localStorage.getItem('reader_review:' + projectId);
-            if (!raw) return { on: false, types: [] };
-            const c = JSON.parse(raw) || {};
-            return { on: !!c.on, types: Array.isArray(c.types) ? c.types : [] };
+            on = !!((JSON.parse(raw) || {}).on);
         } catch (e) {
-            return { on: false, types: [] };
+            on = false;
         }
+        return { on: on, types: types };
     }
 
     const reviewConfig = loadReviewConfig();
