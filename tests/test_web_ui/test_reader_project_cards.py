@@ -426,7 +426,54 @@ def test_unread_chip_renders_first_and_suppresses_the_clean_chip(client, card_pr
     assert chips.index("1 unread") < chips.index("project-chip-flags")
 
 
-# ── 9. The cookie endpoint ───────────────────────────────────────────────────
+# ── 9. Card navigation (title link, gear, status) ────────────────────────────
+
+def _header(html):
+    return html.split('class="project-card-header"')[1].split("</div>")[0]
+
+
+def test_card_title_links_to_the_reader(client, card_project):
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    assert 'href="/read/cardproj"' in header
+    assert "Card Project" in header
+
+
+def test_card_title_and_subtitle_share_one_link(client, card_project):
+    (card_project / "project.json").write_text(
+        json.dumps({"title": "Card Project", "spanish_title": "Proyecto"}),
+        encoding="utf-8",
+    )
+    clear_card_cache()
+
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    # One anchor wrapping both, so clicking either navigates.
+    assert header.count("<a ") == 1
+    link = header.split("<a ")[1]
+    assert "nav-title" in link and "nav-subtitle" in link
+
+
+def test_card_title_falls_back_to_the_dashboard_without_alignments(client, card_project):
+    (card_project / "alignments" / "chapter_01.json").unlink()
+    clear_card_cache()
+
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    assert 'href="/project/cardproj"' in header
+    assert "/read/cardproj" not in header
+
+
+def test_card_actions_are_a_gear_and_the_status_dropdown(client, card_project):
+    actions = (client.get("/read/").data.decode("utf-8")
+               .split('class="project-card-actions"')[1].split("</div>")[0])
+    assert 'aria-label="Dashboard"' in actions
+    assert 'href="/project/cardproj"' in actions
+    # The text buttons are gone; the status dropdown stays.
+    assert ">Dashboard<" not in actions
+    assert "btn-card" not in actions
+    assert "Read" not in actions
+    assert "status-select" in actions
+
+
+# ── 10. The cookie endpoint ──────────────────────────────────────────────────
 
 def test_set_review_types_round_trips(client, card_project):
     rv = client.post("/api/set-review-types", json={"types": ["dialogue", "grammar"]})

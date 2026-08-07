@@ -103,15 +103,20 @@
              data-flags='{{ p.flag_counts | tojson }}'
              {% if clean_eligible %}data-clean-eligible="1"{% endif %}>
             <div class="project-card-header">
+                {#- Title and subtitle are one link into the book: the reader when
+                    there is something to read, the dashboard otherwise (same
+                    fallback the work chips use). -#}
+                <a class="project-card-link" href="{{ work_href }}">
                 {% if lang == 'es' and p.spanish_title %}
-                <span class="nav-title">{{ p.spanish_title }}</span>
-                <span class="nav-subtitle">{{ p.title }}</span>
+                    <span class="nav-title">{{ p.spanish_title }}</span>
+                    <span class="nav-subtitle">{{ p.title }}</span>
                 {% else %}
-                <span class="nav-title">{{ p.title }}</span>
-                {% if p.spanish_title %}
-                <span class="nav-subtitle">{{ p.spanish_title }}</span>
+                    <span class="nav-title">{{ p.title }}</span>
+                    {% if p.spanish_title %}
+                    <span class="nav-subtitle">{{ p.spanish_title }}</span>
+                    {% endif %}
                 {% endif %}
-                {% endif %}
+                </a>
             </div>
             {% if not setup_done %}
             <div class="project-chips">
@@ -155,12 +160,14 @@
             </div>
             {% endif %}
             <div class="project-card-actions">
-                <a href="/project/{{ p.id }}" class="btn-card btn-setup">{{ t.dashboard_btn }}</a>
-                {% if p.has_alignments %}
-                <a href="/read/{{ p.id }}" class="btn-card">{{ t.read_btn }}</a>
-                {% else %}
-                <span class="btn-card btn-disabled">{{ t.read_btn }}</span>
-                {% endif %}
+                <a href="/project/{{ p.id }}" class="topbar-icon-btn card-gear-btn"
+                   title="{{ t.dashboard_btn }}" aria-label="{{ t.dashboard_btn }}">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                </a>
                 <select class="status-select status-{{ p.status }}" data-project-id="{{ p.id }}">
                     <option value="pending"{% if p.status == 'pending' %} selected{% endif %}>{{ t.status_pending }}</option>
                     <option value="in_progress"{% if p.status == 'in_progress' %} selected{% endif %}>{{ t.status_in_progress }}</option>
