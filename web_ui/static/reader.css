@@ -67,8 +67,6 @@
     --ann-footnote: rgba(140, 100, 180, 0.12);
     --ann-footnote-color: #8a6aaf;
     --ann-flag: rgba(180, 180, 180, 0.15);
-    --ann-flag-badge: rgba(180, 180, 180, 0.2);
-    --ann-flag-color: #888;
     --ann-hover: rgba(0, 0, 0, 0.06);
     --ann-active: rgba(0, 0, 0, 0.08);
     --ann-remove: #ccc;
@@ -145,8 +143,6 @@
     --ann-footnote: rgba(140, 100, 180, 0.18);
     --ann-footnote-color: #b08ad8;
     --ann-flag: rgba(180, 180, 180, 0.1);
-    --ann-flag-badge: rgba(180, 180, 180, 0.15);
-    --ann-flag-color: #999;
     --ann-hover: rgba(255, 255, 255, 0.06);
     --ann-active: rgba(255, 255, 255, 0.08);
     --ann-remove: #666;
@@ -416,10 +412,6 @@ body {
 
 .project-chips a.badge:hover {
     filter: brightness(0.95);
-}
-
-.badge[hidden] {
-    display: none;
 }
 
 .project-progress {
@@ -850,6 +842,13 @@ body {
     white-space: nowrap;
 }
 
+/* The flags chip and the clean chip on both list pages ship rendered and are
+   toggled by JS as the category picker changes; `display: inline-block` above
+   would otherwise beat the UA stylesheet's rule for [hidden]. */
+.badge[hidden] {
+    display: none;
+}
+
 .badge-review {
     background: var(--ann-word-choice-badge);
     color: var(--ann-word-choice-color);
@@ -858,11 +857,6 @@ body {
 .badge-footnote {
     background: var(--ann-footnote);
     color: var(--ann-footnote-color);
-}
-
-.badge-flag {
-    background: var(--ann-flag-badge);
-    color: var(--ann-flag-color);
 }
 
 .badge-warn {

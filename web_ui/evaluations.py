@@ -448,8 +448,19 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
     return out
 
 
-def load_project_type_counts(project_dir: Path) -> dict[str, int]:
-    """Walk ``evaluations/*.json`` and count live findings per review category.
+def chapter_id_from_chunk_id(chunk_id: str) -> str:
+    """``'chapter_01_chunk_003'`` -> ``'chapter_01'``.
+
+    A chunk_id with no ``_chunk_`` marker is returned unchanged rather than
+    dropped: it will never match a chapter row, but its findings still have to
+    reach the project-level total that :func:`load_project_type_counts` sums.
+    """
+    idx = chunk_id.rfind("_chunk_")
+    return chunk_id[:idx] if idx > 0 else chunk_id
+
+
+def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
+    """Walk ``evaluations/*.json`` and count live findings per chapter, per category.
 
     Same shape of walk as :func:`load_project_summary`, but bucketed by
     category rather than severity, and gated exactly the way the reader's
@@ -461,16 +472,19 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
     One deliberate divergence from the reader: the reader additionally drops
     any finding it cannot anchor to a sentence (``_anchor_judge_excerpt``),
     which needs the alignments plus the chunk text — far too expensive for a
-    list page. So this count is an **upper bound**, and the gap is almost
+    list page. So these counts are an **upper bound**, and the gap is almost
     entirely judge findings whose excerpt has drifted from the current prose.
 
     Returns:
-        All six :data:`REVIEW_TYPES` keys, zero-filled.
+        ``{chapter_id: {category: count}}``, each inner dict holding all six
+        :data:`REVIEW_TYPES` keys zero-filled. Chapters with no live findings
+        are absent — callers wanting a row for every chapter should fall back
+        to :func:`empty_type_counts`.
     """
-    counts: dict[str, int] = {name: 0 for name in REVIEW_TYPES}
+    by_chapter: dict[str, dict[str, int]] = {}
     eval_dir = _eval_results_dir(project_dir)
     if not eval_dir.exists():
-        return counts
+        return by_chapter
 
     coded_types = frozenset(REVIEW_CODED_TYPES)
     judge_types = frozenset(REVIEW_JUDGE_TYPES)
@@ -493,6 +507,7 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
             (fb.get("eval_name"), fb.get("issue_index"))
             for fb in feedback_by_chunk.get(chunk_id, [])
         }
+        counts = by_chapter.setdefault(chapter_id_from_chunk_id(chunk_id), empty_type_counts())
 
         for ni in data.get("normalized_issues") or []:
             if not isinstance(ni, dict):
@@ -520,7 +535,22 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
                     continue
                 counts[judge_name] += 1
 
-    return counts
+    return by_chapter
+
+
+def load_project_type_counts(project_dir: Path) -> dict[str, int]:
+    """Roll :func:`load_chapter_type_counts` up to one count per review category.
+
+    Same walk, same gating, same upper-bound caveat — see that function.
+
+    Returns:
+        All six :data:`REVIEW_TYPES` keys, zero-filled.
+    """
+    totals = empty_type_counts()
+    for counts in load_chapter_type_counts(project_dir).values():
+        for name, n in counts.items():
+            totals[name] += n
+    return totals
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +567,15 @@ REVIEW_CODED_TYPES: tuple[str, ...] = ("blacklist", "grammar", "dictionary", "co
 # Tailored judges whose issues can be anchored to a sentence by text search.
 REVIEW_JUDGE_TYPES: tuple[str, ...] = ("dialogue", "address")
 REVIEW_TYPES: tuple[str, ...] = REVIEW_CODED_TYPES + REVIEW_JUDGE_TYPES
+
+
+def empty_type_counts() -> dict[str, int]:
+    """A fresh zero-filled count per :data:`REVIEW_TYPES` category.
+
+    Every category is always present so the template and the JS re-sum can
+    index a card or a chapter row without guarding for missing keys.
+    """
+    return {name: 0 for name in REVIEW_TYPES}
 
 
 # The seven coded evaluators; ``llm_judge`` is deliberately excluded here and

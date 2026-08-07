@@ -23,7 +23,7 @@ from web_ui.i18n import get_strings
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.annotations import REVIEW_ANNOTATION_TYPES, load_active
+from src.annotations import REVIEW_ANNOTATION_TYPES, is_effectively_blank, load_active
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
@@ -54,8 +54,11 @@ from web_ui.evaluations import (
     REVIEW_JUDGE_TYPES,
     REVIEW_TYPES,
     append_feedback,
+    chapter_id_from_chunk_id,
+    empty_type_counts,
     evaluate_and_persist_chunk,
     load_all_feedback_by_chunk,
+    load_chapter_type_counts,
     load_chunk_evaluation,
     load_feedback_for_chunk,
     load_project_summary,
@@ -1028,9 +1031,23 @@ def reader_chapters(project_id):
     project_dir = _resolve_project_dir(project_id)
     from collections import defaultdict
     ann_counts = defaultdict(lambda: defaultdict(int))
+    empty_fn_counts = defaultdict(int)
     for rec in load_active(project_dir):
-        ann_counts[rec.get("chapter_id", "")][rec.get("type", "flag")] += 1
+        ann_type = rec.get("type", "flag")
+        chapter_key = rec.get("chapter_id", "")
+        ann_counts[chapter_key][ann_type] += 1
+        # A footnote mark with nothing but its [anchor] is silently dropped from
+        # the built EPUB (src/endnotes.py), so the row badges written-vs-total
+        # rather than a bare count. is_effectively_blank is the same predicate
+        # the home card's book-wide rollup uses, so the two cannot disagree.
+        if ann_type == "footnote" and is_effectively_blank(rec.get("content") or ""):
+            empty_fn_counts[chapter_key] += 1
     all_annotations = dict(ann_counts)  # chapter_id -> {type -> count}
+
+    # Evaluator/judge findings in the six review categories, bucketed by
+    # chapter. One extra walk of evaluations/*.json — cheap next to the
+    # alignments this route already opens in full.
+    flag_counts_by_chapter = load_chapter_type_counts(project_dir)
 
     # Check for pending corrections (file must exist AND contain at least one
     # non-blank line — a stale file with only whitespace shouldn't trigger the banner).
@@ -1062,7 +1079,6 @@ def reader_chapters(project_id):
             with open(f, encoding="utf-8") as fh:
                 data = json.load(fh)
             ch_id = f.stem
-            confidence = data.get("high_confidence_pct", 0)
             # Source runs with no translation at all (src/sentence_aligner.py).
             # Distinct from low confidence: those sentences ARE translated, just
             # matched weakly. A gap means the prose is missing outright.
@@ -1074,20 +1090,20 @@ def reader_chapters(project_id):
             # (src/annotations/summary.py), so the two can't drift.
             review_count = sum(ann.get(t, 0) for t in REVIEW_ANNOTATION_TYPES)
             footnote_count = ann.get("footnote", 0)
-            total_ann = sum(ann.values())
+            empty_footnotes = empty_fn_counts.get(ch_id, 0)
 
             entry = manifest.get(ch_id) or {}
             chapters.append({
                 "id": ch_id,
                 "display_label": _chapter_display_label(ch_id, manifest, chapter_prefix),
                 "kind": entry.get("kind", "chapter"),
-                "confidence": confidence,
-                "low_confidence": confidence < 90,
                 "gap_count": coverage.get("gap_count", 0),
                 "gap_chars": coverage.get("en_orphan_chars", 0),
                 "review_count": review_count,
                 "footnote_count": footnote_count,
-                "total_ann": total_ann,
+                "filled_footnotes": footnote_count - empty_footnotes,
+                "empty_footnotes": empty_footnotes,
+                "flag_counts": flag_counts_by_chapter.get(ch_id) or empty_type_counts(),
                 "reviewed": ch_id in reviewed,
             })
         except (json.JSONDecodeError, OSError):
@@ -4633,12 +4649,15 @@ def _apply_pending_corrections_for_chapter(
 
 
 def _chapter_id_from_chunk_id(chunk_id: str) -> Optional[str]:
-    """Derive the parent chapter_id from a chunk_id like 'chapter_01_chunk_003'."""
-    marker = "_chunk_"
-    idx = chunk_id.rfind(marker)
-    if idx <= 0:
-        return None
-    return chunk_id[:idx]
+    """Derive the parent chapter_id from a chunk_id like 'chapter_01_chunk_003'.
+
+    Delegates to the evaluations copy so the chapter-list flag badges bucket
+    findings exactly the way these callers resolve a chunk to its chapter. The
+    two differ only at the edge: this returns None where that returns the
+    chunk_id unchanged, because these callers compare against a real chapter.
+    """
+    chapter_id = chapter_id_from_chunk_id(chunk_id)
+    return chapter_id if chapter_id != chunk_id else None
 
 
 _IMAGE_TOKEN_RE = re.compile(r"\[IMAGE:[^\]]+\]")

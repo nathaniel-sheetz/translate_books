@@ -94,7 +94,9 @@
         {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + p.flag_counts.get(tkey, 0) %}{% endfor %}
         {% set setup_done = p.has_style_guide and p.glossary_count > 0 %}
         {% set fully_translated = p.total_chunks > 0 and p.translated_chunks == p.total_chunks %}
-        {% set clean_eligible = setup_done and fully_translated and p.awaiting_review == 0 and p.empty_footnotes == 0 %}
+        {#- A book you have not read through still has work outstanding — the
+            read-through itself — so unread chapters suppress the clean chip. -#}
+        {% set clean_eligible = setup_done and fully_translated and p.unread_chapters == 0 and p.awaiting_review == 0 and p.empty_footnotes == 0 %}
         {% set work_href = '/read/' ~ p.id if p.has_alignments else '/project/' ~ p.id %}
         <div class="project-card{% if p.status == 'archived' %} card-archived{% endif %}"
              data-status="{{ p.status }}"
@@ -136,6 +138,9 @@
             {% endif %}
             {% if p.translated_chunks > 0 %}
             <div class="project-chips project-work-chips">
+                {% if p.unread_chapters %}
+                <a class="badge badge-unread" href="{{ work_href }}">{{ p.unread_chapters }} {{ t.badge_unread }}</a>
+                {% endif %}
                 {% if p.awaiting_review %}
                 <a class="badge badge-review" href="{{ work_href }}">{{ p.awaiting_review }} {{ t.badge_review }}</a>
                 {% endif %}
@@ -143,7 +148,7 @@
                 <a class="badge badge-footnote" href="{{ work_href }}">{{ p.empty_footnotes }} {{ t.chip_empty_fn }}</a>
                 {% endif %}
                 <a class="badge badge-warn project-chip-flags" href="{{ work_href }}"
-                   {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> {{ t.chip_flags }}</a>
+                   {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> <span class="chip-flag-label">{{ t.chip_flag_one if ns.flags == 1 else t.chip_flags }}</span></a>
                 {% if clean_eligible %}
                 <span class="badge badge-clean project-chip-clean" {% if ns.flags %}hidden{% endif %}>✓ {{ t.chip_clean }}</span>
                 {% endif %}
@@ -184,8 +189,12 @@
     </div>
 </div>
 
-<script>window.__i18n_projects = { new_project_error: {{ t.new_project_error | tojson }} };</script>
-<script src="{{ url_for('static', filename='reader_projects.js') }}?v=1"></script>
+<script>window.__i18n_projects = {
+    new_project_error: {{ t.new_project_error | tojson }},
+    flag_one: {{ t.chip_flag_one | tojson }},
+    flag_many: {{ t.chip_flags | tojson }}
+};</script>
+<script src="{{ url_for('static', filename='reader_projects.js') }}?v=2"></script>
 
 {% elif mode == "chapters" %}
 <!-- Chapter list -->
@@ -284,28 +293,36 @@
     });
     </script>
     {% endif %}
+    {#- Same badge language as the home-page card: what is left to do, in the
+        same words and the same colors. `chapter_flags` is the flag total under
+        the *current* category selection; reader_chapters.js re-sums it from
+        data-flags when the picker changes, and toggles the clean chip with it. -#}
     <ul class="nav-list">
         {% for ch in chapters %}
-        <li>
+        {% set ns = namespace(flags=0) %}
+        {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + ch.flag_counts.get(tkey, 0) %}{% endfor %}
+        {% set clean_eligible = ch.reviewed and ch.review_count == 0 and ch.empty_footnotes == 0 and not ch.gap_count %}
+        <li data-flags='{{ ch.flag_counts | tojson }}'>
             <a href="/read/{{ project_id }}/{{ ch.id }}">
                 <span class="nav-title{% if ch.kind and ch.kind != 'chapter' %} nav-title-matter{% endif %}">{{ ch.display_label or (ch.id | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix)) }}</span>
                 <span class="nav-meta">
+                    {%- if not ch.reviewed -%}
+                        <span class="badge badge-unread">{{ t.badge_unread }}</span>
+                    {%- endif -%}
                     {%- if ch.review_count > 0 -%}
                         <span class="badge badge-review">{{ ch.review_count }} {{ t.badge_review }}</span>
                     {%- endif -%}
+                    {#- Written-of-total, because a footnote mark with no gloss is
+                        dropped from the EPUB — 4/6 says two notes are still owed. -#}
                     {%- if ch.footnote_count > 0 -%}
-                        <span class="badge badge-footnote">{{ ch.footnote_count }} {{ t.badge_fn }}</span>
+                        <span class="badge badge-footnote">{{ ch.filled_footnotes }}/{{ ch.footnote_count }} {{ t.badge_notes }}</span>
                     {%- endif -%}
-                    {%- if ch.low_confidence -%}
-                        <span class="badge badge-warn">{{ ch.confidence }}% {{ t.badge_aligned }}</span>
-                    {%- endif -%}
+                    <span class="badge badge-warn chapter-chip-flags" {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> <span class="chip-flag-label">{{ t.chip_flag_one if ns.flags == 1 else t.chip_flags }}</span></span>
                     {%- if ch.gap_count -%}
                         <span class="badge badge-warn" title="{{ ch.gap_chars }} {{ t.badge_gap_title }}">{{ ch.gap_count }} {{ t.badge_gap }}</span>
                     {%- endif -%}
-                    {%- if ch.reviewed -%}
-                        <span class="badge badge-clean">{{ t.badge_reviewed }}</span>
-                    {%- elif ch.total_ann == 0 and not ch.low_confidence and not ch.gap_count -%}
-                        <span class="badge badge-unread">{{ t.badge_unread }}</span>
+                    {%- if clean_eligible -%}
+                        <span class="badge badge-clean chapter-chip-clean" {% if ns.flags %}hidden{% endif %}>✓ {{ t.chip_clean }}</span>
                     {%- endif -%}
                 </span>
             </a>
@@ -313,112 +330,12 @@
         {% endfor %}
     </ul>
 </div>
-<script>
-(function(){
-    var btn = document.getElementById('theme-toggle');
-    if (!btn) return;
-    var dark = document.documentElement.dataset.theme === 'dark';
-    btn.textContent = dark ? '☀️' : '🌙';
-    btn.addEventListener('click', function() {
-        dark = !dark;
-        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-        localStorage.setItem('reader_theme', dark ? 'dark' : 'light');
-        btn.textContent = dark ? '☀️' : '🌙';
-    });
-})();
-
-/* ── Review mode selection ──
- *
- * The on/off switch is a per-book reading preference and stays in localStorage;
- * the *category* selection is global and lives in a cookie, so the home page,
- * every other book, and the reader all agree on it. The checkboxes therefore
- * render checked from the server and POST on change.
- */
-(function(){
-    var KEY = 'reader_review:{{ project_id }}';
-    var group = document.getElementById('review-topbar-group');
-    var toggleBtn = document.getElementById('review-mode-toggle');
-    var optionsBtn = document.getElementById('review-options-btn');
-    var popup = document.getElementById('review-types-popup');
-    if (!group || !toggleBtn || !optionsBtn || !popup) return;
-
-    var typeCbs = Array.prototype.slice.call(popup.querySelectorAll('.review-type-cb'));
-    var reviewOn = false;
-    var popupOpen = false;
-
-    function setPopupOpen(open) {
-        popupOpen = open;
-        popup.hidden = !open;
-        toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        optionsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        optionsBtn.classList.toggle('popup-open', open);
-    }
-
-    function setReviewOn(on, opts) {
-        opts = opts || {};
-        reviewOn = on;
-        toggleBtn.classList.toggle('review-on', on);
-        toggleBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-        optionsBtn.hidden = !on;
-        if (!on) setPopupOpen(false);
-        else if (opts.showPopup) setPopupOpen(true);
-    }
-
-    function selectedTypes() {
-        return typeCbs.filter(function(cb){ return cb.checked; })
-                      .map(function(cb){ return cb.value; });
-    }
-
-    function persist() {
-        localStorage.setItem(KEY, JSON.stringify({ on: reviewOn }));
-    }
-
-    function persistTypes() {
-        fetch('/api/set-review-types', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ types: selectedTypes() })
-        }).catch(function(){ /* keeps the current page's selection either way */ });
-    }
-
-    function loadSaved() {
-        var saved = {};
-        try { saved = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { saved = {}; }
-        setReviewOn(!!saved.on, { showPopup: false });
-    }
-
-    toggleBtn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        if (reviewOn) {
-            setReviewOn(false);
-        } else {
-            setReviewOn(true, { showPopup: true });
-        }
-        persist();
-    });
-
-    optionsBtn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        setPopupOpen(!popupOpen);
-    });
-
-    typeCbs.forEach(function(cb){
-        cb.addEventListener('change', persistTypes);
-    });
-
-    document.addEventListener('click', function(e) {
-        if (!popupOpen) return;
-        if (!group.contains(e.target)) setPopupOpen(false);
-    });
-
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape' && popupOpen) setPopupOpen(false);
-    });
-
-    loadSaved();
-    persist();
-})();
-</script>
+<script>window.__reader_chapters = {
+    projectId: {{ project_id | tojson }},
+    flag_one: {{ t.chip_flag_one | tojson }},
+    flag_many: {{ t.chip_flags | tojson }}
+};</script>
+<script src="{{ url_for('static', filename='reader_chapters.js') }}?v=1"></script>
 
 {% elif mode == "read" %}
 <!-- Reader view -->

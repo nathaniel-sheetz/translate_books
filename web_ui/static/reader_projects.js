@@ -205,6 +205,8 @@
                 try { counts = JSON.parse(card.dataset.flags) || {}; } catch (e) { counts = {}; }
                 var total = chosen.reduce(function (sum, t) { return sum + (counts[t] || 0); }, 0);
                 chip.querySelector('.chip-flag-count').textContent = total;
+                chip.querySelector('.chip-flag-label').textContent =
+                    total === 1 ? i.flag_one : i.flag_many;
                 chip.hidden = total === 0;
                 var clean = card.querySelector('.project-chip-clean');
                 if (clean) clean.hidden = total !== 0;

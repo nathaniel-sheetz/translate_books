@@ -72,6 +72,12 @@ def _annotations(proj_dir, records):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def _reviewed(proj_dir, chapter_ids):
+    (proj_dir / "reviewed.json").write_text(
+        json.dumps({ch: "2026-01-01T00:00:00" for ch in chapter_ids}), encoding="utf-8"
+    )
+
+
 def _blacklist_finding(proj_dir, chunk_id="chapter_01_chunk_000"):
     issue = NormalizedIssue(
         eval_name="blacklist",
@@ -275,7 +281,7 @@ def test_flag_chip_counts_all_categories_by_default(client, card_project):
     clear_card_cache()
 
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">2</span> flags' in html
+    assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
 
 
 def test_flag_chip_respects_category_cookie(client, card_project):
@@ -285,7 +291,7 @@ def test_flag_chip_respects_category_cookie(client, card_project):
 
     client.set_cookie("reader_review_types", "dialogue")
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">1</span> flags' in html
+    assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
     # Only the selected category is ticked in the picker.
     assert html.count('class="review-type-cb"') == 6
     assert html.count("checked") == 1
@@ -298,7 +304,7 @@ def test_unknown_cookie_categories_fall_back_to_all(client, card_project):
 
     client.set_cookie("reader_review_types", "nonsense")
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">2</span> flags' in html
+    assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
 
 
 # ── 7. Cache invalidation ────────────────────────────────────────────────────
@@ -356,12 +362,16 @@ def test_untranslated_project_renders_no_work_chips(client, card_project):
 
 
 def test_clean_chip_when_nothing_is_pending(client, card_project):
+    _reviewed(card_project, ["chapter_01"])
+    clear_card_cache()
+
     html = client.get("/read/").data.decode("utf-8")
     assert "Nothing pending" in html
     assert "project-chip-flags" in html   # present but hidden, for the JS to re-sum
 
 
 def test_no_clean_chip_when_work_remains(client, card_project):
+    _reviewed(card_project, ["chapter_01"])
     _annotations(card_project, [
         {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice", "content": "a"},
     ])
@@ -370,6 +380,50 @@ def test_no_clean_chip_when_work_remains(client, card_project):
     html = client.get("/read/").data.decode("utf-8")
     assert "Nothing pending" not in html
     assert "1 to review" in html
+
+
+# ── 8b. Unread chapters ──────────────────────────────────────────────────────
+
+def test_unread_counts_chapters_with_no_reviewed_mark(card_project):
+    (card_project / "alignments" / "chapter_02.json").write_text(
+        json.dumps({"chapter_id": "chapter_02", "alignments": []}), encoding="utf-8"
+    )
+    assert _card(card_project)["unread_chapters"] == 2
+
+    _reviewed(card_project, ["chapter_01"])
+    assert _card(card_project)["unread_chapters"] == 1
+
+    _reviewed(card_project, ["chapter_01", "chapter_02"])
+    assert _card(card_project)["unread_chapters"] == 0
+
+
+def test_unread_ignores_reviewed_marks_for_chapters_that_are_gone(card_project):
+    # reviewed.json outlives a re-import, so a stale key must not push the count
+    # negative or mask a chapter that really is unread.
+    _reviewed(card_project, ["chapter_01", "chapter_99"])
+    assert _card(card_project)["unread_chapters"] == 0
+
+
+def test_unread_survives_a_malformed_reviewed_file(card_project):
+    (card_project / "reviewed.json").write_text("{not json", encoding="utf-8")
+    assert _card(card_project)["unread_chapters"] == 1
+
+
+def test_marking_a_chapter_reviewed_busts_the_card_cache(card_project):
+    # reviewed.json is the only file that moves when you mark a chapter read, so
+    # without it in the fingerprint the home page would keep a stale count.
+    assert build_project_card(card_project, "cardproj")["unread_chapters"] == 1
+    _reviewed(card_project, ["chapter_01"])
+    assert build_project_card(card_project, "cardproj")["unread_chapters"] == 0
+
+
+def test_unread_chip_renders_first_and_suppresses_the_clean_chip(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    assert "1 unread" in html
+    # A book you have not read through has work outstanding: the read-through.
+    assert "Nothing pending" not in html
+    chips = html.split('class="project-chips project-work-chips"')[1]
+    assert chips.index("1 unread") < chips.index("project-chip-flags")
 
 
 # ── 9. The cookie endpoint ───────────────────────────────────────────────────
@@ -384,7 +438,7 @@ def test_set_review_types_round_trips(client, card_project):
     _dialogue_finding(card_project)
     clear_card_cache()
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">1</span> flags' in html
+    assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
 
 
 def test_set_review_types_rejects_unknown_categories(client):

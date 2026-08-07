@@ -30,6 +30,9 @@ STRINGS = {
         "no_glossary": "No glossary",
         "not_chunked": "Not chunked",
         "chip_empty_fn": "empty notes",
+        # Both forms ship to the page: the flags count is re-summed client-side
+        # as the category picker changes, so the JS has to repick the label too.
+        "chip_flag_one": "flag",
         "chip_flags": "flags",
         "chip_clean": "Nothing pending",
         "status_pending": "Pending",
@@ -45,12 +48,9 @@ STRINGS = {
         "apply_done": "corrections applied to",
         "apply_chapters": "chapters",
         "badge_review": "to review",
-        "badge_fn": "fn",
-        "badge_flag": "flag",
-        "badge_aligned": "aligned",
+        "badge_notes": "notes",
         "badge_gap": "gap",
         "badge_gap_title": "characters of source text with no translation",
-        "badge_reviewed": "reviewed",
         "badge_unread": "unread",
 
         # Review mode (chapter-list controls; type labels shared with the reader)
@@ -263,6 +263,7 @@ STRINGS = {
         "no_glossary": "Sin glosario",
         "not_chunked": "Sin fragmentar",
         "chip_empty_fn": "notas vacías",
+        "chip_flag_one": "marca",
         "chip_flags": "marcas",
         "chip_clean": "Nada pendiente",
         "status_pending": "Pendiente",
@@ -278,12 +279,9 @@ STRINGS = {
         "apply_done": "correcciones aplicadas a",
         "apply_chapters": "cap\u00edtulos",
         "badge_review": "por revisar",
-        "badge_fn": "nota",
-        "badge_flag": "marca",
-        "badge_aligned": "alineado",
+        "badge_notes": "notas",
         "badge_gap": "hueco",
         "badge_gap_title": "caracteres del texto original sin traducción",
-        "badge_reviewed": "revisado",
         "badge_unread": "sin leer",
 
         # Review mode (chapter-list controls; type labels shared with the reader)

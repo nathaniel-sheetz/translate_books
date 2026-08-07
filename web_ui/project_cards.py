@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.annotations.summary import project_annotation_summary
-from web_ui.evaluations import REVIEW_TYPES, load_project_type_counts
+from web_ui.evaluations import empty_type_counts, load_project_type_counts
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,9 @@ _WATCHED_FILES = (
     "style.json",
     "glossary.json",
     "project.json",
+    # Marking a chapter reviewed changes the unread count and nothing else on
+    # disk, so without this the card would go stale until some unrelated file moved.
+    "reviewed.json",
 )
 
 # Resolved project path -> (fingerprint, card). Module-level: the card content
@@ -128,9 +131,9 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         The setup/progress keys the card has always shown (``id``, ``title``,
         ``spanish_title``, ``status``, ``chapter_count``, ``has_style_guide``,
         ``glossary_count``, ``total_chunks``, ``translated_chunks``,
-        ``has_alignments``) plus the work-remaining keys: ``awaiting_review``,
-        ``empty_footnotes``, and ``flag_counts`` (all six review categories,
-        zero-filled).
+        ``has_alignments``) plus the work-remaining keys: ``unread_chapters``,
+        ``awaiting_review``, ``empty_footnotes``, and ``flag_counts`` (all six
+        review categories, zero-filled).
 
         The dict is the cached instance — callers must treat it as read-only.
     """
@@ -146,7 +149,13 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         return cached[1]
 
     align_dir = project_dir / "alignments"
-    alignment_count = len(list(align_dir.glob("*.json"))) if align_dir.exists() else 0
+    chapter_ids = {f.stem for f in align_dir.glob("*.json")} if align_dir.exists() else set()
+    # "Unread" is exactly "not marked reviewed" — the same rule the chapter list
+    # badges per row. Read straight from reviewed.json rather than through
+    # app._load_reviewed, because app.py imports this module.
+    reviewed = _load_json(project_dir / "reviewed.json")
+    reviewed_ids = set(reviewed) if isinstance(reviewed, dict) else set()
+    unread_chapters = len(chapter_ids - reviewed_ids)
 
     glossary_count = 0
     gdata = _load_json(project_dir / "glossary.json")
@@ -162,7 +171,7 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         flag_counts = load_project_type_counts(project_dir)
     else:
         ann = {"awaiting_review": 0, "empty_footnotes": 0}
-        flag_counts = {name: 0 for name in REVIEW_TYPES}
+        flag_counts = empty_type_counts()
 
     config = _load_json(project_dir / "project.json")
     if not isinstance(config, dict):
@@ -173,12 +182,13 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         "title": config.get("title") or project_id,
         "spanish_title": config.get("spanish_title", ""),
         "status": config.get("status", "pending"),
-        "chapter_count": alignment_count,
+        "chapter_count": len(chapter_ids),
         "has_style_guide": (project_dir / "style.json").exists(),
         "glossary_count": glossary_count,
         "total_chunks": total_chunks,
         "translated_chunks": translated_chunks,
-        "has_alignments": alignment_count > 0,
+        "has_alignments": bool(chapter_ids),
+        "unread_chapters": unread_chapters,
         "awaiting_review": ann["awaiting_review"],
         "empty_footnotes": ann["empty_footnotes"],
         "flag_counts": flag_counts,
