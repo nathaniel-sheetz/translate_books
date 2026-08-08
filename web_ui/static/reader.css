@@ -285,12 +285,6 @@ body {
     background: var(--bg-filter-hover);
 }
 
-.filter-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-}
-
 /* Project dashboard cards */
 
 .project-grid {

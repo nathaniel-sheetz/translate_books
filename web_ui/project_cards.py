@@ -27,15 +27,12 @@ and removes; mtime catches in-place edits.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
 
 from src.annotations.summary import project_annotation_summary
 from web_ui.evaluations import empty_type_counts, load_project_type_counts
-
-logger = logging.getLogger(__name__)
 
 # Every status a project can be in, in display order. The single source of
 # truth: app.py validates the filter cookie against this and the template loops
@@ -136,16 +133,17 @@ def derive_status(
     fully_translated: bool,
     awaiting_review: int,
     empty_footnotes: int,
+    setup_complete: bool,
 ) -> str:
     """Work out a project's status from what is actually on disk.
 
     Archived is the one manual choice and wins over everything else. Otherwise
     the rule reads off the same numbers the card's work chips show:
 
-    * ``complete`` — nothing left to do: every chapter read, no annotation
-      awaiting review, no blank footnote mark, and translation finished.
-      Evaluator/judge flags deliberately don't count; you can finish a book
-      while disagreeing with the judges.
+    * ``complete`` — nothing left to do: style guide and glossary present,
+      every chapter read, no annotation awaiting review, no blank footnote
+      mark, and translation finished. Evaluator/judge flags deliberately
+      don't count; you can finish a book while disagreeing with the judges.
     * ``in_progress`` — at least one chapter read.
     * ``pending`` — nothing read yet, which is also where a brand-new project
       with no chapters lands (``chapter_count == 0`` can't be "complete", or
@@ -157,6 +155,7 @@ def derive_status(
         chapter_count > 0
         and read_chapters >= chapter_count
         and fully_translated
+        and setup_complete
         and awaiting_review == 0
         and empty_footnotes == 0
     ):
@@ -209,7 +208,9 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
     glossary_count = 0
     gdata = _load_json(project_dir / "glossary.json")
     if isinstance(gdata, dict):
-        glossary_count = len(gdata.get("terms", []))
+        terms = gdata.get("terms", [])
+        if isinstance(terms, list):
+            glossary_count = len(terms)
 
     total_chunks, translated_chunks = _count_chunks(project_dir / "chunks")
 
@@ -232,6 +233,8 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
     # first time a book is archived or unarchived.
     archived = bool(config.get("archived", config.get("status") == "archived"))
     fully_translated = total_chunks > 0 and translated_chunks == total_chunks
+    has_style_guide = (project_dir / "style.json").exists()
+    setup_complete = has_style_guide and glossary_count > 0
 
     card = {
         "id": project_id,
@@ -245,9 +248,10 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
             fully_translated=fully_translated,
             awaiting_review=ann["awaiting_review"],
             empty_footnotes=ann["empty_footnotes"],
+            setup_complete=setup_complete,
         ),
         "chapter_count": len(chapter_ids),
-        "has_style_guide": (project_dir / "style.json").exists(),
+        "has_style_guide": has_style_guide,
         "glossary_count": glossary_count,
         "total_chunks": total_chunks,
         "translated_chunks": translated_chunks,

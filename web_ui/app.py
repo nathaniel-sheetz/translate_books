@@ -23,7 +23,12 @@ from web_ui.i18n import get_strings
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.annotations import REVIEW_ANNOTATION_TYPES, is_effectively_blank, load_active
+from src.annotations import (
+    ANNOTATION_TYPES,
+    REVIEW_ANNOTATION_TYPES,
+    is_effectively_blank,
+    load_active,
+)
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
@@ -446,6 +451,9 @@ def update_project_archived(project_id):
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.is_dir():
+        return jsonify({"error": "Project not found"}), 404
     archived = (request.json or {}).get("archived")
     if not isinstance(archived, bool):
         return jsonify({"error": "archived must be true or false"}), 400
@@ -454,7 +462,7 @@ def update_project_archived(project_id):
     # Drop the pre-derivation hand-set field so the two can never disagree.
     config.pop("status", None)
     _save_project_config(project_id, config)
-    card = build_project_card(_resolve_project_dir(project_id), project_id)
+    card = build_project_card(project_dir, project_id)
     return jsonify({"ok": True, "archived": archived, "status": card["status"]})
 
 
@@ -1086,7 +1094,11 @@ def reader_chapters(project_id):
     ann_counts = defaultdict(lambda: defaultdict(int))
     empty_fn_counts = defaultdict(int)
     for rec in load_active(project_dir):
+        # Unknown types coerce to flag — same rule as project_annotation_summary,
+        # so chapter badges and the home-card rollup cannot disagree.
         ann_type = rec.get("type", "flag")
+        if ann_type not in ANNOTATION_TYPES:
+            ann_type = "flag"
         chapter_key = rec.get("chapter_id", "")
         ann_counts[chapter_key][ann_type] += 1
         # A footnote mark with nothing but its [anchor] is silently dropped from
@@ -1139,8 +1151,8 @@ def reader_chapters(project_id):
             ann = all_annotations.get(ch_id, {})
             # Fold the three review-type annotations (word choice, inconsistency,
             # and "Other"/flag) into one "to review" count; footnotes stay separate
-            # because they feed endnotes. Same list the home-page card rolls up
-            # (src/annotations/summary.py), so the two can't drift.
+            # because they feed endnotes. Unknown types were coerced to flag above,
+            # matching project_annotation_summary.
             review_count = sum(ann.get(t, 0) for t in REVIEW_ANNOTATION_TYPES)
             footnote_count = ann.get("footnote", 0)
             empty_footnotes = empty_fn_counts.get(ch_id, 0)

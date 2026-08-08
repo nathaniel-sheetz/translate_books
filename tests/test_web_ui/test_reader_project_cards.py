@@ -129,6 +129,32 @@ def test_empty_glossary_counts_as_missing(client, card_project):
     assert "No glossary" in html
 
 
+def test_null_glossary_terms_do_not_500_the_home_page(client, card_project):
+    (card_project / "glossary.json").write_text(json.dumps({"terms": None}), encoding="utf-8")
+    clear_card_cache()
+
+    assert _card(card_project)["glossary_count"] == 0
+    rv = client.get("/read/")
+    assert rv.status_code == 200
+    assert "No glossary" in rv.data.decode("utf-8")
+
+
+def test_non_list_glossary_terms_do_not_500_the_home_page(client, card_project):
+    (card_project / "glossary.json").write_text(json.dumps({"terms": {}}), encoding="utf-8")
+    clear_card_cache()
+
+    assert _card(card_project)["glossary_count"] == 0
+    rv = client.get("/read/")
+    assert rv.status_code == 200
+    assert "No glossary" in rv.data.decode("utf-8")
+
+
+def test_home_page_ships_archive_error_i18n(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    assert "archive_error:" in html
+    assert "Could not update archive status." in html
+
+
 # ── 2. Progress ──────────────────────────────────────────────────────────────
 
 def test_progress_hidden_when_fully_translated(client, card_project):
@@ -523,7 +549,8 @@ def test_set_review_types_rejects_non_list(client):
 def _status(**over):
     """derive_status with a "one chapter, read, nothing outstanding" baseline."""
     kwargs = dict(archived=False, chapter_count=1, read_chapters=1,
-                  fully_translated=True, awaiting_review=0, empty_footnotes=0)
+                  fully_translated=True, awaiting_review=0, empty_footnotes=0,
+                  setup_complete=True)
     kwargs.update(over)
     return derive_status(**kwargs)
 
@@ -549,6 +576,10 @@ def test_unfinished_translation_holds_a_fully_read_project_at_in_progress():
     assert _status(fully_translated=False) == "in_progress"
 
 
+def test_missing_setup_holds_a_fully_read_project_at_in_progress():
+    assert _status(setup_complete=False) == "in_progress"
+
+
 def test_annotations_awaiting_review_hold_a_project_at_in_progress():
     assert _status(awaiting_review=1) == "in_progress"
 
@@ -570,6 +601,12 @@ def test_card_status_tracks_what_has_been_read(card_project):
 
     _reviewed(card_project, ["chapter_01"])
     assert _card(card_project)["status"] == "complete"
+
+
+def test_missing_setup_keeps_a_fully_read_card_in_progress(card_project):
+    _reviewed(card_project, ["chapter_01"])
+    (card_project / "style.json").unlink()
+    assert _card(card_project)["status"] == "in_progress"
 
 
 def test_flags_alone_do_not_stop_a_project_completing(card_project):

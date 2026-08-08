@@ -212,10 +212,20 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ archived: archived })
             })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
+            .then(function (r) {
+                return r.json().then(function (data) {
+                    return { httpOk: r.ok, data: data };
+                }, function () {
+                    return { httpOk: r.ok, data: null };
+                });
+            })
+            .then(function (result) {
                 archiveBtn.disabled = false;
-                if (!data.ok) return;
+                if (!result.httpOk || !result.data || !result.data.ok) {
+                    window.alert(i.archive_error || 'Could not update archive status.');
+                    return;
+                }
+                var data = result.data;
                 archiveBtn.dataset.archived = data.archived ? '1' : '0';
                 label.textContent = data.archived ? i.unarchive : i.archive;
                 card.classList.toggle('card-archived', data.archived);
@@ -225,7 +235,10 @@
                 api.close();
                 card.style.display = showsStatus(data.status) ? '' : 'none';
             })
-            .catch(function () { archiveBtn.disabled = false; });
+            .catch(function () {
+                archiveBtn.disabled = false;
+                window.alert(i.archive_error || 'Could not update archive status.');
+            });
         });
     });
 

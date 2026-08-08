@@ -99,3 +99,9 @@ class TestArchiveDottedProject:
         (projects_dir / proj_id).mkdir()
         rv = client.patch(f"/api/project/{proj_id}/archived", json={"archived": "yes"})
         assert rv.status_code == 400
+
+    def test_missing_project_is_404_and_does_not_mkdir(self, client, projects_dir):
+        rv = client.patch("/api/project/ghost-book/archived", json={"archived": True})
+        assert rv.status_code == 404
+        assert rv.get_json() == {"error": "Project not found"}
+        assert not (projects_dir / "ghost-book").exists()

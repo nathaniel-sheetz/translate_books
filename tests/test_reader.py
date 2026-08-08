@@ -162,6 +162,15 @@ class TestReaderChapterList:
         assert "badge-flag" not in html
         assert "3 to review" in html
 
+    def test_unknown_annotation_type_counts_as_to_review(self, client, project_with_alignment):
+        # Legacy/typo'd types coerce to flag — same rule as the home-card rollup.
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "typo_legacy"},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        assert "1 to review" in rv.data.decode("utf-8")
+
     def test_footnote_and_review_note_on_one_sentence_both_count(self, client, project_with_alignment):
         # Two annotations at the same es_idx are distinct records (distinct
         # sub_ids). Keying the badge counts on (chapter_id, es_idx) alone

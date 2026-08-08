@@ -32,6 +32,7 @@ STRINGS = {
         "card_menu_label": "More actions",
         "archive_action": "Archive",
         "unarchive_action": "Unarchive",
+        "archive_error": "Could not update archive status.",
         # Project card chips (shown only when they need attention)
         "no_style_guide": "No style guide",
         "no_glossary": "No glossary",
@@ -268,6 +269,7 @@ STRINGS = {
         "card_menu_label": "Más acciones",
         "archive_action": "Archivar",
         "unarchive_action": "Desarchivar",
+        "archive_error": "No se pudo actualizar el estado de archivo.",
         # Project card chips (shown only when they need attention)
         "no_style_guide": "Sin guía de estilo",
         "no_glossary": "Sin glosario",
