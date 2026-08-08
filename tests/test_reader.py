@@ -124,6 +124,14 @@ class TestReaderProjectList:
         assert 'id="review-types-popup"' in html
         assert html.count('class="review-type-cb"') == 6
 
+    def test_status_picker_replaced_the_filter_buttons(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert 'id="status-filter-popup"' in html
+        assert html.count('class="status-filter-cb"') == 4
+        # The old one-button-per-status bar is gone.
+        assert 'data-status="all"' not in html
+        assert 'class="filter-btn active"' not in html
+
     def test_home_page_js_is_external(self, client, project_with_alignment):
         html = client.get("/read/").data.decode("utf-8")
         assert "reader_projects.js" in html

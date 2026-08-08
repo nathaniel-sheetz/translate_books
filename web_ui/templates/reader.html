@@ -53,11 +53,28 @@
     <!-- Status filter bar -->
     <div class="filter-bar" id="filter-bar">
         <span class="filter-label">{{ t.filter_label }}:</span>
-        <button class="filter-btn active" data-status="all">{{ t.filter_all }}</button>
-        <button class="filter-btn active" data-status="pending">{{ t.status_pending }}</button>
-        <button class="filter-btn active" data-status="in_progress">{{ t.status_in_progress }}</button>
-        <button class="filter-btn" data-status="complete">{{ t.status_complete }}</button>
-        <button class="filter-btn" data-status="archived">{{ t.status_archived }}</button>
+        <!-- Status is derived from the files (see project_cards.derive_status), so
+             this only ever filters — it never sets anything. Same popup markup as
+             the category picker beside it; selection is a global cookie. -->
+        <div class="review-topbar-group filter-statuses" id="status-filter-group">
+            <button class="filter-btn" id="status-filter-btn"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                    aria-controls="status-filter-popup">{{ t.filter_status_label }}</button>
+            <div class="review-types-popup" id="status-filter-popup" hidden>
+                <div class="review-types-popup-title">{{ t.filter_status_label }}</div>
+                <div class="review-type-checks">
+                    {% for skey in statuses %}
+                    <label class="review-type-check">
+                        <input type="checkbox" class="status-filter-cb" value="{{ skey }}"
+                               {% if skey in statuses_selected %}checked{% endif %}>
+                        <span>{{ t['status_' ~ skey] }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
         <!-- Which error categories the flag chip counts. Same popup markup as the
              chapter list, minus the on/off toggle: here it filters a number, it
              doesn't paint an overlay. Selection is a global cookie. -->
@@ -93,10 +110,9 @@
         {% set ns = namespace(flags=0) %}
         {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + p.flag_counts.get(tkey, 0) %}{% endfor %}
         {% set setup_done = p.has_style_guide and p.glossary_count > 0 %}
-        {% set fully_translated = p.total_chunks > 0 and p.translated_chunks == p.total_chunks %}
         {#- A book you have not read through still has work outstanding — the
             read-through itself — so unread chapters suppress the clean chip. -#}
-        {% set clean_eligible = setup_done and fully_translated and p.unread_chapters == 0 and p.awaiting_review == 0 and p.empty_footnotes == 0 %}
+        {% set clean_eligible = setup_done and p.fully_translated and p.unread_chapters == 0 and p.awaiting_review == 0 and p.empty_footnotes == 0 %}
         {% set work_href = '/read/' ~ p.id if p.has_alignments else '/project/' ~ p.id %}
         <div class="project-card{% if p.status == 'archived' %} card-archived{% endif %}"
              data-status="{{ p.status }}"
@@ -117,6 +133,40 @@
                     {% endif %}
                 {% endif %}
                 </a>
+                {#- Everything you can do *to* a project rather than in it. One
+                    button per card, so no ids: the JS resolves by class. -#}
+                <div class="card-menu">
+                    <button class="topbar-icon-btn card-menu-btn" type="button"
+                            title="{{ t.card_menu_label }}" aria-label="{{ t.card_menu_label }}"
+                            aria-haspopup="true" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                            <circle cx="12" cy="5" r="2"/>
+                            <circle cx="12" cy="12" r="2"/>
+                            <circle cx="12" cy="19" r="2"/>
+                        </svg>
+                    </button>
+                    <div class="card-menu-popup" hidden>
+                        <a class="card-menu-item" href="/project/{{ p.id }}">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                            <span>{{ t.dashboard_btn }}</span>
+                        </a>
+                        <button class="card-menu-item card-archive-btn" type="button"
+                                data-project-id="{{ p.id }}"
+                                data-archived="{{ 1 if p.archived else 0 }}">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M21 8v13H3V8"/>
+                                <rect x="1" y="3" width="22" height="5"/>
+                                <line x1="10" y1="12" x2="14" y2="12"/>
+                            </svg>
+                            <span class="card-archive-label">{{ t.unarchive_action if p.archived else t.archive_action }}</span>
+                        </button>
+                    </div>
+                </div>
             </div>
             {% if not setup_done %}
             <div class="project-chips">
@@ -132,7 +182,7 @@
             <div class="project-chips">
                 <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.not_chunked }}</a>
             </div>
-            {% elif not fully_translated %}
+            {% elif not p.fully_translated %}
             <div class="project-progress">
                 <div class="project-progress-track">
                     <div class="project-progress-fill"
@@ -159,22 +209,6 @@
                 {% endif %}
             </div>
             {% endif %}
-            <div class="project-card-actions">
-                <a href="/project/{{ p.id }}" class="topbar-icon-btn card-gear-btn"
-                   title="{{ t.dashboard_btn }}" aria-label="{{ t.dashboard_btn }}">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="12" cy="12" r="3"/>
-                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                    </svg>
-                </a>
-                <select class="status-select status-{{ p.status }}" data-project-id="{{ p.id }}">
-                    <option value="pending"{% if p.status == 'pending' %} selected{% endif %}>{{ t.status_pending }}</option>
-                    <option value="in_progress"{% if p.status == 'in_progress' %} selected{% endif %}>{{ t.status_in_progress }}</option>
-                    <option value="complete"{% if p.status == 'complete' %} selected{% endif %}>{{ t.status_complete }}</option>
-                    <option value="archived"{% if p.status == 'archived' %} selected{% endif %}>{{ t.status_archived }}</option>
-                </select>
-            </div>
         </div>
         {% endfor %}
     </div>
@@ -199,9 +233,11 @@
 <script>window.__i18n_projects = {
     new_project_error: {{ t.new_project_error | tojson }},
     flag_one: {{ t.chip_flag_one | tojson }},
-    flag_many: {{ t.chip_flags | tojson }}
+    flag_many: {{ t.chip_flags | tojson }},
+    archive: {{ t.archive_action | tojson }},
+    unarchive: {{ t.unarchive_action | tojson }}
 };</script>
-<script src="{{ url_for('static', filename='reader_projects.js') }}?v=2"></script>
+<script src="{{ url_for('static', filename='reader_projects.js') }}?v=3"></script>
 
 {% elif mode == "chapters" %}
 <!-- Chapter list -->

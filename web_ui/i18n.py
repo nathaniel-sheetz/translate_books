@@ -22,8 +22,12 @@ STRINGS = {
         "dashboard_btn": "Dashboard",
         "chunks_suffix": "chunks",
         "filter_label": "Filter",
-        "filter_all": "All",
+        "filter_status_label": "Status",
         "filter_categories_label": "Categories",
+        # Project card overflow menu
+        "card_menu_label": "More actions",
+        "archive_action": "Archive",
+        "unarchive_action": "Unarchive",
         # Project card chips (shown only when they need attention)
         "no_style_guide": "No style guide",
         "no_glossary": "No glossary",
@@ -254,8 +258,12 @@ STRINGS = {
         "dashboard_btn": "Panel",
         "chunks_suffix": "fragmentos",
         "filter_label": "Filtro",
-        "filter_all": "Todos",
+        "filter_status_label": "Estado",
         "filter_categories_label": "Categorías",
+        # Project card overflow menu
+        "card_menu_label": "Más acciones",
+        "archive_action": "Archivar",
+        "unarchive_action": "Desarchivar",
         # Project card chips (shown only when they need attention)
         "no_style_guide": "Sin guía de estilo",
         "no_glossary": "Sin glosario",

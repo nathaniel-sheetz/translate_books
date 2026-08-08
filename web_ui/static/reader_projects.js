@@ -1,14 +1,63 @@
 /* Reader home page (`/read/`, mode == "projects").
  *
  * Language + sheet-layout toggles, the new-project modal, the status filter,
- * the status dropdown, and the review-category picker. Lifted out of the
+ * the review-category picker, and each card's ⋮ menu. Lifted out of the
  * template's inline <script> when the picker landed; strings arrive via
  * window.__i18n_projects, the same way the reader gets window.__i18n.
+ *
+ * A card's status is derived server-side from its files, so nothing here sets
+ * one — the only status the reader chooses is archived, via the ⋮ menu.
  */
 (function () {
     'use strict';
 
     var i = window.__i18n_projects || {};
+
+    /* ── Popups ──
+     *
+     * The status filter, the category picker and every card menu are the same
+     * anchored popup: a button that toggles `hidden` on the panel beside it,
+     * closing on an outside click or Escape. One registry so opening any popup
+     * closes the rest.
+     */
+
+    var popups = [];
+
+    function closeAllPopups(except) {
+        popups.forEach(function (p) { if (p !== except) p.close(); });
+    }
+
+    function bindPopup(button, panel, container) {
+        var api = {
+            isOpen: false,
+            set: function (open) {
+                api.isOpen = open;
+                panel.hidden = !open;
+                button.setAttribute('aria-expanded', open ? 'true' : 'false');
+                button.classList.toggle('popup-open', open);
+            },
+            close: function () { if (api.isOpen) api.set(false); },
+            contains: function (node) { return container.contains(node); },
+        };
+        button.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var open = !api.isOpen;
+            closeAllPopups(api);
+            api.set(open);
+        });
+        popups.push(api);
+        return api;
+    }
+
+    document.addEventListener('click', function (e) {
+        popups.forEach(function (p) {
+            if (p.isOpen && !p.contains(e.target)) p.close();
+        });
+    });
+
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') closeAllPopups(null);
+    });
 
     /* ── Settings toggles (language, reader sheet layout) ── */
 
@@ -93,74 +142,90 @@
         });
     })();
 
-    /* ── Status filter ── */
+    /* ── Status filter ──
+     *
+     * The server already rendered every card's derived status into data-status,
+     * so filtering is a local show/hide; the POST only persists the choice
+     * (globally, via cookie) for the next load.
+     */
 
-    var filterBar = document.getElementById('filter-bar');
+    var statusCbs = Array.prototype.slice.call(
+        document.querySelectorAll('.status-filter-cb'));
 
-    function activeStatuses() {
-        if (!filterBar) return [];
-        var active = [];
-        filterBar.querySelectorAll('.filter-btn[data-status]').forEach(function (b) {
-            if (b.dataset.status !== 'all' && b.classList.contains('active')) {
-                active.push(b.dataset.status);
-            }
+    function selectedStatuses() {
+        return statusCbs.filter(function (cb) { return cb.checked; })
+                        .map(function (cb) { return cb.value; });
+    }
+
+    function showsStatus(status) {
+        // Nothing ticked reads as "no filter" — the same convention the
+        // category picker uses.
+        var chosen = selectedStatuses();
+        return chosen.length === 0 || chosen.indexOf(status) !== -1;
+    }
+
+    function applyStatusFilter() {
+        document.querySelectorAll('.project-card[data-status]').forEach(function (card) {
+            card.style.display = showsStatus(card.dataset.status) ? '' : 'none';
         });
-        return active;
     }
 
     (function () {
-        if (!filterBar) return;
-        var buttons = filterBar.querySelectorAll('.filter-btn[data-status]');
-        var allBtn = filterBar.querySelector('[data-status="all"]');
-        var cards = document.querySelectorAll('.project-card[data-status]');
+        var group = document.getElementById('status-filter-group');
+        var btn = document.getElementById('status-filter-btn');
+        var popup = document.getElementById('status-filter-popup');
+        if (!group || !btn || !popup) return;
 
-        function applyFilter() {
-            var active = activeStatuses();
-            allBtn.classList.toggle('active', active.length === 4);
-            var noneActive = active.length === 0;
-            cards.forEach(function (card) {
-                card.style.display =
-                    (noneActive || active.indexOf(card.dataset.status) !== -1) ? '' : 'none';
-            });
-        }
+        bindPopup(btn, popup, group);
 
-        buttons.forEach(function (btn) {
-            btn.addEventListener('click', function () {
-                if (btn.dataset.status === 'all') {
-                    var turnOn = !btn.classList.contains('active');
-                    buttons.forEach(function (b) { b.classList.toggle('active', turnOn); });
-                } else {
-                    btn.classList.toggle('active');
-                    allBtn.classList.toggle('active', activeStatuses().length === 4);
-                }
-                applyFilter();
+        statusCbs.forEach(function (cb) {
+            cb.addEventListener('change', function () {
+                applyStatusFilter();
+                fetch('/api/set-status-filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ statuses: selectedStatuses() })
+                }).catch(function () { /* the local filter already applied; retry next change */ });
             });
         });
 
-        applyFilter();
+        applyStatusFilter();
     })();
 
-    /* ── Status dropdown change ── */
+    /* ── Card ⋮ menu (dashboard + archive toggle) ── */
 
-    document.querySelectorAll('.status-select').forEach(function (sel) {
-        sel.addEventListener('change', function () {
-            var newStatus = sel.value;
-            var card = sel.closest('.project-card');
-            fetch('/api/project/' + sel.dataset.projectId + '/status', {
+    document.querySelectorAll('.project-card .card-menu').forEach(function (menu) {
+        var btn = menu.querySelector('.card-menu-btn');
+        var popup = menu.querySelector('.card-menu-popup');
+        var archiveBtn = menu.querySelector('.card-archive-btn');
+        if (!btn || !popup || !archiveBtn) return;
+
+        var api = bindPopup(btn, popup, menu);
+        var card = menu.closest('.project-card');
+        var label = archiveBtn.querySelector('.card-archive-label');
+
+        archiveBtn.addEventListener('click', function () {
+            var archived = archiveBtn.dataset.archived !== '1';
+            archiveBtn.disabled = true;
+            fetch('/api/project/' + archiveBtn.dataset.projectId + '/archived', {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ status: newStatus })
+                body: JSON.stringify({ archived: archived })
             })
             .then(function (r) { return r.json(); })
             .then(function (data) {
+                archiveBtn.disabled = false;
                 if (!data.ok) return;
-                card.dataset.status = newStatus;
-                sel.className = 'status-select status-' + newStatus;
-                card.classList.toggle('card-archived', newStatus === 'archived');
-                var active = activeStatuses();
-                card.style.display =
-                    (active.length === 0 || active.indexOf(newStatus) !== -1) ? '' : 'none';
-            });
+                archiveBtn.dataset.archived = data.archived ? '1' : '0';
+                label.textContent = data.archived ? i.unarchive : i.archive;
+                card.classList.toggle('card-archived', data.archived);
+                // Unarchiving lands on whichever status the files imply, so
+                // take it from the response rather than guessing.
+                card.dataset.status = data.status;
+                api.close();
+                card.style.display = showsStatus(data.status) ? '' : 'none';
+            })
+            .catch(function () { archiveBtn.disabled = false; });
         });
     });
 
@@ -178,14 +243,8 @@
         if (!group || !optionsBtn || !popup) return;
 
         var typeCbs = Array.prototype.slice.call(popup.querySelectorAll('.review-type-cb'));
-        var popupOpen = false;
 
-        function setPopupOpen(open) {
-            popupOpen = open;
-            popup.hidden = !open;
-            optionsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-            optionsBtn.classList.toggle('popup-open', open);
-        }
+        bindPopup(optionsBtn, popup, group);
 
         function selectedTypes() {
             return typeCbs.filter(function (cb) { return cb.checked; })
@@ -213,11 +272,6 @@
             });
         }
 
-        optionsBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            setPopupOpen(!popupOpen);
-        });
-
         typeCbs.forEach(function (cb) {
             cb.addEventListener('change', function () {
                 resum();
@@ -227,14 +281,6 @@
                     body: JSON.stringify({ types: selectedTypes() })
                 }).catch(function () { /* the re-sum already happened; retry next change */ });
             });
-        });
-
-        document.addEventListener('click', function (e) {
-            if (popupOpen && !group.contains(e.target)) setPopupOpen(false);
-        });
-
-        document.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape' && popupOpen) setPopupOpen(false);
         });
     })();
 })();

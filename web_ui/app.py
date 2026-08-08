@@ -65,7 +65,7 @@ from web_ui.evaluations import (
     merge_llm_judge_result,
     run_coded_evaluators,
 )
-from web_ui.project_cards import build_project_card
+from web_ui.project_cards import PROJECT_STATUSES, build_project_card
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # For session management
@@ -390,21 +390,70 @@ def set_review_types():
     return resp
 
 
-_VALID_STATUSES = {"pending", "in_progress", "complete", "archived"}
+# Which statuses the reader home page shows. Mirrors the review-types cookie
+# above, with one difference: an absent cookie is not "everything". A first
+# visit hides archived books, so the default has to be distinguishable from a
+# deliberately emptied selection (which, like the category picker, means "no
+# filter at all").
+_STATUS_FILTER_COOKIE = "reader_status_filter"
+_DEFAULT_STATUS_FILTER = tuple(s for s in PROJECT_STATUSES if s != "archived")
 
 
-@app.route("/api/project/<project_id>/status", methods=["PATCH"])
-def update_project_status(project_id):
-    """Update the status field in a project's config."""
+def _get_status_filter() -> list[str]:
+    """Read the ticked statuses from cookie; default to everything but archived.
+
+    Order follows :data:`PROJECT_STATUSES`, not the cookie, so the UI is stable.
+    Returns ``[]`` when the cookie is present but empty — the reader unticked
+    every box, which the page renders as "show all".
+    """
+    raw = request.cookies.get(_STATUS_FILTER_COOKIE)
+    if raw is None:
+        return list(_DEFAULT_STATUS_FILTER)
+    return [s for s in PROJECT_STATUSES if s in set(raw.split(","))]
+
+
+@app.route("/api/set-status-filter", methods=["POST"])
+def set_status_filter():
+    """Persist the ticked project statuses via cookie."""
+    raw = (request.json or {}).get("statuses")
+    if not isinstance(raw, list):
+        return jsonify({"error": "statuses must be a list"}), 400
+    unknown = [s for s in raw if s not in PROJECT_STATUSES]
+    if unknown:
+        return jsonify({"error": f"Unknown statuses: {', '.join(map(str, unknown))}"}), 400
+    statuses = [s for s in PROJECT_STATUSES if s in set(raw)]
+    resp = make_response(jsonify({"ok": True, "statuses": statuses}))
+    resp.set_cookie(
+        _STATUS_FILTER_COOKIE, ",".join(statuses),
+        max_age=365 * 24 * 3600, samesite="Lax",
+    )
+    return resp
+
+
+@app.route("/api/project/<project_id>/archived", methods=["PATCH"])
+def update_project_archived(project_id):
+    """Archive or unarchive a project — the one status the reader sets by hand.
+
+    Body: ``{"archived": true|false}``. The other three statuses are derived
+    from the files by ``project_cards.derive_status``, so the response hands
+    back the freshly derived status: after unarchiving, the caller needs to know
+    where the card landed to re-apply the status filter.
+
+    Not to be confused with ``GET /api/project/<id>/status``, which is the
+    unrelated dashboard scan of the project's files.
+    """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    status = (request.json or {}).get("status", "")
-    if status not in _VALID_STATUSES:
-        return jsonify({"error": f"Invalid status. Must be one of: {', '.join(sorted(_VALID_STATUSES))}"}), 400
+    archived = (request.json or {}).get("archived")
+    if not isinstance(archived, bool):
+        return jsonify({"error": "archived must be true or false"}), 400
     config = _load_project_config(project_id)
-    config["status"] = status
+    config["archived"] = archived
+    # Drop the pre-derivation hand-set field so the two can never disagree.
+    config.pop("status", None)
     _save_project_config(project_id, config)
-    return jsonify({"ok": True, "status": status})
+    card = build_project_card(_resolve_project_dir(project_id), project_id)
+    return jsonify({"ok": True, "archived": archived, "status": card["status"]})
 
 
 @app.route(
@@ -1010,6 +1059,8 @@ def reader_projects():
         reader_ui_version=_get_reader_ui_version(),
         review_types=list(REVIEW_TYPES),
         review_types_selected=_get_review_types(),
+        statuses=list(PROJECT_STATUSES),
+        statuses_selected=_get_status_filter(),
     )
 
 

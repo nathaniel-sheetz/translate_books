@@ -7,6 +7,9 @@ that remains once translation lands — open annotations, blank footnote marks,
 and evaluator/judge findings — which is three more directory walks per project,
 so the logic moved here and grew a cache.
 
+Status is *derived* from those same numbers (see :func:`derive_status`) rather
+than hand-set: the only thing a reader chooses is whether a book is archived.
+
 Two things keep a 21-project home page cheap:
 
 * **Nothing translated ⇒ nothing to scan.** The card hides every work chip when
@@ -33,6 +36,11 @@ from src.annotations.summary import project_annotation_summary
 from web_ui.evaluations import empty_type_counts, load_project_type_counts
 
 logger = logging.getLogger(__name__)
+
+# Every status a project can be in, in display order. The single source of
+# truth: app.py validates the filter cookie against this and the template loops
+# over it to build the Status picker.
+PROJECT_STATUSES = ("pending", "in_progress", "complete", "archived")
 
 # Directories whose contents feed a card, fingerprinted by (count, max mtime, size).
 _WATCHED_DIRS = ("chunks", "evaluations", "alignments")
@@ -120,6 +128,42 @@ def _count_chunks(chunks_dir: Path) -> tuple[int, int]:
     return (total, translated)
 
 
+def derive_status(
+    *,
+    archived: bool,
+    chapter_count: int,
+    read_chapters: int,
+    fully_translated: bool,
+    awaiting_review: int,
+    empty_footnotes: int,
+) -> str:
+    """Work out a project's status from what is actually on disk.
+
+    Archived is the one manual choice and wins over everything else. Otherwise
+    the rule reads off the same numbers the card's work chips show:
+
+    * ``complete`` — nothing left to do: every chapter read, no annotation
+      awaiting review, no blank footnote mark, and translation finished.
+      Evaluator/judge flags deliberately don't count; you can finish a book
+      while disagreeing with the judges.
+    * ``in_progress`` — at least one chapter read.
+    * ``pending`` — nothing read yet, which is also where a brand-new project
+      with no chapters lands (``chapter_count == 0`` can't be "complete", or
+      importing a book would mark it finished).
+    """
+    if archived:
+        return "archived"
+    if (
+        chapter_count > 0
+        and read_chapters >= chapter_count
+        and fully_translated
+        and awaiting_review == 0
+        and empty_footnotes == 0
+    ):
+        return "complete"
+    return "in_progress" if read_chapters > 0 else "pending"
+
+
 def build_project_card(project_dir: Path, project_id: str) -> dict:
     """Assemble the dict the ``mode == "projects"`` template renders for one book.
 
@@ -129,11 +173,13 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
 
     Returns:
         The setup/progress keys the card has always shown (``id``, ``title``,
-        ``spanish_title``, ``status``, ``chapter_count``, ``has_style_guide``,
+        ``spanish_title``, ``chapter_count``, ``has_style_guide``,
         ``glossary_count``, ``total_chunks``, ``translated_chunks``,
-        ``has_alignments``) plus the work-remaining keys: ``unread_chapters``,
-        ``awaiting_review``, ``empty_footnotes``, and ``flag_counts`` (all six
-        review categories, zero-filled).
+        ``fully_translated``, ``has_alignments``), the work-remaining keys
+        (``unread_chapters``, ``awaiting_review``, ``empty_footnotes``, and
+        ``flag_counts`` — all six review categories, zero-filled), and the two
+        status keys: ``archived`` (the reader's choice) and ``status`` (derived
+        from all of the above by :func:`derive_status`).
 
         The dict is the cached instance — callers must treat it as read-only.
     """
@@ -156,6 +202,9 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
     reviewed = _load_json(project_dir / "reviewed.json")
     reviewed_ids = set(reviewed) if isinstance(reviewed, dict) else set()
     unread_chapters = len(chapter_ids - reviewed_ids)
+    # Intersect rather than len(reviewed_ids): reviewed.json can name chapters
+    # that a re-chunk since removed, and those must not count as read.
+    read_chapters = len(chapter_ids & reviewed_ids)
 
     glossary_count = 0
     gdata = _load_json(project_dir / "glossary.json")
@@ -177,16 +226,32 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
     if not isinstance(config, dict):
         config = {}
 
+    # `archived` replaced the old hand-set `status` field. Projects written
+    # before the switch still carry status == "archived" and nothing else, so
+    # fall back to it; PATCH /api/project/<id>/archived drops the stale key the
+    # first time a book is archived or unarchived.
+    archived = bool(config.get("archived", config.get("status") == "archived"))
+    fully_translated = total_chunks > 0 and translated_chunks == total_chunks
+
     card = {
         "id": project_id,
         "title": config.get("title") or project_id,
         "spanish_title": config.get("spanish_title", ""),
-        "status": config.get("status", "pending"),
+        "archived": archived,
+        "status": derive_status(
+            archived=archived,
+            chapter_count=len(chapter_ids),
+            read_chapters=read_chapters,
+            fully_translated=fully_translated,
+            awaiting_review=ann["awaiting_review"],
+            empty_footnotes=ann["empty_footnotes"],
+        ),
         "chapter_count": len(chapter_ids),
         "has_style_guide": (project_dir / "style.json").exists(),
         "glossary_count": glossary_count,
         "total_chunks": total_chunks,
         "translated_chunks": translated_chunks,
+        "fully_translated": fully_translated,
         "has_alignments": bool(chapter_ids),
         "unread_chapters": unread_chapters,
         "awaiting_review": ann["awaiting_review"],

@@ -14,7 +14,7 @@ import pytest
 
 from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocation
 from web_ui.app import app
-from web_ui.project_cards import build_project_card, clear_card_cache
+from web_ui.project_cards import build_project_card, clear_card_cache, derive_status
 from web_ui.evaluations import (
     append_feedback,
     mark_evaluation_stale,
@@ -292,9 +292,11 @@ def test_flag_chip_respects_category_cookie(client, card_project):
     client.set_cookie("reader_review_types", "dialogue")
     html = client.get("/read/").data.decode("utf-8")
     assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
-    # Only the selected category is ticked in the picker.
-    assert html.count('class="review-type-cb"') == 6
-    assert html.count("checked") == 1
+    # Only the selected category is ticked in the picker. Scoped to that popup:
+    # the Status picker beside it has ticked boxes of its own.
+    popup = html.split('id="review-types-popup"')[1].split('class="project-grid"')[0]
+    assert popup.count('class="review-type-cb"') == 6
+    assert popup.count("checked") == 1
 
 
 def test_unknown_cookie_categories_fall_back_to_all(client, card_project):
@@ -426,10 +428,16 @@ def test_unread_chip_renders_first_and_suppresses_the_clean_chip(client, card_pr
     assert chips.index("1 unread") < chips.index("project-chip-flags")
 
 
-# ── 9. Card navigation (title link, gear, status) ────────────────────────────
+# ── 9. Card navigation (title link, ⋮ menu) ──────────────────────────────────
 
 def _header(html):
-    return html.split('class="project-card-header"')[1].split("</div>")[0]
+    """The card header, up to the ⋮ menu that shares the row with the title."""
+    return html.split('class="project-card-header"')[1].split('class="card-menu"')[0]
+
+
+def _menu(html):
+    """The card's ⋮ menu: button plus popup, up to wherever the card body starts."""
+    return html.split('class="card-menu"')[1].split('class="project-chips')[0]
 
 
 def test_card_title_links_to_the_reader(client, card_project):
@@ -461,16 +469,28 @@ def test_card_title_falls_back_to_the_dashboard_without_alignments(client, card_
     assert "/read/cardproj" not in header
 
 
-def test_card_actions_are_a_gear_and_the_status_dropdown(client, card_project):
-    actions = (client.get("/read/").data.decode("utf-8")
-               .split('class="project-card-actions"')[1].split("</div>")[0])
-    assert 'aria-label="Dashboard"' in actions
-    assert 'href="/project/cardproj"' in actions
-    # The text buttons are gone; the status dropdown stays.
-    assert ">Dashboard<" not in actions
-    assert "btn-card" not in actions
-    assert "Read" not in actions
-    assert "status-select" in actions
+def test_card_menu_holds_the_dashboard_link_and_the_archive_toggle(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    menu = _menu(html)
+    assert 'aria-label="More actions"' in menu
+    assert 'href="/project/cardproj"' in menu
+    assert ">Dashboard<" in menu
+    assert "card-archive-btn" in menu
+    assert ">Archive<" in menu
+    assert 'data-archived="0"' in menu
+    # The dropdown is gone: status is derived now, not chosen.
+    assert "status-select" not in html
+
+
+def test_card_menu_offers_unarchive_for_an_archived_project(client, card_project):
+    (card_project / "project.json").write_text(
+        json.dumps({"title": "Card Project", "archived": True}), encoding="utf-8"
+    )
+    clear_card_cache()
+
+    menu = _menu(client.get("/read/").data.decode("utf-8"))
+    assert ">Unarchive<" in menu
+    assert 'data-archived="1"' in menu
 
 
 # ── 10. The cookie endpoint ──────────────────────────────────────────────────
@@ -496,3 +516,161 @@ def test_set_review_types_rejects_unknown_categories(client):
 
 def test_set_review_types_rejects_non_list(client):
     assert client.post("/api/set-review-types", json={"types": "dialogue"}).status_code == 400
+
+
+# ── 11. Derived status ───────────────────────────────────────────────────────
+
+def _status(**over):
+    """derive_status with a "one chapter, read, nothing outstanding" baseline."""
+    kwargs = dict(archived=False, chapter_count=1, read_chapters=1,
+                  fully_translated=True, awaiting_review=0, empty_footnotes=0)
+    kwargs.update(over)
+    return derive_status(**kwargs)
+
+
+def test_status_is_complete_when_nothing_is_outstanding():
+    assert _status() == "complete"
+
+
+def test_status_is_in_progress_while_a_chapter_is_unread():
+    assert _status(chapter_count=3, read_chapters=1) == "in_progress"
+
+
+def test_status_is_pending_before_anything_is_read():
+    assert _status(chapter_count=3, read_chapters=0) == "pending"
+
+
+def test_a_project_with_no_chapters_is_pending_not_complete():
+    # Importing a book must not mark it finished.
+    assert _status(chapter_count=0, read_chapters=0) == "pending"
+
+
+def test_unfinished_translation_holds_a_fully_read_project_at_in_progress():
+    assert _status(fully_translated=False) == "in_progress"
+
+
+def test_annotations_awaiting_review_hold_a_project_at_in_progress():
+    assert _status(awaiting_review=1) == "in_progress"
+
+
+def test_blank_footnotes_hold_a_project_at_in_progress():
+    assert _status(empty_footnotes=1) == "in_progress"
+
+
+def test_archived_wins_over_a_would_be_complete_project():
+    assert _status(archived=True) == "archived"
+
+
+def test_archived_wins_over_a_never_opened_project():
+    assert _status(archived=True, chapter_count=0, read_chapters=0) == "archived"
+
+
+def test_card_status_tracks_what_has_been_read(card_project):
+    assert _card(card_project)["status"] == "pending"
+
+    _reviewed(card_project, ["chapter_01"])
+    assert _card(card_project)["status"] == "complete"
+
+
+def test_flags_alone_do_not_stop_a_project_completing(card_project):
+    """You can finish a book while disagreeing with the judges."""
+    _reviewed(card_project, ["chapter_01"])
+    _blacklist_finding(card_project)
+    card = _card(card_project)
+    assert card["flag_counts"]["blacklist"] == 1
+    assert card["status"] == "complete"
+
+
+def test_reviewed_chapters_that_no_longer_exist_do_not_count_as_read(card_project):
+    _reviewed(card_project, ["chapter_99"])
+    assert _card(card_project)["status"] == "pending"
+
+
+def test_the_legacy_status_field_still_archives(card_project):
+    """Projects written before the switch carry status, not archived."""
+    (card_project / "project.json").write_text(
+        json.dumps({"title": "Card Project", "status": "archived"}), encoding="utf-8"
+    )
+    card = _card(card_project)
+    assert card["archived"] is True
+    assert card["status"] == "archived"
+
+
+def test_an_explicit_archived_false_beats_the_legacy_field(card_project):
+    (card_project / "project.json").write_text(
+        json.dumps({"title": "Card Project", "status": "archived", "archived": False}),
+        encoding="utf-8",
+    )
+    assert _card(card_project)["status"] == "pending"
+
+
+def test_the_old_hand_set_statuses_no_longer_stick(card_project):
+    """A stale "complete" from the dropdown era must not outrank the files."""
+    (card_project / "project.json").write_text(
+        json.dumps({"title": "Card Project", "status": "complete"}), encoding="utf-8"
+    )
+    assert _card(card_project)["status"] == "pending"
+
+
+def test_archiving_via_the_api_updates_the_rendered_card(client, card_project):
+    rv = client.patch("/api/project/cardproj/archived", json={"archived": True})
+    assert rv.get_json() == {"ok": True, "archived": True, "status": "archived"}
+
+    html = client.get("/read/").data.decode("utf-8")
+    assert 'data-status="archived"' in html
+    assert "card-archived" in html
+
+
+# ── 12. The status filter ────────────────────────────────────────────────────
+
+def test_status_picker_hides_archived_by_default(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    picker = html.split('id="status-filter-popup"')[1].split('id="review-topbar-group"')[0]
+    assert picker.count('class="status-filter-cb"') == 4
+    assert picker.count("checked") == 3
+    # Archived is the one left unticked.
+    archived_box = picker.split('value="archived"')[1].split(">")[0]
+    assert "checked" not in archived_box
+
+
+def test_status_filter_cookie_is_honored(client, card_project):
+    client.set_cookie("reader_status_filter", "complete,archived")
+    html = client.get("/read/").data.decode("utf-8")
+    picker = html.split('id="status-filter-popup"')[1].split('id="review-topbar-group"')[0]
+    assert picker.count("checked") == 2
+    assert "checked" in picker.split('value="complete"')[1].split(">")[0]
+
+
+def test_an_emptied_status_cookie_means_no_filter(client, card_project):
+    """Unticking every box is "show everything", not "show nothing"."""
+    client.set_cookie("reader_status_filter", "")
+    html = client.get("/read/").data.decode("utf-8")
+    picker = html.split('id="status-filter-popup"')[1].split('id="review-topbar-group"')[0]
+    assert picker.count("checked") == 0
+    # The cards still render; reader_projects.js reads an empty selection as
+    # "no filter" and leaves every card visible.
+    assert 'class="project-card' in html
+
+
+def test_unknown_status_cookie_values_are_dropped(client, card_project):
+    client.set_cookie("reader_status_filter", "complete,nonsense")
+    html = client.get("/read/").data.decode("utf-8")
+    picker = html.split('id="status-filter-popup"')[1].split('id="review-topbar-group"')[0]
+    assert picker.count("checked") == 1
+
+
+def test_set_status_filter_round_trips(client):
+    rv = client.post("/api/set-status-filter", json={"statuses": ["archived", "pending"]})
+    assert rv.status_code == 200
+    # Normalized to PROJECT_STATUSES order, not the caller's.
+    assert rv.get_json()["statuses"] == ["pending", "archived"]
+
+
+def test_set_status_filter_rejects_unknown_statuses(client):
+    rv = client.post("/api/set-status-filter", json={"statuses": ["pending", "bogus"]})
+    assert rv.status_code == 400
+    assert "bogus" in rv.get_json()["error"]
+
+
+def test_set_status_filter_rejects_non_list(client):
+    assert client.post("/api/set-status-filter", json={"statuses": "pending"}).status_code == 400

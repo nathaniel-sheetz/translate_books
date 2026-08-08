@@ -44,17 +44,6 @@
     --modal-shadow: rgba(0, 0, 0, 0.18);
     --handle-bg: #ddd;
     --btn-save-disabled: #ccc;
-    --status-pending-bg: #f5f3f0;
-    --status-pending-color: #888;
-    --status-progress-bg: #e8f0fe;
-    --status-progress-color: #1a73e8;
-    --status-progress-border: #c5d9f5;
-    --status-complete-bg: #e6f4ea;
-    --status-complete-color: #2d8a4e;
-    --status-complete-border: #b7dfbf;
-    --status-archived-bg: #e6ddd0;
-    --status-archived-color: #7a6a52;
-    --status-archived-border: #d8cbb5;
     --status-missing: #b33;
     --btn-new-bg: #4f46e5;
     --btn-card-border: #ccc;
@@ -120,17 +109,6 @@
     --modal-shadow: rgba(0, 0, 0, 0.4);
     --handle-bg: #555;
     --btn-save-disabled: #555;
-    --status-pending-bg: #2a2a2a;
-    --status-pending-color: #888;
-    --status-progress-bg: rgba(26, 115, 232, 0.15);
-    --status-progress-color: #6aafff;
-    --status-progress-border: rgba(26, 115, 232, 0.3);
-    --status-complete-bg: rgba(45, 138, 78, 0.15);
-    --status-complete-color: #6ab87f;
-    --status-complete-border: rgba(45, 138, 78, 0.3);
-    --status-archived-bg: rgba(180, 140, 60, 0.12);
-    --status-archived-color: #b0906a;
-    --status-archived-border: rgba(180, 140, 60, 0.3);
     --status-missing: #e06060;
     --btn-new-bg: #6366f1;
     --btn-card-border: #555;
@@ -335,8 +313,18 @@ body {
     background: var(--bg-card);
 }
 
+/* Title block on the left, the ⋮ menu pinned top-right. */
 .project-card-header {
-    margin-bottom: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 15px;
+}
+
+/* Rows carry their own bottom margin for the row below; the last one has no
+   row below it, so its margin would just double the card's bottom padding. */
+.project-card > *:last-child {
+    margin-bottom: 0;
 }
 
 .project-card-header .nav-title {
@@ -348,6 +336,8 @@ body {
 /* The whole title block is the link into the book. */
 .project-card-link {
     display: block;
+    flex: 1;
+    min-width: 0;
     text-decoration: none;
     color: inherit;
 }
@@ -370,41 +360,46 @@ body {
     margin-top: 2px;
 }
 
-/* Status select dropdown */
+/* Card ⋮ menu: everything you can do *to* a project rather than in it.
+   Anchors its popup the same way .review-topbar-group does. */
 
-.status-select {
-    margin-left: auto;
+.card-menu {
+    position: relative;
+    flex: none;
+}
+
+.card-menu-btn {
+    padding: 4px;
+}
+
+/* min-height, not padding: the two rows sit right next to each other, so the
+   target has to be thumb-sized however the label's font metrics land. */
+.card-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12px;
-    padding: 3px 8px;
-    border-radius: 10px;
-    border: 1px solid var(--border-light);
+    font-size: 13px;
+    text-align: left;
+    text-decoration: none;
+    white-space: nowrap;
+    color: var(--text);
     cursor: pointer;
-    font-weight: 500;
-    appearance: auto;
 }
 
-.status-select.status-pending {
-    background: var(--status-pending-bg);
-    color: var(--status-pending-color);
+.card-menu-item:hover {
+    background: var(--bg-filter-hover);
 }
 
-.status-select.status-in_progress {
-    background: var(--status-progress-bg);
-    color: var(--status-progress-color);
-    border-color: var(--status-progress-border);
-}
-
-.status-select.status-complete {
-    background: var(--status-complete-bg);
-    color: var(--status-complete-color);
-    border-color: var(--status-complete-border);
-}
-
-.status-select.status-archived {
-    background: var(--status-archived-bg);
-    color: var(--status-archived-color);
-    border-color: var(--status-archived-border);
+.card-menu-item svg {
+    flex: none;
+    color: var(--text-muted);
 }
 
 /* Archived card */
@@ -459,22 +454,9 @@ body {
     white-space: nowrap;
 }
 
-/* Category picker sits at the far right of the status filter row. */
+/* Category picker sits at the far right of the filter row, Status on the left. */
 .filter-categories {
     margin-left: auto;
-}
-
-.project-card-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-/* Gear (dashboard) sits hard left; .status-select's margin-left:auto keeps the
-   status dropdown pinned right. */
-.project-card-actions .card-gear-btn {
-    margin-left: 0;
-    padding: 6px;
 }
 
 .btn-card {
@@ -1770,12 +1752,15 @@ body {
     --review-address: #5cc26a;        --review-address-bg: rgba(92, 194, 106, 0.24);
 }
 
-[data-theme="dark"] .review-types-popup {
+[data-theme="dark"] .review-types-popup,
+[data-theme="dark"] .card-menu-popup {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
-/* Chapter-list controls (top-bar toggle + popup) */
-.review-types-popup {
+/* Anchored popup chrome, shared by the chapter-list/home pickers and the
+   project card's ⋮ menu. Each sits inside a position:relative container. */
+.review-types-popup,
+.card-menu-popup {
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
@@ -1786,6 +1771,26 @@ body {
     border: 1px solid var(--border);
     border-radius: 10px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* Two short labels — size to the longest one instead of the pickers' 200px.
+   The items carry the padding, so the panel only holds a hairline of its own. */
+.card-menu-popup {
+    min-width: 0;
+    width: max-content;
+    padding: 5px;
+}
+
+/* The Status picker sits at the *left* end of the filter row, so its popup
+   hangs off the left edge; the shared right:0 anchor would push it off-screen. */
+.filter-statuses .review-types-popup {
+    right: auto;
+    left: 0;
+}
+
+/* Statuses have no per-category color, so drop the picker's leading dot. */
+.filter-statuses .review-type-check span::before {
+    display: none;
 }
 
 .review-types-popup-title {
