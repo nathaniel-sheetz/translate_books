@@ -1,8 +1,8 @@
 /* Reader home page (`/read/`, mode == "projects").
  *
- * Language + sheet-layout toggles, the new-project modal, the status filter,
- * the review-category picker, and each card's ⋮ menu. Lifted out of the
- * template's inline <script> when the picker landed; strings arrive via
+ * The header's language menu, the new-project modal, the status filter, the
+ * review-category picker, and each card's ⋮ menu. Lifted out of the template's
+ * inline <script> when the picker landed; strings arrive via
  * window.__i18n_projects, the same way the reader gets window.__i18n.
  *
  * A card's status is derived server-side from its files, so nothing here sets
@@ -59,29 +59,29 @@
         if (e.key === 'Escape') closeAllPopups(null);
     });
 
-    /* ── Settings toggles (language, reader sheet layout) ── */
+    /* ── UI language menu ── */
+    (function () {
+        var container = document.getElementById('lang-menu');
+        var button = document.getElementById('lang-menu-btn');
+        var panel = document.getElementById('lang-menu-popup');
+        if (!container || !button || !panel) return;
+        bindPopup(button, panel, container);
 
-    document.querySelectorAll('.lang-btn[data-lang]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            fetch('/api/set-lang', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lang: btn.dataset.lang }),
-            }).then(function () { location.reload(); });
+        panel.querySelectorAll('.lang-option[data-lang]').forEach(function (opt) {
+            opt.addEventListener('click', function () {
+                if (opt.classList.contains('active')) {
+                    closeAllPopups(null);
+                    return;
+                }
+                fetch('/api/set-lang', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lang: opt.dataset.lang }),
+                }).then(function () { location.reload(); })
+                  .catch(function () { location.reload(); });
+            });
         });
-    });
-
-    document.querySelectorAll('.ui-version-toggle [data-ui-version]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            if (btn.classList.contains('active')) return;
-            fetch('/api/set-ui-version', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ version: btn.getAttribute('data-ui-version') }),
-            }).then(function () { location.reload(); })
-              .catch(function () { location.reload(); });
-        });
-    });
+    })();
 
     /* ── New project modal ── */
     (function () {

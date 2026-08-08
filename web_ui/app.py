@@ -329,24 +329,26 @@ def set_language():
     return resp
 
 
-# Reader bottom-sheet UI version. "classic" is the shipped sheet; "v2" is the
-# opt-in redesigned sheet (Annotate / Edit / Issues tabs). Mirrors the language
-# cookie precedent above: a persistent per-device preference, default classic.
+# Reader bottom-sheet UI version. "v2" (Annotate / Edit / Issues tabs) is now
+# the sheet, so it is the default; "classic" is the original, still rendered
+# but no longer offered on the home page — reach it with `?ui=classic`, which
+# persists the same per-device cookie the language switch uses.
 _READER_UI_VERSIONS = ("classic", "v2")
+_DEFAULT_READER_UI_VERSION = "v2"
 
 
 def _get_reader_ui_version() -> str:
-    """Read the reader sheet UI version from cookie, default to classic."""
-    v = request.cookies.get("reader_ui_version", "classic")
-    return v if v in _READER_UI_VERSIONS else "classic"
+    """Read the reader sheet UI version from cookie, default to v2."""
+    v = request.cookies.get("reader_ui_version", _DEFAULT_READER_UI_VERSION)
+    return v if v in _READER_UI_VERSIONS else _DEFAULT_READER_UI_VERSION
 
 
 @app.route("/api/set-ui-version", methods=["POST"])
 def set_ui_version():
     """Set the reader sheet UI version via cookie."""
-    version = (request.json or {}).get("version", "classic")
+    version = (request.json or {}).get("version", _DEFAULT_READER_UI_VERSION)
     if version not in _READER_UI_VERSIONS:
-        version = "classic"
+        version = _DEFAULT_READER_UI_VERSION
     resp = make_response(jsonify({"version": version}))
     resp.set_cookie("reader_ui_version", version, max_age=365 * 24 * 3600, samesite="Lax")
     return resp
@@ -1200,8 +1202,8 @@ def reader_view(project_id, chapter):
     has_pending_corrections = _chapter_has_pending_corrections(project_dir, chapter)
 
     # Sheet UI version: a `?ui=` query param overrides (and persists) the cookie
-    # so shared "?ui=v2" links open the redesigned sheet; otherwise the cookie
-    # preference wins, defaulting to classic.
+    # so a "?ui=classic" link drops back to the original sheet; otherwise the
+    # cookie preference wins, defaulting to v2.
     ui_override = request.args.get("ui")
     if ui_override in _READER_UI_VERSIONS:
         ui_version = ui_override

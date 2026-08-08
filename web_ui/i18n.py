@@ -15,15 +15,19 @@ STRINGS = {
         "language_label": "Language",
         "chapter_prefix": "Chapter",
         "new_project": "New Project",
+        # Header button only — it sits beside the language menu, where the full
+        # "New Project" crowds the title. The modal keeps the long form.
+        "new_project_btn": "Project",
         "new_project_title_label": "Book title",
         "new_project_cancel": "Cancel",
         "new_project_create": "Create",
         "new_project_error": "Please enter a title.",
         "dashboard_btn": "Dashboard",
         "chunks_suffix": "chunks",
-        "filter_label": "Filter",
         "filter_status_label": "Status",
-        "filter_categories_label": "Categories",
+        # Names what the chip actually filters — which flag types the card's
+        # flag count includes — rather than the evaluator's word, "categories".
+        "filter_categories_label": "Flag types",
         # Project card overflow menu
         "card_menu_label": "More actions",
         "archive_action": "Archive",
@@ -251,15 +255,15 @@ STRINGS = {
         "language_label": "Idioma",
         "chapter_prefix": "Cap\u00edtulo",
         "new_project": "Nuevo Proyecto",
+        "new_project_btn": "Proyecto",
         "new_project_title_label": "T\u00edtulo del libro",
         "new_project_cancel": "Cancelar",
         "new_project_create": "Crear",
         "new_project_error": "Por favor ingrese un t\u00edtulo.",
         "dashboard_btn": "Panel",
         "chunks_suffix": "fragmentos",
-        "filter_label": "Filtro",
         "filter_status_label": "Estado",
-        "filter_categories_label": "Categorías",
+        "filter_categories_label": "Tipos de marcas",
         # Project card overflow menu
         "card_menu_label": "Más acciones",
         "archive_action": "Archivar",

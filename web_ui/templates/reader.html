@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=2">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
     <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=17">
@@ -31,28 +31,45 @@
     <div class="nav-header">
         <h1>{{ t.reader_title }}</h1>
         <div class="nav-header-actions">
-            <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project }}</button>
+            {#- UI language, as an icon menu in the header: the EN/ES pair used to
+                sit in a settings row of its own between the header and the
+                filters, and that row was most of a band of vertical space. -#}
+            <div class="lang-menu" id="lang-menu">
+                <button class="topbar-icon-btn lang-menu-btn" id="lang-menu-btn" type="button"
+                        title="{{ t.language_label }}" aria-label="{{ t.language_label }}"
+                        aria-haspopup="true" aria-expanded="false" aria-controls="lang-menu-popup">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="2" y1="12" x2="22" y2="12"/>
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    </svg>
+                    <span class="lang-menu-code">{{ lang | upper }}</span>
+                </button>
+                {#- Each language in its own name, the way language pickers
+                    conventionally read, so the choice is legible either way. -#}
+                <div class="card-menu-popup lang-menu-popup" id="lang-menu-popup" hidden>
+                    {% for code, name in [('en', 'English'), ('es', 'Español')] %}
+                    <button class="card-menu-item lang-option{% if lang == code %} active{% endif %}"
+                            type="button" data-lang="{{ code }}"
+                            {% if lang == code %}aria-current="true"{% endif %}>
+                        <svg class="lang-option-check" viewBox="0 0 24 24" width="16" height="16" fill="none"
+                             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                             stroke-linejoin="round" aria-hidden="true">
+                            <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                        <span>{{ name }}</span>
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+            <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project_btn }}</button>
         </div>
     </div>
 
-    <!-- Settings toggles: UI language + reader sheet layout -->
-    <div class="nav-toggles">
-        <div class="lang-toggle">
-            <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
-            <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
-        </div>
-        <div class="lang-toggle ui-version-toggle" role="group"
-             aria-label="{{ t.ui_version_switch_label }}">
-            <button class="lang-btn {% if reader_ui_version != 'v2' %}active{% endif %}"
-                    data-ui-version="classic">{{ t.ui_version_classic }}</button>
-            <button class="lang-btn {% if reader_ui_version == 'v2' %}active{% endif %}"
-                    data-ui-version="v2">{{ t.ui_version_new }}</button>
-        </div>
-    </div>
-
-    <!-- Status filter bar -->
+    <!-- Filter chips. Both read as filters on their own, so there is no "Filter:"
+         label ahead of them. -->
     <div class="filter-bar" id="filter-bar">
-        <span class="filter-label">{{ t.filter_label }}:</span>
         <!-- Status is derived from the files (see project_cards.derive_status), so
              this only ever filters — it never sets anything. Same popup markup as
              the category picker beside it; selection is a global cookie. -->
@@ -75,9 +92,10 @@
                 </div>
             </div>
         </div>
-        <!-- Which error categories the flag chip counts. Same popup markup as the
+        <!-- Which flag types the flag chip counts. Same popup markup as the
              chapter list, minus the on/off toggle: here it filters a number, it
-             doesn't paint an overlay. Selection is a global cookie. -->
+             doesn't paint an overlay — hence its own title rather than the
+             chapter list's "Show errors". Selection is a global cookie. -->
         <div class="review-topbar-group filter-categories" id="review-topbar-group">
             <button class="filter-btn review-options-btn" id="review-options-btn"
                     type="button"
@@ -85,7 +103,7 @@
                     aria-expanded="false"
                     aria-controls="review-types-popup">{{ t.filter_categories_label }}</button>
             <div class="review-types-popup" id="review-types-popup" hidden>
-                <div class="review-types-popup-title">{{ t.review_types_label }}</div>
+                <div class="review-types-popup-title">{{ t.filter_categories_label }}</div>
                 <div class="review-type-checks" id="review-type-checks">
                     {% for tkey in review_types %}
                     <label class="review-type-check review-type-{{ tkey }}">
@@ -237,7 +255,7 @@
     archive: {{ t.archive_action | tojson }},
     unarchive: {{ t.unarchive_action | tojson }}
 };</script>
-<script src="{{ url_for('static', filename='reader_projects.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='reader_projects.js') }}?v=4"></script>
 
 {% elif mode == "chapters" %}
 <!-- Chapter list -->

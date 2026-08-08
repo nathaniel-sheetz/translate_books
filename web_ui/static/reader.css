@@ -270,13 +270,6 @@ body {
     flex-wrap: wrap;
 }
 
-.filter-label {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-muted3);
-    margin-right: 2px;
-}
-
 .filter-btn {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
@@ -454,11 +447,6 @@ body {
     white-space: nowrap;
 }
 
-/* Category picker sits at the far right of the filter row, Status on the left. */
-.filter-categories {
-    margin-left: auto;
-}
-
 .btn-card {
     display: inline-block;
     padding: 6px 16px;
@@ -486,20 +474,50 @@ body {
     cursor: default;
 }
 
+/* The header's own controls: the language menu and + Project. The 4px nudge
+   optically seats the row against the h1's cap height; the header is
+   flex-start, so the two controls still line up with each other. */
 .nav-header-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 6px;
+    margin-top: 4px;
 }
 
-/* Settings toggles row: sits below the header, above the filter chips. */
-.nav-toggles {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-top: 0;
-    margin-bottom: 20px;
+/* UI language menu — it moved into the header when the settings-toggle row
+   below it went away, so the filters could sit under the title. The button
+   reuses the reader's icon-button chrome and the panel the card menu's; all
+   that is left is the globe + code pairing and the active-language check. */
+.lang-menu {
+    position: relative;
+    flex: none;
+}
+
+.lang-menu-btn {
+    gap: 4px;
+    margin-left: 0;
+    padding: 6px;
+    line-height: 1;
+}
+
+.lang-menu-code {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+.lang-option.active {
+    font-weight: 600;
+}
+
+.lang-option .lang-option-check {
+    color: var(--accent);
+}
+
+/* Hidden, not removed, so both labels start at the same x. */
+.lang-option:not(.active) .lang-option-check {
+    visibility: hidden;
 }
 
 .btn-new-project {
@@ -512,7 +530,6 @@ body {
     cursor: pointer;
     font-weight: 500;
     white-space: nowrap;
-    margin-top: 4px;
 }
 
 .btn-new-project:hover {
@@ -1781,9 +1798,11 @@ body {
     padding: 5px;
 }
 
-/* The Status picker sits at the *left* end of the filter row, so its popup
-   hangs off the left edge; the shared right:0 anchor would push it off-screen. */
-.filter-statuses .review-types-popup {
+/* Both home-page pickers sit at the *left* end of the filter row, so their
+   popups hang off the left edge; the shared right:0 anchor, meant for the
+   chapter list's right-aligned topbar, would push them off-screen. */
+.filter-statuses .review-types-popup,
+.filter-categories .review-types-popup {
     right: auto;
     left: 0;
 }
