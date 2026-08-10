@@ -5,6 +5,7 @@ banner, the BOOKS_DEBUG gate that keeps Werkzeug's debugger opt-in, and the
 cwd the entry point establishes for cwd-relative paths in src/.
 """
 
+import json
 import os
 import socket
 import subprocess
@@ -12,6 +13,10 @@ import sys
 from pathlib import Path
 
 import pytest
+
+requires_powershell = pytest.mark.skipif(
+    sys.platform != "win32", reason="reader.ps1 drives the Windows Task Scheduler"
+)
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -208,3 +213,63 @@ def test_prompt_template_resolves_from_a_foreign_cwd(tmp_path, monkeypatch):
     assert not (Path(os.getcwd()) / "prompts").exists()
 
     assert "{{source_text}}" in load_prompt_template()
+
+
+# ---------------------------------------------------------------------------
+# Scheduled task definition
+# ---------------------------------------------------------------------------
+
+
+def _reader_spec():
+    """The task definition `reader.ps1 install` would register, as a dict.
+
+    `spec` exists so this can be asserted on without registering anything --
+    the alternative is a live Task Scheduler round-trip in the test suite.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-File",
+            str(repo_root / "scripts" / "reader.ps1"),
+            "spec",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@requires_powershell
+def test_install_spec_sets_working_directory():
+    """The regression lock for the bug this whole thread started with: a task
+    registered without a WorkingDirectory starts in system32, and every
+    cwd-relative path in src/ resolves against it."""
+    repo_root = Path(__file__).resolve().parents[2]
+    spec = _reader_spec()
+
+    assert Path(spec["WorkingDirectory"]).resolve() == repo_root
+    assert "scripts\\serve.py" in spec["Arguments"]
+
+
+@requires_powershell
+def test_install_spec_allows_battery_start():
+    """The hand-made task disallowed it, so a reboot on battery left the reader
+    down -- the exact case docs/design/tailscale.md Step 3 promises to survive."""
+    spec = _reader_spec()
+
+    assert spec["DisallowStartIfOnBatteries"] is False
+    assert spec["StopIfGoingOnBatteries"] is False
+
+
+@requires_powershell
+def test_install_spec_keeps_the_service_durable():
+    """No run-time cap, one instance, and a restart watchdog."""
+    spec = _reader_spec()
+
+    assert spec["ExecutionTimeLimit"] == "PT0S"  # PT0S means no limit
+    assert spec["MultipleInstances"] == "IgnoreNew"
+    assert spec["RestartCount"] == 60
+    assert spec["TriggerClass"] == "MSFT_TaskBootTrigger"

@@ -20,8 +20,9 @@ Open `http://localhost:5000` to see your projects, or go directly to `http://loc
 
 To run it as an always-on service instead — reachable from a phone over Tailscale —
 see `docs/design/tailscale.md`. In short: `python scripts/serve.py` runs the app under
-waitress on loopback, and `scripts/reader.ps1 start|stop|restart|status|dev|log` drives
-the `TranslateBooksReader` scheduled task.
+waitress on loopback, and `scripts/reader.ps1 install|start|stop|restart|status|dev|log` drives
+the `TranslateBooksReader` scheduled task. `install` registers the task from the definition in
+the script; `status` audits the live task against it and reports anything that has drifted.
 
 ### Create a project (CLI)
 
