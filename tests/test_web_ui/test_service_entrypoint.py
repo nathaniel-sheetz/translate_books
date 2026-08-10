@@ -1,10 +1,14 @@
 """Tests for the pieces that let the app run as an unattended service.
 
 Covers the /healthz probe, the tailnet-vs-Wi-Fi labelling in the startup
-banner, and the BOOKS_DEBUG gate that keeps Werkzeug's debugger opt-in.
+banner, the BOOKS_DEBUG gate that keeps Werkzeug's debugger opt-in, and the
+cwd the entry point establishes for cwd-relative paths in src/.
 """
 
+import os
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -157,3 +161,50 @@ def test_debug_opt_in_values(monkeypatch, value):
 def test_debug_stays_off_for_other_values(monkeypatch, value):
     monkeypatch.setenv("BOOKS_DEBUG", value)
     assert _debug_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# Working directory
+# ---------------------------------------------------------------------------
+
+
+def test_entrypoint_chdirs_to_repo_root(tmp_path):
+    """The task registers no "Start in" directory, so serve.py must set one.
+
+    Run in a subprocess started somewhere else entirely: importing the module
+    in-process would move the test session's cwd out from under everything
+    else. Importing is enough -- the chdir is module level, main() is not.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    serve_py = repo_root / "scripts" / "serve.py"
+
+    code = "\n".join(
+        [
+            "import importlib.util, os",
+            f"spec = importlib.util.spec_from_file_location('serve', {str(serve_py)!r})",
+            "mod = importlib.util.module_from_spec(spec)",
+            "spec.loader.exec_module(mod)",
+            "print(os.getcwd())",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()).resolve() == repo_root
+
+
+def test_prompt_template_resolves_from_a_foreign_cwd(tmp_path, monkeypatch):
+    """The failure this guards: batch translation from the service died on
+    "Template file not found: prompts\\translation.txt" because the default
+    resolved against C:\\Windows\\system32."""
+    from src.utils.file_io import load_prompt_template
+
+    monkeypatch.chdir(tmp_path)
+    assert not (Path(os.getcwd()) / "prompts").exists()
+
+    assert "{{source_text}}" in load_prompt_template()

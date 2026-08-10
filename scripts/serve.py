@@ -9,6 +9,7 @@ Dev still uses ``python -m web_ui.app`` (set ``BOOKS_DEBUG=1`` for auto-reload).
 """
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -18,6 +19,13 @@ from pathlib import Path
 # `import web_ui.app` would fail outright.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+# sys.path alone is not enough. Every other entry point runs from the repo root
+# -- dev types `python -m web_ui.app` there, and the harness passes
+# cwd=REPO_ROOT to its subprocesses -- so cwd-relative defaults in src/ have
+# always resolved. Under the task they resolved against system32 instead, and
+# batch translation died on "Template file not found: prompts\translation.txt".
+os.chdir(REPO_ROOT)
 
 # Loopback only — `tailscale serve` is the single door in. Flip to "0.0.0.0"
 # for a one-off LAN fallback if the tunnel is misbehaving.
