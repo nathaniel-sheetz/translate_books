@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.42.0.0] - 2026-08-07
+
+### Added
+- **Reader-home project cards progressively disclose.** Setup chips only while something is missing, chunk progress only while translation is unfinished, and once any chunk is translated, the work that remains (annotations awaiting review, blank footnote marks, evaluator/judge flags). Card logic lives in `web_ui/project_cards.py` with a fingerprint cache so a 21-project home page stays cheap.
+- **Derived project status plus an archive toggle.** Status is computed from disk (pending / in progress / complete / archived); the only hand choice is archive via the card ⋮ menu (`PATCH /api/project/<id>/archived`). Complete requires style guide, glossary, full translation, every chapter read, and no outstanding review notes or blank footnotes.
+- **Chapter-list badges aligned with the home card**, including unread-chapter tracking and unknown annotation types coerced to `flag` so chapter badges and the home-card rollup cannot disagree.
+
+### Changed
+- **Reader-home language switch moved into the header**; the sheet toggle is gone from that page. Card titles are the link into the book (reader when alignments exist, dashboard otherwise).
+
+### Fixed
+- **`glossary.json` with non-list `terms` no longer 500s `/read/`.**
+- **Archiving a missing project id returns 404** instead of mkdir'ing a ghost directory.
+- **Archive toggle surfaces a failure alert** when the PATCH does not succeed.
+
 ## [0.41.0.0] - 2026-08-06
 
 ### Added

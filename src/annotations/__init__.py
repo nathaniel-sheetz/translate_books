@@ -20,13 +20,19 @@ from src.annotations.store import (
     load_active,
     target_key,
 )
+from src.annotations.summary import (
+    REVIEW_ANNOTATION_TYPES,
+    project_annotation_summary,
+)
 
 __all__ = [
     "ANNOTATION_TYPES",
+    "REVIEW_ANNOTATION_TYPES",
     "append_record",
     "bare_hint",
     "is_effectively_blank",
     "load_active",
     "parse_anchors",
+    "project_annotation_summary",
     "target_key",
 ]

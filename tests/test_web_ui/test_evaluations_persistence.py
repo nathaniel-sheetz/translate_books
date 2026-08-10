@@ -9,9 +9,16 @@ import pytest
 from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocation
 from src.models import EvalResult, Issue, IssueLevel
 from web_ui.evaluations import (
+    REVIEW_TYPES,
     append_feedback,
+    chapter_id_from_chunk_id,
+    empty_type_counts,
+    load_chapter_type_counts,
     load_chunk_evaluation,
     load_project_summary,
+    load_project_type_counts,
+    mark_evaluation_stale,
+    merge_judge_result,
     merge_llm_judge_result,
     save_chunk_evaluation,
 )
@@ -341,3 +348,99 @@ def test_evaluate_and_persist_return_includes_stale_fields(tmp_path):
 
     assert result["stale"] is True
     assert result["stale_reason"] == "edited by apply"
+
+
+# ── Per-chapter review-category counts ───────────────────────────────────────
+#
+# The chapter list badges flags per chapter and the home card badges them per
+# book. Both read the same walk: load_chapter_type_counts does the work and
+# load_project_type_counts sums it, so the two views cannot disagree.
+
+
+def _target_issue(eval_name: str, issue_index: int = 0) -> NormalizedIssue:
+    return NormalizedIssue(
+        eval_name=eval_name,
+        eval_version="1.0.0",
+        issue_index=issue_index,
+        severity="error",
+        message="flagged",
+        suggestion="reconsider",
+        location=NormalizedLocation(
+            raw="char 0-3", side="target", char_start=0, char_end=3, match="abc",
+        ),
+    )
+
+
+def test_chapter_type_counts_bucket_chunks_by_chapter(tmp_path):
+    save_chunk_evaluation(tmp_path, "chapter_01_chunk_000", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist")])
+    save_chunk_evaluation(tmp_path, "chapter_01_chunk_001", results=[], aggregated={},
+                          normalized_issues=[_target_issue("grammar")])
+    save_chunk_evaluation(tmp_path, "chapter_02_chunk_000", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist")])
+
+    by_chapter = load_chapter_type_counts(tmp_path)
+    assert set(by_chapter) == {"chapter_01", "chapter_02"}
+    assert by_chapter["chapter_01"]["blacklist"] == 1
+    assert by_chapter["chapter_01"]["grammar"] == 1
+    assert by_chapter["chapter_02"]["blacklist"] == 1
+    # Every category is present so the template and the JS re-sum can index freely.
+    assert set(by_chapter["chapter_02"]) == set(REVIEW_TYPES)
+
+
+def test_project_type_counts_equal_the_sum_over_chapters(tmp_path):
+    save_chunk_evaluation(tmp_path, "chapter_01_chunk_000", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist")])
+    save_chunk_evaluation(tmp_path, "chapter_02_chunk_000", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist")])
+    merge_judge_result(tmp_path, "chapter_02_chunk_000", "dialogue",
+                       {"eval_name": "dialogue", "issues": [{"severity": "warning", "message": "raya"}]})
+
+    totals = load_project_type_counts(tmp_path)
+    summed = empty_type_counts()
+    for counts in load_chapter_type_counts(tmp_path).values():
+        for name, n in counts.items():
+            summed[name] += n
+    assert totals == summed
+    assert totals["blacklist"] == 2
+    assert totals["dialogue"] == 1
+
+
+def test_chunk_id_without_a_chapter_still_reaches_the_project_total(tmp_path):
+    # A chunk_id with no _chunk_ marker buckets under itself rather than being
+    # dropped: it will never match a chapter row, but the book-wide count on the
+    # home card must not silently lose it.
+    save_chunk_evaluation(tmp_path, "loose_chunk", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist")])
+
+    assert chapter_id_from_chunk_id("loose_chunk") == "loose_chunk"
+    assert chapter_id_from_chunk_id("chapter_01_chunk_003") == "chapter_01"
+    assert load_chapter_type_counts(tmp_path)["loose_chunk"]["blacklist"] == 1
+    assert load_project_type_counts(tmp_path)["blacklist"] == 1
+
+
+def test_chapter_type_counts_skip_stale_and_dismissed(tmp_path):
+    save_chunk_evaluation(tmp_path, "chapter_01_chunk_000", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist", issue_index=0),
+                                             _target_issue("grammar", issue_index=1)])
+    save_chunk_evaluation(tmp_path, "chapter_02_chunk_000", results=[], aggregated={},
+                          normalized_issues=[_target_issue("blacklist")])
+    append_feedback(tmp_path, "chapter_01_chunk_000", "blacklist", 0, "false_positive")
+    mark_evaluation_stale(tmp_path, "chapter_02_chunk_000", "edited by apply")
+
+    by_chapter = load_chapter_type_counts(tmp_path)
+    assert by_chapter["chapter_01"]["blacklist"] == 0
+    assert by_chapter["chapter_01"]["grammar"] == 1
+    assert "chapter_02" not in by_chapter
+
+
+def test_chapter_type_counts_ignore_source_side_findings(tmp_path):
+    # Only target-side findings with a char span can be painted, so only those
+    # are counted — the same gate the reader's Review Mode applies.
+    issue = NormalizedIssue(
+        eval_name="blacklist", eval_version="1.0.0", issue_index=0, severity="error",
+        message="flagged", suggestion="", location=NormalizedLocation(raw="src", side="source"),
+    )
+    save_chunk_evaluation(tmp_path, "chapter_01_chunk_000", results=[], aggregated={},
+                          normalized_issues=[issue])
+    assert load_chapter_type_counts(tmp_path)["chapter_01"]["blacklist"] == 0

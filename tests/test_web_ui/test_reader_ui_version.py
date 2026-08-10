@@ -1,8 +1,8 @@
-"""Tests for the opt-in reader sheet UI version (classic vs v2).
+"""Tests for the reader sheet UI version (v2 vs classic).
 
-The redesigned bottom sheet ships behind a per-device `reader_ui_version` cookie
-(mirroring the language switch). Classic stays the default and untouched; v2 is
-opt-in via the cookie, a `?ui=` link override, or the toggle's POST route.
+The redesigned bottom sheet is now the default. Classic is still rendered, but
+no longer offered on the home page: it is reachable through the per-device
+`reader_ui_version` cookie, a `?ui=classic` link override, or the POST route.
 """
 
 import json
@@ -55,34 +55,8 @@ V2_MARKERS = ['id="reader-sheet-v2"', 'data-tab="issues"']
 V2_ASSET = "reader_sheet_v2.js"
 
 
-class TestDefaultClassic:
-    def test_default_renders_classic_sheet(self, client, project_with_alignment):
-        html = client.get(READ_URL).get_data(as_text=True)
-        for m in CLASSIC_MARKERS:
-            assert m in html
-        # v2 sheet + assets must be absent on the default path.
-        assert 'id="reader-sheet-v2"' not in html
-        assert V2_ASSET not in html
-        assert 'window.READER_UI_VERSION = "classic"' in html
-
-    def test_toggle_present_on_project_list(self, client, project_with_alignment):
-        # Toggle lives on the project list (/read/), not the chapter reader.
-        html = client.get("/read/").get_data(as_text=True)
-        assert "ui-version-toggle" in html
-        assert 'data-ui-version="classic"' in html
-        assert 'data-ui-version="v2"' in html
-
-    def test_toggle_absent_from_chapter_reader(self, client, project_with_alignment):
-        # Toggle markup lives on /read/ only; chapter pages must not render the buttons.
-        html = client.get(READ_URL).get_data(as_text=True)
-        assert 'class="lang-toggle ui-version-toggle"' not in html
-        assert 'data-ui-version="classic"' not in html
-        assert 'data-ui-version="v2"' not in html
-
-
-class TestCookieOptIn:
-    def test_cookie_renders_v2(self, client, project_with_alignment):
-        client.set_cookie("reader_ui_version", "v2")
+class TestDefaultV2:
+    def test_default_renders_v2_sheet(self, client, project_with_alignment):
         html = client.get(READ_URL).get_data(as_text=True)
         for m in V2_MARKERS:
             assert m in html
@@ -93,51 +67,72 @@ class TestCookieOptIn:
         assert 'id="classic-sheet-host"' in html
         assert 'id="bottom-sheet"' in html
 
-    def test_bad_cookie_falls_back_to_classic(self, client, project_with_alignment):
+    def test_toggle_absent_from_project_list(self, client, project_with_alignment):
+        # The home page no longer offers the switch — v2 is simply the reader.
+        html = client.get("/read/").get_data(as_text=True)
+        assert "ui-version-toggle" not in html
+        assert "data-ui-version" not in html
+
+    def test_toggle_absent_from_chapter_reader(self, client, project_with_alignment):
+        html = client.get(READ_URL).get_data(as_text=True)
+        assert "ui-version-toggle" not in html
+        assert "data-ui-version" not in html
+
+
+class TestCookieOptOut:
+    def test_cookie_renders_classic(self, client, project_with_alignment):
+        client.set_cookie("reader_ui_version", "classic")
+        html = client.get(READ_URL).get_data(as_text=True)
+        for m in CLASSIC_MARKERS:
+            assert m in html
+        assert 'id="reader-sheet-v2"' not in html
+        assert V2_ASSET not in html
+        assert 'window.READER_UI_VERSION = "classic"' in html
+
+    def test_bad_cookie_falls_back_to_v2(self, client, project_with_alignment):
         client.set_cookie("reader_ui_version", "bogus")
         html = client.get(READ_URL).get_data(as_text=True)
-        assert 'id="reader-sheet-v2"' not in html
-        assert 'window.READER_UI_VERSION = "classic"' in html
+        assert 'id="reader-sheet-v2"' in html
+        assert 'window.READER_UI_VERSION = "v2"' in html
 
 
 class TestQueryOverride:
-    def test_ui_v2_renders_and_sets_cookie(self, client, project_with_alignment):
-        rv = client.get(READ_URL + "?ui=v2")
-        html = rv.get_data(as_text=True)
-        assert 'id="reader-sheet-v2"' in html
-        set_cookie = rv.headers.get("Set-Cookie", "")
-        assert "reader_ui_version=v2" in set_cookie
-
-    def test_ui_classic_overrides_v2_cookie_and_resets(self, client, project_with_alignment):
-        client.set_cookie("reader_ui_version", "v2")
+    def test_ui_classic_renders_and_sets_cookie(self, client, project_with_alignment):
         rv = client.get(READ_URL + "?ui=classic")
         html = rv.get_data(as_text=True)
         assert 'id="reader-sheet-v2"' not in html
         assert "reader_ui_version=classic" in rv.headers.get("Set-Cookie", "")
 
+    def test_ui_v2_overrides_classic_cookie_and_resets(self, client, project_with_alignment):
+        client.set_cookie("reader_ui_version", "classic")
+        rv = client.get(READ_URL + "?ui=v2")
+        html = rv.get_data(as_text=True)
+        assert 'id="reader-sheet-v2"' in html
+        assert "reader_ui_version=v2" in rv.headers.get("Set-Cookie", "")
+
     def test_invalid_ui_param_ignored(self, client, project_with_alignment):
         # An unknown ?ui= value is ignored (no cookie write) and cookie wins.
-        client.set_cookie("reader_ui_version", "v2")
+        client.set_cookie("reader_ui_version", "classic")
         rv = client.get(READ_URL + "?ui=nope")
         html = rv.get_data(as_text=True)
-        assert 'id="reader-sheet-v2"' in html  # cookie still v2
+        assert 'id="reader-sheet-v2"' not in html  # cookie still classic
         assert "Set-Cookie" not in rv.headers  # override ignored, no write
 
 
 class TestSetUiVersionRoute:
     def test_sets_cookie(self, client):
-        rv = client.post("/api/set-ui-version", json={"version": "v2"})
-        assert rv.get_json()["version"] == "v2"
-        assert "reader_ui_version=v2" in rv.headers.get("Set-Cookie", "")
-
-    def test_invalid_coerces_to_classic(self, client):
-        rv = client.post("/api/set-ui-version", json={"version": "hacker"})
+        rv = client.post("/api/set-ui-version", json={"version": "classic"})
         assert rv.get_json()["version"] == "classic"
         assert "reader_ui_version=classic" in rv.headers.get("Set-Cookie", "")
 
-    def test_missing_body_defaults_classic(self, client):
+    def test_invalid_coerces_to_v2(self, client):
+        rv = client.post("/api/set-ui-version", json={"version": "hacker"})
+        assert rv.get_json()["version"] == "v2"
+        assert "reader_ui_version=v2" in rv.headers.get("Set-Cookie", "")
+
+    def test_missing_body_defaults_v2(self, client):
         rv = client.post("/api/set-ui-version", json={})
-        assert rv.get_json()["version"] == "classic"
+        assert rv.get_json()["version"] == "v2"
 
 
 class TestAnnotationTypeAllowlist:

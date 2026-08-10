@@ -23,7 +23,12 @@ from web_ui.i18n import get_strings
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.annotations import load_active
+from src.annotations import (
+    ANNOTATION_TYPES,
+    REVIEW_ANNOTATION_TYPES,
+    is_effectively_blank,
+    load_active,
+)
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
@@ -50,15 +55,22 @@ from src.utils.text_utils import (
 )
 from src.utils.verse import is_verse_block
 from web_ui.evaluations import (
+    REVIEW_CODED_TYPES,
+    REVIEW_JUDGE_TYPES,
+    REVIEW_TYPES,
     append_feedback,
+    chapter_id_from_chunk_id,
+    empty_type_counts,
     evaluate_and_persist_chunk,
     load_all_feedback_by_chunk,
+    load_chapter_type_counts,
     load_chunk_evaluation,
     load_feedback_for_chunk,
     load_project_summary,
     merge_llm_judge_result,
     run_coded_evaluators,
 )
+from web_ui.project_cards import PROJECT_STATUSES, build_project_card
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # For session management
@@ -322,44 +334,136 @@ def set_language():
     return resp
 
 
-# Reader bottom-sheet UI version. "classic" is the shipped sheet; "v2" is the
-# opt-in redesigned sheet (Annotate / Edit / Issues tabs). Mirrors the language
-# cookie precedent above: a persistent per-device preference, default classic.
+# Reader bottom-sheet UI version. "v2" (Annotate / Edit / Issues tabs) is now
+# the sheet, so it is the default; "classic" is the original, still rendered
+# but no longer offered on the home page — reach it with `?ui=classic`, which
+# persists the same per-device cookie the language switch uses.
 _READER_UI_VERSIONS = ("classic", "v2")
+_DEFAULT_READER_UI_VERSION = "v2"
 
 
 def _get_reader_ui_version() -> str:
-    """Read the reader sheet UI version from cookie, default to classic."""
-    v = request.cookies.get("reader_ui_version", "classic")
-    return v if v in _READER_UI_VERSIONS else "classic"
+    """Read the reader sheet UI version from cookie, default to v2."""
+    v = request.cookies.get("reader_ui_version", _DEFAULT_READER_UI_VERSION)
+    return v if v in _READER_UI_VERSIONS else _DEFAULT_READER_UI_VERSION
 
 
 @app.route("/api/set-ui-version", methods=["POST"])
 def set_ui_version():
     """Set the reader sheet UI version via cookie."""
-    version = (request.json or {}).get("version", "classic")
+    version = (request.json or {}).get("version", _DEFAULT_READER_UI_VERSION)
     if version not in _READER_UI_VERSIONS:
-        version = "classic"
+        version = _DEFAULT_READER_UI_VERSION
     resp = make_response(jsonify({"version": version}))
     resp.set_cookie("reader_ui_version", version, max_age=365 * 24 * 3600, samesite="Lax")
     return resp
 
 
-_VALID_STATUSES = {"pending", "in_progress", "complete", "archived"}
+# Which evaluator/judge categories count as "errors I care about". Global, not
+# per project: the same six categories mean the same thing in every book, and
+# the home page needs the selection before you have picked a book. Mirrors the
+# two cookies above. The review-mode *on/off* switch stays per project in
+# localStorage — that one is a per-book reading preference.
+_REVIEW_TYPES_COOKIE = "reader_review_types"
 
 
-@app.route("/api/project/<project_id>/status", methods=["PATCH"])
-def update_project_status(project_id):
-    """Update the status field in a project's config."""
+def _get_review_types() -> list[str]:
+    """Read the selected review categories from cookie, default to all six.
+
+    Order follows :data:`REVIEW_TYPES`, not the cookie, so the UI is stable.
+    An absent, empty, or fully unrecognized cookie means "show everything" —
+    the same thing the checkboxes show on a first visit.
+    """
+    raw = request.cookies.get(_REVIEW_TYPES_COOKIE, "")
+    selected = [t for t in REVIEW_TYPES if t in set(raw.split(","))]
+    return selected or list(REVIEW_TYPES)
+
+
+@app.route("/api/set-review-types", methods=["POST"])
+def set_review_types():
+    """Persist the selected review categories via cookie."""
+    raw = (request.json or {}).get("types")
+    if not isinstance(raw, list):
+        return jsonify({"error": "types must be a list"}), 400
+    unknown = [t for t in raw if t not in REVIEW_TYPES]
+    if unknown:
+        return jsonify({"error": f"Unknown review types: {', '.join(map(str, unknown))}"}), 400
+    types = [t for t in REVIEW_TYPES if t in set(raw)]
+    resp = make_response(jsonify({"ok": True, "types": types}))
+    resp.set_cookie(
+        _REVIEW_TYPES_COOKIE, ",".join(types),
+        max_age=365 * 24 * 3600, samesite="Lax",
+    )
+    return resp
+
+
+# Which statuses the reader home page shows. Mirrors the review-types cookie
+# above, with one difference: an absent cookie is not "everything". A first
+# visit hides archived books, so the default has to be distinguishable from a
+# deliberately emptied selection (which, like the category picker, means "no
+# filter at all").
+_STATUS_FILTER_COOKIE = "reader_status_filter"
+_DEFAULT_STATUS_FILTER = tuple(s for s in PROJECT_STATUSES if s != "archived")
+
+
+def _get_status_filter() -> list[str]:
+    """Read the ticked statuses from cookie; default to everything but archived.
+
+    Order follows :data:`PROJECT_STATUSES`, not the cookie, so the UI is stable.
+    Returns ``[]`` when the cookie is present but empty — the reader unticked
+    every box, which the page renders as "show all".
+    """
+    raw = request.cookies.get(_STATUS_FILTER_COOKIE)
+    if raw is None:
+        return list(_DEFAULT_STATUS_FILTER)
+    return [s for s in PROJECT_STATUSES if s in set(raw.split(","))]
+
+
+@app.route("/api/set-status-filter", methods=["POST"])
+def set_status_filter():
+    """Persist the ticked project statuses via cookie."""
+    raw = (request.json or {}).get("statuses")
+    if not isinstance(raw, list):
+        return jsonify({"error": "statuses must be a list"}), 400
+    unknown = [s for s in raw if s not in PROJECT_STATUSES]
+    if unknown:
+        return jsonify({"error": f"Unknown statuses: {', '.join(map(str, unknown))}"}), 400
+    statuses = [s for s in PROJECT_STATUSES if s in set(raw)]
+    resp = make_response(jsonify({"ok": True, "statuses": statuses}))
+    resp.set_cookie(
+        _STATUS_FILTER_COOKIE, ",".join(statuses),
+        max_age=365 * 24 * 3600, samesite="Lax",
+    )
+    return resp
+
+
+@app.route("/api/project/<project_id>/archived", methods=["PATCH"])
+def update_project_archived(project_id):
+    """Archive or unarchive a project — the one status the reader sets by hand.
+
+    Body: ``{"archived": true|false}``. The other three statuses are derived
+    from the files by ``project_cards.derive_status``, so the response hands
+    back the freshly derived status: after unarchiving, the caller needs to know
+    where the card landed to re-apply the status filter.
+
+    Not to be confused with ``GET /api/project/<id>/status``, which is the
+    unrelated dashboard scan of the project's files.
+    """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
-    status = (request.json or {}).get("status", "")
-    if status not in _VALID_STATUSES:
-        return jsonify({"error": f"Invalid status. Must be one of: {', '.join(sorted(_VALID_STATUSES))}"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.is_dir():
+        return jsonify({"error": "Project not found"}), 404
+    archived = (request.json or {}).get("archived")
+    if not isinstance(archived, bool):
+        return jsonify({"error": "archived must be true or false"}), 400
     config = _load_project_config(project_id)
-    config["status"] = status
+    config["archived"] = archived
+    # Drop the pre-derivation hand-set field so the two can never disagree.
+    config.pop("status", None)
     _save_project_config(project_id, config)
-    return jsonify({"ok": True, "status": status})
+    card = build_project_card(project_dir, project_id)
+    return jsonify({"ok": True, "archived": archived, "status": card["status"]})
 
 
 @app.route(
@@ -954,53 +1058,7 @@ def reader_projects():
             )
             continue
         seen_ids[proj_dir.name] = proj_dir
-
-        # Count alignment chapters (for Read link)
-        align_dir = proj_dir / "alignments"
-        alignment_count = len(list(align_dir.glob("*.json"))) if align_dir.exists() else 0
-
-        # Style guide status
-        has_style_guide = (proj_dir / "style.json").exists()
-
-        # Glossary status
-        glossary_count = 0
-        glossary_path = proj_dir / "glossary.json"
-        if glossary_path.exists():
-            try:
-                with open(glossary_path, "r", encoding="utf-8") as f:
-                    gdata = json.load(f)
-                glossary_count = len(gdata.get("terms", []))
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        # Translation progress
-        total_chunks = 0
-        translated_chunks = 0
-        chunks_dir = proj_dir / "chunks"
-        if chunks_dir.exists():
-            for cf in chunks_dir.glob("*_chunk_*.json"):
-                total_chunks += 1
-                try:
-                    with open(cf, "r", encoding="utf-8") as f:
-                        cdata = json.load(f)
-                    if cdata.get("translated_text"):
-                        translated_chunks += 1
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-        proj_config = _load_project_config(proj_dir.name)
-        projects.append({
-            "id": proj_dir.name,
-            "title": proj_config.get("title") or proj_dir.name,
-            "spanish_title": proj_config.get("spanish_title", ""),
-            "status": proj_config.get("status", "pending"),
-            "chapter_count": alignment_count,
-            "has_style_guide": has_style_guide,
-            "glossary_count": glossary_count,
-            "total_chunks": total_chunks,
-            "translated_chunks": translated_chunks,
-            "has_alignments": alignment_count > 0,
-        })
+        projects.append(build_project_card(proj_dir, proj_dir.name))
 
     return render_template(
         "reader.html",
@@ -1009,6 +1067,10 @@ def reader_projects():
         t=t,
         lang=_get_ui_lang(),
         reader_ui_version=_get_reader_ui_version(),
+        review_types=list(REVIEW_TYPES),
+        review_types_selected=_get_review_types(),
+        statuses=list(PROJECT_STATUSES),
+        statuses_selected=_get_status_filter(),
     )
 
 
@@ -1030,9 +1092,27 @@ def reader_chapters(project_id):
     project_dir = _resolve_project_dir(project_id)
     from collections import defaultdict
     ann_counts = defaultdict(lambda: defaultdict(int))
+    empty_fn_counts = defaultdict(int)
     for rec in load_active(project_dir):
-        ann_counts[rec.get("chapter_id", "")][rec.get("type", "flag")] += 1
+        # Unknown types coerce to flag — same rule as project_annotation_summary,
+        # so chapter badges and the home-card rollup cannot disagree.
+        ann_type = rec.get("type", "flag")
+        if ann_type not in ANNOTATION_TYPES:
+            ann_type = "flag"
+        chapter_key = rec.get("chapter_id", "")
+        ann_counts[chapter_key][ann_type] += 1
+        # A footnote mark with nothing but its [anchor] is silently dropped from
+        # the built EPUB (src/endnotes.py), so the row badges written-vs-total
+        # rather than a bare count. is_effectively_blank is the same predicate
+        # the home card's book-wide rollup uses, so the two cannot disagree.
+        if ann_type == "footnote" and is_effectively_blank(rec.get("content") or ""):
+            empty_fn_counts[chapter_key] += 1
     all_annotations = dict(ann_counts)  # chapter_id -> {type -> count}
+
+    # Evaluator/judge findings in the six review categories, bucketed by
+    # chapter. One extra walk of evaluations/*.json — cheap next to the
+    # alignments this route already opens in full.
+    flag_counts_by_chapter = load_chapter_type_counts(project_dir)
 
     # Check for pending corrections (file must exist AND contain at least one
     # non-blank line — a stale file with only whitespace shouldn't trigger the banner).
@@ -1064,7 +1144,6 @@ def reader_chapters(project_id):
             with open(f, encoding="utf-8") as fh:
                 data = json.load(fh)
             ch_id = f.stem
-            confidence = data.get("high_confidence_pct", 0)
             # Source runs with no translation at all (src/sentence_aligner.py).
             # Distinct from low confidence: those sentences ARE translated, just
             # matched weakly. A gap means the prose is missing outright.
@@ -1072,23 +1151,24 @@ def reader_chapters(project_id):
             ann = all_annotations.get(ch_id, {})
             # Fold the three review-type annotations (word choice, inconsistency,
             # and "Other"/flag) into one "to review" count; footnotes stay separate
-            # because they feed endnotes.
-            review_count = ann.get("word_choice", 0) + ann.get("inconsistency", 0) + ann.get("flag", 0)
+            # because they feed endnotes. Unknown types were coerced to flag above,
+            # matching project_annotation_summary.
+            review_count = sum(ann.get(t, 0) for t in REVIEW_ANNOTATION_TYPES)
             footnote_count = ann.get("footnote", 0)
-            total_ann = sum(ann.values())
+            empty_footnotes = empty_fn_counts.get(ch_id, 0)
 
             entry = manifest.get(ch_id) or {}
             chapters.append({
                 "id": ch_id,
                 "display_label": _chapter_display_label(ch_id, manifest, chapter_prefix),
                 "kind": entry.get("kind", "chapter"),
-                "confidence": confidence,
-                "low_confidence": confidence < 90,
                 "gap_count": coverage.get("gap_count", 0),
                 "gap_chars": coverage.get("en_orphan_chars", 0),
                 "review_count": review_count,
                 "footnote_count": footnote_count,
-                "total_ann": total_ann,
+                "filled_footnotes": footnote_count - empty_footnotes,
+                "empty_footnotes": empty_footnotes,
+                "flag_counts": flag_counts_by_chapter.get(ch_id) or empty_type_counts(),
                 "reviewed": ch_id in reviewed,
             })
         except (json.JSONDecodeError, OSError):
@@ -1100,6 +1180,8 @@ def reader_chapters(project_id):
         project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
         chapters=chapters,
         has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
+        review_types=list(REVIEW_TYPES),
+        review_types_selected=_get_review_types(),
     )
 
 
@@ -1132,8 +1214,8 @@ def reader_view(project_id, chapter):
     has_pending_corrections = _chapter_has_pending_corrections(project_dir, chapter)
 
     # Sheet UI version: a `?ui=` query param overrides (and persists) the cookie
-    # so shared "?ui=v2" links open the redesigned sheet; otherwise the cookie
-    # preference wins, defaulting to classic.
+    # so a "?ui=classic" link drops back to the original sheet; otherwise the
+    # cookie preference wins, defaulting to v2.
     ui_override = request.args.get("ui")
     if ui_override in _READER_UI_VERSIONS:
         ui_version = ui_override
@@ -1149,6 +1231,8 @@ def reader_view(project_id, chapter):
         display_label=display_label,
         has_pending_corrections=has_pending_corrections,
         reader_ui_version=ui_version,
+        review_types=list(REVIEW_TYPES),
+        review_types_selected=_get_review_types(),
     ))
     if ui_override is not None:
         resp.set_cookie(
@@ -4630,12 +4714,15 @@ def _apply_pending_corrections_for_chapter(
 
 
 def _chapter_id_from_chunk_id(chunk_id: str) -> Optional[str]:
-    """Derive the parent chapter_id from a chunk_id like 'chapter_01_chunk_003'."""
-    marker = "_chunk_"
-    idx = chunk_id.rfind(marker)
-    if idx <= 0:
-        return None
-    return chunk_id[:idx]
+    """Derive the parent chapter_id from a chunk_id like 'chapter_01_chunk_003'.
+
+    Delegates to the evaluations copy so the chapter-list flag badges bucket
+    findings exactly the way these callers resolve a chunk to its chapter. The
+    two differ only at the edge: this returns None where that returns the
+    chunk_id unchanged, because these callers compare against a real chapter.
+    """
+    chapter_id = chapter_id_from_chunk_id(chunk_id)
+    return chapter_id if chapter_id != chunk_id else None
 
 
 _IMAGE_TOKEN_RE = re.compile(r"\[IMAGE:[^\]]+\]")
@@ -5245,12 +5332,9 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
 
 # ── Reader "Review Mode" — overlay evaluator findings on the reader ───────────
 
-# Coded evaluators whose target-side issues carry a highlightable char span.
-_REVIEW_CODED_TYPES = frozenset(
-    {"blacklist", "grammar", "dictionary", "completeness"}
-)
-# Tailored judges whose issues can be anchored to a sentence by text search.
-_REVIEW_JUDGE_TYPES = frozenset({"dialogue", "address"})
+# Membership-test forms of the shared category lists (web_ui/evaluations.py).
+_REVIEW_CODED_TYPES = frozenset(REVIEW_CODED_TYPES)
+_REVIEW_JUDGE_TYPES = frozenset(REVIEW_JUDGE_TYPES)
 
 
 def _row_containing_offset(rows_sorted: list[dict], offset: int) -> Optional[dict]:

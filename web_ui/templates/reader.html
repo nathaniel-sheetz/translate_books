@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=2">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
     <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=17">
@@ -31,82 +31,201 @@
     <div class="nav-header">
         <h1>{{ t.reader_title }}</h1>
         <div class="nav-header-actions">
-            <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project }}</button>
+            {#- UI language, as an icon menu in the header: the EN/ES pair used to
+                sit in a settings row of its own between the header and the
+                filters, and that row was most of a band of vertical space. -#}
+            <div class="lang-menu" id="lang-menu">
+                <button class="topbar-icon-btn lang-menu-btn" id="lang-menu-btn" type="button"
+                        title="{{ t.language_label }}" aria-label="{{ t.language_label }}"
+                        aria-haspopup="true" aria-expanded="false" aria-controls="lang-menu-popup">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="2" y1="12" x2="22" y2="12"/>
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    </svg>
+                    <span class="lang-menu-code">{{ lang | upper }}</span>
+                </button>
+                {#- Each language in its own name, the way language pickers
+                    conventionally read, so the choice is legible either way. -#}
+                <div class="card-menu-popup lang-menu-popup" id="lang-menu-popup" hidden>
+                    {% for code, name in [('en', 'English'), ('es', 'Español')] %}
+                    <button class="card-menu-item lang-option{% if lang == code %} active{% endif %}"
+                            type="button" data-lang="{{ code }}"
+                            {% if lang == code %}aria-current="true"{% endif %}>
+                        <svg class="lang-option-check" viewBox="0 0 24 24" width="16" height="16" fill="none"
+                             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                             stroke-linejoin="round" aria-hidden="true">
+                            <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                        <span>{{ name }}</span>
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+            <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project_btn }}</button>
         </div>
     </div>
 
-    <!-- Settings toggles: UI language + reader sheet layout -->
-    <div class="nav-toggles">
-        <div class="lang-toggle">
-            <button class="lang-btn {% if lang == 'en' %}active{% endif %}" data-lang="en">EN</button>
-            <button class="lang-btn {% if lang == 'es' %}active{% endif %}" data-lang="es">ES</button>
-        </div>
-        <div class="lang-toggle ui-version-toggle" role="group"
-             aria-label="{{ t.ui_version_switch_label }}">
-            <button class="lang-btn {% if reader_ui_version != 'v2' %}active{% endif %}"
-                    data-ui-version="classic">{{ t.ui_version_classic }}</button>
-            <button class="lang-btn {% if reader_ui_version == 'v2' %}active{% endif %}"
-                    data-ui-version="v2">{{ t.ui_version_new }}</button>
-        </div>
-    </div>
-
-    <!-- Status filter bar -->
+    <!-- Filter chips. Both read as filters on their own, so there is no "Filter:"
+         label ahead of them. -->
     <div class="filter-bar" id="filter-bar">
-        <span class="filter-label">{{ t.filter_label }}:</span>
-        <button class="filter-btn active" data-status="all">{{ t.filter_all }}</button>
-        <button class="filter-btn active" data-status="pending">{{ t.status_pending }}</button>
-        <button class="filter-btn active" data-status="in_progress">{{ t.status_in_progress }}</button>
-        <button class="filter-btn" data-status="complete">{{ t.status_complete }}</button>
-        <button class="filter-btn" data-status="archived">{{ t.status_archived }}</button>
+        <!-- Status is derived from the files (see project_cards.derive_status), so
+             this only ever filters — it never sets anything. Same popup markup as
+             the category picker beside it; selection is a global cookie. -->
+        <div class="review-topbar-group filter-statuses" id="status-filter-group">
+            <button class="filter-btn" id="status-filter-btn"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                    aria-controls="status-filter-popup">{{ t.filter_status_label }}</button>
+            <div class="review-types-popup" id="status-filter-popup" hidden>
+                <div class="review-types-popup-title">{{ t.filter_status_label }}</div>
+                <div class="review-type-checks">
+                    {% for skey in statuses %}
+                    <label class="review-type-check">
+                        <input type="checkbox" class="status-filter-cb" value="{{ skey }}"
+                               {% if skey in statuses_selected %}checked{% endif %}>
+                        <span>{{ t['status_' ~ skey] }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        <!-- Which flag types the flag chip counts. Same popup markup as the
+             chapter list, minus the on/off toggle: here it filters a number, it
+             doesn't paint an overlay — hence its own title rather than the
+             chapter list's "Show errors". Selection is a global cookie. -->
+        <div class="review-topbar-group filter-categories" id="review-topbar-group">
+            <button class="filter-btn review-options-btn" id="review-options-btn"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                    aria-controls="review-types-popup">{{ t.filter_categories_label }}</button>
+            <div class="review-types-popup" id="review-types-popup" hidden>
+                <div class="review-types-popup-title">{{ t.filter_categories_label }}</div>
+                <div class="review-type-checks" id="review-type-checks">
+                    {% for tkey in review_types %}
+                    <label class="review-type-check review-type-{{ tkey }}">
+                        <input type="checkbox" class="review-type-cb" value="{{ tkey }}"
+                               {% if tkey in review_types_selected %}checked{% endif %}>
+                        <span>{{ t.review_types[tkey] }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
     </div>
 
     {% if projects %}
     <div class="project-grid" id="project-grid">
         {% for p in projects %}
-        <div class="project-card{% if p.status == 'archived' %} card-archived{% endif %}" data-status="{{ p.status }}">
+        {#- Progressive disclosure: setup facts only while something is missing,
+            progress only while translation is unfinished, and once any chunk is
+            translated, the work that remains. `ns.flags` is the flag total under
+            the *current* category selection; reader_projects.js re-sums it from
+            data-flags when the picker changes. -#}
+        {% set ns = namespace(flags=0) %}
+        {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + p.flag_counts.get(tkey, 0) %}{% endfor %}
+        {% set setup_done = p.has_style_guide and p.glossary_count > 0 %}
+        {#- A book you have not read through still has work outstanding — the
+            read-through itself — so unread chapters suppress the clean chip. -#}
+        {% set clean_eligible = setup_done and p.fully_translated and p.unread_chapters == 0 and p.awaiting_review == 0 and p.empty_footnotes == 0 %}
+        {% set work_href = '/read/' ~ p.id if p.has_alignments else '/project/' ~ p.id %}
+        <div class="project-card{% if p.status == 'archived' %} card-archived{% endif %}"
+             data-status="{{ p.status }}"
+             data-flags='{{ p.flag_counts | tojson }}'>
             <div class="project-card-header">
+                {#- Title and subtitle are one link into the book: the reader when
+                    there is something to read, the dashboard otherwise (same
+                    fallback the work chips use). -#}
+                <a class="project-card-link" href="{{ work_href }}">
                 {% if lang == 'es' and p.spanish_title %}
-                <span class="nav-title">{{ p.spanish_title }}</span>
-                <span class="nav-subtitle">{{ p.title }}</span>
+                    <span class="nav-title">{{ p.spanish_title }}</span>
+                    <span class="nav-subtitle">{{ p.title }}</span>
                 {% else %}
-                <span class="nav-title">{{ p.title }}</span>
-                {% if p.spanish_title %}
-                <span class="nav-subtitle">{{ p.spanish_title }}</span>
+                    <span class="nav-title">{{ p.title }}</span>
+                    {% if p.spanish_title %}
+                    <span class="nav-subtitle">{{ p.spanish_title }}</span>
+                    {% endif %}
                 {% endif %}
+                </a>
+                {#- Everything you can do *to* a project rather than in it. One
+                    button per card, so no ids: the JS resolves by class. -#}
+                <div class="card-menu">
+                    <button class="topbar-icon-btn card-menu-btn" type="button"
+                            title="{{ t.card_menu_label }}" aria-label="{{ t.card_menu_label }}"
+                            aria-haspopup="true" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                            <circle cx="12" cy="5" r="2"/>
+                            <circle cx="12" cy="12" r="2"/>
+                            <circle cx="12" cy="19" r="2"/>
+                        </svg>
+                    </button>
+                    <div class="card-menu-popup" hidden>
+                        <a class="card-menu-item" href="/project/{{ p.id }}">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                            <span>{{ t.dashboard_btn }}</span>
+                        </a>
+                        <button class="card-menu-item card-archive-btn" type="button"
+                                data-project-id="{{ p.id }}"
+                                data-archived="{{ 1 if p.archived else 0 }}">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M21 8v13H3V8"/>
+                                <rect x="1" y="3" width="22" height="5"/>
+                                <line x1="10" y1="12" x2="14" y2="12"/>
+                            </svg>
+                            <span class="card-archive-label">{{ t.unarchive_action if p.archived else t.archive_action }}</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            {% if not setup_done %}
+            <div class="project-chips">
+                {% if not p.has_style_guide %}
+                <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.no_style_guide }}</a>
+                {% endif %}
+                {% if p.glossary_count == 0 %}
+                <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.no_glossary }}</a>
                 {% endif %}
             </div>
-            <div class="project-status">
-                <div class="status-row">
-                    <span class="status-label">{{ t.style_guide_label }}</span>
-                    <span class="status-value {% if p.has_style_guide %}status-ok{% else %}status-missing{% endif %}">
-                        {{ "✓" if p.has_style_guide else "✗" }}
-                    </span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">{{ t.glossary_label }}</span>
-                    <span class="status-value {% if p.glossary_count > 0 %}status-ok{% else %}status-missing{% endif %}">
-                        {% if p.glossary_count > 0 %}{{ p.glossary_count }} {{ t.terms_suffix }}{% else %}✗{% endif %}
-                    </span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">{{ t.translated_label }}</span>
-                    <span class="status-value">{{ p.translated_chunks }}/{{ p.total_chunks }} {{ t.chunks_suffix }}</span>
-                </div>
+            {% endif %}
+            {% if p.total_chunks == 0 %}
+            <div class="project-chips">
+                <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.not_chunked }}</a>
             </div>
-            <div class="project-card-actions">
-                <a href="/project/{{ p.id }}" class="btn-card btn-setup">{{ t.dashboard_btn }}</a>
-                {% if p.has_alignments %}
-                <a href="/read/{{ p.id }}" class="btn-card">{{ t.read_btn }}</a>
-                {% else %}
-                <span class="btn-card btn-disabled">{{ t.read_btn }}</span>
+            {% elif not p.fully_translated %}
+            <div class="project-progress">
+                <div class="project-progress-track">
+                    <div class="project-progress-fill"
+                         style="width: {{ (100 * p.translated_chunks / p.total_chunks) | round | int }}%"></div>
+                </div>
+                <span class="project-progress-label">{{ p.translated_chunks }}/{{ p.total_chunks }} {{ t.chunks_suffix }}</span>
+            </div>
+            {% endif %}
+            {% if p.translated_chunks > 0 %}
+            <div class="project-chips project-work-chips">
+                {% if p.unread_chapters %}
+                <a class="badge badge-unread" href="{{ work_href }}">{{ p.unread_chapters }} {{ t.badge_unread }}</a>
                 {% endif %}
-                <select class="status-select status-{{ p.status }}" data-project-id="{{ p.id }}">
-                    <option value="pending"{% if p.status == 'pending' %} selected{% endif %}>{{ t.status_pending }}</option>
-                    <option value="in_progress"{% if p.status == 'in_progress' %} selected{% endif %}>{{ t.status_in_progress }}</option>
-                    <option value="complete"{% if p.status == 'complete' %} selected{% endif %}>{{ t.status_complete }}</option>
-                    <option value="archived"{% if p.status == 'archived' %} selected{% endif %}>{{ t.status_archived }}</option>
-                </select>
+                {% if p.awaiting_review %}
+                <a class="badge badge-review" href="{{ work_href }}">{{ p.awaiting_review }} {{ t.badge_review }}</a>
+                {% endif %}
+                {% if p.empty_footnotes %}
+                <a class="badge badge-footnote" href="{{ work_href }}">{{ p.empty_footnotes }} {{ t.chip_empty_fn }}</a>
+                {% endif %}
+                <a class="badge badge-warn project-chip-flags" href="{{ work_href }}"
+                   {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> <span class="chip-flag-label">{{ t.chip_flag_one if ns.flags == 1 else t.chip_flags }}</span></a>
+                {% if clean_eligible %}
+                <span class="badge badge-clean project-chip-clean" {% if ns.flags %}hidden{% endif %}>✓ {{ t.chip_clean }}</span>
+                {% endif %}
             </div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -128,145 +247,15 @@
     </div>
 </div>
 
-<script>
-document.querySelectorAll('.lang-btn[data-lang]').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-        fetch('/api/set-lang', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lang: btn.dataset.lang }),
-        }).then(function() { location.reload(); });
-    });
-});
-
-// Reader sheet layout (classic / v2) opt-in toggle. Persists via cookie.
-document.querySelectorAll('.ui-version-toggle [data-ui-version]').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-        if (btn.classList.contains('active')) return;
-        fetch('/api/set-ui-version', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ version: btn.getAttribute('data-ui-version') }),
-        }).then(function() { location.reload(); })
-          .catch(function() { location.reload(); });
-    });
-});
-
-(function() {
-    var overlay = document.getElementById('new-project-modal');
-    var titleInput = document.getElementById('new-project-title');
-    var errEl = document.getElementById('new-project-error');
-
-    document.getElementById('btn-new-project').addEventListener('click', function() {
-        titleInput.value = '';
-        errEl.style.display = 'none';
-        overlay.style.display = 'flex';
-        titleInput.focus();
-    });
-
-    document.getElementById('btn-cancel-project').addEventListener('click', function() {
-        overlay.style.display = 'none';
-    });
-
-    overlay.addEventListener('click', function(e) {
-        if (e.target === overlay) overlay.style.display = 'none';
-    });
-
-    titleInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') document.getElementById('btn-create-project').click();
-    });
-
-    document.getElementById('btn-create-project').addEventListener('click', function() {
-        var title = titleInput.value.trim();
-        if (!title) { errEl.textContent = {{ t.new_project_error | tojson }}; errEl.style.display = ''; return; }
-        var btn = this;
-        btn.disabled = true;
-        fetch('/api/projects/create', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: title })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.error) { errEl.textContent = data.error; errEl.style.display = ''; btn.disabled = false; return; }
-            window.location.href = data.redirect;
-        })
-        .catch(function(err) { errEl.textContent = err.message; errEl.style.display = ''; btn.disabled = false; });
-    });
-})();
-
-/* ── Status filter ── */
-(function() {
-    var filterBar = document.getElementById('filter-bar');
-    if (!filterBar) return;
-    var buttons = filterBar.querySelectorAll('.filter-btn');
-    var allBtn = filterBar.querySelector('[data-status="all"]');
-    var cards = document.querySelectorAll('.project-card[data-status]');
-
-    function getActiveStatuses() {
-        var active = [];
-        buttons.forEach(function(b) {
-            if (b.dataset.status !== 'all' && b.classList.contains('active')) active.push(b.dataset.status);
-        });
-        return active;
-    }
-
-    function applyFilter() {
-        var active = getActiveStatuses();
-        var allActive = active.length === 4;
-        var noneActive = active.length === 0;
-        allBtn.classList.toggle('active', allActive);
-        cards.forEach(function(card) {
-            card.style.display = (noneActive || active.indexOf(card.dataset.status) !== -1) ? '' : 'none';
-        });
-    }
-
-    buttons.forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            if (btn.dataset.status === 'all') {
-                var turnOn = !btn.classList.contains('active');
-                buttons.forEach(function(b) { b.classList.toggle('active', turnOn); });
-            } else {
-                btn.classList.toggle('active');
-                /* sync "All" button */
-                allBtn.classList.toggle('active', getActiveStatuses().length === 4);
-            }
-            applyFilter();
-        });
-    });
-
-    applyFilter();
-})();
-
-/* ── Status dropdown change ── */
-document.querySelectorAll('.status-select').forEach(function(sel) {
-    sel.addEventListener('change', function() {
-        var projectId = sel.dataset.projectId;
-        var newStatus = sel.value;
-        var card = sel.closest('.project-card');
-        fetch('/api/project/' + projectId + '/status', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: newStatus })
-        }).then(function(r) { return r.json(); }).then(function(data) {
-            if (data.ok) {
-                card.dataset.status = newStatus;
-                sel.className = 'status-select status-' + newStatus;
-                card.classList.toggle('card-archived', newStatus === 'archived');
-                /* re-apply filter to hide/show if needed */
-                var filterBar = document.getElementById('filter-bar');
-                if (filterBar) {
-                    var active = [];
-                    filterBar.querySelectorAll('.filter-btn').forEach(function(b) {
-                        if (b.dataset.status !== 'all' && b.classList.contains('active')) active.push(b.dataset.status);
-                    });
-                    card.style.display = (active.length === 0 || active.indexOf(newStatus) !== -1) ? '' : 'none';
-                }
-            }
-        });
-    });
-});
-</script>
+<script>window.__i18n_projects = {
+    new_project_error: {{ t.new_project_error | tojson }},
+    flag_one: {{ t.chip_flag_one | tojson }},
+    flag_many: {{ t.chip_flags | tojson }},
+    archive: {{ t.archive_action | tojson }},
+    unarchive: {{ t.unarchive_action | tojson }},
+    archive_error: {{ t.archive_error | tojson }}
+};</script>
+<script src="{{ url_for('static', filename='reader_projects.js') }}?v=5"></script>
 
 {% elif mode == "chapters" %}
 <!-- Chapter list -->
@@ -307,9 +296,10 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
                 <div class="review-types-popup" id="review-types-popup" hidden>
                     <div class="review-types-popup-title">{{ t.review_types_label }}</div>
                     <div class="review-type-checks" id="review-type-checks">
-                        {% for tkey in ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'] %}
+                        {% for tkey in review_types %}
                         <label class="review-type-check review-type-{{ tkey }}">
-                            <input type="checkbox" class="review-type-cb" value="{{ tkey }}" checked>
+                            <input type="checkbox" class="review-type-cb" value="{{ tkey }}"
+                                   {% if tkey in review_types_selected %}checked{% endif %}>
                             <span>{{ t.review_types[tkey] }}</span>
                         </label>
                         {% endfor %}
@@ -364,28 +354,36 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     });
     </script>
     {% endif %}
+    {#- Same badge language as the home-page card: what is left to do, in the
+        same words and the same colors. `chapter_flags` is the flag total under
+        the *current* category selection; reader_chapters.js re-sums it from
+        data-flags when the picker changes, and toggles the clean chip with it. -#}
     <ul class="nav-list">
         {% for ch in chapters %}
-        <li>
+        {% set ns = namespace(flags=0) %}
+        {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + ch.flag_counts.get(tkey, 0) %}{% endfor %}
+        {% set clean_eligible = ch.reviewed and ch.review_count == 0 and ch.empty_footnotes == 0 and not ch.gap_count %}
+        <li data-flags='{{ ch.flag_counts | tojson }}'>
             <a href="/read/{{ project_id }}/{{ ch.id }}">
                 <span class="nav-title{% if ch.kind and ch.kind != 'chapter' %} nav-title-matter{% endif %}">{{ ch.display_label or (ch.id | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix)) }}</span>
                 <span class="nav-meta">
+                    {%- if not ch.reviewed -%}
+                        <span class="badge badge-unread">{{ t.badge_unread }}</span>
+                    {%- endif -%}
                     {%- if ch.review_count > 0 -%}
                         <span class="badge badge-review">{{ ch.review_count }} {{ t.badge_review }}</span>
                     {%- endif -%}
+                    {#- Written-of-total, because a footnote mark with no gloss is
+                        dropped from the EPUB — 4/6 says two notes are still owed. -#}
                     {%- if ch.footnote_count > 0 -%}
-                        <span class="badge badge-footnote">{{ ch.footnote_count }} {{ t.badge_fn }}</span>
+                        <span class="badge badge-footnote">{{ ch.filled_footnotes }}/{{ ch.footnote_count }} {{ t.badge_notes }}</span>
                     {%- endif -%}
-                    {%- if ch.low_confidence -%}
-                        <span class="badge badge-warn">{{ ch.confidence }}% {{ t.badge_aligned }}</span>
-                    {%- endif -%}
+                    <span class="badge badge-warn chapter-chip-flags" {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> <span class="chip-flag-label">{{ t.chip_flag_one if ns.flags == 1 else t.chip_flags }}</span></span>
                     {%- if ch.gap_count -%}
                         <span class="badge badge-warn" title="{{ ch.gap_chars }} {{ t.badge_gap_title }}">{{ ch.gap_count }} {{ t.badge_gap }}</span>
                     {%- endif -%}
-                    {%- if ch.reviewed -%}
-                        <span class="badge badge-clean">{{ t.badge_reviewed }}</span>
-                    {%- elif ch.total_ann == 0 and not ch.low_confidence and not ch.gap_count -%}
-                        <span class="badge badge-unread">{{ t.badge_unread }}</span>
+                    {%- if clean_eligible -%}
+                        <span class="badge badge-clean chapter-chip-clean" {% if ns.flags %}hidden{% endif %}>✓ {{ t.chip_clean }}</span>
                     {%- endif -%}
                 </span>
             </a>
@@ -393,98 +391,12 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         {% endfor %}
     </ul>
 </div>
-<script>
-(function(){
-    var btn = document.getElementById('theme-toggle');
-    if (!btn) return;
-    var dark = document.documentElement.dataset.theme === 'dark';
-    btn.textContent = dark ? '☀️' : '🌙';
-    btn.addEventListener('click', function() {
-        dark = !dark;
-        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-        localStorage.setItem('reader_theme', dark ? 'dark' : 'light');
-        btn.textContent = dark ? '☀️' : '🌙';
-    });
-})();
-
-/* ── Review mode selection (persisted per project; applied by the reader) ── */
-(function(){
-    var KEY = 'reader_review:{{ project_id }}';
-    var group = document.getElementById('review-topbar-group');
-    var toggleBtn = document.getElementById('review-mode-toggle');
-    var optionsBtn = document.getElementById('review-options-btn');
-    var popup = document.getElementById('review-types-popup');
-    if (!group || !toggleBtn || !optionsBtn || !popup) return;
-
-    var typeCbs = Array.prototype.slice.call(popup.querySelectorAll('.review-type-cb'));
-    var reviewOn = false;
-    var popupOpen = false;
-
-    function setPopupOpen(open) {
-        popupOpen = open;
-        popup.hidden = !open;
-        toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        optionsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        optionsBtn.classList.toggle('popup-open', open);
-    }
-
-    function setReviewOn(on, opts) {
-        opts = opts || {};
-        reviewOn = on;
-        toggleBtn.classList.toggle('review-on', on);
-        toggleBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-        optionsBtn.hidden = !on;
-        if (!on) setPopupOpen(false);
-        else if (opts.showPopup) setPopupOpen(true);
-    }
-
-    function persist() {
-        var types = typeCbs.filter(function(cb){ return cb.checked; })
-                           .map(function(cb){ return cb.value; });
-        localStorage.setItem(KEY, JSON.stringify({ on: reviewOn, types: types }));
-    }
-
-    function loadSaved() {
-        var saved = {};
-        try { saved = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { saved = {}; }
-        if (Array.isArray(saved.types)) {
-            typeCbs.forEach(function(cb){ cb.checked = saved.types.indexOf(cb.value) !== -1; });
-        }
-        setReviewOn(!!saved.on, { showPopup: false });
-    }
-
-    toggleBtn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        if (reviewOn) {
-            setReviewOn(false);
-        } else {
-            setReviewOn(true, { showPopup: true });
-        }
-        persist();
-    });
-
-    optionsBtn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        setPopupOpen(!popupOpen);
-    });
-
-    typeCbs.forEach(function(cb){
-        cb.addEventListener('change', persist);
-    });
-
-    document.addEventListener('click', function(e) {
-        if (!popupOpen) return;
-        if (!group.contains(e.target)) setPopupOpen(false);
-    });
-
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape' && popupOpen) setPopupOpen(false);
-    });
-
-    loadSaved();
-    persist();
-})();
-</script>
+<script>window.__reader_chapters = {
+    projectId: {{ project_id | tojson }},
+    flag_one: {{ t.chip_flag_one | tojson }},
+    flag_many: {{ t.chip_flags | tojson }}
+};</script>
+<script src="{{ url_for('static', filename='reader_chapters.js') }}?v=1"></script>
 
 {% elif mode == "read" %}
 <!-- Reader view -->
@@ -874,8 +786,10 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
     </div>
 </div>
 <script>window.__i18n = {{ t.js | tojson }};</script>
-<script>window.READER_UI_VERSION = {{ reader_ui_version | default('classic') | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=26"></script>
+<script>window.READER_UI_VERSION = {{ reader_ui_version | default('v2') | tojson }};</script>
+<script>window.REVIEW_TYPES = {{ review_types | tojson }};
+window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};</script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=27"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
 <script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=9"></script>

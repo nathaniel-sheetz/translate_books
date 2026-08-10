@@ -44,18 +44,6 @@
     --modal-shadow: rgba(0, 0, 0, 0.18);
     --handle-bg: #ddd;
     --btn-save-disabled: #ccc;
-    --status-pending-bg: #f5f3f0;
-    --status-pending-color: #888;
-    --status-progress-bg: #e8f0fe;
-    --status-progress-color: #1a73e8;
-    --status-progress-border: #c5d9f5;
-    --status-complete-bg: #e6f4ea;
-    --status-complete-color: #2d8a4e;
-    --status-complete-border: #b7dfbf;
-    --status-archived-bg: #e6ddd0;
-    --status-archived-color: #7a6a52;
-    --status-archived-border: #d8cbb5;
-    --status-ok: #2d8a4e;
     --status-missing: #b33;
     --btn-new-bg: #4f46e5;
     --btn-card-border: #ccc;
@@ -68,8 +56,6 @@
     --ann-footnote: rgba(140, 100, 180, 0.12);
     --ann-footnote-color: #8a6aaf;
     --ann-flag: rgba(180, 180, 180, 0.15);
-    --ann-flag-badge: rgba(180, 180, 180, 0.2);
-    --ann-flag-color: #888;
     --ann-hover: rgba(0, 0, 0, 0.06);
     --ann-active: rgba(0, 0, 0, 0.08);
     --ann-remove: #ccc;
@@ -123,18 +109,6 @@
     --modal-shadow: rgba(0, 0, 0, 0.4);
     --handle-bg: #555;
     --btn-save-disabled: #555;
-    --status-pending-bg: #2a2a2a;
-    --status-pending-color: #888;
-    --status-progress-bg: rgba(26, 115, 232, 0.15);
-    --status-progress-color: #6aafff;
-    --status-progress-border: rgba(26, 115, 232, 0.3);
-    --status-complete-bg: rgba(45, 138, 78, 0.15);
-    --status-complete-color: #6ab87f;
-    --status-complete-border: rgba(45, 138, 78, 0.3);
-    --status-archived-bg: rgba(180, 140, 60, 0.12);
-    --status-archived-color: #b0906a;
-    --status-archived-border: rgba(180, 140, 60, 0.3);
-    --status-ok: #6ab87f;
     --status-missing: #e06060;
     --btn-new-bg: #6366f1;
     --btn-card-border: #555;
@@ -147,8 +121,6 @@
     --ann-footnote: rgba(140, 100, 180, 0.18);
     --ann-footnote-color: #b08ad8;
     --ann-flag: rgba(180, 180, 180, 0.1);
-    --ann-flag-badge: rgba(180, 180, 180, 0.15);
-    --ann-flag-color: #999;
     --ann-hover: rgba(255, 255, 255, 0.06);
     --ann-active: rgba(255, 255, 255, 0.08);
     --ann-remove: #666;
@@ -298,13 +270,6 @@ body {
     flex-wrap: wrap;
 }
 
-.filter-label {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-muted3);
-    margin-right: 2px;
-}
-
 .filter-btn {
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
@@ -318,12 +283,6 @@ body {
 
 .filter-btn:hover {
     background: var(--bg-filter-hover);
-}
-
-.filter-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
 }
 
 /* Project dashboard cards */
@@ -341,13 +300,43 @@ body {
     background: var(--bg-card);
 }
 
+/* Title block on the left, the ⋮ menu pinned top-right. */
 .project-card-header {
-    margin-bottom: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 15px;
+}
+
+/* Rows carry their own bottom margin for the row below; the last one has no
+   row below it, so its margin would just double the card's bottom padding. */
+.project-card > *:last-child {
+    margin-bottom: 0;
 }
 
 .project-card-header .nav-title {
+    display: block;
     font-size: 18px;
     font-weight: 600;
+}
+
+/* The whole title block is the link into the book. */
+.project-card-link {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    text-decoration: none;
+    color: inherit;
+}
+
+.project-card-link:hover .nav-title {
+    text-decoration: underline;
+}
+
+.project-card-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
 }
 
 .nav-subtitle {
@@ -358,41 +347,46 @@ body {
     margin-top: 2px;
 }
 
-/* Status select dropdown */
+/* Card ⋮ menu: everything you can do *to* a project rather than in it.
+   Anchors its popup the same way .review-topbar-group does. */
 
-.status-select {
-    margin-left: auto;
+.card-menu {
+    position: relative;
+    flex: none;
+}
+
+.card-menu-btn {
+    padding: 4px;
+}
+
+/* min-height, not padding: the two rows sit right next to each other, so the
+   target has to be thumb-sized however the label's font metrics land. */
+.card-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12px;
-    padding: 3px 8px;
-    border-radius: 10px;
-    border: 1px solid var(--border-light);
+    font-size: 13px;
+    text-align: left;
+    text-decoration: none;
+    white-space: nowrap;
+    color: var(--text);
     cursor: pointer;
-    font-weight: 500;
-    appearance: auto;
 }
 
-.status-select.status-pending {
-    background: var(--status-pending-bg);
-    color: var(--status-pending-color);
+.card-menu-item:hover {
+    background: var(--bg-filter-hover);
 }
 
-.status-select.status-in_progress {
-    background: var(--status-progress-bg);
-    color: var(--status-progress-color);
-    border-color: var(--status-progress-border);
-}
-
-.status-select.status-complete {
-    background: var(--status-complete-bg);
-    color: var(--status-complete-color);
-    border-color: var(--status-complete-border);
-}
-
-.status-select.status-archived {
-    background: var(--status-archived-bg);
-    color: var(--status-archived-color);
-    border-color: var(--status-archived-border);
+.card-menu-item svg {
+    flex: none;
+    color: var(--text-muted);
 }
 
 /* Archived card */
@@ -401,39 +395,50 @@ body {
     opacity: 0.6;
 }
 
-.project-status {
+/* Card body: chips (setup gaps + work remaining) and the progress bar. Both
+   rows are progressively disclosed, so either may be absent entirely. Chips
+   reuse the chapter-list .badge palette. */
+
+.project-chips {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.project-chips a.badge {
+    text-decoration: none;
+}
+
+.project-chips a.badge:hover {
+    filter: brightness(0.95);
+}
+
+.project-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 12px;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 14px;
-}
-
-.status-row {
-    display: flex;
-    justify-content: space-between;
-}
-
-.status-label {
+    font-size: 13px;
     color: var(--text-muted3);
 }
 
-.status-value {
-    color: var(--text-link-hover);
+.project-progress-track {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border-light);
+    overflow: hidden;
 }
 
-.status-ok {
-    color: var(--status-ok);
+.project-progress-fill {
+    height: 100%;
+    background: var(--accent);
 }
 
-.status-missing {
-    color: var(--status-missing);
-}
-
-.project-card-actions {
-    display: flex;
-    gap: 8px;
+.project-progress-label {
+    white-space: nowrap;
 }
 
 .btn-card {
@@ -463,20 +468,50 @@ body {
     cursor: default;
 }
 
+/* The header's own controls: the language menu and + Project. The 4px nudge
+   optically seats the row against the h1's cap height; the header is
+   flex-start, so the two controls still line up with each other. */
 .nav-header-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 6px;
+    margin-top: 4px;
 }
 
-/* Settings toggles row: sits below the header, above the filter chips. */
-.nav-toggles {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-top: 0;
-    margin-bottom: 20px;
+/* UI language menu — it moved into the header when the settings-toggle row
+   below it went away, so the filters could sit under the title. The button
+   reuses the reader's icon-button chrome and the panel the card menu's; all
+   that is left is the globe + code pairing and the active-language check. */
+.lang-menu {
+    position: relative;
+    flex: none;
+}
+
+.lang-menu-btn {
+    gap: 4px;
+    margin-left: 0;
+    padding: 6px;
+    line-height: 1;
+}
+
+.lang-menu-code {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+.lang-option.active {
+    font-weight: 600;
+}
+
+.lang-option .lang-option-check {
+    color: var(--accent);
+}
+
+/* Hidden, not removed, so both labels start at the same x. */
+.lang-option:not(.active) .lang-option-check {
+    visibility: hidden;
 }
 
 .btn-new-project {
@@ -489,7 +524,6 @@ body {
     cursor: pointer;
     font-weight: 500;
     white-space: nowrap;
-    margin-top: 4px;
 }
 
 .btn-new-project:hover {
@@ -827,6 +861,13 @@ body {
     white-space: nowrap;
 }
 
+/* The flags chip and the clean chip on both list pages ship rendered and are
+   toggled by JS as the category picker changes; `display: inline-block` above
+   would otherwise beat the UA stylesheet's rule for [hidden]. */
+.badge[hidden] {
+    display: none;
+}
+
 .badge-review {
     background: var(--ann-word-choice-badge);
     color: var(--ann-word-choice-color);
@@ -835,11 +876,6 @@ body {
 .badge-footnote {
     background: var(--ann-footnote);
     color: var(--ann-footnote-color);
-}
-
-.badge-flag {
-    background: var(--ann-flag-badge);
-    color: var(--ann-flag-color);
 }
 
 .badge-warn {
@@ -1727,12 +1763,15 @@ body {
     --review-address: #5cc26a;        --review-address-bg: rgba(92, 194, 106, 0.24);
 }
 
-[data-theme="dark"] .review-types-popup {
+[data-theme="dark"] .review-types-popup,
+[data-theme="dark"] .card-menu-popup {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
-/* Chapter-list controls (top-bar toggle + popup) */
-.review-types-popup {
+/* Anchored popup chrome, shared by the chapter-list/home pickers and the
+   project card's ⋮ menu. Each sits inside a position:relative container. */
+.review-types-popup,
+.card-menu-popup {
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
@@ -1743,6 +1782,28 @@ body {
     border: 1px solid var(--border);
     border-radius: 10px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* Two short labels — size to the longest one instead of the pickers' 200px.
+   The items carry the padding, so the panel only holds a hairline of its own. */
+.card-menu-popup {
+    min-width: 0;
+    width: max-content;
+    padding: 5px;
+}
+
+/* Both home-page pickers sit at the *left* end of the filter row, so their
+   popups hang off the left edge; the shared right:0 anchor, meant for the
+   chapter list's right-aligned topbar, would push them off-screen. */
+.filter-statuses .review-types-popup,
+.filter-categories .review-types-popup {
+    right: auto;
+    left: 0;
+}
+
+/* Statuses have no per-category color, so drop the picker's leading dot. */
+.filter-statuses .review-type-check span::before {
+    display: none;
 }
 
 .review-types-popup-title {

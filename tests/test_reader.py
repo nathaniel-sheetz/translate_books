@@ -64,6 +64,27 @@ def _write_reviewed(proj_dir, chapter_ids):
     )
 
 
+def _write_findings(proj_dir, chunk_id):
+    """One coded finding and one judge finding on a chunk — two flags, two categories."""
+    from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocation
+    from web_ui.evaluations import merge_judge_result, save_chunk_evaluation
+
+    save_chunk_evaluation(
+        proj_dir, chunk_id, results=[], aggregated={},
+        normalized_issues=[NormalizedIssue(
+            eval_name="blacklist", eval_version="1.0.0", issue_index=0, severity="error",
+            message="'negro': flagged term", suggestion="reconsider",
+            location=NormalizedLocation(
+                raw="char 3-8", side="target", char_start=3, char_end=8, match="gato",
+            ),
+        )],
+    )
+    merge_judge_result(proj_dir, chunk_id, "dialogue", {
+        "eval_name": "dialogue", "eval_version": "1.0.0",
+        "issues": [{"severity": "warning", "message": "use raya", "location": "El perro."}],
+    })
+
+
 def _write_config(proj_dir, **config):
     (proj_dir / "project.json").write_text(
         json.dumps(config, ensure_ascii=False), encoding="utf-8"
@@ -81,6 +102,40 @@ class TestReaderProjectList:
         monkeypatch.setattr(app_module, "_get_projects_dir", lambda: tmp_path / "nonexistent")
         rv = client.get("/read/")
         assert rv.status_code == 200
+
+    def test_card_shows_setup_gaps_not_the_old_status_rows(self, client, project_with_alignment):
+        # The fixture project has neither a style guide nor a glossary and has
+        # no chunks, so all three "something is missing" chips show and the
+        # retired ✓/✗ status table is gone.
+        html = client.get("/read/").data.decode("utf-8")
+        assert "No style guide" in html
+        assert "No glossary" in html
+        assert "Not chunked" in html
+        assert 'class="project-status"' not in html
+        assert 'class="status-row"' not in html
+
+    def test_card_hides_work_chips_before_translation(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert "project-work-chips" not in html
+        assert "Nothing pending" not in html
+
+    def test_category_picker_rendered_in_filter_bar(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert 'id="review-types-popup"' in html
+        assert html.count('class="review-type-cb"') == 6
+
+    def test_status_picker_replaced_the_filter_buttons(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert 'id="status-filter-popup"' in html
+        assert html.count('class="status-filter-cb"') == 4
+        # The old one-button-per-status bar is gone.
+        assert 'data-status="all"' not in html
+        assert 'class="filter-btn active"' not in html
+
+    def test_home_page_js_is_external(self, client, project_with_alignment):
+        html = client.get("/read/").data.decode("utf-8")
+        assert "reader_projects.js" in html
+        assert "btn-create-project').addEventListener" not in html
 
 
 class TestReaderChapterList:
@@ -107,6 +162,15 @@ class TestReaderChapterList:
         assert "badge-flag" not in html
         assert "3 to review" in html
 
+    def test_unknown_annotation_type_counts_as_to_review(self, client, project_with_alignment):
+        # Legacy/typo'd types coerce to flag — same rule as the home-card rollup.
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "typo_legacy"},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        assert "1 to review" in rv.data.decode("utf-8")
+
     def test_footnote_and_review_note_on_one_sentence_both_count(self, client, project_with_alignment):
         # Two annotations at the same es_idx are distinct records (distinct
         # sub_ids). Keying the badge counts on (chapter_id, es_idx) alone
@@ -120,7 +184,7 @@ class TestReaderChapterList:
         assert rv.status_code == 200
         html = rv.data.decode("utf-8")
         assert "1 to review" in html
-        assert "1 fn" in html
+        assert "0/1 notes" in html
 
     def test_two_footnotes_on_one_sentence_count_as_two(self, client, project_with_alignment):
         # Badge counts are annotation *records*, not unique sentences — the same
@@ -132,7 +196,40 @@ class TestReaderChapterList:
         rv = client.get("/read/test-project")
         assert rv.status_code == 200
         html = rv.data.decode("utf-8")
-        assert "2 fn" in html
+        assert "0/2 notes" in html
+
+    def test_notes_badge_counts_written_notes_against_the_total(self, client, project_with_alignment):
+        # A footnote mark carrying nothing but its [anchor] is dropped from the
+        # built EPUB (src/endnotes.py), so the badge is written-of-total: 1/3
+        # says two notes are still owed.
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote",
+             "sub_id": "a", "content": "Sancerre is a Loire white."},
+            {"chapter_id": "chapter_01", "es_idx": 1, "type": "footnote",
+             "sub_id": "b", "content": "[Sancerre]"},
+            {"chapter_id": "chapter_01", "es_idx": 2, "type": "footnote",
+             "sub_id": "c", "content": ""},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "1/3 notes" in html
+
+    def test_all_notes_written_shows_a_full_fraction(self, client, project_with_alignment):
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote",
+             "sub_id": "a", "content": "A gloss."},
+            {"chapter_id": "chapter_01", "es_idx": 1, "type": "footnote",
+             "sub_id": "b", "content": "Another gloss."},
+        ])
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "2/2 notes" in html
+        # Written notes are a record, not outstanding work, so they do not block
+        # the clean chip.
+        assert "Nothing pending" in html
 
     def test_unparseable_annotation_line_does_not_break_chapter_list(self, client, project_with_alignment):
         # A half-written line must never 500 the whole chapter list.
@@ -145,11 +242,11 @@ class TestReaderChapterList:
         assert rv.status_code == 200
         html = rv.data.decode("utf-8")
         assert "1 to review" in html
-        assert "1 fn" in html
+        assert "0/1 notes" in html
 
-    def test_reviewed_chapter_always_shows_reviewed_badge(self, client, project_with_alignment):
-        # A reviewed chapter shows the "reviewed" badge even with outstanding
-        # annotations (previously gated on total_ann == 0).
+    def test_reviewed_chapter_drops_the_unread_badge(self, client, project_with_alignment):
+        # "unread" now means exactly "not marked reviewed", and the standalone
+        # "reviewed" badge is gone — its absence is what says the chapter is read.
         _write_annotations(project_with_alignment, [
             {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice"},
         ])
@@ -157,9 +254,60 @@ class TestReaderChapterList:
         rv = client.get("/read/test-project")
         assert rv.status_code == 200
         html = rv.data.decode("utf-8")
-        assert "badge-clean" in html
-        assert ">reviewed<" in html
         assert "badge-unread" not in html
+        assert ">reviewed<" not in html
+        # Still an open annotation, so nothing is "pending"-free yet.
+        assert "1 to review" in html
+        assert "Nothing pending" not in html
+
+    def test_unread_badge_shows_alongside_outstanding_work(self, client, project_with_alignment):
+        # The old heuristic hid "unread" as soon as a chapter had any annotation.
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice"},
+        ])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "badge-unread" in html
+        assert "1 to review" in html
+
+    def test_clean_chip_on_a_reviewed_chapter_with_nothing_outstanding(self, client, project_with_alignment):
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "Nothing pending" in html
+        assert "badge-unread" not in html
+
+    def test_no_clean_chip_while_a_note_is_unwritten(self, client, project_with_alignment):
+        _write_annotations(project_with_alignment, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote", "content": ""},
+        ])
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "0/1 notes" in html
+        assert "Nothing pending" not in html
+
+    def test_alignment_confidence_badge_is_gone(self, client, project_with_alignment):
+        # Confidence is not actionable from the chapter list, so the badge went
+        # away; coverage gaps, which are, kept theirs.
+        align_file = project_with_alignment / "alignments" / "chapter_01.json"
+        data = json.loads(align_file.read_text(encoding="utf-8"))
+        data["high_confidence_pct"] = 42.0
+        align_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "aligned" not in html
+
+    def test_chapter_list_js_is_external(self, client, project_with_alignment):
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert "reader_chapters.js" in html
+        assert "window.__reader_chapters" in html
+        assert "reader_review:" not in html   # the localStorage key moved into the script
 
     def test_coverage_gap_badge_rendered(self, client, project_with_alignment):
         """A chapter with untranslated source runs must be badged.
@@ -182,11 +330,19 @@ class TestReaderChapterList:
         html = rv.data.decode("utf-8")
         assert "1 gap" in html
         assert "749" in html
-        # high_confidence_pct is 100 here, so the confidence badge stays away —
-        # proving the gap badge is what surfaces the omission.
-        assert "% aligned" not in html
-        # A chapter with missing prose is not "unread".
-        assert "badge-unread" not in html
+
+    def test_gap_blocks_the_clean_chip_on_a_reviewed_chapter(self, client, project_with_alignment):
+        align_file = project_with_alignment / "alignments" / "chapter_01.json"
+        data = json.loads(align_file.read_text(encoding="utf-8"))
+        data["coverage"] = {"gap_count": 1, "en_orphan_chars": 749}
+        align_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert "1 gap" in html
+        assert "Nothing pending" not in html
 
     def test_no_gap_badge_when_coverage_clean(self, client, project_with_alignment):
         rv = client.get("/read/test-project")
@@ -195,6 +351,44 @@ class TestReaderChapterList:
         # Match the badge's title text — a bare "gap" also hits the CSS `gap:8px`.
         assert "characters of source text with no translation" not in html
         assert "badge-unread" in html
+
+    def test_flags_badge_counts_findings_in_the_chapter(self, client, project_with_alignment):
+        # Evaluator and judge findings are bucketed per chapter and shipped with
+        # the row as data-flags, so reader_chapters.js can re-sum them when the
+        # category picker changes without a refetch.
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        html = rv.data.decode("utf-8")
+        assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
+        assert '"blacklist": 1' in html and '"dialogue": 1' in html
+
+    def test_flags_badge_respects_the_category_cookie(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        client.post("/api/set-review-types", json={"types": ["dialogue"]})
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
+        # Still shipped in full so unticking the box re-sums without a reload.
+        assert '"blacklist": 1' in html
+
+    def test_flags_badge_hidden_when_the_chapter_is_clean(self, client, project_with_alignment):
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert "chapter-chip-flags" in html   # present but hidden, for the JS
+        assert '<span class="chip-flag-count">0</span>' in html
+        assert "chapter-chip-flags\" hidden" in html
+
+    def test_flags_block_the_clean_chip(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+        html = client.get("/read/test-project").data.decode("utf-8")
+        # Server-rendered hidden, and reader_chapters.js flips it back if the
+        # user unticks every category the findings fall into.
+        assert 'chapter-chip-clean" hidden' in html
+
+    def test_findings_in_another_chapter_do_not_leak(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_02_chunk_000")
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert '<span class="chip-flag-count">0</span>' in html
 
     def test_spanish_title_shown_when_lang_es(self, client, project_with_alignment):
         # With the UI language set to Spanish, the chapters header uses the
