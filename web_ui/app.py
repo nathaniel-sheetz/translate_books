@@ -7,6 +7,7 @@ Provides the pipeline dashboard and bilingual reader:
 - Bilingual sentence-aligned reader with annotations and corrections
 """
 
+import ipaddress
 import json
 import math
 import re
@@ -87,6 +88,17 @@ def _strip_json_fences(text: str) -> str:
 _PROJECT_ROOT = Path(__file__).parent.parent
 
 
+def _read_version() -> str:
+    """Read VERSION once at import so /healthz never touches disk."""
+    try:
+        return (_PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+_VERSION = _read_version()
+
+
 # ============================================================================
 # Flask Routes
 # ============================================================================
@@ -96,6 +108,16 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 def index():
     """Redirect to the project list."""
     return redirect("/read/")
+
+
+@app.route("/healthz")
+def healthz():
+    """Liveness probe for the service task, the watchdog, and post-deploy checks.
+
+    Deliberately cheap — no project scanning, no disk access. A slow response
+    here means the process itself is wedged, not that a project is large.
+    """
+    return jsonify({"ok": True, "version": _VERSION})
 
 
 # ============================================================================
@@ -6056,26 +6078,66 @@ def serve_edit_report(project_id, filename):
     return send_from_directory(str(reports_dir), filename)
 
 
-def _print_access_urls(port: int) -> None:
-    import os, socket
-    # Werkzeug's reloader runs this block twice (parent + child). Only print in
-    # the child, identified by WERKZEUG_RUN_MAIN=true.
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+def _is_tailnet_addr(addr: str) -> bool:
+    """True for Tailscale's 100.64.0.0/10 CGNAT range."""
+    try:
+        return ipaddress.ip_address(addr) in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return False
+
+
+def _print_access_urls(port: int, host: str = "0.0.0.0") -> None:
+    """Print the startup banner.
+
+    The reloader guard is the caller's business — scripts/serve.py runs under
+    waitress, where WERKZEUG_RUN_MAIN is never set and an early return would
+    swallow the banner entirely.
+    """
+    import socket
+
+    print("=" * 70)
+    print(f"  Translation Web UI — running on port {port}")
+    print("=" * 70)
+    print(f"  Local:    http://localhost:{port}")
+    if host in ("127.0.0.1", "localhost", "::1"):
+        print("  Bound to loopback only — `tailscale serve` is the door in.")
+        print("  Run `tailscale serve status` for the https://<machine>.<tailnet>.ts.net name.")
+        print("=" * 70)
         return
     try:
         addrs = sorted(set(socket.gethostbyname_ex(socket.gethostname())[2]))
     except socket.gaierror:
         addrs = []
-    print("=" * 70)
-    print(f"  Translation Web UI — running on port {port}")
-    print("=" * 70)
-    print(f"  Local:    http://localhost:{port}")
-    for addr in addrs:
+    lan = [a for a in addrs if not _is_tailnet_addr(a)]
+    tailnet = [a for a in addrs if _is_tailnet_addr(a)]
+    for addr in lan:
         print(f"  Network:  http://{addr}:{port}")
-    print("  (Phones/tablets on the same Wi-Fi: pick a Network URL above.)")
+    if lan:
+        print("  (Phones/tablets on the same Wi-Fi: pick a Network URL above.)")
+    for addr in tailnet:
+        print(f"  Tailnet:  http://{addr}:{port}")
+    if tailnet:
+        print("  (Tailnet addresses reach this machine from anywhere via Tailscale.)")
     print("=" * 70)
+
+
+def _debug_enabled() -> bool:
+    """Whether to run the dev server with Werkzeug's debugger.
+
+    Off unless BOOKS_DEBUG explicitly opts in: the debugger is an RCE console,
+    and the unattended service must never be able to acquire one by accident.
+    """
+    import os
+
+    return os.environ.get("BOOKS_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 if __name__ == "__main__":
-    _print_access_urls(5000)
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    import os
+
+    debug = _debug_enabled()
+    # With debug on, the reloader runs this block twice (parent + child); only
+    # the child, identified by WERKZEUG_RUN_MAIN, should print.
+    if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _print_access_urls(5000, host="0.0.0.0")
+    app.run(debug=debug, host="0.0.0.0", port=5000)

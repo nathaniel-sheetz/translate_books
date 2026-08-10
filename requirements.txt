@@ -19,6 +19,7 @@ rich>=13.0.0
 
 # Web UI
 Flask>=3.0.0
+waitress>=3.0.0       # Production WSGI server for scripts/serve.py (Windows-friendly)
 
 # Ingestion
 requests>=2.28.0       # HTTP fetch for Gutenberg importer
