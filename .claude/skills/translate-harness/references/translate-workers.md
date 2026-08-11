@@ -215,9 +215,11 @@ cheaper translate pass changes the prose itself. Reduced effort on literary
 prose is **unmeasured** — the measured `low`/`medium` numbers in
 `docs/LLM_PROVIDERS.md` are judge-wave data and do not transfer. Never lower
 this silently; if the user wants a cheaper run, say what is untested about it.
-Pin a Cursor model id at prepare time (manifest `worker_model`), e.g.
-`translate-prepare --worker-model grok-4.5` or `--worker-model auto`. Or pass
-`--cli cursor` on the fan-out itself (worker model still comes from the manifest).
+On a Cursor book an unpinned `worker_model` inherits the model selected in
+`~/.cursor/cli-config.json`; override it at prepare time (manifest
+`worker_model`), e.g. `translate-prepare --worker-model grok-4.5` or
+`--worker-model auto`. Or pass `--cli cursor` on the fan-out itself (worker model
+still comes from the manifest).
 
 **Claude profile (default):** each process is effectively
 `claude -p` with the body (or full prompt) on stdin, optional `--system-prompt-file <preamble_path>`,
@@ -227,19 +229,27 @@ split is used only when `preamble + body` still equals `prompt.txt`; otherwise f
 to the full prompt (no cache).
 
 **Cursor profile (`--cli cursor` / `headless_cli=cursor`):** each process is
-`cursor-agent -p --trust --mode ask --model <worker_model> --output-format text` with the
-**full prompt on stdin** (no `--system-prompt-file`, no `--tools`). Auth is the interactive
-`cursor-agent login` session — no `CURSOR_API_KEY`, no metered per-call spend. Pin
-`worker_model` to a Cursor id (`grok-4.5`, `auto`, …); a Claude alias with cursor is almost
-certainly a misconfiguration (warning only).
+`cursor-agent -p --trust --mode ask --model <worker_model> --output-format json` with the
+**full prompt on stdin** (no `--system-prompt-file`, no `--tools`; `--effort` and
+`headless_extra_flags` are Claude argv and are dropped). Auth is the interactive
+`cursor-agent login` session — no `CURSOR_API_KEY`, no metered per-call spend. `worker_model`
+defaults to your selected Cursor model; a Claude alias with cursor is almost certainly a
+misconfiguration (warning only), and an id the CLI outright rejects fails the wave before it
+spawns anything.
+
+Cursor waves report `usage` like Claude ones, but the shape differs sharply: **~17.2k fixed
+tokens per process** against Claude's ~3.9k, and no prompt cache to configure (no
+`--system-prompt-file`, no TTL knob, `cacheWriteTokens` always 0 — a `.cursor/rules`
+workspace-rule placement was probed and changed nothing). Fewer processes or a smaller prompt
+are the only levers; the `overhead_ratio` on each wave is what that decision should rest on.
 
 **Subscription enforcement (both profiles).** The child env is scrubbed of every metered
 credential — the whole `ANTHROPIC_*` namespace, the `CLAUDE_CODE_USE_*` third-party switches,
 `CURSOR_API_KEY` — while `CLAUDE_CODE_OAUTH_TOKEN` survives, since that *is* subscription auth.
-On the Claude profile a `claude auth status --json` preflight then runs once per wave and blocks
-it outright unless a subscription is confirmed; there is no override flag. **Caveat:** no verified
-`cursor-agent` auth-status command exists, so the Cursor profile gets the scrub but not the
-preflight. Full rationale in `docs/LLM_PROVIDERS.md`.
+An auth preflight then runs once per wave and blocks it outright on failure, with no override
+flag: `claude auth status --json` (a *routing* probe — which credential gets billed) or
+`cursor-agent status --format json` (a *liveness* probe; with no metered Cursor path in this
+repo, the scrub is the billing half). Full rationale in `docs/LLM_PROVIDERS.md`.
 
 Headless does **not** use extended "think hard" thinking. After the wave, commit as below — the
 prepare→commit seam is unchanged (`committed`/`failed`/`missing`).

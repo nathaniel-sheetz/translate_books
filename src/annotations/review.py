@@ -45,7 +45,6 @@ from src.judges.llm_io import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_WORKER_MODEL = "sonnet"
 _DEFAULT_BATCH_SIZE = 5
 _DEFAULT_COST_LIMIT = 0.50
 
@@ -174,7 +173,8 @@ _PREPARE_SCHEMA = {
     "types": "annotation types included",
     "chapters": "chapter ids included, or null for the whole book",
     "skipped": "annotations gated out before any LLM call: {key, type, reason, content}",
-    "worker_model": "model tier to pin each spawned annotation-worker to (default sonnet)",
+    "worker_model": "model tier to pin each spawned annotation-worker to; unset, it "
+    "defaults per headless_cli (sonnet on claude, your selected Cursor model on cursor)",
     "batch_size": "recommended workers per wave / default headless concurrency",
     "usage_summary": "{targets, workers, skipped, by_type, worker_model, batch_size, "
     "estimated_api_cost, headless_effort, headless_effort_source}",
@@ -201,9 +201,17 @@ def prepare(
 
     Re-preparing clears the drafts for the entries it re-renders so ``commit``
     never reads an orphan; pass ``keep_drafts`` to protect work still in flight.
+
+    ``worker_model`` unset defaults per the book's ``headless_cli`` — see
+    :func:`~src.harness.headless.default_worker_model`.
     """
+    from src.harness import state as hstate
+    from src.harness.headless import default_worker_model
+
     project_dir = Path(project_dir)
-    worker_model = worker_model or _DEFAULT_WORKER_MODEL
+    worker_model = worker_model or default_worker_model(
+        str(hstate.load_config(project_dir).get("headless_cli") or "claude")
+    )
     batch_size = (
         _DEFAULT_BATCH_SIZE if batch_size is None else max(1, int(batch_size))
     )
@@ -363,8 +371,9 @@ _FANOUT_SCHEMA = {
     "cache_read, prompt_sent, overhead, overhead_ratio, cost_equiv_usd, wall_s, "
     "side_calls}. 'prompt_sent' is the annotation content we meant to send; 'overhead' is "
     "billed input minus that (per-process context the jobs pay before reading a word of "
-    "the book) and 'overhead_ratio' is its share. Absent when the CLI reported no usage "
-    "(Cursor runs on --output-format text). Per-job detail goes to "
+    "the book) and 'overhead_ratio' is its share. BOTH CLIs report this now; expect a far "
+    "larger overhead share on cursor (~17.2k fixed per process vs ~3.9k on claude). Absent "
+    "only when the CLI reported no usage at all. Per-job detail goes to "
     ".harness/annotations/usage.jsonl, never into this payload",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
@@ -406,7 +415,11 @@ def fanout(
     ``cache`` is a per-run override of ``headless_prompt_cache``.
     """
     from src.harness import state as hstate
-    from src.harness.headless import run_headless_wave, warn_cursor_claude_model
+    from src.harness.headless import (
+        default_worker_model,
+        run_headless_wave,
+        warn_cursor_claude_model,
+    )
 
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
@@ -432,7 +445,7 @@ def fanout(
         if missing_ids:
             return _fanout_error(f"keys not in manifest: {sorted(missing_ids)}")
 
-    worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
+    worker_model = doc.get("worker_model") or default_worker_model(cli_name)
     model_warning = warn_cursor_claude_model(cli_name, worker_model)
 
     if concurrency is None:

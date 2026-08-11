@@ -50,9 +50,9 @@ A judge runs one of two interchangeable ways (the same split as translate-harnes
   to a logged-in CLI (`claude -p` or `cursor-agent -p`) with `--cli {claude,cursor}`.
   Cursor uses subscription auth (`cursor-agent login`); no `CURSOR_API_KEY` — now
   enforced by the launcher's env scrub rather than by convention. The shell-out
-  runs with every metered credential stripped from the child environment, and on
-  the Claude profile a `claude auth status` preflight blocks the wave unless a
-  subscription is confirmed (`docs/LLM_PROVIDERS.md`).
+  runs with every metered credential stripped from the child environment, and an
+  auth preflight (`claude auth status` or `cursor-agent status --format json`)
+  blocks the wave unless a login is confirmed (`docs/LLM_PROVIDERS.md`).
   Task workers remain Claude-only.
 
 The two share one seam: every judge implements `build_prompt(target, context)` and
@@ -83,6 +83,13 @@ a 2026-07-30 wave paid a large fixed per-process cost that nothing could report.
 `prepare`'s `usage_summary` uses the same log to self-calibrate
 `estimated_headless_tokens`, so the usage gate quotes the backend being chosen
 rather than the API price of the one declined.
+
+**Both CLI families report usage** (Cursor since 2026-08-11; it spells the fields
+`inputTokens` / `cacheReadTokens` / `cacheWriteTokens`). The baseline is per CLI —
+~3.9k fixed tokens per `claude` process against ~17.2k per `cursor-agent` one —
+and `baseline_tokens()` filters the log to the family being estimated, because a
+median across a 4.4× gap describes neither. See `docs/LLM_PROVIDERS.md` for the
+measurements and for why Cursor has no prompt cache to configure.
 
 ## Layout
 

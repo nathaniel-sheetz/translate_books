@@ -810,12 +810,13 @@ def test_prepare_reports_headless_tokens_beside_the_api_price(tmp_path):
     summary = out["usage_summary"]
 
     assert summary["estimated_prompt_tokens"] > 0
-    # Untouched machine: the documented baseline probe, not a silent zero.
-    assert summary["headless_baseline_tokens"] == usage.DEFAULT_BASELINE_TOKENS
+    # Untouched machine: the documented baseline probe for this book's CLI
+    # (headless_cli defaults to claude), not a silent zero.
+    claude_baseline = usage.DEFAULT_BASELINE_TOKENS["claude"]
+    assert summary["headless_baseline_tokens"] == claude_baseline
     assert summary["headless_baseline_source"].startswith("default:")
     assert summary["estimated_headless_tokens"] == (
-        summary["estimated_prompt_tokens"]
-        + summary["workers"] * usage.DEFAULT_BASELINE_TOKENS
+        summary["estimated_prompt_tokens"] + summary["workers"] * claude_baseline
     )
     # The API figure is still there — it just no longer stands alone.
     assert "estimated_api_cost" in summary
@@ -829,13 +830,58 @@ def test_prepare_baseline_self_calibrates_from_the_usage_log(tmp_path):
     log = subagent.usage_log_path(project)
     log.parent.mkdir(parents=True, exist_ok=True)
     row = json.dumps(
-        {"input": 0, "cache_creation": 4200, "cache_read": 0, "prompt_sent": 0, "rc": 0}
+        {"cli": "claude", "input": 0, "cache_creation": 4200, "cache_read": 0,
+         "prompt_sent": 0, "rc": 0}
     )
     log.write_text((row + "\n") * 4, encoding="utf-8")
 
     summary = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")["usage_summary"]
     assert summary["headless_baseline_tokens"] == 4200
     assert summary["headless_baseline_source"].startswith("measured:")
+
+
+def test_prepare_baseline_ignores_the_other_cli_s_rows(tmp_path):
+    """One usage.jsonl, two families ~4.4x apart: a mixed median describes neither.
+
+    A claude book that has also run cursor waves must still quote the claude
+    number — before the per-cli filter, four cursor rows dragged its estimate
+    from ~3.9k to ~19k and the gate quoted that at the moment consent was given.
+    """
+    project, cid = _project_with_chunk(tmp_path)
+    log = subagent.usage_log_path(project)
+    log.parent.mkdir(parents=True, exist_ok=True)
+
+    def _row(cli: str, overhead: int) -> str:
+        return json.dumps({
+            "cli": cli, "input": 0, "cache_creation": overhead, "cache_read": 0,
+            "prompt_sent": 0, "rc": 0,
+        })
+
+    log.write_text(
+        "".join([_row("cursor", 19_000) + "\n"] * 4 + [_row("claude", 4_200) + "\n"] * 4),
+        encoding="utf-8",
+    )
+    summary = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")["usage_summary"]
+    assert summary["headless_baseline_tokens"] == 4200
+    assert "claude" in summary["headless_baseline_source"]
+
+
+def test_prepare_on_a_cursor_book_quotes_the_cursor_baseline(tmp_path):
+    """~17.2k per process, not the ~3.9k that priced every past Cursor wave."""
+    project, cid = _project_with_chunk(tmp_path)
+    from src.harness import state as hstate
+
+    cfg = hstate.load_config(project)
+    cfg["headless_cli"] = "cursor"
+    hstate.save_config(project, cfg)
+
+    summary = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")["usage_summary"]
+    assert summary["headless_baseline_tokens"] == usage.DEFAULT_BASELINE_TOKENS["cursor"]
+    assert "2026-08-10" in summary["headless_baseline_source"]
+    assert summary["estimated_headless_tokens"] == (
+        summary["estimated_prompt_tokens"]
+        + summary["workers"] * usage.DEFAULT_BASELINE_TOKENS["cursor"]
+    )
 
 
 def test_fanout_estimate_spawns_nothing(tmp_path):
@@ -849,7 +895,7 @@ def test_fanout_estimate_spawns_nothing(tmp_path):
     assert out["wrote"] == []
     assert out["estimate"]["jobs"] == 1
     assert out["estimate"]["projected_tokens"] == (
-        out["estimate"]["prompt_tokens"] + usage.DEFAULT_BASELINE_TOKENS
+        out["estimate"]["prompt_tokens"] + usage.DEFAULT_BASELINE_TOKENS["claude"]
     )
     # The argv is included so a bad headless_extra_flags entry is visible before
     # a wave commits to it, not after N jobs have failed.

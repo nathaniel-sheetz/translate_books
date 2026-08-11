@@ -9,21 +9,41 @@ The translate-harness / judge-review **headless** backend can drive either:
 | CLI | Binary | Auth | Config | Enforced by |
 |---|---|---|---|---|
 | Claude Code | `claude` | `claude` login session | `headless_cli=claude` (default) | env scrub + auth preflight |
-| Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` | env scrub only |
+| Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` | env scrub + auth preflight |
+
+The two preflights answer different questions, on purpose. `claude auth status
+--json` is a **routing** probe — which credential would be billed — because the
+Claude path has a metered twin to be confused with. `cursor-agent status --format
+json` is a **liveness** probe: there is no metered Cursor code path in this repo,
+so the billing-safety half is carried entirely by the `CURSOR_API_KEY` scrub, and
+what the probe adds is failing once instead of once per job. Both fail closed.
+
+`worker_model` unset defaults per CLI: `sonnet` on claude, and on cursor whatever
+`~/.cursor/cli-config.json` has selected (`selectedModel.modelId` plus its
+parameters, composed as `grok-4.5[effort=low,fast=false]`; Cursor's own "Auto"
+becomes `auto`). That is the model the interactive Cursor orchestrator is already
+running on, so an unpinned wave no longer defaults to a Claude alias that only
+produced a warning.
 
 ```bash
 python scripts/harness.py config-set --project projects/<slug> --key headless_cli --value cursor
-# Pin a Cursor model id at translate-prepare / judge-prepare time:
+# Override the inherited model at translate-prepare / judge-prepare time:
 python scripts/harness.py translate-prepare --project projects/<slug> --worker-model grok-4.5
-# or: --worker-model auto
+# or: --worker-model auto, or any `cursor-agent models` id, or the bracket form.
 ```
+
+A Cursor wave validates `--model` before it spawns anything (both checks are
+token-free), so a typo costs one message instead of one dead process per job.
+Note that `cursor-agent models` is **incomplete** — `grok-4.5` is accepted and
+unlisted — so an unlisted id is checked against the CLI itself rather than
+rejected, and every ambiguous outcome passes.
 
 There is **no** `CURSOR_API_KEY` path for the harness — subscription login only,
 mirroring how `claude -p` uses the Claude subscription. Install the Cursor CLI
 separately (`https://cursor.com/install`) and run `cursor-agent login` once.
 See `references/translate-workers.md` and `judge-review/SKILL.md`.
 
-### Wave telemetry (Claude profile)
+### Wave telemetry (both profiles)
 
 Every `fanout` returns a `usage` rollup — `input`/`output`, the `cache_creation`
 vs `cache_read` split, `prompt_sent` (the content we meant to send) and
@@ -35,14 +55,48 @@ disk rather than entering an agent's context.
 This exists because the numbers were being computed and thrown away: the
 launcher asked for `--output-format text`, which discards the `usage` block, so a
 2026-07-30 judge wave spent ~56% of its input tokens on fixed per-process
-overhead with nothing able to report it. The Claude profile now asks for `json`
-and unwraps the envelope; anything that is not an envelope still passes through
-as prose, so a CLI that ignores the flag degrades to the old behavior.
+overhead with nothing able to report it. Both profiles now ask for `json` and
+unwrap the envelope; anything that is not an envelope still passes through as
+prose, so a CLI that ignores the flag degrades to the old behavior.
 
-**Cursor stays on `--output-format text`**, so Cursor waves report no `usage` —
-its envelope keys are unverified and guessing at them would produce confident
-wrong numbers. `headless_extra_flags` / `headless_effort_<type>` (config) are
-likewise Claude-only.
+Cursor spells the same fields differently (`inputTokens`, `outputTokens`,
+`cacheReadTokens`, `cacheWriteTokens`); the parser accepts both vocabularies.
+Its `inputTokens` excludes cache reads, exactly as Claude's does, so the shared
+`input + cache_creation + cache_read` sum is billed input on either family.
+
+**Per-process overhead is per CLI, and far apart:**
+
+| CLI | fixed prefix per job | provenance |
+|---|---|---|
+| `claude` | ~3,900 tok | 2026-07-30 baseline probe |
+| `cursor` | ~17,200 tok | 2026-08-10 Cursor probe (confirmed at ~18.0k on a real 2026-08-11 wave, overhead ratio 0.78) |
+
+`baseline_tokens()` therefore medians **only the rows of the CLI being
+estimated** — one `usage.jsonl` holds every family's rows, and an unfiltered
+median over a 4.4× gap describes neither.
+
+`headless_extra_flags` / `headless_effort_<type>` (config) remain Claude-only:
+they are Claude argv and are dropped on a Cursor wave.
+
+#### There is no Cursor prompt cache to configure
+
+Stated as a measured fact so it stops reading as an open item. `cursor-agent`
+has no `--system-prompt-file`, no cache-TTL env knob, and reported
+`cacheWriteTokens: 0` on every probe — the client cannot write, pin, or price an
+entry. Server-side prefix caching does fire opportunistically (`cacheReadTokens`
+of 0 / 256 / 1664 / 7680 across identical-prefix calls), which is why Cursor
+waves keep `warm_first` and now log `cache_read` beside `warm`: the question is
+answerable from two waves of `usage.jsonl` rather than by argument. Relocating
+the preamble into a `.cursor/rules` always-apply file via `--workspace` was
+probed on 2026-08-11 (3 runs per arm, same model and body) and moved cache reads
+not at all — median 5,312 in both arms — so `_fold_system_prompt` stays as it is.
+
+The only client-side levers on the ~17.2k fixed prefix are **fewer processes** or
+**a smaller prompt**. That is a description of the CLI, not a recommendation to
+group: grouping trades per-target reasoning depth for fewer prefixes, and with
+`usage` reported per wave that trade is now the operator's to make per wave.
+
+Cursor waves record `cache: null` on every row, since no mode was requested.
 
 #### `headless_effort_<type>`
 
@@ -181,23 +235,21 @@ layers. Neither subsumes the other:
    auth (`claude setup-token`). This is a denylist, so `PATH`, `PATHEXT` and the
    rest of the ordinary runtime survive.
 2. **Auth preflight** (`subscription_auth_error`) — once per wave, before any
-   job, the harness runs `claude auth status --json` in that same scrubbed
-   environment and from the same neutral cwd the workers use. It proceeds only
-   on a confirmed subscription. It **fails closed**: an `apiKeySource`, a
-   third-party `apiProvider`, a logged-out CLI, a non-zero exit or an output
-   shape it does not recognise all block the wave with a top-level `error` and
-   zero jobs run. There is no override flag — metered spend goes through
-   `--backend api`, which is what that backend is for.
+   job, the harness runs a CLI-specific probe in that same scrubbed environment
+   and from the same neutral cwd the workers use. Claude: `claude auth status
+   --json` (a *routing* probe — which credential would be billed). Cursor:
+   `cursor-agent status --format json` (a *liveness* probe — login session
+   present; billing safety is the `CURSOR_API_KEY` scrub, since there is no
+   metered Cursor path). Both **fail closed**: an `apiKeySource`, a third-party
+   `apiProvider`, a logged-out CLI, a non-zero exit or an output shape it does
+   not recognise all block the wave with a top-level `error` and zero jobs run.
+   There is no override flag — metered spend goes through `--backend api`, which
+   is what that backend is for.
 
-Why both: `claude auth status` reports a clean subscription even with
-`ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` set, so only the scrub catches
-endpoint redirection; and an `apiKeyHelper` in a settings file never touches the
-environment, so only the preflight catches that.
-
-**Cursor gap:** there is no verified `cursor-agent` auth-status command, so the
-Cursor profile gets the scrub but not the preflight. Guessing at a command risks
-hard-failing a working setup. The harness has no metered Cursor code path at all,
-which is what makes the gap tolerable.
+Why both layers on Claude: `claude auth status` reports a clean subscription even
+with `ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` set, so only the scrub
+catches endpoint redirection; and an `apiKeyHelper` in a settings file never
+touches the environment, so only the preflight catches that.
 
 The scrub happens at the spawn rather than by removing the key from the parent
 process on purpose: the metered path below genuinely needs `.env`, and a boundary

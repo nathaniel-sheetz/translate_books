@@ -88,14 +88,13 @@ wave, and it is the only path that uses the prompt cache.
 
 **Headless is subscription-only by enforcement.** `fanout` shells out to the
 user's own `claude` / `cursor-agent` binary, so `src/harness/headless.py` scrubs
-every metered credential from the child environment and runs one
-`claude auth status --json` preflight per wave. Unless a subscription is
-confirmed the command returns a top-level `error`, writes nothing and spawns no
-jobs. There is no override flag — metered spend goes through `--backend api`,
-which is what that backend is for. Full rationale, and why both layers are
-load-bearing, in `docs/LLM_PROVIDERS.md`. **Caveat:** there is no verified
-`cursor-agent` auth-status command, so the Cursor profile gets the scrub but not
-the preflight.
+every metered credential from the child environment and runs one auth preflight
+per wave — `claude auth status --json` or `cursor-agent status --format json`.
+Unless a login is confirmed the command returns a top-level `error`, writes
+nothing and spawns no jobs. There is no override flag — metered spend goes
+through `--backend api`, which is what that backend is for. Full rationale, and
+why the two layers answer different questions per CLI, in
+`docs/LLM_PROVIDERS.md`.
 
 That replaced a weaker guarantee, and the failure it prevents is worth recording.
 A real `stormy-misty-s-foal` run died after 15 of 28 jobs with `Credit balance is

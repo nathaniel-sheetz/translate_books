@@ -41,11 +41,14 @@ def test_build_cmd_cursor_ignores_extra_flags():
         "cursor", "cursor-agent", "grok-4.5", None, extra_flags=["--strict-mcp-config"]
     )
     assert "--strict-mcp-config" not in cmd
-    assert cmd[cmd.index("--output-format") + 1] == "text"
+    assert cmd[cmd.index("--output-format") + 1] == "json"
 
 
 def test_build_cmd_cursor_has_no_system_prompt_or_tools():
     cmd = headless._build_cmd("cursor", "cursor-agent", "grok-4.5", "ignored.txt")
+    # json, not text: verified 2026-08-10 that cursor-agent emits the same
+    # {"type":"result", …, "usage":{…}} envelope. On text it computed a ~17.2k
+    # per-process overhead and threw the number away, exactly as claude did.
     assert cmd == [
         "cursor-agent",
         "-p",
@@ -55,7 +58,7 @@ def test_build_cmd_cursor_has_no_system_prompt_or_tools():
         "--model",
         "grok-4.5",
         "--output-format",
-        "text",
+        "json",
     ]
     assert "--system-prompt-file" not in cmd
     assert "--tools" not in cmd
@@ -611,12 +614,86 @@ def test_subscription_auth_error_fails_closed_on_oserror():
     assert "No such file or directory" in err
 
 
-def test_subscription_auth_error_skips_cursor():
-    """No verified cursor-agent probe exists; the scrub is its only guarantee."""
+# Verbatim `cursor-agent status --format json`, 2026.08.04-aaa8809.
+_CURSOR_AUTHENTICATED = {
+    "status": "authenticated",
+    "isAuthenticated": True,
+    "hasAccessToken": True,
+    "hasRefreshToken": True,
+    "userInfo": {
+        "email": "someone@example.com",
+        "userId": 351249343,
+        "firstName": "Someone",
+        "lastName": "Example",
+        "createdAt": "2026-04-21T16:40:15.477Z",
+    },
+}
+
+
+def test_subscription_auth_error_accepts_cursor_authenticated():
     err = headless.subscription_auth_error(
-        "cursor", "cursor-agent", {}, cwd=".", prober=_exploding_prober
+        "cursor", "cursor-agent", {}, cwd=".", prober=_prober(_CURSOR_AUTHENTICATED)
     )
     assert err is None
+
+
+def test_subscription_auth_error_accepts_cursor_status_string_alone():
+    """Either key alone is enough; the CLI has spelled it both ways."""
+    assert headless.subscription_auth_error(
+        "cursor", "cursor-agent", {}, cwd=".",
+        prober=_prober({"status": "authenticated"}),
+    ) is None
+    assert headless.subscription_auth_error(
+        "cursor", "cursor-agent", {}, cwd=".", prober=_prober({"isAuthenticated": True}),
+    ) is None
+
+
+def test_subscription_auth_error_rejects_logged_out_cursor():
+    err = headless.subscription_auth_error(
+        "cursor",
+        "cursor-agent",
+        {},
+        cwd=".",
+        prober=_prober({"status": "unauthenticated", "isAuthenticated": False}),
+    )
+    assert err and "not logged in" in err
+    assert "cursor-agent login" in err
+
+
+def test_subscription_auth_error_cursor_never_echoes_user_info():
+    """The payload carries email / real name / userId; only the verdict keys ship."""
+    payload = {**_CURSOR_AUTHENTICATED, "status": "expired", "isAuthenticated": False}
+    err = headless.subscription_auth_error(
+        "cursor", "cursor-agent", {}, cwd=".", prober=_prober(payload)
+    )
+    assert err
+    assert "someone@example.com" not in err
+    assert "351249343" not in err
+    assert "Someone" not in err
+    assert "expired" in err
+
+
+def test_subscription_auth_error_cursor_fails_closed_on_unknown_shape():
+    err = headless.subscription_auth_error(
+        "cursor", "cursor-agent", {}, cwd=".", prober=_prober({"somethingElse": 1})
+    )
+    assert err and "not logged in" in err
+
+
+def test_subscription_auth_error_cursor_probe_argv():
+    """`status --format json`, not a guess — and reported as itself when it fails."""
+    seen: dict[str, object] = {}
+
+    def probe(argv, *, env, cwd, timeout):
+        seen["argv"] = list(argv)
+        return 1, "", "unknown command 'status'"
+
+    err = headless.subscription_auth_error(
+        "cursor", "cursor-agent", {}, cwd=".", prober=probe
+    )
+    assert seen["argv"] == ["cursor-agent", "status", "--format", "json"]
+    assert err and "cursor-agent status --format json" in err
+    assert "unknown command" in err
 
 
 def test_subscription_auth_probe_uses_neutral_cwd_and_scrubbed_env(tmp_path: Path):
@@ -1080,3 +1157,227 @@ def test_cursor_records_cache_none(tmp_path: Path):
     row = json.loads(log.read_text(encoding="utf-8"))
     assert row["cache"] is None
     assert row["effort"] is None
+
+
+def test_cursor_wave_now_reports_usage(tmp_path: Path):
+    """The whole point of the argv flip: a Cursor wave stops being a blind spot."""
+    log = tmp_path / "usage.jsonl"
+    envelope = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": "translated prose", "duration_ms": 9099,
+        "usage": {"inputTokens": 13874, "outputTokens": 29,
+                  "cacheReadTokens": 5248, "cacheWriteTokens": 0},
+    })
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="grok-4.5",
+        concurrency=1,
+        cli="cursor",
+        runner=lambda *a, **k: (0, envelope, ""),
+        usage_log=log,
+    )
+    assert result["counts"]["wrote"] == 1
+    assert result["usage"]["input"] == 13874
+    assert result["usage"]["cache_read"] == 5248
+    # 100 tokens of real body against 19,122 billed — the ratio is the argument
+    # about how many Cursor processes a wave is worth, now self-reporting.
+    assert result["usage"]["overhead"] == 19_122 - 100
+    row = json.loads(log.read_text(encoding="utf-8"))
+    assert row["cli"] == "cursor" and row["cache_read"] == 5248
+
+
+# ---------------------------------------------------------------------------
+# Cursor model selection + validation
+# ---------------------------------------------------------------------------
+
+
+def _cursor_config(tmp_path: Path, doc) -> Path:
+    path = tmp_path / "cli-config.json"
+    path.write_text(
+        doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8"
+    )
+    return path
+
+
+def test_cursor_default_model_composes_the_bracket_form(tmp_path: Path):
+    cfg = _cursor_config(tmp_path, {
+        "selectedModel": {
+            "modelId": "grok-4.5",
+            "parameters": [
+                {"id": "effort", "value": "low"},
+                {"id": "fast", "value": "false"},
+            ],
+        },
+    })
+    assert headless.cursor_default_model(cfg) == "grok-4.5[effort=low,fast=false]"
+
+
+def test_cursor_default_model_without_parameters(tmp_path: Path):
+    cfg = _cursor_config(tmp_path, {"selectedModel": {"modelId": "gpt-5.2", "parameters": []}})
+    assert headless.cursor_default_model(cfg) == "gpt-5.2"
+
+
+def test_cursor_default_model_maps_cursors_own_auto(tmp_path: Path):
+    """Cursor spells "let me pick" as modelId=default; --model spells it auto."""
+    for model_id in ("default", "auto", ""):
+        cfg = _cursor_config(tmp_path, {"selectedModel": {"modelId": model_id}})
+        assert headless.cursor_default_model(cfg) == "auto"
+
+
+def test_cursor_default_model_never_raises(tmp_path: Path):
+    """A preferences file must not be able to stop a wave."""
+    assert headless.cursor_default_model(tmp_path / "absent.json") == "auto"
+    assert headless.cursor_default_model(_cursor_config(tmp_path, "{not json")) == "auto"
+    assert headless.cursor_default_model(_cursor_config(tmp_path, "[1, 2]")) == "auto"
+    assert headless.cursor_default_model(_cursor_config(tmp_path, {})) == "auto"
+    assert headless.cursor_default_model(
+        _cursor_config(tmp_path, {"selectedModel": "not a dict"})
+    ) == "auto"
+    # Junk parameters are dropped, not rendered into the argv.
+    assert headless.cursor_default_model(_cursor_config(tmp_path, {
+        "selectedModel": {
+            "modelId": "grok-4.5",
+            "parameters": ["nope", {"id": "", "value": 1}, {"id": "effort"},
+                           {"id": "x", "value": {"nested": 1}},
+                           {"id": "fast", "value": False}],
+        },
+    })) == "grok-4.5[fast=false]"
+
+
+def test_default_worker_model_is_a_function_of_the_cli(monkeypatch):
+    assert headless.default_worker_model("claude") == "sonnet"
+    assert headless.default_worker_model("") == "sonnet"
+    monkeypatch.setattr(headless, "cursor_default_model", lambda: "grok-4.5[effort=low]")
+    assert headless.default_worker_model("cursor") == "grok-4.5[effort=low]"
+    # And what it returns never trips the Claude-alias warning it replaced.
+    assert headless.warn_cursor_claude_model(
+        "cursor", headless.default_worker_model("cursor")
+    ) is None
+
+
+def test_warn_cursor_claude_model_strips_bracket_suffix():
+    """A Claude alias with ``[effort=…]`` must still warn — operators paste both forms."""
+    assert headless.warn_cursor_claude_model("cursor", "sonnet[effort=low]")
+    assert headless.warn_cursor_claude_model("cursor", "claude-opus-4")
+    assert headless.warn_cursor_claude_model("cursor", "grok-4.5[effort=low]") is None
+    assert headless.warn_cursor_claude_model("claude", "sonnet[effort=low]") is None
+
+
+def _model_probe(models_out: str, reject: str = ""):
+    """Stub for both token-free model checks: `models`, then the argv probe."""
+    def probe(argv, *, env, cwd, timeout):
+        if argv[1:] == ["models"]:
+            return 0, models_out, ""
+        return 1, "", reject or "Error: No prompt provided for print mode"
+    return probe
+
+
+def test_cursor_model_error_passes_a_listed_id():
+    probe = _model_probe("Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n")
+    assert headless.cursor_model_error("cursor-agent", "auto", probe=probe) is None
+    # The bracket suffix is stripped before the membership test.
+    assert headless.cursor_model_error(
+        "cursor-agent", "gpt-5.2[effort=low,fast=false]", probe=probe
+    ) is None
+
+
+def test_cursor_model_error_passes_an_unlisted_id_the_cli_accepts():
+    """`cursor-agent models` is incomplete: grok-4.5 works and is not in it.
+
+    Verified 2026-08-11. A membership test alone would have hard-failed the very
+    id warn_cursor_claude_model recommends, so absence from the list only
+    triggers the second, authoritative check.
+    """
+    probe = _model_probe("Available models\n\nauto - Auto\ncursor-grok-4.5-high - Grok\n")
+    assert headless.cursor_model_error("cursor-agent", "grok-4.5", probe=probe) is None
+
+
+def test_cursor_model_error_rejects_what_the_cli_rejects():
+    probe = _model_probe(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n",
+        reject="Cannot use this model: bogus-xyz. Available models: auto, gpt-5.2",
+    )
+    err = headless.cursor_model_error("cursor-agent", "bogus-xyz", probe=probe)
+    assert err and "bogus-xyz" in err
+    assert "Known ids: auto, gpt-5.2" in err
+
+
+def test_cursor_model_error_rejects_bogus_brackets_on_a_listed_id():
+    """A listed base id must not short-circuit past a rejected ``[effort=…]`` suffix."""
+    probe = _model_probe(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n",
+        reject="Cannot use this model: gpt-5.2[effort=bogus]. Available models: auto, gpt-5.2",
+    )
+    err = headless.cursor_model_error(
+        "cursor-agent", "gpt-5.2[effort=bogus]", probe=probe
+    )
+    assert err and "gpt-5.2[effort=bogus]" in err
+    # Valid brackets on a listed id still pass (probe returns the no-prompt error).
+    assert headless.cursor_model_error(
+        "cursor-agent",
+        "gpt-5.2[effort=low,fast=false]",
+        probe=_model_probe("Available models\n\ngpt-5.2 - GPT-5.2\n"),
+    ) is None
+
+
+def test_cursor_model_error_fails_open():
+    """Validation must never be the thing that blocks a working wave."""
+    def dead(argv, *, env, cwd, timeout):
+        raise OSError("cursor-agent vanished")
+
+    assert headless.cursor_model_error("cursor-agent", "grok-4.5", probe=dead) is None
+
+    def timing_out(argv, *, env, cwd, timeout):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    assert headless.cursor_model_error("cursor-agent", "grok-4.5", probe=timing_out) is None
+    # `models` unavailable, probe says something unrecognised → still pass.
+    def confused(argv, *, env, cwd, timeout):
+        return 127, "", "command not found"
+
+    assert headless.cursor_model_error("cursor-agent", "grok-4.5", probe=confused) is None
+    assert headless.cursor_model_error("cursor-agent", "", probe=_exploding_prober) is None
+
+
+def test_wave_blocks_on_a_bad_cursor_model_with_zero_spawns(tmp_path: Path):
+    """One message instead of one dead process per job."""
+    out = tmp_path / "draft.txt"
+
+    def probe(argv, *, env, cwd, timeout):
+        if argv[1:] == ["status", "--format", "json"]:
+            return 0, json.dumps(_CURSOR_AUTHENTICATED), ""
+        if argv[1:] == ["models"]:
+            return 0, "Available models\n\nauto - Auto\n", ""
+        return 1, "", "Cannot use this model: nope. Available models: auto"
+
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(out)}],
+        model="nope",
+        concurrency=1,
+        cli="cursor",
+        runner=_exploding_prober,  # any job invocation is a failure
+        prober=probe,
+    )
+    assert "error" in result
+    assert "model preflight failed" in result["error"]
+    assert result["counts"] == {"wrote": 0, "failed": 0, "todo": 0}
+    assert not out.exists()
+
+
+def test_wave_model_preflight_is_cursor_only(tmp_path: Path):
+    """A Claude wave must not pay for a Cursor-shaped check."""
+    seen: list[list[str]] = []
+
+    def probe(argv, *, env, cwd, timeout):
+        seen.append(list(argv))
+        return 0, json.dumps(_AUTH_SUBSCRIPTION), ""
+
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (0, "prose", ""),
+        prober=probe,
+    )
+    assert result["counts"]["wrote"] == 1
+    assert [a[1:] for a in seen] == [["auth", "status", "--json"]]

@@ -120,6 +120,17 @@ def _warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
     return warn_cursor_claude_model(cli, worker_model)
 
 
+def _default_worker_model(cfg: dict) -> str:
+    """The worker model for a book that never pinned one.
+
+    A function of the book's ``headless_cli``, not a literal: ``sonnet`` is a
+    Claude alias, and defaulting a Cursor book to it only ever produced a warning
+    after the fact. See :func:`~src.harness.headless.default_worker_model`.
+    """
+    from src.harness.headless import default_worker_model
+    return default_worker_model(str(cfg.get("headless_cli") or "claude"))
+
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 @contextlib.contextmanager
@@ -1599,7 +1610,7 @@ def translate_prepare(
         cfg.update(persist)
         state.save_config(project_dir, cfg)
 
-    worker_model = cfg.get("worker_model") or "sonnet"
+    worker_model = cfg.get("worker_model") or _default_worker_model(cfg)
     # Resolve the worker's thinking choice, then gate it on model support: a
     # non-thinking worker (e.g. `fable`, always-on) can never be flagged on — the
     # analog of the GUI hiding+unchecking the checkbox for such models.
@@ -2020,7 +2031,9 @@ def translate_commit(
         doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return {"error": f"manifest unreadable (truncated write?): {exc}", "committed": []}
-    worker_model = worker_model or doc.get("worker_model") or "sonnet"
+    worker_model = worker_model or doc.get("worker_model") or _default_worker_model(
+        state.load_config(project_dir)
+    )
     entries = doc.get("entries", [])
     allow_subs = [s.lower() for s in (allow_problems or []) if s.strip()]
 
@@ -2265,7 +2278,7 @@ def translate_fanout(
                 "wrote": [],
             }
 
-    worker_model = doc.get("worker_model") or "sonnet"
+    worker_model = doc.get("worker_model") or _default_worker_model(cfg)
     model_warning = _warn_cursor_claude_model(cli_name, worker_model)
     if model_warning:
         print(model_warning, file=sys.stderr)
@@ -3341,7 +3354,7 @@ def _render_footnote_batches(
         })
 
     meta = {
-        "worker_model": cfg.get("worker_model") or "sonnet",
+        "worker_model": cfg.get("worker_model") or _default_worker_model(cfg),
         "source_language": source_language,
         "target_language": target,
         "title": title,
@@ -4324,7 +4337,7 @@ def status(project: str) -> dict:
         "artifacts": artifacts,
         "epubs": epubs,
         "spawn_plan": spawn_plan,
-        "worker_model": cfg.get("worker_model") or "sonnet",
+        "worker_model": cfg.get("worker_model") or _default_worker_model(cfg),
         "run_id": cfg.get("run_id"),
         "backend": backend,
         "footnotes_decision": footnotes_decision,

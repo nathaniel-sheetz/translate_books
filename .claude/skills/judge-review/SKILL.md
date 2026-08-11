@@ -73,7 +73,8 @@ Shared flags (`run`, `prepare`):
 `prepare` (subagent backend) adds:
 - `--scope` is **repeatable** here — pass it multiple times to stage several
   chapters into one manifest for a single `commit` (see the multi-chapter note in B).
-- `--worker-model <tier>` (default `sonnet`) — pins each spawned `judge-worker`.
+- `--worker-model <tier>` — pins each spawned `judge-worker`; unset, defaults per
+  `headless_cli` (`sonnet` on claude, your selected Cursor model on cursor).
 - `--batch-size <n>` (default 5) — workers per spawn wave; wait for the wave to
   finish before launching the next (see 4b).
 - `--targets-per-worker <n>` (default 1) — group up to N **low-dialogue-density**
@@ -100,11 +101,16 @@ and `--estimate` (project the token cost and print the argv without spawning).
 
 **Cursor headless:** `fanout --cli cursor` (or
 `config-set --key headless_cli --value cursor`) drives `cursor-agent` under a
-subscription login — pin `--worker-model` / manifest `worker_model` to a Cursor
-id (`grok-4.5`, `auto`, …). Cursor uses the full prompt (no cache-split /
-`--system-prompt-file`). The **Task-worker** path (`prepare` → spawn
-`judge-worker` → `commit`) stays **Claude-only** — the Task tool spawns Claude
-subagents; Cursor is offered only on the headless `fanout` path.
+subscription login, with a `cursor-agent status --format json` preflight per wave
+and a token-free `--model` check before any spawn. An unpinned `worker_model`
+now inherits whatever model is selected in `~/.cursor/cli-config.json` — the one
+the operator is already using — so pin `--worker-model` only to override that
+(`grok-4.5`, `auto`, a `cursor-agent models` id, or the bracket form
+`grok-4.5[effort=low,fast=false]`). Cursor uses the full prompt (no cache-split /
+`--system-prompt-file`), and **that is measured, not assumed** — see the
+overhead note below. The **Task-worker** path (`prepare` → spawn `judge-worker` →
+`commit`) stays **Claude-only** — the Task tool spawns Claude subagents; Cursor
+is offered only on the headless `fanout` path.
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
 
@@ -195,8 +201,11 @@ land in one manifest, one `commit` collects them all, and `usage_summary` is a
 single rollup (no manual summing across calls).
 
 **Ask spawn mode and grouping together, in that order, in ONE `AskUserQuestion` call**
-(skip whichever the user already chose). Order matters and the old order was wrong: the
-right grouping *depends on* the spawn mode, `prepare` bakes the grouping in, and
+— or, if you are an orchestrator without that tool (a Cursor-hosted session has no
+`AskUserQuestion`), as one message with two short numbered lists. What matters is that
+both questions arrive together and are answered before `prepare`, not which widget asks
+them. Skip whichever the user already chose. Order matters and the old order was wrong:
+the right grouping *depends on* the spawn mode, `prepare` bakes the grouping in, and
 re-`prepare` is destructive — so grouping cannot be revised after the fact.
 
 - **Q1 — spawn mode.** (1) **Task workers** — spawn `judge-worker` Task subagents
@@ -252,12 +261,23 @@ is visible. Get approval in a separate turn before spawning.
 **Want the real number first?** `fanout --estimate` projects the wave from the measured
 baseline and prints the argv without spawning anything.
 
-**Worker-model / cache note (fold into the confirmation, not a new gate):** the shared
-preamble (dialogue rules ≈1.7k tok; address rubric+map ≈1.3–1.8k) clears **Sonnet's**
-1024-token cache minimum but **not** Opus/Haiku's 4096, so prefer a **Sonnet** worker on
-headless. The wave runs its first job alone so the rest read the shared prefix from cache
-instead of each re-creating it. Task workers get no cross-invocation prompt caching either
-way.
+**Worker-model / overhead note (fold into the confirmation, not a new gate):**
+
+- **Claude path.** The shared preamble (dialogue rules ≈1.7k tok; address rubric+map
+  ≈1.3–1.8k) clears **Sonnet's** 1024-token cache minimum but **not** Opus/Haiku's 4096,
+  so prefer a **Sonnet** worker on headless. The wave runs its first job alone so the rest
+  read the shared prefix from cache instead of each re-creating it. Task workers get no
+  cross-invocation prompt caching either way.
+- **Cursor path.** None of that Sonnet cache advice applies — it is Claude-only. What
+  binds instead is a **fixed ~17.2k tokens per process** (vs ~3.9k on Claude), measured
+  2026-08-10 and confirmed on a real wave at a **0.78 overhead ratio**. There is no
+  client-side lever on it: `cursor-agent` has no `--system-prompt-file`, no cache-TTL env
+  knob, and `cacheWriteTokens` is always 0. Moving the preamble into a `.cursor/rules`
+  always-apply file was probed (2026-08-11, 3 runs per arm) and changed cache reads not at
+  all. The only levers are **fewer processes** or **a smaller prompt** — that is a fact
+  about the CLI, not a recommendation to group. Grouping (`--targets-per-worker`) trades
+  per-target reasoning depth for fewer prefixes; with `usage` now reported per wave the
+  operator can decide it per wave on numbers instead of on principle.
 
 **End your turn and wait.** Do not spawn workers or run `fanout` in the same turn that
 produced the manifest.
@@ -310,11 +330,21 @@ python scripts/run_judges.py fanout --project understood-betsy \
 ```
 Each process is effectively: `claude -p` with the body (or full prompt) on stdin,
 optional `--system-prompt-file <preamble_path>`, `--model <worker_model>`,
-`--tools ""`, `--output-format json` → `draft_path`. The child env is scrubbed of
-every metered credential first, and one `claude auth status --json` preflight runs
-per wave; if it cannot confirm a subscription the command returns a top-level
+`--tools ""`, `--output-format json` → `draft_path`. On `--cli cursor` it is
+`cursor-agent -p --trust --mode ask --model <worker_model> --output-format json`
+with the full prompt on stdin (no `--system-prompt-file`, no `--tools`, and
+`--effort` / `headless_extra_flags` are dropped — both are Claude argv).
+
+The child env is scrubbed of every metered credential first, and one auth
+preflight runs per wave — `claude auth status --json` (a *routing* probe: which
+credential would be billed) or `cursor-agent status --format json` (a *liveness*
+probe; Cursor has no metered path here, so the `CURSOR_API_KEY` scrub is the
+billing half). If it cannot confirm a login the command returns a top-level
 `error`, writes nothing, and spawns no jobs (relay that error — the fix is
-`claude` + `/login`, or `--backend api` if metered spend was actually intended).
+`claude` + `/login`, `cursor-agent login`, or `--backend api` if metered spend
+was actually intended). A Cursor wave additionally rejects an unusable
+`--model` up front, so a typo costs one message rather than one dead process per
+job.
 After the wave, commit as below — the prepare→commit seam is unchanged
 (`committed`/`failed`/`missing`). On 529, re-run with a lower `--concurrency`.
 
@@ -343,13 +373,15 @@ the book cheaper to translate.
 Offer a cheaper level only when the user asks for a faster/cheaper pass, and say what it
 trades; **never switch silently**. See `docs/LLM_PROVIDERS.md`.
 
-**Relay `usage` after every wave.** `fanout` now reports what the wave actually consumed:
-`input`/`output`, the `cache_creation` vs `cache_read` split, `prompt_sent` (the judging
-content) and `overhead` / `overhead_ratio` (everything else — the per-process context each
-job pays before reading a word of the book). A ratio near 0.5+ means the wave spent more on
-being a process than on judging, and the answer is fewer, larger jobs. Per-job detail lands
-in `.harness/judges/usage.jsonl`; **read that file only if asked** — it exists so the detail
-does *not* have to enter the conversation.
+**Relay `usage` after every wave — on both CLIs.** `fanout` reports what the wave actually
+consumed: `input`/`output`, the `cache_creation` vs `cache_read` split, `prompt_sent` (the
+judging content) and `overhead` / `overhead_ratio` (everything else — the per-process
+context each job pays before reading a word of the book). A ratio near 0.5+ means the wave
+spent more on being a process than on judging, and the answer is fewer, larger jobs.
+**Expect a much higher ratio on Cursor** (a real 3-chunk-manifest wave measured 0.78: 18.0k
+of 23.0k billed input was fixed prefix) — that is the CLI's floor, not something the wave
+did wrong. Per-job detail lands in `.harness/judges/usage.jsonl`; **read that file only if
+asked** — it exists so the detail does *not* have to enter the conversation.
 
 Committing after each wave is fine for recovery; a single final `commit` after all
 waves is also fine. Either way, never start wave N+1 until wave N has finished
