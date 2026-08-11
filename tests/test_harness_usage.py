@@ -29,6 +29,36 @@ def test_usage_from_envelope_reads_both_key_spellings():
     assert usage.usage_from_envelope(snake) == usage.usage_from_envelope(camel)
 
 
+def test_usage_from_a_verbatim_cursor_envelope():
+    """The exact stdout of `cursor-agent -p --output-format json`, 2026-08-10.
+
+    Verbatim on purpose: Cursor spells its cache fields `cacheReadTokens` /
+    `cacheWriteTokens`, which nothing else in this file uses. A rename would
+    otherwise silently zero the only telemetry the Cursor path has, and the
+    numbers would still look plausible.
+    """
+    envelope = json.loads(
+        '{"type":"result","subtype":"success","is_error":false,"duration_ms":9099,'
+        '"duration_api_ms":9099,"result":"ok",'
+        '"session_id":"1fcf1d99-fca7-4f72-85b5-b1d2f0c751d8",'
+        '"request_id":"ae3dadb7-3a8a-4305-ab0f-c39ef1bdee02",'
+        '"usage":{"inputTokens":13874,"outputTokens":29,'
+        '"cacheReadTokens":5248,"cacheWriteTokens":0}}'
+    )
+    out = usage.usage_from_envelope(envelope, model="grok-4.5")
+    assert out["input"] == 13874
+    assert out["output"] == 29
+    assert out["cache_read"] == 5248
+    assert out["cache_creation"] == 0
+    assert out["duration_ms"] == 9099
+
+    # Cursor's inputTokens EXCLUDES cache reads, same as Claude's, so the shared
+    # billed-input sum needs no per-CLI arithmetic.
+    rolled = usage.rollup([{**out, "prompt_sent": 7}])
+    assert rolled["input"] + rolled["cache_read"] == 19_122
+    assert rolled["overhead"] == 19_122 - 7
+
+
 def test_usage_from_envelope_survives_garbage():
     """Never raise: every field optional, anything unrecognised dropped."""
     assert usage.usage_from_envelope(None) is None
@@ -122,7 +152,7 @@ def test_read_recent_skips_corrupt_lines(tmp_path: Path):
 def test_baseline_falls_back_until_enough_measurements(tmp_path: Path):
     log = tmp_path / "usage.jsonl"
     value, source = usage.baseline_tokens(log)
-    assert value == usage.DEFAULT_BASELINE_TOKENS
+    assert value == usage.DEFAULT_BASELINE_TOKENS["claude"]
     assert source.startswith("default:")
 
     # Two rows is not yet enough to prefer measurement over the documented default.
@@ -136,6 +166,44 @@ def test_baseline_falls_back_until_enough_measurements(tmp_path: Path):
     value, source = usage.baseline_tokens(log)
     assert value == 9000
     assert source.startswith("measured:")
+
+
+def test_default_baseline_is_per_cli(tmp_path: Path):
+    """~4.4x apart: one constant for both under-quoted every Cursor wave."""
+    log = tmp_path / "usage.jsonl"
+    claude_value, claude_src = usage.baseline_tokens(log, cli="claude")
+    cursor_value, cursor_src = usage.baseline_tokens(log, cli="cursor")
+    assert claude_value == 3900 and "2026-07-30" in claude_src
+    assert cursor_value == 17_200 and "2026-08-10" in cursor_src
+    # An un-threaded caller, or an unknown family, gets the claude number rather
+    # than a crash — this function must never be what fails a wave.
+    assert usage.baseline_tokens(log)[0] == 3900
+    assert usage.baseline_tokens(log, cli="gemini")[0] == 3900
+    assert usage.baseline_tokens(log, cli=None)[0] == 3900
+
+
+def test_baseline_medians_only_the_requested_cli(tmp_path: Path):
+    """One log holds every family's rows; a mixed median describes neither."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(4):
+        usage.append_usage(log, {"cli": "claude", "input": 4000, "prompt_sent": 0, "rc": 0})
+        usage.append_usage(log, {"cli": "cursor", "input": 18_000, "prompt_sent": 0, "rc": 0})
+
+    assert usage.baseline_tokens(log, cli="claude")[0] == 4000
+    assert usage.baseline_tokens(log, cli="cursor")[0] == 18_000
+    # Unfiltered still medians the mixture — which is why callers thread cli.
+    assert usage.baseline_tokens(log)[0] == 11_000
+    # Provenance names the family it measured, so a quoted number is traceable.
+    assert "cursor" in usage.baseline_tokens(log, cli="cursor")[1]
+
+
+def test_baseline_ignores_rows_with_no_cli_when_filtering(tmp_path: Path):
+    """Unknown provenance cannot calibrate a specific family."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(4):
+        usage.append_usage(log, {"input": 9999, "prompt_sent": 0, "rc": 0})
+    assert usage.baseline_tokens(log, cli="cursor")[0] == 17_200
+    assert usage.baseline_tokens(log, cli="cursor")[1].startswith("default:")
 
 
 def test_baseline_ignores_failed_jobs(tmp_path: Path):

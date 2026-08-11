@@ -36,21 +36,35 @@ from typing import Any, Iterable, Mapping, Sequence
 # and this file is meant to be deletable without unpicking an import graph.
 _CHARS_PER_TOKEN = 4
 
-# Per-job fixed overhead assumed until this machine has measured its own. From a
-# 2026-07-30 real judge job (6,700-token prompt, `--system-prompt-file`, CLI
-# 2.1.220): 10,554 billed input against 6,700 sent = 3,854 of fixed context.
+# Per-job fixed overhead assumed until this machine has measured its own, **per
+# CLI family**. One number for both was wrong by ~4.4x on the Cursor path.
 #
-# Deliberately NOT the 9,067 the friction log's no-op probe reported. That probe
-# passed no `--system-prompt-file`, so it measured the CLI's *default* system
-# prompt; a judge job replaces that with the judge preamble. Which suggests the
-# cache split is worth more than the caching it is named for — it also evicts a
-# ~5k default system prompt — but that is an inference from two runs with several
-# differences, not a measurement. Grouped entries take the full-prompt path with
-# no override, so testing them would settle it.
+# claude — from a 2026-07-30 real judge job (6,700-token prompt,
+# `--system-prompt-file`, CLI 2.1.220): 10,554 billed input against 6,700 sent =
+# 3,854 of fixed context. Deliberately NOT the 9,067 the friction log's no-op
+# probe reported: that probe passed no `--system-prompt-file`, so it measured the
+# CLI's *default* system prompt, which a judge job replaces with the judge
+# preamble.
 #
-# Only load-bearing on a cold machine: three logged jobs and baseline_tokens()
-# switches to the measured median.
-DEFAULT_BASELINE_TOKENS = 3900
+# cursor — from the 2026-08-10 probe (cursor-agent 2026.08.04-aaa8809): a no-op
+# job billed ~18.2k input, and a 4.5k-token prompt billed 21.8k total, putting
+# the fixed per-process prefix at ~17.2k. There is no client-side lever on it:
+# `cursor-agent` has no `--system-prompt-file` and no cache-TTL knob, and
+# `cacheWriteTokens` came back 0 on every probe.
+#
+# Only load-bearing on a cold machine: three logged jobs *of that CLI* and
+# baseline_tokens() switches to the measured median.
+DEFAULT_BASELINE_TOKENS: dict[str, int] = {
+    "claude": 3900,
+    "cursor": 17200,
+}
+_BASELINE_PROVENANCE: dict[str, str] = {
+    "claude": "2026-07-30 baseline probe",
+    "cursor": "2026-08-10 Cursor probe",
+}
+# What an un-threaded caller (``cli=None``) gets. Claude is the default headless
+# family, and under-quoting the Claude path is the smaller error.
+_BASELINE_FALLBACK_CLI = "claude"
 
 # Rows :func:`baseline_tokens` reads back, and the minimum it needs before it
 # prefers measurement over the default.
@@ -121,6 +135,17 @@ def usage_from_envelope(obj: Any, *, model: str | None = None) -> dict[str, Any]
     Returns ``None`` when the envelope carries no ``usage`` block. **Never
     raises**: telemetry that can fail a wave is worse than no telemetry, so every
     field is optional and anything unrecognised is dropped.
+
+    Handles both CLI families. ``cursor-agent`` spells its cache fields
+    ``cacheReadTokens`` / ``cacheWriteTokens`` (verified 2026-08-10 on
+    2026.08.04-aaa8809) rather than Claude's ``cache_read_input_tokens``; the
+    ``inputTokens`` / ``outputTokens`` spellings it shares were already accepted.
+
+    Semantics are the same across both, which is what lets one ``rollup`` price
+    either: Cursor's ``inputTokens`` **excludes** cache reads (repeat probe run 2:
+    20,105 + 1,664 = 21,769 = run 1's total), so ``input + cache_creation +
+    cache_read`` is billed input on both families and ``overhead_ratio`` needs no
+    per-CLI arithmetic.
     """
     if not isinstance(obj, Mapping):
         return None
@@ -132,8 +157,14 @@ def usage_from_envelope(obj: Any, *, model: str | None = None) -> dict[str, Any]
     for field, names in (
         ("input", ("input_tokens", "inputTokens")),
         ("output", ("output_tokens", "outputTokens")),
-        ("cache_creation", ("cache_creation_input_tokens", "cacheCreationInputTokens")),
-        ("cache_read", ("cache_read_input_tokens", "cacheReadInputTokens")),
+        (
+            "cache_creation",
+            ("cache_creation_input_tokens", "cacheCreationInputTokens", "cacheWriteTokens"),
+        ),
+        (
+            "cache_read",
+            ("cache_read_input_tokens", "cacheReadInputTokens", "cacheReadTokens"),
+        ),
     ):
         value = _first_int(usage, *names)
         if value is not None:
@@ -232,8 +263,11 @@ def _has_tokens(record: Mapping[str, Any]) -> bool:
 def rollup(records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
     """Wave summary, or ``None`` when no job reported token usage.
 
-    ``None`` is the honest answer for a Cursor wave or a stubbed test runner, and
-    keeps the ``usage`` key out of payloads that have nothing to put in it.
+    ``None`` is the honest answer for a stubbed test runner or a CLI build that
+    ignored ``--output-format json``, and keeps the ``usage`` key out of payloads
+    that have nothing to put in it. Both CLI families report usage now — Cursor
+    stopped being a permanent ``None`` when its profile moved off
+    ``--output-format text``.
 
     ``overhead`` is billed input minus the prompt we meant to send, and
     ``overhead_ratio`` is that as a share of billed input — the one number that
@@ -291,8 +325,19 @@ def read_recent(path: Path | str | None, limit: int = _BASELINE_WINDOW) -> list[
     return rows
 
 
+def default_baseline_tokens(cli: str | None = None) -> tuple[int, str]:
+    """``(tokens, provenance)`` assumed for ``cli`` before anything is measured."""
+    key = (cli or _BASELINE_FALLBACK_CLI).strip().lower()
+    if key not in DEFAULT_BASELINE_TOKENS:
+        key = _BASELINE_FALLBACK_CLI
+    return DEFAULT_BASELINE_TOKENS[key], _BASELINE_PROVENANCE[key]
+
+
 def baseline_tokens(
-    path: Path | str | None, default: int = DEFAULT_BASELINE_TOKENS
+    path: Path | str | None,
+    default: int | None = None,
+    *,
+    cli: str | None = None,
 ) -> tuple[int, str]:
     """``(per_job_overhead, provenance)`` for the pre-spawn estimate.
 
@@ -300,16 +345,35 @@ def baseline_tokens(
     usage gate quotes. Falls back to :data:`DEFAULT_BASELINE_TOKENS` until enough
     real jobs have been logged — which is what makes the estimate self-calibrate
     instead of trusting a constant forever.
+
+    ``cli`` restricts both halves to one CLI family, and is **required for a
+    correct number on any project that has run both**. One ``usage.jsonl`` holds
+    every family's rows, and the families are ~4.4x apart on fixed overhead, so a
+    median over the mixture describes neither: a Cursor wave following three
+    Claude ones would quote ~3.9k against a real ~17.2k. Rows with no ``cli`` key
+    are excluded when filtering — unknown provenance cannot calibrate a family.
+
+    ``default`` overrides the per-CLI constant (kept for callers that already
+    hold a measurement); ``None`` means use the constant for ``cli``.
     """
+    fallback, provenance = default_baseline_tokens(cli)
+    if default is not None:
+        fallback, provenance = int(default), "caller-supplied"
+
+    wanted = (cli or "").strip().lower() or None
+    rows = read_recent(path)
+    if wanted is not None:
+        rows = [r for r in rows if str(r.get("cli") or "").strip().lower() == wanted]
     overheads = [
         max(0, _billed_input(row) - int(row.get("prompt_sent") or 0))
-        for row in read_recent(path)
+        for row in rows
         if _has_tokens(row) and row.get("rc") == 0
     ]
     if len(overheads) < _BASELINE_MIN_ROWS:
-        return default, f"default: {default} (2026-07-30 baseline probe)"
+        return fallback, f"default: {fallback} ({provenance})"
     measured = int(statistics.median(overheads))
-    return measured, f"measured: median of {len(overheads)} logged jobs"
+    scope = f" {wanted}" if wanted else ""
+    return measured, f"measured: median of {len(overheads)} logged{scope} jobs"
 
 
 def median_wall_s(path: Path | str | None) -> float | None:

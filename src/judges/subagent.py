@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.evaluators import aggregate_results
+from src.harness.headless import default_worker_model
 from src.harness.usage import approx_tokens, baseline_tokens
 from src.judges.base import Judge, JudgeTarget
 from src.judges.llm_io import JudgeParseError, parse_judge_json
@@ -39,7 +40,6 @@ from src.judges.scope import _ID_RE, build_targets
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_WORKER_MODEL = "sonnet"
 _DEFAULT_BATCH_SIZE = 5
 
 # --- Dialogue-density gating for target grouping ----------------------------
@@ -174,12 +174,15 @@ _PREPARE_SCHEMA = {
     "manifest_path": "path to the written manifest.json (commit reads this)",
     "scopes": "the list of --scope values resolved into this one manifest",
     "judges": "judge names rendered",
-    "worker_model": "model tier to pin each spawned judge-worker to (default sonnet)",
+    "worker_model": "model tier to pin each spawned judge-worker to; unset, it defaults "
+    "per headless_cli (sonnet on claude, your selected Cursor model on cursor)",
     "batch_size": "recommended workers to spawn per wave",
     "usage_summary": "{pairs, targets, workers, targets_per_worker, source_words, worker_model, "
     "batch_size, estimated_api_cost, estimated_prompt_tokens, headless_baseline_tokens, "
     "headless_baseline_source, estimated_headless_tokens, headless_effort, "
-    "headless_effort_source}. The two estimates price DIFFERENT "
+    "headless_effort_source}. 'headless_baseline_tokens' is PER CLI (claude ~3.9k fixed per "
+    "process, cursor ~17.2k) and self-calibrates off this project's logged rows for that cli "
+    "only. The two estimates price DIFFERENT "
     "backends and neither bounds the other: 'estimated_api_cost' is USD **if you choose the API "
     "backend** and says nothing about the headless path, which on the 2026-07-30 measurement "
     "consumed ~2.4x the tokens. 'estimated_headless_tokens' is the subscription cost of the "
@@ -204,8 +207,10 @@ _FANOUT_SCHEMA = {
     "cache_read, prompt_sent, overhead, overhead_ratio, cost_equiv_usd, wall_s, "
     "side_calls}. 'prompt_sent' is the judging content we meant to send; 'overhead' is "
     "billed input minus that (per-process context the jobs pay before reading a word of "
-    "the book) and 'overhead_ratio' is its share. Absent when the CLI reported no usage "
-    "(Cursor runs on --output-format text). Per-job detail goes to "
+    "the book) and 'overhead_ratio' is its share. BOTH CLIs report this now; expect a far "
+    "larger overhead share on cursor (~17.2k fixed per process vs ~3.9k on claude), which "
+    "is the number to quote when deciding how many processes a wave is worth. Absent only "
+    "when the CLI reported no usage at all. Per-job detail goes to "
     ".harness/judges/usage.jsonl, never into this payload",
     "estimate": "--estimate only: {jobs, prompt_tokens, baseline_tokens, baseline_source, "
     "projected_tokens, argv, effort, effort_source, cache} — projected, nothing spawned. "
@@ -279,14 +284,21 @@ def prepare(
     an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
     during a recovery re-prepare (re-prepare is otherwise destructive).
 
-    ``worker_model`` (default ``sonnet``) is the tier the orchestrator pins each
-    spawned ``judge-worker`` to; ``batch_size`` (default 5) is the recommended
-    fan-out per spawn wave. Nothing here calls an API; ``estimated_api_cost`` in
-    ``usage_summary`` is the API-equivalent price shown for context only.
+    ``worker_model`` is the tier the orchestrator pins each spawned
+    ``judge-worker`` to; unset, it defaults per the book's ``headless_cli``
+    (``sonnet`` on claude, the operator's own selected Cursor model on cursor —
+    see :func:`~src.harness.headless.default_worker_model`). ``batch_size``
+    (default 5) is the recommended fan-out per spawn wave. Nothing here calls an
+    API; ``estimated_api_cost`` in ``usage_summary`` is the API-equivalent price
+    shown for context only.
     """
+    from src.harness import state as hstate
+
     project_dir = Path(project_dir)
     context = dict(context or {})
-    worker_model = worker_model or _DEFAULT_WORKER_MODEL
+    cfg = hstate.load_config(project_dir)
+    cli_name = str(cfg.get("headless_cli") or "claude").strip().lower()
+    worker_model = worker_model or default_worker_model(cli_name)
     batch_size = int(batch_size or _DEFAULT_BATCH_SIZE)
     targets_per_worker = max(1, int(targets_per_worker or 1))
     scope_list = [scopes] if isinstance(scopes, str) else list(scopes)
@@ -406,10 +418,13 @@ def prepare(
     # reads anything (~9.1k tokens in the 2026-07-30 baseline probe — ~56% of that
     # wave). Quoting only the API figure understated the chosen path ~2.4x at the
     # exact moment consent was given.
-    baseline, baseline_source = baseline_tokens(usage_log_path(project_dir))
-    from src.harness import state as hstate
+    # Per CLI: one usage.jsonl holds every family's rows and Cursor's fixed
+    # overhead is ~4.4x Claude's, so an unfiltered median describes neither.
+    baseline, baseline_source = baseline_tokens(
+        usage_log_path(project_dir), cli=cli_name
+    )
     _effort_argv, headless_effort, headless_effort_source = hstate.resolve_headless_argv(
-        hstate.load_config(project_dir), command="judges",
+        cfg, command="judges",
     )
 
     manifest_doc = {
@@ -580,7 +595,7 @@ def fanout(
                 "_schema": _FANOUT_SCHEMA,
             }
 
-    worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
+    worker_model = doc.get("worker_model") or default_worker_model(cli_name)
     model_warning = warn_cursor_claude_model(cli_name, worker_model)
     if model_warning:
         print(model_warning, file=sys.stderr)
@@ -680,7 +695,7 @@ def fanout(
 
     if estimate:
         log_path = usage_log_path(project_dir)
-        baseline, baseline_source = baseline_tokens(log_path)
+        baseline, baseline_source = baseline_tokens(log_path, cli=cli_name)
         spf_tokens: dict[str, int] = {}
         prompt_tokens = 0
         for job in ready:
@@ -878,7 +893,14 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
             "missing": [],
             "_schema": _COMMIT_SCHEMA,
         }
-    worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
+    # Only fires for a manifest that predates (or hand-edits away) the field —
+    # `prepare` always records the resolved id, which is what makes a wave
+    # reproducible from its manifest alone.
+    from src.harness import state as hstate
+
+    worker_model = doc.get("worker_model") or default_worker_model(
+        str(hstate.load_config(project_dir).get("headless_cli") or "claude")
+    )
     context = {
         "judge_model": doc.get("model"),
         "judge_provider": doc.get("provider"),

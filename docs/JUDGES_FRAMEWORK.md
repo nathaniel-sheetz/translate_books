@@ -84,6 +84,13 @@ a 2026-07-30 wave paid a large fixed per-process cost that nothing could report.
 `estimated_headless_tokens`, so the usage gate quotes the backend being chosen
 rather than the API price of the one declined.
 
+**Both CLI families report usage** (Cursor since 2026-08-11; it spells the fields
+`inputTokens` / `cacheReadTokens` / `cacheWriteTokens`). The baseline is per CLI —
+~3.9k fixed tokens per `claude` process against ~17.2k per `cursor-agent` one —
+and `baseline_tokens()` filters the log to the family being estimated, because a
+median across a 4.4× gap describes neither. See `docs/LLM_PROVIDERS.md` for the
+measurements and for why Cursor has no prompt cache to configure.
+
 ## Layout
 
 ```

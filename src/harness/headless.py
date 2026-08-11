@@ -277,7 +277,12 @@ def subscription_env(
 
 
 def warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
-    """Return a warning when cursor is paired with a Claude-looking worker_model."""
+    """Return a warning when cursor is paired with a Claude-looking worker_model.
+
+    Now a check on an *explicit* choice rather than on our own default: an
+    un-pinned Cursor wave resolves through :func:`default_worker_model`, which
+    never emits a Claude alias.
+    """
     if (cli or "").strip().lower() != "cursor":
         return None
     alias = (worker_model or "").strip().lower()
@@ -290,6 +295,162 @@ def warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
             f"(e.g. grok-4.5 or auto)"
         )
     return None
+
+
+# The file the interactive Cursor orchestrator itself runs on: whatever model is
+# selected there is the one the operator already chose and is already paying for.
+CURSOR_CLI_CONFIG = Path.home() / ".cursor" / "cli-config.json"
+
+# `modelId` for "let Cursor pick", spelled two ways across CLI versions. Both mean
+# the `auto` the --model flag accepts.
+_CURSOR_AUTO_IDS = frozenset({"", "default", "auto"})
+
+CURSOR_FALLBACK_MODEL = "auto"
+
+
+def cursor_default_model(config_path: Path | str | None = None) -> str:
+    """The model ``cursor-agent`` is currently configured to use, in argv form.
+
+    Reads ``selectedModel`` from ``~/.cursor/cli-config.json`` and composes the
+    bracket form the CLI accepts (``grok-4.5[effort=medium,fast=false]``). A
+    ``modelId`` of ``default`` — Cursor's own "Auto" — becomes ``auto``.
+
+    **Never raises and never blocks**: a missing, unreadable, or unrecognised
+    config returns :data:`CURSOR_FALLBACK_MODEL`, because failing to read a
+    preferences file must not be the thing that stops a wave.
+    """
+    path = Path(config_path) if config_path is not None else CURSOR_CLI_CONFIG
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return CURSOR_FALLBACK_MODEL
+    if not isinstance(doc, dict):
+        return CURSOR_FALLBACK_MODEL
+
+    selected = doc.get("selectedModel")
+    if not isinstance(selected, dict):
+        return CURSOR_FALLBACK_MODEL
+    model_id = str(selected.get("modelId") or "").strip()
+    if model_id.lower() in _CURSOR_AUTO_IDS:
+        return CURSOR_FALLBACK_MODEL
+
+    params: list[str] = []
+    for param in selected.get("parameters") or []:
+        if not isinstance(param, dict):
+            continue
+        pid = str(param.get("id") or "").strip()
+        value = param.get("value")
+        if not pid or value is None or isinstance(value, (dict, list)):
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        params.append(f"{pid}={value}")
+    if not params:
+        return model_id
+    return f"{model_id}[{','.join(params)}]"
+
+
+def default_worker_model(cli: str) -> str:
+    """The worker model to use when nobody pinned one, for this CLI family.
+
+    Claude keeps ``sonnet``. Cursor inherits whatever the operator already
+    selected in the Cursor CLI, so an un-pinned Cursor wave runs the model they
+    are already using rather than a Claude alias that only produced a warning.
+    """
+    if (cli or "").strip().lower() == "cursor":
+        return cursor_default_model()
+    return "sonnet"
+
+
+def _cursor_model_base(model: str) -> str:
+    """A Cursor model id with any ``[effort=…,fast=…]`` suffix stripped."""
+    return (model or "").split("[", 1)[0].strip()
+
+
+def _cursor_known_models(
+    cli_bin: str, *, probe: AuthProber | None = None, timeout: float = 30.0
+) -> set[str]:
+    """Ids from ``cursor-agent models``; empty set when it cannot be read.
+
+    The list is **incomplete** — see :func:`cursor_model_error` — so an empty
+    result and a missing id are treated the same way: not evidence of anything.
+    """
+    runner = probe if probe is not None else _default_auth_prober
+    try:
+        rc, stdout, _stderr = runner(
+            [cli_bin, "models"],
+            env=subscription_env("cursor"),
+            cwd=neutral_claude_cwd(),
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if rc != 0:
+        return set()
+    ids: set[str] = set()
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or " - " not in line:
+            continue
+        candidate = line.split(" - ", 1)[0].strip()
+        if candidate and " " not in candidate:
+            ids.add(candidate)
+    return ids
+
+
+def cursor_model_error(
+    cli_bin: str,
+    model: str,
+    *,
+    probe: AuthProber | None = None,
+    timeout: float = 30.0,
+) -> str | None:
+    """Return why ``cursor-agent`` would reject ``model``, or ``None`` to proceed.
+
+    A bad ``--model`` costs one dead process per job — N identical failures for
+    one typo. Both checks here are token-free (``cursor-agent`` validates the
+    model id before it reads the prompt, let alone calls a model), so a wave can
+    be stopped with one message and zero spawns.
+
+    Two signals, because neither alone is sound:
+
+    - ``cursor-agent models`` lists ids, but **not all of them**: ``grok-4.5``
+      is accepted by the CLI and absent from that list (verified 2026-08-11), and
+      it is the very id this module's own warning recommends. Membership is
+      therefore proof of validity but absence is not proof of invalidity.
+    - So for an unlisted id, ask the CLI itself: an empty stdin makes it exit
+      non-zero either way, but it reports ``Cannot use this model`` *before* it
+      reports the missing prompt. Only that message fails the wave.
+
+    Fails **open** on every other outcome — an unavailable, slow, or restructured
+    CLI must never be the thing that blocks a working wave.
+    """
+    base = _cursor_model_base(model)
+    if not base:
+        return None
+    known = _cursor_known_models(cli_bin, probe=probe, timeout=timeout)
+    if base in known:
+        return None
+
+    runner = probe if probe is not None else _default_auth_prober
+    argv = [
+        cli_bin, "-p", "--trust", "--mode", "ask",
+        "--model", model, "--output-format", "json",
+    ]
+    try:
+        _rc, stdout, stderr = runner(
+            argv, env=subscription_env("cursor"), cwd=neutral_claude_cwd(), timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    detail = f"{stderr or ''}\n{stdout or ''}".strip()
+    if "cannot use this model" not in detail.lower():
+        return None
+    listed = f" Known ids: {', '.join(sorted(known))}." if known else ""
+    return (
+        f"cursor-agent rejected --model {model!r}: {detail.splitlines()[0][:300]}."
+        f"{listed}"
+    )
 
 
 def neutral_claude_cwd() -> Path:
@@ -385,16 +546,16 @@ def _error_result(message: str, cwd: Path | str | None = None) -> dict[str, Any]
 
 AuthProber = Callable[..., tuple[int, str, str]]
 
-# Argv that makes a CLI report which credential path it would use. ``None`` means
-# the family has no verified equivalent -- it gets the env scrub but not the
-# preflight (see the Cursor entry below).
+# Argv that makes a CLI report its credential state. ``None`` is still honored --
+# a family registered that way gets the env scrub but no preflight -- but no
+# family uses it any more: both entries below are verified commands.
 _AUTH_PROBE_ARGV: dict[str, tuple[str, ...] | None] = {
     "claude": ("auth", "status", "--json"),
-    # No verified `cursor-agent` auth-status command. Guessing at one risks
-    # hard-failing a working setup, so the Cursor profile relies on the
-    # CURSOR_API_KEY scrub plus the fact that the harness has no metered Cursor
-    # code path at all. See docs/LLM_PROVIDERS.md.
-    "cursor": None,
+    # Verified 2026-08-10 on cursor-agent 2026.08.04-aaa8809:
+    # {"status":"authenticated","isAuthenticated":true,"hasAccessToken":true,
+    #  "hasRefreshToken":true,"userInfo":{…}}. See subscription_auth_error for
+    # why this probe answers a different question than Claude's.
+    "cursor": ("status", "--format", "json"),
 }
 _AUTH_PROBE_TIMEOUT_S = 30.0
 
@@ -416,6 +577,26 @@ def _default_auth_prober(
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+def _cursor_auth_error(cli_bin: str, obj: dict[str, Any]) -> str | None:
+    """Verdict for a parsed ``cursor-agent status --format json`` payload.
+
+    Passes on ``isAuthenticated is True`` or ``status == "authenticated"`` and
+    fails closed on anything else. The payload also carries a ``userInfo`` block
+    with the account's email, id and real name; **only the two decision keys are
+    ever echoed**, mirroring how the Claude branch withholds email/orgId/orgName.
+    """
+    if obj.get("isAuthenticated") is True:
+        return None
+    if str(obj.get("status") or "").strip().lower() == "authenticated":
+        return None
+    safe = {k: obj.get(k) for k in ("status", "isAuthenticated") if k in obj}
+    detail = json.dumps(safe, sort_keys=True)[:300] if safe else "no status/isAuthenticated key"
+    return (
+        f"{cli_bin} is not logged in ({detail}) — run `{cli_bin} login`, "
+        f"or use `--backend api` if metered spend is what you want."
+    )
+
+
 def subscription_auth_error(
     cli: str,
     cli_bin: str,
@@ -427,18 +608,25 @@ def subscription_auth_error(
 ) -> str | None:
     """Return why this CLI would *not* bill the subscription, or None if it would.
 
-    A **routing** probe, not a liveness probe: ``claude auth status`` reports the
-    credential path that would be used and reports it identically for a valid and
-    a bogus key. It answers "where does the bill go", never "will this call
-    succeed".
+    **The two families answer different questions, deliberately.**
+
+    - ``claude auth status --json`` is a **routing** probe: it reports the
+      credential path that would be used, identically for a valid and a bogus
+      key. It answers "where does the bill go", never "will this call succeed" —
+      which is what matters, because the Claude path has a metered twin.
+    - ``cursor-agent status --format json`` is a **liveness** probe: it reports
+      whether a login session exists. There is no metered Cursor code path in
+      this repo to route to, so the billing-safety half is already carried by the
+      ``CURSOR_API_KEY`` scrub; what this adds is failing before N jobs each
+      discover a logged-out CLI on their own.
 
     Must run with the same scrubbed ``env`` *and* the same ``cwd`` as the workers.
     The CLI reads project-local settings, so probing from the repo root can report
     a different auth path than a worker in the neutral cwd actually gets.
 
-    Fails closed. An unusable probe (missing subcommand, non-zero exit, output
-    shape we do not recognise) blocks the wave -- unverifiable means unsafe, and
-    ``--backend api`` is the supported way to spend money.
+    Fails closed for both. An unusable probe (missing subcommand, non-zero exit,
+    output shape we do not recognise) blocks the wave -- unverifiable means
+    unsafe, and ``--backend api`` is the supported way to spend money.
     """
     if cli not in _AUTH_PROBE_ARGV:
         return (
@@ -450,19 +638,20 @@ def subscription_auth_error(
         return None  # family explicitly has no probe; the scrub is its only guarantee
 
     argv = [cli_bin, *argv_tail]
+    label = " ".join(argv)
     probe = prober if prober is not None else _default_auth_prober
     probe_cwd = cwd if cwd is not None else neutral_claude_cwd()
     try:
         rc, stdout, stderr = probe(argv, env=env, cwd=probe_cwd, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return f"`{cli_bin} auth status` timed out after {timeout:g}s"
+        return f"`{label}` timed out after {timeout:g}s"
     except OSError as exc:
-        return f"could not run `{cli_bin} auth status`: {exc}"
+        return f"could not run `{label}`: {exc}"
 
     if rc != 0:
         detail = (stderr or stdout or "").strip()[:300] or f"exit {rc}"
         return (
-            f"`{cli_bin} auth status --json` failed ({detail}). Upgrade the CLI "
+            f"`{label}` failed ({detail}). Upgrade the CLI "
             f"so the subscription preflight can run, or use `--backend api`."
         )
 
@@ -470,11 +659,14 @@ def subscription_auth_error(
         obj = json.loads((stdout or "").strip())
     except json.JSONDecodeError:
         return (
-            f"could not parse `{cli_bin} auth status --json` output: "
+            f"could not parse `{label}` output: "
             f"{(stdout or '').strip()[:200]!r}"
         )
     if not isinstance(obj, dict):
-        return f"unexpected `{cli_bin} auth status --json` shape: {type(obj).__name__}"
+        return f"unexpected `{label}` shape: {type(obj).__name__}"
+
+    if cli == "cursor":
+        return _cursor_auth_error(cli_bin, obj)
 
     if obj.get("loggedIn") is not True:
         return f"{cli_bin} is not logged in — run `{cli_bin}` and `/login`"
@@ -552,8 +744,13 @@ def _build_cmd(
         # --trust: skip workspace-trust prompts in the empty neutral cwd.
         # No --system-prompt-file / --tools (Cursor has neither); callers fold
         # any preamble into stdin via _fold_system_prompt.
-        # Stays on --output-format text: cursor-agent's envelope keys are
-        # unverified, and _extract_result already unwraps one if it appears.
+        # --output-format json: verified 2026-08-10 on cursor-agent
+        # 2026.08.04-aaa8809 to emit {"type":"result","subtype","is_error",
+        # "result","duration_ms","session_id","usage":{"inputTokens",
+        # "outputTokens","cacheReadTokens","cacheWriteTokens"}} — the same
+        # envelope _extract_result already unwraps. Before this, Cursor was the
+        # only family whose per-process overhead (~17.2k tokens, ~4.4x Claude's)
+        # nothing could report.
         return [
             cli_bin,
             "-p",
@@ -563,7 +760,7 @@ def _build_cmd(
             "--model",
             model,
             "--output-format",
-            "text",
+            "json",
         ]
 
     # claude profile. ``--output-format json`` costs nothing and is the only way
@@ -628,10 +825,10 @@ def _extract_result(
     ``repr`` / nested JSON).
 
     **Anything that is not an envelope passes through as prose with no usage.**
-    That is what lets a stubbed test runner, a Cursor wave on ``text``, or a CLI
-    build that ignores ``--output-format json`` keep working exactly as before —
-    the telemetry degrades, the wave does not. A judge verdict is itself JSON but
-    has no ``type: "result"`` key, so it is never mistaken for an envelope.
+    That is what lets a stubbed test runner, or a CLI build of either family that
+    ignores ``--output-format json``, keep working exactly as before — the
+    telemetry degrades, the wave does not. A judge verdict is itself JSON but has
+    no ``type: "result"`` key, so it is never mistaken for an envelope.
     """
     text = (stdout or "").strip()
     if not text.startswith("{"):
@@ -749,9 +946,10 @@ def run_headless_wave(
 
     When the real runner is used, the child env is scrubbed via
     ``subscription_env``. A custom ``runner`` never receives that scrubbed env
-    (tests pass their own). The auth preflight runs when ``prober`` is given, or
-    when the real runner is in use; a stub ``runner`` with no ``prober`` skips
-    it, so unit tests never spawn anything.
+    (tests pass their own). The auth preflight — and, on Cursor, the token-free
+    ``--model`` validation — runs when ``prober`` is given, or when the real
+    runner is in use; a stub ``runner`` with no ``prober`` skips both, so unit
+    tests never spawn anything.
 
     ``usage_log`` (a JSONL path) receives one row per job — the detail stays on
     disk rather than in the orchestrator's context. ``extra_flags`` is appended
@@ -759,10 +957,17 @@ def run_headless_wave(
     only (the flag is already composed into ``extra_flags`` by
     :func:`~src.harness.state.resolve_headless_argv`); recorded as ``None`` on
     the Cursor profile. ``warm_first`` runs job 1 alone so the rest read the
-    shared prefix from cache instead of each re-creating it. ``cache``
-    (``auto`` | ``5m`` | ``1h`` | ``off``) selects the Claude prompt-cache TTL;
-    ``auto`` resolves from job shapes and prior wall times. Cursor ignores it
-    and records ``cache=None``. When the resolved mode is ``off``, warm-up is
+    shared prefix from cache instead of each re-creating it.
+
+    ``cache`` (``auto`` | ``5m`` | ``1h`` | ``off``) selects the Claude
+    prompt-cache TTL; ``auto`` resolves from job shapes and prior wall times.
+    **Cursor has no controllable cache** — not "no cache": its server-side prefix
+    caching fires opportunistically (``cacheReadTokens`` of 0 / 256 / 1664 / 7680
+    across identical-prefix probe calls) while ``cacheWriteTokens`` stayed 0, so
+    the client cannot write, pin, or price an entry. Cursor waves therefore record
+    ``cache=None`` and keep ``warm_first``: with ``cache_read`` now logged beside
+    ``warm``, two waves of ``usage.jsonl`` settle empirically whether serializing
+    job 1 raises cache reads. When the resolved Claude mode is ``off``, warm-up is
     forced off — nothing to warm.
     """
     try:
@@ -830,6 +1035,13 @@ def run_headless_wave(
         )
         if auth_error:
             return _error_result(f"subscription preflight failed: {auth_error}", cwd)
+        # A bad Cursor --model otherwise costs one dead process per job. Both
+        # checks are token-free and fail open, so this can only ever convert N
+        # identical failures into one message with zero spawns.
+        if cli_name == "cursor":
+            model_error = cursor_model_error(cli_bin, model, probe=prober)
+            if model_error:
+                return _error_result(f"model preflight failed: {model_error}", cwd)
 
     wrote: list[str] = []
     failed: list[dict[str, str]] = []
@@ -855,7 +1067,7 @@ def run_headless_wave(
     use_warm_first = warm_first
     if cli_name == "claude":
         if requested_cache == "auto":
-            baseline, _ = baseline_tokens(usage_log)
+            baseline, _ = baseline_tokens(usage_log, cli=cli_name)
             resolved_cache = resolve_cache_mode(
                 jobs, spf_tokens, baseline, median_wall_s(usage_log)
             )

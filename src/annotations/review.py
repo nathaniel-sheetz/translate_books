@@ -45,7 +45,6 @@ from src.judges.llm_io import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_WORKER_MODEL = "sonnet"
 _DEFAULT_BATCH_SIZE = 5
 _DEFAULT_COST_LIMIT = 0.50
 
@@ -201,9 +200,17 @@ def prepare(
 
     Re-preparing clears the drafts for the entries it re-renders so ``commit``
     never reads an orphan; pass ``keep_drafts`` to protect work still in flight.
+
+    ``worker_model`` unset defaults per the book's ``headless_cli`` — see
+    :func:`~src.harness.headless.default_worker_model`.
     """
+    from src.harness import state as hstate
+    from src.harness.headless import default_worker_model
+
     project_dir = Path(project_dir)
-    worker_model = worker_model or _DEFAULT_WORKER_MODEL
+    worker_model = worker_model or default_worker_model(
+        str(hstate.load_config(project_dir).get("headless_cli") or "claude")
+    )
     batch_size = (
         _DEFAULT_BATCH_SIZE if batch_size is None else max(1, int(batch_size))
     )
@@ -406,7 +413,11 @@ def fanout(
     ``cache`` is a per-run override of ``headless_prompt_cache``.
     """
     from src.harness import state as hstate
-    from src.harness.headless import run_headless_wave, warn_cursor_claude_model
+    from src.harness.headless import (
+        default_worker_model,
+        run_headless_wave,
+        warn_cursor_claude_model,
+    )
 
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
@@ -432,7 +443,7 @@ def fanout(
         if missing_ids:
             return _fanout_error(f"keys not in manifest: {sorted(missing_ids)}")
 
-    worker_model = doc.get("worker_model") or _DEFAULT_WORKER_MODEL
+    worker_model = doc.get("worker_model") or default_worker_model(cli_name)
     model_warning = warn_cursor_claude_model(cli_name, worker_model)
 
     if concurrency is None:
