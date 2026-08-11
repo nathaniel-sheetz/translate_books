@@ -13,6 +13,11 @@ from typing import Any, Optional
 
 from src.models import AddressMap, Blacklist, Chunk, Glossary, ProjectState, StyleGuide
 
+# Anchored to this file, not to cwd (same convention as text_utils._PROMPTS_DIR).
+# The shipped prompts live in the repo whatever directory the process was
+# started from, and a service started by Task Scheduler has no say in its cwd.
+_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+
 
 def load_chunk(chunk_path: Path) -> Chunk:
     """
@@ -213,8 +218,10 @@ def load_prompt_template(template_path: Optional[Path] = None) -> str:
     hand-primed with `cp`.
 
     Args:
-        template_path: Path to the template file. If None, uses default
-                      'prompts/translation.txt' from current directory.
+        template_path: Path to the template file. If None, uses the repo's own
+                      ``prompts/translation.txt`` -- resolved from this module's
+                      location, not from the cwd, so it works under a service
+                      started in an arbitrary directory.
 
     Returns:
         Template content as string
@@ -227,7 +234,7 @@ def load_prompt_template(template_path: Optional[Path] = None) -> str:
         >>> template = load_prompt_template(Path("custom/my_template.txt"))
     """
     if template_path is None:
-        template_path = Path("prompts/translation.txt")
+        template_path = _PROMPTS_DIR / "translation.txt"
 
     if not template_path.exists():
         # prompts/translation.txt -> prompts/translation.example.txt

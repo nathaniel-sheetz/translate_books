@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.43.0.0] - 2026-08-10
+
+### Added
+- **Unattended reader service.** `scripts/serve.py` runs the app under waitress with rotating logs at `logs/web_ui.log`, loopback bind, and `/healthz` for the reboot/watchdog probe. `scripts/reader.ps1` installs/audits the TranslateBooksReader scheduled task from a single `Get-DesiredTask` definition (WorkingDirectory, battery-start, restart watchdog, no hard terminate).
+- **Per-request LLM timeouts.** SDK clients take an explicit timeout and `max_retries=0`; `RequestTimeoutError` is not retried by `call_llm`. Budget is per-provider `timeout_seconds`, then `LLM_REQUEST_TIMEOUT`, then a 300s default.
+
+### Fixed
+- **Prompt template resolved against system32 under the task.** `load_prompt_template` anchors to the repo; `serve.py` also `chdir`s to the repo root.
+- **Batch translate could freeze the dashboard with no explanation.** Per-chunk failures emit named `chunk_error` events; a fatal job error still closes the SSE stream with `batch_complete` and truthful counts; the dashboard shows the failure detail.
+
 ## [0.42.0.0] - 2026-08-07
 
 ### Added

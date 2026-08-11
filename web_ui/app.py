@@ -7,6 +7,7 @@ Provides the pipeline dashboard and bilingual reader:
 - Bilingual sentence-aligned reader with annotations and corrections
 """
 
+import ipaddress
 import json
 import math
 import re
@@ -87,6 +88,17 @@ def _strip_json_fences(text: str) -> str:
 _PROJECT_ROOT = Path(__file__).parent.parent
 
 
+def _read_version() -> str:
+    """Read VERSION once at import so /healthz never touches disk."""
+    try:
+        return (_PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+_VERSION = _read_version()
+
+
 # ============================================================================
 # Flask Routes
 # ============================================================================
@@ -96,6 +108,16 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 def index():
     """Redirect to the project list."""
     return redirect("/read/")
+
+
+@app.route("/healthz")
+def healthz():
+    """Liveness probe for the service task, the watchdog, and post-deploy checks.
+
+    Deliberately cheap — no project scanning, no disk access. A slow response
+    here means the process itself is wedged, not that a project is large.
+    """
+    return jsonify({"ok": True, "version": _VERSION})
 
 
 # ============================================================================
@@ -3990,15 +4012,52 @@ def project_translate_batch(project_id):
     job_id = str(uuid.uuid4())[:8]
     job_queue = queue.Queue()
 
+    # Owned out here, not in _batch_body, so the fatal handler can report what
+    # actually happened. A crash late in the job (evals, alignment) leaves real
+    # translations on disk; calling those failures because the thread died is
+    # the same lie the terminal event was added to stop telling.
+    translated_chunks: list = []
+    errors: list[str] = []
+
     def run_batch():
+        """Wrapper: guarantees a terminal ``batch_complete`` event.
+
+        Anything raised outside the per-chunk handler used to kill this thread
+        with no event on the queue, so the SSE stream sat on keepalives and the
+        modal's progress bar stayed frozen at 0% with nothing to explain why.
+        The stream must always be told the job is over."""
+        try:
+            _batch_body()
+        except Exception as e:
+            app.logger.exception("Batch translate: job %s died: %s", job_id, e)
+            job_queue.put(json.dumps({
+                "event": "batch_complete",
+                "translated_count": len(translated_chunks),
+                # Everything not on disk: the chunks that raised, plus the ones
+                # the crash meant we never reached.
+                "error_count": len(chunk_paths) - len(translated_chunks),
+                # A job can die with every chunk translated (a crash in the
+                # eval or align phase). The counts alone read as a clean run
+                # then, so flag the abort separately or the reason is lost.
+                "fatal": f"Batch failed: {e}",
+                "errors": ([f"Batch failed: {e}"] + errors)[:5],
+            }))
+
+    def _batch_body():
         from src.api_translator import last_cache_usage, translate_chunk_realtime
         affected_chapters: set[str] = set()
-        translated_chunks: list = []
         total_cache_read = 0
         total_cache_created = 0
         for cp in chunk_paths:
+            # Bind per-iteration so the error handler can never read a stale id
+            # from the previous chunk (or raise UnboundLocalError when the very
+            # first load_chunk fails, which used to kill this thread outright and
+            # leave the dashboard's progress bar spinning forever).
+            chunk = None
+            chunk_id = cp.stem
             try:
                 chunk = load_chunk(cp)
+                chunk_id = chunk.id
                 job_queue.put(json.dumps({
                     "event": "chunk_started",
                     "chunk_id": chunk.id,
@@ -4036,9 +4095,17 @@ def project_translate_batch(project_id):
                     "cache_creation_input_tokens": cache_created,
                 }))
             except Exception as e:
+                # Log server-side too. The SSE event only reaches a browser that
+                # is still watching; a failed run has to leave a trace on disk
+                # that survives a refresh or a closed tab.
+                app.logger.exception(
+                    "Batch translate: chunk %s failed: %s", chunk_id, e,
+                )
+                errors.append(f"{chunk_id}: {e}")
                 job_queue.put(json.dumps({
                     "event": "chunk_error",
-                    "chunk_id": chunk.id if chunk else "",
+                    "chunk_id": chunk_id,
+                    "chapter_id": chunk.chapter_id if chunk else "",
                     "error": str(e),
                 }))
 
@@ -4102,11 +4169,21 @@ def project_translate_batch(project_id):
                 # Non-fatal: alignment can be re-run from the Review stage.
                 pass
 
+        if errors:
+            app.logger.warning(
+                "Batch translate: job %s finished with %d/%d chunks failed",
+                job_id, len(errors), len(chunk_paths),
+            )
         job_queue.put(json.dumps({
             "event": "batch_complete",
             "cache_read_input_tokens": total_cache_read,
             "cache_creation_input_tokens": total_cache_created,
             "evaluated_count": evaluated_count,
+            "translated_count": len(translated_chunks),
+            "error_count": len(errors),
+            # Cap the payload: one bad API key fails every chunk with the same
+            # message, and the modal only shows the first one anyway.
+            "errors": errors[:5],
         }))
 
     t = threading.Thread(target=run_batch, daemon=True)
@@ -6056,26 +6133,66 @@ def serve_edit_report(project_id, filename):
     return send_from_directory(str(reports_dir), filename)
 
 
-def _print_access_urls(port: int) -> None:
-    import os, socket
-    # Werkzeug's reloader runs this block twice (parent + child). Only print in
-    # the child, identified by WERKZEUG_RUN_MAIN=true.
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+def _is_tailnet_addr(addr: str) -> bool:
+    """True for Tailscale's 100.64.0.0/10 CGNAT range."""
+    try:
+        return ipaddress.ip_address(addr) in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return False
+
+
+def _print_access_urls(port: int, host: str = "0.0.0.0") -> None:
+    """Print the startup banner.
+
+    The reloader guard is the caller's business — scripts/serve.py runs under
+    waitress, where WERKZEUG_RUN_MAIN is never set and an early return would
+    swallow the banner entirely.
+    """
+    import socket
+
+    print("=" * 70)
+    print(f"  Translation Web UI — running on port {port}")
+    print("=" * 70)
+    print(f"  Local:    http://localhost:{port}")
+    if host in ("127.0.0.1", "localhost", "::1"):
+        print("  Bound to loopback only — `tailscale serve` is the door in.")
+        print("  Run `tailscale serve status` for the https://<machine>.<tailnet>.ts.net name.")
+        print("=" * 70)
         return
     try:
         addrs = sorted(set(socket.gethostbyname_ex(socket.gethostname())[2]))
     except socket.gaierror:
         addrs = []
-    print("=" * 70)
-    print(f"  Translation Web UI — running on port {port}")
-    print("=" * 70)
-    print(f"  Local:    http://localhost:{port}")
-    for addr in addrs:
+    lan = [a for a in addrs if not _is_tailnet_addr(a)]
+    tailnet = [a for a in addrs if _is_tailnet_addr(a)]
+    for addr in lan:
         print(f"  Network:  http://{addr}:{port}")
-    print("  (Phones/tablets on the same Wi-Fi: pick a Network URL above.)")
+    if lan:
+        print("  (Phones/tablets on the same Wi-Fi: pick a Network URL above.)")
+    for addr in tailnet:
+        print(f"  Tailnet:  http://{addr}:{port}")
+    if tailnet:
+        print("  (Tailnet addresses reach this machine from anywhere via Tailscale.)")
     print("=" * 70)
+
+
+def _debug_enabled() -> bool:
+    """Whether to run the dev server with Werkzeug's debugger.
+
+    Off unless BOOKS_DEBUG explicitly opts in: the debugger is an RCE console,
+    and the unattended service must never be able to acquire one by accident.
+    """
+    import os
+
+    return os.environ.get("BOOKS_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 if __name__ == "__main__":
-    _print_access_urls(5000)
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    import os
+
+    debug = _debug_enabled()
+    # With debug on, the reloader runs this block twice (parent + child); only
+    # the child, identified by WERKZEUG_RUN_MAIN, should print.
+    if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _print_access_urls(5000, host="0.0.0.0")
+    app.run(debug=debug, host="0.0.0.0", port=5000)
