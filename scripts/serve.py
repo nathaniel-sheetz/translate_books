@@ -14,17 +14,17 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-# Must precede the web_ui import: the task has no "Start in" directory, so the
-# cwd is whatever Windows hands us (typically C:\Windows\system32), and
-# `import web_ui.app` would fail outright.
+# Must precede the web_ui import: without a WorkingDirectory the task starts in
+# system32 and `import web_ui.app` fails. install sets WorkingDirectory now;
+# keep the path insert + chdir so a hand-rolled or drifted task still works.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 # sys.path alone is not enough. Every other entry point runs from the repo root
 # -- dev types `python -m web_ui.app` there, and the harness passes
 # cwd=REPO_ROOT to its subprocesses -- so cwd-relative defaults in src/ have
-# always resolved. Under the task they resolved against system32 instead, and
-# batch translation died on "Template file not found: prompts\translation.txt".
+# always resolved. Defense-in-depth against a missing WorkingDirectory (the
+# failure mode that produced "Template file not found: prompts\translation.txt").
 os.chdir(REPO_ROOT)
 
 # Loopback only — `tailscale serve` is the single door in. Flip to "0.0.0.0"

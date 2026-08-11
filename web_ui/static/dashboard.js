@@ -2544,9 +2544,15 @@
         var prog = document.getElementById('batch-progress');
         if (prog) prog.style.display = 'none';
         var txt = document.getElementById('batch-progress-text');
-        if (txt) txt.textContent = 'Translating...';
+        if (txt) { txt.textContent = 'Translating...'; txt.style.color = ''; }
         var fill = document.getElementById('batch-progress-fill');
-        if (fill) fill.style.width = '0%';
+        if (fill) { fill.style.width = '0%'; fill.classList.remove('failed'); }
+        // The error banner and spinner are the two bits a failed run leaves
+        // behind; without clearing them the next run opens pre-failed.
+        var errEl = document.getElementById('batch-error-detail');
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+        var spinner = document.querySelector('#batch-progress .spinner');
+        if (spinner) spinner.style.display = '';
         var start = document.getElementById('btn-start-batch');
         if (start) start.disabled = false;
         var cancel = document.getElementById('btn-cancel-batch');
@@ -2657,28 +2663,48 @@
 
     function startBatchSSE(jobId, totalChunks) {
         var completed = 0;
+        var failed = 0;
+        var firstError = '';
         var cacheReadTotal = 0;
         var cacheCreatedTotal = 0;
         var evalsTotal = 0;
         var evalsDone = 0;
         batchEventSource = new EventSource('/api/project/' + PROJECT + '/translate/sse?job_id=' + jobId);
 
+        // "Translated 2/4" alone reads as success even when the other two blew
+        // up, so the failure count rides along as soon as there is one.
+        function progressLabel(prefix) {
+            var txt = prefix + ' ' + completed + '/' + totalChunks;
+            if (failed > 0) txt += ' · ' + failed + ' failed';
+            return txt;
+        }
+
         batchEventSource.addEventListener('chunk_done', function(e) {
             completed++;
-            var pct = totalChunks > 0 ? Math.round(completed / totalChunks * 100) : 0;
+            var pct = totalChunks > 0 ? Math.round((completed + failed) / totalChunks * 100) : 0;
             try {
                 var payload = JSON.parse(e.data);
                 cacheReadTotal += (payload.cache_read_input_tokens || 0);
                 cacheCreatedTotal += (payload.cache_creation_input_tokens || 0);
             } catch (err) { /* ignore */ }
-            document.getElementById('batch-progress-text').textContent =
-                'Translated ' + completed + '/' + totalChunks;
+            document.getElementById('batch-progress-text').textContent = progressLabel('Translated');
             document.getElementById('batch-progress-fill').style.width = pct + '%';
         });
 
         batchEventSource.addEventListener('chunk_error', function(e) {
-            var data = JSON.parse(e.data);
+            failed++;
+            var data = {};
+            try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }
             console.error('Chunk error:', data);
+            if (!firstError) {
+                firstError = (data.chunk_id ? data.chunk_id + ': ' : '') +
+                    (data.error || 'unknown error');
+            }
+            // Advance the bar on failures too. A stalled bar is the one thing a
+            // run where every chunk fails must not look like.
+            var pct = totalChunks > 0 ? Math.round((completed + failed) / totalChunks * 100) : 0;
+            document.getElementById('batch-progress-fill').style.width = pct + '%';
+            document.getElementById('batch-progress-text').textContent = progressLabel('Translated');
         });
 
         batchEventSource.addEventListener('evals_started', function(e) {
@@ -2700,21 +2726,56 @@
         batchEventSource.addEventListener('batch_complete', function(e) {
             batchEventSource.close();
             batchEventSource = null;
-            var msg = 'Complete!';
-            try {
-                var payload = JSON.parse(e.data);
-                var read = payload.cache_read_input_tokens || cacheReadTotal || 0;
-                var created = payload.cache_creation_input_tokens || cacheCreatedTotal || 0;
-                if (read > 0) {
-                    msg += ' Cache saved ~' + read.toLocaleString() + ' input tokens';
-                    if (created > 0) {
-                        msg += ' (' + created.toLocaleString() + ' written)';
-                    }
-                }
-            } catch (err) { /* ignore */ }
-            document.getElementById('batch-progress-text').textContent = msg;
+            var payload = {};
+            try { payload = JSON.parse(e.data); } catch (err) { /* ignore */ }
+
+            // Trust the server's tally over the events we happened to catch —
+            // a reconnect mid-run can cost us a chunk_error.
+            var errorCount = payload.error_count != null ? payload.error_count : failed;
+            var okCount = payload.translated_count != null ? payload.translated_count : completed;
+            // The job can die after every chunk landed — a crash in the eval or
+            // align phase. Counts alone read as a clean run there, so the abort
+            // has to be its own signal or the modal says "Complete!" of a run
+            // that did not complete.
+            var fatal = payload.fatal || '';
+            if (payload.errors && payload.errors.length && !firstError) {
+                firstError = payload.errors[0];
+            }
+            if (fatal && !firstError) firstError = fatal;
+
             document.getElementById('btn-start-batch').disabled = false;
             document.getElementById('btn-cancel-batch').style.display = 'none';
+            var textEl = document.getElementById('batch-progress-text');
+            var errEl = document.getElementById('batch-error-detail');
+
+            if (errorCount > 0 || fatal) {
+                // Nothing auto-closes on a failed run. The modal is the only
+                // place the reason exists, and closing it throws the reason away.
+                document.getElementById('batch-progress-fill').style.width = '100%';
+                document.getElementById('batch-progress-fill').classList.add('failed');
+                var spinner = document.querySelector('#batch-progress .spinner');
+                if (spinner) spinner.style.display = 'none';
+                textEl.textContent = okCount + ' of ' + totalChunks + ' translated · ' +
+                    (errorCount > 0 ? errorCount + ' failed' : 'run did not finish');
+                textEl.style.color = '#b91c1c';
+                if (errEl) {
+                    errEl.textContent = firstError || 'See the server log for details.';
+                    errEl.style.display = '';
+                }
+                try { loadStatus(); } catch (err) { console.error('loadStatus after batch failed:', err); }
+                return;
+            }
+
+            var msg = 'Complete!';
+            var read = payload.cache_read_input_tokens || cacheReadTotal || 0;
+            var created = payload.cache_creation_input_tokens || cacheCreatedTotal || 0;
+            if (read > 0) {
+                msg += ' Cache saved ~' + read.toLocaleString() + ' input tokens';
+                if (created > 0) {
+                    msg += ' (' + created.toLocaleString() + ' written)';
+                }
+            }
+            textEl.textContent = msg;
             // Schedule the close before loadStatus() so a rebuild error can't strand the modal open.
             setTimeout(closeBatchModal, 1500);
             try { loadStatus(); } catch (err) { console.error('loadStatus after batch failed:', err); }

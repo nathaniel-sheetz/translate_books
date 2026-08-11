@@ -134,6 +134,38 @@ def get_provider_config(provider_id: str) -> dict:
     raise ValueError(f"Unknown provider '{provider_id}'. Check llm_config.json.")
 
 
+# A request that has returned nothing for this long is not slow, it is stuck.
+# Both SDKs default to 600s AND retry internally, which stacks under call_llm's
+# own retry loop: nine 10-minute attempts, 90 minutes per chunk, with a frozen
+# progress bar and no way to tell a stalled provider from a working one.
+# 300s sits well clear of a real chunk (a 4096-token translation measured ~2min
+# on google/gemma-4-31B-it-turbo) while still failing fast enough to be read as
+# a failure. The non-turbo gemma-4-31B-it runs at ~1.2 tok/s, or ~57min/chunk:
+# no sane budget covers that, and it should fail loudly rather than look busy.
+DEFAULT_REQUEST_TIMEOUT = 300.0
+
+
+def get_request_timeout(provider_id: str) -> float:
+    """Seconds to wait on one LLM request before calling it stuck.
+
+    Resolution order: the provider's ``timeout_seconds`` in llm_config.json,
+    then ``LLM_REQUEST_TIMEOUT``, then :data:`DEFAULT_REQUEST_TIMEOUT`. Slow
+    self-hosted or very large models can be given more room per provider
+    without loosening the budget for everyone else.
+    """
+    try:
+        configured = get_provider_config(provider_id).get("timeout_seconds")
+    except ValueError:
+        configured = None
+    if configured is None:
+        configured = os.environ.get("LLM_REQUEST_TIMEOUT")
+    try:
+        value = float(configured)
+    except (TypeError, ValueError):
+        return DEFAULT_REQUEST_TIMEOUT
+    return value if value > 0 else DEFAULT_REQUEST_TIMEOUT
+
+
 def get_default_model() -> str:
     return load_llm_config().get("default_model", "claude-sonnet-5")
 
@@ -286,6 +318,17 @@ class RateLimitError(APIError):
 
 class CostLimitError(APIError):
     """Raised when cost limit is exceeded."""
+    pass
+
+
+class RequestTimeoutError(APIError):
+    """Raised when a provider does not answer within the request timeout.
+
+    Deliberately not retried by :func:`call_llm`. A timeout means the provider
+    is stalled or the model is too slow for the configured budget; re-sending
+    the same request just multiplies the wait, which is how a stuck DeepInfra
+    call turned into 90 minutes of a motionless progress bar.
+    """
     pass
 
 
@@ -596,6 +639,7 @@ def call_anthropic_api(
     api_key: str | None = None,
     enable_thinking: bool | None = None,
     cache_prefix: str | None = None,
+    provider_id: str | None = None,
 ) -> str:
     """Call the Anthropic Claude API and return the text response.
 
@@ -618,7 +662,13 @@ def call_anthropic_api(
 
     if api_key is None:
         api_key = get_api_key("anthropic")
-    client = anthropic.Anthropic(api_key=api_key)
+    # The id, not the type: a second anthropic-type entry in llm_config.json
+    # gets its own timeout_seconds, the same way the openai-compatible path
+    # gives deepinfra a budget separate from openai's.
+    timeout = get_request_timeout(provider_id or "anthropic")
+    # max_retries=0: call_llm owns the retry loop. Leaving the SDK's default of
+    # 2 in place multiplies every attempt by three behind call_llm's back.
+    client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
 
     if cache_prefix and prompt.startswith(cache_prefix):
         content: str | list = [
@@ -671,6 +721,12 @@ def call_anthropic_api(
         else:
             raise APIError("Empty response from Claude API")
 
+    except anthropic.APITimeoutError:
+        raise RequestTimeoutError(
+            f"Anthropic did not respond within {timeout:.0f}s "
+            f"(model {model}). Raise 'timeout_seconds' for the provider in "
+            f"llm_config.json, or pick a faster model."
+        )
     except anthropic.RateLimitError as e:
         raise RateLimitError(f"Claude API rate limit exceeded: {e}")
     except anthropic.AuthenticationError as e:
@@ -687,6 +743,7 @@ def call_openai_api(
     api_key: str | None = None,
     base_url: str | None = None,
     cache_prefix: str | None = None,  # ignored; OpenAI path has no prompt cache
+    provider_id: str | None = None,
 ) -> str:
     """Call an OpenAI-compatible API and return the text response.
 
@@ -703,7 +760,13 @@ def call_openai_api(
 
     if api_key is None:
         api_key = get_api_key("openai")
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    timeout = get_request_timeout(provider_id or "openai")
+    # max_retries=0: call_llm owns the retry loop. The SDK's default of 2 is
+    # what turned one stalled DeepInfra request into three 10-minute waits
+    # before call_llm even saw a failure.
+    client = openai.OpenAI(
+        api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0,
+    )
 
     try:
         response = client.chat.completions.create(
@@ -721,6 +784,12 @@ def call_openai_api(
         else:
             raise APIError("Empty response from OpenAI API")
 
+    except openai.APITimeoutError:
+        raise RequestTimeoutError(
+            f"{provider_id or 'Provider'} did not respond within {timeout:.0f}s "
+            f"(model {model}). Raise 'timeout_seconds' for the provider in "
+            f"llm_config.json, or pick a faster model."
+        )
     except openai.RateLimitError as e:
         raise RateLimitError(f"OpenAI API rate limit exceeded: {e}")
     except openai.AuthenticationError as e:
@@ -751,13 +820,13 @@ def _dispatch_llm_call(
         response = call_anthropic_api(
             prompt, model, max_tokens, temperature,
             api_key=api_key, enable_thinking=enable_thinking,
-            cache_prefix=cache_prefix,
+            cache_prefix=cache_prefix, provider_id=provider,
         )
     elif ptype == "openai-compatible":
         response = call_openai_api(
             prompt, model, max_tokens, temperature,
             api_key=api_key, base_url=pconfig.get("base_url"),
-            cache_prefix=cache_prefix,
+            cache_prefix=cache_prefix, provider_id=provider,
         )
     else:
         raise ValueError(f"Unknown provider type '{ptype}' for provider '{provider}'")
@@ -817,6 +886,12 @@ def call_llm(
                 call_type=call_type, chunk_id=chunk_id, project_slug=project_slug,
                 enable_thinking=enable_thinking, cache_prefix=cache_prefix,
             )
+        except RequestTimeoutError:
+            # Not retried on purpose. The provider is stalled or the model is
+            # too slow for the budget; three more DEFAULT_REQUEST_TIMEOUT waits
+            # (5 minutes each) change nothing except how long the caller stares
+            # at a stationary progress bar.
+            raise
         except RateLimitError as e:
             last_error = e
             if attempt < max_retries - 1:

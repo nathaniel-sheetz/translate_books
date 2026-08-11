@@ -46,10 +46,20 @@ function Get-ReaderListener {
         Bind address tells the two entry points apart - serve.py binds
         127.0.0.1, the dev server binds 0.0.0.0.
     #>
+    # SilentlyContinue, not Stop: on a free port the cmdlet raises "no
+    # MSFT_NetTCPConnection objects found", and an empty port is the normal case
+    # this function exists to report, not an error. With Stop it threw into the
+    # catch, which returned $null -- and @($null).Count is 1, not 0, so every
+    # caller that counted the result saw one nameless listener that did not
+    # exist. `status` printed a blank "Process: PID -" line in place of
+    # "nothing listening", which is a lie told by the one command you run when
+    # the reader is already broken.
     try {
-        $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
+        $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
     } catch {
-        return $null
+        # A real CIM failure (service stopped, WMI repository trouble) is not
+        # the same as an idle port, but there is nothing to report either way.
+        return @()
     }
     foreach ($c in $conns) {
         $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
@@ -106,25 +116,14 @@ function Get-PythonPath {
     return $cmd.Source
 }
 
-function Get-DesiredTask {
+function Get-DesiredSettings {
     <#
-        The single description of what the task should be: `install` writes from
-        it and `status` audits against it, so the two cannot drift apart.
-
-        Transcribed from the task as originally registered by hand, with one
-        deliberate change. That task carried DisallowStartIfOnBatteries=true, so
-        a reboot on battery left the reader down - the exact case Step 3 of
-        docs/design/tailscale.md promises to survive.
+        Split out from Get-DesiredTask because it needs nothing from the
+        machine. `status` audits only these, and building the whole task to get
+        at them meant resolving an interpreter first: run `status` from a shell
+        where python is missing or shadowed by the Store alias and the audit
+        reported "could not audit" about a task that was perfectly fine.
     #>
-    $action = New-ScheduledTaskAction `
-        -Execute (Get-PythonPath) `
-        -Argument "`"$ServePath`"" `
-        -WorkingDirectory $RepoRoot
-
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    # A minute of slack so the network stack and Tailscale are up first.
-    $trigger.Delay = 'PT1M'
-
     $settings = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
         -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -135,11 +134,34 @@ function Get-DesiredTask {
     # No cmdlet parameter exists for this one, and it matters: the service
     # should not be hard-killed in the middle of writing a translation.
     $settings.AllowHardTerminate = $false
+    return $settings
+}
+
+function Get-DesiredTask {
+    <#
+        The single description of what the task should be: `install` writes from
+        it and `status` audits against it, so the two cannot drift apart.
+
+        Transcribed from the task as originally registered by hand, with one
+        deliberate change. That task carried DisallowStartIfOnBatteries=true, so
+        a reboot on battery left the reader down - the exact case Step 3 of
+        docs/design/tailscale.md promises to survive.
+
+        Needs a usable interpreter; only `install` calls it.
+    #>
+    $action = New-ScheduledTaskAction `
+        -Execute (Get-PythonPath) `
+        -Argument "`"$ServePath`"" `
+        -WorkingDirectory $RepoRoot
+
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    # A minute of slack so the network stack and Tailscale are up first.
+    $trigger.Delay = 'PT1M'
 
     return [PSCustomObject]@{
         Action   = $action
         Trigger  = $trigger
-        Settings = $settings
+        Settings = Get-DesiredSettings
     }
 }
 
@@ -155,7 +177,10 @@ function Test-TaskDrift {
     param($Task)
 
     $findings = @()
-    $desired = Get-DesiredTask
+    # Settings only, not the whole task: nothing below compares Execute, and
+    # resolving an interpreter to build it would make the audit fail on
+    # machines where the registered task is correct.
+    $desiredSettings = Get-DesiredSettings
 
     $action = @($Task.Actions)[0]
     if ($null -eq $action) {
@@ -180,17 +205,20 @@ function Test-TaskDrift {
     if ($s.StopIfGoingOnBatteries) {
         $findings += 'StopIfGoingOnBatteries=true - the reader dies when you unplug'
     }
-    if ("$($s.ExecutionTimeLimit)" -ne "$($desired.Settings.ExecutionTimeLimit)") {
-        $findings += "ExecutionTimeLimit=$($s.ExecutionTimeLimit), expected $($desired.Settings.ExecutionTimeLimit) (no limit)"
+    if ("$($s.ExecutionTimeLimit)" -ne "$($desiredSettings.ExecutionTimeLimit)") {
+        $findings += "ExecutionTimeLimit=$($s.ExecutionTimeLimit), expected $($desiredSettings.ExecutionTimeLimit) (no limit)"
     }
-    if ("$($s.MultipleInstances)" -ne "$($desired.Settings.MultipleInstances)") {
-        $findings += "MultipleInstances=$($s.MultipleInstances), expected $($desired.Settings.MultipleInstances)"
+    if ("$($s.MultipleInstances)" -ne "$($desiredSettings.MultipleInstances)") {
+        $findings += "MultipleInstances=$($s.MultipleInstances), expected $($desiredSettings.MultipleInstances)"
     }
-    if ($s.RestartCount -ne $desired.Settings.RestartCount) {
-        $findings += "RestartCount=$($s.RestartCount), expected $($desired.Settings.RestartCount)"
+    if ($s.RestartCount -ne $desiredSettings.RestartCount) {
+        $findings += "RestartCount=$($s.RestartCount), expected $($desiredSettings.RestartCount)"
     }
-    if ("$($s.RestartInterval)" -ne "$($desired.Settings.RestartInterval)") {
-        $findings += "RestartInterval=$($s.RestartInterval), expected $($desired.Settings.RestartInterval)"
+    if ("$($s.RestartInterval)" -ne "$($desiredSettings.RestartInterval)") {
+        $findings += "RestartInterval=$($s.RestartInterval), expected $($desiredSettings.RestartInterval)"
+    }
+    if ($s.AllowHardTerminate -ne $desiredSettings.AllowHardTerminate) {
+        $findings += "AllowHardTerminate=$($s.AllowHardTerminate), expected $($desiredSettings.AllowHardTerminate)"
     }
 
     $boot = @($Task.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' })
@@ -237,15 +265,26 @@ function Install-Reader {
         Write-Host "  restore: Register-ScheduledTask -Xml (Get-Content '$backup' -Raw) -TaskName $TaskName -User $user -Password <pw> -Force"
     }
 
-    if (Get-ReaderListener) { Stop-Reader }
-
+    # Everything that can fail or block goes above the stop. Ctrl+C at the
+    # password prompt is the ordinary way to back out of this command, and it
+    # used to leave the reader down with no message and nothing to restart it.
     $desired = Get-DesiredTask
     # "Run whether user is logged on or not" means a stored password: the
     # packages this app needs live in per-user site-packages, so the task has to
     # carry the user's own identity (see docs/design/tailscale.md, Step 3).
     $secure = Read-Host "Windows password for $user" -AsSecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    $registered = $false
+    $regError = $null
+    # Remember whether we are the ones who took the reader down: a failed
+    # registration below has to put back exactly what it interrupted.
+    $wasRunning = $false
     try {
+        # Inside the try so a failure stopping the service still reaches the
+        # recovery path below, and still zeroes the password in `finally`.
+        $wasRunning = [bool](Get-ReaderListener)
+        if ($wasRunning) { Stop-Reader }
+
         $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         Register-ScheduledTask `
             -TaskName $TaskName `
@@ -257,16 +296,39 @@ function Install-Reader {
             -Password $plain `
             -RunLevel Limited `
             -Force | Out-Null
+        $registered = $true
     } catch {
-        # The raw COM failure here is unreadable, and both likely causes are
-        # things the caller can act on.
-        Write-Host "Registration failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Usually one of: wrong password, or '$user' lacks the 'Log on as a batch job' right" -ForegroundColor Yellow
-        Write-Host "(secpol.msc -> Local Policies -> User Rights Assignment)" -ForegroundColor Yellow
-        throw
+        # Report and recover below, once the password is out of memory: the
+        # recovery restart waits up to 30s for a health response, and the
+        # plaintext should not sit in $plain for that whole window.
+        $regError = $_
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         Remove-Variable plain -ErrorAction SilentlyContinue
+    }
+
+    if (-not $registered) {
+        # The raw COM failure here is unreadable, and both likely causes are
+        # things the caller can act on.
+        Write-Host "Registration failed: $($regError.Exception.Message)" -ForegroundColor Red
+        Write-Host "Usually one of: wrong password, or '$user' lacks the 'Log on as a batch job' right" -ForegroundColor Yellow
+        Write-Host "(secpol.msc -> Local Policies -> User Rights Assignment)" -ForegroundColor Yellow
+
+        # Without this, one mistyped password is an outage: the stop above
+        # already ended the service, and the caller gets a red error that says
+        # nothing about the reader now being down. A failed -Force registration
+        # leaves the previous task definition in place, so it can simply be
+        # started again -- unfixed, but running, which is how it was found.
+        if ($wasRunning) {
+            Write-Host "The task is unchanged and the reader is down. Restarting it..." -ForegroundColor Cyan
+            try {
+                Start-Reader
+            } catch {
+                Write-Host "Could not restart: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "Bring it back by hand with 'scripts\reader.ps1 start'" -ForegroundColor Yellow
+            }
+        }
+        throw $regError
     }
 
     Write-Host "Registered $TaskName." -ForegroundColor Green
@@ -366,6 +428,7 @@ switch ($Command) {
         # registering anything, and answers "what would install write?" by hand.
         $desired = Get-DesiredTask
         $action = $desired.Action
+        $desiredSettings = $desired.Settings
         [PSCustomObject]@{
             TaskName                   = $TaskName
             Execute                    = $action.Execute
@@ -373,13 +436,13 @@ switch ($Command) {
             WorkingDirectory           = $action.WorkingDirectory
             TriggerClass               = $desired.Trigger.CimClass.CimClassName
             TriggerDelay               = $desired.Trigger.Delay
-            MultipleInstances          = "$($desired.Settings.MultipleInstances)"
-            ExecutionTimeLimit         = $desired.Settings.ExecutionTimeLimit
-            RestartCount               = $desired.Settings.RestartCount
-            RestartInterval            = $desired.Settings.RestartInterval
-            DisallowStartIfOnBatteries = $desired.Settings.DisallowStartIfOnBatteries
-            StopIfGoingOnBatteries     = $desired.Settings.StopIfGoingOnBatteries
-            AllowHardTerminate         = $desired.Settings.AllowHardTerminate
+            MultipleInstances          = "$($desiredSettings.MultipleInstances)"
+            ExecutionTimeLimit         = $desiredSettings.ExecutionTimeLimit
+            RestartCount               = $desiredSettings.RestartCount
+            RestartInterval            = $desiredSettings.RestartInterval
+            DisallowStartIfOnBatteries = $desiredSettings.DisallowStartIfOnBatteries
+            StopIfGoingOnBatteries     = $desiredSettings.StopIfGoingOnBatteries
+            AllowHardTerminate         = $desiredSettings.AllowHardTerminate
         } | ConvertTo-Json
     }
 

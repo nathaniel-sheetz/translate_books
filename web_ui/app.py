@@ -4012,15 +4012,52 @@ def project_translate_batch(project_id):
     job_id = str(uuid.uuid4())[:8]
     job_queue = queue.Queue()
 
+    # Owned out here, not in _batch_body, so the fatal handler can report what
+    # actually happened. A crash late in the job (evals, alignment) leaves real
+    # translations on disk; calling those failures because the thread died is
+    # the same lie the terminal event was added to stop telling.
+    translated_chunks: list = []
+    errors: list[str] = []
+
     def run_batch():
+        """Wrapper: guarantees a terminal ``batch_complete`` event.
+
+        Anything raised outside the per-chunk handler used to kill this thread
+        with no event on the queue, so the SSE stream sat on keepalives and the
+        modal's progress bar stayed frozen at 0% with nothing to explain why.
+        The stream must always be told the job is over."""
+        try:
+            _batch_body()
+        except Exception as e:
+            app.logger.exception("Batch translate: job %s died: %s", job_id, e)
+            job_queue.put(json.dumps({
+                "event": "batch_complete",
+                "translated_count": len(translated_chunks),
+                # Everything not on disk: the chunks that raised, plus the ones
+                # the crash meant we never reached.
+                "error_count": len(chunk_paths) - len(translated_chunks),
+                # A job can die with every chunk translated (a crash in the
+                # eval or align phase). The counts alone read as a clean run
+                # then, so flag the abort separately or the reason is lost.
+                "fatal": f"Batch failed: {e}",
+                "errors": ([f"Batch failed: {e}"] + errors)[:5],
+            }))
+
+    def _batch_body():
         from src.api_translator import last_cache_usage, translate_chunk_realtime
         affected_chapters: set[str] = set()
-        translated_chunks: list = []
         total_cache_read = 0
         total_cache_created = 0
         for cp in chunk_paths:
+            # Bind per-iteration so the error handler can never read a stale id
+            # from the previous chunk (or raise UnboundLocalError when the very
+            # first load_chunk fails, which used to kill this thread outright and
+            # leave the dashboard's progress bar spinning forever).
+            chunk = None
+            chunk_id = cp.stem
             try:
                 chunk = load_chunk(cp)
+                chunk_id = chunk.id
                 job_queue.put(json.dumps({
                     "event": "chunk_started",
                     "chunk_id": chunk.id,
@@ -4058,9 +4095,17 @@ def project_translate_batch(project_id):
                     "cache_creation_input_tokens": cache_created,
                 }))
             except Exception as e:
+                # Log server-side too. The SSE event only reaches a browser that
+                # is still watching; a failed run has to leave a trace on disk
+                # that survives a refresh or a closed tab.
+                app.logger.exception(
+                    "Batch translate: chunk %s failed: %s", chunk_id, e,
+                )
+                errors.append(f"{chunk_id}: {e}")
                 job_queue.put(json.dumps({
                     "event": "chunk_error",
-                    "chunk_id": chunk.id if chunk else "",
+                    "chunk_id": chunk_id,
+                    "chapter_id": chunk.chapter_id if chunk else "",
                     "error": str(e),
                 }))
 
@@ -4124,11 +4169,21 @@ def project_translate_batch(project_id):
                 # Non-fatal: alignment can be re-run from the Review stage.
                 pass
 
+        if errors:
+            app.logger.warning(
+                "Batch translate: job %s finished with %d/%d chunks failed",
+                job_id, len(errors), len(chunk_paths),
+            )
         job_queue.put(json.dumps({
             "event": "batch_complete",
             "cache_read_input_tokens": total_cache_read,
             "cache_creation_input_tokens": total_cache_created,
             "evaluated_count": evaluated_count,
+            "translated_count": len(translated_chunks),
+            "error_count": len(errors),
+            # Cap the payload: one bad API key fails every chunk with the same
+            # message, and the modal only shows the first one anyway.
+            "errors": errors[:5],
         }))
 
     t = threading.Thread(target=run_batch, daemon=True)

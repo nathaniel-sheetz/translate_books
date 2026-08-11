@@ -18,7 +18,6 @@ requires_powershell = pytest.mark.skipif(
     sys.platform != "win32", reason="reader.ps1 drives the Windows Task Scheduler"
 )
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from web_ui.app import (
@@ -273,3 +272,6 @@ def test_install_spec_keeps_the_service_durable():
     assert spec["MultipleInstances"] == "IgnoreNew"
     assert spec["RestartCount"] == 60
     assert spec["TriggerClass"] == "MSFT_TaskBootTrigger"
+    # No cmdlet parameter for this; install sets it so a reboot/watchdog
+    # cannot hard-kill mid-write. Drift audit compares it — lock the value.
+    assert spec["AllowHardTerminate"] is False
