@@ -3443,6 +3443,11 @@
         var judgesBtn = document.getElementById('btn-run-judges');
         if (judgesBtn) judgesBtn.addEventListener('click', function() { openJudgesModal(null); });
 
+        // Bound once, here rather than in openJudgesModal: the modal is a single
+        // DOM node reopened from two entry points, so binding on open would stack
+        // a duplicate change listener every time it is shown.
+        bindProviderModelPair('judges-provider', 'judges-model');
+
         var closeJudges = document.getElementById('judges-modal-close');
         if (closeJudges) {
             closeJudges.addEventListener('click', function() {
