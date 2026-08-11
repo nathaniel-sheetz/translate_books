@@ -932,11 +932,17 @@ def run(
     target_language = context["target_language"]
     marker = ai_marker(target_language)
 
-    built: list[tuple[AnnotationTarget, str]] = []
+    # (target, prompt, cache_prefix). The prefix is the per-type preamble the
+    # prepare path already splits out; carrying it here lets the API path cache
+    # it too. prompt stays prefix + suffix, i.e. what build_prompt() returned.
+    built: list[tuple[AnnotationTarget, str, str]] = []
     estimated = 0.0
     for target in targets:
-        prompt = annprompts.build_prompt(target, context)
-        built.append((target, prompt))
+        prefix, suffix = annprompts.build_prompt_parts(target, context)
+        prompt = prefix + suffix
+        built.append((target, prompt, prefix))
+        # Deliberately priced without the cache discount: this feeds the
+        # cost_limit gate, which should stay a conservative upper bound.
         estimated += estimate_call_cost(prompt, provider=provider, model=model)
     estimated = round(estimated, 4)
 
@@ -957,7 +963,7 @@ def run(
     failed: list[dict[str, str]] = []
     results: list[dict[str, Any]] = []
 
-    for target, prompt in built:
+    for target, prompt, cache_prefix in built:
         entry = {
             "key": target.key,
             "chapter_id": target.chapter_id,
@@ -976,6 +982,7 @@ def run(
                 provider=provider,
                 model=model,
                 call_type=f"annotation_{target.ann_type}",
+                cache_prefix=cache_prefix or None,
             )
             verdict = parse_verdict(raw, key=target.key)
         except JudgeParseError as exc:
