@@ -204,6 +204,29 @@ and `stale_reason` at the **top level** of `evaluations/<chunk>.json`, not insid
 `judges.<judge_name>` — a fixed finding must not keep asserting a failure, and
 `merge_judge_result` clears the stamp on the next run.
 
+### Freshness ledger (`eval_runs`)
+
+That stamp only covers edits `apply` itself makes. Every *other* path that
+rewrites `translated_text` — the chunk editor, `/api/correction`,
+`/api/apply-corrections`, `/api/sentence/replace` — leaves a persisted verdict
+asserting itself against prose it never saw. So each evaluation also carries:
+
+```json
+"eval_runs": {"dialogue": {"at": "2026-08-11T…", "text_sha": "9f2c…"}}
+```
+
+one entry per evaluator/judge, holding the sha256 of the newline-normalized
+`translated_text` that evaluator actually judged. `merge_judge_result` (both
+backends) and `save_chunk_evaluation` (the coded set) stamp it;
+`web_ui.evaluations.evaluator_freshness` compares it against the chunk on disk
+to answer fresh / stale / missing, which is what the dashboard Review tab's
+status pips render. No edit path has to remember to do anything: a changed
+chunk hashes differently, and the badge goes stale by itself.
+
+Evaluations written before `eval_runs` existed fall back to comparing the chunk
+file's mtime against `evaluated_at` / `judges_at`, and self-heal into the ledger
+on the next run. The explicit `stale` flag above still wins when set.
+
 ## Crash consistency in `apply`
 
 `apply` finishes each chunk's pre-edit snapshot (`.chunk_edits/`), its edit, its

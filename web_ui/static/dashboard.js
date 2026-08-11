@@ -249,7 +249,13 @@
 
     function navigateTo(stage) {
         if (stages.indexOf(stage) === -1) stage = 'source';
+        var changed = currentStage !== stage;
         currentStage = stage;
+        // The Review rollup is the one stage expensive enough to be worth
+        // fetching on demand rather than with every status poll.
+        if (stage === 'review' && changed && typeof refreshReviewStatus === 'function') {
+            refreshReviewStatus();
+        }
 
         // Update hash without triggering hashchange
         history.replaceState(null, '', '#' + stage);
@@ -372,11 +378,10 @@
                     }
                     break;
                 case 'review':
-                    if (status.alignment_count > 0) {
-                        badge.textContent = status.alignment_count + ' aligned';
-                        if (status.alignment_count >= status.chapter_count && status.chapter_count > 0) {
-                            li.classList.add('done');
-                        }
+                    // Text comes from /review-status (outstanding findings);
+                    // only the done state is cheap enough to derive here.
+                    if (status.alignment_count >= status.chapter_count && status.chapter_count > 0) {
+                        li.classList.add('done');
                     }
                     break;
                 case 'export':
@@ -393,7 +398,8 @@
         populateStyleGuideStage(status);
         populateGlossaryStage(status);
         populateTranslateStage(status);
-        populateReviewStage(status);
+        // Review renders from /review-status, not from here — see
+        // refreshReviewStatus().
         populateExportStage(status);
     }
 
@@ -3013,88 +3019,204 @@
     // Stage 7: Review
     // ========================================================================
 
-    function populateReviewStage(status) {
+    // The Review stage renders from its own endpoint, not from /status: the
+    // rollup opens and hashes every chunk in the book to decide what is stale,
+    // which is far too much work to repeat on every dashboard poll. It is
+    // fetched when the stage is opened and after anything that could change it.
+    var REVIEW_TYPES = window.DASHBOARD_REVIEW_TYPES ||
+        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
+    var REVIEW_LABELS = window.DASHBOARD_REVIEW_LABELS || {};
+    // Short column-friendly tags for the finding chips; the full label is the
+    // chip's tooltip.
+    var REVIEW_ABBR = {
+        blacklist: 'bl', grammar: 'gr', dictionary: 'dic',
+        completeness: 'cmp', dialogue: 'dlg', address: 'adr',
+    };
+    var JUDGE_GROUPS = [
+        { key: 'coded', tag: 'CD', label: 'Deterministic evaluators' },
+        { key: 'dialogue', tag: 'DL', label: 'Dialogue judge' },
+        { key: 'address', tag: 'AD', label: 'Address judge' },
+    ];
+    var JUDGE_STATE = {
+        done:    { glyph: '✓', cls: 'pip-done', word: 'up to date' },
+        partial: { glyph: '◑', cls: 'pip-partial', word: 'partly run' },
+        stale:   { glyph: '⚠', cls: 'pip-stale', word: 'stale (text changed since)' },
+        not_run: { glyph: '○', cls: 'pip-none', word: 'not run' },
+    };
+
+    var reviewStatus = null;          // last /review-status payload
+    var reviewStatusLoading = false;
+
+    function reviewSelectedChapters() {
+        var ids = [];
+        document.querySelectorAll('#review-tbody .review-pick:checked').forEach(function(cb) {
+            ids.push(cb.dataset.chapter);
+        });
+        return ids;
+    }
+
+    // null = whole book, which is what both run endpoints take for "no selection".
+    function reviewScope() {
+        var ids = reviewSelectedChapters();
+        return ids.length ? ids : null;
+    }
+
+    function updateReviewScopeHint() {
+        var hint = document.getElementById('review-scope-hint');
+        if (!hint) return;
+        var ids = reviewSelectedChapters();
+        hint.textContent = ids.length
+            ? (ids.length === 1 ? '1 chapter selected' : ids.length + ' chapters selected')
+            : 'whole book';
+    }
+
+    function findingChipsHtml(ch) {
+        var counts = ch.flag_counts || {};
+        var html = '';
+        REVIEW_TYPES.forEach(function(type) {
+            var n = counts[type] || 0;
+            if (!n) return;
+            var label = REVIEW_LABELS[type] || type;
+            html += '<a class="finding-chip finding-' + type +
+                '" href="/read/' + PROJECT + '/' + ch.id + '?review=' + encodeURIComponent(type) +
+                '" target="_blank" title="' + escapeHtml(n + ' · ' + label +
+                ' — open in the reader') + '">' +
+                n + ' ' + (REVIEW_ABBR[type] || type) + '</a> ';
+        });
+        return html || '<span class="review-muted">&mdash; clean</span>';
+    }
+
+    function judgePipsHtml(ch) {
+        var judges = ch.judges || {};
+        return JUDGE_GROUPS.map(function(g) {
+            var info = judges[g.key] || { state: 'not_run', fresh: 0, stale: 0, missing: 0 };
+            var meta = JUDGE_STATE[info.state] || JUDGE_STATE.not_run;
+            var total = (info.fresh || 0) + (info.stale || 0) + (info.missing || 0);
+            // "0/5 chunks fresh" on a judge that never ran reads like it ran and
+            // came back empty. Only quote the fraction once something has run.
+            var tip = g.label + ': ' + meta.word +
+                (total && info.state !== 'not_run'
+                    ? ' — ' + (info.fresh || 0) + '/' + total + ' chunks fresh' : '');
+            return '<span class="judge-pip ' + meta.cls + '" title="' + escapeHtml(tip) + '">' +
+                g.tag + meta.glyph + '</span>';
+        }).join(' ');
+    }
+
+    function notesCellHtml(ch) {
+        var ann = ch.annotations || {};
+        var bits = [];
+        if (ann.review) bits.push(ann.review + ' to review');
+        if (ann.footnotes_total) {
+            bits.push((ann.footnotes_filled || 0) + '/' + ann.footnotes_total + ' notes');
+        }
+        var html = bits.length ? escapeHtml(bits.join(' · ')) : '<span class="review-muted">&mdash;</span>';
+        if (ch.gap_count) {
+            html += ' <span class="review-gap" title="' + escapeHtml(
+                ch.gap_chars + ' characters of source text with no translation') + '">' +
+                ch.gap_count + ' gaps</span>';
+        }
+        return html;
+    }
+
+    function refreshReviewStatus() {
+        if (reviewStatusLoading) return Promise.resolve(reviewStatus);
+        reviewStatusLoading = true;
+        return apiGet('/api/project/' + PROJECT + '/review-status')
+            .then(function(data) {
+                reviewStatusLoading = false;
+                if (data && data.ok) {
+                    reviewStatus = data;
+                    renderReviewTable(data);
+                    updateReviewBadge(data);
+                }
+                return data;
+            })
+            .catch(function() {
+                reviewStatusLoading = false;
+                return null;
+            });
+    }
+
+    function updateReviewBadge(data) {
+        var badge = document.getElementById('badge-review');
+        if (!badge) return;
+        var totals = (data && data.totals) || {};
+        var findings = totals.findings || 0;
+        var translated = totals.translated_count || 0;
+        if (!translated) { badge.textContent = ''; return; }
+        badge.textContent = findings
+            ? findings + (findings === 1 ? ' finding' : ' findings')
+            : '✓ clean';
+    }
+
+    function renderReviewTable(data) {
         var tbody = document.getElementById('review-tbody');
+        if (!tbody) return;
         tbody.innerHTML = '';
         var alignAllBtn = document.getElementById('btn-align-all');
-        alignAllBtn.style.display = 'none';
+        var chapters = (data && data.chapters) || [];
 
-        if (!status.chapters || status.chapters.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5">No chapters available.</td></tr>';
+        if (!chapters.length) {
+            tbody.innerHTML = '<tr><td colspan="6">No chapters available.</td></tr>';
+            if (alignAllBtn) alignAllBtn.style.display = 'none';
             return;
         }
 
-        var hasAnyTranslated = false;
-        var unalignedChapters = [];
+        var unaligned = [];
+        var rows = 0;
 
-        status.chapters.forEach(function(ch) {
+        chapters.forEach(function(ch) {
             var translated = ch.translated_count || 0;
-            var total = ch.chunk_count || 0;
-            if (translated === 0 || total === 0) return;
-            hasAnyTranslated = true;
-
-            var hasAlignment = ch.has_alignment;
-            if (!hasAlignment) unalignedChapters.push(ch.id);
-            var confidence = ch.alignment_confidence;
-            var annotations = ch.annotation_count || 0;
-            var reviewed = ch.reviewed;
+            if (translated === 0 || !ch.chunk_count) return;
+            rows++;
+            if (!ch.has_alignment) unaligned.push(ch.id);
+            var notes = (ch.annotations || {}).review || 0;
 
             var tr = document.createElement('tr');
+            tr.dataset.chapterId = ch.id;
             tr.innerHTML =
-                '<td>' + escapeHtml(ch.name) + '</td>' +
-                '<td>' + (hasAlignment
-                    ? '<span class="' + (confidence < 90 ? 'confidence-warn' : 'confidence-ok') + '">' + confidence + '%</span>'
-                    : '&mdash;') + '</td>' +
-                '<td>' + (annotations > 0 ? annotations + ' notes' : '&mdash;') + '</td>' +
-                '<td>' + (reviewed ? '&#10003;' : '&mdash;') + '</td>' +
-                '<td>' +
-                    (!hasAlignment
-                        ? '<button class="btn-primary ch-align" data-chapter="' + ch.id + '" style="padding:3px 10px;font-size:12px">Align</button> '
-                        : '<button class="btn-secondary ch-realign" data-chapter="' + ch.id + '" data-annotations="' + annotations + '" style="padding:3px 10px;font-size:12px">Realign</button> '
-                    ) +
-                    '<a href="/read/' + PROJECT + '/' + ch.id + '" target="_blank" class="btn-secondary" style="padding:3px 10px;font-size:12px;text-decoration:none">Read</a>' +
+                '<td><input type="checkbox" class="review-pick" data-chapter="' + ch.id + '"></td>' +
+                '<td><div>' + escapeHtml(ch.display_label || ch.id) + '</div>' +
+                    '<div class="review-muted">' + translated + '/' + ch.chunk_count + ' chunks</div></td>' +
+                '<td>' + findingChipsHtml(ch) + '</td>' +
+                '<td class="judge-cell">' + judgePipsHtml(ch) + '</td>' +
+                '<td>' + notesCellHtml(ch) + '</td>' +
+                '<td class="review-actions">' +
+                    (!ch.has_alignment
+                        ? '<button class="btn-primary ch-align" data-chapter="' + ch.id + '">Align</button> '
+                        : '<button class="btn-secondary ch-realign" data-chapter="' + ch.id +
+                          '" data-annotations="' + notes + '">Realign</button> ') +
+                    '<a href="/read/' + PROJECT + '/' + ch.id + '" target="_blank" class="btn-secondary">Read</a> ' +
+                    '<button class="btn-secondary ch-rerun-coded" data-chapter="' + ch.id + '">Rerun</button> ' +
+                    '<button class="btn-secondary ch-run-judges" data-chapter="' + ch.id + '">Judges…</button>' +
                 '</td>';
             tbody.appendChild(tr);
         });
 
-        if (!hasAnyTranslated) {
-            tbody.innerHTML = '<tr><td colspan="5">No translated chapters yet.</td></tr>';
+        if (!rows) {
+            tbody.innerHTML = '<tr><td colspan="6">No translated chapters yet.</td></tr>';
         }
 
-        // Show "Align All Unaligned" button when there are unaligned chapters
-        if (unalignedChapters.length > 0) {
-            alignAllBtn.style.display = '';
-            alignAllBtn.textContent = 'Align All Unaligned (' + unalignedChapters.length + ')';
-            alignAllBtn.disabled = false;
-            // Replace listener by cloning
-            var fresh = alignAllBtn.cloneNode(true);
-            alignAllBtn.parentNode.replaceChild(fresh, alignAllBtn);
-            fresh.addEventListener('click', function() {
-                fresh.disabled = true;
-                var done = 0;
-                var total = unalignedChapters.length;
-                fresh.textContent = 'Aligning 1 of ' + total + '...';
-                function next(i) {
-                    if (i >= total) {
-                        fresh.textContent = 'Done';
-                        loadStatus();
-                        return;
-                    }
-                    fresh.textContent = 'Aligning ' + (i + 1) + ' of ' + total + '...';
-                    apiPost('/api/project/' + PROJECT + '/align/' + unalignedChapters[i], {}).then(function(data) {
-                        if (data.error) {
-                            fresh.textContent = 'Error on ' + unalignedChapters[i];
-                            alert('Error aligning ' + unalignedChapters[i] + ': ' + data.error);
-                            return;
-                        }
-                        next(i + 1);
-                    });
-                }
-                next(0);
-            });
+        if (alignAllBtn) {
+            alignAllBtn.style.display = unaligned.length ? '' : 'none';
+            if (unaligned.length) {
+                alignAllBtn.textContent = 'Align All Unaligned (' + unaligned.length + ')';
+                alignAllBtn.disabled = false;
+            }
         }
+        bindReviewRowHandlers(unaligned);
+        var selectAll = document.getElementById('select-all-review');
+        if (selectAll) selectAll.checked = false;
+        updateReviewScopeHint();
+    }
 
-        // Align button handlers
+    function bindReviewRowHandlers(unaligned) {
+        var tbody = document.getElementById('review-tbody');
+
+        tbody.querySelectorAll('.review-pick').forEach(function(cb) {
+            cb.addEventListener('change', updateReviewScopeHint);
+        });
+
         tbody.querySelectorAll('.ch-align').forEach(function(btn) {
             btn.addEventListener('click', function() {
                 var chId = btn.dataset.chapter;
@@ -3105,14 +3227,13 @@
                         btn.textContent = 'Error';
                         alert(data.error);
                     } else {
-                        btn.textContent = 'Done';
-                        loadStatus();
+                        refreshStatusBadges();
+                        refreshReviewStatus();
                     }
                 });
             });
         });
 
-        // Realign button handlers
         tbody.querySelectorAll('.ch-realign').forEach(function(btn) {
             btn.addEventListener('click', function() {
                 var chId = btn.dataset.chapter;
@@ -3138,12 +3259,274 @@
                         alert('Realigned ' + chId + '. ' + orphans +
                             ' annotation(s) could not be re-anchored and are now orphaned.');
                     }
-                    btn.textContent = 'Done';
-                    loadStatus();
+                    refreshStatusBadges();
+                    refreshReviewStatus();
                 });
             });
         });
+
+        tbody.querySelectorAll('.ch-rerun-coded').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                startCodedRun([btn.dataset.chapter]);
+            });
+        });
+
+        tbody.querySelectorAll('.ch-run-judges').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                openJudgesModal([btn.dataset.chapter]);
+            });
+        });
+
+        // Align All is re-bound here rather than at render so it picks up the
+        // current unaligned list instead of a stale closure from a prior render.
+        var alignAllBtn = document.getElementById('btn-align-all');
+        if (alignAllBtn && unaligned.length) {
+            var fresh = alignAllBtn.cloneNode(true);
+            alignAllBtn.parentNode.replaceChild(fresh, alignAllBtn);
+            fresh.addEventListener('click', function() {
+                fresh.disabled = true;
+                var total = unaligned.length;
+                function next(i) {
+                    if (i >= total) {
+                        refreshStatusBadges();
+                        refreshReviewStatus();
+                        return;
+                    }
+                    fresh.textContent = 'Aligning ' + (i + 1) + ' of ' + total + '...';
+                    apiPost('/api/project/' + PROJECT + '/align/' + unaligned[i]).then(function(data) {
+                        if (data.error) {
+                            fresh.textContent = 'Error on ' + unaligned[i];
+                            alert('Error aligning ' + unaligned[i] + ': ' + data.error);
+                            return;
+                        }
+                        next(i + 1);
+                    });
+                }
+                next(0);
+            });
+        }
     }
+
+    // ── Review: job progress (shared by both run endpoints) ──
+
+    function openJobModal(title) {
+        document.getElementById('review-job-title').textContent = title;
+        document.getElementById('review-job-text').textContent = 'Starting…';
+        document.getElementById('review-job-fill').style.width = '0%';
+        document.getElementById('review-job-spinner').style.display = '';
+        var err = document.getElementById('review-job-error');
+        err.style.display = 'none';
+        err.textContent = '';
+        document.getElementById('btn-review-job-close').disabled = true;
+        document.getElementById('review-job-modal').classList.add('visible');
+    }
+
+    function finishJobModal(text, errorText) {
+        document.getElementById('review-job-text').textContent = text;
+        document.getElementById('review-job-spinner').style.display = 'none';
+        document.getElementById('review-job-fill').style.width = '100%';
+        if (errorText) {
+            var err = document.getElementById('review-job-error');
+            err.textContent = errorText;
+            err.style.display = '';
+        }
+        document.getElementById('btn-review-job-close').disabled = false;
+    }
+
+    // One SSE consumer for every review job. `onProgress` gets each non-terminal
+    // event; the terminal `complete` always arrives, even when the job body
+    // died (the server attaches `fatal`), so this never hangs on a crash.
+    function streamJob(jobId, total, label, onDone) {
+        var source = new EventSource('/api/project/' + PROJECT + '/jobs/' + jobId + '/sse');
+        var seen = 0;
+
+        function progress(e) {
+            var data = {};
+            try { data = JSON.parse(e.data); } catch (err) { return; }
+            seen = data.index || (seen + 1);
+            var pct = total ? Math.round((seen / total) * 100) : 0;
+            document.getElementById('review-job-fill').style.width = pct + '%';
+            document.getElementById('review-job-text').textContent =
+                label + ' ' + seen + ' of ' + total + '…';
+        }
+
+        source.addEventListener('chunk_done', progress);
+        source.addEventListener('target_done', progress);
+        source.addEventListener('chunk_error', progress);
+        source.addEventListener('complete', function(e) {
+            source.close();
+            var data = {};
+            try { data = JSON.parse(e.data); } catch (err) { /* keep defaults */ }
+            var errText = data.fatal || '';
+            if (!errText && data.error_count) {
+                errText = data.error_count + ' failed: ' + (data.errors || []).join('; ');
+            }
+            var summary = data.fatal ? 'Stopped' :
+                ((data.evaluated !== undefined ? data.evaluated : data.ran || 0) +
+                 ' of ' + total + ' done');
+            if (data.estimated_cost) summary += ' (~$' + Number(data.estimated_cost).toFixed(4) + ')';
+            finishJobModal(summary, errText);
+            refreshReviewStatus();
+            if (onDone) onDone(data);
+        });
+        source.onerror = function() {
+            source.close();
+            finishJobModal('Connection lost', 'The progress stream dropped. The job may still be running — reopen the Review tab to see the result.');
+        };
+    }
+
+    function startCodedRun(chapterIds) {
+        var scope = chapterIds && chapterIds.length ? chapterIds : reviewScope();
+        openJobModal('Rerunning deterministic evaluators');
+        apiPost('/api/project/' + PROJECT + '/review/run-coded', { chapter_ids: scope })
+            .then(function(data) {
+                if (data.error || !data.job_id) {
+                    finishJobModal('Could not start', data.error || 'No job started.');
+                    return;
+                }
+                streamJob(data.job_id, data.total, 'Evaluated');
+            });
+    }
+
+    // ── Review: LLM judge panel ──
+
+    var judgesScope = null;   // chapter ids for the pending run, or null = book
+
+    function selectedJudges() {
+        var out = [];
+        document.querySelectorAll('#judges-modal .judge-pick:checked').forEach(function(cb) {
+            out.push(cb.value);
+        });
+        return out;
+    }
+
+    function openJudgesModal(chapterIds) {
+        judgesScope = chapterIds && chapterIds.length ? chapterIds : reviewScope();
+        document.getElementById('judges-scope').textContent =
+            'Scope: ' + (judgesScope ? judgesScope.join(', ') : 'whole book');
+        document.getElementById('judges-cost-estimate').textContent = '';
+        setStatus('judges-modal-status', '', '');
+        populateProviderSelect('judges-provider');
+        populateModelSelect('judges-provider', 'judges-model');
+        document.getElementById('judges-modal').classList.add('visible');
+    }
+
+    function postJudges(confirm) {
+        var judges = selectedJudges();
+        if (!judges.length) {
+            setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
+            return Promise.resolve(null);
+        }
+        return apiPost('/api/project/' + PROJECT + '/review/run-judges', {
+            chapter_ids: judgesScope,
+            judges: judges,
+            provider: (document.getElementById('judges-provider') || {}).value,
+            model: (document.getElementById('judges-model') || {}).value,
+            confirm: !!confirm,
+        });
+    }
+
+    function initReviewControls() {
+        var selectAll = document.getElementById('select-all-review');
+        if (selectAll) {
+            selectAll.addEventListener('change', function() {
+                document.querySelectorAll('#review-tbody .review-pick').forEach(function(cb) {
+                    cb.checked = selectAll.checked;
+                });
+                updateReviewScopeHint();
+            });
+        }
+
+        var rerunBtn = document.getElementById('btn-rerun-coded');
+        if (rerunBtn) rerunBtn.addEventListener('click', function() { startCodedRun(null); });
+
+        var judgesBtn = document.getElementById('btn-run-judges');
+        if (judgesBtn) judgesBtn.addEventListener('click', function() { openJudgesModal(null); });
+
+        var closeJudges = document.getElementById('judges-modal-close');
+        if (closeJudges) {
+            closeJudges.addEventListener('click', function() {
+                document.getElementById('judges-modal').classList.remove('visible');
+            });
+        }
+
+        var estimateBtn = document.getElementById('btn-judges-estimate');
+        if (estimateBtn) {
+            estimateBtn.addEventListener('click', function() {
+                setStatus('judges-modal-status', 'Estimating…', 'info');
+                // Deliberately unconfirmed with a zero limit: the endpoint
+                // answers `needs_confirm` with the estimate and spends nothing.
+                var judges = selectedJudges();
+                if (!judges.length) {
+                    setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
+                    return;
+                }
+                apiPost('/api/project/' + PROJECT + '/review/run-judges', {
+                    chapter_ids: judgesScope, judges: judges,
+                    provider: (document.getElementById('judges-provider') || {}).value,
+                    model: (document.getElementById('judges-model') || {}).value,
+                    cost_limit: 0, confirm: false,
+                }).then(function(data) {
+                    if (data.error) {
+                        // Drop the previous estimate: leaving it under an error
+                        // reads as a price for a run that cannot happen.
+                        document.getElementById('judges-cost-estimate').textContent = '';
+                        setStatus('judges-modal-status', data.error, 'error');
+                        return;
+                    }
+                    setStatus('judges-modal-status', '', '');
+                    document.getElementById('judges-cost-estimate').textContent =
+                        'Estimated $' + Number(data.estimated_cost || 0).toFixed(4) +
+                        ' over ' + (data.target_count || 0) + ' chunks.';
+                });
+            });
+        }
+
+        var runBtn = document.getElementById('btn-judges-run');
+        if (runBtn) {
+            runBtn.addEventListener('click', function() {
+                setStatus('judges-modal-status', 'Starting…', 'info');
+                postJudges(false).then(function(data) {
+                    if (!data) return;
+                    if (data.error) {
+                        setStatus('judges-modal-status', data.error, 'error');
+                        return;
+                    }
+                    if (data.status === 'needs_confirm') {
+                        var msg = 'Estimated $' + Number(data.estimated_cost).toFixed(4) +
+                            ' over ' + data.target_count + ' chunks, above the $' +
+                            Number(data.cost_limit).toFixed(2) + ' limit. Run anyway?';
+                        if (!window.confirm(msg)) {
+                            setStatus('judges-modal-status', 'Cancelled.', '');
+                            return;
+                        }
+                        postJudges(true).then(function(confirmed) {
+                            if (confirmed.error) {
+                                setStatus('judges-modal-status', confirmed.error, 'error');
+                                return;
+                            }
+                            document.getElementById('judges-modal').classList.remove('visible');
+                            openJobModal('Running LLM judges');
+                            streamJob(confirmed.job_id, confirmed.total, 'Judged');
+                        });
+                        return;
+                    }
+                    document.getElementById('judges-modal').classList.remove('visible');
+                    openJobModal('Running LLM judges');
+                    streamJob(data.job_id, data.total, 'Judged');
+                });
+            });
+        }
+
+        var jobClose = document.getElementById('btn-review-job-close');
+        if (jobClose) {
+            jobClose.addEventListener('click', function() {
+                document.getElementById('review-job-modal').classList.remove('visible');
+            });
+        }
+    }
+
+    initReviewControls();
 
     // ========================================================================
     // Stage 8: Export
@@ -3363,6 +3746,9 @@
             else if (projectStatus.translated_chunks < projectStatus.total_chunks) navigateTo('translate');
             else navigateTo('review');
         }
+        // One rollup on boot so the sidebar badge reads "12 findings" instead of
+        // nothing; after this it is refreshed only on demand.
+        if (projectStatus.translated_chunks > 0) refreshReviewStatus();
     });
 
 })();

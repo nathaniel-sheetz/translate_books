@@ -10,6 +10,7 @@ Public API:
 """
 
 from src.judges.base import Judge, JudgeSpec, JudgeTarget, VerdictJudge
+from src.judges.context import build_judge_context
 from src.judges.llm_io import JudgeParseError
 from src.judges.registry import (
     all_suites,
@@ -27,6 +28,7 @@ __all__ = [
     "VerdictJudge",
     "JudgeParseError",
     "ScopeError",
+    "build_judge_context",
     "build_targets",
     "get_judge",
     "available_judges",

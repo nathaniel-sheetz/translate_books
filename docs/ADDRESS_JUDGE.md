@@ -158,5 +158,5 @@ Scoring reuses the shared severity-weighted, per-rule-capped compliance score in
 | Drafting prompt | `prompts/address_map_generate.txt` |
 | Judge | `src/judges/address_judge.py`, `src/judges/registry.py` |
 | Judge prompts | `prompts/address_forms.txt` (rubric), `prompts/judge_address.txt`, `prompts/judge_address_batch.txt` |
-| Backend wiring | `scripts/run_judges.py` (`_build_judge_context`) |
+| Backend wiring | `src/judges/context.py` (`build_judge_context`), shared by `scripts/run_judges.py` and the dashboard Review tab |
 | Shared scoring | `src/judges/scoring.py` |

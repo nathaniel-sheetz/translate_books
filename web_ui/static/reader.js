@@ -126,6 +126,12 @@
         const types = Array.isArray(window.REVIEW_TYPES_SELECTED) && window.REVIEW_TYPES_SELECTED.length
             ? window.REVIEW_TYPES_SELECTED
             : REVIEW_TYPES;
+        // `?review=<category>` (the dashboard Review tab's finding chips) forces
+        // review mode on with just that category, for this page load only.
+        // Nothing is written back and the category picker still shows the saved
+        // selection, so the reader's own settings survive the visit.
+        const forced = window.REVIEW_FORCED_TYPES;
+        if (Array.isArray(forced) && forced.length) return { on: true, types: forced };
         let on = false;
         try {
             const raw = localStorage.getItem('reader_review:' + projectId);

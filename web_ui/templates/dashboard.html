@@ -560,17 +560,24 @@
         <!-- ============================================================ -->
         <div class="stage-panel" id="stage-review">
             <h2>Review</h2>
-            <p class="stage-subtitle">Align, read, and annotate translated chapters.</p>
+            <p class="stage-subtitle">What review found, per chapter. Counts link into the reader, where findings are read and acted on.</p>
 
-            <button class="btn-primary" id="btn-align-all" style="margin-bottom:12px;display:none">Align All Unaligned</button>
+            <div class="review-toolbar">
+                <button class="btn-primary" id="btn-align-all" style="display:none">Align All Unaligned</button>
+                <button class="btn-secondary" id="btn-rerun-coded">Rerun deterministic</button>
+                <button class="btn-secondary" id="btn-run-judges">Run LLM judges&hellip;</button>
+                <span class="review-scope-hint" id="review-scope-hint">whole book</span>
+                <span class="status-msg" id="review-toolbar-status"></span>
+            </div>
 
             <table class="review-table" id="review-table">
                 <thead>
                     <tr>
+                        <th style="width:30px"><input type="checkbox" id="select-all-review"></th>
                         <th>Chapter</th>
-                        <th>Alignment</th>
-                        <th>Annotations</th>
-                        <th>Reviewed</th>
+                        <th>Findings</th>
+                        <th>Judges</th>
+                        <th>Notes</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -749,10 +756,64 @@
     </div>
 </div>
 
+<!-- ── Review: LLM judge run panel ── -->
+<div class="modal-overlay" id="judges-modal">
+    <div class="modal">
+        <button class="modal-close" id="judges-modal-close">&times;</button>
+        <h3>Run LLM judges</h3>
+        <p style="font-size:13px; color:#666; margin-top:0;">
+            Metered API calls, one per chunk per judge. Findings land in the reader's Review Mode.
+        </p>
+
+        <div class="dash-field">
+            <label>Judges</label>
+            <label class="judges-check"><input type="checkbox" class="judge-pick" value="dialogue" checked> Dialogue formatting</label>
+            <label class="judges-check"><input type="checkbox" class="judge-pick" value="address"> Forms of address (usted/t&uacute;)</label>
+        </div>
+        <div class="dash-field">
+            <label>Provider</label>
+            <select id="judges-provider"></select>
+        </div>
+        <div class="dash-field">
+            <label>Model</label>
+            <select id="judges-model"></select>
+        </div>
+
+        <div id="judges-scope" style="margin:12px 0; font-size:13px; color:#666;"></div>
+        <div id="judges-cost-estimate" style="margin:12px 0; font-size:14px;"></div>
+
+        <div class="btn-row">
+            <button class="btn-secondary" id="btn-judges-estimate">Estimate cost</button>
+            <button class="btn-primary" id="btn-judges-run">Run judges</button>
+        </div>
+        <div id="judges-modal-status" class="status-msg" style="margin-top:8px;"></div>
+    </div>
+</div>
+
+<!-- ── Review: shared job progress modal ── -->
+<div class="modal-overlay" id="review-job-modal">
+    <div class="modal">
+        <h3 id="review-job-title">Running&hellip;</h3>
+        <div style="font-size:14px; margin-bottom:4px;">
+            <span class="spinner" id="review-job-spinner"></span>
+            <span id="review-job-text">Starting&hellip;</span>
+        </div>
+        <div class="progress-bar">
+            <div class="progress-fill" id="review-job-fill" style="width:0%"></div>
+        </div>
+        <div id="review-job-error" class="batch-error-detail" style="display:none"></div>
+        <div class="btn-row">
+            <button class="btn-secondary" id="btn-review-job-close" disabled>Close</button>
+        </div>
+    </div>
+</div>
+
 <script>
     window.DASHBOARD_PROJECT_ID = {{ project_id | tojson }};
     window.DASHBOARD_PROJECT_TITLE = {{ project_title | tojson }};
     window.DASHBOARD_FIXED_QUESTIONS = {{ fixed_questions | tojson }};
+    window.DASHBOARD_REVIEW_TYPES = {{ review_types | tojson }};
+    window.DASHBOARD_REVIEW_LABELS = {{ t.review_types | tojson }};
 </script>
 <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
 
