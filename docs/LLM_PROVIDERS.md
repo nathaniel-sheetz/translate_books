@@ -235,23 +235,21 @@ layers. Neither subsumes the other:
    auth (`claude setup-token`). This is a denylist, so `PATH`, `PATHEXT` and the
    rest of the ordinary runtime survive.
 2. **Auth preflight** (`subscription_auth_error`) — once per wave, before any
-   job, the harness runs `claude auth status --json` in that same scrubbed
-   environment and from the same neutral cwd the workers use. It proceeds only
-   on a confirmed subscription. It **fails closed**: an `apiKeySource`, a
-   third-party `apiProvider`, a logged-out CLI, a non-zero exit or an output
-   shape it does not recognise all block the wave with a top-level `error` and
-   zero jobs run. There is no override flag — metered spend goes through
-   `--backend api`, which is what that backend is for.
+   job, the harness runs a CLI-specific probe in that same scrubbed environment
+   and from the same neutral cwd the workers use. Claude: `claude auth status
+   --json` (a *routing* probe — which credential would be billed). Cursor:
+   `cursor-agent status --format json` (a *liveness* probe — login session
+   present; billing safety is the `CURSOR_API_KEY` scrub, since there is no
+   metered Cursor path). Both **fail closed**: an `apiKeySource`, a third-party
+   `apiProvider`, a logged-out CLI, a non-zero exit or an output shape it does
+   not recognise all block the wave with a top-level `error` and zero jobs run.
+   There is no override flag — metered spend goes through `--backend api`, which
+   is what that backend is for.
 
-Why both: `claude auth status` reports a clean subscription even with
-`ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` set, so only the scrub catches
-endpoint redirection; and an `apiKeyHelper` in a settings file never touches the
-environment, so only the preflight catches that.
-
-**Cursor gap:** there is no verified `cursor-agent` auth-status command, so the
-Cursor profile gets the scrub but not the preflight. Guessing at a command risks
-hard-failing a working setup. The harness has no metered Cursor code path at all,
-which is what makes the gap tolerable.
+Why both layers on Claude: `claude auth status` reports a clean subscription even
+with `ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` set, so only the scrub
+catches endpoint redirection; and an `apiKeyHelper` in a settings file never
+touches the environment, so only the preflight catches that.
 
 The scrub happens at the spawn rather than by removing the key from the parent
 process on purpose: the metered path below genuinely needs `.env`, and a boundary

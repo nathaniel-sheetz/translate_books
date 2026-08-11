@@ -73,7 +73,8 @@ Shared flags (`run`, `prepare`):
 `prepare` (subagent backend) adds:
 - `--scope` is **repeatable** here — pass it multiple times to stage several
   chapters into one manifest for a single `commit` (see the multi-chapter note in B).
-- `--worker-model <tier>` (default `sonnet`) — pins each spawned `judge-worker`.
+- `--worker-model <tier>` — pins each spawned `judge-worker`; unset, defaults per
+  `headless_cli` (`sonnet` on claude, your selected Cursor model on cursor).
 - `--batch-size <n>` (default 5) — workers per spawn wave; wait for the wave to
   finish before launching the next (see 4b).
 - `--targets-per-worker <n>` (default 1) — group up to N **low-dialogue-density**

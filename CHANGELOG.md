@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.43.1.0] - 2026-08-11
+
+### Added
+- **Cursor headless parity with Claude.** Waves run `cursor-agent status --format json` auth preflight, inherit the selected model from `~/.cursor/cli-config.json` when `worker_model` is unset, reject unusable `--model` values before any spawn, and report `usage` via `--output-format json` (including Cursor's `inputTokens` / `cacheReadTokens` / `cacheWriteTokens` spellings).
+
+### Changed
+- **Per-CLI overhead baselines.** `baseline_tokens` / `median_wall_s` filter `usage.jsonl` by CLI family (~3.9k Claude vs ~17.2k Cursor fixed prefix) so mixed logs no longer skew estimates or Claude `cache=auto` TTL picks.
+
+### Fixed
+- Stale docs/schemas that still claimed Cursor was scrub-only / `--output-format text` with no usage.
+
 ## [0.43.0.0] - 2026-08-10
 
 ### Added

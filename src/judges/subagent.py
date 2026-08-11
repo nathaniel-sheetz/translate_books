@@ -715,7 +715,7 @@ def fanout(
         if cli_name == "claude":
             if requested_cache == "auto":
                 resolved_cache = resolve_cache_mode(
-                    ready, spf_tokens, baseline, median_wall_s(log_path)
+                    ready, spf_tokens, baseline, median_wall_s(log_path, cli=cli_name)
                 )
             else:
                 resolved_cache = requested_cache

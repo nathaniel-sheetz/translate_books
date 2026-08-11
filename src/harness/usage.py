@@ -376,15 +376,25 @@ def baseline_tokens(
     return measured, f"measured: median of {len(overheads)} logged{scope} jobs"
 
 
-def median_wall_s(path: Path | str | None) -> float | None:
+def median_wall_s(
+    path: Path | str | None, *, cli: str | None = None
+) -> float | None:
     """Median ``wall_s`` of recent successful jobs, or ``None`` with no history.
 
     Feeds the prompt-cache auto picker: a warm-up that routinely runs past ~270 s
     risks expiring a 5-minute TTL entry before any follower can read it.
+
+    ``cli`` restricts to one family, matching :func:`baseline_tokens` — Cursor
+    and Claude wall times live in the same ``usage.jsonl`` and must not mix when
+    picking a Claude cache TTL.
     """
+    wanted = (cli or "").strip().lower() or None
+    rows = read_recent(path)
+    if wanted is not None:
+        rows = [r for r in rows if str(r.get("cli") or "").strip().lower() == wanted]
     walls = [
         float(row["wall_s"])
-        for row in read_recent(path)
+        for row in rows
         if row.get("rc") == 0 and isinstance(row.get("wall_s"), (int, float))
     ]
     if not walls:

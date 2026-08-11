@@ -268,6 +268,20 @@ def test_median_wall_s_from_usage_log(tmp_path: Path):
     assert usage.median_wall_s(log) == 200.0
 
 
+def test_median_wall_s_filters_by_cli(tmp_path: Path):
+    """Claude cache=auto must not pick a TTL from Cursor wall times in the same log."""
+    log = tmp_path / "usage.jsonl"
+    for wall in (100.0, 200.0, 300.0):
+        usage.append_usage(log, {"cli": "claude", "rc": 0, "wall_s": wall})
+    for wall in (500.0, 600.0, 700.0):
+        usage.append_usage(log, {"cli": "cursor", "rc": 0, "wall_s": wall})
+    assert usage.median_wall_s(log, cli="claude") == 200.0
+    assert usage.median_wall_s(log, cli="cursor") == 600.0
+    # Unfiltered still mixes — callers that pick a Claude TTL must thread cli.
+    assert usage.median_wall_s(log) == 400.0
+    assert usage.median_wall_s(log, cli="gemini") is None
+
+
 def test_resolve_prompt_cache_precedence():
     from src.harness import state
 

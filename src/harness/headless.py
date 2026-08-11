@@ -285,7 +285,9 @@ def warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
     """
     if (cli or "").strip().lower() != "cursor":
         return None
-    alias = (worker_model or "").strip().lower()
+    # Strip any ``[effort=…,fast=…]`` suffix before the alias check — same base
+    # as ``_cursor_model_base``, so ``sonnet[effort=low]`` still warns.
+    alias = _cursor_model_base(worker_model).lower()
     if not alias:
         return None
     if alias in _CLAUDE_WORKER_ALIASES or alias.startswith("claude-"):
@@ -429,7 +431,10 @@ def cursor_model_error(
     if not base:
         return None
     known = _cursor_known_models(cli_bin, probe=probe, timeout=timeout)
-    if base in known:
+    # A listed base id proves the *id* is valid, but a bracket suffix can still
+    # be rejected (``gpt-5.2[effort=bogus]``). Only skip the CLI probe when the
+    # argv has no parameters to validate.
+    if base in known and "[" not in (model or ""):
         return None
 
     runner = probe if probe is not None else _default_auth_prober
@@ -1069,7 +1074,7 @@ def run_headless_wave(
         if requested_cache == "auto":
             baseline, _ = baseline_tokens(usage_log, cli=cli_name)
             resolved_cache = resolve_cache_mode(
-                jobs, spf_tokens, baseline, median_wall_s(usage_log)
+                jobs, spf_tokens, baseline, median_wall_s(usage_log, cli=cli_name)
             )
         else:
             resolved_cache = requested_cache

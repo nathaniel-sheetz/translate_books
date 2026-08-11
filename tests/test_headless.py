@@ -1255,6 +1255,14 @@ def test_default_worker_model_is_a_function_of_the_cli(monkeypatch):
     ) is None
 
 
+def test_warn_cursor_claude_model_strips_bracket_suffix():
+    """A Claude alias with ``[effort=…]`` must still warn — operators paste both forms."""
+    assert headless.warn_cursor_claude_model("cursor", "sonnet[effort=low]")
+    assert headless.warn_cursor_claude_model("cursor", "claude-opus-4")
+    assert headless.warn_cursor_claude_model("cursor", "grok-4.5[effort=low]") is None
+    assert headless.warn_cursor_claude_model("claude", "sonnet[effort=low]") is None
+
+
 def _model_probe(models_out: str, reject: str = ""):
     """Stub for both token-free model checks: `models`, then the argv probe."""
     def probe(argv, *, env, cwd, timeout):
@@ -1292,6 +1300,24 @@ def test_cursor_model_error_rejects_what_the_cli_rejects():
     err = headless.cursor_model_error("cursor-agent", "bogus-xyz", probe=probe)
     assert err and "bogus-xyz" in err
     assert "Known ids: auto, gpt-5.2" in err
+
+
+def test_cursor_model_error_rejects_bogus_brackets_on_a_listed_id():
+    """A listed base id must not short-circuit past a rejected ``[effort=…]`` suffix."""
+    probe = _model_probe(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n",
+        reject="Cannot use this model: gpt-5.2[effort=bogus]. Available models: auto, gpt-5.2",
+    )
+    err = headless.cursor_model_error(
+        "cursor-agent", "gpt-5.2[effort=bogus]", probe=probe
+    )
+    assert err and "gpt-5.2[effort=bogus]" in err
+    # Valid brackets on a listed id still pass (probe returns the no-prompt error).
+    assert headless.cursor_model_error(
+        "cursor-agent",
+        "gpt-5.2[effort=low,fast=false]",
+        probe=_model_probe("Available models\n\ngpt-5.2 - GPT-5.2\n"),
+    ) is None
 
 
 def test_cursor_model_error_fails_open():

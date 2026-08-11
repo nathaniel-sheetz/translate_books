@@ -173,7 +173,8 @@ _PREPARE_SCHEMA = {
     "types": "annotation types included",
     "chapters": "chapter ids included, or null for the whole book",
     "skipped": "annotations gated out before any LLM call: {key, type, reason, content}",
-    "worker_model": "model tier to pin each spawned annotation-worker to (default sonnet)",
+    "worker_model": "model tier to pin each spawned annotation-worker to; unset, it "
+    "defaults per headless_cli (sonnet on claude, your selected Cursor model on cursor)",
     "batch_size": "recommended workers per wave / default headless concurrency",
     "usage_summary": "{targets, workers, skipped, by_type, worker_model, batch_size, "
     "estimated_api_cost, headless_effort, headless_effort_source}",
@@ -370,8 +371,9 @@ _FANOUT_SCHEMA = {
     "cache_read, prompt_sent, overhead, overhead_ratio, cost_equiv_usd, wall_s, "
     "side_calls}. 'prompt_sent' is the annotation content we meant to send; 'overhead' is "
     "billed input minus that (per-process context the jobs pay before reading a word of "
-    "the book) and 'overhead_ratio' is its share. Absent when the CLI reported no usage "
-    "(Cursor runs on --output-format text). Per-job detail goes to "
+    "the book) and 'overhead_ratio' is its share. BOTH CLIs report this now; expect a far "
+    "larger overhead share on cursor (~17.2k fixed per process vs ~3.9k on claude). Absent "
+    "only when the CLI reported no usage at all. Per-job detail goes to "
     ".harness/annotations/usage.jsonl, never into this payload",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
