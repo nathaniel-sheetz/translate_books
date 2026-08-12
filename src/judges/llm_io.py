@@ -182,12 +182,22 @@ def call_judge(
     call_type: str,
     max_retries: int = 3,
     temperature: float = 0.0,
+    cache_prefix: Optional[str] = None,
 ) -> str:
     """Call the judge LLM at ``temperature`` (0 by default for reproducibility).
 
     Retries once with a stricter "JSON only" suffix is the caller's job — this
     just dispatches through ``call_llm`` so prompt logging + provider retry are
     handled centrally.
+
+    ``cache_prefix`` is the target-independent head of ``prompt`` (a judge's
+    rubric + per-book rules, i.e. the ``build_prompt_parts`` prefix). Passing it
+    lets Anthropic's prompt cache serve it on every call after the first, so a
+    suite pays for the rubric once per run instead of once per target. Empty is
+    normalized to ``None`` — the same convention ``translate_chunk_realtime``
+    uses — and no validation happens here: ``call_anthropic_api`` already falls
+    back to single-block content when the prefix doesn't match, and the
+    OpenAI-compatible path ignores it outright.
     """
     resolved_provider = resolve_provider(provider, model)
     return call_llm(
@@ -197,6 +207,7 @@ def call_judge(
         temperature=temperature,
         max_retries=max_retries,
         call_type=call_type,
+        cache_prefix=cache_prefix or None,
     )
 
 

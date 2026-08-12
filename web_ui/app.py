@@ -55,20 +55,26 @@ from src.utils.text_utils import (
     kwic_window,
 )
 from src.utils.verse import is_verse_block
+from web_ui import jobs
 from web_ui.evaluations import (
+    CODED_EVAL_NAMES,
+    JUDGE_STATUS_GROUPS,
     REVIEW_CODED_TYPES,
     REVIEW_JUDGE_TYPES,
     REVIEW_TYPES,
     append_feedback,
     chapter_id_from_chunk_id,
+    chapter_judge_status,
     empty_type_counts,
     evaluate_and_persist_chunk,
+    iter_chapter_chunks,
     load_all_feedback_by_chunk,
     load_chapter_type_counts,
     load_chunk_evaluation,
     load_feedback_for_chunk,
     load_project_summary,
     merge_llm_judge_result,
+    rollup_group_state,
     run_coded_evaluators,
 )
 from web_ui.project_cards import PROJECT_STATUSES, build_project_card
@@ -1096,6 +1102,46 @@ def reader_projects():
     )
 
 
+def _empty_annotation_state() -> dict[str, int]:
+    """Zero-filled per-chapter annotation state (see :func:`_chapter_annotation_state`)."""
+    return {"review": 0, "footnotes_total": 0, "footnotes_filled": 0, "footnotes_empty": 0}
+
+
+def _chapter_annotation_state(project_dir: Path) -> dict[str, dict[str, int]]:
+    """Return ``{chapter_id: {review, footnotes_total, footnotes_filled, footnotes_empty}}``.
+
+    ``src.annotations.load_active`` owns the append-only / tombstone /
+    latest-wins rule keyed on ``(chapter_id, es_idx, sub_id)`` — keying on
+    ``sub_id`` too is what lets one sentence hold both a footnote and a review
+    note — and skips unparseable lines so a half-written record can't 500 a
+    list page.
+
+    Shared by the reader's chapter list and the dashboard's Review tab so the
+    two views cannot report different numbers for the same book.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for rec in load_active(project_dir):
+        # Unknown types coerce to flag — same rule as project_annotation_summary,
+        # so chapter badges and the home-card rollup cannot disagree.
+        ann_type = rec.get("type", "flag")
+        if ann_type not in ANNOTATION_TYPES:
+            ann_type = "flag"
+        state = out.setdefault(rec.get("chapter_id", ""), _empty_annotation_state())
+        if ann_type in REVIEW_ANNOTATION_TYPES:
+            state["review"] += 1
+        elif ann_type == "footnote":
+            state["footnotes_total"] += 1
+            # A footnote mark with nothing but its [anchor] is silently dropped
+            # from the built EPUB (src/endnotes.py), so callers badge
+            # written-vs-total rather than a bare count. is_effectively_blank is
+            # the same predicate the home card's book-wide rollup uses.
+            if is_effectively_blank(rec.get("content") or ""):
+                state["footnotes_empty"] += 1
+            else:
+                state["footnotes_filled"] += 1
+    return out
+
+
 @app.route("/read/<project_id>")
 def reader_chapters(project_id):
     """List chapters with alignments for a project."""
@@ -1106,30 +1152,8 @@ def reader_chapters(project_id):
     if not align_dir.exists():
         return render_template("reader.html", mode="not_found", project_id=project_id, t=t, lang=_get_ui_lang()), 404
 
-    # Load all annotations for this project. src.annotations.load_active owns the
-    # append-only / tombstone / latest-wins rule keyed on
-    # (chapter_id, es_idx, sub_id) — keying on sub_id too is what lets one
-    # sentence hold both a footnote and a review note — and skips unparseable
-    # lines so a half-written record can't 500 the chapter list.
     project_dir = _resolve_project_dir(project_id)
-    from collections import defaultdict
-    ann_counts = defaultdict(lambda: defaultdict(int))
-    empty_fn_counts = defaultdict(int)
-    for rec in load_active(project_dir):
-        # Unknown types coerce to flag — same rule as project_annotation_summary,
-        # so chapter badges and the home-card rollup cannot disagree.
-        ann_type = rec.get("type", "flag")
-        if ann_type not in ANNOTATION_TYPES:
-            ann_type = "flag"
-        chapter_key = rec.get("chapter_id", "")
-        ann_counts[chapter_key][ann_type] += 1
-        # A footnote mark with nothing but its [anchor] is silently dropped from
-        # the built EPUB (src/endnotes.py), so the row badges written-vs-total
-        # rather than a bare count. is_effectively_blank is the same predicate
-        # the home card's book-wide rollup uses, so the two cannot disagree.
-        if ann_type == "footnote" and is_effectively_blank(rec.get("content") or ""):
-            empty_fn_counts[chapter_key] += 1
-    all_annotations = dict(ann_counts)  # chapter_id -> {type -> count}
+    all_annotations = _chapter_annotation_state(project_dir)
 
     # Evaluator/judge findings in the six review categories, bucketed by
     # chapter. One extra walk of evaluations/*.json — cheap next to the
@@ -1170,14 +1194,14 @@ def reader_chapters(project_id):
             # Distinct from low confidence: those sentences ARE translated, just
             # matched weakly. A gap means the prose is missing outright.
             coverage = data.get("coverage") or {}
-            ann = all_annotations.get(ch_id, {})
-            # Fold the three review-type annotations (word choice, inconsistency,
-            # and "Other"/flag) into one "to review" count; footnotes stay separate
-            # because they feed endnotes. Unknown types were coerced to flag above,
-            # matching project_annotation_summary.
-            review_count = sum(ann.get(t, 0) for t in REVIEW_ANNOTATION_TYPES)
-            footnote_count = ann.get("footnote", 0)
-            empty_footnotes = empty_fn_counts.get(ch_id, 0)
+            # The three review-type annotations (word choice, inconsistency, and
+            # "Other"/flag) are folded into one "to review" count by
+            # _chapter_annotation_state; footnotes stay separate because they
+            # feed endnotes.
+            ann = all_annotations.get(ch_id) or _empty_annotation_state()
+            review_count = ann["review"]
+            footnote_count = ann["footnotes_total"]
+            empty_footnotes = ann["footnotes_empty"]
 
             entry = manifest.get(ch_id) or {}
             chapters.append({
@@ -1245,6 +1269,18 @@ def reader_view(project_id, chapter):
         ui_override = None
         ui_version = _get_reader_ui_version()
 
+    # `?review=blacklist,grammar` — the Review tab's finding chips link here.
+    # It forces Review Mode on with only those categories lit **for this page
+    # load only**: neither the per-book on/off switch (localStorage) nor the
+    # global category cookie is written, and the category picker still renders
+    # the reader's own saved selection, so following a deep link cannot quietly
+    # reset anything. Unknown names are dropped; a param naming nothing
+    # recognizable is ignored entirely.
+    review_forced = [
+        c for c in REVIEW_TYPES
+        if c in {p.strip() for p in (request.args.get("review") or "").split(",")}
+    ]
+
     resp = make_response(render_template(
         "reader.html", mode="read",
         project_id=project_id, project_title=_project_title(project_id),
@@ -1255,6 +1291,7 @@ def reader_view(project_id, chapter):
         reader_ui_version=ui_version,
         review_types=list(REVIEW_TYPES),
         review_types_selected=_get_review_types(),
+        review_forced_types=review_forced,
     ))
     if ui_override is not None:
         resp.set_cookie(
@@ -3006,6 +3043,7 @@ def dashboard_page(project_id):
         fixed_questions=all_questions,
         t=t,
         lang=_get_ui_lang(),
+        review_types=list(REVIEW_TYPES),
     )
 
 
@@ -5653,6 +5691,401 @@ def project_chapter_review(project_id, chapter):
         "type_counts": dict(type_counts),
         "stale_chunks": stale_chunks,
     })
+
+
+# ── Review tab: per-chapter status + bulk reruns ─────────────────────────────
+
+
+@app.route("/api/project/<project_id>/review-status", methods=["GET"])
+def project_review_status(project_id):
+    """Per-chapter findings, annotation state, and judge freshness.
+
+    Deliberately **not** folded into :func:`_get_project_status`, which every
+    dashboard poll calls for all eight stages: this walk opens and hashes every
+    chunk in the book, and is only needed while the Review stage is on screen.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    t = _reader_strings()
+    chapter_prefix = t.get("chapter_prefix", "Chapter")
+    manifest = _load_chapter_manifest_for_project(project_id)
+    reviewed = _load_reviewed(project_dir)
+    flag_counts = load_chapter_type_counts(project_dir)
+    annotations = _chapter_annotation_state(project_dir)
+    chunks_by_chapter = iter_chapter_chunks(project_dir)
+    align_dir = project_dir / "alignments"
+    chapters_dir = project_dir / "chapters"
+
+    # Same chapter universe the dashboard's other stages use, plus any chapter
+    # that only exists as chunks (chapters/*.txt is written by Combine, so a
+    # freshly chunked-but-uncombined book would otherwise show nothing here).
+    from_txt = (
+        {f.stem for f in chapters_dir.glob("chapter_*.txt")}
+        if chapters_dir.exists() else set()
+    )
+    chapter_ids = sorted(from_txt | set(chunks_by_chapter))
+
+    chapters: list[dict] = []
+    all_chunk_states: list[dict[str, str]] = []
+    totals_flags = empty_type_counts()
+    totals_ann = _empty_annotation_state()
+    totals = {"chunk_count": 0, "translated_count": 0, "gap_count": 0, "gap_chars": 0}
+
+    for ch_id in chapter_ids:
+        chunks = chunks_by_chapter.get(ch_id, [])
+        translated = [c for c in chunks if (c[1].get("translated_text") or "").strip()]
+
+        gap_count = gap_chars = 0
+        align_path = align_dir / f"{ch_id}.json"
+        has_alignment = align_path.exists()
+        if has_alignment:
+            try:
+                coverage = (json.loads(align_path.read_text(encoding="utf-8")) or {}).get("coverage") or {}
+                gap_count = int(coverage.get("gap_count", 0) or 0)
+                gap_chars = int(coverage.get("en_orphan_chars", 0) or 0)
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+
+        judges, per_chunk = chapter_judge_status(project_dir, chunks)
+        all_chunk_states.extend(per_chunk)
+
+        ch_flags = flag_counts.get(ch_id) or empty_type_counts()
+        ch_ann = annotations.get(ch_id) or _empty_annotation_state()
+        entry = manifest.get(ch_id) or {}
+
+        chapters.append({
+            "id": ch_id,
+            "display_label": _chapter_display_label(ch_id, manifest, chapter_prefix),
+            "kind": entry.get("kind", "chapter"),
+            "chunk_count": len(chunks),
+            "translated_count": len(translated),
+            "has_alignment": has_alignment,
+            "gap_count": gap_count,
+            "gap_chars": gap_chars,
+            "flag_counts": ch_flags,
+            "annotations": {
+                "review": ch_ann["review"],
+                "footnotes_total": ch_ann["footnotes_total"],
+                "footnotes_filled": ch_ann["footnotes_filled"],
+            },
+            "reviewed": ch_id in reviewed,
+            "judges": judges,
+        })
+
+        for name, n in ch_flags.items():
+            totals_flags[name] += n
+        for key in totals_ann:
+            totals_ann[key] += ch_ann[key]
+        totals["chunk_count"] += len(chunks)
+        totals["translated_count"] += len(translated)
+        totals["gap_count"] += gap_count
+        totals["gap_chars"] += gap_chars
+
+    return jsonify({
+        "ok": True,
+        "chapters": chapters,
+        "totals": {
+            **totals,
+            "flag_counts": totals_flags,
+            "annotations": {
+                "review": totals_ann["review"],
+                "footnotes_total": totals_ann["footnotes_total"],
+                "footnotes_filled": totals_ann["footnotes_filled"],
+            },
+            "findings": sum(totals_flags.values()),
+            "judges": {
+                group: rollup_group_state(
+                    states.get(group, "missing") for states in all_chunk_states
+                )
+                for group in JUDGE_STATUS_GROUPS
+            },
+        },
+    })
+
+
+def _review_target_chunks(
+    project_dir: Path, chapter_ids: Optional[list], *, translated_only: bool = True
+) -> list[Path]:
+    """Resolve a ``chapter_ids`` body field to chunk paths (``None`` = whole book)."""
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.exists():
+        return []
+    if chapter_ids is None:
+        paths = sorted(chunks_dir.glob("*_chunk_*.json"))
+    else:
+        paths = []
+        for ch_id in chapter_ids:
+            paths.extend(sorted(chunks_dir.glob(f"{ch_id}_chunk_*.json")))
+    if not translated_only:
+        return paths
+    kept = []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if (data.get("translated_text") or "").strip():
+            kept.append(path)
+    return kept
+
+
+def _parse_chapter_ids(data: dict) -> tuple[Optional[list[str]], Optional[str]]:
+    """Validate the optional ``chapter_ids`` body field. ``None`` = whole book."""
+    raw = data.get("chapter_ids")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, list):
+        return None, "chapter_ids must be a list or null"
+    ids = [str(c) for c in raw]
+    if not ids:
+        return None, "chapter_ids must not be empty (use null for the whole book)"
+    if not all(_safe_id(c) for c in ids):
+        return None, "Invalid chapter ID"
+    return ids, None
+
+
+@app.route("/api/project/<project_id>/review/run-coded", methods=["POST"])
+def project_review_run_coded(project_id):
+    """Rerun the deterministic evaluators over selected chapters (or the book).
+
+    No API spend, so no cost gate. Runs on a background job because the grammar
+    evaluator alone can take minutes over a whole book.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.json or {}
+    chapter_ids, err = _parse_chapter_ids(data)
+    if err:
+        return jsonify({"error": err}), 400
+
+    evaluators = data.get("evaluators")
+    if evaluators is not None:
+        if not isinstance(evaluators, list) or not evaluators:
+            return jsonify({"error": "evaluators must be a non-empty list or null"}), 400
+        unknown = [e for e in evaluators if e not in CODED_EVAL_NAMES]
+        if unknown:
+            return jsonify({"error": f"Unknown evaluators: {', '.join(map(str, unknown))}"}), 400
+
+    chunk_paths = _review_target_chunks(project_dir, chapter_ids)
+    if not chunk_paths:
+        return jsonify({"error": "No translated chunks in scope"}), 400
+
+    from web_ui.evaluations import _load_project_blacklist, _load_project_glossary
+
+    glossary = _load_project_glossary(project_dir)
+    blacklist = _load_project_blacklist(project_dir)
+    total = len(chunk_paths)
+
+    def body(emit):
+        done = 0
+        errors: list[str] = []
+        for index, path in enumerate(chunk_paths):
+            chunk_id = path.stem
+            try:
+                chunk = load_chunk(path)
+                chunk_id = chunk.id
+                evaluate_and_persist_chunk(
+                    project_dir, chunk,
+                    glossary=glossary, blacklist=blacklist,
+                    enabled_evals=evaluators,
+                )
+                done += 1
+                emit(
+                    "chunk_done", chunk_id=chunk_id, chapter_id=chunk.chapter_id,
+                    index=index + 1, total=total,
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad chunk must not sink the run
+                app.logger.exception("Review rerun: chunk %s failed", chunk_id)
+                errors.append(f"{chunk_id}: {exc}")
+                emit(
+                    "chunk_error", chunk_id=chunk_id, error=str(exc),
+                    index=index + 1, total=total,
+                )
+        return {
+            "evaluated": done, "total": total,
+            "error_count": len(errors), "errors": errors[:5],
+        }
+
+    try:
+        job_id = jobs.start_job(project_id, "review-coded", body)
+    except jobs.JobConflict as conflict:
+        return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
+
+    return jsonify({"ok": True, "job_id": job_id, "total": total})
+
+
+_JUDGE_COST_LIMIT_DEFAULT = 0.50
+
+
+@app.route("/api/project/<project_id>/review/run-judges", methods=["POST"])
+def project_review_run_judges(project_id):
+    """Run tailored LLM judges over selected chapters (or the whole book).
+
+    Metered API path only — the headless/subagent backends stay in the
+    judge-review skill. Refuses to spend past ``cost_limit`` without an
+    explicit ``confirm``, and returns the estimate so the UI can show it before
+    the click rather than as a surprise afterwards.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    from src.judges import ScopeError, build_judge_context, build_targets, estimate_suite_cost
+    from src.judges.registry import available_judges
+
+    data = request.json or {}
+    chapter_ids, err = _parse_chapter_ids(data)
+    if err:
+        return jsonify({"error": err}), 400
+
+    judge_names = data.get("judges") or list(REVIEW_JUDGE_TYPES)
+    if not isinstance(judge_names, list) or not judge_names:
+        return jsonify({"error": "judges must be a non-empty list"}), 400
+    known = set(available_judges())
+    unknown = [j for j in judge_names if j not in known]
+    if unknown:
+        return jsonify({"error": f"Unknown judges: {', '.join(map(str, unknown))}"}), 400
+
+    scopes = ["book"] if chapter_ids is None else [f"chapter:{c}" for c in chapter_ids]
+    targets = []
+    seen: set[str] = set()
+    skipped: list[dict[str, str]] = []
+    for scope in scopes:
+        try:
+            for target in build_targets(project_dir, scope):
+                if target.id not in seen:
+                    seen.add(target.id)
+                    targets.append(target)
+        except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
+            # One untranslated chapter in a multi-chapter selection is a reason
+            # to leave that chapter out, not to refuse the whole run. The Review
+            # table lists untranslated chapters, so ticking one is easy — and the
+            # coded sibling above already skips rather than aborts.
+            skipped.append({"scope": scope, "error": str(exc)})
+    if not targets:
+        return jsonify({
+            "error": skipped[0]["error"] if skipped else "No translated chunks in scope",
+            "skipped": skipped,
+        }), 400
+
+    # The address-map precheck lives in the shared context builder; its error
+    # strings already name the `harness.py address-map` fix, so pass them
+    # through verbatim rather than paraphrasing them here.
+    context, ctx_error = build_judge_context(
+        project_dir, judge_names, data.get("model") or None, data.get("provider") or None,
+    )
+    if ctx_error:
+        return jsonify({"error": ctx_error}), 409
+
+    try:
+        cost_limit = float(data.get("cost_limit", _JUDGE_COST_LIMIT_DEFAULT))
+    except (TypeError, ValueError):
+        return jsonify({"error": "cost_limit must be a number"}), 400
+
+    estimated_cost = estimate_suite_cost(judge_names, targets, context)
+    # An explicit flag, not `cost_limit: 0` relying on `estimated_cost > limit`:
+    # a zero-priced provider in llm_config.json makes `0.0 > 0` false, and the
+    # "estimate" would silently start a real metered run.
+    if data.get("dry_run"):
+        return jsonify({
+            "ok": True,
+            "status": "estimate",
+            "estimated_cost": estimated_cost,
+            "cost_limit": cost_limit,
+            "target_count": len(targets),
+            "judges": judge_names,
+            "skipped": skipped,
+        })
+    if estimated_cost > cost_limit and not data.get("confirm"):
+        return jsonify({
+            "ok": True,
+            "status": "needs_confirm",
+            "estimated_cost": estimated_cost,
+            "cost_limit": cost_limit,
+            "target_count": len(targets),
+            "judges": judge_names,
+            "skipped": skipped,
+        })
+
+    total = len(targets) * len(judge_names)
+
+    def body(emit):
+        # Through the module, not the re-export: ``run_judge`` is the seam every
+        # judge call goes through, and it stays substitutable that way.
+        from src.judges import runner as judge_runner
+        from web_ui.evaluations import merge_judge_result
+
+        done = 0
+        spent = 0.0
+        errors: list[str] = []
+        for target in targets:
+            for judge_name in judge_names:
+                done += 1
+                try:
+                    result = judge_runner.run_judge(judge_name, target, context)
+                    payload = result.model_dump(mode="json")
+                    if result.target_type == "chunk":
+                        merge_judge_result(project_dir, target.id, judge_name, payload)
+                    if not result.passed and result.metadata.get("error"):
+                        errors.append(f"{target.id}/{judge_name}: {result.metadata['error']}")
+                except Exception as exc:  # noqa: BLE001 - persist failures are not fatal
+                    app.logger.exception(
+                        "Review judges: %s on %s failed", judge_name, target.id,
+                    )
+                    errors.append(f"{target.id}/{judge_name}: {exc}")
+                spent += estimate_suite_cost([judge_name], [target], context)
+                emit(
+                    "target_done", target_id=target.id, judge=judge_name,
+                    index=done, total=total, estimated_cost=round(spent, 6),
+                )
+        return {
+            "ran": done, "total": total,
+            "estimated_cost": round(spent, 6),
+            "error_count": len(errors), "errors": errors[:5],
+        }
+
+    try:
+        job_id = jobs.start_job(project_id, "review-judges", body)
+    except jobs.JobConflict as conflict:
+        return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
+
+    return jsonify({
+        "ok": True,
+        "status": "started",
+        "job_id": job_id,
+        "total": total,
+        "target_count": len(targets),
+        "estimated_cost": estimated_cost,
+        "skipped": skipped,
+    })
+
+
+@app.route("/api/project/<project_id>/jobs/<job_id>/sse")
+def project_job_sse(project_id, job_id):
+    """Generic SSE stream for a job started by :mod:`web_ui.jobs`."""
+    from flask import Response
+
+    if not _safe_id(project_id) or not _safe_id(job_id):
+        return "Bad request", 400
+    job = jobs.get_job(job_id)
+    if job is None or job["project_id"] != project_id:
+        return "Job not found", 404
+
+    return Response(
+        jobs.stream_job(job_id),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route(

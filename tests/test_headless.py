@@ -1156,7 +1156,89 @@ def test_cursor_records_cache_none(tmp_path: Path):
     )
     row = json.loads(log.read_text(encoding="utf-8"))
     assert row["cache"] is None
+    # `sonnet` carries no bracket, so there is genuinely no effort to record.
     assert row["effort"] is None
+
+
+def test_cursor_records_the_bracket_effort_not_null(tmp_path: Path):
+    """A Cursor wave logged `effort: null` while plainly running at some effort.
+
+    `--effort` is Claude argv and is dropped from a Cursor command line, so the
+    level has to be read back from the model's own bracket — otherwise "what did
+    this wave run at?" is unanswerable from the log, which is the only place the
+    answer is kept.
+    """
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="grok-4.5[effort=high,fast=false]",
+        concurrency=1,
+        cli="cursor",
+        runner=lambda *a, **k: (0, "ok", ""),
+        usage_log=log,
+        effort="medium",  # Claude argv: inert here, and must not be logged as truth
+    )
+    row = json.loads(log.read_text(encoding="utf-8"))
+    assert row["effort"] == "high"
+
+
+def test_claude_still_records_the_argv_effort(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (0, _envelope("ok"), ""),
+        usage_log=log,
+        effort="medium",
+    )
+    row = json.loads(log.read_text(encoding="utf-8"))
+    assert row["effort"] == "medium"
+
+
+# ── Cursor model brackets: parse / compose / effort ─────────────────────────
+
+
+def test_parse_and_compose_cursor_model_round_trip():
+    parse, compose = headless.parse_cursor_model, headless.compose_cursor_model
+    assert parse("grok-4.5[effort=high,fast=false]") == (
+        "grok-4.5", {"effort": "high", "fast": "false"}
+    )
+    assert parse("grok-4.5") == ("grok-4.5", {})
+    assert parse("") == ("", {})
+    for model in ("grok-4.5[effort=high,fast=false]", "grok-4.5", "auto"):
+        base, params = parse(model)
+        assert compose(base, params) == model
+
+
+def test_parse_cursor_model_drops_junk_rather_than_raising():
+    """This parses argv a human may have typed; a bad knob must not kill a wave."""
+    parse = headless.parse_cursor_model
+    assert parse("grok-4.5[effort=high") == ("grok-4.5", {"effort": "high"})
+    assert parse("grok-4.5[,,]") == ("grok-4.5", {})
+    assert parse("grok-4.5[bare]") == ("grok-4.5", {})
+    assert parse(None) == ("", {})
+
+
+def test_with_cursor_effort_preserves_other_parameters():
+    out = headless.with_cursor_effort("grok-4.5[effort=low,fast=false]", "xhigh")
+    assert out == "grok-4.5[effort=xhigh,fast=false]"
+    assert headless.cursor_model_effort(out) == "xhigh"
+    # A None effort is "leave it alone", not "strip it".
+    assert headless.with_cursor_effort(out, None) == out
+
+
+def test_with_cursor_effort_leaves_the_auto_sentinel_alone():
+    """`auto[effort=…]` is not known to be accepted, and any bracket forces a probe."""
+    assert headless.with_cursor_effort("auto", "high") == "auto"
+    assert headless.cursor_model_effort("auto") is None
+
+
+def test_cursor_model_base_still_strips_brackets_for_the_alias_warning():
+    """_cursor_model_base is now the parser's first element — same behaviour."""
+    assert headless._cursor_model_base("sonnet[effort=low]") == "sonnet"
+    warning = headless.warn_cursor_claude_model("cursor", "sonnet[effort=low]")
+    assert warning and "headless_cli=cursor" in warning
 
 
 def test_cursor_wave_now_reports_usage(tmp_path: Path):

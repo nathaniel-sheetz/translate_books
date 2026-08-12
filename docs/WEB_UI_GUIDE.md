@@ -302,17 +302,63 @@ The evaluator card lives only in the dashboard (`#chunk-detail-container` in `da
 
 ## Stage 7: Review
 
-Table of translated chapters with columns: chapter, alignment status, annotation count, reviewed status, actions.
+One row per translated chapter: **Chapter · Findings · Judges · Notes · Actions**, plus a
+checkbox column for selecting a subset.
 
-**Actions:**
-- **Combine + Align** — merges chunks into full chapter text, then runs sentence alignment
-- **Read** — opens bilingual reader in a new tab
+- **Findings** — one chip per non-zero review category (blacklist, grammar, dictionary,
+  completeness, dialogue, address). Each chip links to `/read/<id>/<chapter>?review=<category>`,
+  which opens the reader in Review Mode with just that category lit *for that page load*
+  — it writes neither the per-book on/off switch (localStorage) nor the global category
+  cookie, so a deep link can't reset your reader settings. The reader stays the place
+  findings are read and acted on.
+- **Judges** — three status pips: `CD` (the deterministic evaluators, which always run as
+  one set), `DL` (dialogue judge), `AD` (address judge). Each is `✓ done`, `◑ partial`,
+  `⚠ stale`, or `○ not run`, with a `3/5 chunks fresh` tooltip. "Stale" comes from the
+  per-evaluator content hash described in
+  [JUDGES_FRAMEWORK.md](JUDGES_FRAMEWORK.md#freshness-ledger-eval_runs): edit a chunk
+  anywhere — chunk editor, correction, sentence replace — and its badges go stale by
+  themselves. The quality `llm_judge` is not here; it keeps its per-chunk button on the
+  Translate stage.
+- **Notes** — `N to review · filled/total notes`, plus a `N gaps` badge. Same numbers as
+  the reader's chapter list, from the same walk.
+
+There is no alignment percentage. It was a mean of per-row cosine similarity that read
+~84% on a perfect chapter, so it painted almost everything as suspect; what matters is
+whether a chapter is aligned at all, which the Align/Realign action already says.
+
+**Actions:** Align / Realign, Read, **Rerun** (deterministic evaluators for that chapter),
+**Judges…**. The toolbar runs the same two actions over the ticked chapters, or over the
+whole book when nothing is ticked. Both run as background jobs with a progress modal.
+
+The LLM judge panel shows an estimate before you commit. A run whose estimate exceeds
+`cost_limit` (default $0.50) comes back `needs_confirm` **without calling an LLM**;
+confirming re-posts it. Asking for the address judge on a book with no `address_map.json`
+409s with the `harness.py address-map` commands that fix it.
 
 **APIs:**
+- `GET /api/project/<id>/review-status` — the whole table: per-chapter `flag_counts`,
+  `annotations`, `judges` (state + fresh/stale/missing counts), gaps, plus book-wide
+  `totals`. Deliberately separate from `/status`, which every dashboard poll calls: this
+  one opens and hashes every chunk, so it is fetched only when the Review stage is opened
+  or a run finishes.
+- `POST /api/project/<id>/review/run-coded` — `{chapter_ids: [...] | null, evaluators: [...] | null}`.
+  No API spend. Returns `{job_id, total}`.
+- `POST /api/project/<id>/review/run-judges` — `{chapter_ids, judges, provider, model, confirm, cost_limit}`.
+  Returns `{status: "needs_confirm", estimated_cost, target_count}` or `{status: "started", job_id}`.
+  Metered API backend only; the headless/subagent backends stay in the judge-review skill.
+- `GET /api/project/<id>/jobs/<job_id>/sse` — progress for either run. Always ends in one
+  terminal `complete` event, carrying `fatal` if the job died (the grammar evaluator drives
+  a JVM that has crashed before; the progress bar must never just stop).
 - `POST /api/project/<id>/combine/<chapter>` — combine chunks → `chapters/<chapter>.txt`
 - `POST /api/project/<id>/align/<chapter>` — applies any pending corrections for the chapter to chunk files first, then refreshes `chapters/<chapter>.txt` (re-combines chunks) and writes sentence alignment → `alignments/<chapter>.json`. Response includes `corrections_applied: N` with the count of queued corrections that were patched into chunks before realigning.
 
-**Backend:** `combine_chunks()` from `src/combiner.py`, `align_chapter_chunks()` from `src/sentence_aligner.py`.
+Only one review job runs per project at a time — two would interleave partial writes into
+the same `evaluations/<chunk>.json` — so a second start returns 409 with the live `job_id`.
+
+**Backend:** `web_ui/jobs.py` (generic job registry), `web_ui/evaluations.py`
+(`evaluator_freshness`, `chunk_group_states`, `rollup_group_state`),
+`src/judges/context.py`, `combine_chunks()` from `src/combiner.py`,
+`align_chapter_chunks()` from `src/sentence_aligner.py`.
 
 ---
 

@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 from src.evaluators import aggregate_results
 from src.harness.headless import default_worker_model
-from src.harness.usage import approx_tokens, baseline_tokens
+from src.harness.usage import approx_tokens
 from src.judges.base import Judge, JudgeTarget
 from src.judges.llm_io import JudgeParseError, parse_judge_json
 from src.judges.registry import get_judge
@@ -254,6 +254,8 @@ def prepare(
     batch_size: Optional[int] = None,
     targets_per_worker: int = 1,
     keep_drafts: bool = False,
+    cli: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> dict[str, Any]:
     """Render judge prompts plus a manifest for spawned workers (no spend).
 
@@ -284,21 +286,36 @@ def prepare(
     an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
     during a recovery re-prepare (re-prepare is otherwise destructive).
 
-    ``worker_model`` is the tier the orchestrator pins each spawned
-    ``judge-worker`` to; unset, it defaults per the book's ``headless_cli``
-    (``sonnet`` on claude, the operator's own selected Cursor model on cursor —
-    see :func:`~src.harness.headless.default_worker_model`). ``batch_size``
-    (default 5) is the recommended fan-out per spawn wave. Nothing here calls an
-    API; ``estimated_api_cost`` in ``usage_summary`` is the API-equivalent price
-    shown for context only.
+    ``cli`` (``claude`` | ``cursor``), ``worker_model`` and ``effort`` are the
+    per-run overrides; anything left unset is resolved by
+    :func:`~src.harness.profile.resolve_profile` — including from the *detected
+    host*, so a book that never pinned a CLI follows the agent driving it. The
+    resolved profile is written into the manifest, so ``fanout`` inherits it
+    without the operator re-passing ``--cli``, and returned as ``effective`` so
+    the consent gate quotes the CLI that will actually run. That is the whole
+    point: this used to default to ``sonnet`` on the Claude baseline for a wave
+    the operator had already said would run on Cursor, understating it ~2.6x.
+
+    ``batch_size`` (default 5) is the recommended fan-out per spawn wave. Nothing
+    here calls an API; ``estimated_api_cost`` in ``usage_summary`` is the
+    API-equivalent price shown for context only.
     """
     from src.harness import state as hstate
+    from src.harness.profile import resolve_profile
 
     project_dir = Path(project_dir)
     context = dict(context or {})
     cfg = hstate.load_config(project_dir)
-    cli_name = str(cfg.get("headless_cli") or "claude").strip().lower()
-    worker_model = worker_model or default_worker_model(cli_name)
+    prof = resolve_profile(
+        project_dir,
+        command="judges",
+        cli=cli,
+        worker_model=worker_model,
+        effort=effort,
+        cfg=cfg,
+        usage_log=usage_log_path(project_dir),
+    )
+    worker_model = prof.worker_model
     batch_size = int(batch_size or _DEFAULT_BATCH_SIZE)
     targets_per_worker = max(1, int(targets_per_worker or 1))
     scope_list = [scopes] if isinstance(scopes, str) else list(scopes)
@@ -419,13 +436,10 @@ def prepare(
     # wave). Quoting only the API figure understated the chosen path ~2.4x at the
     # exact moment consent was given.
     # Per CLI: one usage.jsonl holds every family's rows and Cursor's fixed
-    # overhead is ~4.4x Claude's, so an unfiltered median describes neither.
-    baseline, baseline_source = baseline_tokens(
-        usage_log_path(project_dir), cli=cli_name
-    )
-    _effort_argv, headless_effort, headless_effort_source = hstate.resolve_headless_argv(
-        cfg, command="judges",
-    )
+    # overhead is ~4.4x Claude's, so an unfiltered median describes neither. Both
+    # the baseline and the effort come off the resolved profile, so the number
+    # quoted here and the wave that runs can no longer disagree.
+    baseline, baseline_source = prof.baseline_tokens, prof.baseline_source
 
     manifest_doc = {
         "scopes": scope_list,
@@ -435,12 +449,25 @@ def prepare(
         "targets_per_worker": targets_per_worker,
         "model": context.get("judge_model"),
         "provider": context.get("judge_provider"),
+        # The resolved profile, so `fanout` inherits it without the operator
+        # re-passing --cli (and so a wrong pin is visible on disk, not just in a
+        # payload that scrolled away).
+        "cli": prof.cli,
+        "effort": prof.effort,
+        "effort_channel": prof.effort_channel,
+        "host": prof.host,
         "entries": entries,
     }
     manifest_path = jdir / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+    # Also on stderr: a mis-resolved CLI is worth seeing even when the caller
+    # only skims stdout's JSON, and this is the last moment before the manifest
+    # is spawned against.
+    for warning in prof.warnings:
+        print(f"[prepare] warning: {warning}", file=sys.stderr)
 
     return {
         "status": "ok",
@@ -450,6 +477,7 @@ def prepare(
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
+        "effective": prof.to_payload(),
         "usage_summary": {
             "pairs": total_pairs,
             "targets": len(targets),
@@ -458,13 +486,15 @@ def prepare(
             "source_words": total_words,
             "worker_model": worker_model,
             "batch_size": batch_size,
+            "cli": prof.cli,
             "estimated_api_cost": estimated_api_cost,
             "estimated_prompt_tokens": total_prompt_tokens,
             "headless_baseline_tokens": baseline,
             "headless_baseline_source": baseline_source,
             "estimated_headless_tokens": total_prompt_tokens + len(entries) * baseline,
-            "headless_effort": headless_effort,
-            "headless_effort_source": headless_effort_source,
+            "headless_effort": prof.effort,
+            "headless_effort_source": prof.effort_source,
+            "headless_effort_channel": prof.effort_channel,
         },
         "instructions": (
             "For each manifest entry (one target, or a small group of low-density "
@@ -476,6 +506,7 @@ def prepare(
             if entries
             else "Nothing to judge — scope resolved to no targets."
         ),
+        "warnings": list(prof.warnings),
         "_schema": _PREPARE_SCHEMA,
     }
 
@@ -512,6 +543,7 @@ def fanout(
     claude_bin: str | None = None,
     estimate: bool = False,
     effort: str | None = None,
+    worker_model: str | None = None,
     cache: str | None = None,
     runner=None,
 ) -> dict[str, Any]:
@@ -535,8 +567,15 @@ def fanout(
     ``estimate=True`` renders the argv and projects the token cost from the
     measured per-job baseline, then returns without spawning anything — so the
     usage gate can quote the path being taken rather than the API price of the
-    path that was declined. ``effort`` is a per-run override of
-    ``headless_effort_judges`` (see :func:`~src.harness.state.resolve_headless_argv`).
+    path that was declined.
+
+    ``cli``, ``worker_model`` and ``effort`` override what ``prepare`` resolved
+    into the manifest; unset, all three are **inherited from it**, so the wave
+    runs what was consented to without the operator re-typing anything. The
+    override exists so a wrong pin costs one flag instead of a re-``prepare``,
+    which is destructive — and an override that changes the model is written back
+    to the manifest, because ``commit`` stamps it into each result's metadata and
+    a silent divergence there would misreport what judged the book.
     ``cache`` is a per-run override of ``headless_prompt_cache``.
     """
     from src.harness.headless import (
@@ -544,17 +583,13 @@ def fanout(
         effective_wave_tokens,
         resolve_cache_mode,
         run_headless_wave,
-        warn_cursor_claude_model,
     )
     from src.harness import state as hstate
+    from src.harness.profile import resolve_profile
     from src.harness.usage import median_wall_s
 
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
-    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
-    extra_flags, resolved_effort, effort_source = hstate.resolve_headless_argv(
-        cfg, command="judges", effort_override=effort,
-    )
     requested_cache = hstate.resolve_prompt_cache(cfg, cache_override=cache)
     jdir = _judges_dir(project_dir)
     manifest_path = jdir / "manifest.json"
@@ -595,10 +630,76 @@ def fanout(
                 "_schema": _FANOUT_SCHEMA,
             }
 
-    worker_model = doc.get("worker_model") or default_worker_model(cli_name)
-    model_warning = warn_cursor_claude_model(cli_name, worker_model)
-    if model_warning:
-        print(model_warning, file=sys.stderr)
+    # Resolve against the manifest, not just config: `prepare` already wrote the
+    # CLI/model/effort the operator consented to, so a bare `fanout` reproduces
+    # that wave exactly. Flags still win, for the one-flag correction of a bad pin.
+    # A bare `fanout` runs at the level `prepare` quoted the consent estimate
+    # for. A manifest that recorded `null` means "no flag", which the resolver
+    # spells "default" — inheriting it as None would fall through to the config
+    # ladder and run at something nobody consented to.
+    #
+    # Only when the CLI has not flipped, though: a level resolved for Claude is
+    # a Claude-table number, and carrying it onto a Cursor wave would write an
+    # `[effort=…]` bracket onto a model that never had one — the argv change
+    # `resolve_profile` deliberately refuses to invent.
+    inherited_effort, inherited_effort_source = effort, "cli"
+    if not effort and "effort" in doc and (cli or doc.get("cli")) == doc.get("cli"):
+        inherited_effort = doc["effort"] or "default"
+        inherited_effort_source = "manifest"
+
+    prof = resolve_profile(
+        project_dir,
+        command="judges",
+        cli=cli or doc.get("cli"),
+        cli_source="cli" if cli else "manifest",
+        worker_model=worker_model or doc.get("worker_model"),
+        worker_model_source="cli" if worker_model else "manifest",
+        effort=inherited_effort,
+        effort_source=inherited_effort_source,
+        cfg=cfg,
+        usage_log=usage_log_path(project_dir),
+    )
+    cli_name = prof.cli
+    model_override = bool(worker_model) and worker_model != doc.get("worker_model")
+    worker_model = prof.worker_model
+    resolved_effort, effort_source = prof.effort, prof.effort_source
+    extra_flags = hstate.compose_headless_argv(
+        cfg, resolved_effort if prof.effort_channel == "argv" else None
+    )
+    for warning in prof.warnings:
+        print(warning, file=sys.stderr)
+    # One joined string, plus the list. Callers (and tests) substring-match
+    # `warning` for a specific notice, which a list would break.
+    model_warning = "; ".join(prof.warnings) or None
+
+    def _with_profile(payload: dict[str, Any]) -> dict[str, Any]:
+        """Attach the resolved profile to any return path.
+
+        Every exit from here — estimate, launcher error, completed wave — has to
+        say what it ran (or would have run) as. A payload that omits it is how
+        the operator ends up reading a Claude effort next to a Cursor wave.
+        """
+        payload["effective"] = prof.to_payload()
+        if prof.warnings:
+            payload["warnings"] = list(prof.warnings)
+            payload["warning"] = model_warning
+        return payload
+
+    # An override that changes the model must reach the manifest: `commit` stamps
+    # it into each result's metadata and `status` reports it back as what judged
+    # the book. Only the profile fields are rewritten — drafts and entries are
+    # untouched, so this is not the destructive re-`prepare`.
+    if model_override or doc.get("cli") != prof.cli or doc.get("effort") != prof.effort:
+        doc["worker_model"] = prof.worker_model
+        doc["cli"] = prof.cli
+        doc["effort"] = prof.effort
+        doc["effort_channel"] = prof.effort_channel
+        try:
+            manifest_path.write_text(
+                json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:  # pragma: no cover - disk failure
+            print(f"could not update manifest {manifest_path}: {exc}", file=sys.stderr)
     if concurrency is None:
         try:
             concurrency = int(doc.get("batch_size") or _DEFAULT_BATCH_SIZE)
@@ -689,13 +790,11 @@ def fanout(
             ),
             "_schema": _FANOUT_SCHEMA,
         }
-        if model_warning:
-            out["warning"] = model_warning
-        return out
+        return _with_profile(out)
 
     if estimate:
         log_path = usage_log_path(project_dir)
-        baseline, baseline_source = baseline_tokens(log_path, cli=cli_name)
+        baseline, baseline_source = prof.baseline_tokens, prof.baseline_source
         spf_tokens: dict[str, int] = {}
         prompt_tokens = 0
         for job in ready:
@@ -757,6 +856,11 @@ def fanout(
                 ),
                 "effort": resolved_effort,
                 "effort_source": effort_source,
+                # Which knob actually carries that effort. Without this the block
+                # reads as a contradiction on Cursor: an effort beside an argv
+                # that (correctly) has no --effort in it, because the level is in
+                # the model's own bracket.
+                "effort_channel": prof.effort_channel,
                 "cache": cache_for_estimate,
             },
             "instructions": (
@@ -765,9 +869,7 @@ def fanout(
             ),
             "_schema": _FANOUT_SCHEMA,
         }
-        if model_warning:
-            est_out["warning"] = model_warning
-        return est_out
+        return _with_profile(est_out)
 
     wave_out = run_headless_wave(
         ready,
@@ -802,9 +904,7 @@ def fanout(
             "_schema": _FANOUT_SCHEMA,
             "instructions": "Fix the launcher error, then re-run `fanout`.",
         }
-        if model_warning:
-            err_out["warning"] = model_warning
-        return err_out
+        return _with_profile(err_out)
 
     failed = list(pre_failed)
     failed.extend(wave_out.get("failed") or [])
@@ -834,9 +934,7 @@ def fanout(
     }
     if wave_out.get("usage"):
         out["usage"] = wave_out["usage"]
-    if model_warning:
-        out["warning"] = model_warning
-    return out
+    return _with_profile(out)
 
 
 def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
@@ -897,9 +995,10 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     # `prepare` always records the resolved id, which is what makes a wave
     # reproducible from its manifest alone.
     from src.harness import state as hstate
+    from src.harness.profile import resolve_cli
 
     worker_model = doc.get("worker_model") or default_worker_model(
-        str(hstate.load_config(project_dir).get("headless_cli") or "claude")
+        resolve_cli(hstate.load_config(project_dir), override=doc.get("cli"))[0]
     )
     context = {
         "judge_model": doc.get("model"),

@@ -45,6 +45,53 @@ def test_build_prompt_parts_keeps_chapter_ref_in_suffix():
     assert suffix.startswith("# ---8<--- cache split ---8<---")
 
 
+def test_run_sends_cacheable_prefix_and_unchanged_prompt(monkeypatch):
+    """run() caches the rubric+map head without altering the prompt it sends.
+
+    Byte-parity with build_prompt() is the load-bearing half: prompt_version
+    hashes and API/subagent prompt parity both depend on it.
+    """
+    seen = {}
+
+    def fake(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen["cache_prefix"] = kwargs.get("cache_prefix")
+        return json.dumps({"compliant": True, "findings": [], "summary": "ok"})
+
+    monkeypatch.setattr(llm_io, "call_judge", fake)
+    judge = AddressComplianceJudge()
+    target, ctx = _target(), _ctx()
+    judge.run(target, ctx)
+
+    assert seen["prompt"] == judge.build_prompt(target, ctx)
+    assert seen["cache_prefix"]
+    assert seen["prompt"].startswith(seen["cache_prefix"])
+    # The cached head must carry the shared rules and none of the target text.
+    assert "</address_map>" in seen["cache_prefix"]
+    assert target.translated_text not in seen["cache_prefix"]
+
+
+def test_retry_reuses_the_same_cache_prefix(monkeypatch):
+    """The JSON-only note is appended, so the retry reads the cache, not rewrites it."""
+    calls = []
+
+    def fake(prompt, **kwargs):
+        calls.append((prompt, kwargs.get("cache_prefix")))
+        if len(calls) == 1:
+            return "not json at all"
+        return json.dumps({"compliant": True, "findings": [], "summary": "ok"})
+
+    monkeypatch.setattr(llm_io, "call_judge", fake)
+    AddressComplianceJudge().run(_target(), _ctx())
+
+    assert len(calls) == 2
+    assert calls[0][1] == calls[1][1]
+    assert calls[1][1]
+    # Still a genuine prefix of the longer retry prompt, or Anthropic silently
+    # drops the split and the retry pays a second cache write.
+    assert calls[1][0].startswith(calls[1][1])
+
+
 def test_explicit_error_vs_global_warning(monkeypatch):
     """Explicit pair violation is an error; a global-rule inference is a warning."""
     payload = {

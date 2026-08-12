@@ -12,6 +12,7 @@ can be unit-tested against a bare ``tmp_path`` directory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import is_dataclass, asdict
@@ -24,6 +25,7 @@ from src.evaluators import aggregate_results, run_all_evaluators
 from src.evaluators.location_normalizer import NormalizedIssue, fan_out_issues
 from src.models import Blacklist, Chunk, EvalResult, EvaluationConfig, Glossary
 from src.utils.file_io import load_blacklist, load_glossary
+from src.utils.text_utils import normalize_newlines
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,21 @@ def _serialize_result(result: EvalResult) -> dict[str, Any]:
         return json.loads(result.model_dump_json())
 
 
+def _rehydrate_result(payload: dict[str, Any]) -> Optional[EvalResult]:
+    """Rebuild an :class:`EvalResult` from a previously persisted dict.
+
+    Used when a narrowed rerun carries an untouched evaluator's results
+    forward. Returns ``None`` if the stored shape no longer validates (an old
+    file written before a model change), in which case that evaluator's
+    findings are simply dropped rather than crashing the rerun.
+    """
+    try:
+        return EvalResult.model_validate(payload)
+    except Exception as e:  # noqa: BLE001 - a stale on-disk shape is not fatal
+        logger.debug("Could not rehydrate persisted eval result: %s", e)
+        return None
+
+
 def _serialize_issue(issue: NormalizedIssue | dict[str, Any]) -> dict[str, Any]:
     """Accept either a ``NormalizedIssue`` or a plain dict and return a dict."""
     if isinstance(issue, NormalizedIssue):
@@ -84,6 +101,231 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-evaluator freshness ledger
+#
+# ``evaluations/<chunk>.json`` carries an ``eval_runs`` block:
+#
+#     "eval_runs": {"grammar": {"at": "<iso>", "text_sha": "<sha256>"}, ...}
+#
+# recording, per evaluator/judge, the hash of the ``translated_text`` it
+# actually judged. Every path that rewrites a chunk (the chunk editor,
+# /api/correction, /api/apply-corrections, /api/sentence/replace, a judge
+# apply) changes that hash, so a persisted verdict can no longer assert itself
+# against prose it never saw — without any of those paths having to remember to
+# stamp a flag.
+
+
+def chunk_text_sha(text: str) -> str:
+    """Content hash of a chunk translation, newline-normalized first.
+
+    Normalizing means a CRLF/LF round-trip through an editor is not mistaken
+    for an edit — the same normalization the reader's review anchoring applies
+    before searching chunk text.
+    """
+    return hashlib.sha256(normalize_newlines(text or "").encode("utf-8")).hexdigest()
+
+
+def current_chunk_sha(project_dir: Path, chunk_id: str) -> Optional[str]:
+    """Hash the chunk's translation as it currently sits on disk.
+
+    Returns ``None`` when the chunk file is missing or unreadable — callers
+    treat that as "cannot judge freshness" rather than "stale", so a project
+    whose chunks moved does not paint every badge red.
+    """
+    path = Path(project_dir) / "chunks" / f"{chunk_id}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return chunk_text_sha(data.get("translated_text") or "")
+
+
+def _entry_predates(entry: Optional[dict[str, Any]], since: Optional[str]) -> bool:
+    """Was this ledger entry recorded before ``since`` (an ISO stamp)?
+
+    An evaluator with no entry, or one whose ``at`` will not parse, counts as
+    predating: no evidence that it re-ran is not evidence that it did. Used to
+    scope the chunk-level ``stale`` flag to the evaluators it still describes.
+    """
+    ran_at = entry.get("at") if isinstance(entry, dict) else None
+    if not (since and ran_at):
+        return True
+    try:
+        return datetime.fromisoformat(str(ran_at)) < datetime.fromisoformat(str(since))
+    except ValueError:
+        return True
+
+
+def _stamp_eval_runs(
+    previous: Optional[dict[str, Any]],
+    names: Iterable[str],
+    text_sha: Optional[str],
+    *,
+    keep: Optional[Iterable[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """Merge a run of ``names`` into the previous ledger.
+
+    ``keep`` names the evaluators whose *findings* survive into the payload
+    being written, so their prior ledger entry is carried over untouched — a
+    coded rerun must not silently claim the dialogue judge is current, and it
+    must not erase the judge's ledger either. Everything else is dropped: an
+    evaluator whose results are no longer in the file has no run to record.
+    ``None`` keeps the whole prior ledger (a patch-in-place write).
+    """
+    prior: dict[str, Any] = {}
+    if isinstance(previous, dict):
+        raw = previous.get("eval_runs")
+        if isinstance(raw, dict):
+            prior = {k: v for k, v in raw.items() if isinstance(v, dict)}
+
+    if keep is None:
+        ledger = dict(prior)
+    else:
+        keep_set = set(keep)
+        ledger = {k: v for k, v in prior.items() if k in keep_set}
+
+    now = datetime.now().isoformat()
+    for name in [n for n in names if n]:
+        entry: dict[str, Any] = {"at": now}
+        if text_sha is not None:
+            entry["text_sha"] = text_sha
+        ledger[name] = entry
+    return ledger or None
+
+
+def evaluator_freshness_detail(
+    payload: Optional[dict[str, Any]],
+    current_sha: Optional[str],
+    *,
+    names: Optional[Iterable[str]] = None,
+    chunk_mtime: Optional[float] = None,
+) -> dict[str, dict[str, Optional[str]]]:
+    """Return ``{evaluator_name: {"state": ..., "basis": ...}}``.
+
+    ``state`` is ``"fresh" | "stale" | "missing"``; ``basis`` names *which*
+    source decided it — ``"flag"``, ``"hash"``, ``"mtime"``, or ``None`` for a
+    ``missing`` verdict (and for a recorded run whose freshness nothing could
+    disprove).
+
+    The basis is not decoration. Only a minority of the evaluation files on
+    disk carry an ``eval_runs`` ledger — every project evaluated before it
+    existed falls through to the timestamp rule, where a git checkout, a
+    byte-identical rewrite or a re-chunk all bump the mtime. ``"mtime"``-stale
+    is a *suspicion*; ``"hash"``- and ``"flag"``-stale are facts, and a caller
+    telling an operator to re-run N chapters should be able to say which it has.
+
+    Args:
+        payload: The chunk's persisted evaluation, or ``None`` if never run.
+        current_sha: :func:`current_chunk_sha` for the chunk right now. ``None``
+            (unreadable chunk) means freshness cannot be disproved, so recorded
+            runs read ``fresh``.
+        names: Evaluators the caller wants an answer for. Any name with no
+            evidence in ``payload`` comes back ``"missing"``. When omitted,
+            only the names the payload has evidence for are reported.
+        chunk_mtime: Modification time of ``chunks/<chunk>.json``, used for the
+            legacy fallback below.
+
+    Freshness sources, in order:
+
+    1. The top-level ``stale`` flag (written by a judge apply) still wins, so
+       apply-fix behaviour is exactly what it was.
+    2. ``eval_runs[name].text_sha`` vs ``current_sha``.
+    3. **Legacy fallback** for evaluations written before ``eval_runs`` existed:
+       an evaluator with no ledger entry but visible evidence it ran
+       (``enabled_evals`` / ``judges``) is compared by timestamp — a chunk file
+       newer than ``evaluated_at`` / ``judges_at`` means the text moved on.
+       Those files self-heal into the ledger on the next rerun.
+    """
+    requested = list(names) if names is not None else None
+    missing: dict[str, Optional[str]] = {"state": "missing", "basis": None}
+
+    if not isinstance(payload, dict):
+        return {name: dict(missing) for name in (requested or [])}
+
+    ledger = payload.get("eval_runs")
+    ledger = ledger if isinstance(ledger, dict) else {}
+    judges = payload.get("judges")
+    judges = judges if isinstance(judges, dict) else {}
+    ran_coded = payload.get("enabled_evals")
+    ran_coded = [n for n in ran_coded if isinstance(n, str)] if isinstance(ran_coded, list) else []
+
+    evidenced = set(ledger) | set(judges) | set(ran_coded)
+    targets = requested if requested is not None else sorted(evidenced)
+
+    explicitly_stale = bool(payload.get("stale"))
+
+    def _flag_covers(entry: Optional[dict[str, Any]]) -> bool:
+        """Does the chunk-level ``stale`` flag still describe this evaluator?
+
+        The flag is written per *chunk* — "the text moved under the verdicts
+        recorded before this edit" — but an evaluator whose ledger entry is
+        dated at or after ``stale_since`` has re-run since, and carries its own
+        newer evidence. Without this scoping, re-running one judge had to
+        either leave every other judge wrongly stale or clear the flag
+        outright, which laundered them all fresh.
+        """
+        return explicitly_stale and _entry_predates(entry, payload.get("stale_since"))
+
+    def _legacy(name: str) -> tuple[str, Optional[str]]:
+        """Timestamp comparison for a pre-``eval_runs`` evaluation."""
+        if name in judges:
+            stamp = payload.get("judges_at") or payload.get("evaluated_at")
+        elif name in ran_coded:
+            stamp = payload.get("evaluated_at")
+        else:
+            return "missing", None
+        if chunk_mtime is None or not stamp:
+            return "fresh", None
+        try:
+            ran_at = datetime.fromisoformat(str(stamp)).timestamp()
+        except ValueError:
+            return "fresh", None
+        return ("stale", "mtime") if chunk_mtime > ran_at else ("fresh", "mtime")
+
+    out: dict[str, dict[str, Optional[str]]] = {}
+    for name in targets:
+        entry = ledger.get(name)
+        if isinstance(entry, dict) and entry.get("text_sha"):
+            if _flag_covers(entry):
+                out[name] = {"state": "stale", "basis": "flag"}
+            elif current_sha is None:
+                out[name] = {"state": "fresh", "basis": None}
+            else:
+                same = entry["text_sha"] == current_sha
+                out[name] = {"state": "fresh" if same else "stale", "basis": "hash"}
+            continue
+        state, basis = _legacy(name)
+        if state != "missing" and _flag_covers(None):
+            state, basis = "stale", "flag"
+        out[name] = {"state": state, "basis": basis if state != "missing" else None}
+    return out
+
+
+def evaluator_freshness(
+    payload: Optional[dict[str, Any]],
+    current_sha: Optional[str],
+    *,
+    names: Optional[Iterable[str]] = None,
+    chunk_mtime: Optional[float] = None,
+) -> dict[str, str]:
+    """Return ``{evaluator_name: "fresh" | "stale" | "missing"}``.
+
+    The state half of :func:`evaluator_freshness_detail` — see there for the
+    argument meanings and the three-source precedence ladder. Kept as the
+    hot-path shape most callers want (the dashboard's Review rollup asks this
+    question once per chunk per page load and never looks at the basis).
+    """
+    return {
+        name: str(entry["state"])
+        for name, entry in evaluator_freshness_detail(
+            payload, current_sha, names=names, chunk_mtime=chunk_mtime
+        ).items()
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public API
 
 
@@ -98,6 +340,8 @@ def save_chunk_evaluation(
     llm_judge: Optional[dict[str, Any]] = None,
     judges: Optional[dict[str, Any]] = None,
     stale_mark: Optional[dict[str, str]] = None,
+    text_sha: Optional[str] = None,
+    stamp_evals: Optional[Iterable[str]] = None,
 ) -> Path:
     """Persist a full evaluation run for ``chunk_id``.
 
@@ -120,6 +364,14 @@ def save_chunk_evaluation(
         stale_mark: When preserving outdated judge findings after a text edit,
             pass ``{"stale_since": ..., "stale_reason": ...}`` to re-stamp the
             evaluation as stale (see :func:`mark_evaluation_stale`).
+        text_sha: Content hash of the ``translated_text`` these results describe.
+            Defaults to hashing ``chunks/<chunk_id>.json`` on disk, so callers
+            that already hold the chunk can skip a read and callers that don't
+            still get a stamped ledger.
+        stamp_evals: Which of ``enabled_evals`` actually ran against
+            ``text_sha`` just now. Defaults to all of them. A narrowed rerun
+            passes the smaller list so evaluators whose *previous* findings are
+            being carried forward keep their original — possibly stale — hash.
 
     Returns:
         Path to the written JSON file.
@@ -129,6 +381,12 @@ def save_chunk_evaluation(
 
     if enabled_evals is None:
         enabled_evals = [r.eval_name for r in results_list]
+    if text_sha is None:
+        text_sha = current_chunk_sha(project_dir, chunk_id)
+
+    # Read the file we are about to overwrite so the ledger keeps the entries
+    # for evaluators this run did not touch (the tailored judges, above all).
+    previous = load_chunk_evaluation(project_dir, chunk_id)
 
     payload: dict[str, Any] = {
         "chunk_id": chunk_id,
@@ -139,7 +397,25 @@ def save_chunk_evaluation(
         "normalized_issues": [_serialize_issue(i) for i in normalized_issues],
         "llm_judge": llm_judge,
         "judges": judges,
+        # The ledger describes exactly what this file now holds: the evaluators
+        # whose results are in it, plus the judges carried over. A wipe of
+        # ``judges`` takes their ledger rows with it.
+        "eval_runs": _stamp_eval_runs(
+            previous,
+            enabled_evals if stamp_evals is None else stamp_evals,
+            text_sha,
+            keep=list(enabled_evals) + (list(judges) if isinstance(judges, dict) else []),
+        ),
     }
+    # Carrying a block over means carrying over *when it ran*. Dropping these
+    # would relabel a judge verdict inherited from an earlier run with this
+    # run's timestamp — which, for an evaluation written before ``eval_runs``
+    # existed, is exactly what would launder a stale verdict into a fresh one.
+    if isinstance(previous, dict):
+        if judges and previous.get("judges_at"):
+            payload["judges_at"] = previous["judges_at"]
+        if llm_judge is not None and previous.get("llm_judge_at"):
+            payload["llm_judge_at"] = previous["llm_judge_at"]
     if stale_mark:
         payload["stale"] = True
         payload["stale_since"] = stale_mark.get("stale_since") or datetime.now().isoformat()
@@ -228,11 +504,29 @@ def merge_judge_result(
         judges = {}
     judges[judge_name] = result
     payload["judges"] = judges
-    payload["judges_at"] = datetime.now().isoformat()
-    # A fresh judge result supersedes any stale marker a prior apply-fix edit
-    # left behind — the badge now reflects the current translated_text again.
-    for key in ("stale", "stale_since", "stale_reason"):
-        payload.pop(key, None)
+    # ``judges_at`` is the *legacy* per-chunk stamp: it dates judges that have
+    # no ledger entry. This judge is getting one below, so bumping the shared
+    # stamp would only re-date the others — turning a pre-``eval_runs`` verdict
+    # that never saw the current prose green. Same reasoning as the carry-over
+    # in `save_chunk_evaluation`; set it only when there is nothing to keep.
+    payload.setdefault("judges_at", datetime.now().isoformat())
+    # Single persistence seam for both judge backends (API and subagent), so a
+    # CLI run and a dashboard run stamp the freshness ledger identically.
+    current = current_chunk_sha(project_dir, chunk_id)
+    payload["eval_runs"] = _stamp_eval_runs(payload, [judge_name], current)
+    # This judge's fresh run outdates the stale marker for *itself* — its new
+    # ledger entry postdates ``stale_since``, which is what scopes the flag.
+    # Drop the flag only once no other evaluator is still covered by it;
+    # clearing it wholesale relabelled their older verdicts as current.
+    runs = payload.get("eval_runs")
+    runs = runs if isinstance(runs, dict) else {}
+    coded = payload.get("enabled_evals")
+    coded = [n for n in coded if isinstance(n, str)] if isinstance(coded, list) else []
+    others = (set(judges) | set(coded)) - {judge_name}
+    since = payload.get("stale_since")
+    if not any(_entry_predates(runs.get(name), since) for name in others):
+        for key in ("stale", "stale_since", "stale_reason"):
+            payload.pop(key, None)
 
     path = _eval_file(project_dir, chunk_id)
     _atomic_write_json(path, payload)
@@ -591,6 +885,154 @@ CODED_EVAL_NAMES: tuple[str, ...] = (
 )
 
 
+# The Review tab's status cells. The deterministic evaluators always run as one
+# set, so they get one cell; each tailored judge is run separately and gets its
+# own. The quality ``llm_judge`` is deliberately absent — it stays on the
+# Translate stage's per-chunk card.
+JUDGE_STATUS_GROUPS: dict[str, tuple[str, ...]] = {
+    "coded": CODED_EVAL_NAMES,
+    "dialogue": ("dialogue",),
+    "address": ("address",),
+}
+
+
+def chunk_group_states(
+    freshness: dict[str, str],
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> dict[str, str]:
+    """Collapse one chunk's per-evaluator freshness into one state per group.
+
+    ``coded`` reads only the evaluators the ledger actually recorded, never the
+    full seven: ``app_config.json`` may narrow the set (see
+    :func:`get_enabled_evaluators`), and demanding the full list there would
+    pin a correctly-configured project at a permanent ``partial``. No coded
+    entry at all is the only thing that means "never run".
+
+    ``groups`` defaults to :data:`JUDGE_STATUS_GROUPS` (what the dashboard's
+    Review tab shows). The CLI passes a wider map so a judge registered after
+    that constant was written is not invisible.
+    """
+    out: dict[str, str] = {}
+    for group, names in (groups or JUDGE_STATUS_GROUPS).items():
+        states = [freshness[n] for n in names if freshness.get(n, "missing") != "missing"]
+        if not states:
+            out[group] = "missing"
+        elif "stale" in states:
+            out[group] = "stale"
+        else:
+            out[group] = "fresh"
+    return out
+
+
+def rollup_group_state(chunk_states: Iterable[str]) -> dict[str, Any]:
+    """Roll per-chunk group states up to a chapter (or book) verdict.
+
+    Any stale chunk makes the whole thing ``stale`` — one out-of-date verdict
+    is enough to stop trusting the badge. Otherwise a gap is ``partial``, all
+    gaps is ``not_run``, and everything current is ``done``.
+    """
+    counts = {"fresh": 0, "stale": 0, "missing": 0}
+    for state in chunk_states:
+        counts[state if state in counts else "missing"] += 1
+    total = sum(counts.values())
+    if total == 0 or counts["missing"] == total:
+        state = "not_run"
+    elif counts["stale"]:
+        state = "stale"
+    elif counts["missing"]:
+        state = "partial"
+    else:
+        state = "done"
+    return {"state": state, **counts}
+
+
+def iter_chapter_chunks(project_dir: Path) -> dict[str, list[tuple[str, dict]]]:
+    """Read ``chunks/*_chunk_*.json`` once into ``{chapter_id: [(chunk_id, data)]}``.
+
+    Every caller of this has to hash each chunk's ``translated_text`` anyway, so
+    it pays for the read regardless — doing it in one pass keeps the walk to a
+    single sweep of the directory instead of one stat-and-open per lookup. Each
+    payload carries an extra ``_mtime`` key for the legacy freshness fallback.
+    """
+    from collections import defaultdict
+
+    out: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    chunks_dir = Path(project_dir) / "chunks"
+    if not chunks_dir.exists():
+        return out
+    for path in sorted(chunks_dir.glob("*_chunk_*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            mtime = path.stat().st_mtime
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        chunk_id = data.get("id") or path.stem
+        chapter_id = data.get("chapter_id") or chapter_id_from_chunk_id(chunk_id)
+        data["_mtime"] = mtime
+        out[chapter_id].append((chunk_id, data))
+    return out
+
+
+def chapter_chunk_states(
+    project_dir: Path,
+    chunks: list[tuple[str, dict]],
+    *,
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> list[dict[str, Any]]:
+    """Per translated chunk: its group states, per-evaluator detail, and payload.
+
+    The one place a chapter's evaluations are opened and hashed. Untranslated
+    chunks are skipped — there is nothing to have judged — which is why the
+    returned list can be shorter than ``chunks``.
+
+    Returns one dict per translated chunk with ``chunk_id``, ``states``
+    (``{group: fresh|stale|missing}``), ``detail`` (per-evaluator
+    ``{state, basis}`` from :func:`evaluator_freshness_detail`) and
+    ``evaluation`` (the persisted payload, or ``None``) so a caller wanting
+    provenance does not re-read the file.
+    """
+    out: list[dict[str, Any]] = []
+    for chunk_id, data in chunks:
+        if not (data.get("translated_text") or "").strip():
+            continue
+        payload = load_chunk_evaluation(project_dir, chunk_id)
+        detail = evaluator_freshness_detail(
+            payload,
+            chunk_text_sha(data.get("translated_text") or ""),
+            chunk_mtime=data.get("_mtime"),
+        )
+        freshness = {name: str(entry["state"]) for name, entry in detail.items()}
+        out.append({
+            "chunk_id": chunk_id,
+            "states": chunk_group_states(freshness, groups),
+            "detail": detail,
+            "evaluation": payload,
+        })
+    return out
+
+
+def chapter_judge_status(
+    project_dir: Path,
+    chunks: list[tuple[str, dict]],
+    *,
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> tuple[dict[str, dict], list[dict[str, str]]]:
+    """Roll a chapter's chunks up to one status per :data:`JUDGE_STATUS_GROUPS`.
+
+    Returns ``(by_group, per_chunk_states)`` — the second value is handed back
+    so the book-wide totals can be rolled up from the same per-chunk verdicts
+    rather than from an average of chapter verdicts.
+    """
+    per_chunk = [rec["states"] for rec in chapter_chunk_states(project_dir, chunks, groups=groups)]
+    by_group = {
+        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
+        for group in (groups or JUDGE_STATUS_GROUPS)
+    }
+    return by_group, per_chunk
+
+
 def _load_project_glossary(project_dir: Path) -> Optional[Glossary]:
     """Best-effort glossary load from ``projects/<id>/glossary.json``."""
     glossary_path = Path(project_dir) / "glossary.json"
@@ -672,6 +1114,7 @@ def evaluate_and_persist_chunk(
     glossary: Optional[Glossary] = None,
     blacklist: Optional[Blacklist] = None,
     preserve_llm_judge: bool = True,
+    enabled_evals: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Run coded evaluators on ``chunk`` and persist results.
 
@@ -684,6 +1127,9 @@ def evaluate_and_persist_chunk(
         preserve_llm_judge: If ``True``, keep any existing ``llm_judge`` block
             from a previous run so rerunning the coded evaluators doesn't wipe
             out the LLM judge output.
+        enabled_evals: Optional subset of :data:`CODED_EVAL_NAMES` to run. The
+            Review tab's "rerun deterministic" passes this so a user can redo
+            just one evaluator; ``None`` runs the configured set.
 
     Returns:
         Dict with keys suitable for JSON-ing back to the frontend:
@@ -697,40 +1143,72 @@ def evaluate_and_persist_chunk(
         blacklist = _load_project_blacklist(project_dir)
 
     results, aggregated, normalized = run_coded_evaluators(
-        chunk, glossary=glossary, blacklist=blacklist,
+        chunk, glossary=glossary, blacklist=blacklist, enabled_evals=enabled_evals,
     )
     actually_ran = [r.eval_name for r in results]
+
+    previous = load_chunk_evaluation(project_dir, chunk.id)
 
     existing_llm = None
     existing_judges = None
     stale_mark = None
-    if preserve_llm_judge:
-        previous = load_chunk_evaluation(project_dir, chunk.id)
-        if previous is not None:
-            existing_llm = previous.get("llm_judge")
-            existing_judges = previous.get("judges")
-            if previous.get("stale") and existing_judges:
-                stale_mark = {
-                    "stale_since": previous.get("stale_since"),
-                    "stale_reason": previous.get("stale_reason"),
-                }
+    if preserve_llm_judge and previous is not None:
+        existing_llm = previous.get("llm_judge")
+        existing_judges = previous.get("judges")
+        if previous.get("stale") and existing_judges:
+            stale_mark = {
+                "stale_since": previous.get("stale_since"),
+                "stale_reason": previous.get("stale_reason"),
+            }
+
+    # A narrowed rerun ("just re-run grammar") must not delete the other
+    # evaluators' findings: save_chunk_evaluation overwrites the file wholesale,
+    # so carry the untouched ones forward explicitly. Their ledger entries keep
+    # their original hash — carrying a finding forward is not a claim that the
+    # evaluator has seen the current text.
+    carried_issues: list[dict[str, Any]] = []
+    persisted_results: list[EvalResult] = list(results)
+    if enabled_evals is not None and previous is not None:
+        ran = set(actually_ran)
+        carried_names: set[str] = set()
+        for raw in previous.get("results") or []:
+            if not isinstance(raw, dict) or raw.get("eval_name") in ran:
+                continue
+            rehydrated = _rehydrate_result(raw)
+            if rehydrated is not None:
+                persisted_results.append(rehydrated)
+                carried_names.add(rehydrated.eval_name)
+        carried_issues = [
+            i for i in (previous.get("normalized_issues") or [])
+            if isinstance(i, dict) and i.get("eval_name") in carried_names
+        ]
+        if carried_names:
+            aggregated = aggregate_results(persisted_results)
+
+    persisted_evals = [r.eval_name for r in persisted_results]
 
     save_chunk_evaluation(
         project_dir,
         chunk.id,
-        results,
+        persisted_results,
         aggregated,
-        normalized,
-        enabled_evals=actually_ran,
+        list(normalized) + carried_issues,
+        enabled_evals=persisted_evals,
         llm_judge=existing_llm,
         judges=existing_judges,
         stale_mark=stale_mark,
+        stamp_evals=actually_ran,
+        # Hash the text these results were produced from, not whatever is on
+        # disk by the time we write: a background run evaluates at T0 and the
+        # chunk editor can save at T1, which would stamp the ledger with a hash
+        # the findings never saw and leave the badge permanently "fresh".
+        text_sha=chunk_text_sha(chunk.translated_text),
     )
 
     result: dict = {
         "aggregated": aggregated,
-        "issues": [issue.to_dict() for issue in normalized],
-        "enabled_evals": actually_ran,
+        "issues": [issue.to_dict() for issue in normalized] + carried_issues,
+        "enabled_evals": persisted_evals,
     }
     if stale_mark:
         result["stale"] = True
@@ -741,6 +1219,7 @@ def evaluate_and_persist_chunk(
 
 __all__ = [
     "CODED_EVAL_NAMES",
+    "JUDGE_STATUS_GROUPS",
     "save_chunk_evaluation",
     "load_chunk_evaluation",
     "merge_llm_judge_result",
@@ -751,4 +1230,9 @@ __all__ = [
     "load_project_summary",
     "run_coded_evaluators",
     "evaluate_and_persist_chunk",
+    "chunk_text_sha",
+    "current_chunk_sha",
+    "evaluator_freshness",
+    "chunk_group_states",
+    "rollup_group_state",
 ]

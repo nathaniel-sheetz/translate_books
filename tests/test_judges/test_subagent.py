@@ -884,6 +884,160 @@ def test_prepare_on_a_cursor_book_quotes_the_cursor_baseline(tmp_path):
     )
 
 
+# ---------------------------------------------------------------------------
+# CLI-aware prepare / fanout (2026-08-11 friction logs)
+#
+# `prepare` had no --cli, so a Cursor operator's first manifest pinned `sonnet`
+# and quoted the Claude baseline; the only fix was a destructive re-prepare. And
+# effort had two channels with only the Claude one reported, so a wave running
+# `effort=high` announced itself as `medium`.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_cli_flag_writes_the_cursor_profile_into_the_manifest(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}",
+        cli="cursor", worker_model="grok-4.5[effort=high,fast=false]",
+    )
+
+    eff = out["effective"]
+    assert eff["cli"] == "cursor" and eff["cli_source"] == "cli"
+    assert eff["worker_model"] == "grok-4.5[effort=high,fast=false]"
+    assert eff["baseline_tokens"] == usage.DEFAULT_BASELINE_TOKENS["cursor"]
+
+    # …and it is on disk, so `fanout` reproduces the consented wave with no flags.
+    doc = json.loads((subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
+    assert doc["cli"] == "cursor"
+    assert doc["worker_model"] == "grok-4.5[effort=high,fast=false]"
+    assert doc["effort"] == "high"
+    assert doc["effort_channel"] == "model_bracket"
+
+
+def test_prepare_effort_and_the_model_bracket_can_no_longer_disagree(tmp_path):
+    """The photogen bug, as an invariant.
+
+    After pinning `effort=high` in the bracket — the only knob Cursor honours —
+    prepare still advertised `headless_effort: medium` from the Claude ladder. An
+    agent relaying usage_summary faithfully told the operator the wave was medium
+    while argv said high.
+    """
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}",
+        cli="cursor", worker_model="grok-4.5[effort=high,fast=false]",
+    )
+    summary, eff = out["usage_summary"], out["effective"]
+
+    assert summary["headless_effort"] == "high"
+    assert summary["headless_effort_channel"] == "model_bracket"
+    assert summary["cli"] == "cursor"
+    # The reported level and the level in the argv-bound model are the same fact.
+    from src.harness.headless import cursor_model_effort
+    assert cursor_model_effort(eff["worker_model"]) == summary["headless_effort"]
+    # And nothing anywhere claims the Claude default for a Cursor wave.
+    assert "medium" not in json.dumps(eff)
+
+
+def test_prepare_never_pins_a_claude_alias_on_a_cursor_wave(tmp_path, capsys):
+    """The default is per-CLI now, and a bad explicit pin warns at prepare, not fanout."""
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}", cli="cursor", worker_model="sonnet"
+    )
+    assert any("headless_cli=cursor" in w for w in out["warnings"])
+    assert "headless_cli=cursor" in capsys.readouterr().err
+
+
+def test_fanout_inherits_the_manifest_cli_without_re_passing_it(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}",
+        cli="cursor", worker_model="grok-4.5[effort=high,fast=false]",
+    )
+
+    seen: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append(list(cmd))
+        return 0, _GOOD_VERDICT, ""
+
+    fan = subagent.fanout(project, runner=fake_runner)  # no --cli, no --worker-model
+    assert fan["effective"]["cli"] == "cursor"
+    # …and it says so honestly: this came off the consented manifest, not a flag.
+    assert fan["effective"]["cli_source"] == "manifest"
+    assert fan["effective"]["worker_model_source"] == "manifest"
+    assert fan["counts"]["wrote"] == 1
+    assert "grok-4.5[effort=high,fast=false]" in seen[0]
+    # cursor-agent takes no --effort; the level rides in the model instead.
+    assert "--effort" not in seen[0]
+
+
+def test_fanout_worker_model_overrides_the_manifest_and_writes_it_back(tmp_path):
+    """A bad pin costs one flag, not a destructive re-prepare.
+
+    The write-back is load-bearing: `commit` stamps the manifest's worker_model
+    into each result's metadata, and `status` reports that back as what judged the
+    book — so an un-persisted override would misreport the run forever.
+    """
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}", cli="cursor",
+                     worker_model="sonnet")
+
+    seen: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append(list(cmd))
+        return 0, _GOOD_VERDICT, ""
+
+    fan = subagent.fanout(
+        project, worker_model="grok-4.5[effort=high,fast=false]", runner=fake_runner
+    )
+    assert fan["counts"]["wrote"] == 1
+    assert "grok-4.5[effort=high,fast=false]" in seen[0]
+    assert "sonnet" not in seen[0]
+
+    doc = json.loads((subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
+    assert doc["worker_model"] == "grok-4.5[effort=high,fast=false]"
+
+    committed = subagent.commit(project, persist=False)
+    assert committed["run_header"]["worker_model"] == "grok-4.5[effort=high,fast=false]"
+
+
+def test_fanout_estimate_on_cursor_reports_the_bracket_effort(tmp_path):
+    """`estimate.effort` used to contradict `estimate.argv` in adjacent keys."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}",
+        cli="cursor", worker_model="grok-4.5[effort=high,fast=false]",
+    )
+
+    def exploding_runner(*args, **kwargs):
+        raise AssertionError("--estimate must not spawn")
+
+    est = subagent.fanout(project, estimate=True, runner=exploding_runner)["estimate"]
+    assert est["effort"] == "high"
+    assert est["effort_channel"] == "model_bracket"
+    assert est["baseline_tokens"] == usage.DEFAULT_BASELINE_TOKENS["cursor"]
+    assert est["projected_tokens"] == (
+        est["prompt_tokens"] + est["jobs"] * usage.DEFAULT_BASELINE_TOKENS["cursor"]
+    )
+    # No --effort in the argv, and that is now consistent with what is reported.
+    assert "--effort" not in est["argv"]
+    assert "grok-4.5[effort=high,fast=false]" in est["argv"]
+
+
+def test_prepare_survives_an_unreadable_cursor_cli_config(tmp_path, monkeypatch):
+    """Failing to read a preferences file must never be what stops a wave."""
+    from src.harness import headless
+
+    monkeypatch.setattr(headless, "CURSOR_CLI_CONFIG", tmp_path / "nope.json")
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}", cli="cursor")
+    assert out["status"] == "ok"
+    assert out["effective"]["worker_model"] == "auto"
+
+
 def test_fanout_estimate_spawns_nothing(tmp_path):
     project, cid = _project_with_chunk(tmp_path)
     subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
@@ -901,8 +1055,10 @@ def test_fanout_estimate_spawns_nothing(tmp_path):
     # a wave commits to it, not after N jobs have failed.
     assert "--output-format" in out["estimate"]["argv"]
     # Auto default for judges is medium — exactly one --effort, plus the fields.
+    # `prepare` resolved that medium and recorded it, so a bare fanout inherits
+    # it *from the manifest*: same level, and the provenance says which.
     assert out["estimate"]["effort"] == "medium"
-    assert out["estimate"]["effort_source"] == "default:judges"
+    assert out["estimate"]["effort_source"] == "manifest"
     argv = out["estimate"]["argv"]
     assert argv.count("--effort") == 1
     assert "--effort" in argv and argv[argv.index("--effort") + 1] == "medium"
@@ -911,6 +1067,27 @@ def test_fanout_estimate_spawns_nothing(tmp_path):
     # And no draft was written.
     draft = json.loads((subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
     assert not Path(draft["entries"][0]["draft_path"]).exists()
+
+
+def test_fanout_inherits_the_manifest_effort(tmp_path):
+    """`prepare --effort xhigh` quotes the consent estimate for xhigh; a bare
+    `fanout` used to drop it and fall through to the judges default (medium),
+    so the wave ran at a level nobody was shown."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}", effort="xhigh")
+
+    manifest = json.loads(
+        (subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
+    assert manifest["effort"] == "xhigh"
+
+    out = subagent.fanout(
+        project, estimate=True,
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert out["estimate"]["effort"] == "xhigh"
+    assert out["estimate"]["effort_source"] == "manifest"
+    argv = out["estimate"]["argv"]
+    assert argv[argv.index("--effort") + 1] == "xhigh"
 
 
 def test_fanout_estimate_cli_effort_override(tmp_path):

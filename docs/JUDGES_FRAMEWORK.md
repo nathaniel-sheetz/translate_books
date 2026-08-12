@@ -55,6 +55,27 @@ A judge runs one of two interchangeable ways (the same split as translate-harnes
   blocks the wave unless a login is confirmed (`docs/LLM_PROVIDERS.md`).
   Task workers remain Claude-only.
 
+### One resolved profile per wave
+
+`prepare` and `fanout` both resolve the CLI, worker model, effort and token baseline
+through `src/harness/profile.py::resolve_profile`, and return the result as an
+`effective` block with a provenance string per field. `prepare` writes it into
+`manifest.json`, so a bare `fanout` reproduces the wave that was consented to.
+
+Two consequences worth knowing:
+
+- **`prepare --cli` exists.** It used to not, so a Cursor operator's first manifest
+  pinned `sonnet` and quoted Claude's 3.9k per-job baseline for a wave that would pay
+  Cursor's 17.2k — a ~2.6× consent error on a real book, fixable only by a destructive
+  re-`prepare`. `--cli` (or `headless_cli`, or the detected host) now decides both the
+  default worker and the baseline before anything is rendered.
+- **`fanout --worker-model` overrides the manifest and writes the correction back.**
+  A wrong pin costs one flag instead of a re-`prepare`; the write-back is required
+  because `commit` stamps the manifest's model into each result's metadata and
+  `src/judges/status.py` reports it back as what judged the book.
+
+Read the profile without rendering anything: `run_judges.py profile --project <slug>`.
+
 The two share one seam: every judge implements `build_prompt(target, context)` and
 `parse_response(target, raw, context)` on the `Judge` base. The API `run()` does
 *build → call LLM → parse*; the subagent path renders the same `build_prompt` output
@@ -110,12 +131,20 @@ scripts/run_judges.py
 
 ## CLI
 
-Three subcommands: `run` (API backend), `prepare` + `commit` (subagent backend).
+Seven subcommands: `profile` (read-only resolved CLI/model/effort/baseline), `status`
+(read-only coverage), `run` (API backend), `prepare` + `fanout` + `commit` (subagent
+backend), and `apply` (turn findings into edits).
 Each prints exactly one JSON object. Pass `--schema` for the block documenting
 every output key — it is opt-in on success (`apply`'s alone is ~910 tokens, and
 it used to be re-sent on every call) and automatic on any error.
 
 ```bash
+# Read-only — which chapters have a current verdict from each judge, which are
+# stale (and on what evidence), and which were never judged. No spend.
+python scripts/run_judges.py status --project understood-betsy
+python scripts/run_judges.py status --project understood-betsy \
+    --judge dialogue --scope chapter:chapter_03..chapter_09 --detail
+
 # API backend — single judge over a chapter (cost dry-run; refuses to spend over $0.50)
 python scripts/run_judges.py run --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03
@@ -203,6 +232,29 @@ the same loop the coded evaluators use — useful for tuning a judge's prompt.
 and `stale_reason` at the **top level** of `evaluations/<chunk>.json`, not inside
 `judges.<judge_name>` — a fixed finding must not keep asserting a failure, and
 `merge_judge_result` clears the stamp on the next run.
+
+### Freshness ledger (`eval_runs`)
+
+That stamp only covers edits `apply` itself makes. Every *other* path that
+rewrites `translated_text` — the chunk editor, `/api/correction`,
+`/api/apply-corrections`, `/api/sentence/replace` — leaves a persisted verdict
+asserting itself against prose it never saw. So each evaluation also carries:
+
+```json
+"eval_runs": {"dialogue": {"at": "2026-08-11T…", "text_sha": "9f2c…"}}
+```
+
+one entry per evaluator/judge, holding the sha256 of the newline-normalized
+`translated_text` that evaluator actually judged. `merge_judge_result` (both
+backends) and `save_chunk_evaluation` (the coded set) stamp it;
+`web_ui.evaluations.evaluator_freshness` compares it against the chunk on disk
+to answer fresh / stale / missing, which is what the dashboard Review tab's
+status pips render. No edit path has to remember to do anything: a changed
+chunk hashes differently, and the badge goes stale by itself.
+
+Evaluations written before `eval_runs` existed fall back to comparing the chunk
+file's mtime against `evaluated_at` / `judges_at`, and self-heal into the ledger
+on the next run. The explicit `stale` flag above still wins when set.
 
 ## Crash consistency in `apply`
 

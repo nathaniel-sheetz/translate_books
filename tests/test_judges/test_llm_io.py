@@ -244,10 +244,13 @@ def test_call_judge_dispatches_to_call_llm(monkeypatch):
     """call_judge resolves the provider and delegates to call_llm (lines 190-191)."""
     calls = {}
 
-    def fake_call_llm(prompt, *, provider, model, temperature, max_retries, call_type):
+    def fake_call_llm(
+        prompt, *, provider, model, temperature, max_retries, call_type, cache_prefix
+    ):
         calls["provider"] = provider
         calls["call_type"] = call_type
         calls["temperature"] = temperature
+        calls["cache_prefix"] = cache_prefix
         return '{"findings": []}'
 
     monkeypatch.setattr(llm_io, "call_llm", fake_call_llm)
@@ -258,3 +261,40 @@ def test_call_judge_dispatches_to_call_llm(monkeypatch):
     assert calls["provider"] == "anthropic"
     assert calls["call_type"] == "judge_dialogue"
     assert calls["temperature"] == 0.0
+    assert calls["cache_prefix"] is None
+
+
+def test_call_judge_forwards_cache_prefix(monkeypatch):
+    """An explicit cache_prefix reaches call_llm verbatim."""
+    calls = {}
+
+    def fake_call_llm(prompt, **kwargs):
+        calls.update(kwargs)
+        return '{"findings": []}'
+
+    monkeypatch.setattr(llm_io, "call_llm", fake_call_llm)
+    monkeypatch.setattr(llm_io, "resolve_provider", lambda p, m: "anthropic")
+
+    llm_io.call_judge(
+        "RULES\nBODY", call_type="judge_address", cache_prefix="RULES\n"
+    )
+    assert calls["cache_prefix"] == "RULES\n"
+
+
+def test_call_judge_normalizes_empty_cache_prefix(monkeypatch):
+    """An empty prefix becomes None rather than "", matching translate_chunk_realtime.
+
+    call_anthropic_api treats a falsy prefix as "no split", so "" would work by
+    accident; sending None keeps the contract explicit at the seam.
+    """
+    calls = {}
+
+    def fake_call_llm(prompt, **kwargs):
+        calls.update(kwargs)
+        return '{"findings": []}'
+
+    monkeypatch.setattr(llm_io, "call_llm", fake_call_llm)
+    monkeypatch.setattr(llm_io, "resolve_provider", lambda p, m: "anthropic")
+
+    llm_io.call_judge("prompt", call_type="judge_address", cache_prefix="")
+    assert calls["cache_prefix"] is None

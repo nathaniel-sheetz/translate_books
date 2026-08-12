@@ -99,6 +99,37 @@ def test_run_rejects_a_key_mismatch(project, monkeypatch):
     assert out["results"] == []
 
 
+def test_run_forwards_the_cache_prefix(project, monkeypatch):
+    """The API backend caches the per-type preamble the prepare path already splits.
+
+    Two annotations of the same type must send a byte-identical prefix, or every
+    call pays a cache write instead of a read.
+    """
+    write_annotations(
+        project,
+        [
+            _ann(es_idx=1, content="poyo", sub_id="u1"),
+            _ann(es_idx=2, content="zaguan", sub_id="u2"),
+        ],
+    )
+    seen = []
+
+    def fake(prompt, **kwargs):
+        seen.append((prompt, kwargs.get("cache_prefix")))
+        # Key doesn't matter: these verdicts are never committed, and a mismatch
+        # still lets the loop run every target.
+        return _verdict("ignored")
+
+    monkeypatch.setattr(review, "call_judge", fake)
+    review.run(project, cost_limit=9.99)
+
+    assert len(seen) == 2
+    for prompt, prefix in seen:
+        assert prefix
+        assert prompt.startswith(prefix)
+    assert seen[0][1] == seen[1][1]
+
+
 def test_unknown_confidence_falls_back_to_medium():
     assert parse_verdict(_verdict("k", confidence="certain"), key="k")["confidence"] == "medium"
 

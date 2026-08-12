@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """Non-interactive CLI for tailored LLM judges (two backends).
 
-Four subcommands:
+Seven subcommands:
 
+  * ``profile`` — **read-only**. Which CLI, worker model, effort and per-job token
+                  baseline a wave would resolve to, and where each answer came
+                  from. No spend, no writes, no subprocess. Run it before the
+                  backend/CLI question so the gate is asked with the right
+                  defaults filled in — ``prepare`` used to be the first command
+                  that revealed the worker model, by which point it had already
+                  written it into the manifest.
+  * ``status``  — **read-only**. Which chapters have a current verdict from each
+                  judge, which are stale, and which were never judged. No spend,
+                  no writes. Run it first when a request covers more than one
+                  chapter: an ``evaluations/<chunk>.json`` file exists as soon as
+                  the deterministic evaluators run, so its presence is not
+                  evidence that any LLM judge ever looked at the chapter.
   * ``run``     — **API backend**. Run one judge or a named suite over a chunk or
                   chapter NOW, calling the LLM behind a dollar cost gate, and
                   (optionally) persist findings into ``evaluations/<chunk>.json``.
@@ -14,6 +27,8 @@ Four subcommands:
                   processes write drafts from the prepare manifest (no Task workers).
   * ``commit``  — **subagent backend**, phase 2. Collect the workers' JSON drafts,
                   parse them, and (optionally) persist — identical output to ``run``.
+  * ``apply``   — turn **persisted** findings into chunk edits, behind an explicit
+                  ``--select``; omit it for a plan-only dry run.
 
 Both backends share the same prompt builder and response parser, so a judge result
 is byte-for-byte the same whichever backend produced it.
@@ -29,6 +44,8 @@ Cost / usage safety:
 Every command prints one JSON object with a ``_schema`` block documenting its keys.
 
 Examples:
+    python scripts/run_judges.py profile --project understood-betsy
+    python scripts/run_judges.py status --project understood-betsy
     python scripts/run_judges.py run --project understood-betsy \\
         --judge dialogue --scope chapter:chapter_03
     python scripts/run_judges.py prepare --project understood-betsy \\
@@ -81,11 +98,41 @@ from src.judges import (  # noqa: E402
     resolve_suite,
     run_judge_suite,
 )
+from src.harness import state as hstate  # noqa: E402
+from src.harness.profile import resolve_profile  # noqa: E402
 from src.judges import subagent  # noqa: E402
+from src.judges.context import build_judge_context  # noqa: E402
 from src.judges.registry import available_judges  # noqa: E402
 from src.judges.subagent import _PREPARE_SCHEMA  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Derived, never re-typed: argparse choices and the resolver must not be able to
+# drift apart (a flag that accepts a level the resolver ignores is how "two
+# effort knobs, one inert" happened in the first place).
+_HEADLESS_CLIS = hstate.HEADLESS_CLIS
+_EFFORT_CHOICES = (*hstate.EFFORT_LEVELS, "default")
+
+_PROFILE_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "project": "resolved project directory",
+    "command": "wave type the profile was resolved for (judges | annotations | translate | footnotes)",
+    "host": "detected hosting agent (claude-code | cursor | unknown)",
+    "effective": {
+        "cli": "launcher family that will run (claude | cursor)",
+        "cli_source": "cli | config | host:<host> | fallback[:reason]",
+        "worker_model": "model each job runs, including any [effort=…] bracket",
+        "worker_model_source": "cli | cursor-cli-config | default:claude",
+        "effort": "resolved effort level, or null for none",
+        "effort_source": "cli | cli:default | manifest | manifest:default | config | model-bracket | cursor-cli-config | default:<command> | unsupported:auto-model",
+        "effort_channel": "how the effort reaches the model: argv (claude --effort) | "
+        "model_bracket (cursor) | none (nothing carries it)",
+        "baseline_tokens": "fixed per-job token overhead used by the consent estimate, for THIS cli",
+        "baseline_source": "'default: N (probe)' or 'measured: median of N logged <cli> jobs'",
+        "warnings": "non-fatal notices (missing binary, Claude alias on cursor, CLI flip vs prior waves)",
+    },
+    "next": "suggested next command",
+}
 
 _RUN_SCHEMA = {
     "status": "'ok' | 'cost_exceeded' | 'error'",
@@ -101,6 +148,28 @@ _RUN_SCHEMA = {
     "persisted": "evaluations/*.json FILENAMES (join with persisted_dir) written when "
     "--persist is set, else null",
     "persist_errors": "list of '<chunk>/<judge>: <error>' strings for any failed persists, else null",
+}
+
+_STATUS_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "project": "resolved project directory",
+    "totals": "chapters (whole book), chapters_in_scope, chunks, translated (chunks with prose)",
+    "judges": "per status group ('coded' = the deterministic evaluators, then one per judge): "
+    "state ('done' | 'partial' | 'stale' | 'not_run', rolled up from chunks — any stale chunk "
+    "makes the group stale), chunks{fresh,stale,missing}, chapters{stale,partial,not_run,done} "
+    "(the chapter ids in each bucket — this is the 'what's left' answer), last_run, "
+    "worker_models, and stale_basis{flag,hash,mtime} when anything is stale",
+    "needs": "per group that still owes work, how many chapters are in each owed bucket "
+    "(stale / partial / not_run). The ids themselves are in judges[<group>].chapters — this "
+    "is the headline, not a second copy of them. Absent for a group that owes nothing",
+    "warnings": "notes that change how the numbers should be read (deterministic-only "
+    "evaluation files; stale verdicts decided by mtime rather than content hash), else null",
+    "next": "one sentence naming the most useful command to run next",
+    "chapters": "--detail only: per chapter {id, chunks, translated} plus, per group, "
+    "{state, at, worker_model, backend} and — for a stale/partial verdict — chunk_ids (the "
+    "chunks responsible), basis ('flag' = an apply stale-stamped it, 'hash' = the translation's "
+    "content hash moved, 'mtime' = a pre-eval_runs file judged by timestamp, which is a "
+    "suspicion rather than proof) and stale_reason",
 }
 
 _APPLY_SCHEMA = {
@@ -150,62 +219,11 @@ _APPLY_SCHEMA = {
 }
 
 
-def _build_judge_context(
-    project_dir: Path, judge_names: list[str], model: str | None, provider: str | None
-) -> tuple[dict, str | None]:
-    """Build the judge ``context`` for both backends (API run + subagent prepare).
-
-    Loads the per-project inputs judges read from disk so the API and subagent
-    paths render byte-identical prompts:
-      * ``style_json_path`` — for judges that use the style guide (existing).
-      * ``address_map`` — the ``content`` prose of ``address_map.json`` for the
-        forms-of-address judge.
-
-    Returns ``(context, error)``. ``error`` is a human-readable string when the
-    ``address`` judge is requested but no ``address_map.json`` exists (the caller
-    emits it and refuses to run); otherwise ``None``.
-    """
-    context: dict = {"judge_model": model, "judge_provider": provider}
-
-    style_path = project_dir / "style.json"
-    if style_path.exists():
-        context["style_json_path"] = style_path
-
-    map_path = project_dir / "address_map.json"
-    address_map_loaded = False
-    if map_path.exists():
-        try:
-            from src.utils.file_io import load_address_map
-
-            amap = load_address_map(map_path)
-            # v1 the judge reads the prose ``content``; fall back to global_rules
-            # if a committed map left content empty.
-            prose = (amap.content or "").strip() or (amap.global_rules or "").strip()
-            if prose:
-                context["address_map"] = prose
-                address_map_loaded = True
-            elif "address" in judge_names:
-                return context, (
-                    f"address_map.json at {map_path} has empty content and "
-                    "global_rules — the address judge has nothing to check against. "
-                    "Re-draft with non-empty `content`, then:\n"
-                    f"  python scripts/harness.py address-map commit --project {project_dir.name}"
-                )
-        except Exception as exc:  # noqa: BLE001 - surface as a clean CLI error
-            return context, (
-                f"address_map.json at {map_path} failed to load: {exc}. "
-                f"Re-run: python scripts/harness.py address-map commit --project {project_dir.name}"
-            )
-
-    if "address" in judge_names and not address_map_loaded:
-        return context, (
-            "The 'address' judge needs a per-book address map, but "
-            f"{map_path} does not exist. Build it first:\n"
-            f"  python scripts/harness.py address-map prepare --project {project_dir.name}\n"
-            f"  python scripts/harness.py address-map commit  --project {project_dir.name}"
-        )
-
-    return context, None
+# The context builder lives in ``src/judges/context.py`` so the dashboard's
+# Review tab runs judges against exactly the same inputs (address map included)
+# as this CLI. Kept aliased here because ``_build_judge_context`` is what both
+# subcommands below and the address-map tests call.
+_build_judge_context = build_judge_context
 
 
 def _resolve_project(arg: str) -> Path:
@@ -266,6 +284,80 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--model", default=None, help="Judge model id override")
         p.add_argument("--provider", default=None, help="Judge provider override")
 
+    # profile — read-only "what would this wave run as?" ---------------------
+    prof_p = sub.add_parser(
+        "profile",
+        help="Read-only: the CLI, worker model, effort and token baseline a wave "
+        "would resolve to (no spend, no writes, no subprocess)",
+    )
+    prof_p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    prof_p.add_argument(
+        "--command",
+        # NOT dest="command" — the subparser itself owns that name, and shadowing
+        # it makes every `profile` invocation dispatch to a subcommand called
+        # "judges".
+        dest="wave_command",
+        default="judges",
+        choices=["judges", "annotations", "translate", "footnotes"],
+        help="Wave type to resolve for (default: judges). Each reads its own "
+        "effort key and its own usage log, so the baselines differ.",
+    )
+    prof_p.add_argument(
+        "--cli",
+        dest="cli",
+        default=None,
+        choices=list(_HEADLESS_CLIS),
+        help="Preview a candidate CLI instead of the resolved one",
+    )
+    prof_p.add_argument(
+        "--worker-model",
+        dest="worker_model",
+        default=None,
+        help="Preview a candidate worker model instead of the resolved one",
+    )
+    prof_p.add_argument(
+        "--effort",
+        dest="effort",
+        default=None,
+        choices=list(_EFFORT_CHOICES),
+        help="Preview a candidate effort instead of the resolved one",
+    )
+    prof_p.add_argument("--verbose", action="store_true", help="Debug logging")
+
+    # status — read-only coverage report ------------------------------------
+    stp = sub.add_parser(
+        "status",
+        help="Read-only: which chapters have a current judge verdict (no spend)",
+    )
+    stp.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    stp.add_argument(
+        "--judge",
+        action="append",
+        default=None,
+        metavar="JUDGE",
+        help="Status group to report — 'coded' (the deterministic evaluators) or a judge "
+        f"name ({', '.join(available_judges())}). Repeatable; default: all of them.",
+    )
+    stp.add_argument(
+        "--scope",
+        action="append",
+        default=None,
+        metavar="SCOPE",
+        help="Narrow the report: 'chapter:<id>', 'chapter:<first>..<last>' (inclusive "
+        "range), 'chunk:<id>' or 'book'. Repeatable. Default is the whole book — "
+        "'what is left?' is usually a whole-book question. This is a filter over the "
+        "chapters that exist, not a target resolver: unlike the other subcommands' "
+        "--scope, a chapter with no translated chunks is reported, not an error.",
+    )
+    stp.add_argument(
+        "--detail",
+        action="store_true",
+        help="Add the per-chapter rows: when each group last ran, which worker model ran "
+        "it, and the chunk ids behind a partial/stale verdict. Off by default — the "
+        "bucketed chapter lists answer 'what's left?' for a fraction of the tokens.",
+    )
+    stp.add_argument("--verbose", action="store_true", help="Debug logging")
+
     # run — API backend ------------------------------------------------------
     rp = sub.add_parser("run", help="API backend: run judges now (metered, cost-gated)")
     add_select(rp)
@@ -294,10 +386,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_select(pp, multi_scope=True)
     pp.add_argument(
+        "--cli",
+        dest="cli",
+        default=None,
+        choices=list(_HEADLESS_CLIS),
+        help="Headless CLI family this manifest is for (default: config "
+        "headless_cli, else the detected host, else claude). Decides the default "
+        "worker model AND the per-job token baseline the usage gate quotes — "
+        "Cursor's is ~4.4x Claude's, so getting it wrong here understates consent.",
+    )
+    pp.add_argument(
         "--worker-model",
         dest="worker_model",
         default=None,
-        help="Model tier to pin spawned judge-workers to (default: sonnet)",
+        help="Model tier to pin spawned judge-workers to (default: sonnet on "
+        "claude, your selected Cursor model on cursor)",
+    )
+    pp.add_argument(
+        "--effort",
+        dest="effort",
+        default=None,
+        choices=list(_EFFORT_CHOICES),
+        help="Per-run effort override (default: config headless_effort_judges, "
+        "else the per-command default). Delivered as --effort on claude and in "
+        "the model's [effort=…] bracket on cursor.",
     )
     pp.add_argument(
         "--batch-size",
@@ -356,8 +468,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cli",
         dest="cli",
         default=None,
-        choices=["claude", "cursor"],
-        help="Headless CLI family (default: config headless_cli, else claude)",
+        choices=list(_HEADLESS_CLIS),
+        help="Headless CLI family (default: the manifest's, else config "
+        "headless_cli, else the detected host, else claude)",
+    )
+    fp.add_argument(
+        "--worker-model",
+        dest="worker_model",
+        default=None,
+        help="Override the manifest's pinned worker model for this wave (and "
+        "write it back, so `commit` records what actually judged). Fixes a bad "
+        "pin without a re-`prepare`, which would destroy drafts in flight.",
     )
     fp.add_argument(
         "--cli-bin",
@@ -382,9 +503,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--effort",
         dest="effort",
         default=None,
-        choices=["low", "medium", "high", "xhigh", "default"],
-        help="Per-run Claude --effort override (default: config "
-        "headless_effort_judges, else medium; 'default' emits no --effort flag)",
+        choices=list(_EFFORT_CHOICES),
+        help="Per-run effort override (default: the manifest's, else config "
+        "headless_effort_judges, else the per-command default). On claude this "
+        "is the --effort flag and 'default' emits none; on cursor it is written "
+        "into the model's [effort=…] bracket, the only channel that CLI has.",
     )
     fp.add_argument(
         "--prompt-cache",
@@ -524,6 +647,65 @@ def _emit(payload: dict, schema: dict | None = None) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _cmd_profile(args: argparse.Namespace) -> int:
+    """Read-only: what a wave would run as, before anything is rendered.
+
+    Exists so the CLI/preset question can be asked *at* the gate instead of
+    discovered after it. Previously the first command that revealed the resolved
+    worker model was ``prepare`` — which had already written it into the manifest,
+    so correcting it meant a destructive re-``prepare``.
+
+    Touches nothing: no prompts rendered, no manifest, no drafts, no subprocess
+    (the auth and model preflights belong to the wave, and each spawns).
+    """
+    project_dir = _resolve_project(args.project)
+    wave = args.wave_command
+    prof = resolve_profile(
+        project_dir,
+        command=wave,
+        cli=args.cli,
+        worker_model=args.worker_model,
+        effort=args.effort,
+    )
+    payload = {
+        "status": "ok",
+        "project": str(project_dir),
+        "command": wave,
+        "host": prof.host,
+        "effective": prof.to_payload(),
+        "next": (
+            f"python scripts/run_judges.py prepare --project {args.project} "
+            f"--judge <name> --scope <scope> --cli {prof.cli}"
+            if wave == "judges"
+            else "feed these values to the matching prepare/fanout command"
+        ),
+    }
+    _emit(payload, _PROFILE_SCHEMA)
+    return 0
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    """Read-only judge-coverage report: done / stale / partial / not_run."""
+    from src.judges.status import StatusScopeError, build_status
+
+    project_dir = _resolve_project(args.project)
+    try:
+        payload = build_status(
+            project_dir,
+            judges=args.judge,
+            scopes=args.scope,
+            detail=args.detail,
+        )
+    except StatusScopeError as exc:
+        _emit(
+            {"status": "error", "error": str(exc), "scopes": args.scope},
+            _STATUS_SCHEMA,
+        )
+        return 1
+    _emit(payload, _STATUS_SCHEMA)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """API backend: cost-gated suite run, optional persist (the original behavior)."""
     project_dir = _resolve_project(args.project)
@@ -643,6 +825,8 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
             batch_size=args.batch_size,
             targets_per_worker=args.targets_per_worker,
             keep_drafts=args.keep_drafts,
+            cli=args.cli,
+            effort=args.effort,
         )
     except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
         _emit({"status": "error", "error": str(exc), "scopes": args.scope}, _PREPARE_SCHEMA)
@@ -670,6 +854,7 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
         claude_bin=args.claude_bin,
         estimate=args.estimate,
         effort=getattr(args, "effort", None),
+        worker_model=getattr(args, "worker_model", None),
         cache=getattr(args, "prompt_cache", None),
     )
     payload["project"] = str(project_dir)
@@ -1444,6 +1629,8 @@ def _cmd_apply(args: argparse.Namespace) -> int:
 
 
 _DISPATCH = {
+    "profile": _cmd_profile,
+    "status": _cmd_status,
     "run": _cmd_run,
     "prepare": _cmd_prepare,
     "fanout": _cmd_fanout,

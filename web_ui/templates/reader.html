@@ -788,7 +788,8 @@
 <script>window.__i18n = {{ t.js | tojson }};</script>
 <script>window.READER_UI_VERSION = {{ reader_ui_version | default('v2') | tojson }};</script>
 <script>window.REVIEW_TYPES = {{ review_types | tojson }};
-window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};</script>
+window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};
+window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</script>
 <script src="{{ url_for('static', filename='reader.js') }}?v=27"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}

@@ -123,12 +123,17 @@ def _warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
 def _default_worker_model(cfg: dict) -> str:
     """The worker model for a book that never pinned one.
 
-    A function of the book's ``headless_cli``, not a literal: ``sonnet`` is a
-    Claude alias, and defaulting a Cursor book to it only ever produced a warning
-    after the fact. See :func:`~src.harness.headless.default_worker_model`.
+    A function of the book's *resolved* ``headless_cli``, not a literal: ``sonnet``
+    is a Claude alias, and defaulting a Cursor book to it only ever produced a
+    warning after the fact. Goes through
+    :func:`~src.harness.profile.resolve_cli` so a book that never pinned a CLI
+    follows the agent driving it, the same way its waves do — otherwise this
+    would advertise ``sonnet`` for a wave about to launch ``cursor-agent``.
+    See :func:`~src.harness.headless.default_worker_model`.
     """
     from src.harness.headless import default_worker_model
-    return default_worker_model(str(cfg.get("headless_cli") or "claude"))
+    from src.harness.profile import resolve_cli
+    return default_worker_model(resolve_cli(cfg)[0])
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -2253,9 +2258,10 @@ def translate_fanout(
 
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
-    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    from src.harness.profile import resolve_cli
+    cli_name, _cli_source = resolve_cli(cfg, override=cli)
     extra_flags, resolved_effort, _effort_source = state.resolve_headless_argv(
-        cfg, command="translate", effort_override=effort,
+        cfg, command="translate", effort_override=effort, cli=cli_name,
     )
     requested_cache = state.resolve_prompt_cache(cfg, cache_override=cache)
     hdir = state.harness_dir(project_dir)
@@ -3596,9 +3602,10 @@ def _footnotes_headless(
 
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
-    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    from src.harness.profile import resolve_cli
+    cli_name, _cli_source = resolve_cli(cfg, override=cli)
     extra_flags, resolved_effort, _effort_source = state.resolve_headless_argv(
-        cfg, command="footnotes", effort_override=effort,
+        cfg, command="footnotes", effort_override=effort, cli=cli_name,
     )
     requested_cache = state.resolve_prompt_cache(cfg, cache_override=cache)
     entries, meta = _render_footnote_batches(project_dir, retranslate=retranslate)
@@ -4121,7 +4128,9 @@ _CONFIG_SET_COERCE: dict[str, dict[str, object]] = {
 _CONFIG_SET_KEYS = {
     "backend": frozenset({"api", "subagent", "headless"}),
     "footnotes_decision": frozenset({"keep", "drop", "none"}),
-    "headless_cli": frozenset({"claude", "cursor"}),
+    # `auto` un-pins the book back to host detection; claude/cursor pin it, and a
+    # pin always outranks detection.
+    "headless_cli": frozenset(state.CLI_VALUES),
     "headless_prompt_cache": frozenset(state.CACHE_VALUES),
     "headless_extra_flags": FREE_TEXT,
     # Prompt-prefix opt-ins. Read at render time by ``translate_prepare`` (never
@@ -4322,10 +4331,14 @@ def status(project: str) -> dict:
     footnotes_decision = cfg.get("footnotes_decision")
     # Resolve effort per wave type so a book carrying --effort medium is not
     # indistinguishable from one that isn't (status is what the skill router runs).
+    from src.harness.profile import resolve_cli, resolve_profile
+    resolved_cli, resolved_cli_source = resolve_cli(cfg)
     effort_config: dict[str, str] = {}
     effort_resolved: dict[str, str | None] = {}
     for cmd_name in state.COMMAND_EFFORT_DEFAULTS:
-        _argv, level, _src = state.resolve_headless_argv(cfg, command=cmd_name)
+        _argv, level, _src = state.resolve_headless_argv(
+            cfg, command=cmd_name, cli=resolved_cli
+        )
         effort_resolved[cmd_name] = level
         raw = cfg.get(state.effort_config_key(cmd_name))
         effort_config[cmd_name] = raw if isinstance(raw, str) else "auto"
@@ -4342,12 +4355,20 @@ def status(project: str) -> dict:
         "backend": backend,
         "footnotes_decision": footnotes_decision,
         "address_map_decision": cfg.get("address_map_decision"),
-        "headless_cli": cfg.get("headless_cli") or "claude",
+        # The launcher family that would actually run, never the `auto` sentinel;
+        # `headless_cli_config` carries the raw value so "pinned to claude" and
+        # "unpinned, and the host happens to be Claude Code" stay distinguishable.
+        "headless_cli": resolved_cli,
+        "headless_cli_config": cfg.get("headless_cli") or "auto",
+        "headless_cli_source": resolved_cli_source,
         "headless_effort": {
             "config": effort_config,
             "resolved": effort_resolved,
             "extra_flags": residual_flags,
         },
+        "headless_profile": resolve_profile(
+            project_dir, command="translate", cfg=cfg
+        ).to_payload(),
         "headless_prompt_cache": cfg.get("headless_prompt_cache") or "auto",
         # Raw tri-state values (null = auto). Without these the only way to learn
         # which prefix mode a book is in was to re-run setup or read config.json.
@@ -4974,7 +4995,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "backend": "persisted translation backend (api | subagent | headless), or null if unset",
         "footnotes_decision": "persisted footnotes choice (keep | drop | none), or null if unset",
         "address_map_decision": "address-map beat outcome (built | skipped | no_dialogue), or null if not yet offered",
-        "headless_cli": "headless launcher family (claude | cursor); default claude",
+        "headless_cli": "resolved headless launcher family (claude | cursor); never the auto sentinel",
+        "headless_cli_config": "raw configured value (auto | claude | cursor); auto = follow the detected host",
+        "headless_cli_source": "where headless_cli came from (config | host:<host> | fallback)",
+        "headless_profile": "resolved cli/worker_model/effort/effort_channel/baseline with provenance, for translate waves",
         "headless_effort": (
             "dict {config, resolved, extra_flags} — per-wave-type effort. `config` is the "
             "raw headless_effort_<type> setting ('auto' when unset), `resolved` the level "

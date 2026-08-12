@@ -336,7 +336,7 @@ def cursor_default_model(config_path: Path | str | None = None) -> str:
     if model_id.lower() in _CURSOR_AUTO_IDS:
         return CURSOR_FALLBACK_MODEL
 
-    params: list[str] = []
+    params: dict[str, str] = {}
     for param in selected.get("parameters") or []:
         if not isinstance(param, dict):
             continue
@@ -346,10 +346,8 @@ def cursor_default_model(config_path: Path | str | None = None) -> str:
             continue
         if isinstance(value, bool):
             value = "true" if value else "false"
-        params.append(f"{pid}={value}")
-    if not params:
-        return model_id
-    return f"{model_id}[{','.join(params)}]"
+        params[pid] = str(value)
+    return compose_cursor_model(model_id, params)
 
 
 def default_worker_model(cli: str) -> str:
@@ -366,7 +364,89 @@ def default_worker_model(cli: str) -> str:
 
 def _cursor_model_base(model: str) -> str:
     """A Cursor model id with any ``[effort=…,fast=…]`` suffix stripped."""
-    return (model or "").split("[", 1)[0].strip()
+    return parse_cursor_model(model)[0]
+
+
+# ---------------------------------------------------------------------------
+# Cursor model brackets: the CLI's only effort channel
+# ---------------------------------------------------------------------------
+#
+# ``cursor-agent`` takes its knobs inside the model argument
+# (``grok-4.5[effort=high,fast=false]``) and accepts no ``--effort`` flag; the
+# Claude-argv ``--effort`` is dropped from a Cursor wave by ``_build_cmd``. So on
+# Cursor the bracket IS the effort, and it has to be readable and writable rather
+# than an opaque string — otherwise the harness reports the Claude answer
+# (``medium``) beside a wave running ``effort=high``, which is exactly what the
+# 2026-08-11 friction logs caught it doing twice.
+
+
+def parse_cursor_model(model: str | None) -> tuple[str, dict[str, str]]:
+    """Split a Cursor model argument into ``(base_id, params)``.
+
+    ``"grok-4.5[effort=high,fast=false]"`` -> ``("grok-4.5", {"effort": "high",
+    "fast": "false"})``. A model with no bracket yields an empty param dict, and
+    junk (an unterminated bracket, a bare ``,``, a valueless key) is dropped
+    rather than raised on: this parses argv the operator may have typed, and a
+    malformed knob must not be able to stop a wave. :func:`compose_cursor_model`
+    is its inverse for everything it accepts.
+    """
+    text = (model or "").strip()
+    if not text:
+        return "", {}
+    base, sep, rest = text.partition("[")
+    base = base.strip()
+    if not sep:
+        return base, {}
+    params: dict[str, str] = {}
+    for item in rest.rstrip("]").split(","):
+        key, eq, value = item.partition("=")
+        key = key.strip()
+        if not key or not eq:
+            continue
+        params[key] = value.strip()
+    return base, params
+
+
+def compose_cursor_model(base: str, params: Mapping[str, str] | None = None) -> str:
+    """Rebuild a Cursor model argument from ``base`` and ``params``.
+
+    Insertion order is preserved so a round-trip through
+    :func:`parse_cursor_model` is byte-identical, which keeps the model string
+    stable in manifests, argv and ``usage.jsonl`` across re-resolution.
+    """
+    base = (base or "").strip()
+    pairs = [f"{k}={v}" for k, v in (params or {}).items() if str(k).strip()]
+    if not base or not pairs:
+        return base
+    return f"{base}[{','.join(pairs)}]"
+
+
+def cursor_model_effort(model: str | None) -> str | None:
+    """The effort level carried by a Cursor model argument, if it carries one."""
+    value = parse_cursor_model(model)[1].get("effort")
+    value = (value or "").strip()
+    return value or None
+
+
+def with_cursor_effort(model: str | None, effort: str | None) -> str:
+    """``model`` with its ``effort=`` parameter set to ``effort``.
+
+    Other parameters are preserved (``fast=false`` survives an effort change) and
+    a ``None`` effort leaves the model untouched.
+
+    ``auto`` is returned unchanged, deliberately: it is the "let Cursor pick"
+    sentinel, there is no evidence ``cursor-agent`` accepts ``auto[effort=…]``,
+    and :func:`cursor_model_error` force-probes any bracketed model — so
+    synthesizing one here would turn a working default into a live subprocess
+    probe that can fail. Callers detect this case by comparing
+    :func:`cursor_model_effort` of the result against what they asked for; the
+    profile layer reports it as ``effort_channel: "none"`` plus a warning.
+    """
+    base, params = parse_cursor_model(model)
+    if effort is None or not base or base.lower() in _CURSOR_AUTO_IDS:
+        return compose_cursor_model(base, params)
+    params["effort"] = str(effort).strip()
+    return compose_cursor_model(base, params)
 
 
 def _cursor_known_models(
@@ -960,9 +1040,11 @@ def run_headless_wave(
     disk rather than in the orchestrator's context. ``extra_flags`` is appended
     to the Claude argv and recorded in each row. ``effort`` is a telemetry label
     only (the flag is already composed into ``extra_flags`` by
-    :func:`~src.harness.state.resolve_headless_argv`); recorded as ``None`` on
-    the Cursor profile. ``warm_first`` runs job 1 alone so the rest read the
-    shared prefix from cache instead of each re-creating it.
+    :func:`~src.harness.state.resolve_headless_argv`) and applies to the Claude
+    profile; on Cursor it is **ignored**, and the level recorded in each row is
+    read back from the model's own ``[effort=…]`` bracket instead — the only
+    effort channel that CLI has. ``warm_first`` runs job 1 alone so the rest read
+    the shared prefix from cache instead of each re-creating it.
 
     ``cache`` (``auto`` | ``5m`` | ``1h`` | ``off``) selects the Claude
     prompt-cache TTL; ``auto`` resolves from job shapes and prior wall times.
@@ -1087,6 +1169,12 @@ def run_headless_wave(
     else:
         cache_label = None
 
+    # What the log should say this wave ran at. On Claude that is the ``--effort``
+    # argv; on Cursor that flag is dropped by ``_build_cmd`` and the live channel
+    # is the model's own ``[effort=…]`` bracket — so read it back from the model
+    # rather than logging ``null`` for a wave that plainly ran at some effort.
+    effort_label = effort if cli_name == "claude" else cursor_model_effort(model)
+
     def _run_one(job: dict[str, Any], warm: bool) -> tuple[str, bool, str, dict[str, Any]]:
         job_id = str(job["id"])
         started = time.monotonic()
@@ -1106,7 +1194,7 @@ def run_headless_wave(
                 warm=warm,
                 usage=usage,
                 error=detail,
-                effort=effort if cli_name == "claude" else None,
+                effort=effort_label,
                 cache=cache_label,
             )
 

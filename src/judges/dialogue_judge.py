@@ -123,10 +123,19 @@ class DialogueComplianceJudge(VerdictJudge):
         model: Optional[str] = context.get("judge_model")
         provider: Optional[str] = context.get("judge_provider")
 
-        prompt = self.build_prompt(target, context)
+        # Split rather than build_prompt(): prefix is the dialogue house rules,
+        # identical for every target, so it caches across the suite. prefix +
+        # suffix is byte-identical to build_prompt(), which keeps the
+        # prompt_version hash and the API/subagent prompt parity intact.
+        prefix, suffix = self.build_prompt_parts(target, context)
+        prompt = prefix + suffix
 
         raw = llm_io.call_judge(
-            prompt, provider=provider, model=model, call_type="judge_dialogue"
+            prompt,
+            provider=provider,
+            model=model,
+            call_type="judge_dialogue",
+            cache_prefix=prefix or None,
         )
         try:
             return self.parse_response(target, raw, context)
@@ -142,6 +151,9 @@ class DialogueComplianceJudge(VerdictJudge):
                 model=model,
                 call_type="judge_dialogue",
                 max_retries=1,
+                # The note is appended, so prefix still leads retry_prompt: the
+                # retry reads the cache rather than paying a second write.
+                cache_prefix=prefix or None,
             )
             try:
                 return self.parse_response(target, raw, context)

@@ -14,7 +14,21 @@ from __future__ import annotations
 
 import pytest
 
+from src.harness.host import HOST_OVERRIDE_ENV, HOST_UNKNOWN
 from src.utils import prompt_logger, run_logger
+
+
+@pytest.fixture(autouse=True)
+def _neutral_host(monkeypatch):
+    """Pin host detection to ``unknown`` so results don't depend on who ran pytest.
+
+    ``headless_cli`` defaults to ``auto``, which resolves through
+    :func:`src.harness.host.detect_host`. Without this, every assertion about a
+    default worker model, effort or token baseline would pass under Claude Code
+    and fail under a Cursor-hosted session — the suite would be testing the
+    developer's terminal. Tests that care about a host set the variable themselves.
+    """
+    monkeypatch.setenv(HOST_OVERRIDE_ENV, HOST_UNKNOWN)
 
 
 @pytest.fixture(autouse=True)

@@ -68,3 +68,11 @@ def test_empty_map_ok_for_other_judges(tmp_path: Path):
     ctx, err = run_judges._build_judge_context(tmp_path, ["dialogue"], None, None)
     assert err is None
     assert "address_map" not in ctx
+
+
+def test_cli_and_dashboard_share_one_builder():
+    """The precheck above must not be duplicated: a second copy is a copy that
+    can drift, and the dashboard would silently judge against nothing."""
+    from src.judges.context import build_judge_context
+
+    assert run_judges._build_judge_context is build_judge_context
