@@ -179,14 +179,26 @@ def _stamp_eval_runs(
     return ledger or None
 
 
-def evaluator_freshness(
+def evaluator_freshness_detail(
     payload: Optional[dict[str, Any]],
     current_sha: Optional[str],
     *,
     names: Optional[Iterable[str]] = None,
     chunk_mtime: Optional[float] = None,
-) -> dict[str, str]:
-    """Return ``{evaluator_name: "fresh" | "stale" | "missing"}``.
+) -> dict[str, dict[str, Optional[str]]]:
+    """Return ``{evaluator_name: {"state": ..., "basis": ...}}``.
+
+    ``state`` is ``"fresh" | "stale" | "missing"``; ``basis`` names *which*
+    source decided it — ``"flag"``, ``"hash"``, ``"mtime"``, or ``None`` for a
+    ``missing`` verdict (and for a recorded run whose freshness nothing could
+    disprove).
+
+    The basis is not decoration. Only a minority of the evaluation files on
+    disk carry an ``eval_runs`` ledger — every project evaluated before it
+    existed falls through to the timestamp rule, where a git checkout, a
+    byte-identical rewrite or a re-chunk all bump the mtime. ``"mtime"``-stale
+    is a *suspicion*; ``"hash"``- and ``"flag"``-stale are facts, and a caller
+    telling an operator to re-run N chapters should be able to say which it has.
 
     Args:
         payload: The chunk's persisted evaluation, or ``None`` if never run.
@@ -211,9 +223,10 @@ def evaluator_freshness(
        Those files self-heal into the ledger on the next rerun.
     """
     requested = list(names) if names is not None else None
+    missing: dict[str, Optional[str]] = {"state": "missing", "basis": None}
 
     if not isinstance(payload, dict):
-        return {name: "missing" for name in (requested or [])}
+        return {name: dict(missing) for name in (requested or [])}
 
     ledger = payload.get("eval_runs")
     ledger = ledger if isinstance(ledger, dict) else {}
@@ -227,38 +240,61 @@ def evaluator_freshness(
 
     explicitly_stale = bool(payload.get("stale"))
 
-    def _legacy(name: str) -> str:
+    def _legacy(name: str) -> tuple[str, Optional[str]]:
         """Timestamp comparison for a pre-``eval_runs`` evaluation."""
         if name in judges:
             stamp = payload.get("judges_at") or payload.get("evaluated_at")
         elif name in ran_coded:
             stamp = payload.get("evaluated_at")
         else:
-            return "missing"
+            return "missing", None
         if chunk_mtime is None or not stamp:
-            return "fresh"
+            return "fresh", None
         try:
             ran_at = datetime.fromisoformat(str(stamp)).timestamp()
         except ValueError:
-            return "fresh"
-        return "stale" if chunk_mtime > ran_at else "fresh"
+            return "fresh", None
+        return ("stale", "mtime") if chunk_mtime > ran_at else ("fresh", "mtime")
 
-    out: dict[str, str] = {}
+    out: dict[str, dict[str, Optional[str]]] = {}
     for name in targets:
         entry = ledger.get(name)
         if isinstance(entry, dict) and entry.get("text_sha"):
             if explicitly_stale:
-                out[name] = "stale"
+                out[name] = {"state": "stale", "basis": "flag"}
             elif current_sha is None:
-                out[name] = "fresh"
+                out[name] = {"state": "fresh", "basis": None}
             else:
-                out[name] = "fresh" if entry["text_sha"] == current_sha else "stale"
+                same = entry["text_sha"] == current_sha
+                out[name] = {"state": "fresh" if same else "stale", "basis": "hash"}
             continue
-        state = _legacy(name)
+        state, basis = _legacy(name)
         if state != "missing" and explicitly_stale:
-            state = "stale"
-        out[name] = state
+            state, basis = "stale", "flag"
+        out[name] = {"state": state, "basis": basis if state != "missing" else None}
     return out
+
+
+def evaluator_freshness(
+    payload: Optional[dict[str, Any]],
+    current_sha: Optional[str],
+    *,
+    names: Optional[Iterable[str]] = None,
+    chunk_mtime: Optional[float] = None,
+) -> dict[str, str]:
+    """Return ``{evaluator_name: "fresh" | "stale" | "missing"}``.
+
+    The state half of :func:`evaluator_freshness_detail` — see there for the
+    argument meanings and the three-source precedence ladder. Kept as the
+    hot-path shape most callers want (the dashboard's Review rollup asks this
+    question once per chunk per page load and never looks at the basis).
+    """
+    return {
+        name: str(entry["state"])
+        for name, entry in evaluator_freshness_detail(
+            payload, current_sha, names=names, chunk_mtime=chunk_mtime
+        ).items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +855,10 @@ JUDGE_STATUS_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def chunk_group_states(freshness: dict[str, str]) -> dict[str, str]:
+def chunk_group_states(
+    freshness: dict[str, str],
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> dict[str, str]:
     """Collapse one chunk's per-evaluator freshness into one state per group.
 
     ``coded`` reads only the evaluators the ledger actually recorded, never the
@@ -827,9 +866,13 @@ def chunk_group_states(freshness: dict[str, str]) -> dict[str, str]:
     :func:`get_enabled_evaluators`), and demanding the full list there would
     pin a correctly-configured project at a permanent ``partial``. No coded
     entry at all is the only thing that means "never run".
+
+    ``groups`` defaults to :data:`JUDGE_STATUS_GROUPS` (what the dashboard's
+    Review tab shows). The CLI passes a wider map so a judge registered after
+    that constant was written is not invisible.
     """
     out: dict[str, str] = {}
-    for group, names in JUDGE_STATUS_GROUPS.items():
+    for group, names in (groups or JUDGE_STATUS_GROUPS).items():
         states = [freshness[n] for n in names if freshness.get(n, "missing") != "missing"]
         if not states:
             out[group] = "missing"
@@ -860,6 +903,92 @@ def rollup_group_state(chunk_states: Iterable[str]) -> dict[str, Any]:
     else:
         state = "done"
     return {"state": state, **counts}
+
+
+def iter_chapter_chunks(project_dir: Path) -> dict[str, list[tuple[str, dict]]]:
+    """Read ``chunks/*_chunk_*.json`` once into ``{chapter_id: [(chunk_id, data)]}``.
+
+    Every caller of this has to hash each chunk's ``translated_text`` anyway, so
+    it pays for the read regardless — doing it in one pass keeps the walk to a
+    single sweep of the directory instead of one stat-and-open per lookup. Each
+    payload carries an extra ``_mtime`` key for the legacy freshness fallback.
+    """
+    from collections import defaultdict
+
+    out: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    chunks_dir = Path(project_dir) / "chunks"
+    if not chunks_dir.exists():
+        return out
+    for path in sorted(chunks_dir.glob("*_chunk_*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        chunk_id = data.get("id") or path.stem
+        chapter_id = data.get("chapter_id") or chapter_id_from_chunk_id(chunk_id)
+        data["_mtime"] = path.stat().st_mtime
+        out[chapter_id].append((chunk_id, data))
+    return out
+
+
+def chapter_chunk_states(
+    project_dir: Path,
+    chunks: list[tuple[str, dict]],
+    *,
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> list[dict[str, Any]]:
+    """Per translated chunk: its group states, per-evaluator detail, and payload.
+
+    The one place a chapter's evaluations are opened and hashed. Untranslated
+    chunks are skipped — there is nothing to have judged — which is why the
+    returned list can be shorter than ``chunks``.
+
+    Returns one dict per translated chunk with ``chunk_id``, ``states``
+    (``{group: fresh|stale|missing}``), ``detail`` (per-evaluator
+    ``{state, basis}`` from :func:`evaluator_freshness_detail`) and
+    ``evaluation`` (the persisted payload, or ``None``) so a caller wanting
+    provenance does not re-read the file.
+    """
+    out: list[dict[str, Any]] = []
+    for chunk_id, data in chunks:
+        if not (data.get("translated_text") or "").strip():
+            continue
+        payload = load_chunk_evaluation(project_dir, chunk_id)
+        detail = evaluator_freshness_detail(
+            payload,
+            chunk_text_sha(data.get("translated_text") or ""),
+            chunk_mtime=data.get("_mtime"),
+        )
+        freshness = {name: str(entry["state"]) for name, entry in detail.items()}
+        out.append({
+            "chunk_id": chunk_id,
+            "states": chunk_group_states(freshness, groups),
+            "detail": detail,
+            "evaluation": payload,
+        })
+    return out
+
+
+def chapter_judge_status(
+    project_dir: Path,
+    chunks: list[tuple[str, dict]],
+    *,
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> tuple[dict[str, dict], list[dict[str, str]]]:
+    """Roll a chapter's chunks up to one status per :data:`JUDGE_STATUS_GROUPS`.
+
+    Returns ``(by_group, per_chunk_states)`` — the second value is handed back
+    so the book-wide totals can be rolled up from the same per-chunk verdicts
+    rather than from an average of chapter verdicts.
+    """
+    per_chunk = [rec["states"] for rec in chapter_chunk_states(project_dir, chunks, groups=groups)]
+    by_group = {
+        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
+        for group in (groups or JUDGE_STATUS_GROUPS)
+    }
+    return by_group, per_chunk
 
 
 def _load_project_glossary(project_dir: Path) -> Optional[Glossary]:

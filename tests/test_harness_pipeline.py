@@ -1897,9 +1897,11 @@ def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
     flow.config_set(str(tmp_path), key="footnotes_decision", value="none")
     cfg = state.load_config(tmp_path)
     assert cfg["footnotes_decision"] == "none"
-    # Other defaults still present after the merge write.
+    # Other defaults still present after the merge write. headless_cli defaults
+    # to the `auto` sentinel — a book that never chose follows the detected host
+    # rather than silently meaning "claude".
     assert cfg["target_language"] == "Spanish"
-    assert cfg["headless_cli"] == "claude"
+    assert cfg["headless_cli"] == "auto"
     for cmd in state.COMMAND_EFFORT_DEFAULTS:
         assert cfg[state.effort_config_key(cmd)] == "auto"
 
@@ -1907,6 +1909,14 @@ def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
     cfg = state.load_config(tmp_path)
     assert cfg["headless_cli"] == "cursor"
     assert flow.status(str(tmp_path))["headless_cli"] == "cursor"
+
+    # `auto` is settable, so a book can be un-pinned back to host detection.
+    flow.config_set(str(tmp_path), key="headless_cli", value="auto")
+    assert state.load_config(tmp_path)["headless_cli"] == "auto"
+    # …but `status` reports a launcher family, never the sentinel: `auto` is not
+    # a profile and must not reach headless._normalize_cli.
+    assert flow.status(str(tmp_path))["headless_cli"] in ("claude", "cursor")
+    assert flow.status(str(tmp_path))["headless_cli_config"] == "auto"
 
     # Every per-type effort key accepts all EFFORT_VALUES and rejects unknowns,
     # and setting one leaves the others alone.

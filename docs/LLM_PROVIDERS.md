@@ -8,8 +8,45 @@ The translate-harness / judge-review **headless** backend can drive either:
 
 | CLI | Binary | Auth | Config | Enforced by |
 |---|---|---|---|---|
-| Claude Code | `claude` | `claude` login session | `headless_cli=claude` (default) | env scrub + auth preflight |
+| Claude Code | `claude` | `claude` login session | `headless_cli=claude` | env scrub + auth preflight |
 | Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` | env scrub + auth preflight |
+
+### Which CLI a wave picks (`headless_cli=auto`, the default)
+
+`headless_cli` defaults to **`auto`**: follow whichever agent is driving the harness.
+`src/harness/host.py` reads per-process env markers — `CLAUDECODE` /
+`CLAUDE_CODE_ENTRYPOINT` mean Claude Code, `CURSOR_AGENT` / `CURSOR_CONVERSATION_ID` /
+`CURSOR_INVOKED_AS` / `CURSOR_AGENT_STORE` mean the Cursor agent — and nothing else.
+Editor signals (`TERM_PROGRAM`, `VSCODE_*`, Cursor paths on `PATH`) are **deliberately
+ignored**: Claude Code running inside Cursor's integrated terminal has all of them, and
+reading them picks the wrong subscription.
+
+Precedence, highest first:
+
+1. an explicit `--cli` flag → `cli_source: "cli"`
+2. `headless_cli` pinned to `claude`/`cursor` → `"config"` (a pin is never flipped by detection)
+3. the detected host → `"host:claude-code"` / `"host:cursor"`
+4. `claude` → `"fallback"`
+
+`auto` could not have been spelled `claude`: `save_config` merges DEFAULTS into every
+write, so a literal `"claude"` on disk was indistinguishable from a book that had never
+chosen — which is why a Cursor operator kept getting a Claude worker, a Claude baseline
+and a Claude effort, and had to correct all three by hand every wave (2026-08-11
+friction logs). Books already carrying `claude`/`cursor` keep that value and outrank
+detection; `config-set --key headless_cli --value auto` un-pins one.
+
+Detection only ever supplies a **default**, and the resolved answer always travels with
+its source. See it without running anything:
+
+```bash
+python scripts/run_judges.py profile --project <slug> [--command translate]
+```
+
+**Never call `detect_host()` from inside a spawned worker.** `CLAUDECODE` survives the
+credential scrub on purpose, so a `cursor-agent` child of a Claude Code parent inherits
+it (and vice versa) — a worker would detect its *parent's* host. That is why detection
+lives in `src/harness/profile.py`, which the launcher never imports;
+`tests/test_spawn_boundary.py` pins the boundary.
 
 The two preflights answer different questions, on purpose. `claude auth status
 --json` is a **routing** probe — which credential would be billed — because the
@@ -75,8 +112,9 @@ Its `inputTokens` excludes cache reads, exactly as Claude's does, so the shared
 estimated** — one `usage.jsonl` holds every family's rows, and an unfiltered
 median over a 4.4× gap describes neither.
 
-`headless_extra_flags` / `headless_effort_<type>` (config) remain Claude-only:
-they are Claude argv and are dropped on a Cursor wave.
+`headless_extra_flags` remains Claude-only: it is Claude argv and is dropped on a
+Cursor wave. **`headless_effort_<type>` no longer is** — see the two-channel note
+below.
 
 #### There is no Cursor prompt cache to configure
 
@@ -98,9 +136,34 @@ group: grouping trades per-target reasoning depth for fewer prefixes, and with
 
 Cursor waves record `cache: null` on every row, since no mode was requested.
 
+#### Effort has two channels — one per CLI
+
+`cursor-agent` has **no `--effort` flag**; it takes its knobs inside the model
+argument (`grok-4.5[effort=high,fast=false]`). So the same setting is delivered
+two different ways:
+
+| CLI | channel | delivered as |
+|---|---|---|
+| `claude` | `argv` | `--effort <level>` |
+| `cursor` | `model_bracket` | the `[effort=…]` parameter, rewritten into `--model` |
+| either | `none` | nothing carries it (Cursor's `auto` model takes no bracket) |
+
+This used to be two independent knobs with only the Claude one reported: a wave
+running `effort=high` from a Cursor bracket announced itself as `medium` from the
+Claude ladder, and `usage.jsonl` logged `effort: null` for the same wave. Now
+`resolve_profile()` returns one `effort` plus an `effort_channel` saying which knob
+carries it, and the log records the bracket level on Cursor rows.
+
+On Cursor the ladder resolves: `--effort` → an explicit bracket on a pinned
+`--worker-model` → `headless_effort_<type>` → **whatever `~/.cursor/cli-config.json`
+already selects** → nothing. That fourth tier matters: the effort table below was
+measured on Claude, so the harness does **not** synthesize a bracket onto a bare
+`--model grok-4.5` from an unswept default — it leaves the argv alone and reports
+`effort_source: "cursor-default"`.
+
 #### `headless_effort_<type>`
 
-Named Claude `--effort` level for headless waves — **one key per wave type**:
+Named effort level for headless waves — **one key per wave type**:
 
 | key | wave |
 |---|---|

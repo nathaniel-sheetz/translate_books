@@ -64,11 +64,10 @@ from web_ui.evaluations import (
     REVIEW_TYPES,
     append_feedback,
     chapter_id_from_chunk_id,
-    chunk_group_states,
-    chunk_text_sha,
+    chapter_judge_status,
     empty_type_counts,
     evaluate_and_persist_chunk,
-    evaluator_freshness,
+    iter_chapter_chunks,
     load_all_feedback_by_chunk,
     load_chapter_type_counts,
     load_chunk_evaluation,
@@ -5697,61 +5696,6 @@ def project_chapter_review(project_id, chapter):
 # ── Review tab: per-chapter status + bulk reruns ─────────────────────────────
 
 
-def _iter_chapter_chunks(project_dir: Path) -> dict[str, list[tuple[str, dict]]]:
-    """Read ``chunks/*_chunk_*.json`` once into ``{chapter_id: [(chunk_id, data)]}``.
-
-    The Review rollup has to hash every chunk's ``translated_text``, so it pays
-    for the read anyway — doing it in one pass keeps the walk to a single sweep
-    of the directory instead of one stat-and-open per lookup.
-    """
-    from collections import defaultdict
-
-    out: dict[str, list[tuple[str, dict]]] = defaultdict(list)
-    chunks_dir = project_dir / "chunks"
-    if not chunks_dir.exists():
-        return out
-    for path in sorted(chunks_dir.glob("*_chunk_*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        chunk_id = data.get("id") or path.stem
-        chapter_id = data.get("chapter_id") or _chapter_id_from_chunk_id(chunk_id)
-        data["_mtime"] = path.stat().st_mtime
-        out[chapter_id].append((chunk_id, data))
-    return out
-
-
-def _chapter_judge_status(
-    project_dir: Path, chunks: list[tuple[str, dict]]
-) -> tuple[dict[str, dict], list[dict[str, str]]]:
-    """Roll a chapter's chunks up to one status per :data:`JUDGE_STATUS_GROUPS`.
-
-    Returns ``(by_group, per_chunk_states)`` — the second value is handed back
-    so the book-wide totals can be rolled up from the same per-chunk verdicts
-    rather than from an average of chapter verdicts.
-    """
-    per_chunk: list[dict[str, str]] = []
-    for chunk_id, data in chunks:
-        if not (data.get("translated_text") or "").strip():
-            continue
-        payload = load_chunk_evaluation(project_dir, chunk_id)
-        freshness = evaluator_freshness(
-            payload,
-            chunk_text_sha(data.get("translated_text") or ""),
-            chunk_mtime=data.get("_mtime"),
-        )
-        per_chunk.append(chunk_group_states(freshness))
-
-    by_group = {
-        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
-        for group in JUDGE_STATUS_GROUPS
-    }
-    return by_group, per_chunk
-
-
 @app.route("/api/project/<project_id>/review-status", methods=["GET"])
 def project_review_status(project_id):
     """Per-chapter findings, annotation state, and judge freshness.
@@ -5772,7 +5716,7 @@ def project_review_status(project_id):
     reviewed = _load_reviewed(project_dir)
     flag_counts = load_chapter_type_counts(project_dir)
     annotations = _chapter_annotation_state(project_dir)
-    chunks_by_chapter = _iter_chapter_chunks(project_dir)
+    chunks_by_chapter = iter_chapter_chunks(project_dir)
     align_dir = project_dir / "alignments"
     chapters_dir = project_dir / "chapters"
 
@@ -5806,7 +5750,7 @@ def project_review_status(project_id):
             except (json.JSONDecodeError, OSError, TypeError):
                 pass
 
-        judges, per_chunk = _chapter_judge_status(project_dir, chunks)
+        judges, per_chunk = chapter_judge_status(project_dir, chunks)
         all_chunk_states.extend(per_chunk)
 
         ch_flags = flag_counts.get(ch_id) or empty_type_counts()

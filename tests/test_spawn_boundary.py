@@ -157,6 +157,48 @@ def test_no_module_but_the_launcher_names_a_headless_cli():
     )
 
 
+def test_the_launcher_never_detects_a_host():
+    """Host detection must stay out of the launcher's import graph.
+
+    ``CLAUDECODE`` survives the credential scrub on purpose (``_SCRUB_KEEP``), so
+    a ``cursor-agent`` worker spawned from a Claude Code parent inherits it — and
+    a ``claude -p`` worker spawned from a Cursor host inherits ``CURSOR_*``.
+    Anything asking "who is my host?" from inside a worker therefore gets its
+    *parent's* answer, in both directions.
+
+    The rule ("only the orchestrator may detect") is enforced structurally rather
+    than by memory: :mod:`src.harness.headless` and :mod:`src.harness.usage` run
+    in the spawning process, so they must not be able to reach
+    :mod:`src.harness.host` at all. :mod:`src.harness.profile` is where detection
+    is allowed to live, and nothing in the wave path imports it.
+    """
+    offenders: list[str] = []
+    for rel in ("src/harness/headless.py", "src/harness/usage.py"):
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            elif isinstance(node, ast.Name) and node.id == "detect_host":
+                offenders.append(f"{rel}:{node.lineno} names detect_host")
+                continue
+            else:
+                continue
+            for name in names:
+                if name.endswith("harness.host") or name.endswith("harness.profile"):
+                    offenders.append(f"{rel}:{node.lineno} imports {name}")
+
+    assert not offenders, (
+        "The headless launcher must not detect a host: "
+        + "; ".join(offenders)
+        + ". A spawned worker inherits its parent's CLAUDECODE / CURSOR_* markers "
+        "(CLAUDECODE is kept by the credential scrub deliberately), so detection "
+        "inside the wave path answers for the wrong process. Resolve the profile "
+        "in the orchestrator via src/harness/profile.py and pass the result down."
+    )
+
+
 def test_sanctioned_launcher_scrubs_and_preflights():
     """The inventory is only meaningful if the sanctioned module still enforces."""
     from src.harness import headless

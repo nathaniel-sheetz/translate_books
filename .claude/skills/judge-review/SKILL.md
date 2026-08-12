@@ -18,9 +18,9 @@ allowed-tools:
 # judge-review
 
 Drive the tailored-judge framework as a short conversation. The deterministic
-surface is one non-interactive CLI — **`scripts/run_judges.py`** — with three
-subcommands that each print JSON. You pick a scope, pick a backend, run a judge
-(or suite), relay the findings, and offer to persist them.
+surface is one non-interactive CLI — **`scripts/run_judges.py`** — whose
+subcommands each print JSON. You check what has already been judged, pick a scope,
+pick a backend, run a judge (or suite), relay the findings, and offer to persist them.
 
 ## Two backends
 
@@ -44,8 +44,60 @@ findings — and the persisted `evaluations/<chunk>.json` — are identical eith
 
 ## The CLI (read first)
 
-`python scripts/run_judges.py <run|prepare|fanout|commit|apply>` is non-interactive and prints
-one JSON object.
+`python scripts/run_judges.py <profile|status|run|prepare|fanout|commit|apply>` is
+non-interactive and prints one JSON object.
+
+**Two read-only commands answer the two questions you open with**, and both are free —
+no spend, no writes: `status` ("what still needs judging?") and `profile` ("what would
+the wave run as?"). Run both before you ask the user anything.
+
+**`profile` before the gate — the CLI is not a detail you discover later.**
+It reports the detected host and the resolved `cli` / `worker_model` / `effort` /
+`effort_channel` / `baseline_tokens`, each with its source. A Claude Code session
+resolves to `sonnet` + `medium` on the 3.9k baseline; a Cursor session resolves to your
+own selected Cursor model on the 17.2k one. Those are **presets, not suggestions** —
+pass the answer to `prepare --cli` and everything downstream follows.
+
+```bash
+python scripts/run_judges.py profile --project fabre2
+```
+
+Precedence, highest first: `--cli` flag → the book's `headless_cli` when pinned to
+`claude`/`cursor` → the detected host → `claude`. A pinned book is never flipped by
+detection; `config-set --key headless_cli --value auto` un-pins it.
+
+**`status` first — an evaluation file is not a judge verdict.**
+`evaluations/<chunk>.json` is written the moment the *deterministic* evaluators run, so a
+chapter can carry one while holding `judges: {}`. On 2026-08-11 eight of ten fabre2 chapters
+looked reviewed and had never been judged; the gap was only found by hand-probing the JSON.
+Never infer coverage from a file listing, an `ls`, or a dashboard badge you didn't read —
+ask:
+
+```bash
+python scripts/run_judges.py status --project fabre2                       # whole book
+python scripts/run_judges.py status --project fabre2 --judge dialogue \
+    --scope chapter:chapter_41..chapter_50 [--detail]
+```
+
+Read-only, no spend, no writes. Flags: `--judge` (repeatable — `coded`, `dialogue`,
+`address`; default all), `--scope` (repeatable **filter**, not a target resolver:
+`chapter:<id>`, the inclusive range `chapter:<first>..<last>`, `chunk:<id>`, `book`; a
+chapter with no translated chunks is *reported*, not an error), and `--detail`.
+
+It returns, per group: `state` (`done` | `partial` | `stale` | `not_run`), `chunks`
+({fresh, stale, missing}), `chapters` — **the four buckets of chapter ids, which is the
+"what's left" answer** — plus `last_run` and `worker_models`. `needs` gives the owed counts
+per group (`stale + partial + not_run`); the ids come from `chapters`, not a second copy.
+`--detail` adds per-chapter rows with `at` / `worker_model` / `backend` and, for a
+`stale`/`partial` chapter, the `chunk_ids` responsible.
+
+**Say which evidence a `stale` verdict rests on.** `stale_basis` splits it:
+- `hash` — the translation's content hash moved. **Proof.**
+- `flag` — an `apply` stale-stamped it (`stale_reason` says which judge). **Proof.**
+- `mtime` — a pre-`eval_runs` evaluation compared by timestamp. **A suspicion**: a git
+  checkout or a byte-identical rewrite bumps mtime too. Most older books are still on this
+  path, so relay it as "may be stale", and note that re-running that evaluator settles the
+  question and writes the ledger. The `warnings[]` array already says so — don't drop it.
 
 **`_schema` is opt-in.** Every subcommand takes `--schema` to include the block documenting
 each output key; **errors always carry it**, successes carry a `_schema_hint` pointer instead.
@@ -73,8 +125,15 @@ Shared flags (`run`, `prepare`):
 `prepare` (subagent backend) adds:
 - `--scope` is **repeatable** here — pass it multiple times to stage several
   chapters into one manifest for a single `commit` (see the multi-chapter note in B).
+- `--cli {claude,cursor}` — which CLI this manifest is for. **Pass it whenever the
+  wave is not Claude.** It picks the default worker model *and* the per-job token
+  baseline the consent number is built from (Cursor's is ~4.4× Claude's), and it is
+  written into the manifest so `fanout` inherits it.
+- `--effort <level>` — per-run effort. Delivered as `--effort` on claude and inside
+  the model's `[effort=…]` bracket on cursor; either way `effective.effort` is the
+  one true answer.
 - `--worker-model <tier>` — pins each spawned `judge-worker`; unset, defaults per
-  `headless_cli` (`sonnet` on claude, your selected Cursor model on cursor).
+  the resolved CLI (`sonnet` on claude, your selected Cursor model on cursor).
 - `--batch-size <n>` (default 5) — workers per spawn wave; wait for the wave to
   finish before launching the next (see 4b).
 - `--targets-per-worker <n>` (default 1) — group up to N **low-dialogue-density**
@@ -95,22 +154,43 @@ Shared flags (`run`, `prepare`):
 
 `fanout` (subagent backend, opt-in headless wave) takes `--project`, optional
 `--target-ids` (comma-separated solo `target_id` or `batch_id`), `--concurrency`
-(default: manifest `batch_size`), `--cli {claude,cursor}` (default: config
-`headless_cli`, else `claude`), `--cli-bin` (back-compat alias: `--claude-bin`),
+(default: manifest `batch_size`), `--cli-bin` (back-compat alias: `--claude-bin`),
 and `--estimate` (project the token cost and print the argv without spawning).
 
-**Cursor headless:** `fanout --cli cursor` (or
-`config-set --key headless_cli --value cursor`) drives `cursor-agent` under a
-subscription login, with a `cursor-agent status --format json` preflight per wave
-and a token-free `--model` check before any spawn. An unpinned `worker_model`
-now inherits whatever model is selected in `~/.cursor/cli-config.json` — the one
-the operator is already using — so pin `--worker-model` only to override that
-(`grok-4.5`, `auto`, a `cursor-agent models` id, or the bracket form
+**`fanout` inherits the manifest's CLI, model and effort — run it bare.** `prepare`
+wrote the profile the user consented to, so re-passing `--cli` is noise. Two
+overrides exist for when something was wrong: `--cli` and `--worker-model`. A model
+override is **written back** to the manifest (drafts untouched — this is *not* the
+destructive re-prepare), because `commit` stamps the manifest's model into each
+result and `status` reports it back as what judged the book.
+
+**Cursor headless** drives `cursor-agent` under a subscription login, with a
+`cursor-agent status --format json` preflight per wave and a token-free `--model`
+check before any spawn. An unpinned `worker_model` inherits whatever model is
+selected in `~/.cursor/cli-config.json` — the one the operator is already using and
+already paying for — so pin `--worker-model` only to override that (`grok-4.5`,
+`auto`, a `cursor-agent models` id, or the bracket form
 `grok-4.5[effort=low,fast=false]`). Cursor uses the full prompt (no cache-split /
 `--system-prompt-file`), and **that is measured, not assumed** — see the
 overhead note below. The **Task-worker** path (`prepare` → spawn `judge-worker` →
 `commit`) stays **Claude-only** — the Task tool spawns Claude subagents; Cursor
 is offered only on the headless `fanout` path.
+
+### Effort has two channels; only one is live per CLI
+
+| CLI | channel | how it is set | what to relay |
+|---|---|---|---|
+| `claude` | `--effort` argv | `--effort`, `headless_effort_judges` | `effective.effort` |
+| `cursor` | the model's `[effort=…]` bracket | `--effort` (rewrites the bracket), `headless_effort_judges`, else whatever `~/.cursor/cli-config.json` already selected | `effective.effort` |
+
+`cursor-agent` **has no `--effort` flag** — it is dropped from the argv. Both
+channels now resolve to one number in `effective.effort`, with `effective.effort_channel`
+saying which knob carries it (`argv` / `model_bracket` / `none`).
+
+> **Never quote `headless_effort` beside a Cursor wave.** That field is the Claude
+> ladder's answer. Quote `effective.effort` + `effective.effort_channel`, always.
+> An `effort_channel: "none"` means *nothing* carries the level — that happens on the
+> `auto` model, which takes no bracket; pin a concrete model to control effort.
 
 `commit` (subagent backend) takes only `--project` and `--persist`.
 
@@ -171,11 +251,66 @@ dialogue judge — just pass `--judge address`.
 
 ## Flow
 
-1. **Pick scope.** If the user didn't name one, ask whether to judge a single chunk
-   or a whole chapter, and which (use `AskUserQuestion` only if genuinely ambiguous).
-2. **Pick backend.** If the user didn't say, ask: **API** (spends metered $, behind
-   the cost gate) or **subagent** (no API spend, uses this session, spawns workers)?
-   Default to **API**. Then follow the matching branch below.
+1. **Pick scope — check coverage first when more than one chapter is in play.**
+   A range, a list of chapters, "the rest", "the ones we haven't done", "the whole book":
+   run `status` **before** confirming scope, and lead with what it found — how many chapters
+   already have a current verdict, how many are stale (and on what evidence), how many were
+   never judged. Propose the scope from `judges.<judge>.chapters.not_run` (plus `stale` /
+   `partial`), and never silently re-judge a `done` chapter — if the user's range includes
+   some, say so and let them decide. One named chunk or chapter needs no status call.
+
+   If the user didn't name a scope at all, ask whether to judge a single chunk or a whole
+   chapter, and which (use `AskUserQuestion` only if genuinely ambiguous).
+2. **Read the profile before you ask anything.** One read-only call — no spend, no
+   writes, no subprocess, nothing rendered:
+
+   ```bash
+   python scripts/run_judges.py profile --project <slug>
+   ```
+
+   It returns the detected `host` (`claude-code` / `cursor` / `unknown`) and an
+   `effective` block: `cli` + `cli_source`, `worker_model` + `worker_model_source`,
+   `effort` + `effort_source` + `effort_channel`, `baseline_tokens` + `baseline_source`,
+   and `warnings`. **These are the defaults for question 2 below** — the harness has
+   already worked out that a Claude Code session should run `sonnet`/`medium` on the
+   3.9k baseline and a Cursor session should run your selected Cursor model (today
+   `grok-4.5[effort=high,fast=false]`) on the 17.2k one.
+
+   Read `warnings` and relay any of them. They cover: `cursor-agent` not installed,
+   a Claude alias pinned on a Cursor wave, and **this book's previous waves having run
+   on a different CLI** — that last one is the mid-book flip guard, and it is worth a
+   sentence to the user before they approve.
+
+3. **Ask everything in ONE turn.** All four decisions arrive together, defaults
+   pre-filled from `profile`, and nothing is asked that the user already chose. This
+   ordering is the fix for the 2026-08-11 friction logs, where the CLI was asked
+   *after* `prepare` had already baked in the wrong worker and quoted the wrong
+   baseline. Use one `AskUserQuestion` call (up to 4 questions) — or, in a session
+   without that tool (a Cursor-hosted orchestrator has no `AskUserQuestion`), one
+   message with four short numbered lists. What matters is that they arrive together
+   and are answered before `prepare`, not which widget asks them.
+
+   - **Q1 — backend.** **API** (spends metered $, behind the cost gate) or **subagent**
+     (no API spend, runs on the session). Default **API**; if the user has said anything
+     about cost or subscriptions, subagent is the intent.
+   - **Q2 — CLI + preset** (subagent only). Lead with what `profile` resolved and say
+     where it came from:
+     - **`<effective.cli>` — detected from your session** (`cli_source: host:*`), running
+       `<worker_model>` at `<effort>` (`<effort_channel>`), ~`<baseline_tokens>`/job.
+     - the other CLI, with *its* model and baseline, so the cost difference is visible
+       at the moment of choosing.
+     When `cli_source` is `config` the book is pinned; say so — it outranks detection,
+     and un-pinning is `config-set --key headless_cli --value auto`.
+   - **Q3 — spawn mode** (subagent only). (1) **Task workers** — spawn `judge-worker`
+     Task subagents. (2) **Headless fan-out** — run `fanout`. (3) **Abort.**
+     **Skip this question entirely when Q2 resolved to `cursor`**: the Task tool spawns
+     Claude subagents, so Cursor is only reachable via headless. Say that in one clause
+     rather than offering a choice that does not exist.
+   - **Q4 — grouping** (subagent only) — see the grouping note in B.
+
+   Then run `prepare` with the answers, passing `--cli` (and `--effort` / `--worker-model`
+   if the user overrode them). **`prepare` runs once.** It is destructive to re-run, and
+   with the CLI known up front there is no longer a reason to.
 
 ### A. API backend
 
@@ -200,19 +335,18 @@ request, stage **every** chapter in one `prepare` by repeating `--scope` — the
 land in one manifest, one `commit` collects them all, and `usage_summary` is a
 single rollup (no manual summing across calls).
 
-**Ask spawn mode and grouping together, in that order, in ONE `AskUserQuestion` call**
-— or, if you are an orchestrator without that tool (a Cursor-hosted session has no
-`AskUserQuestion`), as one message with two short numbered lists. What matters is that
-both questions arrive together and are answered before `prepare`, not which widget asks
-them. Skip whichever the user already chose. Order matters and the old order was wrong:
-the right grouping *depends on* the spawn mode, `prepare` bakes the grouping in, and
-re-`prepare` is destructive — so grouping cannot be revised after the fact.
+All four decisions were taken together in step 3 — CLI/preset, spawn mode and grouping
+included. This section is the detail behind Q3 and Q4, not a second round of asking.
+Order matters and the old order was wrong: the right grouping *depends on* the spawn
+mode, `prepare` bakes both the grouping and the CLI in, and re-`prepare` is destructive
+— so neither can be revised after the fact.
 
-- **Q1 — spawn mode.** (1) **Task workers** — spawn `judge-worker` Task subagents
-  (Read→Write→`done`). (2) **Headless fan-out** — run `fanout` (`claude -p`, one generate
-  turn per entry; uses the per-judge preamble cache when `preamble_path`/`body_path` are on
-  the manifest). (3) **Abort**.
-- **Q2 — grouping** (subagent-only; the API path always judges one target per call):
+- **Q3 — spawn mode.** (1) **Task workers** — spawn `judge-worker` Task subagents
+  (Read→Write→`done`). (2) **Headless fan-out** — run `fanout` (one generate turn per
+  entry; uses the per-judge preamble cache when `preamble_path`/`body_path` are on
+  the manifest). (3) **Abort**. **Cursor collapses this to headless** — the Task tool
+  spawns Claude subagents.
+- **Q4 — grouping** (subagent-only; the API path always judges one target per call):
   - **Conservative — one chunk per worker** (`--targets-per-worker 1`, the default). Every
     chunk judged in full isolation — the known-good path, and the most spawns.
   - **Grouped — up to 3 chunks per worker** (`--targets-per-worker 3`). Packs up to three
@@ -232,24 +366,30 @@ re-`prepare` is destructive — so grouping cannot be revised after the fact.
   (Per-job rows land in `.harness/judges/usage.jsonl`, but the rollup is computed, not
   stored — do not go looking for `overhead_ratio` in that file.)
 
-Then run `prepare`, passing the chosen `--targets-per-worker` (omit it for conservative).
-Add `--quiet` on the headless path — `fanout` reads the manifest from disk, so echoing it
-into the conversation is pure duplication:
+Then run `prepare` **once**, passing `--cli` from Q2 and the chosen `--targets-per-worker`
+(omit it for conservative). Add `--quiet` on the headless path — `fanout` reads the
+manifest from disk, so echoing it into the conversation is pure duplication:
 ```bash
 python scripts/run_judges.py prepare --project understood-betsy --judge dialogue \
-    --scope chapter:chapter_05 --scope chapter:chapter_06 \
-    [--targets-per-worker 3] [--worker-model sonnet] [--batch-size 5] [--quiet]
+    --scope chapter:chapter_05 --scope chapter:chapter_06 --cli cursor \
+    [--targets-per-worker 3] [--effort high] [--worker-model grok-4.5] \
+    [--batch-size 5] [--quiet]
 ```
 
-**Relay the figure for the backend being chosen — they price different things and neither
-bounds the other:**
+**Relay ONE consent block, built from `effective` + `usage_summary`.** They price
+different things and neither bounds the other:
 - **API backend** → `usage_summary.estimated_api_cost` (USD, metered).
 - **Headless / Task workers** → `usage_summary.estimated_headless_tokens`, which is
   `estimated_prompt_tokens + workers × headless_baseline_tokens`. Name the split: how much
   is judging content and how much is per-job fixed overhead. `headless_baseline_source`
   says whether that baseline was measured on this machine or is the documented default.
-  Also relay `usage_summary.headless_effort` (the resolved `--effort` level; `null` means
-  the CLI's own default) so the user consents knowing the level, not just the token count.
+
+  Alongside it, quote `effective` **verbatim**: `cli` (and `cli_source`), `worker_model`,
+  `effort` **and** `effort_channel`. Those four are only interpretable together —
+  `baseline_tokens` means nothing without `cli`, and `effort` means nothing without the
+  channel. **Do not quote `usage_summary.headless_effort` on a Cursor wave**; use
+  `effective.effort`. (`headless_effort` is now profile-derived too, so they agree — but
+  `effective` is the field that carries its own provenance.)
 
 Do **not** relay `estimated_api_cost` as "the price, and nothing is spent" when the user is
 choosing headless. No *metered dollars* is true and enforced (headless refuses to run on a
@@ -261,7 +401,10 @@ is visible. Get approval in a separate turn before spawning.
 **Want the real number first?** `fanout --estimate` projects the wave from the measured
 baseline and prints the argv without spawning anything.
 
-**Worker-model / overhead note (fold into the confirmation, not a new gate):**
+**Worker-model / overhead facts — these are the *why* behind the Q2 options.** The model
+is decided **at** the gate now (it used to be discovered after `prepare` had written it
+into the manifest, which cost a destructive re-prepare every time it was wrong). Use these
+to write the two Q2 option descriptions, not to open a fifth question:
 
 - **Claude path.** The shared preamble (dialogue rules ≈1.7k tok; address rubric+map
   ≈1.3–1.8k) clears **Sonnet's** 1024-token cache minimum but **not** Opus/Haiku's 4096,
@@ -288,6 +431,14 @@ throws away completed work and forces a re-spawn. Prepare the whole request once
 (all `--scope`s together); if you truly must re-prepare with good drafts present,
 pass `--keep-drafts`. Don't re-prepare just to "recover" a manifest — stage
 everything up front so you never need to.
+
+**A wrong CLI or worker model is no longer a reason to re-`prepare`.** Fix it on the
+wave instead — `fanout --cli … --worker-model …` overrides the manifest and writes the
+correction back, leaving drafts alone:
+```bash
+python scripts/run_judges.py fanout --project <slug> --worker-model "grok-4.5[effort=high,fast=false]"
+```
+Getting it right at step 3 is still better; this is the recovery path, not the plan.
 
 4b. **Spawn workers per the chosen mode, then wait.**
 
@@ -348,9 +499,9 @@ job.
 After the wave, commit as below — the prepare→commit seam is unchanged
 (`committed`/`failed`/`missing`). On 529, re-run with a lower `--concurrency`.
 
-**Effort is a first-class knob.** Judge/annotation waves default to `--effort medium`
-under `headless_effort_judges: auto` (2026-07-31: output −66%, wall −66%, cost −55%,
-quality confirmed by hand). The ladder, cheapest first:
+**Effort is a first-class knob.** On Claude, judge/annotation waves default to
+`--effort medium` under `headless_effort_judges: auto` (2026-07-31: output −66%,
+wall −66%, cost −55%, quality confirmed by hand). The ladder, cheapest first:
 
 | level | measured trade |
 |---|---|
@@ -358,8 +509,15 @@ quality confirmed by hand). The ladder, cheapest first:
 | `medium` | output −66%, wall −66%, cost −55%; quality OK on the measured wave; **recall still uncontrolled** |
 | CLI default / `high` / `xhigh` | full effort — use when you need maximum recall |
 
+**Those numbers were measured on Claude.** On Cursor the effort ladder is unswept, so
+the harness does not impose one: an unpinned Cursor wave runs at whatever
+`~/.cursor/cli-config.json` already selects (the level the operator picked in Cursor's
+own model picker), and `effort_source: cursor-cli-config` says so. Setting the config
+key or `--effort` overrides that by rewriting the model's bracket — the same one knob,
+whichever CLI you are on.
+
 ```bash
-# Judge waves on this book (persists):
+# Judge waves on this book (persists; binds on BOTH CLIs now):
 python scripts/harness.py config-set --project <slug> --key headless_effort_judges --value low
 # Per-run (does not persist):
 python scripts/run_judges.py fanout --project <slug> --effort low
@@ -533,6 +691,13 @@ that file — `stale`, `stale_since`, `stale_reason`, *not* inside `judges[<judg
 `score`/`issues` it invalidates — and `stale_reason` is single-valued, so a chunk both judges
 edited names only the most recent. Offer to **re-run the judge** on the affected chunks; a fresh
 run clears the stale flag.
+
+`status` is how you see the damage and confirm the repair — it reports those chapters as
+`stale` with `basis: "flag"` and quotes the `stale_reason`, and they move back to `done` as
+they are re-judged:
+```bash
+python scripts/run_judges.py status --project understood-betsy --judge dialogue --detail
+```
 
 ### Feedback (optional, either backend)
 

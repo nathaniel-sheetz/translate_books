@@ -490,7 +490,8 @@ def _build_parser() -> argparse.ArgumentParser:
     csp.add_argument(
         "--value", required=True,
         help="Value to persist. Per key: backend=api|subagent|headless; "
-             "footnotes_decision=keep|drop|none; headless_cli=claude|cursor; "
+             "footnotes_decision=keep|drop|none; "
+             "headless_cli=auto|claude|cursor (auto = follow the detected host); "
              "headless_effort_{judges,annotations,translate,footnotes}="
              "auto|default|low|medium|high|xhigh; "
              "headless_prompt_cache=auto|5m|1h|off; "

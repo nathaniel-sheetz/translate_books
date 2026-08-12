@@ -207,10 +207,11 @@ def prepare(
     """
     from src.harness import state as hstate
     from src.harness.headless import default_worker_model
+    from src.harness.profile import resolve_cli
 
     project_dir = Path(project_dir)
     worker_model = worker_model or default_worker_model(
-        str(hstate.load_config(project_dir).get("headless_cli") or "claude")
+        resolve_cli(hstate.load_config(project_dir))[0]
     )
     batch_size = (
         _DEFAULT_BATCH_SIZE if batch_size is None else max(1, int(batch_size))
@@ -421,11 +422,13 @@ def fanout(
         warn_cursor_claude_model,
     )
 
+    from src.harness.profile import resolve_cli
+
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
-    cli_name = (cli or cfg.get("headless_cli") or "claude").strip().lower()
+    cli_name, _cli_source = resolve_cli(cfg, override=cli)
     extra_flags, resolved_effort, _effort_source = hstate.resolve_headless_argv(
-        cfg, command="annotations", effort_override=effort,
+        cfg, command="annotations", effort_override=effort, cli=cli_name,
     )
     requested_cache = hstate.resolve_prompt_cache(cfg, cache_override=cache)
 

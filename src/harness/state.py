@@ -59,7 +59,20 @@ DEFAULTS: dict[str, object] = {
     "always_include_image_instructions": None,
     # Which CLI family the headless backend drives (``claude -p`` vs ``cursor-agent``).
     # Backend stays ``headless``; this only selects the launcher profile.
-    "headless_cli": "claude",
+    #
+    # ``auto`` (the default) means "follow whichever agent is driving" — see
+    # :func:`src.harness.profile.resolve_profile`, which maps a detected Claude
+    # Code host to ``claude`` and a Cursor host to ``cursor``. It is the default
+    # because ``claude`` could not be one: ``save_config`` merges DEFAULTS into
+    # every write, so a literal ``"claude"`` on disk was indistinguishable from a
+    # book that had never chosen — and a Cursor operator therefore got a
+    # Claude-shaped worker, baseline and effort with no way for the harness to
+    # know better (2026-08-11 friction logs). Books that DO carry a literal
+    # ``claude``/``cursor`` keep it and outrank detection.
+    #
+    # Never read this raw when you need a launcher profile — ``auto`` is not one.
+    # Use :func:`resolved_headless_cli`, which never returns it.
+    "headless_cli": "auto",
     # Extra argv appended to every ``claude -p`` job in a headless wave, to trim
     # what the child loads into its system prompt (``--strict-mcp-config``,
     # ``--setting-sources ""``, ``--safe-mode`` …). A list of strings. Ignored on
@@ -79,6 +92,12 @@ DEFAULTS: dict[str, object] = {
     # ignores it.
     "headless_prompt_cache": "auto",
 }
+
+# Headless launcher families, plus the ``auto`` sentinel that defers to the
+# detected host. ``auto`` is a *config* value only — it is never a launcher
+# profile, so it must not reach ``headless._normalize_cli``.
+HEADLESS_CLIS = ("claude", "cursor")
+CLI_VALUES = frozenset(HEADLESS_CLIS) | {"auto"}
 
 # Claude ``--effort`` levels the CLI accepts, plus the two harness sentinels.
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
@@ -102,6 +121,59 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     "translate": "high",
     "footnotes": "high",
 }
+
+
+# Per-CLI view of the table above. The rows are *measurements*, not preferences:
+# they move when someone runs a probe and writes a friction log, i.e. in a code
+# change with a comment — which is why this lives here and not in config.json.
+# The per-book override stays in config, where it already is
+# (``headless_effort_<type>``).
+#
+# The cursor row is identical to the claude row today, on purpose: no Cursor
+# effort sweep has been run, so inventing different numbers would be fiction.
+# It exists as the seam a future Cursor measurement lands in without having to
+# re-thread a CLI argument through every caller first.
+CLI_COMMAND_EFFORT_DEFAULTS: dict[str, dict[str, str | None]] = {
+    "claude": COMMAND_EFFORT_DEFAULTS,
+    "cursor": dict(COMMAND_EFFORT_DEFAULTS),
+}
+
+
+def command_effort_default(command: str, *, cli: str | None = None) -> str | None:
+    """Effort this wave type runs at when nothing else says, for this CLI family.
+
+    ``cli=None`` (or an unknown family) reads the claude row, which is the
+    historical answer — so an un-threaded caller keeps today's behaviour.
+    """
+    table = CLI_COMMAND_EFFORT_DEFAULTS.get(
+        (cli or "").strip().lower(), COMMAND_EFFORT_DEFAULTS
+    )
+    return table.get(command)
+
+
+def resolved_headless_cli(
+    cfg: Mapping[str, object] | None = None, override: str | None = None
+) -> str:
+    """The launcher family to actually drive: ``claude`` or ``cursor``, never ``auto``.
+
+    ``override`` (a per-run ``--cli``) wins, then ``cfg["headless_cli"]`` when it
+    names a real family, else ``claude``.
+
+    This is the back-compat shim for every caller that only needs *a* profile and
+    has no host to consult: ``auto`` and any mistyped value both land on
+    ``claude``, which is what those call sites did before ``auto`` existed.
+    Callers that want detection to have a say go through
+    :func:`src.harness.profile.resolve_profile` instead — it reports where the
+    answer came from, which this cannot.
+    """
+    candidate = (override or "").strip().lower()
+    if candidate in HEADLESS_CLIS:
+        return candidate
+    raw = (cfg or {}).get("headless_cli")
+    candidate = str(raw or "").strip().lower()
+    if candidate in HEADLESS_CLIS:
+        return candidate
+    return "claude"
 
 
 def effort_config_key(command: str) -> str:
@@ -392,11 +464,34 @@ def _split_effort_from_flags(flags: list[str]) -> tuple[str | None, list[str]]:
     return effort, residual
 
 
+def compose_headless_argv(
+    cfg: Mapping[str, object], effort: str | None
+) -> list[str]:
+    """Claude argv for an **already-resolved** effort level.
+
+    Strips any ``--effort`` out of ``headless_extra_flags`` first (see
+    :func:`_split_effort_from_flags`) and prepends the resolved pair, so argv can
+    never carry a duplicate. ``effort=None`` emits no ``--effort`` at all.
+
+    Split out of :func:`resolve_headless_argv` so a caller that already knows the
+    level — because :func:`src.harness.profile.resolve_profile` resolved it across
+    both CLI channels — can compose the argv without re-running a ladder that
+    would answer a slightly different question.
+    """
+    _stray_effort, residual_flags = _split_effort_from_flags(
+        headless_extra_flags(cfg)
+    )
+    if effort:
+        return ["--effort", effort, *residual_flags]
+    return list(residual_flags)
+
+
 def resolve_headless_argv(
     cfg: Mapping[str, object],
     *,
     command: str,
     effort_override: str | None = None,
+    cli: str | None = None,
 ) -> tuple[list[str], str | None, str]:
     """Compose headless argv with a resolved ``--effort`` for one wave type.
 
@@ -405,7 +500,13 @@ def resolve_headless_argv(
     Precedence, highest first:
       1. ``effort_override`` (per-run ``--effort``) → ``"cli"``
       2. ``cfg[effort_config_key(command)]`` when not ``"auto"`` → ``"config"``
-      3. ``COMMAND_EFFORT_DEFAULTS[command]`` → ``"default:<command>"``
+      3. ``command_effort_default(command, cli=cli)`` → ``"default:<command>"``
+
+    ``cli`` selects the tier-3 row. **The composed argv is Claude argv**: a Cursor
+    wave drops ``--effort`` entirely (``headless._build_cmd``) and takes its
+    effort from the model bracket instead, so on that path use the *level* this
+    returns and ignore the argv — or, better, go through
+    :func:`src.harness.profile.resolve_profile`, which picks the channel for you.
 
     Each wave type reads its own key, so pinning judges never moves translate.
     ``"auto"`` defers to the table; ``"default"`` and ``None`` both mean *emit no
@@ -418,15 +519,8 @@ def resolve_headless_argv(
     :func:`_split_effort_from_flags`) and then prepends the resolved pair, so argv
     can never carry a duplicate.
     """
-    residual_flags: list[str]
-    _stray_effort, residual_flags = _split_effort_from_flags(
-        headless_extra_flags(cfg)
-    )
-
     def _compose(level: str | None) -> list[str]:
-        if level:
-            return ["--effort", level, *residual_flags]
-        return list(residual_flags)
+        return compose_headless_argv(cfg, level)
 
     # 1. Per-run CLI override.
     if effort_override is not None:
@@ -445,8 +539,8 @@ def resolve_headless_argv(
             return _compose(raw_cfg), raw_cfg, "config"
         # Mistyped config value: fall through to the per-command table.
 
-    # 3. Per-command auto default.
-    level = COMMAND_EFFORT_DEFAULTS.get(command)
+    # 3. Per-command auto default (per CLI family).
+    level = command_effort_default(command, cli=cli)
     return _compose(level), level, f"default:{command}"
 
 
