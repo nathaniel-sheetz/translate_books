@@ -562,6 +562,101 @@ def test_coded_rerun_cannot_launder_a_stale_legacy_judge_verdict(tmp_path):
     assert chunk_path.stat().st_mtime > _dt.datetime(2020, 1, 1).timestamp()
 
 
+def test_judge_rerun_cannot_launder_a_stale_legacy_sibling(tmp_path):
+    """The judge-path twin of the coded-rerun test above.
+
+    Re-running *one* judge used to bump the shared ``judges_at`` and drop the
+    stale flag for the whole file, so the other judge — with no ledger row of
+    its own — was re-dated to now and reported fresh for prose it never saw.
+    """
+    from web_ui.evaluations import current_chunk_sha, evaluator_freshness_detail
+
+    chunk_path = _write_chunk(tmp_path, "chapter_01_chunk_000", "Hola")
+    eval_dir = tmp_path / "evaluations"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "chapter_01_chunk_000.json").write_text(json.dumps({
+        "chunk_id": "chapter_01_chunk_000",
+        "evaluated_at": "2020-01-01T00:00:00",
+        "enabled_evals": [],
+        "judges": {
+            "dialogue": {"eval_name": "dialogue", "issues": []},
+            "address": {"eval_name": "address", "issues": []},
+        },
+        "judges_at": "2020-01-01T00:00:00",
+    }), encoding="utf-8")
+
+    merge_judge_result(
+        tmp_path, "chapter_01_chunk_000", "dialogue",
+        {"eval_name": "dialogue", "issues": []},
+    )
+
+    payload = load_chunk_evaluation(tmp_path, "chapter_01_chunk_000")
+    assert payload["judges_at"] == "2020-01-01T00:00:00"
+
+    detail = evaluator_freshness_detail(
+        payload, current_chunk_sha(tmp_path, "chapter_01_chunk_000"),
+        names=["dialogue", "address"],
+        chunk_mtime=chunk_path.stat().st_mtime,
+    )
+    assert detail["dialogue"] == {"state": "fresh", "basis": "hash"}
+    assert detail["address"]["state"] == "stale"
+
+
+def test_the_stale_flag_stops_covering_a_judge_that_re_ran_after_it(tmp_path):
+    """``stale`` is written per chunk but means "the text moved under the
+    verdicts recorded before this edit". A judge that re-ran *after* the stamp
+    has its own newer evidence — clearing the flag for everyone laundered the
+    others, and keeping it for everyone left the re-run judge wrongly red."""
+    from web_ui.evaluations import current_chunk_sha, evaluator_freshness_detail
+
+    _write_chunk(tmp_path, "chapter_01_chunk_000", "Hola")
+    for judge in ("dialogue", "address"):
+        merge_judge_result(
+            tmp_path, "chapter_01_chunk_000", judge,
+            {"eval_name": judge, "issues": []},
+        )
+    mark_evaluation_stale(
+        tmp_path, "chapter_01_chunk_000",
+        "translated_text edited by judge-review apply (address)",
+    )
+
+    # Both are covered by the flag while neither has re-run.
+    payload = load_chunk_evaluation(tmp_path, "chapter_01_chunk_000")
+    sha = current_chunk_sha(tmp_path, "chapter_01_chunk_000")
+    before = evaluator_freshness_detail(payload, sha, names=["dialogue", "address"])
+    assert before["dialogue"] == {"state": "stale", "basis": "flag"}
+    assert before["address"] == {"state": "stale", "basis": "flag"}
+
+    merge_judge_result(
+        tmp_path, "chapter_01_chunk_000", "dialogue",
+        {"eval_name": "dialogue", "issues": []},
+    )
+
+    payload = load_chunk_evaluation(tmp_path, "chapter_01_chunk_000")
+    after = evaluator_freshness_detail(payload, sha, names=["dialogue", "address"])
+    assert after["dialogue"] == {"state": "fresh", "basis": "hash"}
+    assert after["address"] == {"state": "stale", "basis": "flag"}
+    assert payload["stale"] is True
+
+
+def test_evaluate_and_persist_stamps_the_text_it_evaluated(tmp_path):
+    """The ledger must describe the prose the findings came from. Hashing the
+    chunk on disk at write time let a chunk-editor save land mid-run and stamp
+    the *new* text's hash, so the badge read fresh for findings that predate
+    the edit and never went stale."""
+    from web_ui.evaluations import chunk_text_sha, evaluate_and_persist_chunk
+
+    _write_chunk(tmp_path, "chapter_01_chunk_000", "Texto editado despues.")
+    chunk = _demo_chunk(translated="Texto que se evaluo.")
+
+    evaluate_and_persist_chunk(tmp_path, chunk, glossary=None, blacklist=None)
+
+    payload = load_chunk_evaluation(tmp_path, "chapter_01_chunk_000")
+    stamped = {e["text_sha"] for e in payload["eval_runs"].values()}
+    assert stamped == {chunk_text_sha("Texto que se evaluo.")}
+    assert chunk_text_sha("Texto editado despues.") not in stamped
+
+
 def test_evaluator_freshness_reads_stale_from_the_hash(tmp_path):
     """The four leak paths this closes: any edit changes the hash, full stop."""
     from web_ui.evaluations import current_chunk_sha, evaluator_freshness

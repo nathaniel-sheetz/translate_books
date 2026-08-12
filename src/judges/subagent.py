@@ -633,6 +633,20 @@ def fanout(
     # Resolve against the manifest, not just config: `prepare` already wrote the
     # CLI/model/effort the operator consented to, so a bare `fanout` reproduces
     # that wave exactly. Flags still win, for the one-flag correction of a bad pin.
+    # A bare `fanout` runs at the level `prepare` quoted the consent estimate
+    # for. A manifest that recorded `null` means "no flag", which the resolver
+    # spells "default" — inheriting it as None would fall through to the config
+    # ladder and run at something nobody consented to.
+    #
+    # Only when the CLI has not flipped, though: a level resolved for Claude is
+    # a Claude-table number, and carrying it onto a Cursor wave would write an
+    # `[effort=…]` bracket onto a model that never had one — the argv change
+    # `resolve_profile` deliberately refuses to invent.
+    inherited_effort, inherited_effort_source = effort, "cli"
+    if not effort and "effort" in doc and (cli or doc.get("cli")) == doc.get("cli"):
+        inherited_effort = doc["effort"] or "default"
+        inherited_effort_source = "manifest"
+
     prof = resolve_profile(
         project_dir,
         command="judges",
@@ -640,7 +654,8 @@ def fanout(
         cli_source="cli" if cli else "manifest",
         worker_model=worker_model or doc.get("worker_model"),
         worker_model_source="cli" if worker_model else "manifest",
-        effort=effort,
+        effort=inherited_effort,
+        effort_source=inherited_effort_source,
         cfg=cfg,
         usage_log=usage_log_path(project_dir),
     )
@@ -674,7 +689,7 @@ def fanout(
     # it into each result's metadata and `status` reports it back as what judged
     # the book. Only the profile fields are rewritten — drafts and entries are
     # untouched, so this is not the destructive re-`prepare`.
-    if model_override or doc.get("cli") != prof.cli:
+    if model_override or doc.get("cli") != prof.cli or doc.get("effort") != prof.effort:
         doc["worker_model"] = prof.worker_model
         doc["cli"] = prof.cli
         doc["effort"] = prof.effort

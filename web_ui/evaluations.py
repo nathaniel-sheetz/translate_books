@@ -142,6 +142,22 @@ def current_chunk_sha(project_dir: Path, chunk_id: str) -> Optional[str]:
     return chunk_text_sha(data.get("translated_text") or "")
 
 
+def _entry_predates(entry: Optional[dict[str, Any]], since: Optional[str]) -> bool:
+    """Was this ledger entry recorded before ``since`` (an ISO stamp)?
+
+    An evaluator with no entry, or one whose ``at`` will not parse, counts as
+    predating: no evidence that it re-ran is not evidence that it did. Used to
+    scope the chunk-level ``stale`` flag to the evaluators it still describes.
+    """
+    ran_at = entry.get("at") if isinstance(entry, dict) else None
+    if not (since and ran_at):
+        return True
+    try:
+        return datetime.fromisoformat(str(ran_at)) < datetime.fromisoformat(str(since))
+    except ValueError:
+        return True
+
+
 def _stamp_eval_runs(
     previous: Optional[dict[str, Any]],
     names: Iterable[str],
@@ -240,6 +256,18 @@ def evaluator_freshness_detail(
 
     explicitly_stale = bool(payload.get("stale"))
 
+    def _flag_covers(entry: Optional[dict[str, Any]]) -> bool:
+        """Does the chunk-level ``stale`` flag still describe this evaluator?
+
+        The flag is written per *chunk* — "the text moved under the verdicts
+        recorded before this edit" — but an evaluator whose ledger entry is
+        dated at or after ``stale_since`` has re-run since, and carries its own
+        newer evidence. Without this scoping, re-running one judge had to
+        either leave every other judge wrongly stale or clear the flag
+        outright, which laundered them all fresh.
+        """
+        return explicitly_stale and _entry_predates(entry, payload.get("stale_since"))
+
     def _legacy(name: str) -> tuple[str, Optional[str]]:
         """Timestamp comparison for a pre-``eval_runs`` evaluation."""
         if name in judges:
@@ -260,7 +288,7 @@ def evaluator_freshness_detail(
     for name in targets:
         entry = ledger.get(name)
         if isinstance(entry, dict) and entry.get("text_sha"):
-            if explicitly_stale:
+            if _flag_covers(entry):
                 out[name] = {"state": "stale", "basis": "flag"}
             elif current_sha is None:
                 out[name] = {"state": "fresh", "basis": None}
@@ -269,7 +297,7 @@ def evaluator_freshness_detail(
                 out[name] = {"state": "fresh" if same else "stale", "basis": "hash"}
             continue
         state, basis = _legacy(name)
-        if state != "missing" and explicitly_stale:
+        if state != "missing" and _flag_covers(None):
             state, basis = "stale", "flag"
         out[name] = {"state": state, "basis": basis if state != "missing" else None}
     return out
@@ -476,16 +504,29 @@ def merge_judge_result(
         judges = {}
     judges[judge_name] = result
     payload["judges"] = judges
-    payload["judges_at"] = datetime.now().isoformat()
+    # ``judges_at`` is the *legacy* per-chunk stamp: it dates judges that have
+    # no ledger entry. This judge is getting one below, so bumping the shared
+    # stamp would only re-date the others — turning a pre-``eval_runs`` verdict
+    # that never saw the current prose green. Same reasoning as the carry-over
+    # in `save_chunk_evaluation`; set it only when there is nothing to keep.
+    payload.setdefault("judges_at", datetime.now().isoformat())
     # Single persistence seam for both judge backends (API and subagent), so a
     # CLI run and a dashboard run stamp the freshness ledger identically.
-    payload["eval_runs"] = _stamp_eval_runs(
-        payload, [judge_name], current_chunk_sha(project_dir, chunk_id),
-    )
-    # A fresh judge result supersedes any stale marker a prior apply-fix edit
-    # left behind — the badge now reflects the current translated_text again.
-    for key in ("stale", "stale_since", "stale_reason"):
-        payload.pop(key, None)
+    current = current_chunk_sha(project_dir, chunk_id)
+    payload["eval_runs"] = _stamp_eval_runs(payload, [judge_name], current)
+    # This judge's fresh run outdates the stale marker for *itself* — its new
+    # ledger entry postdates ``stale_since``, which is what scopes the flag.
+    # Drop the flag only once no other evaluator is still covered by it;
+    # clearing it wholesale relabelled their older verdicts as current.
+    runs = payload.get("eval_runs")
+    runs = runs if isinstance(runs, dict) else {}
+    coded = payload.get("enabled_evals")
+    coded = [n for n in coded if isinstance(n, str)] if isinstance(coded, list) else []
+    others = (set(judges) | set(coded)) - {judge_name}
+    since = payload.get("stale_since")
+    if not any(_entry_predates(runs.get(name), since) for name in others):
+        for key in ("stale", "stale_since", "stale_reason"):
+            payload.pop(key, None)
 
     path = _eval_file(project_dir, chunk_id)
     _atomic_write_json(path, payload)
@@ -922,13 +963,14 @@ def iter_chapter_chunks(project_dir: Path) -> dict[str, list[tuple[str, dict]]]:
     for path in sorted(chunks_dir.glob("*_chunk_*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            mtime = path.stat().st_mtime
         except (json.JSONDecodeError, OSError):
             continue
         if not isinstance(data, dict):
             continue
         chunk_id = data.get("id") or path.stem
         chapter_id = data.get("chapter_id") or chapter_id_from_chunk_id(chunk_id)
-        data["_mtime"] = path.stat().st_mtime
+        data["_mtime"] = mtime
         out[chapter_id].append((chunk_id, data))
     return out
 
@@ -1156,6 +1198,11 @@ def evaluate_and_persist_chunk(
         judges=existing_judges,
         stale_mark=stale_mark,
         stamp_evals=actually_ran,
+        # Hash the text these results were produced from, not whatever is on
+        # disk by the time we write: a background run evaluates at T0 and the
+        # chunk editor can save at T1, which would stamp the ledger with a hash
+        # the findings never saw and leave the badge permanently "fresh".
+        text_sha=chunk_text_sha(chunk.translated_text),
     )
 
     result: dict = {

@@ -124,7 +124,7 @@ _PROFILE_SCHEMA = {
         "worker_model": "model each job runs, including any [effort=…] bracket",
         "worker_model_source": "cli | cursor-cli-config | default:claude",
         "effort": "resolved effort level, or null for none",
-        "effort_source": "cli | cli:default | config | model-bracket | cursor-cli-config | default:<command> | unsupported:auto-model",
+        "effort_source": "cli | cli:default | manifest | manifest:default | config | model-bracket | cursor-cli-config | default:<command> | unsupported:auto-model",
         "effort_channel": "how the effort reaches the model: argv (claude --effort) | "
         "model_bracket (cursor) | none (nothing carries it)",
         "baseline_tokens": "fixed per-job token overhead used by the consent estimate, for THIS cli",

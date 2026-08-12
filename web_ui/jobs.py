@@ -108,6 +108,7 @@ def start_job(project_id: str, kind: str, fn: JobBody) -> str:
             "started_at": time.time(),
             "finished_at": None,
             "thread": None,
+            "terminal": None,
         }
         _jobs[job_id] = record
 
@@ -125,10 +126,16 @@ def start_job(project_id: str, kind: str, fn: JobBody) -> str:
             logger.exception("Job %s (%s) died: %s", job_id, kind, exc)
             summary = {"fatal": f"{kind} failed: {exc}"}
         finally:
+            terminal = {"event": "complete", **summary}
             with _lock:
                 record["status"] = "complete"
                 record["finished_at"] = time.time()
-            job_queue.put({"event": "complete", **summary})
+                # Kept so a second (or reconnecting) stream can be replayed the
+                # terminal event: the queue hands each payload to exactly one
+                # consumer, so the first stream to drain it would otherwise
+                # leave every later one waiting for an event that is gone.
+                record["terminal"] = terminal
+            job_queue.put(terminal)
 
     thread = threading.Thread(target=run, daemon=True, name=f"job-{kind}-{job_id}")
     record["thread"] = thread
@@ -142,6 +149,10 @@ def stream_job(job_id: str, *, keepalive_seconds: float = 20.0):
     Emits a comment keepalive when the queue is quiet so proxies (and the
     browser's own idle timeout) don't drop a long deterministic run that is
     simply slow between chunks.
+
+    Safe to call more than once for the same job: a stream that finds the job
+    already finished and its queue drained is replayed the stored terminal
+    event, so a second tab or a late reconnect ends instead of hanging.
     """
     import json
 
@@ -151,10 +162,22 @@ def stream_job(job_id: str, *, keepalive_seconds: float = 20.0):
     job_queue: queue.Queue = job["queue"]
     while True:
         try:
-            payload = job_queue.get(timeout=keepalive_seconds)
+            payload = job_queue.get_nowait()
         except queue.Empty:
-            yield ": keepalive\n\n"
-            continue
+            # Nothing buffered. If the job has already finished, its queue was
+            # drained by an earlier consumer, so the terminal event will never
+            # arrive here — replay the stored copy and stop, rather than
+            # keepalive-ing forever (which pins a worker thread and leaves the
+            # browser on "Starting…" with Close disabled).
+            terminal = (get_job(job_id) or {}).get("terminal")
+            if terminal is not None:
+                yield f"event: complete\ndata: {json.dumps(terminal, ensure_ascii=False)}\n\n"
+                break
+            try:
+                payload = job_queue.get(timeout=keepalive_seconds)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
         event = payload.get("event", "message")
         yield f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         if event == "complete":

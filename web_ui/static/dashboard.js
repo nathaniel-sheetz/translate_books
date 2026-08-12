@@ -3046,6 +3046,7 @@
 
     var reviewStatus = null;          // last /review-status payload
     var reviewStatusLoading = false;
+    var reviewStatusPending = false;  // a refresh asked for while one was in flight
 
     function reviewSelectedChapters() {
         var ids = [];
@@ -3078,7 +3079,7 @@
             if (!n) return;
             var label = REVIEW_LABELS[type] || type;
             html += '<a class="finding-chip finding-' + type +
-                '" href="/read/' + PROJECT + '/' + ch.id + '?review=' + encodeURIComponent(type) +
+                '" href="/read/' + PROJECT + '/' + encodeURIComponent(ch.id) + '?review=' + encodeURIComponent(type) +
                 '" target="_blank" title="' + escapeHtml(n + ' · ' + label +
                 ' — open in the reader') + '">' +
                 n + ' ' + (REVIEW_ABBR[type] || type) + '</a> ';
@@ -3119,7 +3120,14 @@
     }
 
     function refreshReviewStatus() {
-        if (reviewStatusLoading) return Promise.resolve(reviewStatus);
+        // A refresh asked for mid-flight is queued, not dropped: a job's
+        // `complete` handler fires one, and if it lands during the boot fetch
+        // the table would otherwise keep showing pre-run findings until the
+        // user left and re-entered the stage.
+        if (reviewStatusLoading) {
+            reviewStatusPending = true;
+            return Promise.resolve(reviewStatus);
+        }
         reviewStatusLoading = true;
         return apiGet('/api/project/' + PROJECT + '/review-status')
             .then(function(data) {
@@ -3129,12 +3137,25 @@
                     renderReviewTable(data);
                     updateReviewBadge(data);
                 }
-                return data;
+                return drainPendingReviewStatus(data);
             })
-            .catch(function() {
+            .catch(function(e) {
                 reviewStatusLoading = false;
-                return null;
+                // Say so. A silent catch leaves an empty tbody that is
+                // indistinguishable from a book with nothing to review.
+                var tbody = document.getElementById('review-tbody');
+                if (tbody && !tbody.querySelector('tr[data-chapter-id]')) {
+                    tbody.innerHTML = '<tr><td colspan="6">Could not load review status: ' +
+                        escapeHtml(String(e && e.message ? e.message : e)) + '</td></tr>';
+                }
+                return drainPendingReviewStatus(null);
             });
+    }
+
+    function drainPendingReviewStatus(data) {
+        if (!reviewStatusPending) return data;
+        reviewStatusPending = false;
+        return refreshReviewStatus();
     }
 
     function updateReviewBadge(data) {
@@ -3175,7 +3196,7 @@
             var tr = document.createElement('tr');
             tr.dataset.chapterId = ch.id;
             tr.innerHTML =
-                '<td><input type="checkbox" class="review-pick" data-chapter="' + ch.id + '"></td>' +
+                '<td><input type="checkbox" class="review-pick" data-chapter="' + escapeHtml(ch.id) + '"></td>' +
                 '<td><div>' + escapeHtml(ch.display_label || ch.id) + '</div>' +
                     '<div class="review-muted">' + translated + '/' + ch.chunk_count + ' chunks</div></td>' +
                 '<td>' + findingChipsHtml(ch) + '</td>' +
@@ -3183,12 +3204,12 @@
                 '<td>' + notesCellHtml(ch) + '</td>' +
                 '<td class="review-actions">' +
                     (!ch.has_alignment
-                        ? '<button class="btn-primary ch-align" data-chapter="' + ch.id + '">Align</button> '
-                        : '<button class="btn-secondary ch-realign" data-chapter="' + ch.id +
+                        ? '<button class="btn-primary ch-align" data-chapter="' + escapeHtml(ch.id) + '">Align</button> '
+                        : '<button class="btn-secondary ch-realign" data-chapter="' + escapeHtml(ch.id) +
                           '" data-annotations="' + notes + '">Realign</button> ') +
-                    '<a href="/read/' + PROJECT + '/' + ch.id + '" target="_blank" class="btn-secondary">Read</a> ' +
-                    '<button class="btn-secondary ch-rerun-coded" data-chapter="' + ch.id + '">Rerun</button> ' +
-                    '<button class="btn-secondary ch-run-judges" data-chapter="' + ch.id + '">Judges…</button>' +
+                    '<a href="/read/' + PROJECT + '/' + encodeURIComponent(ch.id) + '" target="_blank" class="btn-secondary">Read</a> ' +
+                    '<button class="btn-secondary ch-rerun-coded" data-chapter="' + escapeHtml(ch.id) + '">Rerun</button> ' +
+                    '<button class="btn-secondary ch-run-judges" data-chapter="' + escapeHtml(ch.id) + '">Judges…</button>' +
                 '</td>';
             tbody.appendChild(tr);
         });
@@ -3380,11 +3401,17 @@
         openJobModal('Rerunning deterministic evaluators');
         apiPost('/api/project/' + PROJECT + '/review/run-coded', { chapter_ids: scope })
             .then(function(data) {
-                if (data.error || !data.job_id) {
-                    finishJobModal('Could not start', data.error || 'No job started.');
+                if (!data || data.error || !data.job_id) {
+                    finishJobModal('Could not start', (data && data.error) || 'No job started.');
                     return;
                 }
                 streamJob(data.job_id, data.total, 'Evaluated');
+            })
+            // Without this, a 500 (which returns HTML, so `r.json()` rejects)
+            // leaves the modal on "Starting…" with Close disabled and no way
+            // out but a page reload.
+            .catch(function(e) {
+                finishJobModal('Could not start', String(e && e.message ? e.message : e));
             });
     }
 
@@ -3459,30 +3486,35 @@
         if (estimateBtn) {
             estimateBtn.addEventListener('click', function() {
                 setStatus('judges-modal-status', 'Estimating…', 'info');
-                // Deliberately unconfirmed with a zero limit: the endpoint
-                // answers `needs_confirm` with the estimate and spends nothing.
                 var judges = selectedJudges();
                 if (!judges.length) {
                     setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
                     return;
                 }
+                // `dry_run` is explicit rather than leaning on `cost_limit: 0`
+                // to force `needs_confirm`: a zero-priced provider makes
+                // `estimated_cost > 0` false and the endpoint would start a
+                // real run behind an "Estimated $0.0000" message.
                 apiPost('/api/project/' + PROJECT + '/review/run-judges', {
                     chapter_ids: judgesScope, judges: judges,
                     provider: (document.getElementById('judges-provider') || {}).value,
                     model: (document.getElementById('judges-model') || {}).value,
-                    cost_limit: 0, confirm: false,
+                    dry_run: true,
                 }).then(function(data) {
-                    if (data.error) {
+                    if (!data || data.error) {
                         // Drop the previous estimate: leaving it under an error
                         // reads as a price for a run that cannot happen.
                         document.getElementById('judges-cost-estimate').textContent = '';
-                        setStatus('judges-modal-status', data.error, 'error');
+                        setStatus('judges-modal-status', (data && data.error) || 'No estimate returned.', 'error');
                         return;
                     }
                     setStatus('judges-modal-status', '', '');
                     document.getElementById('judges-cost-estimate').textContent =
                         'Estimated $' + Number(data.estimated_cost || 0).toFixed(4) +
                         ' over ' + (data.target_count || 0) + ' chunks.';
+                }).catch(function(e) {
+                    document.getElementById('judges-cost-estimate').textContent = '';
+                    setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
                 });
             });
         }
@@ -3506,19 +3538,28 @@
                             return;
                         }
                         postJudges(true).then(function(confirmed) {
-                            if (confirmed.error) {
-                                setStatus('judges-modal-status', confirmed.error, 'error');
+                            if (!confirmed || confirmed.error || !confirmed.job_id) {
+                                setStatus('judges-modal-status',
+                                    (confirmed && confirmed.error) || 'No job started.', 'error');
                                 return;
                             }
                             document.getElementById('judges-modal').classList.remove('visible');
                             openJobModal('Running LLM judges');
                             streamJob(confirmed.job_id, confirmed.total, 'Judged');
+                        }).catch(function(e) {
+                            setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
                         });
+                        return;
+                    }
+                    if (!data.job_id) {
+                        setStatus('judges-modal-status', 'No job started.', 'error');
                         return;
                     }
                     document.getElementById('judges-modal').classList.remove('visible');
                     openJobModal('Running LLM judges');
                     streamJob(data.job_id, data.total, 'Judged');
+                }).catch(function(e) {
+                    setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
                 });
             });
         }

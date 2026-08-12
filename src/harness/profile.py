@@ -27,8 +27,10 @@ survives the credential scrub), so a worker asking "who is my host?" gets its
 that a structural fact rather than a rule someone has to remember;
 ``tests/test_spawn_boundary.py`` pins it.
 
-Resolution costs no subprocess and no LLM call — the heaviest thing it does is
-``shutil.which``. It is safe to call from a read-only command.
+Resolution costs no subprocess and no LLM call — the heaviest things it does are
+``shutil.which`` and reading a few small files (the book's ``config.json``, the
+Cursor CLI config, and ``usage.jsonl`` for the overhead baseline). It is safe to
+call from a read-only command.
 """
 
 from __future__ import annotations
@@ -172,6 +174,7 @@ def resolve_profile(
     worker_model: str | None = None,
     worker_model_source: str = "cli",
     effort: str | None = None,
+    effort_source: str = "cli",
     cfg: Mapping[str, object] | None = None,
     env: Mapping[str, str] | None = None,
     usage_log: Path | str | None = None,
@@ -184,11 +187,11 @@ def resolve_profile(
     ``usage_log`` to this wave type's own log — pass them only to avoid a re-read
     or in tests.
 
-    ``cli_source`` / ``worker_model_source`` label where a passed-in value came
-    from. ``fanout`` sets them to ``"manifest"`` for values it read off disk: the
-    provenance strings are the reason this block can be relayed to an operator at
-    all, so "a flag said so" and "the consented manifest said so" must not print
-    identically.
+    ``cli_source`` / ``worker_model_source`` / ``effort_source`` label where a
+    passed-in value came from. ``fanout`` sets them to ``"manifest"`` for values
+    it read off disk: the provenance strings are the reason this block can be
+    relayed to an operator at all, so "a flag said so" and "the consented
+    manifest said so" must not print identically.
     """
     project_dir = Path(project_dir)
     if cfg is None:
@@ -235,34 +238,44 @@ def resolve_profile(
 
     # ── effort: one ladder … ────────────────────────────────────────────────
     resolved_effort: str | None
-    effort_source: str
     override = (effort or "").strip() or None
+    override_source = effort_source
 
     if override in hstate.EFFORT_LEVELS:
-        resolved_effort, effort_source = override, "cli"
+        resolved_effort, effort_source = override, override_source
     elif override == "default":
         # "emit no flag" on Claude. On Cursor there is no flag to withhold, so it
         # means "leave the model's own bracket alone" rather than "no effort".
         if cli_name == "cursor":
             resolved_effort = cursor_model_effort(resolved_model)
-            effort_source = "cli:default"
+            effort_source = f"{override_source}:default"
         else:
-            resolved_effort, effort_source = None, "cli"
+            resolved_effort, effort_source = None, override_source
     else:
         configured = cfg.get(hstate.effort_config_key(command))
         configured = configured if isinstance(configured, str) else "auto"
-        if configured in hstate.EFFORT_LEVELS:
+        pinned_bracket = (
+            cursor_model_effort(resolved_model)
+            if cli_name == "cursor" and pinned_model
+            else None
+        )
+        if pinned_bracket:
+            # A level typed into the pinned model's own bracket is a more
+            # specific instruction than the book-level default, so it outranks
+            # `headless_effort_<type>` — the ladder docs/LLM_PROVIDERS.md
+            # promises. Reading the config first used to silently overwrite the
+            # bracket the operator typed on `--worker-model`.
+            resolved_effort, effort_source = pinned_bracket, "model-bracket"
+        elif configured in hstate.EFFORT_LEVELS:
             resolved_effort, effort_source = configured, "config"
         elif configured == "default":
             resolved_effort, effort_source = None, "config"
         elif cli_name == "cursor" and cursor_model_effort(resolved_model):
-            # The operator already chose an effort — in Cursor's own model picker
-            # for an un-pinned model, or in the bracket they typed. Honour it
+            # The operator already chose an effort in Cursor's own model picker
+            # (a pinned model's typed bracket is handled above). Honour it
             # rather than overwriting it with a table default they never saw.
             resolved_effort = cursor_model_effort(resolved_model)
-            effort_source = (
-                "model-bracket" if pinned_model else "cursor-cli-config"
-            )
+            effort_source = "cursor-cli-config"
         elif cli_name == "cursor":
             # Nothing specific asked for an effort, and on Cursor "the default"
             # is not ours to invent: the per-command table was measured on Claude

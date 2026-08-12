@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.44.0.0] - 2026-08-12
+
+### Added
+- **The dashboard Review tab is organized around what review actually found.** Per-chapter rows carry finding chips (linking into the reader at that finding type), judge freshness pips, annotation/footnote counts and gap warnings, replacing the old flat action list. `GET /api/project/<id>/review-status` backs it, with the rollup also feeding the tab badge.
+- **Background review runs with live progress.** `web_ui/jobs.py` is a generic job registry — one live job per project, a terminal `complete` guaranteed even when the body dies — behind `POST /review/run-coded`, `POST /review/run-judges` and a shared SSE stream at `/api/project/<id>/jobs/<job_id>/sse`. The judges run is cost-gated with an explicit `dry_run` estimate.
+- **`run_judges.py status` and `profile`.** Read-only commands reporting per-judge, per-chapter freshness (`src/judges/status.py`) and the fully resolved headless profile with provenance for every knob (`src/harness/profile.py`), so what a wave *will* run as is inspectable before it spends anything.
+- **Headless CLI auto-detection from the driving host** (`src/harness/host.py`): `headless_cli: auto` resolves from the agent actually running the harness, validated against a fixed tuple and kept out of the launcher's import graph (`tests/test_spawn_boundary.py` pins that boundary).
+
+### Changed
+- **The shared rubric/preamble prefix is cached on judge and annotation-review API calls**, split at the same seam `build_prompt_parts` already produced and re-verified before the content blocks are built.
+- **A pinned model's `[effort=…]` bracket now outranks `headless_effort_<type>`**, matching the ladder `docs/LLM_PROVIDERS.md` documents. Reading the config first silently overwrote the level typed on `--worker-model`.
+- **`fanout` inherits the manifest's `effort`** — the level `prepare` quoted the consent estimate for — instead of falling through to the judges default, unless the CLI has flipped since prepare (a Claude-table level is not transferable to a Cursor wave). Provenance reports it as `manifest`.
+- The judges model list repopulates when the provider changes.
+
+### Fixed
+- **A finished job's SSE stream could hang a second consumer forever.** The queue hands each payload to exactly one reader, so once the first stream drained the terminal frame a second tab or a reconnect sat on keepalives indefinitely — modal stuck on "Starting…", one pinned worker thread per hung stream. The terminal event is now stored and replayed.
+- **Re-running one judge no longer relabels the others' verdicts as current.** `merge_judge_result` bumped the shared `judges_at` and cleared the chunk-level `stale` flag wholesale, so on a pre-`eval_runs` file the *other* judge reported fresh for prose it never saw. The stamp is preserved, and the stale flag is now scoped by `stale_since` to the evaluators that have not re-run since.
+- **Evaluation results are hashed against the text they were produced from**, not whatever is on disk when the write lands — a chunk-editor save during a background run used to stamp the new text's hash onto old findings, leaving the badge permanently fresh.
+- **One untranslated chapter no longer aborts a multi-chapter judges run.** It is reported in `skipped` and the rest proceed; an all-untranslated selection is still a 400.
+- **"Estimate cost" cannot start a real metered run.** It posted `cost_limit: 0` and leaned on `estimated_cost > cost_limit`; a zero-priced provider made that false and started the job behind an "Estimated $0.0000" message. The estimate is now an explicit `dry_run`.
+- **Review job POST failures no longer strand the progress modal.** A 500 returns HTML, so `r.json()` rejected and `finishJobModal` never ran — Close stayed disabled with no way out but a page reload. A failed `/review-status` fetch now renders an error row instead of an empty table indistinguishable from a clean book, and a refresh requested mid-flight is queued rather than dropped.
+- `iter_chapter_chunks` no longer 500s when a chunk disappears between `glob()` and `stat()`; chapter ids are escaped into the Review table's attributes and URLs.
+
 ## [0.43.1.0] - 2026-08-11
 
 ### Added

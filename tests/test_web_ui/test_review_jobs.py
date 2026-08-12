@@ -9,6 +9,7 @@ same evaluations/*.json.
 
 from __future__ import annotations
 
+import itertools
 import json
 import threading
 
@@ -126,6 +127,25 @@ def test_a_body_returning_a_non_mapping_still_completes():
     events = [json.loads(f.split("data: ", 1)[1]) for f in jobs.stream_job(job_id)
               if "data: " in f]
     assert events == [{"event": "complete"}]
+
+
+def test_a_finished_jobs_stream_can_be_consumed_twice():
+    """The queue hands each payload to exactly one consumer, so once the first
+    stream drained the terminal frame a second tab (or a reconnect) used to sit
+    on `: keepalive` forever — modal stuck on "Starting…", one pinned worker
+    thread per hung stream."""
+    job_id = jobs.start_job("p", "review-coded", lambda emit: {"ran": 1})
+    jobs.get_job(job_id)["thread"].join(timeout=5)
+
+    first = [json.loads(f.split("data: ", 1)[1]) for f in jobs.stream_job(job_id)
+             if "data: " in f]
+    assert first == [{"event": "complete", "ran": 1}]
+
+    # Bounded: a regression yields keepalives forever, and islice makes that a
+    # failed assertion rather than a hung suite.
+    frames = list(itertools.islice(jobs.stream_job(job_id, keepalive_seconds=0.01), 5))
+    replayed = [json.loads(f.split("data: ", 1)[1]) for f in frames if "data: " in f]
+    assert replayed == [{"event": "complete", "ran": 1}]
 
 
 # ── run-coded ────────────────────────────────────────────────────────────────
@@ -282,6 +302,88 @@ def test_run_judges_persists_each_verdict(client, project, monkeypatch):
     # Persisting through merge_judge_result means the freshness ledger is
     # stamped the same way a CLI run stamps it.
     assert payload["eval_runs"]["dialogue"]["text_sha"]
+
+
+def test_one_untranslated_chapter_does_not_abort_the_whole_judges_run(
+    client, project, monkeypatch
+):
+    """The Review table lists untranslated chapters, so ticking one alongside
+    ready ones is easy. That chapter must drop out of the run rather than 400
+    the whole request and leave nothing judged."""
+    import src.judges.runner as runner
+    from src.models import EvalResult
+
+    (project / "chapters" / "chapter_02.txt").write_text("y", encoding="utf-8")
+    (project / "chunks" / "chapter_02_chunk_000.json").write_text(json.dumps({
+        "id": "chapter_02_chunk_000", "chapter_id": "chapter_02", "position": 0,
+        "source_text": "The white dog.", "translated_text": "",
+        "status": "pending",
+        "metadata": {
+            "char_start": 0, "char_end": 14, "overlap_start": 0,
+            "overlap_end": 0, "paragraph_count": 1, "word_count": 3,
+        },
+    }), encoding="utf-8")
+
+    judged = []
+
+    def fake_run_judge(judge_name, target, context):
+        judged.append(target.id)
+        return EvalResult(
+            eval_name=judge_name, eval_version="1.0.0", target_id=target.id,
+            target_type="chunk", passed=True, score=1.0, issues=[],
+        )
+
+    monkeypatch.setattr(runner, "run_judge", fake_run_judge)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"],
+        "chapter_ids": ["chapter_01", "chapter_02"],
+        "confirm": True,
+    })
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["status"] == "started"
+    assert [s["scope"] for s in body["skipped"]] == ["chapter:chapter_02"]
+    drain(client, body["job_id"])
+    assert judged == ["chapter_01_chunk_000", "chapter_01_chunk_001"]
+
+
+def test_every_chapter_untranslated_is_still_a_400(client, project, monkeypatch):
+    """Skipping is per chapter, not a licence to start an empty run."""
+    _no_llm(monkeypatch)
+    for path in (project / "chunks").glob("*.json"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["translated_text"] = ""
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "chapter_ids": ["chapter_01"], "confirm": True,
+    })
+    assert rv.status_code == 400
+    assert jobs.active_job("jobproj") is None
+
+
+def test_dry_run_starts_nothing_even_when_the_estimate_is_zero(
+    client, project, monkeypatch
+):
+    """The estimate button used to post `cost_limit: 0, confirm: false` and rely
+    on `estimated_cost > cost_limit` to force `needs_confirm`. A zero-priced
+    provider makes `0.0 > 0` false, so the "estimate" started a real run."""
+    _no_llm(monkeypatch)
+    import src.judges as judges_pkg
+
+    monkeypatch.setattr(judges_pkg, "estimate_suite_cost", lambda *a, **k: 0.0)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "dry_run": True, "cost_limit": 0,
+    })
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["status"] == "estimate"
+    assert body["estimated_cost"] == 0.0
+    assert body["target_count"] == 2
+    assert "job_id" not in body
+    assert jobs.active_job("jobproj") is None
 
 
 def test_run_judges_rejects_unknown_judge(client, project):

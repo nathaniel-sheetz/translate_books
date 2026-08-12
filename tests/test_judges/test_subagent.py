@@ -1055,8 +1055,10 @@ def test_fanout_estimate_spawns_nothing(tmp_path):
     # a wave commits to it, not after N jobs have failed.
     assert "--output-format" in out["estimate"]["argv"]
     # Auto default for judges is medium — exactly one --effort, plus the fields.
+    # `prepare` resolved that medium and recorded it, so a bare fanout inherits
+    # it *from the manifest*: same level, and the provenance says which.
     assert out["estimate"]["effort"] == "medium"
-    assert out["estimate"]["effort_source"] == "default:judges"
+    assert out["estimate"]["effort_source"] == "manifest"
     argv = out["estimate"]["argv"]
     assert argv.count("--effort") == 1
     assert "--effort" in argv and argv[argv.index("--effort") + 1] == "medium"
@@ -1065,6 +1067,27 @@ def test_fanout_estimate_spawns_nothing(tmp_path):
     # And no draft was written.
     draft = json.loads((subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
     assert not Path(draft["entries"][0]["draft_path"]).exists()
+
+
+def test_fanout_inherits_the_manifest_effort(tmp_path):
+    """`prepare --effort xhigh` quotes the consent estimate for xhigh; a bare
+    `fanout` used to drop it and fall through to the judges default (medium),
+    so the wave ran at a level nobody was shown."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}", effort="xhigh")
+
+    manifest = json.loads(
+        (subagent._judges_dir(project) / "manifest.json").read_text("utf-8"))
+    assert manifest["effort"] == "xhigh"
+
+    out = subagent.fanout(
+        project, estimate=True,
+        runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn")),
+    )
+    assert out["estimate"]["effort"] == "xhigh"
+    assert out["estimate"]["effort_source"] == "manifest"
+    argv = out["estimate"]["argv"]
+    assert argv[argv.index("--effort") + 1] == "xhigh"
 
 
 def test_fanout_estimate_cli_effort_override(tmp_path):

@@ -5959,6 +5959,7 @@ def project_review_run_judges(project_id):
     scopes = ["book"] if chapter_ids is None else [f"chapter:{c}" for c in chapter_ids]
     targets = []
     seen: set[str] = set()
+    skipped: list[dict[str, str]] = []
     for scope in scopes:
         try:
             for target in build_targets(project_dir, scope):
@@ -5966,9 +5967,16 @@ def project_review_run_judges(project_id):
                     seen.add(target.id)
                     targets.append(target)
         except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
-            return jsonify({"error": str(exc), "scope": scope}), 400
+            # One untranslated chapter in a multi-chapter selection is a reason
+            # to leave that chapter out, not to refuse the whole run. The Review
+            # table lists untranslated chapters, so ticking one is easy — and the
+            # coded sibling above already skips rather than aborts.
+            skipped.append({"scope": scope, "error": str(exc)})
     if not targets:
-        return jsonify({"error": "No translated chunks in scope"}), 400
+        return jsonify({
+            "error": skipped[0]["error"] if skipped else "No translated chunks in scope",
+            "skipped": skipped,
+        }), 400
 
     # The address-map precheck lives in the shared context builder; its error
     # strings already name the `harness.py address-map` fix, so pass them
@@ -5985,6 +5993,19 @@ def project_review_run_judges(project_id):
         return jsonify({"error": "cost_limit must be a number"}), 400
 
     estimated_cost = estimate_suite_cost(judge_names, targets, context)
+    # An explicit flag, not `cost_limit: 0` relying on `estimated_cost > limit`:
+    # a zero-priced provider in llm_config.json makes `0.0 > 0` false, and the
+    # "estimate" would silently start a real metered run.
+    if data.get("dry_run"):
+        return jsonify({
+            "ok": True,
+            "status": "estimate",
+            "estimated_cost": estimated_cost,
+            "cost_limit": cost_limit,
+            "target_count": len(targets),
+            "judges": judge_names,
+            "skipped": skipped,
+        })
     if estimated_cost > cost_limit and not data.get("confirm"):
         return jsonify({
             "ok": True,
@@ -5993,6 +6014,7 @@ def project_review_run_judges(project_id):
             "cost_limit": cost_limit,
             "target_count": len(targets),
             "judges": judge_names,
+            "skipped": skipped,
         })
 
     total = len(targets) * len(judge_names)
@@ -6044,6 +6066,7 @@ def project_review_run_judges(project_id):
         "total": total,
         "target_count": len(targets),
         "estimated_cost": estimated_cost,
+        "skipped": skipped,
     })
 
 

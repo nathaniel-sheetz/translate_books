@@ -192,6 +192,25 @@ def test_a_pinned_bracket_beats_the_cli_config_default(book, cursor_selected):
     assert prof.worker_model == "gpt-5.2[effort=low]"
 
 
+def test_a_pinned_bracket_outranks_the_config_default(book, cursor_selected):
+    """docs/LLM_PROVIDERS.md puts the typed bracket above `headless_effort_<type>`.
+
+    The resolver read the config first, so `with_cursor_effort` overwrote the
+    level the operator typed on `--worker-model` with one they never saw.
+    """
+    _write_cfg(book, headless_effort_judges="high")
+    prof = resolve_profile(
+        book,
+        command="judges",
+        cli="cursor",
+        worker_model="grok-4.5[effort=xhigh]",
+        check_binary=False,
+    )
+    assert prof.effort == "xhigh"
+    assert prof.effort_source == "model-bracket"
+    assert prof.worker_model == "grok-4.5[effort=xhigh]"
+
+
 def test_a_bare_pinned_model_gets_no_invented_bracket(book, cursor_selected):
     """The harness only writes a bracket when something specific asked for one.
 
