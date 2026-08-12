@@ -35,13 +35,14 @@ call from a read-only command.
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 from src.harness import state as hstate
 from src.harness.headless import (
+    cli_binary,
+    cli_binary_present,
     cursor_model_effort,
     default_worker_model,
     warn_cursor_claude_model,
@@ -64,6 +65,21 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
 EFFORT_ARGV = "argv"                  # claude: --effort <level>
 EFFORT_MODEL_BRACKET = "model_bracket"  # cursor: grok-4.5[effort=<level>]
 EFFORT_NONE = "none"                  # nothing carries it; say so out loud
+
+# ``cli_source`` values that mean "nobody chose this, we inferred it". Only these
+# may be second-guessed against what is installed (see :func:`resolve_profile`);
+# ``cli`` (a flag) and ``config`` (a pin) are decisions and are never overridden.
+_DECIDED_CLI_SOURCES = frozenset({"cli", "config"})
+
+
+def _is_guessed_cli(cli_source: str) -> bool:
+    """True when the CLI was inferred (host detection or the bare fallback)."""
+    return cli_source not in _DECIDED_CLI_SOURCES
+
+
+def _other_cli(cli: str) -> str:
+    """The launcher family that is not ``cli``."""
+    return "claude" if cli == "cursor" else "cursor"
 
 
 def usage_log_for(project_dir: Path | str, command: str) -> Path | None:
@@ -207,23 +223,40 @@ def resolve_profile(
         cfg, override=cli, override_source=cli_source, env=env
     )
 
-    # A *guessed* cursor with no cursor-agent installed is a bad guess, not a
+    # A *guess* pointing at a CLI that is not installed is a bad guess, not a
     # decision — quoting Cursor's 17.2k baseline for a wave that will fall back
     # to Claude is the same class of consent error this module exists to kill.
+    # Symmetric, because both directions occur: a Cursor host with no
+    # `cursor-agent`, and — the dashboard's case — a Flask server launched from a
+    # plain shell, where `detect_host` says `unknown`, tier 4 answers `claude`,
+    # and a Cursor-only machine would only discover that at the auth preflight.
+    #
     # An explicit choice is never second-guessed: the launcher already fails
     # closed on a missing binary, and silently running something other than what
-    # the operator asked for is worse than a clear error.
-    if (
-        check_binary
-        and cli_name == "cursor"
-        and cli_source.startswith("host:")
-        and shutil.which("cursor-agent") is None
-    ):
-        warnings.append(
-            "detected a Cursor host but 'cursor-agent' is not on PATH; "
-            "falling back to claude (pass --cli cursor to insist)"
-        )
-        cli_name, cli_source = "claude", "fallback:cursor-agent-missing"
+    # the operator asked for is worse than a clear error. Neither is a guess with
+    # nothing to switch *to* — leaving it in place means the operator is told to
+    # install the CLI the host implies rather than the one we happened to pick.
+    if check_binary and _is_guessed_cli(cli_source) and not cli_binary_present(cli_name):
+        missing_bin = cli_binary(cli_name)
+        alternative = _other_cli(cli_name)
+        if cli_binary_present(alternative):
+            if cli_source.startswith("host:"):
+                reason = f"the detected {host} host"
+            elif cli_source == "manifest":
+                reason = "the prepared manifest"
+            else:
+                reason = "the default (no host detected)"
+            warnings.append(
+                f"{reason} selects {cli_name} but {missing_bin!r} is not on PATH; "
+                f"falling back to {alternative} (pass --cli {cli_name} to insist)"
+            )
+            cli_name, cli_source = alternative, f"fallback:{missing_bin}-missing"
+        else:
+            warnings.append(
+                f"{missing_bin!r} is not on PATH and neither is "
+                f"{cli_binary(alternative)!r}; a headless wave cannot run until "
+                f"one of them is installed"
+            )
 
     # ── worker model ────────────────────────────────────────────────────────
     pinned_model = (worker_model or "").strip()
@@ -323,15 +356,19 @@ def resolve_profile(
     # never be silent: on translate/footnotes it changes the model a book's own
     # prose is written by, and detection can flip it just by opening the project
     # from a different agent.
-    if cli_source.startswith("host:"):
+    #
+    # Every source but a flag and a pin, not just `host:*` — a `fallback:*` from
+    # the missing-binary switch above flips the family exactly as hard, and the
+    # dashboard reaches it more often than detection.
+    if _is_guessed_cli(cli_source):
         prior = _prior_clis(usage_log)
         others = sorted(prior - {cli_name})
         if others:
             warnings.append(
                 f"this book's previous {command} waves ran on "
-                f"{', '.join(others)}; the detected host selects {cli_name}. "
-                f"Pin it with `config-set --key headless_cli --value "
-                f"{others[0]}` if that is not intended"
+                f"{', '.join(others)}; this one resolves to {cli_name} "
+                f"({cli_source}). Pin it with `config-set --key headless_cli "
+                f"--value {others[0]}` if that is not intended"
             )
 
     return HeadlessProfile(

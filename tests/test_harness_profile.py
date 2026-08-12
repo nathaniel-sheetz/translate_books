@@ -61,6 +61,27 @@ def _cursor_cli_config(tmp_path, model="grok-4.5", effort="high"):
 
 
 @pytest.fixture
+def installed(monkeypatch):
+    """Control which launcher binaries ``shutil.which`` can find.
+
+    Patched on the ``shutil`` module itself rather than on an importer, so the
+    profile's guard and :mod:`src.harness.headless` (which owns the name → family
+    table) agree about what this machine has.
+    """
+    import shutil
+
+    def _install(*names: str):
+        wanted = set(names)
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name: f"/usr/local/bin/{name}" if name in wanted else None,
+        )
+
+    return _install
+
+
+@pytest.fixture
 def cursor_selected(tmp_path, monkeypatch):
     """Point cursor_default_model at a controlled cli-config."""
     from src.harness import headless
@@ -278,10 +299,8 @@ def test_effort_default_sentinel_leaves_the_cursor_bracket_alone(book, cursor_se
 # ── warnings ────────────────────────────────────────────────────────────────
 
 
-def test_a_missing_cursor_agent_downgrades_a_guess_but_not_a_choice(book, monkeypatch):
-    import src.harness.profile as profile_mod
-
-    monkeypatch.setattr(profile_mod.shutil, "which", lambda _name: None)
+def test_a_missing_cursor_agent_downgrades_a_guess_but_not_a_choice(book, installed):
+    installed("claude")
     _write_cfg(book)
 
     guessed = resolve_profile(book, command="judges", env=_CURSOR_HOST)
@@ -293,6 +312,51 @@ def test_a_missing_cursor_agent_downgrades_a_guess_but_not_a_choice(book, monkey
     # silently running something else is worse than a clear error.
     chosen = resolve_profile(book, command="judges", cli="cursor")
     assert chosen.cli == "cursor" and chosen.cli_source == "cli"
+
+
+def test_a_guessed_claude_switches_to_a_cursor_only_machine(book, installed):
+    """The dashboard's case, and the mirror of the test above.
+
+    A Flask server started from a plain shell detects no host, so tier 4 answers
+    `claude` — on a machine that only has `cursor-agent`, that used to surface
+    as an auth-preflight failure after the operator had already consented to a
+    Claude-priced wave.
+    """
+    installed("cursor-agent")
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", env={})
+    assert prof.cli == "cursor"
+    assert prof.cli_source == "fallback:claude-missing"
+    assert any("'claude' is not on PATH" in w for w in prof.warnings)
+
+
+def test_a_pinned_cli_is_never_switched_for_a_missing_binary(book, installed):
+    """A pin is a decision. The launcher's clear error beats a silent swap."""
+    installed("cursor-agent")
+    cfg = _write_cfg(book, headless_cli="claude")
+
+    prof = resolve_profile(book, command="judges", cfg=cfg, env={})
+    assert (prof.cli, prof.cli_source) == ("claude", "config")
+
+
+def test_no_cli_installed_keeps_the_guess_and_names_both_binaries(book, installed):
+    """With nothing to switch *to*, switching only misnames what to install."""
+    installed()
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", env=_CURSOR_HOST)
+    assert (prof.cli, prof.cli_source) == ("cursor", "host:cursor")
+    assert any("cursor-agent" in w and "claude" in w for w in prof.warnings)
+
+
+def test_the_binary_switch_is_inert_when_both_are_installed(book, installed):
+    installed("claude", "cursor-agent")
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", env=_CURSOR_HOST)
+    assert (prof.cli, prof.cli_source) == ("cursor", "host:cursor")
+    assert not any("not on PATH" in w for w in prof.warnings)
 
 
 def test_a_claude_alias_on_cursor_still_warns_from_every_entry_point(book):
@@ -321,6 +385,26 @@ def test_a_host_driven_cli_flip_warns_against_this_books_history(book):
     # An explicitly pinned CLI is a decision, not a drift — no warning.
     pinned = resolve_profile(book, command="judges", cli="claude")
     assert not any("previous judges waves" in w for w in pinned.warnings)
+
+
+def test_a_bare_fallback_also_warns_about_a_mid_book_flip(book, installed):
+    """The flip warning is about *guesses*, and the bare fallback is one.
+
+    The dashboard hits it more often than host detection does: a server started
+    from a plain shell detects nothing, so the previous-waves check only fires
+    for it once it stops keying on `host:`.
+    """
+    installed("claude", "cursor-agent")
+    _write_cfg(book)
+    log = book / ".harness" / "judges" / "usage.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        json.dumps({"cli": "cursor", "rc": 0, "id": "j1"}) + "\n", encoding="utf-8"
+    )
+
+    prof = resolve_profile(book, command="judges", env={})
+    assert (prof.cli, prof.cli_source) == ("claude", "fallback")
+    assert any("previous judges waves ran on cursor" in w for w in prof.warnings)
 
 
 def test_profile_resolves_without_a_config_file(tmp_path):

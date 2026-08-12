@@ -27,7 +27,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.evaluators import aggregate_results
 from src.harness.headless import default_worker_model
@@ -230,7 +230,8 @@ _COMMIT_SCHEMA = {
     "entry per judge, not per target — use results[] for per-target counts. The parallel "
     "'evaluator_results' array is omitted here: it carries no target_id, so N same-named "
     "entries could not be attributed and results[] already has everything in it",
-    "run_header": "reproducibility metadata: judge versions, prompt hashes, backend=subagent, worker_model, git_commit",
+    "run_header": "reproducibility metadata: judge versions, prompt hashes, backend "
+    "('subagent' for Task workers, 'headless:<cli>' for a CLI wave), worker_model, git_commit",
     "results": "per committed (target, judge): serialized EvalResult",
     "persisted_dir": "directory the --persist files were written to, else null",
     "persisted": "evaluations/*.json FILENAMES (join with persisted_dir) written when "
@@ -546,6 +547,7 @@ def fanout(
     worker_model: str | None = None,
     cache: str | None = None,
     runner=None,
+    on_job_done: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave for judge-prepare manifest entries.
 
@@ -577,6 +579,11 @@ def fanout(
     to the manifest, because ``commit`` stamps it into each result's metadata and
     a silent divergence there would misreport what judged the book.
     ``cache`` is a per-run override of ``headless_prompt_cache``.
+
+    ``on_job_done`` is handed straight to
+    :func:`~src.harness.headless.run_headless_wave` and fires once per finished
+    job, so a caller with a progress bar (the dashboard) is not blind for the
+    several minutes a wave takes. Unset, the wave behaves exactly as before.
     """
     from src.harness.headless import (
         _build_cmd,
@@ -883,6 +890,7 @@ def fanout(
         extra_flags=extra_flags,
         effort=resolved_effort,
         cache=requested_cache,
+        on_job_done=on_job_done,
     )
 
     if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):
@@ -937,7 +945,9 @@ def fanout(
     return _with_profile(out)
 
 
-def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
+def commit(
+    project_dir: Path, *, persist: bool = False, backend: str | None = None
+) -> dict[str, Any]:
     """Collect ``judge-worker`` drafts, parse them, and (optionally) persist.
 
     Reads the ``prepare`` manifest; for each entry reads the worker's draft and
@@ -955,8 +965,16 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     dropped); a malformed per-item verdict is ``failed``; and an unparseable batch
     draft fails every member — so re-spawn/recovery is per target, and everything
     is accounted for exactly as in the solo path.
+
+    ``backend`` labels *what produced these drafts*, on each result's metadata and
+    in the run header. It defaults to ``"subagent"`` — Task-tool workers, the only
+    thing that used to write them — and the dashboard's CLI path passes
+    ``"headless:claude"`` / ``"headless:cursor"``, so a persisted verdict says
+    which launcher judged the book rather than implying a spawn that never
+    happened.
     """
     project_dir = Path(project_dir)
+    backend = (backend or "subagent").strip() or "subagent"
     jdir = _judges_dir(project_dir)
     manifest_path = jdir / "manifest.json"
     if not manifest_path.exists():
@@ -1045,7 +1063,7 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
         # Stamp how this result was produced so a persisted judge entry is
         # self-describing (the API path records model/provider; here we record
         # the worker tier + backend).
-        result.metadata["backend"] = "subagent"
+        result.metadata["backend"] = backend
         result.metadata["worker_model"] = worker_model
 
         results.append(result)
@@ -1147,7 +1165,7 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
         target_count=len(all_target_ids),
         model=context["judge_model"],
         provider=context["judge_provider"],
-        backend="subagent",
+        backend=backend,
         worker_model=worker_model,
     )
 

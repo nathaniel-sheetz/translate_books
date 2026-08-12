@@ -42,6 +42,22 @@ its source. See it without running anything:
 python scripts/run_judges.py profile --project <slug> [--command translate]
 ```
 
+A *guess* (tier 3 or 4) that names a CLI this machine does not have is corrected to the
+other family when that one **is** installed, with a warning and
+`cli_source: "fallback:<binary>-missing"` — quoting Cursor's 17.2k baseline for a wave that
+will run on Claude is the same consent error the profile exists to kill. A flag or a pin is
+never second-guessed: the launcher already fails closed on a missing binary, and silently
+running something other than what was asked for is worse than a clear error. With neither
+binary installed the guess stands, so the error names the CLI the host implies.
+
+**In the dashboard, the host signal is the process that launched the server.** `detect_host`
+reads the Flask process's env, which is fixed for the life of the server, so it reflects
+whoever ran `python -m web_ui.app` — not who is clicking in the browser. That is why the
+Review tab's judge modal prints the provenance line beside the CLI select and offers
+**Remember this CLI for this book**: the checkbox writes `headless_cli` through
+`POST /api/project/<id>/judges/pin-cli`, which is exactly
+`config-set --key headless_cli --value <family>` and outranks detection from then on.
+
 **Never call `detect_host()` from inside a spawned worker.** `CLAUDECODE` survives the
 credential scrub on purpose, so a `cursor-agent` child of a Claude Code parent inherits
 it (and vice versa) — a worker would detect its *parent's* host. That is why detection

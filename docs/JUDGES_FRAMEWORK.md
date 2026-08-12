@@ -55,6 +55,14 @@ A judge runs one of two interchangeable ways (the same split as translate-harnes
   blocks the wave unless a login is confirmed (`docs/LLM_PROVIDERS.md`).
   Task workers remain Claude-only.
 
+**The dashboard drives two of these three.** The Review tab's *Run LLM judges* modal has a
+backend picker: *API (metered)* and *Headless CLI (subscription)*, the latter running
+`prepare` → `fanout` → `commit(persist=True)` as one background job. The Task-subagent
+backend stays skill-only — a Flask worker thread cannot spawn Task workers. The modal
+resolves its defaults through the same `resolve_profile` call as `run_judges.py profile`,
+so the GUI and the CLI cannot disagree about what a wave will run as; see
+[WEB_UI_GUIDE.md](WEB_UI_GUIDE.md#the-llm-judge-panel-two-backends).
+
 ### One resolved profile per wave
 
 `prepare` and `fanout` both resolve the CLI, worker model, effort and token baseline
@@ -81,8 +89,11 @@ The two share one seam: every judge implements `build_prompt(target, context)` a
 *build → call LLM → parse*; the subagent path renders the same `build_prompt` output
 to a file and runs the same `parse_response` on the worker's draft. So the prompt is
 byte-identical and the persisted `EvalResult` is the same whichever backend ran — the
-run header records `backend` (`"api"` | `"subagent"`) and, for the subagent path,
-`worker_model`. `parse_response` raises `JudgeParseError` on unparseable output so the
+run header records `backend` (`"api"` | `"subagent"` | `"headless:claude"` |
+`"headless:cursor"`) and, for the draft-based paths, `worker_model`. The `headless:*`
+labels come from the dashboard's CLI path (`commit(backend=…)`), so a persisted verdict
+names the launcher that produced it rather than implying a Task spawn that never happened;
+`run_judges.py status --detail` reports it back. `parse_response` raises `JudgeParseError` on unparseable output so the
 API path can retry while the subagent `commit` marks the draft failed for re-spawn.
 
 Subagent files live under `<project>/.harness/judges/` (`<target>.<judge>.prompt.txt`,

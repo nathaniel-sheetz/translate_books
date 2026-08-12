@@ -5924,15 +5924,81 @@ def project_review_run_coded(project_id):
 
 _JUDGE_COST_LIMIT_DEFAULT = 0.50
 
+# The two backends the dashboard can drive. The Task-subagent backend stays
+# skill-only on purpose: a Flask worker thread cannot spawn Task workers.
+_JUDGE_BACKENDS = ("api", "headless")
 
-@app.route("/api/project/<project_id>/review/run-judges", methods=["POST"])
-def project_review_run_judges(project_id):
-    """Run tailored LLM judges over selected chapters (or the whole book).
 
-    Metered API path only — the headless/subagent backends stay in the
-    judge-review skill. Refuses to spend past ``cost_limit`` without an
-    explicit ``confirm``, and returns the estimate so the UI can show it before
-    the click rather than as a surprise afterwards.
+def _headless_profile_payload(
+    project_dir: Path, command: str, cli: Optional[str] = None
+) -> dict:
+    """The resolved wave profile, plus the little a picker needs to render it.
+
+    ``prof.to_payload()`` is relayed **unmodified**, so this and
+    ``run_judges.py profile`` cannot drift: the GUI must never re-derive the CLI,
+    worker model, effort or baseline from config on its own — four layers that
+    disagree is precisely the bug :mod:`src.harness.profile` exists to end.
+    Everything added alongside it is render-only.
+
+    ``cli`` previews a different family: the whole block re-resolves together
+    (model, effort, channel, baseline), because those fields are only
+    interpretable as a set.
+
+    Spawns nothing — the auth probe is slow and belongs to the estimate step —
+    except, on Cursor, the token-free ``cursor-agent models`` read behind
+    :func:`~src.harness.headless.worker_model_suggestions`, which fails open.
+    """
+    from src.harness import state as hstate
+    from src.harness.headless import cli_binary_present, worker_model_suggestions
+    from src.harness.profile import resolve_profile
+
+    cfg = hstate.load_config(project_dir)
+    prof = resolve_profile(project_dir, command=command, cli=cli, cfg=cfg)
+    binaries = {name: cli_binary_present(name) for name in hstate.HEADLESS_CLIS}
+    return {
+        **prof.to_payload(),
+        "cli_choices": list(hstate.HEADLESS_CLIS),
+        "worker_model_suggestions": worker_model_suggestions(prof.cli),
+        "prompt_cache": hstate.resolve_prompt_cache(cfg),
+        "prompt_cache_choices": list(hstate.CACHE_MODES),
+        # cursor-agent has no cache-TTL lever at all, so the control is hidden
+        # rather than shown-and-ignored.
+        "prompt_cache_supported": prof.cli == "claude",
+        "effort_choices": [*hstate.EFFORT_LEVELS, "default"],
+        "binaries": binaries,
+        # Open on the subscription path when it can actually run here.
+        "default_backend": "headless" if binaries.get(prof.cli) else "api",
+    }
+
+
+@app.route("/api/project/<project_id>/judges/profile", methods=["GET"])
+def project_judges_profile(project_id):
+    """What a headless judge wave would run as, and why. Read-only, no spend."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    from src.harness import state as hstate
+
+    cli = (request.args.get("cli") or "").strip().lower() or None
+    if cli is not None and cli not in hstate.HEADLESS_CLIS:
+        return jsonify({
+            "error": f"cli must be one of {', '.join(hstate.HEADLESS_CLIS)}"
+        }), 400
+    return jsonify(_headless_profile_payload(project_dir, "judges", cli=cli))
+
+
+@app.route("/api/project/<project_id>/judges/pin-cli", methods=["POST"])
+def project_judges_pin_cli(project_id):
+    """Pin ``headless_cli`` for this book, so a good guess becomes permanent.
+
+    Narrow on purpose: the ``/config`` endpoints manage the *project*
+    ``config.json``, while this writes the one harness key
+    (``.harness/config.json``) the dashboard needs — the same thing
+    ``config-set --key headless_cli`` does, and the tier that outranks detection
+    forever after.
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
@@ -5940,10 +6006,86 @@ def project_review_run_judges(project_id):
     if not project_dir.exists():
         return jsonify({"error": "Project not found"}), 404
 
-    from src.judges import ScopeError, build_judge_context, build_targets, estimate_suite_cost
+    from src.harness import state as hstate
+
+    data = request.json or {}
+    value = data.get("cli")
+    if not isinstance(value, str) or value.strip().lower() not in hstate.CLI_VALUES:
+        return jsonify({
+            "error": f"cli must be one of {', '.join(sorted(hstate.CLI_VALUES))}"
+        }), 400
+    value = value.strip().lower()
+
+    cfg = hstate.load_config(project_dir)
+    cfg["headless_cli"] = value
+    hstate.save_config(project_dir, cfg)
+    return jsonify({"ok": True, "headless_cli": value})
+
+
+def _parse_headless_overrides(data: dict) -> tuple[Optional[dict], Optional[str]]:
+    """Validate the four CLI knobs off a run-judges body.
+
+    ``None`` for a field is the **normal** case and means "let ``resolve_profile``
+    decide". Pre-filling the resolved value and sending it back would make
+    ``cli_source`` read ``"cli"`` — "a flag said so" — when nothing did, and the
+    provenance this whole feature rests on would become a lie.
+    """
+    from src.harness import state as hstate
+
+    def _one(key: str, allowed) -> tuple[Optional[str], Optional[str]]:
+        raw = data.get(key)
+        if raw is None:
+            return None, None
+        if not isinstance(raw, str) or raw.strip().lower() not in allowed:
+            return None, f"{key} must be one of {', '.join(sorted(allowed))} or null"
+        return raw.strip().lower(), None
+
+    out: dict = {}
+    for key, allowed in (
+        ("cli", hstate.HEADLESS_CLIS),
+        ("effort", hstate.EFFORT_VALUES),
+        ("prompt_cache", hstate.CACHE_VALUES),
+    ):
+        value, err = _one(key, allowed)
+        if err:
+            return None, err
+        out[key] = value
+
+    worker_model = data.get("worker_model")
+    if worker_model is not None:
+        if not isinstance(worker_model, str) or not worker_model.strip():
+            return None, "worker_model must be a non-empty string or null"
+        worker_model = worker_model.strip()
+    out["worker_model"] = worker_model
+    return out, None
+
+
+@app.route("/api/project/<project_id>/review/run-judges", methods=["POST"])
+def project_review_run_judges(project_id):
+    """Run tailored LLM judges over selected chapters (or the whole book).
+
+    Two backends behind one route, sharing every guard below: ``api`` (metered,
+    gated on ``cost_limit``) and ``headless`` (the subscription CLI wave, gated
+    on an explicit confirmation of a fetched token estimate). Both persist
+    through ``merge_judge_result``, so the Review tab's pips and the reader's
+    findings look the same whichever ran.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    from src.judges import ScopeError, build_judge_context, build_targets
     from src.judges.registry import available_judges
 
     data = request.json or {}
+    backend = str(data.get("backend") or "api").strip().lower()
+    if backend not in _JUDGE_BACKENDS:
+        return jsonify({
+            "error": f"backend must be one of {', '.join(_JUDGE_BACKENDS)}"
+        }), 400
+
     chapter_ids, err = _parse_chapter_ids(data)
     if err:
         return jsonify({"error": err}), 400
@@ -5980,12 +6122,34 @@ def project_review_run_judges(project_id):
 
     # The address-map precheck lives in the shared context builder; its error
     # strings already name the `harness.py address-map` fix, so pass them
-    # through verbatim rather than paraphrasing them here.
+    # through verbatim rather than paraphrasing them here. The judge model /
+    # provider are the API path's; on the CLI path the worker model *is* the
+    # model, so recording an API one in the manifest would misreport the run.
     context, ctx_error = build_judge_context(
-        project_dir, judge_names, data.get("model") or None, data.get("provider") or None,
+        project_dir,
+        judge_names,
+        (data.get("model") or None) if backend == "api" else None,
+        (data.get("provider") or None) if backend == "api" else None,
     )
     if ctx_error:
         return jsonify({"error": ctx_error}), 409
+
+    if backend == "headless":
+        live_scopes = [s for s in scopes if s not in {sk["scope"] for sk in skipped}]
+        return _run_judges_headless(
+            project_id, project_dir, data, judge_names, live_scopes, targets,
+            context, skipped,
+        )
+    return _run_judges_api(
+        project_id, project_dir, data, judge_names, targets, context, skipped
+    )
+
+
+def _run_judges_api(
+    project_id, project_dir, data, judge_names, targets, context, skipped
+):
+    """Metered API backend: one LLM call per (target, judge), behind a $ gate."""
+    from src.judges import estimate_suite_cost
 
     try:
         cost_limit = float(data.get("cost_limit", _JUDGE_COST_LIMIT_DEFAULT))
@@ -6066,6 +6230,176 @@ def project_review_run_judges(project_id):
         "total": total,
         "target_count": len(targets),
         "estimated_cost": estimated_cost,
+        "skipped": skipped,
+    })
+
+
+def _run_judges_headless(
+    project_id, project_dir, data, judge_names, scopes, targets, context, skipped
+):
+    """Subscription CLI backend: the same judges, run as one headless wave.
+
+    Three states, and the order matters. Without ``estimate`` or ``confirm`` this
+    returns ``needs_confirm`` and starts nothing: unlike the API path there is no
+    threshold below which a run is cheap enough to skip the gate, because what is
+    being spent is a subscription's context budget and the only honest number for
+    it is a fetched estimate. ``estimate`` preflights the CLI and projects the
+    tokens with zero spawns. ``confirm`` runs ``prepare`` -> ``fanout`` ->
+    ``commit(persist=True)`` as one background job.
+    """
+    from src.harness.headless import preflight_error
+    from src.harness.profile import resolve_profile
+    from src.judges import subagent
+
+    overrides, err = _parse_headless_overrides(data)
+    if err:
+        return jsonify({"error": err}), 400
+    cli = overrides["cli"]
+    worker_model = overrides["worker_model"]
+    effort = overrides["effort"]
+    prompt_cache = overrides["prompt_cache"]
+
+    want_estimate = bool(data.get("estimate"))
+    want_run = bool(data.get("confirm"))
+    if not want_estimate and not want_run:
+        return jsonify({
+            "ok": True,
+            "status": "needs_confirm",
+            "target_count": len(targets),
+            "judges": judge_names,
+            "skipped": skipped,
+        })
+
+    # Only to know which binary to preflight and which family to label the
+    # commit with — the overrides below still go down as the caller sent them,
+    # `None` and all, so `prepare` resolves them itself (and `cli_source` keeps
+    # telling the truth about who chose).
+    prof = resolve_profile(
+        project_dir,
+        command="judges",
+        cli=cli,
+        worker_model=worker_model,
+        effort=effort,
+    )
+
+    def _prepare():
+        return subagent.prepare(
+            project_dir,
+            judge_names,
+            scopes,
+            context=context,
+            cli=cli,
+            worker_model=worker_model,
+            effort=effort,
+        )
+
+    if want_estimate:
+        # Fail closed *here*: `fanout(estimate=True)` returns before the launcher
+        # runs its auth preflight, so without this a logged-out CLI reads as a
+        # green light and only fails after the operator has consented.
+        auth_error = preflight_error(prof.cli)
+        if auth_error:
+            return jsonify({
+                "error": auth_error,
+                "effective": prof.to_payload(),
+            }), 409
+        try:
+            _prepare()
+            out = subagent.fanout(project_dir, estimate=True, cache=prompt_cache)
+        except (OSError, ValueError, NotImplementedError) as exc:
+            app.logger.exception("Judge estimate failed for %s", project_id)
+            return jsonify({"error": f"Could not estimate: {exc}"}), 400
+        if out.get("error"):
+            return jsonify({"error": out["error"]}), 400
+        estimate = out.get("estimate") or {}
+        return jsonify({
+            "ok": True,
+            "status": "estimate",
+            # Relayed whole: `baseline_tokens` means nothing without `cli`, and
+            # `effort` means nothing without `effort_channel`.
+            "effective": out.get("effective") or prof.to_payload(),
+            "jobs": estimate.get("jobs", 0),
+            "prompt_tokens": estimate.get("prompt_tokens", 0),
+            "projected_tokens": estimate.get("projected_tokens", 0),
+            "baseline_tokens": estimate.get("baseline_tokens", 0),
+            "baseline_source": estimate.get("baseline_source"),
+            "argv": estimate.get("argv") or [],
+            "cache": estimate.get("cache"),
+            "warnings": out.get("warnings") or [],
+            "target_count": len(targets),
+            "judges": judge_names,
+            "skipped": skipped,
+        })
+
+    # One job per project, so the whole cycle runs inside one body — same shape
+    # as the API path, and the same guaranteed terminal `complete`.
+    total = len(targets) * len(judge_names)
+
+    def body(emit):
+        emit("phase", phase="prepare", message="Preparing prompts…")
+        # Re-prepared inside the job (idempotent, no spend) so the manifest the
+        # wave runs from is this request's, not whatever an estimate left behind.
+        prep = _prepare()
+        entries = len(prep.get("manifest") or [])
+        emit(
+            "phase", phase="fanout",
+            message=f"Running {entries} CLI job(s)…", total=entries,
+        )
+        out = subagent.fanout(
+            project_dir,
+            cache=prompt_cache,
+            on_job_done=lambda rec: emit(
+                "target_done",
+                target_id=rec.get("id"),
+                index=rec.get("done"),
+                total=rec.get("total"),
+                ok=rec.get("ok"),
+            ),
+        )
+        if out.get("error"):
+            # A launcher error (missing binary, failed preflight) means no job
+            # ever ran; report it as the stop it is rather than as 0 of N done.
+            return {"fatal": out["error"], "effective": out.get("effective")}
+
+        cli_name = out.get("cli") or prof.cli
+        emit("phase", phase="commit", message="Committing verdicts…")
+        landed = subagent.commit(
+            project_dir, persist=True, backend=f"headless:{cli_name}"
+        )
+
+        errors = [f"{f.get('id')}: {f.get('error')}" for f in out.get("failed") or []]
+        errors += [
+            f"{f.get('target_id')}/{f.get('judge')}: {f.get('problem')}"
+            for f in landed.get("failed") or []
+        ]
+        errors += list(landed.get("persist_errors") or [])
+        counts = landed.get("counts") or {}
+        return {
+            "ran": counts.get("committed", 0),
+            "total": entries or total,
+            "wrote": len(out.get("wrote") or []),
+            "failed": len(out.get("failed") or []),
+            "error_count": len(errors),
+            "errors": errors[:5],
+            # The wave's *measured* overhead_ratio, not the projection — the
+            # completion line is the one place the estimate can be checked.
+            "usage": out.get("usage"),
+            "effective": out.get("effective"),
+        }
+
+    try:
+        job_id = jobs.start_job(project_id, "review-judges", body)
+    except jobs.JobConflict as conflict:
+        return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
+
+    return jsonify({
+        "ok": True,
+        "status": "started",
+        "job_id": job_id,
+        "total": total,
+        "target_count": len(targets),
+        "backend": "headless",
+        "effective": prof.to_payload(),
         "skipped": skipped,
     })
 

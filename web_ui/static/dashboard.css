@@ -961,6 +961,58 @@
     white-space: pre-line;
 }
 
+/* The profile's own warnings — a mid-book CLI flip, a Claude alias on Cursor, an
+   effort that nothing will carry. Relayed verbatim, so they need room to wrap. */
+.judges-warnings {
+    margin: 8px 0 16px;
+    padding: 8px 10px;
+    background: #fff8e1;
+    border: 1px solid #f5e0a3;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #7a5c00;
+}
+
+.judges-warnings p { margin: 0 0 4px; }
+.judges-warnings p:last-child { margin-bottom: 0; }
+
+.judges-estimate {
+    margin: 12px 0;
+    padding: 10px 12px;
+    background: #f8f9fa;
+    border: 1px solid #e3e6e8;
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.judges-estimate dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 12px;
+    margin: 0;
+}
+
+.judges-estimate dt { color: #666; }
+.judges-estimate dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+.judges-estimate details { margin-top: 8px; }
+.judges-estimate summary { cursor: pointer; color: #666; font-size: 12px; }
+
+.judges-estimate pre {
+    margin: 6px 0 0;
+    padding: 8px;
+    background: #fff;
+    border: 1px solid #e3e6e8;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.judges-estimate #btn-judges-confirm { margin-top: 10px; }
+
 /* ── Status pill ── */
 
 .status-pill {

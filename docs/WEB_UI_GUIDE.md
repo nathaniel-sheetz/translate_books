@@ -330,10 +330,52 @@ whether a chapter is aligned at all, which the Align/Realign action already says
 **Judges…**. The toolbar runs the same two actions over the ticked chapters, or over the
 whole book when nothing is ticked. Both run as background jobs with a progress modal.
 
-The LLM judge panel shows an estimate before you commit. A run whose estimate exceeds
-`cost_limit` (default $0.50) comes back `needs_confirm` **without calling an LLM**;
-confirming re-posts it. Asking for the address judge on a book with no `address_map.json`
-409s with the `harness.py address-map` commands that fix it.
+### The LLM judge panel: two backends
+
+The **Backend** picker chooses how the same judges, over the same scope, actually run:
+
+- **API (metered)** — one LLM call per (chunk, judge), behind the dollar gate. A run whose
+  estimate exceeds `cost_limit` (default $0.50) comes back `needs_confirm` **without calling
+  an LLM**; confirming re-posts it.
+- **Headless CLI (subscription)** — one background CLI wave (`claude -p` or `cursor-agent -p`)
+  through `prepare` → `fanout` → `commit`, the same three verbs the judge-review skill drives.
+  No dollars; what it spends is subscription context.
+
+Whichever runs, the verdicts persist through the same `merge_judge_result` seam, so the pips,
+the reader's Review Mode and `run_judges.py status` see one result shape. A CLI wave stamps
+`backend: "headless:claude"` / `"headless:cursor"` on each verdict, so you can tell later what
+judged the book.
+
+**The CLI fields are not guesses the GUI makes.** Opening the modal fetches
+`judges/profile`, which is [`resolve_profile`](LLM_PROVIDERS.md)'s answer verbatim — the same block `python scripts/run_judges.py profile` prints — so the CLI,
+worker model, effort and token baseline are resolved once, together, with their provenance:
+
+- The line under the CLI select says *why* ("detected from the session running this
+  dashboard", "pinned for this book", "default (no host detected)"). The dashboard's host
+  signal is the process that ran `python -m web_ui.app`, not the browser, so a guess is shown
+  as a guess.
+- **Remember this CLI for this book** writes `headless_cli` into `.harness/config.json` —
+  identical to `harness.py config-set --key headless_cli` — which outranks detection from then
+  on. Unticking it restores `auto`.
+- **Effort** is offered on both CLIs, and the line under it names the channel that carries the
+  level: `--effort` on Claude, the model's `[effort=…]` bracket on Cursor, or "nothing on this
+  CLI carries it" (an `auto` Cursor model takes no bracket — pin a concrete model).
+- **Prompt cache** is Claude-only and hidden on Cursor, which has no cache-TTL lever.
+- Any field left alone is sent as `null`, so the server resolves it. That is deliberate: a GUI
+  that echoed the resolved values back would make the provenance read "a flag said so" when
+  nothing did.
+
+Switching the CLI select re-fetches the whole profile; the worker model, effort, channel and
+baseline change together rather than the JS synthesizing the other family's answers.
+
+**Estimate, then confirm.** The CLI path has no threshold — **Estimate tokens** preflights the
+CLI (a logged-out or uninstalled CLI 409s here with the CLI's own `login` instruction, before
+anything is prepared) and returns process count, projected tokens with their baseline source,
+the effective effort and channel, and the rendered argv. Only then does Confirm start the wave.
+Changing judges, scope, CLI, worker model, effort or cache invalidates the estimate.
+
+Asking for the address judge on a book with no `address_map.json` 409s with the
+`harness.py address-map` commands that fix it, on both backends.
 
 **APIs:**
 - `GET /api/project/<id>/review-status` — the whole table: per-chapter `flag_counts`,
@@ -343,12 +385,30 @@ confirming re-posts it. Asking for the address judge on a book with no `address_
   or a run finishes.
 - `POST /api/project/<id>/review/run-coded` — `{chapter_ids: [...] | null, evaluators: [...] | null}`.
   No API spend. Returns `{job_id, total}`.
-- `POST /api/project/<id>/review/run-judges` — `{chapter_ids, judges, provider, model, confirm, cost_limit}`.
-  Returns `{status: "needs_confirm", estimated_cost, target_count}` or `{status: "started", job_id}`.
-  Metered API backend only; the headless/subagent backends stay in the judge-review skill.
+- `GET /api/project/<id>/judges/profile[?cli=claude|cursor]` — `resolve_profile`'s payload
+  (`cli`, `cli_source`, `worker_model`, `effort`, `effort_channel`, `baseline_tokens`, `host`,
+  `warnings`, …) plus render-only extras: `cli_choices`, `worker_model_suggestions`,
+  `prompt_cache`, `prompt_cache_supported`, `binaries`, `default_backend`. Read-only; runs no
+  auth probe (that belongs to the estimate step).
+- `POST /api/project/<id>/judges/pin-cli` — `{cli: "claude"|"cursor"|"auto"}`. Writes that one
+  key to `.harness/config.json`. (The `/config` endpoints manage the *project* `config.json`;
+  this is the only harness key the dashboard writes.)
+- `POST /api/project/<id>/review/run-judges` — `{chapter_ids, judges, backend, …}`.
+  With `backend: "api"` (the default): `{provider, model, confirm, cost_limit, dry_run}` →
+  `{status: "estimate" | "needs_confirm", estimated_cost, target_count}` or
+  `{status: "started", job_id}`.
+  With `backend: "headless"`: `{cli, worker_model, effort, prompt_cache, estimate, confirm}`,
+  each knob `null` to let the server resolve it → `{status: "needs_confirm"}` when neither flag
+  is set, `{status: "estimate", effective, jobs, prompt_tokens, projected_tokens, argv, cache,
+  warnings}` for `estimate: true`, or `{status: "started", job_id, effective}` for
+  `confirm: true`. A failed CLI preflight is a 409 carrying the CLI's own message.
+  The Task-subagent backend stays in the judge-review skill — a Flask worker thread cannot
+  spawn Task workers.
 - `GET /api/project/<id>/jobs/<job_id>/sse` — progress for either run. Always ends in one
   terminal `complete` event, carrying `fatal` if the job died (the grammar evaluator drives
-  a JVM that has crashed before; the progress bar must never just stop).
+  a JVM that has crashed before; the progress bar must never just stop). A CLI wave also
+  emits `phase` events (`prepare` / `fanout` / `commit`), because the two ends of the cycle
+  report no per-job progress at all.
 - `POST /api/project/<id>/combine/<chapter>` — combine chunks → `chapters/<chapter>.txt`
 - `POST /api/project/<id>/align/<chapter>` — applies any pending corrections for the chapter to chunk files first, then refreshes `chapters/<chapter>.txt` (re-combines chunks) and writes sentence alignment → `alignments/<chapter>.json`. Response includes `corrections_applied: N` with the count of queued corrections that were patched into chunks before realigning.
 

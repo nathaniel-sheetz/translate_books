@@ -40,6 +40,7 @@ a convention that decays.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -58,6 +59,8 @@ from src.harness.usage import (
     rollup,
     usage_from_envelope,
 )
+
+logger = logging.getLogger(__name__)
 
 Runner = Callable[..., tuple[int, str, str]]
 
@@ -601,6 +604,28 @@ def _default_bin(cli: str) -> str:
     return _CLI_DEFAULT_BINS[cli]
 
 
+def cli_binary(cli: str) -> str | None:
+    """The launcher executable a family runs, before PATH resolution.
+
+    Public because two callers outside the wave path need the name-to-family
+    mapping and must not reach into ``_CLI_DEFAULT_BINS``:
+    :mod:`src.harness.profile` (to tell a bad guess from a good one) and the
+    dashboard (to say which backends this machine can offer at all).
+    """
+    return _CLI_DEFAULT_BINS.get((cli or "").strip().lower())
+
+
+def cli_binary_present(cli: str) -> bool:
+    """True when this family's launcher resolves on PATH.
+
+    ``shutil.which``, not ``os.path.exists``: on Windows the npm shim is
+    ``claude.cmd`` and only a PATHEXT-aware lookup finds it — the same
+    resolution :func:`run_headless_wave` does before it spawns.
+    """
+    name = cli_binary(cli)
+    return bool(name) and shutil.which(name) is not None
+
+
 def _bin_missing_error(cli: str, cli_bin: str) -> str:
     if cli == "cursor":
         return (
@@ -805,6 +830,62 @@ def subscription_auth_error(
         f"could not confirm a subscription login for {cli_bin}: "
         f"{json.dumps(safe, sort_keys=True)[:300]}"
     )
+
+
+def preflight_error(cli: str, cli_bin: str | None = None) -> str | None:
+    """Why a wave on ``cli`` would refuse to start, or ``None`` if it would run.
+
+    The same two gates :func:`run_headless_wave` applies before its first job --
+    binary resolution and the subscription probe -- hoisted so a caller can fail
+    closed *before* it prepares anything. ``fanout(estimate=True)`` returns
+    before the launcher is reached, so without this an estimate on a logged-out
+    or uninstalled CLI reads as a green light and the failure only lands after
+    the operator has consented to a run.
+
+    Returns the CLI's own message verbatim: it already names the fix (``claude``
+    + ``/login``, ``cursor-agent login``, install the Cursor CLI), and
+    paraphrasing it is how a caller ends up telling someone to run the wrong
+    command.
+    """
+    try:
+        cli_name = _normalize_cli(cli)
+    except ValueError as exc:
+        return str(exc)
+    name = cli_bin or _default_bin(cli_name)
+    resolved = shutil.which(name)
+    if not resolved:
+        return _bin_missing_error(cli_name, name)
+    return subscription_auth_error(
+        cli_name,
+        resolved,
+        subscription_env(cli_name),
+        cwd=neutral_claude_cwd(),
+    )
+
+
+def worker_model_suggestions(cli: str, *, timeout: float = 10.0) -> list[str]:
+    """Worker-model ids worth *offering* for a family — never an exhaustive list.
+
+    Claude returns its subscription aliases. Cursor asks the CLI (its list is
+    known-incomplete, see :func:`cursor_model_error`) and unions in whatever the
+    operator already selected in Cursor's own picker, so the model a bare wave
+    would actually run is always among the suggestions.
+
+    Fails open in every direction: a missing or unreadable CLI yields whatever is
+    known without it. Callers must treat the result as a suggestion list (a
+    datalist, not a select) — Cursor models take the bracket form
+    ``grok-4.5[effort=medium]``, which no fixed list can enumerate.
+    """
+    if (cli or "").strip().lower() != "cursor":
+        return sorted(_CLAUDE_WORKER_ALIASES)
+    ids: set[str] = set()
+    resolved = shutil.which(_CLI_DEFAULT_BINS["cursor"])
+    if resolved:
+        ids |= _cursor_known_models(resolved, timeout=timeout)
+    selected = cursor_default_model()
+    if selected:
+        ids.add(selected)
+    return sorted(ids)
 
 
 def _build_cmd(
@@ -1017,6 +1098,7 @@ def run_headless_wave(
     effort: str | None = None,
     warm_first: bool = True,
     cache: str = "auto",
+    on_job_done: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave for the given jobs.
 
@@ -1056,6 +1138,14 @@ def run_headless_wave(
     ``warm``, two waves of ``usage.jsonl`` settle empirically whether serializing
     job 1 raises cache reads. When the resolved Claude mode is ``off``, warm-up is
     forced off — nothing to warm.
+
+    ``on_job_done`` is called from the collecting thread as each job lands, with
+    ``{"id", "ok", "error", "done", "total"}`` — the seam a UI needs, because this
+    function returns only when the *whole* wave ends and a 16-job Cursor wave is
+    several minutes of silence. It is called after the usage row is appended, so
+    the log and the callback can never disagree about what finished. A callback
+    that raises is logged and swallowed: progress reporting must not be able to
+    kill a wave that is spending real tokens.
     """
     try:
         cli_name = _normalize_cli(cli)
@@ -1239,6 +1329,7 @@ def run_headless_wave(
     records: list[dict[str, Any]] = []
     wave_started = time.monotonic()
     batches = _wave_batches(jobs, concurrency, use_warm_first)
+    done_count = 0
     for batch_index, wave in enumerate(batches):
         warm = use_warm_first and batch_index == 0 and len(batches) > 1
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
@@ -1253,6 +1344,20 @@ def run_headless_wave(
                 # part-way still leaves the telemetry for the jobs that finished.
                 records.append(record)
                 append_usage(usage_log, record)
+                done_count += 1
+                if on_job_done is not None:
+                    try:
+                        on_job_done({
+                            "id": job_id,
+                            "ok": ok,
+                            "error": None if ok else detail,
+                            "done": done_count,
+                            "total": len(jobs),
+                        })
+                    except Exception:  # noqa: BLE001 - a progress hook is not the wave
+                        logger.exception(
+                            "on_job_done callback failed for job %s", job_id
+                        )
 
     out: dict[str, Any] = {
         "wrote": wrote,
