@@ -340,6 +340,47 @@ def test_a_pinned_cli_is_never_switched_for_a_missing_binary(book, installed):
     assert (prof.cli, prof.cli_source) == ("claude", "config")
 
 
+def test_a_prepared_manifest_is_a_decision_not_a_guess(book, installed):
+    """`fanout` inherits the CLI as ``cli_source="manifest"``. Treating that as a
+    guess let `prepare --cli cursor` be honoured and then silently overturned one
+    command later — the consent bug this module exists to prevent.
+
+    Sound because the manifest is always *post*-fallback: `prepare` resolves with
+    ``check_binary=True``, so a guess that pointed at a missing binary was already
+    corrected before it was written down.
+    """
+    installed("claude")
+    _write_cfg(book)
+
+    prof = resolve_profile(
+        book, command="judges", cli="cursor", cli_source="manifest", env={}
+    )
+    assert (prof.cli, prof.cli_source) == ("cursor", "manifest")
+    assert not any("not on PATH" in w for w in prof.warnings)
+
+
+def test_a_manifest_does_not_re_warn_about_a_cli_flip(book, installed, tmp_path):
+    """`prepare` already said this when it wrote the manifest; repeating it on
+    every faithful `fanout` is noise, not a flip."""
+    installed("claude", "cursor-agent")
+    _write_cfg(book)
+    log = tmp_path / "usage.jsonl"
+    log.write_text(json.dumps({"cli": "claude", "input": 10}) + "\n", encoding="utf-8")
+
+    inherited = resolve_profile(
+        book, command="judges", cli="cursor", cli_source="manifest",
+        usage_log=log, env={},
+    )
+    assert not any("previous judges waves" in w for w in inherited.warnings)
+
+    # A guess that flips the family still says so.
+    guessed = resolve_profile(
+        book, command="judges", usage_log=log, env=_CURSOR_HOST
+    )
+    assert guessed.cli == "cursor"
+    assert any("previous judges waves" in w for w in guessed.warnings)
+
+
 def test_no_cli_installed_keeps_the_guess_and_names_both_binaries(book, installed):
     """With nothing to switch *to*, switching only misnames what to install."""
     installed()

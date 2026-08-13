@@ -445,15 +445,23 @@ def _fake_profile(cli: str = "claude"):
     )
 
 
-def _stub_headless(monkeypatch, *, cli="claude", preflight=None, fanout_extra=None):
+def _stub_headless(
+    monkeypatch, *, cli="claude", preflight=None, fanout_extra=None,
+    commit_result=None, preflight_calls=None,
+):
     """Stub the three subagent verbs + the preflight; record the call order."""
     from src.harness import headless, profile as profile_mod
     from src.judges import subagent
 
     calls: list[tuple[str, dict]] = []
 
+    def fake_preflight(c, cli_bin=None, *, model=None):
+        if preflight_calls is not None:
+            preflight_calls.append({"cli": c, "cli_bin": cli_bin, "model": model})
+        return preflight
+
     monkeypatch.setattr(profile_mod, "resolve_profile", lambda *a, **k: _fake_profile(cli))
-    monkeypatch.setattr(headless, "preflight_error", lambda c, cli_bin=None: preflight)
+    monkeypatch.setattr(headless, "preflight_error", fake_preflight)
 
     def fake_prepare(project_dir, judge_names, scopes, **kwargs):
         calls.append(("prepare", {"scopes": list(scopes), **kwargs}))
@@ -489,9 +497,12 @@ def _stub_headless(monkeypatch, *, cli="claude", preflight=None, fanout_extra=No
 
     def fake_commit(project_dir, **kwargs):
         calls.append(("commit", dict(kwargs)))
+        if commit_result is not None:
+            return commit_result
         return {
+            "status": "ok",
             "counts": {"committed": 2, "failed": 0, "missing": 0},
-            "failed": [], "persist_errors": [],
+            "failed": [], "missing": [], "persist_errors": [],
         }
 
     monkeypatch.setattr(subagent, "prepare", fake_prepare)
@@ -596,6 +607,38 @@ def test_a_headless_estimate_prepares_but_never_runs(client, project, monkeypatc
     assert jobs.active_job("jobproj") is None
 
 
+def test_headless_estimate_drops_an_untranslated_chapter_from_prepare(
+    client, project, monkeypatch
+):
+    """Same skip rule as the API path, but prepare is the consumer here — a
+    skipped chapter in ``scopes`` would make it raise (or write empty prompts)
+    instead of just dropping out of the estimate."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    (project / "chapters" / "chapter_02.txt").write_text("y", encoding="utf-8")
+    (project / "chunks" / "chapter_02_chunk_000.json").write_text(json.dumps({
+        "id": "chapter_02_chunk_000", "chapter_id": "chapter_02", "position": 0,
+        "source_text": "The white dog.", "translated_text": "",
+        "status": "pending",
+        "metadata": {
+            "char_start": 0, "char_end": 14, "overlap_start": 0,
+            "overlap_end": 0, "paragraph_count": 1, "word_count": 3,
+        },
+    }), encoding="utf-8")
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+        "chapter_ids": ["chapter_01", "chapter_02"],
+    })
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["status"] == "estimate"
+    assert [s["scope"] for s in body["skipped"]] == ["chapter:chapter_02"]
+    assert calls[0][0] == "prepare"
+    assert calls[0][1]["scopes"] == ["chapter:chapter_01"]
+
+
 def test_untouched_fields_reach_prepare_as_none(client, project, monkeypatch):
     """Pre-filling the resolved values and sending them back would make
     `cli_source` read "a flag said so" when nothing did."""
@@ -640,6 +683,78 @@ def test_a_failed_preflight_is_a_409_carrying_the_clis_own_fix(
     assert rv.status_code == 409
     assert "/login" in rv.get_json()["error"]
     assert calls == []  # nothing prepared, nothing spawned
+
+
+def test_confirm_is_preflighted_too_and_starts_no_job(client, project, monkeypatch):
+    """The confirm path used to skip the gate estimate had: it started a job, ran
+    the destructive `prepare`, and only then died in fanout — so the operator saw
+    a job modal, then "Stopped", with the previous wave's drafts already gone."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(
+        monkeypatch, preflight="claude is not logged in — run `claude` and `/login`"
+    )
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    })
+    assert rv.status_code == 409
+    assert "/login" in rv.get_json()["error"]
+    assert calls == []
+    assert jobs.active_job("jobproj") is None
+
+
+def test_the_preflight_carries_the_resolved_worker_model(client, project, monkeypatch):
+    """Cursor rejects a bogus `--model` before it reads a prompt, but only inside
+    `run_headless_wave` — i.e. after `prepare`. Hoisting it means the estimate
+    never goes green on argv the wave cannot run."""
+    _no_spawn(monkeypatch)
+    seen: list[dict] = []
+    _stub_headless(monkeypatch, cli="cursor", preflight_calls=seen)
+
+    client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+    })
+    assert seen and seen[0]["cli"] == "cursor"
+    # `_fake_profile`'s resolved model, not the raw override (which is None here).
+    assert seen[0]["model"] == "sonnet"
+
+
+@pytest.mark.parametrize("gate", [{"estimate": True}, {"confirm": True}])
+def test_a_live_job_blocks_both_gates_before_prepare_can_unlink(
+    client, project, monkeypatch, gate
+):
+    """`prepare` unlinks drafts and rewrites manifest.json. Fired while a wave is
+    in fanout/commit (a second tab), it deletes work in flight and swaps the
+    manifest out from under the running job."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    release = threading.Event()
+    running_id = jobs.start_job("jobproj", "review-judges", lambda emit: release.wait(5))
+    try:
+        body = {"judges": ["dialogue"], "backend": "headless", **gate}
+        rv = client.post("/api/project/jobproj/review/run-judges", json=body)
+        assert rv.status_code == 409
+        assert rv.get_json()["job_id"] == running_id
+        assert calls == []  # nothing prepared: no draft was unlinked
+    finally:
+        release.set()
+
+
+def test_dry_run_outranks_confirm_on_the_headless_path(client, project, monkeypatch):
+    """`dry_run` was read only by the API backend, so `{dry_run, confirm}` here
+    started a real wave — silent spend against a flag that says "don't"."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless",
+        "dry_run": True, "confirm": True,
+    })
+    assert rv.status_code == 200
+    assert rv.get_json()["status"] == "estimate"
+    assert [name for name, _ in calls] == ["prepare", "fanout"]
+    assert calls[1][1]["estimate"] is True
+    assert jobs.active_job("jobproj") is None
 
 
 def test_a_confirmed_headless_run_prepares_fans_out_and_commits(
@@ -688,6 +803,55 @@ def test_a_launcher_error_ends_the_job_instead_of_committing(
     assert [name for name, _ in calls] == ["prepare", "fanout"]
     assert events[-1]["event"] == "complete"
     assert "not logged in" in events[-1]["fatal"]
+
+
+def test_a_failed_commit_stops_the_job_instead_of_reporting_a_clean_wave(
+    client, project, monkeypatch
+):
+    """`commit`'s error return carries no `counts`, so the summary read
+    `ran: 0, error_count: 0` and the modal rendered "0 of 2 done" for a commit
+    that never happened. False success is worse than a visible stop."""
+    _no_spawn(monkeypatch)
+    _stub_headless(monkeypatch, commit_result={
+        "status": "error",
+        "error": "no judge manifest — run `prepare` first",
+        "committed": [], "failed": [], "missing": [],
+    })
+    body = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    }).get_json()
+    events = drain(client, body["job_id"])
+
+    assert events[-1]["event"] == "complete"
+    assert "no judge manifest" in events[-1]["fatal"]
+    assert events[-1].get("ran") is None
+
+
+def test_missing_drafts_are_counted_as_errors_not_silence(client, project, monkeypatch):
+    """A draft the wave never wrote is a failure of this run. Left out of
+    `errors`, an all-missing commit reported zero errors and read as a clean
+    wave that simply judged nothing."""
+    _no_spawn(monkeypatch)
+    _stub_headless(monkeypatch, commit_result={
+        "status": "ok",
+        "counts": {"committed": 0, "failed": 0, "missing": 2},
+        "failed": [],
+        "missing": [
+            {"target_id": "chapter_01_chunk_000", "judge": "dialogue"},
+            {"target_id": "chapter_01_chunk_001", "judge": "dialogue"},
+        ],
+        "persist_errors": [],
+    })
+    body = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    }).get_json()
+    events = drain(client, body["job_id"])
+
+    final = events[-1]
+    assert final["event"] == "complete" and final["ran"] == 0
+    assert final["missing"] == 2
+    assert final["error_count"] == 2
+    assert "draft missing" in final["errors"][0]
 
 
 @pytest.mark.parametrize("payload", [

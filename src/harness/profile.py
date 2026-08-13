@@ -66,10 +66,17 @@ EFFORT_ARGV = "argv"                  # claude: --effort <level>
 EFFORT_MODEL_BRACKET = "model_bracket"  # cursor: grok-4.5[effort=<level>]
 EFFORT_NONE = "none"                  # nothing carries it; say so out loud
 
-# ``cli_source`` values that mean "nobody chose this, we inferred it". Only these
-# may be second-guessed against what is installed (see :func:`resolve_profile`);
-# ``cli`` (a flag) and ``config`` (a pin) are decisions and are never overridden.
-_DECIDED_CLI_SOURCES = frozenset({"cli", "config"})
+# ``cli_source`` values that mean someone chose this. A flag (``cli``), a pin
+# (``config``) and a prepared manifest (``manifest``) are never second-guessed
+# against PATH; inferred sources (``host:*``, the bare fallback) may be — see
+# :func:`resolve_profile`.
+#
+# ``manifest`` belongs here because it is a *record* of a decision, not a guess:
+# `prepare` resolves with ``check_binary=True``, so whatever it wrote is already
+# post-fallback, and the operator consented to that CLI when the estimate quoted
+# its baseline. Leaving it guessable let `prepare --cli cursor` be honoured and
+# then silently overturned by a bare `fanout` one command later.
+_DECIDED_CLI_SOURCES = frozenset({"cli", "config", "manifest"})
 
 
 def _is_guessed_cli(cli_source: str) -> bool:
@@ -231,21 +238,21 @@ def resolve_profile(
     # plain shell, where `detect_host` says `unknown`, tier 4 answers `claude`,
     # and a Cursor-only machine would only discover that at the auth preflight.
     #
-    # An explicit choice is never second-guessed: the launcher already fails
-    # closed on a missing binary, and silently running something other than what
-    # the operator asked for is worse than a clear error. Neither is a guess with
+    # An explicit choice — a flag, a pin, or the manifest a wave was consented to
+    # from — is never second-guessed: the launcher already fails closed on a
+    # missing binary, and silently running something other than what the operator
+    # asked for is worse than a clear error. Neither is a guess with
     # nothing to switch *to* — leaving it in place means the operator is told to
     # install the CLI the host implies rather than the one we happened to pick.
     if check_binary and _is_guessed_cli(cli_source) and not cli_binary_present(cli_name):
         missing_bin = cli_binary(cli_name)
         alternative = _other_cli(cli_name)
         if cli_binary_present(alternative):
-            if cli_source.startswith("host:"):
-                reason = f"the detected {host} host"
-            elif cli_source == "manifest":
-                reason = "the prepared manifest"
-            else:
-                reason = "the default (no host detected)"
+            reason = (
+                f"the detected {host} host"
+                if cli_source.startswith("host:")
+                else "the default (no host detected)"
+            )
             warnings.append(
                 f"{reason} selects {cli_name} but {missing_bin!r} is not on PATH; "
                 f"falling back to {alternative} (pass --cli {cli_name} to insist)"
@@ -357,9 +364,12 @@ def resolve_profile(
     # prose is written by, and detection can flip it just by opening the project
     # from a different agent.
     #
-    # Every source but a flag and a pin, not just `host:*` — a `fallback:*` from
-    # the missing-binary switch above flips the family exactly as hard, and the
-    # dashboard reaches it more often than detection.
+    # Every *inferred* source, not just `host:*` — a `fallback:*` from the
+    # missing-binary switch above flips the family exactly as hard, and the
+    # dashboard reaches it more often than detection. A `manifest` is exempt for
+    # the same reason it is exempt from the switch: `prepare` already emitted this
+    # warning when it wrote that manifest, so repeating it on every `fanout` that
+    # faithfully reproduces the consented wave is noise, not a flip.
     if _is_guessed_cli(cli_source):
         prior = _prior_clis(usage_log)
         others = sorted(prior - {cli_name})

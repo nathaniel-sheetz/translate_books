@@ -1529,6 +1529,70 @@ def test_preflight_error_rejects_an_unknown_family():
     assert err and "unsupported headless cli" in err
 
 
+def _cursor_preflight_prober(models_out: str, reject: str = ""):
+    """One prober for all three cursor probes: status, `models`, the model argv."""
+    def probe(argv, *, env, cwd, timeout):
+        if "models" in argv:
+            return 0, models_out, ""
+        if "status" in argv:
+            return 0, json.dumps(_CURSOR_AUTHENTICATED), ""
+        return 1, "", reject or "Error: No prompt provided for print mode"
+    return probe
+
+
+def test_preflight_error_rejects_a_model_the_cursor_cli_will_not_run(monkeypatch):
+    """`run_headless_wave` applies this gate too, but only from inside the job —
+    i.e. after the destructive `prepare`. Hoisted, a bogus id stops the estimate
+    from ever going green instead of killing the wave one step later."""
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", _cursor_preflight_prober(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n",
+        reject="Cannot use this model: bogus-xyz. Available models: auto, gpt-5.2",
+    ))
+    err = headless.preflight_error("cursor", model="bogus-xyz")
+    assert err and "bogus-xyz" in err
+
+
+def test_preflight_error_passes_a_model_the_cursor_cli_accepts(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", _cursor_preflight_prober(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n"
+    ))
+    assert headless.preflight_error("cursor", model="gpt-5.2") is None
+    # And a model is never the reason a login failure gets misreported.
+    assert headless.preflight_error("cursor") is None
+
+
+def test_preflight_error_never_probes_a_model_on_claude(monkeypatch):
+    """`--model` validation is a cursor-agent behaviour; asking claude would be a
+    spawn (and a 30 s timeout) for a check it does not have."""
+    seen: list[list[str]] = []
+
+    def probe(argv, *, env, cwd, timeout):
+        seen.append(list(argv))
+        return 0, json.dumps(_AUTH_SUBSCRIPTION), ""
+
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    assert headless.preflight_error("claude", model="no-such-model") is None
+    assert len(seen) == 1 and "--model" not in seen[0]
+
+
+def test_preflight_error_reports_a_login_failure_before_a_model_one(monkeypatch):
+    """Order matters: a logged-out CLI must read as logged out, not as a model
+    problem it was never asked about."""
+    def probe(argv, *, env, cwd, timeout):
+        if "models" in argv:
+            raise AssertionError("must not reach the model gate")
+        return 0, json.dumps({**_CURSOR_AUTHENTICATED,
+                              "status": "expired", "isAuthenticated": False}), ""
+
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    err = headless.preflight_error("cursor", model="bogus-xyz")
+    assert err and "bogus-xyz" not in err
+
+
 def test_worker_model_suggestions_claude_are_the_subscription_aliases():
     assert headless.worker_model_suggestions("claude") == [
         "fable", "haiku", "opus", "sonnet",

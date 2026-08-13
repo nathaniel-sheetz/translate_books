@@ -368,11 +368,17 @@ worker model, effort and token baseline are resolved once, together, with their 
 Switching the CLI select re-fetches the whole profile; the worker model, effort, channel and
 baseline change together rather than the JS synthesizing the other family's answers.
 
-**Estimate, then confirm.** The CLI path has no threshold — **Estimate tokens** preflights the
-CLI (a logged-out or uninstalled CLI 409s here with the CLI's own `login` instruction, before
-anything is prepared) and returns process count, projected tokens with their baseline source,
-the effective effort and channel, and the rendered argv. Only then does Confirm start the wave.
-Changing judges, scope, CLI, worker model, effort or cache invalidates the estimate.
+**Estimate, then confirm.** The CLI path has no threshold — **Estimate tokens** returns process
+count, projected tokens with their baseline source, the effective effort and channel, and the
+rendered argv. Only then does Confirm start the wave. Changing judges, scope, CLI, worker model,
+effort or cache invalidates the estimate; switching the CLI also clears any worker model typed
+for the other family.
+
+Both Estimate and Confirm preflight the CLI *before* touching disk: a logged-out or uninstalled
+CLI, or a `--model` `cursor-agent` will not run, 409s with the CLI's own instruction. That gate
+is on both because `prepare` is destructive (it unlinks drafts and rewrites `manifest.json`) —
+failing after it means the operator watched a job modal open, then read "Stopped", with the
+previous wave's drafts already gone.
 
 Asking for the address judge on a book with no `address_map.json` 409s with the
 `harness.py address-map` commands that fix it, on both backends.
@@ -401,7 +407,10 @@ Asking for the address judge on a book with no `address_map.json` 409s with the
   each knob `null` to let the server resolve it → `{status: "needs_confirm"}` when neither flag
   is set, `{status: "estimate", effective, jobs, prompt_tokens, projected_tokens, argv, cache,
   warnings}` for `estimate: true`, or `{status: "started", job_id, effective}` for
-  `confirm: true`. A failed CLI preflight is a 409 carrying the CLI's own message.
+  `confirm: true`. `dry_run: true` means the same thing it means on the API path and outranks
+  `confirm`, so a body carrying both spends nothing. A failed CLI preflight is a 409 carrying
+  the CLI's own message; so is a request that arrives while a job is already running (both
+  flags run `prepare`, so neither may fire mid-wave).
   The Task-subagent backend stays in the judge-review skill — a Flask worker thread cannot
   spawn Task workers.
 - `GET /api/project/<id>/jobs/<job_id>/sse` — progress for either run. Always ends in one
@@ -414,6 +423,8 @@ Asking for the address judge on a book with no `address_map.json` 409s with the
 
 Only one review job runs per project at a time — two would interleave partial writes into
 the same `evaluations/<chunk>.json` — so a second start returns 409 with the live `job_id`.
+A headless **estimate** is refused the same way: it re-runs `prepare`, which would unlink the
+running wave's drafts and swap out the manifest it is fanning out from.
 
 **Backend:** `web_ui/jobs.py` (generic job registry), `web_ui/evaluations.py`
 (`evaluator_freshness`, `chunk_group_states`, `rollup_group_state`),

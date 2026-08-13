@@ -3524,12 +3524,18 @@
         box.style.display = '';
     }
 
-    function renderJudgesProfile(p, applyDefaultBackend) {
+    // `isPreview` is true when the profile was fetched for a *hypothetical* CLI
+    // (`?cli=`), which the server resolves as cli_source "cli" — an answer about
+    // the pick, not about the pin. Reading the checkbox off it would untick
+    // "remember this CLI" on every switch without ever writing `auto` to disk.
+    function renderJudgesProfile(p, applyDefaultBackend, isPreview) {
         var cliSel = document.getElementById('judges-cli');
         if (cliSel && p.cli) cliSel.value = p.cli;
 
         document.getElementById('judges-cli-provenance').textContent = judgesCliProvenance(p);
-        document.getElementById('judges-remember-cli').checked = (p.cli_source === 'config');
+        if (!isPreview) {
+            document.getElementById('judges-remember-cli').checked = (p.cli_source === 'config');
+        }
 
         var list = document.getElementById('judges-worker-model-options');
         list.innerHTML = '';
@@ -3579,7 +3585,7 @@
                 return null;
             }
             judgesProfile = data;
-            renderJudgesProfile(data, applyDefaultBackend);
+            renderJudgesProfile(data, applyDefaultBackend, !!cli);
             return data;
         }).catch(function(e) {
             judgesProfile = null;
@@ -3772,11 +3778,45 @@
             cliSel.addEventListener('change', function() {
                 judgesCliTouched = true;
                 clearJudgesEstimate();
+                // A model typed for the other family is not a model for this
+                // one. Only the *placeholder* re-renders below, so leaving the
+                // value would estimate and then run `sonnet` on cursor-agent.
+                document.getElementById('judges-worker-model').value = '';
                 // Re-resolve the whole block server-side: switching family
                 // changes the worker model, the effort channel and the token
                 // baseline together, and guessing any of them here is the bug
                 // the profile endpoint exists to prevent.
-                loadJudgesProfile(cliSel.value, false);
+                //
+                // The box says "remember this CLI"; leaving the old value pinned
+                // on disk makes it a lie until the modal is next reopened. Pin
+                // first, *then* reload without `?cli=` — config outranks every
+                // other tier, so the reload returns this same CLI with the
+                // truthful "pinned for this book" provenance. One request in
+                // flight either way, so the two can't race to render last.
+                var remember = document.getElementById('judges-remember-cli');
+                if (!remember || !remember.checked) {
+                    loadJudgesProfile(cliSel.value, false);
+                    return;
+                }
+                apiPost('/api/project/' + PROJECT + '/judges/pin-cli',
+                        { cli: cliSel.value })
+                    .then(function(data) {
+                        if (!data || data.error) {
+                            remember.checked = false;
+                            setStatus('judges-modal-status',
+                                (data && data.error) || 'Could not pin the CLI.',
+                                'error');
+                            return loadJudgesProfile(cliSel.value, false);
+                        }
+                        judgesCliTouched = false;
+                        return loadJudgesProfile(null, false);
+                    })
+                    .catch(function(e) {
+                        remember.checked = false;
+                        setStatus('judges-modal-status',
+                            String(e && e.message ? e.message : e), 'error');
+                        return loadJudgesProfile(cliSel.value, false);
+                    });
             });
         }
 
@@ -3808,9 +3848,14 @@
 
         // Any change to what would run invalidates the estimate: a confirmation
         // for a run that no longer matches is not a confirmation.
+        // `input` on the free-text model: `change` waits for blur, and clicking
+        // Confirm can beat that, so a typed-but-unblurred id would run against
+        // the previous estimate.
         ['judges-worker-model', 'judges-effort', 'judges-prompt-cache'].forEach(function(id) {
             var el = document.getElementById(id);
-            if (el) el.addEventListener('change', clearJudgesEstimate);
+            if (!el) return;
+            el.addEventListener('change', clearJudgesEstimate);
+            if (el.tagName === 'INPUT') el.addEventListener('input', clearJudgesEstimate);
         });
         document.querySelectorAll('#judges-modal .judge-pick').forEach(function(cb) {
             cb.addEventListener('change', clearJudgesEstimate);

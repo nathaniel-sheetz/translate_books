@@ -6243,9 +6243,16 @@ def _run_judges_headless(
     returns ``needs_confirm`` and starts nothing: unlike the API path there is no
     threshold below which a run is cheap enough to skip the gate, because what is
     being spent is a subscription's context budget and the only honest number for
-    it is a fetched estimate. ``estimate`` preflights the CLI and projects the
-    tokens with zero spawns. ``confirm`` runs ``prepare`` -> ``fanout`` ->
-    ``commit(persist=True)`` as one background job.
+    it is a fetched estimate. ``estimate`` projects the tokens with zero spawns.
+    ``confirm`` runs ``prepare`` -> ``fanout`` -> ``commit(persist=True)`` as one
+    background job. ``dry_run`` is the API path's spelling of ``estimate`` and
+    outranks ``confirm``, so a body carrying both spends nothing.
+
+    Both spending states share two gates *before* either touches disk: a 409 when
+    the project already has a job running (``prepare`` is destructive, so a second
+    request would unlink drafts mid-wave), and the CLI preflight (binary, login,
+    and the Cursor ``--model`` check). Neither belongs inside the job body —
+    failing there means the operator has already watched a job modal open.
     """
     from src.harness.headless import preflight_error
     from src.harness.profile import resolve_profile
@@ -6259,8 +6266,13 @@ def _run_judges_headless(
     effort = overrides["effort"]
     prompt_cache = overrides["prompt_cache"]
 
-    want_estimate = bool(data.get("estimate"))
-    want_run = bool(data.get("confirm"))
+    # `dry_run` is the API path's estimate-only flag. Honour it here rather than
+    # ignoring it: a body carrying both `dry_run` and `confirm` is a caller that
+    # said "don't spend", and silently spending against a dry-run flag is the
+    # wrong way to resolve that contradiction.
+    dry_run = bool(data.get("dry_run"))
+    want_estimate = bool(data.get("estimate")) or dry_run
+    want_run = bool(data.get("confirm")) and not dry_run
     if not want_estimate and not want_run:
         return jsonify({
             "ok": True,
@@ -6269,6 +6281,20 @@ def _run_judges_headless(
             "judges": judge_names,
             "skipped": skipped,
         })
+
+    # Both gates below run `prepare`, which is destructive: it unlinks drafts and
+    # rewrites manifest.json. Firing one while a wave is in fanout/commit deletes
+    # work in flight and swaps the manifest out from under it, so `commit` lands
+    # on missing drafts and a manifest it never fanned out. `start_job` already
+    # refuses a second run, but only *after* this request has done its damage —
+    # and only on the confirm path. One guard, both gates, before either the
+    # preflight probe or the first unlink.
+    running = jobs.active_job(project_id)
+    if running:
+        return jsonify({
+            "error": "A review job is already running for this project.",
+            "job_id": running,
+        }), 409
 
     # Only to know which binary to preflight and which family to label the
     # commit with — the overrides below still go down as the caller sent them,
@@ -6293,16 +6319,20 @@ def _run_judges_headless(
             effort=effort,
         )
 
+    # Fail closed *here*, for both gates. `fanout(estimate=True)` returns before
+    # the launcher runs its preflight, so an estimate on a logged-out CLI would
+    # read as a green light; and a confirmed run reaches the launcher only from
+    # inside the job body, i.e. after the destructive `prepare` — the operator
+    # sees a job modal, then "Stopped", with drafts already gone. The model goes
+    # in too: a bogus Cursor id is rejected by the same launcher, one step later.
+    auth_error = preflight_error(prof.cli, model=prof.worker_model)
+    if auth_error:
+        return jsonify({
+            "error": auth_error,
+            "effective": prof.to_payload(),
+        }), 409
+
     if want_estimate:
-        # Fail closed *here*: `fanout(estimate=True)` returns before the launcher
-        # runs its auth preflight, so without this a logged-out CLI reads as a
-        # green light and only fails after the operator has consented.
-        auth_error = preflight_error(prof.cli)
-        if auth_error:
-            return jsonify({
-                "error": auth_error,
-                "effective": prof.to_payload(),
-            }), 409
         try:
             _prepare()
             out = subagent.fanout(project_dir, estimate=True, cache=prompt_cache)
@@ -6366,11 +6396,27 @@ def _run_judges_headless(
         landed = subagent.commit(
             project_dir, persist=True, backend=f"headless:{cli_name}"
         )
+        if landed.get("status") == "error":
+            # An unreadable/absent manifest returns no `counts`, so the summary
+            # below would read `ran: 0, error_count: 0` and the modal would
+            # render "0 of N done" for a commit that never happened. Same shape
+            # as the launcher-error branch above, which the JS shows as "Stopped".
+            return {
+                "fatal": f"commit failed: {landed.get('error') or 'unknown error'}",
+                "effective": out.get("effective"),
+            }
 
         errors = [f"{f.get('id')}: {f.get('error')}" for f in out.get("failed") or []]
         errors += [
             f"{f.get('target_id')}/{f.get('judge')}: {f.get('problem')}"
             for f in landed.get("failed") or []
+        ]
+        # A draft the wave never wrote is a failure of this run, not an absence
+        # worth staying quiet about: without it, an all-missing commit reports
+        # zero errors and reads as a clean wave that simply judged nothing.
+        missing = landed.get("missing") or []
+        errors += [
+            f"{m.get('target_id')}/{m.get('judge')}: draft missing" for m in missing
         ]
         errors += list(landed.get("persist_errors") or [])
         counts = landed.get("counts") or {}
@@ -6379,6 +6425,7 @@ def _run_judges_headless(
             "total": entries or total,
             "wrote": len(out.get("wrote") or []),
             "failed": len(out.get("failed") or []),
+            "missing": len(missing),
             "error_count": len(errors),
             "errors": errors[:5],
             # The wave's *measured* overhead_ratio, not the projection — the

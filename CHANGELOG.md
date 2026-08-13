@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.45.0.0] - 2026-08-12
+
+### Added
+- **The Review tab's LLM-judge modal can run a headless CLI wave.** Backend picker: *API (metered)* or *Headless CLI (subscription)*. The CLI path is `prepare` → `fanout` → `commit(persist=True)` as one background job, with phase events and per-job progress (`on_job_done`). Verdicts stamp `backend: "headless:claude"` / `"headless:cursor"` so they do not look like a Task spawn.
+- **`GET /api/project/<id>/judges/profile`** relays `resolve_profile` verbatim (plus render-only extras: binaries, worker-model suggestions, cache support). **`POST /api/project/<id>/judges/pin-cli`** writes the one harness key `headless_cli`.
+- **`preflight_error`** hoists the launcher's binary / login / Cursor `--model` gates so Estimate and Confirm 409 before the destructive `prepare`. **`worker_model_suggestions`** feeds the modal datalist.
+
+### Changed
+- **A guessed CLI that is not installed falls back to the other family** when that one *is* — both directions, not only Cursor→Claude. A flag, a pin, and a prepared manifest are never second-guessed.
+- **`commit(backend=…)`** labels what produced the drafts (`"subagent"` still the default).
+
+### Fixed
+- A live review job now blocks a headless *estimate* as well as a confirm — `prepare` would otherwise unlink the running wave's drafts.
+- `dry_run` on the headless path outranks `confirm`, matching the API backend.
+- A failed or all-missing `commit` no longer renders as a clean "0 of N done" wave.
+
 ## [0.44.0.0] - 2026-08-12
 
 ### Added

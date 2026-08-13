@@ -45,10 +45,14 @@ python scripts/run_judges.py profile --project <slug> [--command translate]
 A *guess* (tier 3 or 4) that names a CLI this machine does not have is corrected to the
 other family when that one **is** installed, with a warning and
 `cli_source: "fallback:<binary>-missing"` — quoting Cursor's 17.2k baseline for a wave that
-will run on Claude is the same consent error the profile exists to kill. A flag or a pin is
-never second-guessed: the launcher already fails closed on a missing binary, and silently
-running something other than what was asked for is worse than a clear error. With neither
-binary installed the guess stands, so the error names the CLI the host implies.
+will run on Claude is the same consent error the profile exists to kill. A **decision** is
+never second-guessed — a flag (`cli`), a pin (`config`), or a prepared manifest (`manifest`,
+what `fanout` inherits): the launcher already fails closed on a missing binary, and silently
+running something other than what was asked for is worse than a clear error. The manifest
+counts as a decision because it is already post-fallback — `prepare` corrected any bad guess
+before writing it — so without that, `prepare --cli cursor` would be honoured and then
+overturned by a bare `fanout` one command later. With neither binary installed the guess
+stands, so the error names the CLI the host implies.
 
 **In the dashboard, the host signal is the process that launched the server.** `detect_host`
 reads the Flask process's env, which is fixed for the life of the server, so it reflects

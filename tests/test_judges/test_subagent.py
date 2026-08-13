@@ -223,6 +223,20 @@ def test_commit_success_persists(tmp_path):
     assert out["persisted"] and cid in out["persisted"][0]
 
 
+def test_commit_records_the_launcher_that_produced_the_drafts(tmp_path):
+    """The dashboard's CLI path passes ``backend="headless:<cli>"`` so a persisted
+    verdict names the launcher, not a Task spawn that never happened. The default
+    (tested above) stays ``subagent`` for the skill path."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    _write_draft(tmp_path, cid, "dialogue", _GOOD_VERDICT)
+
+    out = subagent.commit(project, persist=True, backend="headless:cursor")
+
+    assert out["run_header"]["backend"] == "headless:cursor"
+    assert out["results"][0]["metadata"]["backend"] == "headless:cursor"
+
+
 def test_commit_bad_json_is_failed_not_persisted(tmp_path):
     project, cid = _project_with_chunk(tmp_path)
     subagent.prepare(project, ["dialogue"], f"chunk:{cid}")

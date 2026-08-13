@@ -832,15 +832,23 @@ def subscription_auth_error(
     )
 
 
-def preflight_error(cli: str, cli_bin: str | None = None) -> str | None:
+def preflight_error(
+    cli: str, cli_bin: str | None = None, *, model: str | None = None
+) -> str | None:
     """Why a wave on ``cli`` would refuse to start, or ``None`` if it would run.
 
-    The same two gates :func:`run_headless_wave` applies before its first job --
-    binary resolution and the subscription probe -- hoisted so a caller can fail
-    closed *before* it prepares anything. ``fanout(estimate=True)`` returns
-    before the launcher is reached, so without this an estimate on a logged-out
-    or uninstalled CLI reads as a green light and the failure only lands after
-    the operator has consented to a run.
+    The same three gates :func:`run_headless_wave` applies before its first job --
+    binary resolution, the subscription probe, and (on Cursor) the ``--model``
+    check -- hoisted so a caller can fail closed *before* it prepares anything.
+    ``fanout(estimate=True)`` returns before the launcher is reached, so without
+    this an estimate on a logged-out or uninstalled CLI reads as a green light
+    and the failure only lands after the operator has consented to a run.
+
+    ``model`` is the *resolved* worker model (``prof.worker_model``, brackets and
+    all). Optional and keyword-only so the binary/auth gates stay callable before
+    a model has been resolved — but pass it whenever one is known: without it a
+    bogus Cursor id survives a green estimate and only kills the wave later, from
+    inside the job, after the destructive ``prepare`` has already run.
 
     Returns the CLI's own message verbatim: it already names the fix (``claude``
     + ``/login``, ``cursor-agent login``, install the Cursor CLI), and
@@ -855,12 +863,21 @@ def preflight_error(cli: str, cli_bin: str | None = None) -> str | None:
     resolved = shutil.which(name)
     if not resolved:
         return _bin_missing_error(cli_name, name)
-    return subscription_auth_error(
+    auth_error = subscription_auth_error(
         cli_name,
         resolved,
         subscription_env(cli_name),
         cwd=neutral_claude_cwd(),
     )
+    if auth_error:
+        return auth_error
+    # Third gate, same order `run_headless_wave` applies it in (after auth, so a
+    # logged-out CLI is reported as logged out rather than as a model problem).
+    # Token-free and fails open in every direction, so hoisting it can only turn
+    # "the job died after prepare" into "the estimate never went green".
+    if cli_name == "cursor" and model:
+        return cursor_model_error(resolved, model)
+    return None
 
 
 def worker_model_suggestions(cli: str, *, timeout: float = 10.0) -> list[str]:
