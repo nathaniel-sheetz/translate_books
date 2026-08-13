@@ -3365,15 +3365,29 @@
             var data = {};
             try { data = JSON.parse(e.data); } catch (err) { return; }
             seen = data.index || (seen + 1);
+            if (data.total) total = data.total;
             var pct = total ? Math.round((seen / total) * 100) : 0;
             document.getElementById('review-job-fill').style.width = pct + '%';
             document.getElementById('review-job-text').textContent =
                 label + ' ' + seen + ' of ' + total + '…';
         }
 
+        // A CLI wave is prepare → fan-out → commit, and the two ends emit no
+        // per-job progress at all. Without this the modal sits silent for the
+        // slowest parts of the run with nothing to say why.
+        function phase(e) {
+            var data = {};
+            try { data = JSON.parse(e.data); } catch (err) { return; }
+            if (data.total) total = data.total;
+            if (data.message) {
+                document.getElementById('review-job-text').textContent = data.message;
+            }
+        }
+
         source.addEventListener('chunk_done', progress);
         source.addEventListener('target_done', progress);
         source.addEventListener('chunk_error', progress);
+        source.addEventListener('phase', phase);
         source.addEventListener('complete', function(e) {
             source.close();
             var data = {};
@@ -3384,8 +3398,24 @@
             }
             var summary = data.fatal ? 'Stopped' :
                 ((data.evaluated !== undefined ? data.evaluated : data.ran || 0) +
-                 ' of ' + total + ' done');
+                 ' of ' + (data.total || total) + ' done');
             if (data.estimated_cost) summary += ' (~$' + Number(data.estimated_cost).toFixed(4) + ')';
+            // What the wave actually consumed, so the token estimate the user
+            // confirmed can be checked against the run rather than trusted.
+            // `input` alone is the *uncached* slice (4 tokens on a cached wave)
+            // and reads as nonsense next to a 9,801-token projection; the
+            // comparable number is everything billed as input.
+            if (data.usage) {
+                var used = [];
+                if (data.usage.prompt_sent !== undefined || data.usage.overhead !== undefined) {
+                    used.push(formatTokens((data.usage.prompt_sent || 0) +
+                                           (data.usage.overhead || 0)) + ' input tokens');
+                }
+                if (data.usage.overhead_ratio !== undefined && data.usage.overhead_ratio !== null) {
+                    used.push(Math.round(data.usage.overhead_ratio * 100) + '% overhead');
+                }
+                if (used.length) summary += ' (' + used.join(', ') + ')';
+            }
             finishJobModal(summary, errText);
             refreshReviewStatus();
             if (onDone) onDone(data);
@@ -3417,7 +3447,14 @@
 
     // ── Review: LLM judge panel ──
 
-    var judgesScope = null;   // chapter ids for the pending run, or null = book
+    var judgesScope = null;    // chapter ids for the pending run, or null = book
+    var judgesProfile = null;  // last `judges/profile` payload, verbatim
+    var judgesCliTouched = false;  // has the user picked a CLI in this modal?
+    var judgesEstimate = null; // last CLI estimate, or null once invalidated
+
+    function formatTokens(n) {
+        return Number(n || 0).toLocaleString();
+    }
 
     function selectedJudges() {
         var out = [];
@@ -3427,30 +3464,282 @@
         return out;
     }
 
+    function judgesBackend() {
+        var sel = document.getElementById('judges-backend');
+        return sel ? sel.value : 'api';
+    }
+
+    // Why the CLI select shows what it shows. The dashboard's host signal is its
+    // *launch environment* (the Flask process is fixed for the life of the
+    // server), so a guess has to be visible as a guess — that, plus the one-click
+    // pin below it, is the whole answer to a wrong detection.
+    var JUDGE_CLI_SOURCE_TEXT = {
+        'cli': 'your pick in this modal',
+        'config': 'pinned for this book',
+        'manifest': 'from the prepared manifest',
+        'host:claude-code': 'detected from the session running this dashboard',
+        'host:cursor': 'detected from the session running this dashboard',
+        'fallback': 'default (no host detected)'
+    };
+
+    function judgesCliProvenance(p) {
+        var why = JUDGE_CLI_SOURCE_TEXT[p.cli_source];
+        if (!why && p.cli_source && p.cli_source.indexOf('fallback:') === 0) {
+            why = 'fell back — ' +
+                p.cli_source.slice(9).replace(/-missing$/, ' is not on PATH');
+        }
+        var line = p.cli + ' — ' + (why || p.cli_source || 'unknown');
+        if (p.binaries && p.binaries[p.cli] === false) {
+            line += ' · not installed here';
+        }
+        return line;
+    }
+
+    function judgesEffortHint(p) {
+        var level = p.effort || 'none';
+        var source = ' (' + (p.effort_source || '?') + ')';
+        if (p.effort_channel === 'argv') {
+            return 'Resolved: ' + level + ' — passed as --effort' + source + '.';
+        }
+        if (p.effort_channel === 'model_bracket') {
+            return 'Resolved: ' + level + ' — carried in the model bracket ' +
+                '[effort=' + level + ']' + source + '.';
+        }
+        return 'Resolved: ' + level + ' — nothing on this CLI carries it' + source + '.';
+    }
+
+    function renderJudgesWarnings(warnings) {
+        var box = document.getElementById('judges-warnings');
+        if (!box) return;
+        box.innerHTML = '';
+        if (!warnings || !warnings.length) {
+            box.style.display = 'none';
+            return;
+        }
+        warnings.forEach(function(text) {
+            var p = document.createElement('p');
+            p.textContent = text;
+            box.appendChild(p);
+        });
+        box.style.display = '';
+    }
+
+    // `isPreview` is true when the profile was fetched for a *hypothetical* CLI
+    // (`?cli=`), which the server resolves as cli_source "cli" — an answer about
+    // the pick, not about the pin. Reading the checkbox off it would untick
+    // "remember this CLI" on every switch without ever writing `auto` to disk.
+    function renderJudgesProfile(p, applyDefaultBackend, isPreview) {
+        var cliSel = document.getElementById('judges-cli');
+        if (cliSel && p.cli) cliSel.value = p.cli;
+
+        document.getElementById('judges-cli-provenance').textContent = judgesCliProvenance(p);
+        if (!isPreview) {
+            document.getElementById('judges-remember-cli').checked = (p.cli_source === 'config');
+        }
+
+        var list = document.getElementById('judges-worker-model-options');
+        list.innerHTML = '';
+        (p.worker_model_suggestions || []).forEach(function(id) {
+            var opt = document.createElement('option');
+            opt.value = id;
+            list.appendChild(opt);
+        });
+        var wm = document.getElementById('judges-worker-model');
+        wm.placeholder = p.worker_model || 'from config';
+        document.getElementById('judges-worker-model-hint').textContent =
+            p.worker_model
+                ? 'Resolved: ' + p.worker_model + ' (' + (p.worker_model_source || '?') + ')'
+                : '';
+
+        document.getElementById('judges-effort-channel').textContent = judgesEffortHint(p);
+
+        // Claude-only: cursor-agent has no cache-TTL lever, so the control is
+        // hidden rather than shown and quietly ignored.
+        document.getElementById('judges-claude-only').style.display =
+            p.prompt_cache_supported ? '' : 'none';
+        document.getElementById('judges-cursor-cache-note').style.display =
+            p.prompt_cache_supported ? 'none' : '';
+        document.getElementById('judges-prompt-cache-hint').textContent =
+            p.prompt_cache ? 'Config: ' + p.prompt_cache : '';
+
+        renderJudgesWarnings(p.warnings);
+
+        if (applyDefaultBackend && p.default_backend) {
+            document.getElementById('judges-backend').value = p.default_backend;
+        }
+        applyJudgesBackend();
+    }
+
+    // The server re-resolves the whole block — model, effort, channel, baseline —
+    // for whichever CLI is asked about. The JS must never synthesize any of it
+    // for the other family.
+    function loadJudgesProfile(cli, applyDefaultBackend) {
+        var url = '/api/project/' + PROJECT + '/judges/profile';
+        if (cli) url += '?cli=' + encodeURIComponent(cli);
+        return apiGet(url).then(function(data) {
+            if (!data || data.error) {
+                judgesProfile = null;
+                document.getElementById('judges-cli-provenance').textContent =
+                    'Could not read the CLI profile' +
+                    (data && data.error ? ': ' + data.error : '.');
+                return null;
+            }
+            judgesProfile = data;
+            renderJudgesProfile(data, applyDefaultBackend, !!cli);
+            return data;
+        }).catch(function(e) {
+            judgesProfile = null;
+            document.getElementById('judges-cli-provenance').textContent =
+                'Could not read the CLI profile: ' + String(e && e.message ? e.message : e);
+            return null;
+        });
+    }
+
+    function applyJudgesBackend() {
+        var headless = judgesBackend() === 'headless';
+        document.getElementById('judges-api-fields').style.display = headless ? 'none' : '';
+        document.getElementById('judges-cli-fields').style.display = headless ? '' : 'none';
+        document.getElementById('btn-judges-estimate').textContent =
+            headless ? 'Estimate tokens' : 'Estimate cost';
+        // The CLI path never starts a wave without an explicit confirmation of a
+        // fetched estimate, so Run stays disabled until one lands.
+        document.getElementById('btn-judges-run').disabled = headless && !judgesEstimate;
+    }
+
+    function clearJudgesEstimate() {
+        judgesEstimate = null;
+        var panel = document.getElementById('judges-estimate-panel');
+        panel.style.display = 'none';
+        document.getElementById('judges-estimate-body').innerHTML = '';
+        document.getElementById('judges-argv-wrap').style.display = 'none';
+        document.getElementById('judges-argv').textContent = '';
+        var confirmBtn = document.getElementById('btn-judges-confirm');
+        confirmBtn.style.display = 'none';
+        confirmBtn.disabled = true;
+        document.getElementById('btn-judges-run').disabled = judgesBackend() === 'headless';
+    }
+
+    function showJudgesEstimateText(text) {
+        var panel = document.getElementById('judges-estimate-panel');
+        document.getElementById('judges-estimate-body').textContent = text;
+        panel.style.display = '';
+    }
+
+    function renderCliEstimate(data) {
+        var eff = data.effective || {};
+        var rows = [
+            ['Processes', String(data.jobs || 0)],
+            ['Prompt tokens', formatTokens(data.prompt_tokens)],
+            ['Projected tokens', formatTokens(data.projected_tokens) + ' — ' +
+                formatTokens(data.baseline_tokens) + '/job baseline (' +
+                (data.baseline_source || '?') + ')'],
+            ['CLI', (eff.cli || '?') + ' · ' + (eff.worker_model || '?')],
+            ['Effort', (eff.effort || 'none') + ' · ' +
+                (eff.effort_channel === 'argv' ? '--effort' :
+                 eff.effort_channel === 'model_bracket' ? 'model bracket' : 'not carried') +
+                ' (' + (eff.effort_source || '?') + ')']
+        ];
+        if (data.cache) rows.push(['Prompt cache', data.cache]);
+
+        var dl = document.createElement('dl');
+        rows.forEach(function(row) {
+            var dt = document.createElement('dt');
+            dt.textContent = row[0];
+            var dd = document.createElement('dd');
+            dd.textContent = row[1];
+            dl.appendChild(dt);
+            dl.appendChild(dd);
+        });
+        var body = document.getElementById('judges-estimate-body');
+        body.innerHTML = '';
+        body.appendChild(dl);
+        var note = document.createElement('p');
+        note.style.margin = '8px 0 0';
+        note.style.color = '#666';
+        note.textContent = 'Subscription tokens, no dollars. Nothing has run yet — ' +
+            'a wave can take several minutes and blocks other Review runs.';
+        body.appendChild(note);
+
+        if (data.argv && data.argv.length) {
+            document.getElementById('judges-argv').textContent = data.argv.join(' ');
+            document.getElementById('judges-argv-wrap').style.display = '';
+        }
+        renderJudgesWarnings(
+            (data.warnings && data.warnings.length)
+                ? data.warnings
+                : (judgesProfile ? judgesProfile.warnings : [])
+        );
+
+        document.getElementById('judges-estimate-panel').style.display = '';
+        var confirmBtn = document.getElementById('btn-judges-confirm');
+        confirmBtn.style.display = '';
+        confirmBtn.disabled = false;
+        judgesEstimate = data;
+        document.getElementById('btn-judges-run').disabled = false;
+    }
+
     function openJudgesModal(chapterIds) {
         judgesScope = chapterIds && chapterIds.length ? chapterIds : reviewScope();
         document.getElementById('judges-scope').textContent =
             'Scope: ' + (judgesScope ? judgesScope.join(', ') : 'whole book');
-        document.getElementById('judges-cost-estimate').textContent = '';
+        judgesCliTouched = false;
+        clearJudgesEstimate();
         setStatus('judges-modal-status', '', '');
         populateProviderSelect('judges-provider');
         populateModelSelect('judges-provider', 'judges-model');
         document.getElementById('judges-modal').classList.add('visible');
+        // Fetched on open so the modal shows the right CLI already selected,
+        // with the provenance line explaining why. The backend default follows
+        // from what is actually installed.
+        loadJudgesProfile(null, true);
     }
 
-    function postJudges(confirm) {
-        var judges = selectedJudges();
-        if (!judges.length) {
+    // A field left alone sends `null`, never its displayed value: `prepare` and
+    // `fanout` resolve `None` themselves, and echoing the resolved value back
+    // would make `cli_source` report "a flag said so" when nothing did.
+    function judgesRequestBody(extra) {
+        var body = {
+            chapter_ids: judgesScope,
+            judges: selectedJudges(),
+            backend: judgesBackend()
+        };
+        if (body.backend === 'headless') {
+            if (judgesCliTouched) body.cli = document.getElementById('judges-cli').value;
+            var worker = (document.getElementById('judges-worker-model').value || '').trim();
+            if (worker) body.worker_model = worker;
+            var effort = document.getElementById('judges-effort').value;
+            if (effort) body.effort = effort;
+            var cache = document.getElementById('judges-prompt-cache').value;
+            if (cache && judgesProfile && judgesProfile.prompt_cache_supported) {
+                body.prompt_cache = cache;
+            }
+        } else {
+            body.provider = (document.getElementById('judges-provider') || {}).value;
+            body.model = (document.getElementById('judges-model') || {}).value;
+        }
+        for (var key in (extra || {})) {
+            if (Object.prototype.hasOwnProperty.call(extra, key)) body[key] = extra[key];
+        }
+        return body;
+    }
+
+    function postJudges(extra) {
+        if (!selectedJudges().length) {
             setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
             return Promise.resolve(null);
         }
-        return apiPost('/api/project/' + PROJECT + '/review/run-judges', {
-            chapter_ids: judgesScope,
-            judges: judges,
-            provider: (document.getElementById('judges-provider') || {}).value,
-            model: (document.getElementById('judges-model') || {}).value,
-            confirm: !!confirm,
-        });
+        return apiPost('/api/project/' + PROJECT + '/review/run-judges',
+                       judgesRequestBody(extra));
+    }
+
+    function startJudgesRun(data) {
+        if (!data.job_id) {
+            setStatus('judges-modal-status', 'No job started.', 'error');
+            return;
+        }
+        document.getElementById('judges-modal').classList.remove('visible');
+        openJobModal('Running LLM judges');
+        streamJob(data.job_id, data.total, 'Judged');
     }
 
     function initReviewControls() {
@@ -3475,6 +3764,103 @@
         // a duplicate change listener every time it is shown.
         bindProviderModelPair('judges-provider', 'judges-model');
 
+        var backendSel = document.getElementById('judges-backend');
+        if (backendSel) {
+            backendSel.addEventListener('change', function() {
+                clearJudgesEstimate();
+                setStatus('judges-modal-status', '', '');
+                applyJudgesBackend();
+            });
+        }
+
+        var cliSel = document.getElementById('judges-cli');
+        if (cliSel) {
+            cliSel.addEventListener('change', function() {
+                judgesCliTouched = true;
+                clearJudgesEstimate();
+                // A model typed for the other family is not a model for this
+                // one. Only the *placeholder* re-renders below, so leaving the
+                // value would estimate and then run `sonnet` on cursor-agent.
+                document.getElementById('judges-worker-model').value = '';
+                // Re-resolve the whole block server-side: switching family
+                // changes the worker model, the effort channel and the token
+                // baseline together, and guessing any of them here is the bug
+                // the profile endpoint exists to prevent.
+                //
+                // The box says "remember this CLI"; leaving the old value pinned
+                // on disk makes it a lie until the modal is next reopened. Pin
+                // first, *then* reload without `?cli=` — config outranks every
+                // other tier, so the reload returns this same CLI with the
+                // truthful "pinned for this book" provenance. One request in
+                // flight either way, so the two can't race to render last.
+                var remember = document.getElementById('judges-remember-cli');
+                if (!remember || !remember.checked) {
+                    loadJudgesProfile(cliSel.value, false);
+                    return;
+                }
+                apiPost('/api/project/' + PROJECT + '/judges/pin-cli',
+                        { cli: cliSel.value })
+                    .then(function(data) {
+                        if (!data || data.error) {
+                            remember.checked = false;
+                            setStatus('judges-modal-status',
+                                (data && data.error) || 'Could not pin the CLI.',
+                                'error');
+                            return loadJudgesProfile(cliSel.value, false);
+                        }
+                        judgesCliTouched = false;
+                        return loadJudgesProfile(null, false);
+                    })
+                    .catch(function(e) {
+                        remember.checked = false;
+                        setStatus('judges-modal-status',
+                            String(e && e.message ? e.message : e), 'error');
+                        return loadJudgesProfile(cliSel.value, false);
+                    });
+            });
+        }
+
+        var rememberCli = document.getElementById('judges-remember-cli');
+        if (rememberCli) {
+            rememberCli.addEventListener('change', function() {
+                // Unticking returns the book to `auto`, i.e. back to detection.
+                var value = rememberCli.checked
+                    ? document.getElementById('judges-cli').value
+                    : 'auto';
+                apiPost('/api/project/' + PROJECT + '/judges/pin-cli', { cli: value })
+                    .then(function(data) {
+                        if (!data || data.error) {
+                            rememberCli.checked = !rememberCli.checked;
+                            setStatus('judges-modal-status',
+                                (data && data.error) || 'Could not pin the CLI.', 'error');
+                            return;
+                        }
+                        judgesCliTouched = false;
+                        loadJudgesProfile(null, false);
+                    })
+                    .catch(function(e) {
+                        rememberCli.checked = !rememberCli.checked;
+                        setStatus('judges-modal-status',
+                            String(e && e.message ? e.message : e), 'error');
+                    });
+            });
+        }
+
+        // Any change to what would run invalidates the estimate: a confirmation
+        // for a run that no longer matches is not a confirmation.
+        // `input` on the free-text model: `change` waits for blur, and clicking
+        // Confirm can beat that, so a typed-but-unblurred id would run against
+        // the previous estimate.
+        ['judges-worker-model', 'judges-effort', 'judges-prompt-cache'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('change', clearJudgesEstimate);
+            if (el.tagName === 'INPUT') el.addEventListener('input', clearJudgesEstimate);
+        });
+        document.querySelectorAll('#judges-modal .judge-pick').forEach(function(cb) {
+            cb.addEventListener('change', clearJudgesEstimate);
+        });
+
         var closeJudges = document.getElementById('judges-modal-close');
         if (closeJudges) {
             closeJudges.addEventListener('click', function() {
@@ -3485,45 +3871,70 @@
         var estimateBtn = document.getElementById('btn-judges-estimate');
         if (estimateBtn) {
             estimateBtn.addEventListener('click', function() {
-                setStatus('judges-modal-status', 'Estimating…', 'info');
-                var judges = selectedJudges();
-                if (!judges.length) {
+                if (!selectedJudges().length) {
                     setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
                     return;
                 }
-                // `dry_run` is explicit rather than leaning on `cost_limit: 0`
-                // to force `needs_confirm`: a zero-priced provider makes
-                // `estimated_cost > 0` false and the endpoint would start a
-                // real run behind an "Estimated $0.0000" message.
-                apiPost('/api/project/' + PROJECT + '/review/run-judges', {
-                    chapter_ids: judgesScope, judges: judges,
-                    provider: (document.getElementById('judges-provider') || {}).value,
-                    model: (document.getElementById('judges-model') || {}).value,
-                    dry_run: true,
-                }).then(function(data) {
-                    if (!data || data.error) {
-                        // Drop the previous estimate: leaving it under an error
-                        // reads as a price for a run that cannot happen.
-                        document.getElementById('judges-cost-estimate').textContent = '';
-                        setStatus('judges-modal-status', (data && data.error) || 'No estimate returned.', 'error');
-                        return;
-                    }
-                    setStatus('judges-modal-status', '', '');
-                    document.getElementById('judges-cost-estimate').textContent =
-                        'Estimated $' + Number(data.estimated_cost || 0).toFixed(4) +
-                        ' over ' + (data.target_count || 0) + ' chunks.';
-                }).catch(function(e) {
-                    document.getElementById('judges-cost-estimate').textContent = '';
-                    setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
-                });
+                setStatus('judges-modal-status', 'Estimating…', 'info');
+                clearJudgesEstimate();
+                var headless = judgesBackend() === 'headless';
+                // `dry_run` / `estimate` are explicit flags rather than leaning
+                // on `cost_limit: 0` to force `needs_confirm`: a zero-priced
+                // provider makes `estimated_cost > 0` false and the endpoint
+                // would start a real run behind an "Estimated $0.0000" message.
+                postJudges(headless ? { estimate: true } : { dry_run: true })
+                    .then(function(data) {
+                        if (!data) return;
+                        if (data.error) {
+                            // Drop the previous estimate: leaving it under an
+                            // error reads as a price for a run that cannot happen.
+                            clearJudgesEstimate();
+                            setStatus('judges-modal-status', data.error, 'error');
+                            return;
+                        }
+                        setStatus('judges-modal-status', '', '');
+                        if (headless) {
+                            renderCliEstimate(data);
+                        } else {
+                            showJudgesEstimateText(
+                                'Estimated $' + Number(data.estimated_cost || 0).toFixed(4) +
+                                ' over ' + (data.target_count || 0) + ' chunks.');
+                        }
+                    }).catch(function(e) {
+                        clearJudgesEstimate();
+                        setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
+                    });
             });
         }
+
+        function runConfirmedJudges() {
+            setStatus('judges-modal-status', 'Starting…', 'info');
+            postJudges({ confirm: true }).then(function(data) {
+                if (!data) return;
+                if (data.error) {
+                    setStatus('judges-modal-status', data.error, 'error');
+                    return;
+                }
+                startJudgesRun(data);
+            }).catch(function(e) {
+                setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
+            });
+        }
+
+        var confirmBtn = document.getElementById('btn-judges-confirm');
+        if (confirmBtn) confirmBtn.addEventListener('click', runConfirmedJudges);
 
         var runBtn = document.getElementById('btn-judges-run');
         if (runBtn) {
             runBtn.addEventListener('click', function() {
+                // On the CLI path Run is only enabled once an estimate has landed,
+                // and it means the same thing the panel's Confirm does.
+                if (judgesBackend() === 'headless') {
+                    runConfirmedJudges();
+                    return;
+                }
                 setStatus('judges-modal-status', 'Starting…', 'info');
-                postJudges(false).then(function(data) {
+                postJudges().then(function(data) {
                     if (!data) return;
                     if (data.error) {
                         setStatus('judges-modal-status', data.error, 'error');
@@ -3537,27 +3948,19 @@
                             setStatus('judges-modal-status', 'Cancelled.', '');
                             return;
                         }
-                        postJudges(true).then(function(confirmed) {
-                            if (!confirmed || confirmed.error || !confirmed.job_id) {
+                        postJudges({ confirm: true }).then(function(confirmed) {
+                            if (!confirmed || confirmed.error) {
                                 setStatus('judges-modal-status',
                                     (confirmed && confirmed.error) || 'No job started.', 'error');
                                 return;
                             }
-                            document.getElementById('judges-modal').classList.remove('visible');
-                            openJobModal('Running LLM judges');
-                            streamJob(confirmed.job_id, confirmed.total, 'Judged');
+                            startJudgesRun(confirmed);
                         }).catch(function(e) {
                             setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
                         });
                         return;
                     }
-                    if (!data.job_id) {
-                        setStatus('judges-modal-status', 'No job started.', 'error');
-                        return;
-                    }
-                    document.getElementById('judges-modal').classList.remove('visible');
-                    openJobModal('Running LLM judges');
-                    streamJob(data.job_id, data.total, 'Judged');
+                    startJudgesRun(data);
                 }).catch(function(e) {
                     setStatus('judges-modal-status', String(e && e.message ? e.message : e), 'error');
                 });

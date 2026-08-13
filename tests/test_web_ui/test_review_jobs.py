@@ -392,6 +392,486 @@ def test_run_judges_rejects_unknown_judge(client, project):
     assert "vibes" in rv.get_json()["error"]
 
 
+def test_run_judges_rejects_an_unknown_backend(client, project):
+    rv = client.post("/api/project/jobproj/review/run-judges",
+                     json={"judges": ["dialogue"], "backend": "telepathy"})
+    assert rv.status_code == 400
+    assert "backend" in rv.get_json()["error"]
+
+
+# ── run-judges: the headless CLI backend ─────────────────────────────────────
+#
+# Nothing below may reach a real CLI: `subagent.*` is stubbed, the preflight is
+# stubbed, and `_no_spawn` turns any surviving `subprocess.run` into a failure
+# rather than a subscription charge (or a 30 s timeout on a machine with no CLI
+# installed at all).
+
+
+def _no_spawn(monkeypatch):
+    from src.harness import headless
+
+    def explode(*a, **k):
+        raise AssertionError("this path must not spawn a process")
+
+    monkeypatch.setattr(headless.subprocess, "run", explode)
+
+
+def _installed(monkeypatch, *names):
+    """Pin what ``shutil.which`` finds, so the payload is machine-independent."""
+    import shutil
+
+    wanted = set(names)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/bin/{name}" if name in wanted else None
+    )
+
+
+def _fake_profile(cli: str = "claude"):
+    from src.harness.profile import HeadlessProfile
+
+    return HeadlessProfile(
+        command="judges",
+        cli=cli,
+        cli_source="host:claude-code",
+        worker_model="sonnet",
+        worker_model_source="default:claude",
+        effort="medium",
+        effort_source="default:judges",
+        effort_channel="argv",
+        baseline_tokens=3900,
+        baseline_source="constant:claude",
+        host="claude-code",
+        warnings=["heads up"],
+    )
+
+
+def _stub_headless(
+    monkeypatch, *, cli="claude", preflight=None, fanout_extra=None,
+    commit_result=None, preflight_calls=None,
+):
+    """Stub the three subagent verbs + the preflight; record the call order."""
+    from src.harness import headless, profile as profile_mod
+    from src.judges import subagent
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_preflight(c, cli_bin=None, *, model=None):
+        if preflight_calls is not None:
+            preflight_calls.append({"cli": c, "cli_bin": cli_bin, "model": model})
+        return preflight
+
+    monkeypatch.setattr(profile_mod, "resolve_profile", lambda *a, **k: _fake_profile(cli))
+    monkeypatch.setattr(headless, "preflight_error", fake_preflight)
+
+    def fake_prepare(project_dir, judge_names, scopes, **kwargs):
+        calls.append(("prepare", {"scopes": list(scopes), **kwargs}))
+        return {"manifest": [{"target_id": "t1"}, {"target_id": "t2"}]}
+
+    def fake_fanout(project_dir, **kwargs):
+        calls.append(("fanout", dict(kwargs)))
+        if kwargs.get("estimate"):
+            return {
+                "estimate": {
+                    "jobs": 2,
+                    "prompt_tokens": 1200,
+                    "projected_tokens": 9000,
+                    "baseline_tokens": 3900,
+                    "baseline_source": "constant:claude",
+                    "argv": ["claude", "-p", "--model", "sonnet"],
+                    "cache": "5m",
+                },
+                "effective": _fake_profile(cli).to_payload(),
+                "warnings": ["heads up"],
+            }
+        hook = kwargs.get("on_job_done")
+        if hook:
+            hook({"id": "t1", "ok": True, "error": None, "done": 1, "total": 2})
+            hook({"id": "t2", "ok": True, "error": None, "done": 2, "total": 2})
+        out = {
+            "wrote": ["t1", "t2"], "failed": [], "cli": cli,
+            "usage": {"jobs": 2, "input": 20000, "overhead_ratio": 0.56},
+            "effective": _fake_profile(cli).to_payload(),
+        }
+        out.update(fanout_extra or {})
+        return out
+
+    def fake_commit(project_dir, **kwargs):
+        calls.append(("commit", dict(kwargs)))
+        if commit_result is not None:
+            return commit_result
+        return {
+            "status": "ok",
+            "counts": {"committed": 2, "failed": 0, "missing": 0},
+            "failed": [], "missing": [], "persist_errors": [],
+        }
+
+    monkeypatch.setattr(subagent, "prepare", fake_prepare)
+    monkeypatch.setattr(subagent, "fanout", fake_fanout)
+    monkeypatch.setattr(subagent, "commit", fake_commit)
+    return calls
+
+
+def test_judges_profile_relays_the_resolved_payload_and_spawns_nothing(
+    client, project, monkeypatch
+):
+    """The GUI's defaults must be `resolve_profile`'s answer verbatim — the moment
+    the dashboard re-derives one of these from config, it is the fifth layer that
+    can disagree with the other four."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+
+    rv = client.get("/api/project/jobproj/judges/profile")
+    assert rv.status_code == 200
+    body = rv.get_json()
+
+    from src.harness.profile import resolve_profile
+
+    expected = resolve_profile(project, command="judges").to_payload()
+    for key, value in expected.items():
+        assert body[key] == value, key
+    assert body["binaries"] == {"claude": True, "cursor": False}
+    assert body["default_backend"] == "headless"
+    assert body["prompt_cache_supported"] is True
+    assert "sonnet" in body["worker_model_suggestions"]
+
+
+def test_judges_profile_re_resolves_the_whole_block_for_another_cli(
+    client, project, monkeypatch
+):
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    rv = client.get("/api/project/jobproj/judges/profile?cli=cursor")
+    assert rv.status_code == 200
+    body = rv.get_json()
+    # An explicit pick is never second-guessed against what is installed.
+    assert body["cli"] == "cursor" and body["cli_source"] == "cli"
+    assert body["prompt_cache_supported"] is False
+    # No claude binary implied for a cursor wave, and no API backend forced.
+    assert body["default_backend"] == "api"
+
+
+def test_judges_profile_rejects_an_unknown_cli(client, project):
+    assert client.get("/api/project/jobproj/judges/profile?cli=gemini").status_code == 400
+
+
+def test_pin_cli_writes_the_one_harness_key(client, project):
+    rv = client.post("/api/project/jobproj/judges/pin-cli", json={"cli": "cursor"})
+    assert rv.status_code == 200
+    cfg = json.loads((project / ".harness" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["headless_cli"] == "cursor"
+
+    # And unpinning returns the book to detection.
+    client.post("/api/project/jobproj/judges/pin-cli", json={"cli": "auto"})
+    cfg = json.loads((project / ".harness" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["headless_cli"] == "auto"
+
+
+@pytest.mark.parametrize("value", ["gemini", "", None, 3])
+def test_pin_cli_rejects_anything_else(client, project, value):
+    rv = client.post("/api/project/jobproj/judges/pin-cli", json={"cli": value})
+    assert rv.status_code == 400
+
+
+def test_an_unconfirmed_headless_request_starts_nothing(client, project, monkeypatch):
+    """No threshold on this path: a token estimate must be fetched and confirmed."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+    rv = client.post("/api/project/jobproj/review/run-judges",
+                     json={"judges": ["dialogue"], "backend": "headless"})
+    assert rv.status_code == 200
+    assert rv.get_json()["status"] == "needs_confirm"
+    assert calls == []
+    assert jobs.active_job("jobproj") is None
+
+
+def test_a_headless_estimate_prepares_but_never_runs(client, project, monkeypatch):
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+    })
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["status"] == "estimate"
+    assert (body["jobs"], body["projected_tokens"]) == (2, 9000)
+    assert body["argv"] == ["claude", "-p", "--model", "sonnet"]
+    # Relayed whole: baseline_tokens means nothing without cli, effort nothing
+    # without effort_channel.
+    assert body["effective"]["cli"] == "claude"
+    assert body["effective"]["effort_channel"] == "argv"
+    assert body["warnings"] == ["heads up"]
+
+    assert [name for name, _ in calls] == ["prepare", "fanout"]
+    assert calls[1][1]["estimate"] is True
+    assert jobs.active_job("jobproj") is None
+
+
+def test_headless_estimate_drops_an_untranslated_chapter_from_prepare(
+    client, project, monkeypatch
+):
+    """Same skip rule as the API path, but prepare is the consumer here — a
+    skipped chapter in ``scopes`` would make it raise (or write empty prompts)
+    instead of just dropping out of the estimate."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    (project / "chapters" / "chapter_02.txt").write_text("y", encoding="utf-8")
+    (project / "chunks" / "chapter_02_chunk_000.json").write_text(json.dumps({
+        "id": "chapter_02_chunk_000", "chapter_id": "chapter_02", "position": 0,
+        "source_text": "The white dog.", "translated_text": "",
+        "status": "pending",
+        "metadata": {
+            "char_start": 0, "char_end": 14, "overlap_start": 0,
+            "overlap_end": 0, "paragraph_count": 1, "word_count": 3,
+        },
+    }), encoding="utf-8")
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+        "chapter_ids": ["chapter_01", "chapter_02"],
+    })
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["status"] == "estimate"
+    assert [s["scope"] for s in body["skipped"]] == ["chapter:chapter_02"]
+    assert calls[0][0] == "prepare"
+    assert calls[0][1]["scopes"] == ["chapter:chapter_01"]
+
+
+def test_untouched_fields_reach_prepare_as_none(client, project, monkeypatch):
+    """Pre-filling the resolved values and sending them back would make
+    `cli_source` read "a flag said so" when nothing did."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+    })
+    prepared = calls[0][1]
+    assert prepared["cli"] is None
+    assert prepared["worker_model"] is None
+    assert prepared["effort"] is None
+
+
+def test_explicit_overrides_reach_prepare_verbatim(client, project, monkeypatch):
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch, cli="cursor")
+
+    client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+        "cli": "cursor", "worker_model": "grok-4.5[effort=high]", "effort": "high",
+        "prompt_cache": "1h",
+    })
+    prepared = calls[0][1]
+    assert prepared["cli"] == "cursor"
+    assert prepared["worker_model"] == "grok-4.5[effort=high]"
+    assert prepared["effort"] == "high"
+    assert calls[1][1]["cache"] == "1h"
+
+
+def test_a_failed_preflight_is_a_409_carrying_the_clis_own_fix(
+    client, project, monkeypatch
+):
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(
+        monkeypatch, preflight="claude is not logged in — run `claude` and `/login`"
+    )
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+    })
+    assert rv.status_code == 409
+    assert "/login" in rv.get_json()["error"]
+    assert calls == []  # nothing prepared, nothing spawned
+
+
+def test_confirm_is_preflighted_too_and_starts_no_job(client, project, monkeypatch):
+    """The confirm path used to skip the gate estimate had: it started a job, ran
+    the destructive `prepare`, and only then died in fanout — so the operator saw
+    a job modal, then "Stopped", with the previous wave's drafts already gone."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(
+        monkeypatch, preflight="claude is not logged in — run `claude` and `/login`"
+    )
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    })
+    assert rv.status_code == 409
+    assert "/login" in rv.get_json()["error"]
+    assert calls == []
+    assert jobs.active_job("jobproj") is None
+
+
+def test_the_preflight_carries_the_resolved_worker_model(client, project, monkeypatch):
+    """Cursor rejects a bogus `--model` before it reads a prompt, but only inside
+    `run_headless_wave` — i.e. after `prepare`. Hoisting it means the estimate
+    never goes green on argv the wave cannot run."""
+    _no_spawn(monkeypatch)
+    seen: list[dict] = []
+    _stub_headless(monkeypatch, cli="cursor", preflight_calls=seen)
+
+    client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "estimate": True,
+    })
+    assert seen and seen[0]["cli"] == "cursor"
+    # `_fake_profile`'s resolved model, not the raw override (which is None here).
+    assert seen[0]["model"] == "sonnet"
+
+
+@pytest.mark.parametrize("gate", [{"estimate": True}, {"confirm": True}])
+def test_a_live_job_blocks_both_gates_before_prepare_can_unlink(
+    client, project, monkeypatch, gate
+):
+    """`prepare` unlinks drafts and rewrites manifest.json. Fired while a wave is
+    in fanout/commit (a second tab), it deletes work in flight and swaps the
+    manifest out from under the running job."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    release = threading.Event()
+    running_id = jobs.start_job("jobproj", "review-judges", lambda emit: release.wait(5))
+    try:
+        body = {"judges": ["dialogue"], "backend": "headless", **gate}
+        rv = client.post("/api/project/jobproj/review/run-judges", json=body)
+        assert rv.status_code == 409
+        assert rv.get_json()["job_id"] == running_id
+        assert calls == []  # nothing prepared: no draft was unlinked
+    finally:
+        release.set()
+
+
+def test_dry_run_outranks_confirm_on_the_headless_path(client, project, monkeypatch):
+    """`dry_run` was read only by the API backend, so `{dry_run, confirm}` here
+    started a real wave — silent spend against a flag that says "don't"."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless",
+        "dry_run": True, "confirm": True,
+    })
+    assert rv.status_code == 200
+    assert rv.get_json()["status"] == "estimate"
+    assert [name for name, _ in calls] == ["prepare", "fanout"]
+    assert calls[1][1]["estimate"] is True
+    assert jobs.active_job("jobproj") is None
+
+
+def test_a_confirmed_headless_run_prepares_fans_out_and_commits(
+    client, project, monkeypatch
+):
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch, cli="cursor")
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    })
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["status"] == "started"
+    events = drain(client, body["job_id"])
+
+    assert [name for name, _ in calls] == ["prepare", "fanout", "commit"]
+    # The persisted verdict says which launcher judged the book, not a Task
+    # spawn that never happened.
+    assert calls[2][1] == {"persist": True, "backend": "headless:cursor"}
+
+    phases = [e.get("phase") for e in events if e.get("event") == "phase"]
+    assert phases == ["prepare", "fanout", "commit"]
+    assert [e["index"] for e in events if e.get("event") == "target_done"] == [1, 2]
+    assert events[-1]["event"] == "complete"
+    assert events[-1]["ran"] == 2
+    assert events[-1]["usage"]["overhead_ratio"] == 0.56
+
+
+def test_a_launcher_error_ends_the_job_instead_of_committing(
+    client, project, monkeypatch
+):
+    """A wave that never launched has nothing to commit, and saying "0 of 2 done"
+    would hide the one line that explains why."""
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(
+        monkeypatch,
+        fanout_extra={"error": "subscription preflight failed: not logged in",
+                      "wrote": [], "usage": None},
+    )
+    body = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    }).get_json()
+    events = drain(client, body["job_id"])
+
+    assert [name for name, _ in calls] == ["prepare", "fanout"]
+    assert events[-1]["event"] == "complete"
+    assert "not logged in" in events[-1]["fatal"]
+
+
+def test_a_failed_commit_stops_the_job_instead_of_reporting_a_clean_wave(
+    client, project, monkeypatch
+):
+    """`commit`'s error return carries no `counts`, so the summary read
+    `ran: 0, error_count: 0` and the modal rendered "0 of 2 done" for a commit
+    that never happened. False success is worse than a visible stop."""
+    _no_spawn(monkeypatch)
+    _stub_headless(monkeypatch, commit_result={
+        "status": "error",
+        "error": "no judge manifest — run `prepare` first",
+        "committed": [], "failed": [], "missing": [],
+    })
+    body = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    }).get_json()
+    events = drain(client, body["job_id"])
+
+    assert events[-1]["event"] == "complete"
+    assert "no judge manifest" in events[-1]["fatal"]
+    assert events[-1].get("ran") is None
+
+
+def test_missing_drafts_are_counted_as_errors_not_silence(client, project, monkeypatch):
+    """A draft the wave never wrote is a failure of this run. Left out of
+    `errors`, an all-missing commit reported zero errors and read as a clean
+    wave that simply judged nothing."""
+    _no_spawn(monkeypatch)
+    _stub_headless(monkeypatch, commit_result={
+        "status": "ok",
+        "counts": {"committed": 0, "failed": 0, "missing": 2},
+        "failed": [],
+        "missing": [
+            {"target_id": "chapter_01_chunk_000", "judge": "dialogue"},
+            {"target_id": "chapter_01_chunk_001", "judge": "dialogue"},
+        ],
+        "persist_errors": [],
+    })
+    body = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "backend": "headless", "confirm": True,
+    }).get_json()
+    events = drain(client, body["job_id"])
+
+    final = events[-1]
+    assert final["event"] == "complete" and final["ran"] == 0
+    assert final["missing"] == 2
+    assert final["error_count"] == 2
+    assert "draft missing" in final["errors"][0]
+
+
+@pytest.mark.parametrize("payload", [
+    {"cli": "auto"},
+    {"cli": "gemini"},
+    {"effort": "turbo"},
+    {"prompt_cache": "10m"},
+    {"worker_model": "   "},
+    {"worker_model": 7},
+])
+def test_bad_headless_knobs_are_400(client, project, monkeypatch, payload):
+    _no_spawn(monkeypatch)
+    calls = _stub_headless(monkeypatch)
+    body = {"judges": ["dialogue"], "backend": "headless", "estimate": True}
+    body.update(payload)
+    rv = client.post("/api/project/jobproj/review/run-judges", json=body)
+    assert rv.status_code == 400
+    assert calls == []
+
+
 # ── The SSE route ────────────────────────────────────────────────────────────
 
 

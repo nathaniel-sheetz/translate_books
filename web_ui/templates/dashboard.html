@@ -761,7 +761,8 @@
         <button class="modal-close" id="judges-modal-close">&times;</button>
         <h3>Run LLM judges</h3>
         <p style="font-size:13px; color:#666; margin-top:0;">
-            Metered API calls, one per chunk per judge. Findings land in the reader's Review Mode.
+            One run per chunk per judge &mdash; metered API calls, or your CLI subscription.
+            Findings land in the reader's Review Mode.
         </p>
 
         <div class="dash-field">
@@ -770,19 +771,89 @@
             <label class="judges-check"><input type="checkbox" class="judge-pick" value="address"> Forms of address (usted/t&uacute;)</label>
         </div>
         <div class="dash-field">
-            <label>Provider</label>
-            <select id="judges-provider"></select>
+            <label>Backend</label>
+            <select id="judges-backend">
+                <option value="api">API (metered)</option>
+                <option value="headless">Headless CLI (subscription)</option>
+            </select>
         </div>
-        <div class="dash-field">
-            <label>Model</label>
-            <select id="judges-model"></select>
+
+        <div id="judges-api-fields">
+            <div class="dash-field">
+                <label>Provider</label>
+                <select id="judges-provider"></select>
+            </div>
+            <div class="dash-field">
+                <label>Model</label>
+                <select id="judges-model"></select>
+            </div>
+        </div>
+
+        <div id="judges-cli-fields" style="display:none;">
+            <div class="dash-field">
+                <label>CLI</label>
+                <select id="judges-cli">
+                    <option value="claude">Claude Code (claude)</option>
+                    <option value="cursor">Cursor Agent (cursor-agent)</option>
+                </select>
+                <div class="field-hint" id="judges-cli-provenance"></div>
+                <label class="judges-check" style="margin-top:6px;">
+                    <input type="checkbox" id="judges-remember-cli"> Remember this CLI for this book
+                </label>
+            </div>
+            <div class="dash-field">
+                <label>Worker model</label>
+                <!-- Free text, not a select: Cursor models take the bracket form
+                     grok-4.5[effort=medium,fast=false], which no fixed list enumerates. -->
+                <input type="text" id="judges-worker-model" list="judges-worker-model-options"
+                       placeholder="leave empty to use the resolved default">
+                <datalist id="judges-worker-model-options"></datalist>
+                <div class="field-hint" id="judges-worker-model-hint"></div>
+            </div>
+            <div class="dash-field">
+                <label>Effort</label>
+                <select id="judges-effort">
+                    <option value="">From config</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                    <option value="default">default (no level)</option>
+                </select>
+                <div class="field-hint" id="judges-effort-channel"></div>
+            </div>
+            <div class="dash-field" id="judges-claude-only">
+                <label>Prompt cache</label>
+                <select id="judges-prompt-cache">
+                    <option value="">From config</option>
+                    <option value="auto">auto</option>
+                    <option value="5m">5m</option>
+                    <option value="1h">1h</option>
+                    <option value="off">off</option>
+                </select>
+                <div class="field-hint" id="judges-prompt-cache-hint"></div>
+            </div>
+            <div class="field-hint" id="judges-cursor-cache-note" style="display:none;">
+                cursor-agent has no prompt-cache lever, so there is nothing to set here.
+            </div>
+            <div id="judges-warnings" class="judges-warnings" style="display:none;"></div>
         </div>
 
         <div id="judges-scope" style="margin:12px 0; font-size:13px; color:#666;"></div>
-        <div id="judges-cost-estimate" style="margin:12px 0; font-size:14px;"></div>
+
+        <div id="judges-estimate-panel" class="judges-estimate" style="display:none;">
+            <div id="judges-estimate-body"></div>
+            <details id="judges-argv-wrap" style="display:none;">
+                <summary>Command each job runs</summary>
+                <pre id="judges-argv"></pre>
+            </details>
+            <button class="btn-primary" id="btn-judges-confirm" style="display:none;" disabled>
+                Confirm and run
+            </button>
+        </div>
 
         <div class="btn-row">
-            <button class="btn-secondary" id="btn-judges-estimate">Estimate cost</button>
+            <button class="btn-secondary" id="btn-judges-estimate">Estimate</button>
             <button class="btn-primary" id="btn-judges-run">Run judges</button>
         </div>
         <div id="judges-modal-status" class="status-msg" style="margin-top:8px;"></div>

@@ -1446,6 +1446,177 @@ def test_wave_blocks_on_a_bad_cursor_model_with_zero_spawns(tmp_path: Path):
     assert not out.exists()
 
 
+# ---------------------------------------------------------------------------
+# Progress hook and hoisted preflight
+#
+# Both exist for callers that are not a terminal: `run_headless_wave` returns
+# only when the whole wave ends (minutes), and `fanout(estimate=True)` returns
+# before the launcher's own preflight ever runs.
+# ---------------------------------------------------------------------------
+
+
+def test_on_job_done_fires_once_per_job_with_a_running_count(tmp_path: Path):
+    seen: list[dict] = []
+    headless.run_headless_wave(
+        _jobs(tmp_path, 3),
+        model="sonnet",
+        concurrency=3,
+        runner=lambda *a, **k: (0, "prose", ""),
+        warm_first=False,
+        on_job_done=seen.append,
+    )
+    assert len(seen) == 3
+    assert {r["id"] for r in seen} == {"c0", "c1", "c2"}
+    assert all(r["ok"] and r["error"] is None and r["total"] == 3 for r in seen)
+    assert sorted(r["done"] for r in seen) == [1, 2, 3]
+
+
+def test_on_job_done_reports_a_failed_job_too(tmp_path: Path):
+    seen: list[dict] = []
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1),
+        model="sonnet",
+        concurrency=1,
+        runner=lambda *a, **k: (1, "Credit balance is too low", ""),
+        on_job_done=seen.append,
+    )
+    assert len(seen) == 1 and seen[0]["ok"] is False
+    assert "Credit balance" in seen[0]["error"]
+
+
+def test_a_raising_progress_callback_does_not_fail_the_wave(tmp_path: Path):
+    """A dead SSE queue must not be able to kill a wave that is spending tokens."""
+    def boom(_record):
+        raise RuntimeError("browser went away")
+
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 2),
+        model="sonnet",
+        concurrency=2,
+        runner=lambda *a, **k: (0, "prose", ""),
+        warm_first=False,
+        on_job_done=boom,
+    )
+    assert result["counts"]["wrote"] == 2
+
+
+def test_preflight_error_fails_closed_on_a_missing_binary(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda _name: None)
+    err = headless.preflight_error("cursor")
+    assert err and "cursor-agent not found" in err
+    assert "cursor-agent login" in err
+
+
+def test_preflight_error_fails_closed_on_an_unparseable_probe(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        headless, "_default_auth_prober", _prober("not json at all")
+    )
+    err = headless.preflight_error("claude")
+    assert err and "could not parse" in err
+
+
+def test_preflight_error_passes_a_subscription_login(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        headless, "_default_auth_prober", _prober(_AUTH_SUBSCRIPTION)
+    )
+    assert headless.preflight_error("claude") is None
+
+
+def test_preflight_error_rejects_an_unknown_family():
+    err = headless.preflight_error("gemini")
+    assert err and "unsupported headless cli" in err
+
+
+def _cursor_preflight_prober(models_out: str, reject: str = ""):
+    """One prober for all three cursor probes: status, `models`, the model argv."""
+    def probe(argv, *, env, cwd, timeout):
+        if "models" in argv:
+            return 0, models_out, ""
+        if "status" in argv:
+            return 0, json.dumps(_CURSOR_AUTHENTICATED), ""
+        return 1, "", reject or "Error: No prompt provided for print mode"
+    return probe
+
+
+def test_preflight_error_rejects_a_model_the_cursor_cli_will_not_run(monkeypatch):
+    """`run_headless_wave` applies this gate too, but only from inside the job —
+    i.e. after the destructive `prepare`. Hoisted, a bogus id stops the estimate
+    from ever going green instead of killing the wave one step later."""
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", _cursor_preflight_prober(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n",
+        reject="Cannot use this model: bogus-xyz. Available models: auto, gpt-5.2",
+    ))
+    err = headless.preflight_error("cursor", model="bogus-xyz")
+    assert err and "bogus-xyz" in err
+
+
+def test_preflight_error_passes_a_model_the_cursor_cli_accepts(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", _cursor_preflight_prober(
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n"
+    ))
+    assert headless.preflight_error("cursor", model="gpt-5.2") is None
+    # And a model is never the reason a login failure gets misreported.
+    assert headless.preflight_error("cursor") is None
+
+
+def test_preflight_error_never_probes_a_model_on_claude(monkeypatch):
+    """`--model` validation is a cursor-agent behaviour; asking claude would be a
+    spawn (and a 30 s timeout) for a check it does not have."""
+    seen: list[list[str]] = []
+
+    def probe(argv, *, env, cwd, timeout):
+        seen.append(list(argv))
+        return 0, json.dumps(_AUTH_SUBSCRIPTION), ""
+
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    assert headless.preflight_error("claude", model="no-such-model") is None
+    assert len(seen) == 1 and "--model" not in seen[0]
+
+
+def test_preflight_error_reports_a_login_failure_before_a_model_one(monkeypatch):
+    """Order matters: a logged-out CLI must read as logged out, not as a model
+    problem it was never asked about."""
+    def probe(argv, *, env, cwd, timeout):
+        if "models" in argv:
+            raise AssertionError("must not reach the model gate")
+        return 0, json.dumps({**_CURSOR_AUTHENTICATED,
+                              "status": "expired", "isAuthenticated": False}), ""
+
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    err = headless.preflight_error("cursor", model="bogus-xyz")
+    assert err and "bogus-xyz" not in err
+
+
+def test_worker_model_suggestions_claude_are_the_subscription_aliases():
+    assert headless.worker_model_suggestions("claude") == [
+        "fable", "haiku", "opus", "sonnet",
+    ]
+
+
+def test_worker_model_suggestions_cursor_include_the_selected_model(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        headless, "_cursor_known_models", lambda *a, **k: {"auto", "gpt-5.2"}
+    )
+    monkeypatch.setattr(headless, "cursor_default_model", lambda: "grok-4.5[effort=high]")
+    assert headless.worker_model_suggestions("cursor") == [
+        "auto", "gpt-5.2", "grok-4.5[effort=high]",
+    ]
+
+
+def test_worker_model_suggestions_survive_a_missing_cursor_cli(monkeypatch):
+    """A model list is a nicety; failing to read one must never raise."""
+    monkeypatch.setattr(headless.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(headless, "cursor_default_model", lambda: "auto")
+    assert headless.worker_model_suggestions("cursor") == ["auto"]
+
+
 def test_wave_model_preflight_is_cursor_only(tmp_path: Path):
     """A Claude wave must not pay for a Cursor-shaped check."""
     seen: list[list[str]] = []
