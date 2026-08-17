@@ -592,7 +592,12 @@ def _resolve_custom_regex(args: argparse.Namespace) -> str | None:
     p = Path(path)
     if not p.exists():
         raise HarnessValidationError(f"--custom-regex-file not found: {path}")
-    regex = p.read_text(encoding="utf-8").strip()
+    try:
+        regex = p.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HarnessValidationError(
+            f"--custom-regex-file could not be read as UTF-8: {path}"
+        ) from exc
     if not regex:
         raise HarnessValidationError(f"--custom-regex-file is empty: {path}")
     return regex

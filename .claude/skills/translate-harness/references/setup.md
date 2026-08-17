@@ -128,6 +128,16 @@ that has an outline, read `heading_outline.levels` — each `h1`..`h6` comes wit
 `n`, `median_chars`, and how many are stubs (`tiny`). Picking the right level is almost always the
 fix; a hand-written regex almost never is.
 
+`--heading-level` also *selects* the outline path, so it works on `auto` without
+`--chapter-pattern headings` — including when `selected` is `null`. A short book (say 4 chapters) is
+under the 5-section minimum, so the gates decline and `auto` alone falls back to a regex even though
+`levels.h2.n` reads 4. Naming the level is the whole fix. It needs a sidecar to act on: with no
+`headings.json` the regex patterns still run and a warning says the flag had nothing to bite on.
+
+**A `headings.json` that exists but won't parse is reported, not ignored.** Under `auto` it comes
+back as a warning and the regex patterns run; under `--chapter-pattern headings` it is a hard error.
+Re-ingest from the source URL to rebuild it — that path is the only supported writer.
+
 ```jsonc
 "heading_outline": {
   "selected": "h2",

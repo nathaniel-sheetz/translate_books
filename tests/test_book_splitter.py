@@ -430,6 +430,38 @@ class TestSaveChaptersWritesManifest:
         assert data["chapter_heading"] == {"label": "Capítulo"}
         assert "chapter_manifest" in data
 
+    def test_clears_stale_files_from_a_prior_larger_split(self, tmp_path):
+        project_dir = tmp_path / "myproj"
+        chapters_dir = project_dir / "chapters"
+        chapters_dir.mkdir(parents=True)
+        (chapters_dir / "chapter_99.txt").write_text("stale", encoding="utf-8")
+        (chapters_dir / "notes.txt").write_text("keep", encoding="utf-8")
+
+        sections = split_book_into_chapters(
+            "Chapter I\n\n" + CHAPTER_BODY + "\n\n" + "Chapter II\n\n" + CHAPTER_BODY,
+            pattern_type="roman",
+        )
+        save_chapters_to_files(sections, str(chapters_dir))
+
+        names = sorted(p.name for p in chapters_dir.iterdir())
+        assert "chapter_99.txt" not in names
+        assert "notes.txt" in names
+        assert "chapter_01.txt" in names
+        assert "chapter_02.txt" in names
+
+    def test_clear_existing_false_keeps_unrelated_chapter_files(self, tmp_path):
+        project_dir = tmp_path / "myproj"
+        chapters_dir = project_dir / "chapters"
+        chapters_dir.mkdir(parents=True)
+        (chapters_dir / "chapter_99.txt").write_text("stale", encoding="utf-8")
+
+        sections = split_book_into_chapters(
+            "Chapter I\n\n" + CHAPTER_BODY + "\n\n" + "Chapter II\n\n" + CHAPTER_BODY,
+            pattern_type="roman",
+        )
+        save_chapters_to_files(sections, str(chapters_dir), clear_existing=False)
+        assert (chapters_dir / "chapter_99.txt").exists()
+
 
 class TestBuildChapterManifest:
     def test_basic(self):
@@ -728,6 +760,63 @@ class TestHeadingOutlineSplit:
         assert "lorem ipsum" in sections[0].content
         assert "A TITLE FOR 1" not in sections[0].content
 
+    def test_prose_between_merged_headings_opens_the_chapter_body(self):
+        """An epigraph under ``Chapter I.`` used to be written nowhere.
+
+        The merge gap is measured start-to-start, so ~190 chars of prose can sit
+        inside a group that still merges. The body begins after the *last*
+        heading, so that prose was in neither the title nor the body, and never
+        reached ``dropped`` either -- the split reported a clean ledger while
+        silently discarding it.
+        """
+        epigraph = "He rode out at dawn, and the dust rose behind him. " * 2
+        parts, outline = [], []
+        for i in range(1, 7):
+            parts += [f"Chapter {i}.", epigraph, f"A TITLE FOR {i}", _STORY]
+            outline += [{"level": 2, "text": f"Chapter {i}."},
+                        {"level": 2, "text": f"A TITLE FOR {i}"}]
+        text = "\n\n".join(parts)
+        dropped: list = []
+        sections = split_book_into_chapters(
+            text, pattern_type="auto", heading_outline=outline,
+            collect_dropped=dropped)
+
+        # The merge itself is unchanged: still one section per chapter.
+        assert len(sections) == 6
+        assert sections[0].chapter_title == "Chapter 1.\nA TITLE FOR 1"
+        # The epigraph opens the body, where it appears in the book.
+        assert sections[0].content.startswith("He rode out at dawn")
+        assert "lorem ipsum" in sections[0].content
+        assert "A TITLE FOR 1" not in sections[0].content  # title, not body
+        assert all("He rode out at dawn" in s.content for s in sections)
+        assert dropped == []
+
+    def test_chained_numeral_merge_keeps_every_body_but_no_heading_lines(self):
+        # Consecutive short bare numerals chain into one group. The text between
+        # them must survive; the heading lines must not be folded in as prose.
+        verse = "A short verse of a handful of lines. "
+        parts, outline = [], []
+        for n in ("I", "II", "III", "IV", "V", "VI"):
+            parts += [f"{n}.", verse]
+            outline.append({"level": 2, "text": f"{n}."})
+        text = "\n\n".join(parts)
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            heading_level="h2", min_chapter_size=50)
+
+        assert sections[0].content.count("A short verse") == 6
+        for n in ("II.", "III.", "IV."):
+            assert n not in sections[0].content
+
+    def test_unmerged_headings_get_no_lead_text(self):
+        # The regression guard: a book whose headings never merge must have
+        # byte-identical bodies to before the lead-text plumbing existed.
+        text, outline = _outline_book(_titles(6))
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline)
+        for s in sections:
+            assert s.content.startswith("lorem ipsum")
+
     def test_short_standalone_sections_are_not_merged(self):
         # A book of one-page poems: every section is short, but none is a bare
         # numeral, so nothing may collapse into its neighbour.
@@ -742,6 +831,17 @@ class TestHeadingOutlineSplit:
         text, _ = _outline_book(_titles(6))
         with pytest.raises(ValueError, match="headings.json"):
             split_book_into_chapters(text, pattern_type="headings")
+
+    def test_headings_with_unlocated_outline_names_the_desync(self):
+        # Sidecar present, source.txt rewritten: every title misses. That is
+        # not "headings.json was not found" — telling the user to re-ingest
+        # for a missing file sends them at the wrong thing.
+        text, _ = _outline_book(_titles(6))
+        outline = [{"level": 2, "text": f"A Title Nobody Wrote {i}"}
+                   for i in range(1, 7)]
+        with pytest.raises(ValueError, match="Restore source.txt"):
+            split_book_into_chapters(text, pattern_type="headings",
+                                     heading_outline=outline)
 
     def test_explicit_heading_level_overrides_the_selection(self):
         # h2 is denser and wins on its own; h3 is what the caller wants. This is
@@ -782,6 +882,16 @@ class TestHeadingOutlineSplit:
             split_book_into_chapters(text, pattern_type="headings",
                                      heading_outline=outline, heading_level="h5")
 
+    @pytest.mark.parametrize("junk", ["foo", "h2 extra"])
+    def test_garbage_heading_level_is_rejected_not_treated_as_omitted(self, junk):
+        # Non-numeric junk used to normalize to None and run the auto-picked
+        # level with no error. Out-of-range ints already fail later; this is
+        # the case that didn't.
+        text, outline = _outline_book(_titles(6))
+        with pytest.raises(ValueError, match="invalid heading level"):
+            split_book_into_chapters(text, pattern_type="headings",
+                                     heading_outline=outline, heading_level=junk)
+
     def test_unlocated_headings_earn_a_warning(self):
         text, outline = _outline_book(_titles(6))
         outline.append({"level": 2, "text": "A Heading Nobody Wrote"})
@@ -810,6 +920,123 @@ class TestLoadHeadingOutline:
         }), encoding="utf-8")
         assert load_heading_outline(tmp_path) == [
             {"level": 2, "text": "A"}, {"level": 3, "text": "B"}]
+
+    def test_absent_sidecar_reports_no_error(self, tmp_path):
+        # Silence is correct here: a project ingested before the sidecar existed
+        # is not broken, and must not nag.
+        errors: list = []
+        assert load_heading_outline(tmp_path, collect_error=errors) is None
+        assert errors == []
+
+    @pytest.mark.parametrize("payload,expected", [
+        ('{"version": 1, "headings": [{"level": 2, "te', "invalid JSON"),
+        ('[{"level": 2, "text": "A"}]', "no 'headings' list"),
+        ('{"version": 1, "headings": {"a": 1}}', "no 'headings' list"),
+        ('{"version": 1, "headings": [{"level": 2, "text": "  "}]}',
+         "none with usable text"),
+    ])
+    def test_broken_sidecar_is_distinguishable_from_absent(
+            self, tmp_path, payload, expected):
+        # Returning None for both "absent" and "broken" made a truncated write
+        # look like a pre-sidecar project: no warning, and heading_outline null.
+        (tmp_path / "headings.json").write_text(payload, encoding="utf-8")
+        errors: list = []
+        assert load_heading_outline(tmp_path, collect_error=errors) is None
+        assert len(errors) == 1
+        assert expected in errors[0]
+        assert "headings.json" in errors[0]
+
+    def test_broken_sidecar_is_named_when_the_regex_fallback_finds_nothing(self):
+        # Otherwise the run dies on "no chapters with pattern 'roman'" and the
+        # warning naming the real cause is never reached.
+        text, _ = _outline_book([(2, "The Wolf at the Door"),
+                                 (2, "The Long Winter")])
+        with pytest.raises(ValueError, match="headings.json exists but could not"):
+            split_book_into_chapters(
+                text, pattern_type="auto",
+                outline_error="headings.json exists but could not be used — "
+                              "invalid JSON: x")
+
+
+class TestExplicitHeadingLevelOnAuto:
+    """``--heading-level`` must reach the outline path from ``auto``.
+
+    The selector deliberately returns ``selected: None`` for books it isn't
+    confident about, and that is exactly when a caller reads the ``levels``
+    table and names a level by hand. Resolving ``auto`` without consulting
+    ``heading_level`` discarded the flag and ran a regex instead.
+    """
+
+    # 4 h2 chapters: under _HEADING_MIN_SECTIONS, so the selector declines. The
+    # titles are Title Case, so no regex pattern can find them either.
+    def _book(self):
+        return _outline_book([(2, "The Wolf at the Door"), (2, "The Long Winter"),
+                              (2, "A Letter Home"), (2, "The Bridge at Evening")])
+
+    def test_selector_declines_but_reports_the_level(self):
+        text, outline = self._book()
+        anchors, _ = locate_headings(text, outline)
+        report = select_heading_level(anchors, text)
+        assert report["selected"] is None
+        assert report["levels"]["h2"]["n"] == 4
+
+    def test_auto_plus_heading_level_uses_the_outline(self):
+        text, outline = self._book()
+        got: dict = {}
+        sections = split_book_into_chapters(
+            text, pattern_type="auto", heading_outline=outline,
+            heading_level="h2", collect_outline_report=got)
+        assert [s.chapter_title for s in sections] == [
+            "The Wolf at the Door", "The Long Winter",
+            "A Letter Home", "The Bridge at Evening"]
+        # The report must name the level actually used, not the declined one.
+        assert got["selected"] == "h2"
+
+    def test_auto_without_the_flag_still_falls_back(self):
+        text, outline = self._book()
+        with pytest.raises(ValueError, match="No chapters detected"):
+            split_book_into_chapters(
+                text, pattern_type="auto", heading_outline=outline)
+
+    def test_resolve_pattern_type_agrees_with_the_split(self):
+        # pattern_used is computed by a second, independent call; if it ignores
+        # heading_level it reports a regex pattern for an outline split.
+        text, outline = self._book()
+        got: dict = {}
+        split_book_into_chapters(
+            text, pattern_type="auto", heading_outline=outline,
+            heading_level="h2", collect_outline_report=got)
+        assert resolve_pattern_type(
+            "auto", text, outline_report=got, heading_level="h2") == "headings"
+
+    def test_flag_needs_an_outline_to_act_on(self):
+        # No sidecar: the flag has nothing to bite on, so the regex patterns
+        # still run rather than erroring out on a missing headings.json.
+        text, _ = _outline_book(_titles(6))
+        assert resolve_pattern_type(
+            "auto", text, outline_report=None, heading_level="h2") != "headings"
+
+    def test_ignored_flag_is_warned_about(self):
+        # allcaps_heading's class has no digits, so spell the numbers out.
+        text, _ = _outline_book([
+            (2, f"STORY NUMBER {w}") for w in
+            ("ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX")])
+        sections = split_book_into_chapters(text, pattern_type="allcaps_heading")
+        warnings = split_sanity_warnings(
+            sections, text, pattern_used="allcaps_heading",
+            outline_report=None, heading_level="h2")
+        assert any("--heading-level h2 had no effect" in w for w in warnings)
+
+    def test_no_warning_when_the_flag_was_honored(self):
+        text, outline = self._book()
+        got: dict = {}
+        sections = split_book_into_chapters(
+            text, pattern_type="auto", heading_outline=outline,
+            heading_level="h2", collect_outline_report=got)
+        warnings = split_sanity_warnings(
+            sections, text, pattern_used="headings",
+            outline_report=got, heading_level="h2")
+        assert not any("had no effect" in w for w in warnings)
 
 
 class TestDroppedSectionsAreReported:

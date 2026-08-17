@@ -1556,3 +1556,116 @@ def test_headings_requested_without_a_sidecar_fails_loudly(tmp_path: Path):
     (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
     with pytest.raises(ValueError, match="headings.json"):
         flow.split_preview(str(proj), pattern_type="headings")
+
+
+# A book the selector declines (3 h2s is under _HEADING_MIN_SECTIONS) whose
+# Title-Case headings no regex pattern can find either. Naming a level by hand
+# is the only way to split it, which is what --heading-level is for.
+_DECLINED_BOOK = [(2, "The Wolf at the Door"), (2, "The Long Winter"),
+                  (2, "A Letter Home")]
+
+
+def test_auto_plus_heading_level_uses_and_reports_the_outline(tmp_path: Path):
+    """``pattern_used`` comes from a second, independent resolve; it has to see
+    ``heading_level`` too, or it names a regex pattern for an outline split."""
+    proj = _outline_project(tmp_path, _DECLINED_BOOK)
+
+    # Without the flag the selector declines and the regex fallback finds
+    # nothing -- the state the flag exists to rescue.
+    with pytest.raises(ValueError, match="No chapters detected"):
+        flow.split_preview(str(proj), pattern_type="auto")
+
+    result = flow.split_preview(str(proj), pattern_type="auto", heading_level="h2")
+
+    assert result["pattern_used"] == "headings"
+    assert result["heading_outline"]["applied"] is True
+    assert result["heading_outline"]["selected"] == "h2"
+    assert result["ledger"]["chapter_level"] == "h2"
+    assert [s["name"] for s in result["sections"]] == [t for _, t in _DECLINED_BOOK]
+
+
+def test_heading_level_without_a_sidecar_warns_instead_of_vanishing(tmp_path: Path):
+    proj = tmp_path / "book"
+    proj.mkdir()
+    (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
+
+    result = flow.split_preview(str(proj), pattern_type="auto", heading_level="h2")
+
+    assert result["heading_outline"] is None
+    assert result["pattern_used"] != "headings"
+    assert any("--heading-level h2 had no effect" in w for w in result["warnings"])
+
+
+def _tear_sidecar(proj: Path) -> None:
+    """Simulate a write that died partway, leaving truncated JSON."""
+    raw = (proj / "headings.json").read_text(encoding="utf-8")
+    (proj / "headings.json").write_text(raw[:len(raw) // 2], encoding="utf-8")
+
+
+def test_broken_sidecar_fails_closed_when_headings_asked_for_by_name(tmp_path: Path):
+    """``--chapter-pattern headings`` demanded the outline path, so silently
+    regexing would answer a different question than the one asked."""
+    from src.harness_guard import HarnessValidationError
+
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    _tear_sidecar(proj)
+    with pytest.raises(HarnessValidationError, match="headings.json exists but"):
+        flow.split_preview(str(proj), pattern_type="headings")
+
+
+def test_broken_sidecar_warns_but_still_splits_on_auto(tmp_path: Path):
+    """Under ``auto`` the regex fallback is legitimate — it just must not be
+    indistinguishable from a project that predates the sidecar."""
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    _tear_sidecar(proj)
+
+    result = flow.split_preview(str(proj), pattern_type="auto")
+
+    assert result["pattern_used"] != "headings"
+    assert result["heading_outline"] is None
+    assert any("headings.json exists but could not be used" in w
+               for w in result["warnings"])
+
+
+# ── --custom-regex-file ────────────────────────────────────────────────────
+
+def _regex_args(*, custom_regex=None, custom_regex_file=None):
+    import argparse
+    return argparse.Namespace(
+        custom_regex=custom_regex, custom_regex_file=custom_regex_file)
+
+
+def test_custom_regex_file_reads_the_pattern(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    path = tmp_path / "pat.txt"
+    path.write_text(r"^CHAPTER [IVX]+$", encoding="utf-8")
+    assert _resolve_custom_regex(_regex_args(custom_regex_file=str(path))) == (
+        r"^CHAPTER [IVX]+$")
+
+
+def test_custom_regex_file_and_flag_are_mutually_exclusive(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    path = tmp_path / "pat.txt"
+    path.write_text("CHAPTER", encoding="utf-8")
+    with pytest.raises(HarnessValidationError, match="mutually exclusive"):
+        _resolve_custom_regex(_regex_args(
+            custom_regex="CHAPTER", custom_regex_file=str(path)))
+
+
+def test_custom_regex_file_missing_is_named(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    missing = tmp_path / "nope.txt"
+    with pytest.raises(HarnessValidationError, match="not found"):
+        _resolve_custom_regex(_regex_args(custom_regex_file=str(missing)))
+
+
+def test_custom_regex_file_empty_is_rejected(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    path = tmp_path / "empty.txt"
+    path.write_text("   \n", encoding="utf-8")
+    with pytest.raises(HarnessValidationError, match="is empty"):
+        _resolve_custom_regex(_regex_args(custom_regex_file=str(path)))

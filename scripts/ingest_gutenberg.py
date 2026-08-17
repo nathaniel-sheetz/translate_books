@@ -18,6 +18,7 @@ and survive the chunking / translation pipeline for later re-insertion.
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.parse
@@ -418,10 +419,16 @@ def write_heading_outline(output_dir: Path, chapters: list[dict]) -> int:
         if ch.get("heading")
     ]
     path = Path(output_dir) / HEADING_OUTLINE_FILENAME
-    path.write_text(
+    # Write-then-rename: a plain write_text that dies partway (full disk,
+    # interrupted ingest) leaves a truncated file, which the splitter can only
+    # report as "broken sidecar" after the fact. os.replace is atomic on both
+    # POSIX and Windows, so the reader sees either the old outline or the new one.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
         json.dumps({"version": 1, "headings": outline}, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    os.replace(tmp, path)
     return len(outline)
 
 
