@@ -4330,6 +4330,103 @@ def config_set(project: str, *, key: str, value: str) -> dict:
     return {"project": project_dir.name, "key": key, "value": stored, "config": cfg}
 
 
+def _parse_captions_tiers(raw: str | None) -> set:
+    """Parse ``--accept-tiers A,B,C`` into a validated tier set."""
+    from src import captions as captions_mod
+    from src.harness_guard import HarnessValidationError
+
+    if raw is None:
+        return set(captions_mod.AUTO_TIERS)
+    tiers = set()
+    for part in re.split(r"[,\s]+", raw.strip()):
+        if not part:
+            continue
+        tier = part.upper()
+        if tier not in captions_mod.TIERS:
+            raise HarnessValidationError(
+                f"unknown caption tier {part!r}; allowed: {', '.join(captions_mod.TIERS)}"
+            )
+        tiers.add(tier)
+    return tiers
+
+
+def _parse_captions_indices(raw: str | None, valid: set, *, flag: str) -> set:
+    """Parse ``--accept 3,7`` / ``--reject 61`` into a validated index set."""
+    from src.harness_guard import HarnessValidationError
+
+    if not raw:
+        return set()
+    out = set()
+    for part in re.split(r"[,\s]+", raw.strip()):
+        if not part:
+            continue
+        if not part.isdigit():
+            raise HarnessValidationError(f"{flag} takes candidate numbers; got {part!r}")
+        n = int(part)
+        if n not in valid:
+            raise HarnessValidationError(
+                f"{flag}: no candidate #{n} in this scan (run --dry-run to list them)"
+            )
+        out.add(n)
+    return out
+
+
+def captions(
+    project: str,
+    *,
+    accept_tiers: str | None = None,
+    accept: str | None = None,
+    reject: str | None = None,
+    apply: bool = False,
+) -> dict:
+    """Find unmarked image captions and, with ``apply``, mark them in place.
+
+    Books ingested before caption support carry the caption as an ordinary
+    paragraph under its image. This scans for those, sorts them into confidence
+    tiers, and writes ``[CAPTION]`` into ``source.txt`` and ``chunks/*.json``
+    for the accepted ones. See :mod:`src.captions` for the tier definitions and
+    why ``chapters/*.txt`` is never written.
+
+    Dry-run by default: ``apply=False`` reports what would change and touches
+    nothing.
+    """
+    from src import captions as captions_mod
+
+    project_dir = state.resolve_project_dir(project)
+    found = captions_mod.scan_project(project_dir)
+    valid = {c.index for c in found}
+
+    tiers = _parse_captions_tiers(accept_tiers)
+    accept_idx = _parse_captions_indices(accept, valid, flag="--accept")
+    reject_idx = _parse_captions_indices(reject, valid, flag="--reject")
+    selected = captions_mod.select(
+        found, accept_tiers=tiers, accept=accept_idx, reject=reject_idx
+    )
+
+    result = {
+        "project": project_dir.name,
+        "applied": bool(apply),
+        "total_candidates": len(found),
+        "tier_counts": captions_mod.tier_counts(found),
+        "accept_tiers": sorted(tiers),
+        "selected": len(selected),
+        "candidates": [c.to_dict() for c in found],
+        "selected_indices": [c.index for c in selected],
+    }
+
+    if apply:
+        result["report"] = captions_mod.apply_marks(project_dir, selected)
+        result["next_steps"] = [
+            "chapters/*.txt is now stale -- re-run combine to regenerate it",
+            "rebuild the EPUB to pick up the new <figure>/<figcaption> markup",
+        ]
+    else:
+        result["next_steps"] = [
+            "re-run with --apply to write the markers",
+        ]
+    return result
+
+
 def _footnotes_applied(project_dir: Path) -> bool:
     """True once the footnotes stage has written reader notes into the book.
 

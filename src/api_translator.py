@@ -27,6 +27,7 @@ from src.utils.prompt_logger import (
     update_log_response,
 )
 from src.utils.text_utils import (
+    caption_instruction,
     dialogue_instruction,
     footnote_placeholder_instruction,
     image_filenames,
@@ -36,15 +37,22 @@ from src.utils.text_utils import (
 
 
 def _structure_preservation_instructions(source_text: str, *, always_include_images: bool) -> str:
-    """Combine the image + footnote STRUCTURE PRESERVATION bullets.
+    """Combine the image + footnote + caption STRUCTURE PRESERVATION bullets.
 
-    Both slot into the same prompt variable. The footnote bullet appears only
-    when the chunk actually carries [FOOTNOTE:N] tokens, so a book without
+    All three slot into the same prompt variable. The footnote bullet appears
+    only when the chunk actually carries [FOOTNOTE:N] tokens, so a book without
     imported footnotes never sees it.
+
+    The caption bullet rides the same ``always_include_images`` gate as the
+    image bullet: captions only occur in books with images, and this variable
+    sits in the cacheable fixed prefix (ahead of _CACHE_PREFIX_SPLIT_MARKER), so
+    varying it per chunk would fragment the prompt cache for every illustrated
+    book. When the gate is off it still falls back to per-chunk detection.
     """
     bullets = [
         image_placeholder_instruction(source_text, always_include=always_include_images),
         footnote_placeholder_instruction(source_text),
+        caption_instruction(source_text, always_include=always_include_images),
     ]
     return "\n".join(b for b in bullets if b)
 

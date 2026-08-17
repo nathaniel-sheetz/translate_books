@@ -230,12 +230,31 @@
 
     loadAndRender();
 
+    // Leading [CAPTION] marker: structural, not prose. Stripped for display only
+    // — a.es itself stays byte-identical because chunk_offset_start/end and the
+    // edit path are computed against the real chunk text.
+    const CAPTION_MARKER_RE = /^\s*\[CAPTION\][ \t]*/;
+
+    // Display form of a sentence: identical to the stored text except on a
+    // caption, where the structural marker is hidden. Used everywhere sentence
+    // text reaches the DOM, including the post-correction repaint — otherwise
+    // saving an edit to a caption would make the marker reappear.
+    function displayEsOf(alignment, text) {
+        return alignment && alignment.caption ? text.replace(CAPTION_MARKER_RE, '') : text;
+    }
+
     function renderSentences(alignments) {
         content.innerHTML = '';
+
+        // Sentences normally flow inline into `content`, separated by block-level
+        // .para-break spacers. A caption paragraph instead gets its own block
+        // wrapper so it can be centered as a unit under its image.
+        let captionBox = null;
 
         for (const a of alignments) {
             // Render image records
             if (a.type === 'image') {
+                captionBox = null;
                 const div = document.createElement('div');
                 div.className = 'reader-image';
                 const img = document.createElement('img');
@@ -247,28 +266,42 @@
                 continue;
             }
 
-            // Insert paragraph break when alignment record is tagged
-            if (a.para_start) {
+            if (a.caption) {
+                if (!captionBox) {
+                    captionBox = document.createElement('div');
+                    captionBox.className = 'reader-caption';
+                    content.appendChild(captionBox);
+                }
+            } else {
+                captionBox = null;
+            }
+            const container = captionBox || content;
+
+            // Insert paragraph break when alignment record is tagged. Captions
+            // skip it — the wrapper div already provides the block break.
+            if (a.para_start && !a.caption) {
                 const br = document.createElement('span');
                 br.className = 'para-break';
                 content.appendChild(br);
             } else if (a.verse_line_break) {
                 const br = document.createElement('span');
                 br.className = 'verse-break';
-                content.appendChild(br);
+                container.appendChild(br);
             }
 
             const span = document.createElement('span');
             span.className = 'sentence';
             span.dataset.esIdx = a.es_idx;
 
+            const displayEs = displayEsOf(a, a.es);
+
             // Review mode: paint evaluator findings onto the sentence; otherwise
             // render plain text exactly as before.
             const findings = reviewConfig.on ? reviewMap[a.es_idx] : null;
             if (findings && findings.length) {
-                paintSentence(span, a.es, findings);
+                paintSentence(span, displayEs, findings);
             } else {
-                span.textContent = a.es + ' ';
+                span.textContent = displayEs + ' ';
             }
 
             if (a.confidence === 'low') {
@@ -286,7 +319,7 @@
 
             span.addEventListener('click', (e) => onSentenceTap(a, e));
 
-            content.appendChild(span);
+            container.appendChild(span);
         }
     }
 
@@ -1172,7 +1205,7 @@
 
                     const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
                     if (el) {
-                        el.textContent = correctedEs + ' ';
+                        el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                         el.classList.add('corrected');
                     }
 
@@ -1189,7 +1222,7 @@
                 alignment.corrected = true;
                 const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
                 if (el) {
-                    el.textContent = correctedEs + ' ';
+                    el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                     el.classList.add('corrected');
                 }
                 showRealignButton();

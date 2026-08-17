@@ -32,6 +32,7 @@ from src.evaluators.length_eval import LengthEvaluator
 from src.models import Chunk, IssueLevel
 from src.utils.file_io import load_address_map, load_chunk, load_glossary, load_style_guide
 from src.utils.text_utils import (
+    caption_block_count,
     footnote_token_counts,
     image_filename_counts,
 )
@@ -427,6 +428,19 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
         if extra:
             detail.append(f"hallucinated {extra}")
         problems.append("footnote-token-parity: " + "; ".join(detail))
+
+    # [CAPTION] block-marker parity. A plain count is enough here: unlike image
+    # filenames and footnote numbers the marker carries no payload to compare.
+    # This is the check the marker was shaped as a leading atom to make possible
+    # -- a wrapping delimiter that loses its closing half degrades silently back
+    # to a body paragraph, which is the exact bug captions exist to fix.
+    src_caps = caption_block_count(chunk.source_text or "")
+    out_caps = caption_block_count(prose or "")
+    if src_caps != out_caps:
+        problems.append(
+            f"caption-marker-parity: source has {src_caps} [CAPTION] block(s), "
+            f"translation has {out_caps}"
+        )
 
     # Reuse the existing evaluators; only ERROR-severity issues block the commit.
     eval_chunk = chunk.model_copy(update={"translated_text": text})

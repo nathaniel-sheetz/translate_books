@@ -56,6 +56,16 @@ ITALIC_TAGS = {"i", "em"}
 # CSS classes whose elements should be silently dropped
 SKIP_CLASSES = {"pagenum", "page-number", "pageno", "toc", "footnote", "endnote"}
 
+# CSS classes marking an element as an image caption. Emitted as a [CAPTION]
+# block so the EPUB builder can pair it with its image instead of rendering it
+# as body prose.
+#
+# Deliberately excludes container classes like "illustration" and "figcenter":
+# in Gutenberg those wrap BOTH the <img> and its caption, so treating one as a
+# caption would swallow the image. The `not node.find("img")` guard in _walk
+# enforces that regardless of what lands in this set.
+CAPTION_CLASSES = {"caption", "figcaption", "imgcaption", "ill-caption", "illustration-caption"}
+
 # PG boilerplate markers (case-insensitive substrings)
 PG_START_MARKERS = [
     "start of the project gutenberg",
@@ -277,6 +287,17 @@ class Converter:
             self.parts.append("\n\n---\n\n")
             return
 
+        # Image caption -- <figcaption>, or a block element carrying a caption
+        # class. Must be checked BEFORE the BLOCK_TAGS branch below, which would
+        # otherwise swallow <p class="caption"> into an ordinary paragraph and
+        # discard the class. The find("img") guard keeps a container element
+        # (e.g. <div class="caption"> wrapping both image and text) from
+        # swallowing its own image.
+        if (tag == "figcaption" or (tag in BLOCK_TAGS and classes & CAPTION_CLASSES)) \
+                and not node.find("img"):
+            self._handle_caption(node)
+            return
+
         if tag in BLOCK_TAGS or tag in ("body", "article", "section", "main"):
             self.parts.append("\n\n")
             for child in node.children:
@@ -323,6 +344,22 @@ class Converter:
         self.parts.append(f"\n\n{text}\n\n")
 
     # ------------------------------------------------------------------
+    def _handle_caption(self, node: Tag):
+        # Render inner content into a temporary buffer (same technique as the
+        # italic branch), then emit it as its own block prefixed with the
+        # [CAPTION] marker. Internal whitespace is collapsed so a <br> inside
+        # the caption cannot split it into two blocks -- the marker only counts
+        # at the start of a block.
+        saved = self.parts
+        self.parts = []
+        for child in node.children:
+            self._walk(child)
+        inner = re.sub(r"\s+", " ", "".join(self.parts)).strip()
+        self.parts = saved
+        if inner:
+            self.parts.append(f"\n\n[CAPTION] {inner}\n\n")
+
+    # ------------------------------------------------------------------
     def _handle_image(self, img: Tag):
         src = img.get("src", "")
         alt = img.get("alt", "")
@@ -354,7 +391,13 @@ class Converter:
         placeholder = f"[IMAGE:{local_rel}]"
         if alt:
             placeholder = f"[IMAGE:{local_rel}:{alt}]"
-        self.parts.append(f"\n{placeholder}\n")
+        # Blank lines, not single newlines: the placeholder must be its own
+        # blank-line-separated block for _render_body_blocks to recognize it
+        # (it uses fullmatch). With single newlines a neighbouring <figcaption>
+        # -- or any text emitted adjacent to the image -- glues onto the same
+        # block, the fullmatch fails, and the raw token renders as escaped body
+        # text. _normalize_whitespace collapses any excess back to one blank line.
+        self.parts.append(f"\n\n{placeholder}\n\n")
 
 
 # ---------------------------------------------------------------------------

@@ -153,3 +153,78 @@ def test_paragraph_with_only_placeholder_still_works(tmp_path):
     last_idx = next(i for i, a in enumerate(data["alignments"]) if a.get("es") == "Last paragraph.")
     assert data["alignments"][last_idx - 2].get("type") == "image"
     assert data["alignments"][last_idx - 1].get("type") == "image"
+
+
+# ---------------------------------------------------------------------------
+# [CAPTION] tagging
+#
+# The reader needs to know which rows belong to a caption paragraph so it can
+# style them. The flag is added; `es` must NOT be touched, because
+# chunk_offset_start/end are computed against the real chunk text and
+# corrections_apply slices on them.
+# ---------------------------------------------------------------------------
+
+def test_caption_row_is_flagged(tmp_path):
+    chapter = tmp_path / "chapter_01.txt"
+    chapter.write_text(
+        "Primer parrafo.\n\n"
+        "[IMAGE:images/001.jpg]\n\n"
+        "[CAPTION] El cordero.\n\n"
+        "Segundo parrafo.\n",
+        encoding="utf-8",
+    )
+    data = _make_alignments(
+        ("Primer parrafo.", False),
+        ("[CAPTION] El cordero.", True),
+        ("Segundo parrafo.", True),
+    )
+
+    _enrich_alignment(data, chapter, "test-project")
+
+    rows = [a for a in data["alignments"] if a.get("type") != "image"]
+    assert rows[0].get("caption") is None
+    assert rows[1].get("caption") is True
+    assert rows[2].get("caption") is None
+
+
+def test_caption_flag_spans_the_whole_paragraph(tmp_path):
+    chapter = tmp_path / "chapter_01.txt"
+    chapter.write_text(
+        "Primer parrafo.\n\n"
+        "[IMAGE:images/001.jpg]\n\n"
+        "[CAPTION] Primera oracion. Segunda oracion.\n\n"
+        "Cuerpo.\n",
+        encoding="utf-8",
+    )
+    data = _make_alignments(
+        ("Primer parrafo.", False),
+        ("[CAPTION] Primera oracion.", True),
+        ("Segunda oracion.", False),
+        ("Cuerpo.", True),
+    )
+
+    _enrich_alignment(data, chapter, "test-project")
+
+    rows = [a for a in data["alignments"] if a.get("type") != "image"]
+    assert rows[1].get("caption") is True
+    # Continuation sentence of the same caption paragraph.
+    assert rows[2].get("caption") is True
+    # New paragraph ends the caption run.
+    assert rows[3].get("caption") is None
+
+
+def test_caption_tagging_leaves_es_byte_identical(tmp_path):
+    chapter = tmp_path / "chapter_01.txt"
+    chapter.write_text(
+        "Primer parrafo.\n\n[IMAGE:images/001.jpg]\n\n[CAPTION] El cordero.\n",
+        encoding="utf-8",
+    )
+    data = _make_alignments(
+        ("Primer parrafo.", False),
+        ("[CAPTION] El cordero.", True),
+    )
+
+    _enrich_alignment(data, chapter, "test-project")
+
+    row = [a for a in data["alignments"] if a.get("caption")][0]
+    assert row["es"] == "[CAPTION] El cordero."

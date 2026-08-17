@@ -19,6 +19,8 @@ from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.utils.text_utils import is_caption_block
+
 
 SectionKind = Literal["front_matter", "chapter", "back_matter"]
 
@@ -117,8 +119,22 @@ def _find_preceding_header_image(text: str, pos: int) -> Optional[tuple[int, str
     i = pos
     while i > 0 and text[i - 1] in ' \t\r\n':
         i -= 1
-    if i == pos or i == 0 or text[i - 1] != ']':
+    if i == pos or i == 0:
         return None
+
+    # A [CAPTION] block belonging to the ornament may sit between the image and
+    # the heading. Step back over it so the ornament is still found; otherwise
+    # the image and its caption stay glued to the end of the previous section.
+    if text[i - 1] != ']':
+        cap_start = text.rfind('\n', 0, i) + 1
+        if not is_caption_block(text[cap_start:i]):
+            return None
+        i = cap_start
+        while i > 0 and text[i - 1] in ' \t\r\n':
+            i -= 1
+        if i == 0 or text[i - 1] != ']':
+            return None
+
     line_start = text.rfind('\n', 0, i) + 1  # 0 if no preceding newline
     candidate = text[line_start:i]
     if not _HEADER_IMAGE_LINE_RE.fullmatch(candidate):

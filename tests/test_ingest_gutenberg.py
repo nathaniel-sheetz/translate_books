@@ -226,3 +226,81 @@ class TestWriteHeadingOutline:
         from src.book_splitter import load_heading_outline
         assert load_heading_outline(tmp_path) == [
             {"level": 2, "text": "Chapter One"}]
+
+
+class TestCaptionExtraction:
+    """<figcaption> / class="caption" -> a [CAPTION] block."""
+
+    def test_figcaption_becomes_a_caption_block(self):
+        out = _convert(
+            '<body><p>Before.</p><figure><img src="i1.jpg" alt="A lamb"/>'
+            '<figcaption>The lamb with the longest tail.</figcaption></figure>'
+            '<p>After.</p></body>'
+        )
+        assert "[IMAGE:images/i1.jpg:A lamb]" in out
+        assert "[CAPTION] The lamb with the longest tail." in out
+
+    def test_p_class_caption_becomes_a_caption_block(self):
+        # The classic Gutenberg shape.
+        out = _convert(
+            '<body><div class="illustration"><img src="i2.jpg" alt="THE LAMB"/>'
+            '<p class="caption">THE LAMB WITH THE LONGEST TAIL.</p></div></body>'
+        )
+        assert "[CAPTION] THE LAMB WITH THE LONGEST TAIL." in out
+
+    def test_caption_is_its_own_block(self):
+        out = _convert(
+            '<body><figure><img src="i1.jpg"/><figcaption>Cap.</figcaption></figure></body>'
+        )
+        blocks = [b.strip() for b in out.split("\n\n") if b.strip()]
+        assert "[IMAGE:images/i1.jpg]" in blocks
+        assert "[CAPTION] Cap." in blocks
+
+    def test_container_carrying_a_caption_class_does_not_swallow_its_image(self):
+        out = _convert(
+            '<body><div class="caption"><img src="i3.jpg" alt="x"/>'
+            '<p class="caption">Real caption</p></div></body>'
+        )
+        assert "[IMAGE:images/i3.jpg:x]" in out
+        assert "[CAPTION] Real caption" in out
+        assert "[CAPTION] [IMAGE" not in out
+
+    def test_italics_survive_inside_a_caption(self):
+        out = _convert(
+            '<body><figure><img src="i4.jpg"/>'
+            '<figcaption>La gente <i>gatuna</i> comia bien</figcaption></figure></body>'
+        )
+        assert "[CAPTION] La gente _gatuna_ comia bien" in out
+
+    def test_br_inside_a_caption_does_not_split_the_block(self):
+        out = _convert(
+            '<body><figure><img src="i5.jpg"/>'
+            '<figcaption>Primera linea<br/>segunda linea</figcaption></figure></body>'
+        )
+        assert "[CAPTION] Primera linea segunda linea" in out
+
+    def test_empty_caption_emits_nothing(self):
+        out = _convert(
+            '<body><figure><img src="i6.jpg"/><figcaption>  </figcaption></figure></body>'
+        )
+        assert "[CAPTION]" not in out
+
+    def test_plain_paragraph_is_unaffected(self):
+        out = _convert('<body><p>Just a normal paragraph.</p></body>')
+        assert "[CAPTION]" not in out
+
+
+class TestImageBlockSpacing:
+    """An image placeholder must be its own blank-line-separated block."""
+
+    def test_image_is_separated_by_blank_lines(self):
+        out = _convert('<body><p>Before.</p><img src="i1.jpg"/><p>After.</p></body>')
+        blocks = [b.strip() for b in out.split("\n\n") if b.strip()]
+        assert "[IMAGE:images/i1.jpg]" in blocks
+
+    def test_inline_image_splits_its_paragraph_into_blocks(self):
+        # Previously the single-newline form glued the token to the prose, so
+        # the EPUB builder's fullmatch failed and the raw token was rendered.
+        out = _convert('<body><p>text <img src="i5.jpg"/> more text</p></body>')
+        blocks = [b.strip() for b in out.split("\n\n") if b.strip()]
+        assert "[IMAGE:images/i5.jpg]" in blocks
