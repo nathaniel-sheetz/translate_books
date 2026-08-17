@@ -17,6 +17,8 @@ and survive the chunking / translation pipeline for later re-insertion.
 """
 
 import argparse
+import json
+import os
 import re
 import sys
 import urllib.parse
@@ -183,7 +185,7 @@ class Converter:
         self.download_images = download_images
 
         self.parts: list[str] = []
-        self.chapters: list[dict] = []       # {heading, words_before}
+        self.chapters: list[dict] = []       # {heading, level, word_offset}
         self._word_total = 0
         self._images_downloaded = 0
         self._images_skipped = 0
@@ -242,6 +244,15 @@ class Converter:
 
         if tag in HEADING_TAGS:
             text = node.get_text(separator=" ", strip=True)
+            # `separator` only joins *separate* text nodes -- it does not collapse
+            # whitespace *within* one. A hand-typeset "staircase" title
+            # (<h2>The GRASSHOPPER\nand\nthe MEASURING\nWORM</h2>) would keep its
+            # embedded newlines, which later paragraph handling reads as blank-line
+            # breaks, shattering the heading into fragments that leak into the
+            # neighboring chapters. Body text already gets this treatment in the
+            # NavigableString branch above; the heading path returns early and
+            # would otherwise skip it.
+            text = re.sub(r"\s+", " ", text).strip()
             if text:
                 self._flush_heading(tag, text)
             return
@@ -300,9 +311,15 @@ class Converter:
 
     # ------------------------------------------------------------------
     def _flush_heading(self, tag: str, text: str):
-        # Record chapter info before emitting
+        # Record chapter info before emitting. `level` is the h-tag depth: it is
+        # what lets the splitter anchor on the document's own outline instead of
+        # re-guessing chapter boundaries by regexing the flattened text.
         current_words = _word_count("".join(self.parts))
-        self.chapters.append({"heading": text, "word_offset": current_words})
+        self.chapters.append({
+            "heading": text,
+            "level": int(tag[1]) if len(tag) > 1 and tag[1].isdigit() else 0,
+            "word_offset": current_words,
+        })
         self.parts.append(f"\n\n{text}\n\n")
 
     # ------------------------------------------------------------------
@@ -373,6 +390,46 @@ def build_chapter_report(chapters: list[dict], total_words: int) -> list[dict]:
             "chunks": max(1, round(words / WORDS_PER_CHUNK)),
         })
     return result
+
+
+HEADING_OUTLINE_FILENAME = "headings.json"
+
+
+def write_heading_outline(output_dir: Path, chapters: list[dict]) -> int:
+    """
+    Persist the document's heading outline next to ``source.txt`` and return
+    how many headings were written.
+
+    This is the structure the HTML already carries and that every text-only
+    splitter has to re-guess: ``[{level, text}, ...]`` in document order. The
+    splitter's ``headings`` pattern anchors on it (see
+    ``src.book_splitter.load_heading_outline``), so a chapter boundary comes
+    from the markup that declared it rather than from a regex over flattened
+    prose.
+
+    Headings are stored as *text*, not character offsets: offsets computed
+    during the walk do not survive ``_normalize_whitespace``, and hand-editing
+    ``source.txt`` is a supported workflow. Locating by text is robust to both
+    and self-validating -- a heading that cannot be found is reported instead
+    of silently shifting every boundary after it.
+    """
+    outline = [
+        {"level": ch.get("level", 0), "text": ch["heading"]}
+        for ch in chapters
+        if ch.get("heading")
+    ]
+    path = Path(output_dir) / HEADING_OUTLINE_FILENAME
+    # Write-then-rename: a plain write_text that dies partway (full disk,
+    # interrupted ingest) leaves a truncated file, which the splitter can only
+    # report as "broken sidecar" after the fact. os.replace is atomic on both
+    # POSIX and Windows, so the reader sees either the old outline or the new one.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps({"version": 1, "headings": outline}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return len(outline)
 
 
 def suggest_split_pattern(chapters: list[dict]) -> str | None:
@@ -563,6 +620,7 @@ def main():
 
     out_path = output_dir / "source.txt"
     out_path.write_text(text, encoding="utf-8")
+    write_heading_outline(output_dir, converter.chapters)
 
     print_report(
         source=args.source,

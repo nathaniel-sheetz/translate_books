@@ -56,21 +56,49 @@ from src.harness_guard import HarnessValidationError
 
 
 def _chapter_pattern_choices() -> list[str]:
-    """All selectable ``--chapter-pattern`` values: ``auto`` (detect from the
-    text), every named pattern in ``split_patterns.json``, and ``custom`` (with
-    ``--custom-regex``). Derived from the JSON so a pattern that exists there is
+    """All selectable ``--chapter-pattern`` values: ``auto`` (detect the best
+    fit), ``headings`` (anchor on the document's own outline), every named
+    pattern in ``split_patterns.json``, and ``custom`` (with ``--custom-regex``).
+    The regex names are derived from the JSON so a pattern that exists there is
     never unreachable from the CLI (friction-log #1 — ``chapter_roman_titled``
     was defined but not exposed)."""
     from src.book_splitter import get_pattern_names
-    return ["auto", *get_pattern_names(), "custom"]
+    return ["auto", "headings", *get_pattern_names(), "custom"]
 
 
 _CHAPTER_PATTERN_HELP = (
-    "How to detect chapter headings (default: auto). 'auto' picks the best-fit "
-    "pattern from the source text; named patterns include roman / numeric and "
-    "the titled variants chapter_roman_titled / chapter_numeric_titled "
-    "(e.g. 'CHAPTER I. WATHO.'); 'custom' uses --custom-regex."
+    "How to detect chapter headings (default: auto). 'auto' anchors on the "
+    "HTML heading outline (headings.json) when the book has one and it looks "
+    "convincing, else picks the best-fit regex pattern from the text. "
+    "'headings' forces the outline path (see --heading-level); named regex "
+    "patterns include roman / numeric and the titled variants "
+    "chapter_roman_titled / chapter_numeric_titled (e.g. 'CHAPTER I. WATHO.'); "
+    "'custom' uses --custom-regex."
 )
+
+_HEADING_LEVEL_HELP = (
+    "Which heading level holds the chapters (h1..h6, or a bare digit). Only "
+    "meaningful with --chapter-pattern headings/auto. Defaults to the level "
+    "the split picks; the `heading_outline.levels` table in the output shows "
+    "every candidate with its section count, so a wrong pick is a one-flag fix "
+    "rather than a hand-written regex."
+)
+
+_CUSTOM_REGEX_CS_HELP = (
+    "Compile --custom-regex without re.IGNORECASE, which is otherwise forced. "
+    "Matters because under IGNORECASE a class like [A-Z][A-Z ]+ silently means "
+    "'any run of letters and spaces' and will match ordinary prose paragraphs. "
+    "(The inline equivalent is wrapping the pattern in (?-i:...).)"
+)
+
+
+def _heading_level(value: str) -> str:
+    """argparse type: 'h2', 'H2', or '2' -> 'h2'."""
+    s = str(value).strip().lower().lstrip("h")
+    if not s.isdigit() or not (1 <= int(s) <= 6):
+        raise argparse.ArgumentTypeError(
+            f"invalid heading level: {value!r} (expected h1..h6)")
+    return f"h{int(s)}"
 
 
 def _positive_int(value: str) -> int:
@@ -101,6 +129,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--chapter-pattern", default="auto",
                     choices=_chapter_pattern_choices(), help=_CHAPTER_PATTERN_HELP)
     sp.add_argument("--custom-regex", default=None)
+    sp.add_argument("--custom-regex-file", dest="custom_regex_file", default=None,
+                    help="Read --custom-regex from a file. Use for long alternations "
+                         "that the shell would mangle (quotes, $, |, accents).")
+    sp.add_argument("--custom-regex-case-sensitive", dest="case_sensitive_custom",
+                    action="store_true", help=_CUSTOM_REGEX_CS_HELP)
+    sp.add_argument("--heading-level", dest="heading_level", type=_heading_level,
+                    default=None, help=_HEADING_LEVEL_HELP)
     sp.add_argument("--target-lang", dest="target_language", default=None)
     sp.add_argument("--locale", default=None)
     sp.add_argument("--provider", default=None)
@@ -145,6 +180,13 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--chapter-pattern", default="auto",
                        choices=_chapter_pattern_choices(), help=_CHAPTER_PATTERN_HELP)
         p.add_argument("--custom-regex", default=None)
+        p.add_argument("--custom-regex-file", dest="custom_regex_file", default=None,
+                       help="Read --custom-regex from a file. Use for long alternations "
+                            "that the shell would mangle (quotes, $, |, accents).")
+        p.add_argument("--custom-regex-case-sensitive", dest="case_sensitive_custom",
+                       action="store_true", help=_CUSTOM_REGEX_CS_HELP)
+        p.add_argument("--heading-level", dest="heading_level", type=_heading_level,
+                       default=None, help=_HEADING_LEVEL_HELP)
         p.add_argument("--min-chapter-size", dest="min_chapter_size", type=int, default=None,
                        help="Min chars for a real chapter (default 100; raise to ~500 to "
                             "drop stray front-matter lines)")
@@ -535,13 +577,41 @@ def _add_schema_flags(parser: argparse.ArgumentParser) -> None:
             )
 
 
+def _resolve_custom_regex(args: argparse.Namespace) -> str | None:
+    """Return the effective --custom-regex, reading --custom-regex-file if given.
+
+    A long alternation (curly quotes, ``$``, ``|``, accented letters) is hostile
+    to every shell, so it is easier to author in a file than to quote correctly.
+    """
+    path = getattr(args, "custom_regex_file", None)
+    if not path:
+        return args.custom_regex
+    if args.custom_regex:
+        raise HarnessValidationError(
+            "--custom-regex and --custom-regex-file are mutually exclusive")
+    p = Path(path)
+    if not p.exists():
+        raise HarnessValidationError(f"--custom-regex-file not found: {path}")
+    try:
+        regex = p.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HarnessValidationError(
+            f"--custom-regex-file could not be read as UTF-8: {path}"
+        ) from exc
+    if not regex:
+        raise HarnessValidationError(f"--custom-regex-file is empty: {path}")
+    return regex
+
+
 def _dispatch(args: argparse.Namespace):
     """Route a parsed command to its flow function. Returns a dict or an int exit code."""
     cmd = args.command
     if cmd == "setup":
         return flow.setup(
             args.project, url=args.url, chapter_pattern=args.chapter_pattern,
-            custom_regex=args.custom_regex, target_language=args.target_language,
+            custom_regex=_resolve_custom_regex(args),
+            case_sensitive_custom=args.case_sensitive_custom,
+            heading_level=args.heading_level, target_language=args.target_language,
             locale=args.locale, provider=args.provider, model=args.model,
             title=args.title, author=args.author, language_code=args.language_code,
             always_include_dialogue=args.always_include_dialogue,
@@ -556,7 +626,10 @@ def _dispatch(args: argparse.Namespace):
         fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
         return fn(
             args.project, pattern_type=args.chapter_pattern,
-            custom_regex=args.custom_regex, min_chapter_size=args.min_chapter_size,
+            custom_regex=_resolve_custom_regex(args),
+            case_sensitive_custom=args.case_sensitive_custom,
+            heading_level=args.heading_level,
+            min_chapter_size=args.min_chapter_size,
             front_matter_titles=args.front_matter_titles,
             back_matter_titles=args.back_matter_titles,
             auto_detect_front_matter=args.auto_detect_front_matter,

@@ -612,6 +612,66 @@
     min-width: 60px;
 }
 
+/* ── Split preview report (heading-outline levels / dropped / warnings) ── */
+
+.split-report {
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    background: #f8f6f3;
+    border: 1px solid #e8e4df;
+    border-radius: 4px;
+    font-size: 13px;
+}
+.split-report.warn {
+    background: #fff8e1;
+    border-color: #e8d48b;
+}
+.split-report h4 {
+    margin: 0 0 6px;
+    font-size: 13px;
+}
+.split-report ul {
+    margin: 0;
+    padding-left: 18px;
+}
+.split-ledger {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: #888;
+}
+.split-levels-wrap {
+    margin: 0 0 16px;
+}
+.split-levels-wrap.diagnostic .split-levels-note {
+    color: #8a6d3b;
+}
+.split-levels-note {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: #666;
+}
+.split-levels {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    background: #fff;
+}
+.split-levels th,
+.split-levels td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid #e8e4df;
+}
+.split-levels thead th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #888;
+}
+.split-levels tr.selected {
+    background: #e8f1ff;
+}
+
 /* ── Translation chapter table ── */
 
 .chapter-table {

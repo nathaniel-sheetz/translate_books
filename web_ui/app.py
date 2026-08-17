@@ -2282,6 +2282,9 @@ def _get_project_status(project_id: str) -> dict:
     config = _load_project_config(project_id)
     status["gutenberg_url"] = config.get("gutenberg_url")
     status["suggested_split_pattern"] = config.get("suggested_split_pattern")
+    # Existence only: a broken sidecar should still skip the regex suggestion
+    # so Preview stays on `auto` and can warn.
+    status["has_heading_outline"] = (project_dir / "headings.json").exists()
     # Persisted chunking parameters (Stage 3 form remembers what the user
     # last successfully chunked with). May be absent for new projects.
     # Backfill the Advanced ratios so the GUI always has them, even for
@@ -3142,6 +3145,7 @@ def project_ingest_gutenberg(project_id):
 
         source_path = project_dir / "source.txt"
         source_path.write_text(text, encoding="utf-8")
+        _mod.write_heading_outline(project_dir, converter.chapters)
 
         report = build_chapter_report(converter.chapters, total_words)
         pattern = suggest_split_pattern(converter.chapters)
@@ -3208,12 +3212,104 @@ def project_fetch_missing_images(project_id):
 def get_split_patterns():
     """Return available split pattern definitions for the UI."""
     from src.book_splitter import get_pattern_definitions
-    patterns = get_pattern_definitions()
+    patterns = {
+        "auto": {
+            "label": "Auto-detect (heading outline, else best-fit regex)",
+            "numbering": "sequential",
+        },
+        "headings": {
+            "label": "Document heading outline (needs headings.json)",
+            "numbering": "sequential",
+        },
+    }
+    patterns.update(get_pattern_definitions())
     patterns["custom"] = {
         "label": "Custom regex",
         "numbering": "sequential",
     }
     return jsonify({"patterns": patterns})
+
+
+def _run_project_split(project_dir, data: dict, *, write_files: bool = False) -> dict:
+    """Detect chapters for a dashboard split preview or apply.
+
+    Shared by ``/split/preview`` and ``/split`` so the report shape cannot
+    drift. Raises ``ValueError`` for user-facing splitter failures (including
+    a broken ``headings.json`` when the caller asked for the outline by name).
+    """
+    from src.book_splitter import (
+        detect_pattern_from_text,
+        load_heading_outline,
+        resolve_pattern_type,
+        save_chapters_to_files,
+        shape_outline_report,
+        split_book_into_chapters,
+        split_ledger,
+        split_sanity_warnings,
+    )
+
+    source_path = project_dir / "source.txt"
+    text = source_path.read_text(encoding="utf-8")
+    pattern_type = data.get("pattern_type") or "auto"
+    heading_level = data.get("heading_level") or None
+    outline_errors: list = []
+    outline = load_heading_outline(project_dir, collect_error=outline_errors)
+    if outline_errors and pattern_type == "headings":
+        raise ValueError(outline_errors[0])
+
+    dropped: list = []
+    outline_report: dict = {}
+    chapters = split_book_into_chapters(
+        text,
+        pattern_type=pattern_type,
+        custom_regex=data.get("custom_regex"),
+        min_chapter_size=data.get("min_chapter_size", 500),
+        front_matter_titles=data.get("front_matter_titles") or [],
+        back_matter_titles=data.get("back_matter_titles") or [],
+        auto_detect_front_matter=data.get("auto_detect_front_matter", True),
+        auto_detect_back_matter=data.get("auto_detect_back_matter", True),
+        heading_outline=outline,
+        heading_level=heading_level,
+        case_sensitive_custom=data.get("case_sensitive_custom", False),
+        collect_dropped=dropped,
+        collect_outline_report=outline_report,
+        outline_error=outline_errors[0] if outline_errors else None,
+    )
+    detected = detect_pattern_from_text(text)
+    pattern_used = resolve_pattern_type(
+        pattern_type, text, outline_report=outline_report or None,
+        heading_level=heading_level)
+    shaped = shape_outline_report(outline_report, pattern_used)
+    result = []
+    for ch in chapters:
+        if ch.kind == "chapter":
+            display_name = ch.chapter_title or f"Chapter {ch.number or ch.position_index}"
+        else:
+            display_name = ch.label or ch.chapter_title or ch.kind
+        result.append({
+            "name": display_name,
+            "words": len(ch.content.split()),
+            "preview": ch.content[:200],
+            "kind": ch.kind,
+            "label": ch.label,
+            "number": ch.number,
+        })
+    payload = {
+        "chapters": result,
+        "dropped": dropped,
+        "heading_outline": shaped,
+        "ledger": split_ledger(shaped, outline, chapters, dropped),
+        "warnings": split_sanity_warnings(
+            chapters, text, pattern_used=pattern_used, detected=detected,
+            outline_report=outline_report or None, heading_level=heading_level,
+            outline_errors=outline_errors),
+        "pattern_used": pattern_used,
+    }
+    if write_files:
+        save_chapters_to_files(chapters, project_dir / "chapters")
+        payload["ok"] = True
+        payload["chapter_count"] = len(chapters)
+    return payload
 
 
 @app.route("/api/project/<project_id>/split/preview", methods=["POST"])
@@ -3227,34 +3323,9 @@ def project_split_preview(project_id):
         return jsonify({"error": "No source.txt found"}), 404
 
     try:
-        from src.book_splitter import split_book_into_chapters
-        data = request.json or {}
-        text = source_path.read_text(encoding="utf-8")
-        chapters = split_book_into_chapters(
-            text,
-            pattern_type=data.get("pattern_type", "roman"),
-            custom_regex=data.get("custom_regex"),
-            min_chapter_size=data.get("min_chapter_size", 500),
-            front_matter_titles=data.get("front_matter_titles") or [],
-            back_matter_titles=data.get("back_matter_titles") or [],
-            auto_detect_front_matter=data.get("auto_detect_front_matter", True),
-            auto_detect_back_matter=data.get("auto_detect_back_matter", True),
-        )
-        result = []
-        for ch in chapters:
-            if ch.kind == "chapter":
-                display_name = ch.chapter_title or f"Chapter {ch.number or ch.position_index}"
-            else:
-                display_name = ch.label or ch.chapter_title or ch.kind
-            result.append({
-                "name": display_name,
-                "words": len(ch.content.split()),
-                "preview": ch.content[:200],
-                "kind": ch.kind,
-                "label": ch.label,
-                "number": ch.number,
-            })
-        return jsonify({"chapters": result})
+        return jsonify(_run_project_split(project_dir, request.json or {}))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3270,22 +3341,10 @@ def project_split(project_id):
         return jsonify({"error": "No source.txt found"}), 404
 
     try:
-        from src.book_splitter import save_chapters_to_files, split_book_into_chapters
-        data = request.json or {}
-        text = source_path.read_text(encoding="utf-8")
-        chapters = split_book_into_chapters(
-            text,
-            pattern_type=data.get("pattern_type", "roman"),
-            custom_regex=data.get("custom_regex"),
-            min_chapter_size=data.get("min_chapter_size", 500),
-            front_matter_titles=data.get("front_matter_titles") or [],
-            back_matter_titles=data.get("back_matter_titles") or [],
-            auto_detect_front_matter=data.get("auto_detect_front_matter", True),
-            auto_detect_back_matter=data.get("auto_detect_back_matter", True),
-        )
-        chapters_dir = project_dir / "chapters"
-        save_chapters_to_files(chapters, chapters_dir)
-        return jsonify({"ok": True, "chapter_count": len(chapters)})
+        return jsonify(_run_project_split(
+            project_dir, request.json or {}, write_files=True))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

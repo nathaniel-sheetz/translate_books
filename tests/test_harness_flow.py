@@ -919,7 +919,8 @@ def test_setup_threads_footnotes_and_surfaces_detection(tmp_path: Path, monkeypa
     monkeypatch.setattr(tb, "stage_ingest", fake_ingest)
     monkeypatch.setattr(tb, "stage_split", fake_split)
     monkeypatch.setattr(flow, "_pattern_hints", lambda *a, **k: {
-        "pattern_used": "auto", "detected": "auto", "warnings": [], "sections": []})
+        "pattern_used": "auto", "detected": "auto", "warnings": [], "sections": [],
+        "outline_report": None, "heading_outline": None, "dropped": []})
 
     result = flow.setup(str(proj), url="https://example.test/book.html", title="T", author="A")
     assert seen["footnotes"] == "import"  # the harness default is import
@@ -1383,3 +1384,288 @@ def test_glossary_commit_surfaces_convention_reviews(project: Path):
     assert len(reviews) == 2
     assert out["term_count"] == 2          # advisory: the glossary still committed
     assert (project / "glossary.json").exists()
+
+
+# ── heading-outline split ───────────────────────────────────────────────────
+
+def _outline_project(tmp_path: Path, headings, body_reps: int = 40) -> Path:
+    """A project whose source.txt and headings.json agree, as ingest writes them."""
+    proj = tmp_path / "book"
+    proj.mkdir(exist_ok=True)
+    body = "lorem ipsum dolor sit amet " * body_reps
+    parts, outline = [], []
+    for level, text in headings:
+        parts += [text, body]
+        outline.append({"level": level, "text": text})
+    (proj / "source.txt").write_text("\n\n".join(parts), encoding="utf-8")
+    (proj / "headings.json").write_text(
+        json.dumps({"version": 1, "headings": outline}, ensure_ascii=False),
+        encoding="utf-8")
+    return proj
+
+
+_MIXED_CASE_BOOK = [
+    (1, "Among the Meadow People"),
+    (2, "CONTENTS"),
+    (2, "INTRODUCTION."),
+    (2, "The BUTTERFLY That WENT CALLING"),
+    (2, "THE ROBINS BUILD A NEST."),
+    (2, "The Lazy Snail"),
+    (2, "Mr GREEN FROG AND HIS VISITORS"),
+    (2, "The Earthworm Half-Brothers"),
+    (2, "The Crickets School"),
+]
+
+
+def test_split_preview_anchors_on_the_heading_outline(tmp_path: Path):
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+
+    result = flow.split_preview(str(proj), pattern_type="auto")
+
+    assert result["pattern_used"] == "headings"
+    assert result["heading_outline"]["selected"] == "h2"
+    assert result["heading_outline"]["unlocated"] == []
+    # Six stories, every one a chapter — including the four whose Title-Case
+    # headings `allcaps_heading` cannot see. CONTENTS is stripped, INTRODUCTION
+    # is auto-tagged front matter, and the h1 book title is not at this level.
+    assert [(s["kind"], s["name"]) for s in result["sections"]] == [
+        ("front_matter", "Introduction"),
+        ("chapter", "The BUTTERFLY That WENT CALLING"),
+        ("chapter", "THE ROBINS BUILD A NEST."),
+        ("chapter", "The Lazy Snail"),
+        ("chapter", "Mr GREEN FROG AND HIS VISITORS"),
+        ("chapter", "The Earthworm Half-Brothers"),
+        ("chapter", "The Crickets School"),
+    ]
+    assert result["counts"] == {"front_matter": 1, "chapter": 6, "back_matter": 0}
+    assert [d["label"] for d in result["dropped"]] == ["Contents"]
+    assert result["files_written"] is False
+    assert not (proj / "chapters").exists()
+
+
+def test_split_preview_reports_the_level_table(tmp_path: Path):
+    """A wrong level must be fixable from the output, without a custom regex."""
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    levels = flow.split_preview(str(proj), pattern_type="auto")["heading_outline"]["levels"]
+    assert set(levels) >= {"h2"}
+    for stats in levels.values():
+        assert set(stats) == {"n", "median_chars", "tiny", "skew"}
+
+
+def test_heading_level_override_is_honored(tmp_path: Path):
+    # h2 is strictly denser, so the selector picks it on its own. Forcing h3
+    # must change both the split and what the report says it used — a report
+    # naming a level the split didn't use makes the level table useless.
+    headings = []
+    for i in range(1, 9):
+        headings.append((2, f"Scene {i}"))
+        if i % 2:
+            headings.append((3, f"Chapter {i}"))
+    proj = _outline_project(tmp_path, headings)
+
+    auto = flow.split_preview(str(proj), pattern_type="auto")
+    assert auto["heading_outline"]["selected"] == "h2"
+    assert [s["name"] for s in auto["sections"]] == [f"Scene {i}" for i in range(1, 9)]
+
+    forced = flow.split_preview(str(proj), pattern_type="headings", heading_level="h3")
+    assert forced["heading_outline"]["selected"] == "h3"
+    assert "explicitly requested" in forced["heading_outline"]["reason"]
+    assert [s["name"] for s in forced["sections"]] == [
+        f"Chapter {i}" for i in (1, 3, 5, 7)]
+    # The level table still lists every candidate, so the choice stays reversible.
+    assert set(forced["heading_outline"]["levels"]) >= {"h2", "h3"}
+
+
+def test_split_apply_writes_the_outline_split(tmp_path: Path):
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+
+    result = flow.split_apply(str(proj), pattern_type="auto")
+
+    assert result["pattern_used"] == "headings"
+    assert result["files_written"] is True
+    assert result["chapter_count"] == 7  # 6 stories + the introduction
+    assert len(list((proj / "chapters").glob("chapter_*.txt"))) == 7
+    second = (proj / "chapters" / "chapter_02.txt").read_text(encoding="utf-8")
+    assert second.startswith("The BUTTERFLY That WENT CALLING")
+
+
+def test_forcing_a_regex_pattern_marks_the_outline_unapplied(tmp_path: Path):
+    """The report is still computed on a book with a sidecar; it must not read
+    as though the outline is what the split ran on."""
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+
+    result = flow.split_preview(str(proj), pattern_type="allcaps_heading")
+
+    assert result["pattern_used"] == "allcaps_heading"
+    assert result["heading_outline"]["applied"] is False
+    assert result["heading_outline"]["levels"]  # the table is still there to compare
+    assert result["ledger"]["chapter_level"] is None
+    assert result["ledger"]["chapter_level_headings"] is None
+
+    applied = flow.split_preview(str(proj), pattern_type="auto")
+    assert applied["heading_outline"]["applied"] is True
+    assert applied["ledger"]["chapter_level"] == "h2"
+
+
+def test_ledger_accounts_for_every_heading(tmp_path: Path):
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    ledger = flow.split_preview(str(proj), pattern_type="auto")["ledger"]
+    assert ledger["chapter_level"] == "h2"
+    assert ledger["outline_headings"] == len(_MIXED_CASE_BOOK)
+    assert ledger["chapter_level_headings"] == 8  # every h2, boilerplate included
+    assert ledger["sections"] + ledger["dropped"] == 8
+    assert ledger["unlocated"] == 0
+
+
+def test_unlocated_heading_is_reported_not_silent(tmp_path: Path):
+    """source.txt hand-edited after ingest: the sidecar no longer matches."""
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    outline = json.loads((proj / "headings.json").read_text(encoding="utf-8"))
+    outline["headings"].append({"level": 2, "text": "A Story That Was Cut"})
+    (proj / "headings.json").write_text(json.dumps(outline), encoding="utf-8")
+
+    result = flow.split_preview(str(proj), pattern_type="auto")
+
+    assert result["heading_outline"]["unlocated"] == ["A Story That Was Cut"]
+    assert result["ledger"]["unlocated"] == 1
+    assert any("not found in source.txt" in w for w in result["warnings"])
+
+
+def test_no_sidecar_leaves_the_regex_path_untouched(tmp_path: Path):
+    """The no-regression guarantee: a project without headings.json splits
+    exactly as it did before the outline existed."""
+    proj = tmp_path / "book"
+    proj.mkdir()
+    (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
+    assert not (proj / "headings.json").exists()
+
+    result = flow.split_preview(
+        str(proj), pattern_type="auto",
+        front_matter_titles=["To the Teacher"], back_matter_titles=["Afterword"])
+
+    assert result["heading_outline"] is None
+    assert result["pattern_used"] != "headings"
+    assert result["ledger"]["outline_headings"] is None
+    assert [s["kind"] for s in result["sections"]] == [
+        "front_matter", "chapter", "chapter", "back_matter"]
+
+
+def test_headings_requested_without_a_sidecar_fails_loudly(tmp_path: Path):
+    proj = tmp_path / "book"
+    proj.mkdir()
+    (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
+    with pytest.raises(ValueError, match="headings.json"):
+        flow.split_preview(str(proj), pattern_type="headings")
+
+
+# A book the selector declines (3 h2s is under _HEADING_MIN_SECTIONS) whose
+# Title-Case headings no regex pattern can find either. Naming a level by hand
+# is the only way to split it, which is what --heading-level is for.
+_DECLINED_BOOK = [(2, "The Wolf at the Door"), (2, "The Long Winter"),
+                  (2, "A Letter Home")]
+
+
+def test_auto_plus_heading_level_uses_and_reports_the_outline(tmp_path: Path):
+    """``pattern_used`` comes from a second, independent resolve; it has to see
+    ``heading_level`` too, or it names a regex pattern for an outline split."""
+    proj = _outline_project(tmp_path, _DECLINED_BOOK)
+
+    # Without the flag the selector declines and the regex fallback finds
+    # nothing -- the state the flag exists to rescue.
+    with pytest.raises(ValueError, match="No chapters detected"):
+        flow.split_preview(str(proj), pattern_type="auto")
+
+    result = flow.split_preview(str(proj), pattern_type="auto", heading_level="h2")
+
+    assert result["pattern_used"] == "headings"
+    assert result["heading_outline"]["applied"] is True
+    assert result["heading_outline"]["selected"] == "h2"
+    assert result["ledger"]["chapter_level"] == "h2"
+    assert [s["name"] for s in result["sections"]] == [t for _, t in _DECLINED_BOOK]
+
+
+def test_heading_level_without_a_sidecar_warns_instead_of_vanishing(tmp_path: Path):
+    proj = tmp_path / "book"
+    proj.mkdir()
+    (proj / "source.txt").write_text(_front_back_source(), encoding="utf-8")
+
+    result = flow.split_preview(str(proj), pattern_type="auto", heading_level="h2")
+
+    assert result["heading_outline"] is None
+    assert result["pattern_used"] != "headings"
+    assert any("--heading-level h2 had no effect" in w for w in result["warnings"])
+
+
+def _tear_sidecar(proj: Path) -> None:
+    """Simulate a write that died partway, leaving truncated JSON."""
+    raw = (proj / "headings.json").read_text(encoding="utf-8")
+    (proj / "headings.json").write_text(raw[:len(raw) // 2], encoding="utf-8")
+
+
+def test_broken_sidecar_fails_closed_when_headings_asked_for_by_name(tmp_path: Path):
+    """``--chapter-pattern headings`` demanded the outline path, so silently
+    regexing would answer a different question than the one asked."""
+    from src.harness_guard import HarnessValidationError
+
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    _tear_sidecar(proj)
+    with pytest.raises(HarnessValidationError, match="headings.json exists but"):
+        flow.split_preview(str(proj), pattern_type="headings")
+
+
+def test_broken_sidecar_warns_but_still_splits_on_auto(tmp_path: Path):
+    """Under ``auto`` the regex fallback is legitimate — it just must not be
+    indistinguishable from a project that predates the sidecar."""
+    proj = _outline_project(tmp_path, _MIXED_CASE_BOOK)
+    _tear_sidecar(proj)
+
+    result = flow.split_preview(str(proj), pattern_type="auto")
+
+    assert result["pattern_used"] != "headings"
+    assert result["heading_outline"] is None
+    assert any("headings.json exists but could not be used" in w
+               for w in result["warnings"])
+
+
+# ── --custom-regex-file ────────────────────────────────────────────────────
+
+def _regex_args(*, custom_regex=None, custom_regex_file=None):
+    import argparse
+    return argparse.Namespace(
+        custom_regex=custom_regex, custom_regex_file=custom_regex_file)
+
+
+def test_custom_regex_file_reads_the_pattern(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    path = tmp_path / "pat.txt"
+    path.write_text(r"^CHAPTER [IVX]+$", encoding="utf-8")
+    assert _resolve_custom_regex(_regex_args(custom_regex_file=str(path))) == (
+        r"^CHAPTER [IVX]+$")
+
+
+def test_custom_regex_file_and_flag_are_mutually_exclusive(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    path = tmp_path / "pat.txt"
+    path.write_text("CHAPTER", encoding="utf-8")
+    with pytest.raises(HarnessValidationError, match="mutually exclusive"):
+        _resolve_custom_regex(_regex_args(
+            custom_regex="CHAPTER", custom_regex_file=str(path)))
+
+
+def test_custom_regex_file_missing_is_named(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    missing = tmp_path / "nope.txt"
+    with pytest.raises(HarnessValidationError, match="not found"):
+        _resolve_custom_regex(_regex_args(custom_regex_file=str(missing)))
+
+
+def test_custom_regex_file_empty_is_rejected(tmp_path: Path):
+    from scripts.harness import _resolve_custom_regex
+
+    path = tmp_path / "empty.txt"
+    path.write_text("   \n", encoding="utf-8")
+    with pytest.raises(HarnessValidationError, match="is empty"):
+        _resolve_custom_regex(_regex_args(custom_regex_file=str(path)))

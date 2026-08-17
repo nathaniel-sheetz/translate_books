@@ -252,6 +252,8 @@ def setup(
     min_chapter_size: int | None = None,
     auto_strip_boilerplate: bool = True,
     footnotes: str = "import",
+    heading_level=None,
+    case_sensitive_custom: bool = False,
 ) -> dict:
     """Create the project, persist config, run ingest + split (NOT chunk).
 
@@ -309,6 +311,8 @@ def setup(
         front_matter_titles=front_matter_titles or None,
         back_matter_titles=back_matter_titles or None,
         auto_strip_boilerplate=auto_strip_boilerplate,
+        heading_level=heading_level,
+        case_sensitive_custom=case_sensitive_custom,
         # 'import' (default) captures Gutenberg footnotes as [FOOTNOTE:N] tokens +
         # footnotes.json so the skill can offer keep/drop at Step 0; a harmless no-op
         # when the source has none (or on the local source.txt path, which skips
@@ -335,6 +339,8 @@ def setup(
         front_matter_titles=args.front_matter_titles,
         back_matter_titles=args.back_matter_titles,
         auto_strip_boilerplate=args.auto_strip_boilerplate,
+        heading_level=heading_level,
+        case_sensitive_custom=case_sensitive_custom,
     )
     return {
         "project_dir": str(project_dir),
@@ -342,7 +348,14 @@ def setup(
         "chapters": [c.stem for c in chapters],
         "chapter_count": len(chapters),
         "pattern_used": hints["pattern_used"],  # the pattern actually split on
-        "dropped": pstate.get("dropped", []),  # boilerplate stripped at split
+        "dropped": pstate.get("dropped", []),  # sections detected but not written
+        # Level table; null without a sidecar. `applied` says whether the split
+        # actually anchored on it.
+        "heading_outline": _outline_result(
+            hints["outline_report"] or {}, hints["pattern_used"]),
+        "ledger": _split_ledger(
+            _outline_result(hints["outline_report"] or {}, hints["pattern_used"]),
+            hints["heading_outline"], hints["sections"], pstate.get("dropped", [])),
         "footnotes_detected": pstate.get("footnote_count", 0),  # notes found at ingest
         "footnotes_mode": pstate.get("footnote_mode"),  # 'import' | 'drop' | None
         "source_words": pstate.get("source_words"),
@@ -375,6 +388,11 @@ def _detect_sections(
     auto_detect_back_matter: bool,
     auto_strip_boilerplate: bool = True,
     collect_dropped: list | None = None,
+    heading_outline: list | None = None,
+    heading_level=None,
+    case_sensitive_custom: bool = False,
+    collect_outline_report: dict | None = None,
+    outline_error: str | None = None,
 ):
     """Run the shared splitter with the harness's defaults filled in."""
     from src.book_splitter import split_book_into_chapters
@@ -390,7 +408,47 @@ def _detect_sections(
         auto_detect_back_matter=auto_detect_back_matter,
         auto_strip_boilerplate=auto_strip_boilerplate,
         collect_dropped=collect_dropped,
+        heading_outline=heading_outline,
+        heading_level=heading_level,
+        case_sensitive_custom=case_sensitive_custom,
+        collect_outline_report=collect_outline_report,
+        outline_error=outline_error,
     )
+
+
+def _load_outline(project_dir, requested: str | None) -> tuple[list | None, list[str]]:
+    """Load ``headings.json``, failing closed when it was asked for by name.
+
+    Returns ``(outline, errors)``. A broken sidecar is a hard error under
+    ``--chapter-pattern headings`` (the caller demanded the outline path, so
+    silently regexing would answer a different question) and a warning under
+    ``auto`` (where the regex fallback is legitimate — it just must not look
+    like the project simply predates the sidecar).
+    """
+    from src import book_splitter
+
+    errors: list[str] = []
+    outline = book_splitter.load_heading_outline(project_dir, collect_error=errors)
+    if errors and requested == "headings":
+        from src.harness_guard import HarnessValidationError
+
+        raise HarnessValidationError(errors[0])
+    return outline, errors
+
+
+def _outline_result(outline_report: dict, pattern_used: str) -> dict | None:
+    from src.book_splitter import shape_outline_report
+    return shape_outline_report(outline_report, pattern_used)
+
+
+def _split_ledger(
+    outline_report: dict | None,
+    heading_outline: list | None,
+    sections: list,
+    dropped: list,
+) -> dict:
+    from src.book_splitter import split_ledger
+    return split_ledger(outline_report, heading_outline, sections, dropped)
 
 
 def _section_display_name(ch) -> str:
@@ -442,21 +500,25 @@ def _pattern_hints(
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
     auto_strip_boilerplate: bool = True,
+    heading_level=None,
+    case_sensitive_custom: bool = False,
 ) -> dict:
     """Detect the best-fit pattern from ``source.txt`` and re-derive the
     committed split as objects, so any split beat can report ``pattern_used`` /
     ``suggested_pattern`` and run the sanity check on the local path — parity
     with the URL path's HTML-derived hints. Returns
-    ``{detected, pattern_used, sections, warnings}``."""
+    ``{detected, pattern_used, sections, warnings, outline_report, dropped}``."""
     from src import book_splitter
 
     source_text = _read_source(project_dir)
+    outline, outline_errors = _load_outline(project_dir, requested)
     detected = book_splitter.detect_pattern_from_text(source_text)
-    pattern_used = (detected or "roman") if requested in (None, "auto") else requested
+    outline_report: dict = {}
+    dropped: list[dict] = []
     with _quiet_stdout():
         sections = _detect_sections(
             source_text,
-            pattern_type=pattern_used,
+            pattern_type=requested or "auto",
             custom_regex=custom_regex,
             min_chapter_size=min_chapter_size,
             front_matter_titles=front_matter_titles,
@@ -464,14 +526,28 @@ def _pattern_hints(
             auto_detect_front_matter=auto_detect_front_matter,
             auto_detect_back_matter=auto_detect_back_matter,
             auto_strip_boilerplate=auto_strip_boilerplate,
+            collect_dropped=dropped,
+            heading_outline=outline,
+            heading_level=heading_level,
+            case_sensitive_custom=case_sensitive_custom,
+            collect_outline_report=outline_report,
+            outline_error=outline_errors[0] if outline_errors else None,
         )
+    pattern_used = book_splitter.resolve_pattern_type(
+        requested, source_text, outline_report=outline_report,
+        heading_level=heading_level)
     warnings = book_splitter.split_sanity_warnings(
-        sections, source_text, pattern_used=pattern_used, detected=detected)
+        sections, source_text, pattern_used=pattern_used, detected=detected,
+        outline_report=outline_report or None, heading_level=heading_level,
+        outline_errors=outline_errors)
     return {
         "detected": detected,
         "pattern_used": pattern_used,
         "sections": sections,
         "warnings": warnings,
+        "outline_report": outline_report or None,
+        "heading_outline": outline,
+        "dropped": dropped,
     }
 
 
@@ -486,6 +562,8 @@ def split_preview(
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
     auto_strip_boilerplate: bool = True,
+    heading_level=None,
+    case_sensitive_custom: bool = False,
 ) -> dict:
     """Dry-run a chapter split and return the detected sections — writes NO files.
 
@@ -495,9 +573,13 @@ def split_preview(
     committing the split with :func:`split_apply`. Navigation/boilerplate
     (Contents, Title Page, ...) is stripped and reported under ``dropped``.
     """
+    from src import book_splitter
+
     project_dir = state.resolve_project_dir(project, must_exist=True)
     book_text = _read_source(project_dir)
+    outline, outline_errors = _load_outline(project_dir, pattern_type)
     dropped: list[dict] = []
+    outline_report: dict = {}
     with _quiet_stdout():
         chapters = _detect_sections(
             book_text,
@@ -510,6 +592,11 @@ def split_preview(
             auto_detect_back_matter=auto_detect_back_matter,
             auto_strip_boilerplate=auto_strip_boilerplate,
             collect_dropped=dropped,
+            heading_outline=outline,
+            heading_level=heading_level,
+            case_sensitive_custom=case_sensitive_custom,
+            collect_outline_report=outline_report,
+            outline_error=outline_errors[0] if outline_errors else None,
         )
     sections = [
         {
@@ -522,19 +609,25 @@ def split_preview(
         }
         for ch in chapters
     ]
-    from src import book_splitter
     detected = book_splitter.detect_pattern_from_text(book_text)
-    pattern_used = (detected or "roman") if pattern_type in (None, "auto") else pattern_type
+    pattern_used = book_splitter.resolve_pattern_type(
+        pattern_type, book_text, outline_report=outline_report,
+        heading_level=heading_level)
     return {
         "project_dir": str(project_dir),
         "section_count": len(sections),
         "counts": _kind_counts(chapters),
         "pattern_used": pattern_used,
         "suggested_pattern": detected,
+        "heading_outline": _outline_result(outline_report, pattern_used),
+        "ledger": _split_ledger(
+            _outline_result(outline_report, pattern_used), outline, chapters, dropped),
         "sections": sections,
         "dropped": dropped,
         "warnings": book_splitter.split_sanity_warnings(
-            chapters, book_text, pattern_used=pattern_used, detected=detected),
+            chapters, book_text, pattern_used=pattern_used, detected=detected,
+            outline_report=outline_report or None, heading_level=heading_level,
+            outline_errors=outline_errors),
         "files_written": False,
     }
 
@@ -550,21 +643,25 @@ def split_apply(
     auto_detect_front_matter: bool = True,
     auto_detect_back_matter: bool = True,
     auto_strip_boilerplate: bool = True,
+    heading_level=None,
+    case_sensitive_custom: bool = False,
 ) -> dict:
     """Commit a chapter split: (re)write ``chapters/`` from ``source.txt``.
 
-    Mirrors the web GUI's ``/split``. Clears stale ``chapter_*.txt`` first so a
-    smaller re-split never leaves orphaned files behind (``save_chapters_to_files``
-    writes by ``position_index`` and would otherwise leave higher-numbered files).
-    Navigation/boilerplate (Contents, Title Page, ...) is stripped and reported
-    under ``dropped``.
+    Mirrors the web GUI's ``/split``. ``save_chapters_to_files`` clears stale
+    ``chapter_*.txt`` first so a smaller re-split never leaves orphaned files
+    behind. Navigation/boilerplate (Contents, Title Page, ...) is stripped and
+    reported under ``dropped``.
     """
+    from src import book_splitter
     from src.book_splitter import save_chapters_to_files
 
     project_dir = state.resolve_project_dir(project, must_exist=True)
     book_text = _read_source(project_dir)
+    outline, outline_errors = _load_outline(project_dir, pattern_type)
     chapters_dir = project_dir / "chapters"
     dropped: list[dict] = []
+    outline_report: dict = {}
     with _quiet_stdout():
         chapters = _detect_sections(
             book_text,
@@ -577,26 +674,34 @@ def split_apply(
             auto_detect_back_matter=auto_detect_back_matter,
             auto_strip_boilerplate=auto_strip_boilerplate,
             collect_dropped=dropped,
+            heading_outline=outline,
+            heading_level=heading_level,
+            case_sensitive_custom=case_sensitive_custom,
+            collect_outline_report=outline_report,
+            outline_error=outline_errors[0] if outline_errors else None,
         )
-        if chapters_dir.exists():
-            for stale in chapters_dir.glob("chapter_*.txt"):
-                stale.unlink()
         save_chapters_to_files(chapters, str(chapters_dir))
 
     written = sorted(chapters_dir.glob("chapter_*.txt"))
-    from src import book_splitter
     detected = book_splitter.detect_pattern_from_text(book_text)
-    pattern_used = (detected or "roman") if pattern_type in (None, "auto") else pattern_type
+    pattern_used = book_splitter.resolve_pattern_type(
+        pattern_type, book_text, outline_report=outline_report,
+        heading_level=heading_level)
     return {
         "project_dir": str(project_dir),
         "chapter_count": len(chapters),
         "counts": _kind_counts(chapters),
         "pattern_used": pattern_used,
         "suggested_pattern": detected,
+        "heading_outline": _outline_result(outline_report, pattern_used),
+        "ledger": _split_ledger(
+            _outline_result(outline_report, pattern_used), outline, chapters, dropped),
         "chapters": [p.stem for p in written],
         "dropped": dropped,
         "warnings": book_splitter.split_sanity_warnings(
-            chapters, book_text, pattern_used=pattern_used, detected=detected),
+            chapters, book_text, pattern_used=pattern_used, detected=detected,
+            outline_report=outline_report or None, heading_level=heading_level,
+            outline_errors=outline_errors),
         "files_written": True,
         "sections": [
             {
@@ -4598,8 +4703,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "config": "persisted config dict (target_language, locale, provider, model, title, author, language_code, always_include_dialogue, always_include_image_instructions)",
         "chapters": "list of written chapter file stems (e.g. 'chapter_01')",
         "chapter_count": "number of sections written to chapters/",
-        "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved to a concrete pattern here)",
-        "dropped": "list of {label, reason} for boilerplate stripped at split (Contents, Title Page, ...)",
+        "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved to a concrete pattern here); 'headings' means it anchored on the book's own HTML heading outline",
+        "dropped": "list of {label, reason} for every section detected but not written. reason is 'boilerplate' (Contents, Title Page, ...), 'too_short' (below min_chapter_size, with chars), 'empty', or 'unparsable_number'. A 'too_short' row is informational, not an error",
+        "heading_outline": "{selected, reason, levels, unlocated, applied} when the project has a headings.json sidecar, else null. applied says whether the split actually anchored on the outline. levels maps h1..h6 to {n, median_chars, tiny, skew} — the table to read when the split picked the wrong level, then re-run with --heading-level",
+        "ledger": "{outline_headings, chapter_level, chapter_level_headings, sections, dropped, unlocated} — at-a-glance accounting of what became of each heading. A gap between chapter_level_headings and sections is a prompt to read `dropped`, not an error (merged numeral+title headings consume two)",
         "footnotes_detected": "count of Gutenberg footnotes found at ingest (0 if none, or on the local source.txt path which skips detection)",
         "footnotes_mode": "how footnotes were handled: 'import' (default; kept as [FOOTNOTE:N] tokens + footnotes.json) or 'drop'; null when none detected. On 'import' with footnotes_detected>0, prompt keep/drop and run `footnotes drop` to discard",
         "source_words": "word count of the ingested source (null on the no-URL path)",
@@ -4613,10 +4720,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "project_dir": "absolute path to the project directory",
         "section_count": "number of detected sections",
         "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
-        "pattern_used": "the chapter pattern resolved for this preview (an 'auto' request becomes a concrete pattern)",
-        "suggested_pattern": "best-fit chapter pattern detected from the text, or null",
+        "pattern_used": "the chapter pattern resolved for this preview (an 'auto' request becomes a concrete pattern); 'headings' means it anchored on the book's own HTML heading outline",
+        "suggested_pattern": "best-fit *regex* pattern detected from the text, or null. Advisory only — it does not know about the heading outline, so it will differ from pattern_used whenever the outline wins",
+        "heading_outline": "{selected, reason, levels, unlocated, applied} when the project has a headings.json sidecar, else null. applied says whether the split actually anchored on the outline (false when a regex pattern was forced). levels maps h1..h6 to {n, median_chars, tiny, skew}; re-run with --heading-level to pick a different one",
+        "ledger": "{outline_headings, chapter_level, chapter_level_headings, sections, dropped, unlocated} — at-a-glance accounting of what became of each heading",
         "sections": "list of {name, kind, label, number, words, preview}",
-        "dropped": "list of {label, reason} for boilerplate stripped (Contents, Title Page, ...)",
+        "dropped": "list of {label, reason} for every section detected but not written: 'boilerplate', 'too_short' (with chars), 'empty', or 'unparsable_number'",
         "warnings": "advisory strings when the split looks wrong; empty when clean",
         "files_written": "always False for the dry-run preview",
     },
@@ -4624,10 +4733,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "project_dir": "absolute path to the project directory",
         "chapter_count": "number of sections written",
         "counts": "dict of section counts by kind: {front_matter, chapter, back_matter}",
-        "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved here)",
-        "suggested_pattern": "best-fit chapter pattern detected from the text, or null",
+        "pattern_used": "the chapter pattern the split actually ran on (an 'auto' request is resolved here); 'headings' means it anchored on the book's own HTML heading outline",
+        "suggested_pattern": "best-fit *regex* pattern detected from the text, or null. Advisory only — it does not know about the heading outline, so it will differ from pattern_used whenever the outline wins",
+        "heading_outline": "{selected, reason, levels, unlocated, applied} when the project has a headings.json sidecar, else null. applied says whether the split actually anchored on the outline (false when a regex pattern was forced). levels maps h1..h6 to {n, median_chars, tiny, skew}; re-run with --heading-level to pick a different one",
+        "ledger": "{outline_headings, chapter_level, chapter_level_headings, sections, dropped, unlocated} — at-a-glance accounting of what became of each heading",
         "chapters": "list of written chapter file stems",
-        "dropped": "list of {label, reason} for boilerplate stripped (Contents, Title Page, ...)",
+        "dropped": "list of {label, reason} for every section detected but not written: 'boilerplate', 'too_short' (with chars), 'empty', or 'unparsable_number'",
         "warnings": "advisory strings when the split looks wrong; empty when clean",
         "files_written": "always True for the apply",
         "sections": "list of {name, kind, label, number, words}",

@@ -91,21 +91,76 @@ When none are detected, persist that so later sessions skip the footnotes beat:
 python scripts/harness.py config-set --project projects/<slug> --key footnotes_decision --value none
 ```
 
+**How the split picks boundaries.** On the `--url` path, ingest writes `headings.json` next to
+`source.txt` — the book's own `<h1>`–`<h6>` outline. `--chapter-pattern auto` (the default) anchors
+on it whenever one heading level convincingly partitions the text, and reports
+`pattern_used: "headings"`. That is ground truth from the markup, so it is immune to the ways
+flattened prose fools a regex: image captions shaped like titles, hand-typeset multi-line headings,
+Title-Case chapter names in an otherwise ALL-CAPS book, a book that mixes `CHAPTER 1` with
+`CHAPTER II`. When there is no sidecar (a project seeded from a bare `source.txt`, or ingested
+before the sidecar existed) or no level is convincing, `auto` falls back to the regex patterns
+exactly as before.
+
+**`suggested_pattern` only knows about the regex patterns.** It will routinely disagree with
+`pattern_used` when the outline wins. That is expected — do **not** "correct" it by re-running with
+the suggestion.
+
 **Refine the split if it looks wrong** — the `setup` split misfires, reports "No chapters
 detected," or a *real* section is mis-numbered as a chapter (or vice-versa). Don't hand-edit
-`source.txt`; use the review beat, which mirrors the web GUI's Stage 2:
+`source.txt` (it desynchronizes `headings.json`, which then reports `unlocated` headings); use the
+review beat, which mirrors the web GUI's Stage 2:
 
 ```bash
-# Dry-run: prints each section tagged front_matter / chapter / back_matter,
-# plus a `dropped` list of stripped boilerplate. Writes nothing.
+# Dry-run: prints each section tagged front_matter / chapter / back_matter, a
+# `dropped` list, a `ledger`, and the `heading_outline` level table. Writes nothing.
+python scripts/harness.py split-preview --project projects/<slug>
+
+# Wrong heading level? The level table names the alternatives — one flag, no regex.
 python scripts/harness.py split-preview --project projects/<slug> \
-  --chapter-pattern custom --custom-regex '(?<=\n---\n\n)[A-Z][^\n]*' \
-  --min-chapter-size 500 \
-  --front-matter-title "To the Teacher" --back-matter-title "A Word to the Children"
+  --chapter-pattern headings --heading-level h3
 
 # Happy with the preview? Commit it (rewrites chapters/, clearing any stale files).
 python scripts/harness.py split --project projects/<slug>  # + the same split flags
 ```
+
+**Reach for `--heading-level` before `--custom-regex`.** When `section_count` looks wrong on a book
+that has an outline, read `heading_outline.levels` — each `h1`..`h6` comes with its section count
+`n`, `median_chars`, and how many are stubs (`tiny`). Picking the right level is almost always the
+fix; a hand-written regex almost never is.
+
+`--heading-level` also *selects* the outline path, so it works on `auto` without
+`--chapter-pattern headings` — including when `selected` is `null`. A short book (say 4 chapters) is
+under the 5-section minimum, so the gates decline and `auto` alone falls back to a regex even though
+`levels.h2.n` reads 4. Naming the level is the whole fix. It needs a sidecar to act on: with no
+`headings.json` the regex patterns still run and a warning says the flag had nothing to bite on.
+
+**A `headings.json` that exists but won't parse is reported, not ignored.** Under `auto` it comes
+back as a warning and the regex patterns run; under `--chapter-pattern headings` it is a hard error.
+Re-ingest from the source URL to rebuild it — that path is the only supported writer.
+
+```jsonc
+"heading_outline": {
+  "selected": "h2",
+  "reason": "n=66 median=6015 tiny=1",
+  "levels": {
+    "h2": { "n": 66, "median_chars": 6015, "tiny": 1, "skew": 13.2 },  // 65 stories + preface
+    "h3": { "n": 14, "median_chars": 9528, "tiny": 0, "skew": 25.2 }   // in-story section numbers
+  },
+  "unlocated": []
+}
+```
+
+**Read `dropped` — it now reports every section that was detected but not written**, not just
+boilerplate. `reason` is one of `boilerplate` (Contents, Title Page, …), `too_short` (below
+`--min-chapter-size`, with the `chars` it had), `empty`, or `unparsable_number`. A `too_short` row
+for a title-page fragment is **informational, not an error** — it is how a vanished dedication or a
+swallowed title fragment becomes visible instead of silently disappearing. `ledger` is the
+at-a-glance version; a gap between `chapter_level_headings` and `sections` is a prompt to read
+`dropped`, not a failure (a numeral heading merged into the title after it consumes two).
+
+**`unlocated` headings mean `source.txt` and `headings.json` disagree** — almost always because
+`source.txt` was edited after ingest. Those headings are skipped and a warning fires. Re-ingest
+rather than patching around it.
 
 **Force-tagging KEEPS a section, it never removes one.** `--front-matter-title` /
 `--back-matter-title` are repeatable and force a *real* heading the keyword auto-detect missed
@@ -118,3 +173,13 @@ auto-strip stays on unless you pass `--no-auto-strip` (only needed for the rare 
 chapter literally titled "Contents"). Raising `--min-chapter-size` (~500) drops short stray
 front-matter lines a loose pattern would otherwise capture. All of these controls also work
 directly on `setup` for a one-shot run.
+
+**`--custom-regex` is compiled with `re.IGNORECASE` unless you say otherwise.** This silently
+changes what a character class means: under it, `[A-Z][A-Z .,'!?&—-]{2,}` reads as "any run of
+letters, spaces and common punctuation" — a description of almost every English paragraph — and
+will return whole paragraphs of prose as chapter *titles*. Pass `--custom-regex-case-sensitive`
+when you mean the literal reading (the inline equivalent is wrapping the pattern in `(?-i:...)`).
+
+**`--custom-regex-file PATH` reads the pattern from a file.** Use it for anything long: a many-way
+alternation full of curly quotes, `$`, `|`, and accented letters is hostile to every shell, and
+quoting it inline is how it gets mangled. Mutually exclusive with `--custom-regex`.

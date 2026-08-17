@@ -30,7 +30,11 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.book_splitter import split_book_into_chapters, save_chapters_to_files
+from src.book_splitter import (
+    split_book_into_chapters,
+    save_chapters_to_files,
+    load_heading_outline,
+)
 from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
@@ -40,6 +44,23 @@ from src.models import Chunk, ChunkStatus, ChunkingConfig
 from src.sentence_aligner import align_chapter_chunks
 from src.utils.file_io import load_chunk, save_chunk, load_glossary, save_glossary, load_style_guide
 from src.utils.source_text import load_chapter_source_text
+
+
+def _chapter_pattern_choices() -> list[str]:
+    """Selectable ``--chapter-pattern`` values, kept in step with the harness:
+    ``auto``, ``headings``, every named pattern in ``split_patterns.json``, and
+    ``custom``."""
+    from src.book_splitter import get_pattern_names
+    return ["auto", "headings", *get_pattern_names(), "custom"]
+
+
+def _heading_level(value: str) -> str:
+    """argparse type: 'h2', 'H2', or '2' -> 'h2'."""
+    s = str(value).strip().lower().lstrip("h")
+    if not s.isdigit() or not (1 <= int(s) <= 6):
+        raise argparse.ArgumentTypeError(
+            f"invalid heading level: {value!r} (expected h1..h6)")
+    return f"h{int(s)}"
 
 
 # Pipeline stages in order
@@ -123,6 +144,7 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
         _normalize_whitespace,
         build_chapter_report,
         suggest_split_pattern,
+        write_heading_outline,
     )
 
     url = args.url
@@ -174,6 +196,9 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
 
     out_path = project_dir / "source.txt"
     out_path.write_text(text, encoding="utf-8")
+    # The document's own heading outline, persisted next to source.txt so the
+    # splitter can anchor on it instead of regexing the flattened text.
+    write_heading_outline(project_dir, converter.chapters)
 
     word_count = len(text.split())
     fn_note = ""
@@ -202,11 +227,25 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
 
     book_text = source_path.read_text(encoding="utf-8")
 
-    pattern_type = getattr(args, "chapter_pattern", "roman") or "roman"
+    pattern_type = getattr(args, "chapter_pattern", "auto") or "auto"
     custom_regex = getattr(args, "custom_regex", None)
     min_size = getattr(args, "min_chapter_size", 100) or 100
+    heading_level = getattr(args, "heading_level", None)
+    # The document's own heading outline, when ingest captured one. Absent for
+    # projects seeded from a bare source.txt (and for anything ingested before
+    # the sidecar existed), in which case the regex patterns run as before.
+    # A sidecar that exists but is broken is reported rather than passed off as
+    # "no sidecar" -- silently regexing would be indistinguishable from a
+    # pre-sidecar project.
+    outline_errors: list = []
+    outline = load_heading_outline(project_dir, collect_error=outline_errors)
+    if outline_errors and pattern_type == "headings":
+        raise ValueError(outline_errors[0])
+    for err in outline_errors:
+        print(f"  [warning] {err}")
 
     dropped: list = []
+    outline_report: dict = {}
     chapters = split_book_into_chapters(
         book_text=book_text,
         pattern_type=pattern_type,
@@ -218,6 +257,11 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
         auto_detect_back_matter=getattr(args, "auto_detect_back_matter", True),
         auto_strip_boilerplate=getattr(args, "auto_strip_boilerplate", True),
         collect_dropped=dropped,
+        heading_outline=outline,
+        heading_level=heading_level,
+        case_sensitive_custom=getattr(args, "case_sensitive_custom", False),
+        collect_outline_report=outline_report,
+        outline_error=outline_errors[0] if outline_errors else None,
     )
 
     chapters_dir = project_dir / "chapters"
@@ -228,11 +272,16 @@ def stage_split(args, project_dir: Path, state: dict) -> dict:
         words = len(ch.content.split())
         print(f"    {ch.chapter_title}: {words:,} words")
     for d in dropped:
-        print(f"    [stripped boilerplate] {d.get('label')}")
+        print(f"    [dropped: {d.get('reason', 'boilerplate')}] {d.get('label')}")
+    if heading_level is not None and not outline_report:
+        print(f"  [warning] --heading-level {heading_level} had no effect: this "
+              f"project has no usable heading outline to anchor on.")
 
     state["stage_completed"] = "split"
     state["chapter_count"] = len(chapters)
     state["dropped"] = dropped
+    if outline_report:
+        state["heading_outline"] = outline_report
     return state
 
 
@@ -948,11 +997,31 @@ def main():
                              "(--always-images / --no-always-images). Absent auto-enables "
                              "when any in-scope chunk has [IMAGE:...] placeholders.")
 
-    # Chapter detection
-    parser.add_argument("--chapter-pattern", default="roman",
-                        choices=["roman", "numeric", "custom"],
-                        help="Chapter detection pattern (default: roman)")
+    # Chapter detection. Choices are derived from split_patterns.json for the
+    # same reason the harness derives them: a pattern defined there must not be
+    # unreachable from the CLI. Defaults match the harness so the two entry
+    # points split a given project the same way.
+    parser.add_argument("--chapter-pattern", default="auto",
+                        choices=_chapter_pattern_choices(),
+                        help="Chapter detection pattern (default: auto). 'auto' "
+                             "anchors on the HTML heading outline (headings.json) "
+                             "when the book has one and it looks convincing, else "
+                             "picks the best-fit regex pattern; 'headings' forces "
+                             "the outline path (see --heading-level); 'custom' uses "
+                             "--custom-regex.")
+    parser.add_argument("--heading-level", dest="heading_level",
+                        type=_heading_level, default=None,
+                        help="Which heading level holds chapters ('h2', '3'), for "
+                             "--chapter-pattern headings/auto. Defaults to the level "
+                             "the split picks; read the heading_outline.levels table "
+                             "in the split output to choose another.")
     parser.add_argument("--custom-regex", help="Custom regex for chapter detection")
+    parser.add_argument("--custom-regex-case-sensitive", dest="case_sensitive_custom",
+                        action="store_true",
+                        help="Compile --custom-regex without re.IGNORECASE, which is "
+                             "otherwise forced. Matters because under IGNORECASE a "
+                             "class like [A-Z][A-Z ]+ silently means 'any run of "
+                             "letters and spaces' and matches ordinary prose.")
     parser.add_argument("--min-chapter-size", type=int, default=100,
                         help="Minimum chapter size in characters (default: 100)")
 

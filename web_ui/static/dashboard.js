@@ -654,8 +654,11 @@
     }
 
     function populateSplitStage(status) {
-        // Auto-populate pattern from Gutenberg ingest suggestion
-        if (status.suggested_split_pattern && !(status.chapters && status.chapters.length > 0)) {
+        // Auto-populate pattern from Gutenberg ingest suggestion — but not
+        // when the project has a headings.json. That suggestion is a regex
+        // name and would undo the `auto` default that prefers the outline.
+        if (status.suggested_split_pattern && !(status.chapters && status.chapters.length > 0)
+                && !status.has_heading_outline) {
             var suggested = status.suggested_split_pattern;
             var sel = document.getElementById('split-pattern');
             var optionExists = Array.from(sel.options).some(function(o) { return o.value === suggested; });
@@ -774,7 +777,7 @@
                 return;
             }
             setStatus('split-status', '', '');
-            showSplitPreview(data.chapters);
+            showSplitPreview(data);
         });
     });
 
@@ -818,14 +821,157 @@
             min_chapter_size: parseInt(document.getElementById('split-min-size').value, 10) || 500,
             front_matter_titles: parseLines('split-front-matter'),
             back_matter_titles: parseLines('split-back-matter'),
+            heading_level: (document.getElementById('split-heading-level') || {}).value || undefined,
         };
     }
 
-    function showSplitPreview(chapters) {
+    function populateHeadingLevelSelect(levels) {
+        var field = document.getElementById('heading-level-field');
+        var sel = document.getElementById('split-heading-level');
+        if (!field || !sel) return;
+        var keys = Object.keys(levels || {}).sort();
+        if (!keys.length) {
+            field.style.display = 'none';
+            sel.value = '';
+            return;
+        }
+        var current = sel.value;
+        sel.innerHTML = '';
+        var auto = document.createElement('option');
+        auto.value = '';
+        auto.textContent = 'Auto';
+        sel.appendChild(auto);
+        keys.forEach(function(key) {
+            var opt = document.createElement('option');
+            opt.value = key;
+            var stats = levels[key] || {};
+            var n = stats.n != null ? stats.n : '?';
+            opt.textContent = key + ' (' + n + ' sections)';
+            sel.appendChild(opt);
+        });
+        var stillThere = Array.from(sel.options).some(function(o) { return o.value === current; });
+        sel.value = stillThere ? current : '';
+        field.style.display = '';
+    }
+
+    function splitPatternSubtitle(data) {
+        var used = data.pattern_used || '';
+        var outline = data.heading_outline;
+        if (used === 'headings') {
+            var level = outline && outline.selected ? ' (' + outline.selected + ')' : '';
+            return 'Anchored on heading outline' + level;
+        }
+        if (used) {
+            return 'Regex: ' + used;
+        }
+        return '';
+    }
+
+    function renderSplitReport(data) {
+        var host = document.getElementById('split-preview-report');
+        host.innerHTML = '';
+        var warnings = data.warnings || [];
+        var dropped = data.dropped || [];
+        var outline = data.heading_outline;
+        var unlocated = (outline && outline.unlocated) || [];
+        var ledger = data.ledger;
+
+        if (warnings.length) {
+            host.appendChild(renderSplitNoteList('Warnings', warnings, 'split-report warn'));
+        }
+        if (dropped.length) {
+            var dropItems = dropped.map(function(d) {
+                var label = d.label || d.name || '(untitled)';
+                var reason = d.reason ? ' — ' + d.reason : '';
+                return label + reason;
+            });
+            host.appendChild(renderSplitNoteList('Dropped', dropItems, 'split-report'));
+        }
+        if (unlocated.length) {
+            host.appendChild(renderSplitNoteList(
+                'Unlocated headings', unlocated, 'split-report'));
+        }
+        if (ledger) {
+            var parts = [];
+            if (ledger.outline_headings != null) {
+                parts.push(ledger.outline_headings + ' outline headings');
+            }
+            if (ledger.sections != null) parts.push(ledger.sections + ' sections');
+            if (ledger.dropped != null) parts.push(ledger.dropped + ' dropped');
+            if (ledger.unlocated != null) parts.push(ledger.unlocated + ' unlocated');
+            if (parts.length) {
+                var line = document.createElement('p');
+                line.className = 'split-ledger';
+                line.textContent = parts.join(' · ');
+                host.appendChild(line);
+            }
+        }
+        if (outline && outline.levels && Object.keys(outline.levels).length) {
+            host.appendChild(renderLevelsTable(outline));
+        }
+    }
+
+    function renderSplitNoteList(title, items, className) {
+        var wrap = document.createElement('div');
+        wrap.className = className;
+        var h = document.createElement('h4');
+        h.textContent = title;
+        wrap.appendChild(h);
+        var ul = document.createElement('ul');
+        items.forEach(function(item) {
+            var li = document.createElement('li');
+            li.textContent = item;
+            ul.appendChild(li);
+        });
+        wrap.appendChild(ul);
+        return wrap;
+    }
+
+    function renderLevelsTable(outline) {
+        var wrap = document.createElement('div');
+        wrap.className = outline.applied ? 'split-levels-wrap' : 'split-levels-wrap diagnostic';
+        var note = document.createElement('p');
+        note.className = 'split-levels-note';
+        if (outline.applied) {
+            note.textContent = 'Split anchored on ' + (outline.selected || 'the heading outline') +
+                '. Pick another level and preview again to override.';
+        } else {
+            note.textContent = 'Heading-level table is diagnostic only — this split used a regex pattern, not the outline.';
+        }
+        wrap.appendChild(note);
+
+        var table = document.createElement('table');
+        table.className = 'split-levels';
+        var thead = document.createElement('thead');
+        thead.innerHTML = '<tr><th>Level</th><th>n</th><th>Median chars</th><th>Tiny</th><th>Skew</th></tr>';
+        table.appendChild(thead);
+        var tbody = document.createElement('tbody');
+        Object.keys(outline.levels).sort().forEach(function(key) {
+            var stats = outline.levels[key];
+            var tr = document.createElement('tr');
+            if (key === outline.selected) tr.className = 'selected';
+            ['', stats.n, stats.median_chars, stats.tiny, stats.skew].forEach(function(val, i) {
+                var td = document.createElement(i === 0 ? 'th' : 'td');
+                td.textContent = i === 0 ? key : (val == null ? '—' : val);
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        return wrap;
+    }
+
+    function showSplitPreview(data) {
+        var chapters = data.chapters || [];
         var area = document.getElementById('split-preview-area');
         area.style.display = '';
         document.getElementById('split-preview-count').textContent =
             chapters.length + ' chapters detected';
+        var subtitle = document.getElementById('split-pattern-used');
+        subtitle.textContent = splitPatternSubtitle(data);
+        populateHeadingLevelSelect((data.heading_outline && data.heading_outline.levels) || {});
+        renderSplitReport(data);
         var cards = document.getElementById('split-preview-cards');
         cards.innerHTML = '';
         chapters.forEach(function(ch) {

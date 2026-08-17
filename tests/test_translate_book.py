@@ -9,12 +9,36 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.translate_book import (
+    _chapter_pattern_choices,
+    _heading_level,
     load_pipeline_state,
     save_pipeline_state,
     discover_chapters,
     parse_chapter_range,
     STAGES,
 )
+
+
+class TestChapterPatternCli:
+    """The outline path used to be unreachable from this entry point."""
+
+    def test_choices_include_auto_and_headings(self):
+        choices = _chapter_pattern_choices()
+        assert choices[0] == "auto"
+        assert "headings" in choices
+        assert "custom" in choices
+
+    def test_heading_level_accepts_h_prefix_and_bare_int(self):
+        assert _heading_level("h2") == "h2"
+        assert _heading_level("H3") == "h3"
+        assert _heading_level("4") == "h4"
+
+    def test_heading_level_rejects_out_of_range(self):
+        import argparse
+        with pytest.raises(argparse.ArgumentTypeError, match="h1..h6"):
+            _heading_level("7")
+        with pytest.raises(argparse.ArgumentTypeError, match="h1..h6"):
+            _heading_level("foo")
 
 
 class TestPipelineState:

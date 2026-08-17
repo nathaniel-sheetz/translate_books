@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.46.0.0] - 2026-08-17
+
+### Added
+- **Chapter splitting anchors on the book's own HTML heading outline.** Ingest now writes `headings.json` (level + text per `<h1>`–`<h6>`, in document order) next to `source.txt`, and `--chapter-pattern auto` splits on it whenever one heading level convincingly partitions the text — reporting `pattern_used: "headings"`. This replaces regex archaeology over flattened prose with structure the markup already declared, so image captions shaped like titles, hand-typeset multi-line headings, Title-Case chapters in an ALL-CAPS book, and books mixing `CHAPTER 1` with `CHAPTER II` all split correctly on the first try.
+- **`heading_outline` in the `setup` / `split-preview` / `split` output**: `{selected, reason, levels, unlocated, applied}`, where `levels` gives every `h1`–`h6` its section count, median size, and stub count. A wrong level is a one-flag fix — `--heading-level h3` — instead of a hand-written regex. The flag also *selects* the outline path: naming a level works even when the confidence gates declined to pick one, which is exactly the case you reach for it in (a 4-chapter book is under the 5-section minimum, so `auto` alone would fall back to a regex).
+- **`--heading-level` on `scripts/translate_book.py`**, alongside `--chapter-pattern auto|headings|…` (previously `roman|numeric|custom` only, defaulting to `roman`, which meant this entry point wrote `headings.json` at ingest and then could not use it) and `--custom-regex-case-sensitive`. Its `--chapter-pattern` choices now come from `split_patterns.json` like the harness's, so `chapter_roman_titled`, `chapter_numeric_titled`, `allcaps_heading`, and `bare_roman` are reachable here too.
+- **`--custom-regex-case-sensitive`** opts out of the `re.IGNORECASE` that `--custom-regex` has always been compiled with (under which `[A-Z][A-Z ]+` silently matches ordinary prose). **`--custom-regex-file PATH`** reads long, shell-hostile alternations from a file.
+- **`ledger`** in the split output: at-a-glance accounting of what became of each heading.
+
+### Changed
+- **`dropped` reports every section detected but not written**, not just boilerplate: `too_short` (with `chars`), `empty`, and `unparsable_number` join `boilerplate`. Across the 20 local projects this surfaces 275 sections that were previously filtered in silence — the class of bug that lost a book's dedication and two title-page fragments with no report line.
+- **On the headings path, front/back matter is tagged in place** rather than found by position. A positional scan cannot express matter interleaved with chapters, so a half-title between a dedication and a prologue used to swallow the prologue. This also means `Foreword`/`Prologue` no longer need a hand-written `--front-matter-title` just because the markup put them at the chapter level.
+- The web UI's split endpoints accept and report the outline, and `/api/split-patterns` offers `auto` and `headings`.
+
+### Fixed
+- **Prose between two merged headings is no longer written nowhere.** When `Chapter I.` and `THE HORSE AND HIS RIDER.` are sibling headings, the splitter merges them into one section — but the merge gap is measured start-to-start, so up to ~190 characters could sit *inside* a merged group, and since the body begins after the last heading, an epigraph in that space was in neither the title nor the body, and never reached `dropped` either: the ledger read clean while the text was discarded. Those gaps are now carried into the top of the chapter body, per-gap so intervening heading lines are not folded in as prose. Section counts, spans, and the `levels` table are untouched by construction, so level selection cannot shift. Verified across the 20 local projects that record a source URL, re-ingested to regenerate their `headings.json`: zero differences in `pattern_used`, `selected`, `levels`, `section_count`, `counts`, section names, per-section word counts, `dropped`, `ledger`, or `warnings`. Exactly one of those books (`the-red-mustang`) exercises the merge at all, in 38 groups whose gaps run 12–18 characters against the 200-character threshold — so no shipped book was losing text; the defect was latent.
+- **A broken `headings.json` is now distinguishable from no sidecar at all.** The loader returned `None` for both, so a truncated write looked like a pre-sidecar project: no warning, `heading_outline: null`, and a silent drop to the regex patterns. It is now a warning under `auto` (the fallback is legitimate, it just has to be said out loud), a hard error under `--chapter-pattern headings` (which demanded the outline path), and is named in the "no chapters detected" message when the regex fallback then finds nothing — otherwise the run died complaining about the wrong thing. Ingest also writes the sidecar with a write-then-`os.replace`, so an interrupted ingest can no longer leave a torn file.
+- **Multi-line HTML headings no longer shatter the split.** `Converter._walk` extracted heading text with `get_text(separator=" ")`, which does not collapse whitespace *within* a text node — so a hand-typeset "staircase" `<h2>` kept its embedded newlines, later read as paragraph breaks, and leaked fragments into neighbouring chapters. Headings now get the same normalization body text has always had.
+
+### Compatibility
+- Projects without `headings.json` — every existing one — take the regex path unchanged. Verified by diffing `split-preview` across all 22 splittable local projects before and after: zero differences in `section_count`, `counts`, `pattern_used`, `suggested_pattern`, section names, word counts, or warnings, and no `dropped` entry lost.
+- `suggested_pattern` only knows about the regex patterns, so it will disagree with `pattern_used` whenever the outline wins. That is expected, not a signal to re-run.
+
 ## [0.45.0.0] - 2026-08-12
 
 ### Added
