@@ -3142,6 +3142,7 @@ def project_ingest_gutenberg(project_id):
 
         source_path = project_dir / "source.txt"
         source_path.write_text(text, encoding="utf-8")
+        _mod.write_heading_outline(project_dir, converter.chapters)
 
         report = build_chapter_report(converter.chapters, total_words)
         pattern = suggest_split_pattern(converter.chapters)
@@ -3208,7 +3209,17 @@ def project_fetch_missing_images(project_id):
 def get_split_patterns():
     """Return available split pattern definitions for the UI."""
     from src.book_splitter import get_pattern_definitions
-    patterns = get_pattern_definitions()
+    patterns = {
+        "auto": {
+            "label": "Auto-detect (heading outline, else best-fit regex)",
+            "numbering": "sequential",
+        },
+        "headings": {
+            "label": "Document heading outline (needs headings.json)",
+            "numbering": "sequential",
+        },
+    }
+    patterns.update(get_pattern_definitions())
     patterns["custom"] = {
         "label": "Custom regex",
         "numbering": "sequential",
@@ -3227,9 +3238,11 @@ def project_split_preview(project_id):
         return jsonify({"error": "No source.txt found"}), 404
 
     try:
-        from src.book_splitter import split_book_into_chapters
+        from src.book_splitter import load_heading_outline, split_book_into_chapters
         data = request.json or {}
         text = source_path.read_text(encoding="utf-8")
+        dropped: list = []
+        outline_report: dict = {}
         chapters = split_book_into_chapters(
             text,
             pattern_type=data.get("pattern_type", "roman"),
@@ -3239,6 +3252,11 @@ def project_split_preview(project_id):
             back_matter_titles=data.get("back_matter_titles") or [],
             auto_detect_front_matter=data.get("auto_detect_front_matter", True),
             auto_detect_back_matter=data.get("auto_detect_back_matter", True),
+            heading_outline=load_heading_outline(project_dir),
+            heading_level=data.get("heading_level"),
+            case_sensitive_custom=data.get("case_sensitive_custom", False),
+            collect_dropped=dropped,
+            collect_outline_report=outline_report,
         )
         result = []
         for ch in chapters:
@@ -3254,7 +3272,11 @@ def project_split_preview(project_id):
                 "label": ch.label,
                 "number": ch.number,
             })
-        return jsonify({"chapters": result})
+        return jsonify({
+            "chapters": result,
+            "dropped": dropped,
+            "heading_outline": outline_report or None,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3270,9 +3292,15 @@ def project_split(project_id):
         return jsonify({"error": "No source.txt found"}), 404
 
     try:
-        from src.book_splitter import save_chapters_to_files, split_book_into_chapters
+        from src.book_splitter import (
+            load_heading_outline,
+            save_chapters_to_files,
+            split_book_into_chapters,
+        )
         data = request.json or {}
         text = source_path.read_text(encoding="utf-8")
+        dropped: list = []
+        outline_report: dict = {}
         chapters = split_book_into_chapters(
             text,
             pattern_type=data.get("pattern_type", "roman"),
@@ -3282,10 +3310,20 @@ def project_split(project_id):
             back_matter_titles=data.get("back_matter_titles") or [],
             auto_detect_front_matter=data.get("auto_detect_front_matter", True),
             auto_detect_back_matter=data.get("auto_detect_back_matter", True),
+            heading_outline=load_heading_outline(project_dir),
+            heading_level=data.get("heading_level"),
+            case_sensitive_custom=data.get("case_sensitive_custom", False),
+            collect_dropped=dropped,
+            collect_outline_report=outline_report,
         )
         chapters_dir = project_dir / "chapters"
         save_chapters_to_files(chapters, chapters_dir)
-        return jsonify({"ok": True, "chapter_count": len(chapters)})
+        return jsonify({
+            "ok": True,
+            "chapter_count": len(chapters),
+            "dropped": dropped,
+            "heading_outline": outline_report or None,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

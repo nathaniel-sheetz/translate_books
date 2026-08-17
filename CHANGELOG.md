@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.46.0.0] - 2026-08-17
+
+### Added
+- **Chapter splitting anchors on the book's own HTML heading outline.** Ingest now writes `headings.json` (level + text per `<h1>`–`<h6>`, in document order) next to `source.txt`, and `--chapter-pattern auto` splits on it whenever one heading level convincingly partitions the text — reporting `pattern_used: "headings"`. This replaces regex archaeology over flattened prose with structure the markup already declared, so image captions shaped like titles, hand-typeset multi-line headings, Title-Case chapters in an ALL-CAPS book, and books mixing `CHAPTER 1` with `CHAPTER II` all split correctly on the first try.
+- **`heading_outline` in the `setup` / `split-preview` / `split` output**: `{selected, reason, levels, unlocated, applied}`, where `levels` gives every `h1`–`h6` its section count, median size, and stub count. A wrong level is now a one-flag fix — `--heading-level h3` — instead of a hand-written regex.
+- **`--custom-regex-case-sensitive`** opts out of the `re.IGNORECASE` that `--custom-regex` has always been compiled with (under which `[A-Z][A-Z ]+` silently matches ordinary prose). **`--custom-regex-file PATH`** reads long, shell-hostile alternations from a file.
+- **`ledger`** in the split output: at-a-glance accounting of what became of each heading.
+
+### Changed
+- **`dropped` reports every section detected but not written**, not just boilerplate: `too_short` (with `chars`), `empty`, and `unparsable_number` join `boilerplate`. Across the 20 local projects this surfaces 275 sections that were previously filtered in silence — the class of bug that lost a book's dedication and two title-page fragments with no report line.
+- **On the headings path, front/back matter is tagged in place** rather than found by position. A positional scan cannot express matter interleaved with chapters, so a half-title between a dedication and a prologue used to swallow the prologue. This also means `Foreword`/`Prologue` no longer need a hand-written `--front-matter-title` just because the markup put them at the chapter level.
+- The web UI's split endpoints accept and report the outline, and `/api/split-patterns` offers `auto` and `headings`.
+
+### Fixed
+- **Multi-line HTML headings no longer shatter the split.** `Converter._walk` extracted heading text with `get_text(separator=" ")`, which does not collapse whitespace *within* a text node — so a hand-typeset "staircase" `<h2>` kept its embedded newlines, later read as paragraph breaks, and leaked fragments into neighbouring chapters. Headings now get the same normalization body text has always had.
+
+### Compatibility
+- Projects without `headings.json` — every existing one — take the regex path unchanged. Verified by diffing `split-preview` across all 22 splittable local projects before and after: zero differences in `section_count`, `counts`, `pattern_used`, `suggested_pattern`, section names, word counts, or warnings, and no `dropped` entry lost.
+- `suggested_pattern` only knows about the regex patterns, so it will disagree with `pattern_used` whenever the outline wins. That is expected, not a signal to re-run.
+
 ## [0.45.0.0] - 2026-08-12
 
 ### Added

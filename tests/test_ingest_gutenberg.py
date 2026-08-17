@@ -1,8 +1,15 @@
 """Tests for the Project Gutenberg ingest converter."""
 
+import json
+
 from bs4 import BeautifulSoup
 
-from scripts.ingest_gutenberg import Converter, decode_html_bytes, fetch_html
+from scripts.ingest_gutenberg import (
+    Converter,
+    decode_html_bytes,
+    fetch_html,
+    write_heading_outline,
+)
 
 
 def _convert(html: str) -> str:
@@ -150,3 +157,72 @@ class TestEncodingDetection:
         assert "I. — THE BUILDING OF ROME" in html
         assert "�" not in html
         assert base_url == "https://example.com/books/"
+
+
+class TestHeadingCapture:
+    """The outline the splitter anchors on is built here."""
+
+    def _convert_with_chapters(self, html: str):
+        soup = BeautifulSoup(html, "html.parser")
+        root = soup.find("body") or soup
+        conv = Converter(base_url="", images_dir=None, download_images=False)
+        text = conv.convert(root)
+        return conv, text
+
+    def test_multiline_heading_collapses_to_one_line(self):
+        # A hand-typeset "staircase" title: one <h2> whose raw source wraps
+        # across several physical lines. get_text(separator=...) does not
+        # collapse whitespace *within* a text node, so without normalization the
+        # embedded newlines survive, later read as paragraph breaks, and shatter
+        # the heading into fragments that leak into neighbouring chapters.
+        conv, text = self._convert_with_chapters(
+            "<body><h2>The GRASSHOPPER\nand\nthe MEASURING\nWORM\n"
+            "RUN a RACE</h2><p>Once upon a time.</p></body>"
+        )
+        assert [c["heading"] for c in conv.chapters] == [
+            "The GRASSHOPPER and the MEASURING WORM RUN a RACE"]
+        assert "The GRASSHOPPER and the MEASURING WORM RUN a RACE\n" in text
+        assert "WORM\nRUN" not in text
+
+    def test_heading_records_its_level(self):
+        conv, _ = self._convert_with_chapters(
+            "<body><h1>Book</h1><p>x</p><h2>One</h2><p>y</p>"
+            "<h3>Sub</h3><p>z</p></body>"
+        )
+        assert [(c["level"], c["heading"]) for c in conv.chapters] == [
+            (1, "Book"), (2, "One"), (3, "Sub")]
+
+    def test_heading_with_nested_markup_still_collapses(self):
+        # Headings are extracted with get_text(), not walked, so inline markup
+        # is flattened rather than marked up — which is what the splitter wants
+        # to anchor on. What matters is that the whitespace collapses.
+        conv, _ = self._convert_with_chapters(
+            "<body><h2>A <i>Tale</i>\n  of\n Two</h2><p>x</p></body>")
+        assert conv.chapters[0]["heading"] == "A Tale of Two"
+
+
+class TestWriteHeadingOutline:
+    def test_writes_level_and_text_in_document_order(self, tmp_path):
+        n = write_heading_outline(tmp_path, [
+            {"heading": "Book", "level": 1, "word_offset": 0},
+            {"heading": "One", "level": 2, "word_offset": 10},
+        ])
+        assert n == 2
+        data = json.loads((tmp_path / "headings.json").read_text(encoding="utf-8"))
+        assert data["version"] == 1
+        assert data["headings"] == [
+            {"level": 1, "text": "Book"}, {"level": 2, "text": "One"}]
+
+    def test_skips_empty_headings(self, tmp_path):
+        n = write_heading_outline(tmp_path, [
+            {"heading": "", "level": 2, "word_offset": 0},
+            {"heading": "Real", "level": 2, "word_offset": 1},
+        ])
+        assert n == 1
+
+    def test_round_trips_through_the_splitter_loader(self, tmp_path):
+        write_heading_outline(tmp_path, [
+            {"heading": "Chapter One", "level": 2, "word_offset": 0}])
+        from src.book_splitter import load_heading_outline
+        assert load_heading_outline(tmp_path) == [
+            {"level": 2, "text": "Chapter One"}]

@@ -9,7 +9,12 @@ from src.book_splitter import (
     DetectedChapter,
     build_chapter_manifest,
     detect_pattern_from_text,
+    get_chapter_pattern,
+    load_heading_outline,
+    locate_headings,
+    resolve_pattern_type,
     save_chapters_to_files,
+    select_heading_level,
     split_book_into_chapters,
     split_sanity_warnings,
 )
@@ -524,3 +529,328 @@ class TestSplitSanityWarnings:
         assert len(warns) == 1
         assert "fell back to" in warns[0]
         assert "may be wrong" not in warns[0]
+
+
+# ---------------------------------------------------------------------------
+# Heading-outline splitting
+# ---------------------------------------------------------------------------
+
+_STORY = "lorem ipsum dolor sit amet " * 40  # ~1,080 chars, comfortably a chapter
+
+
+def _outline_book(headings, body=_STORY):
+    """Build (source_text, outline) the way the importer emits them.
+
+    ``headings`` is a list of ``(level, text)``; every heading gets ``body``
+    under it, mirroring ``_flush_heading``'s ``\n\n{text}\n\n``.
+    """
+    parts, outline = [], []
+    for level, text in headings:
+        parts += [text, body]
+        outline.append({"level": level, "text": text})
+    return "\n\n".join(parts), outline
+
+
+def _titles(n, prefix="Story"):
+    return [(2, f"{prefix} Number {i}") for i in range(1, n + 1)]
+
+
+class TestLocateHeadings:
+    def test_locates_each_heading_as_a_standalone_line(self):
+        text, outline = _outline_book(_titles(6))
+        anchors, unlocated = locate_headings(text, outline)
+        assert unlocated == []
+        assert [a["text"] for a in anchors] == [h["text"] for h in outline]
+        for a in anchors:
+            assert text[a["start"]:a["end"]] == a["text"]
+
+    def test_repeated_title_anchors_on_successive_occurrences(self):
+        # A story title that is also an illustration caption appears twice. The
+        # scan is sequential, so the second outline entry must not re-anchor on
+        # the first occurrence.
+        text, outline = _outline_book([
+            (2, "A Ravens Funeral"), (2, "Something Else"), (2, "A Ravens Funeral"),
+        ])
+        anchors, unlocated = locate_headings(text, outline)
+        assert unlocated == []
+        starts = [a["start"] for a in anchors]
+        assert starts == sorted(starts)
+        assert len(set(starts)) == 3
+
+    def test_heading_missing_from_source_is_reported_not_skipped_silently(self):
+        text, outline = _outline_book(_titles(4))
+        outline.insert(2, {"level": 2, "text": "A Heading Nobody Wrote"})
+        anchors, unlocated = locate_headings(text, outline)
+        assert unlocated == ["A Heading Nobody Wrote"]
+        # The surrounding anchors keep their real positions.
+        assert len(anchors) == 4
+        for a in anchors:
+            assert text[a["start"]:a["end"]] == a["text"]
+
+    def test_matches_despite_whitespace_differences(self):
+        # The sidecar collapses whitespace; a hand-edited source may not have.
+        text, outline = _outline_book([(2, "A Title")] + _titles(4))
+        text = text.replace("A Title", "A    Title")
+        anchors, unlocated = locate_headings(text, outline)
+        assert unlocated == []
+        assert anchors[0]["text"] == "A Title"
+
+
+class TestSelectHeadingLevel:
+    def test_picks_the_level_that_partitions_the_text(self):
+        text, outline = _outline_book(
+            [(1, "The Book")] + _titles(8) + [(4, "Publisher Note")])
+        anchors, _ = locate_headings(text, outline)
+        report = select_heading_level(anchors, text)
+        assert report["selected"] == "h2"
+        assert report["levels"]["h2"]["n"] == 8
+
+    def test_bails_when_too_few_headings(self):
+        # home-geography: 46 chapters, a handful of headings in the whole file.
+        text, outline = _outline_book([(1, "A"), (1, "B"), (1, "C")])
+        anchors, _ = locate_headings(text, outline)
+        assert select_heading_level(anchors, text)["selected"] is None
+
+    def test_bails_when_sections_are_title_fragments(self):
+        # Every "section" is a few chars: this level is typesetting, not chapters.
+        text, outline = _outline_book(_titles(8), body="hi")
+        anchors, _ = locate_headings(text, outline)
+        assert select_heading_level(anchors, text)["selected"] is None
+
+    def test_skew_is_reported_not_vetoed(self):
+        # An anthology's stories vary wildly in length; that must not disqualify
+        # the level, only earn an advisory.
+        parts, outline = [], []
+        for i, (level, t) in enumerate(_titles(6)):
+            parts += [t, _STORY * (12 if i == 0 else 1)]
+            outline.append({"level": level, "text": t})
+        text = "\n\n".join(parts)
+        anchors, _ = locate_headings(text, outline)
+        report = select_heading_level(anchors, text)
+        assert report["selected"] == "h2"
+        assert report["levels"]["h2"]["skew"] > 4
+        warns = split_sanity_warnings(
+            split_book_into_chapters(text, pattern_type="headings",
+                                     heading_outline=outline),
+            text, pattern_used="headings", outline_report=report)
+        assert any("median" in w for w in warns)
+
+
+class TestHeadingOutlineSplit:
+    def test_mixed_case_titles_all_become_chapters(self):
+        # allcaps_heading silently merges the Title-Case ones into whatever
+        # precedes them; the outline knows they are headings.
+        headings = [
+            (2, "The Lazy Snail"),
+            (2, "THE ROBINS BUILD A NEST."),
+            (2, "The Cricket School"),
+            (2, "The GRASSHOPPER and the MEASURING WORM RUN a RACE"),
+            (2, "Mr GREEN FROG AND HIS VISITORS"),
+            (2, "The Earthworm Half-Brothers"),
+        ]
+        text, outline = _outline_book(headings)
+        sections = split_book_into_chapters(
+            text, pattern_type="auto", heading_outline=outline)
+        assert [s.chapter_title for s in sections] == [h[1] for h in headings]
+        assert all(s.kind == "chapter" for s in sections)
+
+        regex_sections = split_book_into_chapters(text, pattern_type="allcaps_heading")
+        assert len(regex_sections) < len(sections)
+
+    def test_auto_prefers_the_outline_over_a_regex_pattern(self):
+        text, outline = _outline_book(_titles(6))
+        report: dict = {}
+        split_book_into_chapters(text, pattern_type="auto", heading_outline=outline,
+                                 collect_outline_report=report)
+        assert resolve_pattern_type("auto", text, outline_report=report) == "headings"
+
+    def test_auto_without_an_outline_is_unchanged(self):
+        text = _two_sections("CHAPTER I. A", "CHAPTER II. B")
+        assert resolve_pattern_type("auto", text) == detect_pattern_from_text(text)
+
+    def test_auto_falls_back_when_the_outline_is_unconvincing(self):
+        text = _two_sections("CHAPTER I. A", "CHAPTER II. B")
+        outline = [{"level": 1, "text": "CHAPTER I. A"}]
+        report: dict = {}
+        sections = split_book_into_chapters(
+            text, pattern_type="auto", heading_outline=outline,
+            collect_outline_report=report)
+        assert report["selected"] is None
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2]
+
+    def test_matter_keywords_are_tagged_in_place_not_by_position(self):
+        # A half-title between the dedication and the prologue defeats a
+        # positional front-matter scan: it stops there and the prologue is
+        # swallowed into its body. Tagging by heading keeps both.
+        text, outline = _outline_book(
+            [(2, "Dedication"), (2, "Half Title"), (2, "Prologue")]
+            + _titles(5) + [(2, "Epilogue")])
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline)
+        by_title = {s.chapter_title: s.kind for s in sections}
+        assert by_title["Dedication"] == "front_matter"
+        assert by_title["Prologue"] == "front_matter"
+        assert by_title["Epilogue"] == "back_matter"
+        assert by_title["Half Title"] == "chapter"
+        # Chapter numbering skips the matter sections.
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2, 3, 4, 5, 6]
+
+    def test_user_declared_matter_title_is_tagged_in_place(self):
+        text, outline = _outline_book([(2, "To The Children")] + _titles(6))
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            front_matter_titles=["To the Children"])
+        assert sections[0].kind == "front_matter"
+        assert sections[0].label == "To the Children"
+
+    def test_boilerplate_heading_does_not_swallow_following_matter(self):
+        text, outline = _outline_book([(2, "CONTENTS"), (2, "PREFACE")] + _titles(5))
+        dropped: list = []
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            collect_dropped=dropped)
+        assert [d["label"] for d in dropped] == ["Contents"]
+        assert sections[0].chapter_title == "PREFACE"
+        assert sections[0].kind == "front_matter"
+
+    def test_bare_numeral_heading_merges_into_the_title_that_follows(self):
+        # 'Chapter I.' and 'THE HORSE AND HIS RIDER.' as sibling headings.
+        parts, outline = [], []
+        for i in range(1, 7):
+            parts += [f"Chapter {i}.", f"A TITLE FOR {i}", _STORY]
+            outline += [{"level": 2, "text": f"Chapter {i}."},
+                        {"level": 2, "text": f"A TITLE FOR {i}"}]
+        text = "\n\n".join(parts)
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline)
+        assert len(sections) == 6
+        assert sections[0].chapter_title == "Chapter 1.\nA TITLE FOR 1"
+        assert "lorem ipsum" in sections[0].content
+        assert "A TITLE FOR 1" not in sections[0].content
+
+    def test_short_standalone_sections_are_not_merged(self):
+        # A book of one-page poems: every section is short, but none is a bare
+        # numeral, so nothing may collapse into its neighbour.
+        text, outline = _outline_book(_titles(8, prefix="Poem"),
+                                      body="a short poem. " * 20)
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            heading_level="h2")
+        assert len(sections) == 8
+
+    def test_headings_without_an_outline_raises_a_useful_error(self):
+        text, _ = _outline_book(_titles(6))
+        with pytest.raises(ValueError, match="headings.json"):
+            split_book_into_chapters(text, pattern_type="headings")
+
+    def test_explicit_heading_level_overrides_the_selection(self):
+        # h2 is denser and wins on its own; h3 is what the caller wants. This is
+        # the one-flag fix for an ambiguous book (gaudenzia, stormy-misty).
+        parts, outline = [], []
+        for i in range(1, 9):
+            parts += [f"Scene {i}", _STORY]
+            outline.append({"level": 2, "text": f"Scene {i}"})
+            if i % 2:
+                parts += [f"Chapter {i}", _STORY]
+                outline.append({"level": 3, "text": f"Chapter {i}"})
+        text = "\n\n".join(parts)
+
+        auto = split_book_into_chapters(text, pattern_type="headings",
+                                        heading_outline=outline)
+        assert [s.chapter_title for s in auto] == [f"Scene {i}" for i in range(1, 9)]
+
+        forced = split_book_into_chapters(text, pattern_type="headings",
+                                          heading_outline=outline, heading_level="h3")
+        assert [s.chapter_title for s in forced] == [
+            f"Chapter {i}" for i in (1, 3, 5, 7)]
+
+    def test_deeper_level_wins_a_tie(self):
+        # A book that numbers at h2 and titles at h3 should split on the more
+        # specific level rather than on whichever sorts first.
+        parts, outline = [], []
+        for i in range(1, 7):
+            parts += [f"Volume {i}", f"A Title For {i}", _STORY]
+            outline += [{"level": 2, "text": f"Volume {i}"},
+                        {"level": 3, "text": f"A Title For {i}"}]
+        text = "\n\n".join(parts)
+        anchors, _ = locate_headings(text, outline)
+        assert select_heading_level(anchors, text)["selected"] == "h3"
+
+    def test_unknown_heading_level_reports_what_is_available(self):
+        text, outline = _outline_book(_titles(6))
+        with pytest.raises(ValueError, match="h2"):
+            split_book_into_chapters(text, pattern_type="headings",
+                                     heading_outline=outline, heading_level="h5")
+
+    def test_unlocated_headings_earn_a_warning(self):
+        text, outline = _outline_book(_titles(6))
+        outline.append({"level": 2, "text": "A Heading Nobody Wrote"})
+        report: dict = {}
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            collect_outline_report=report)
+        warns = split_sanity_warnings(sections, text, pattern_used="headings",
+                                      outline_report=report)
+        assert any("not found in source.txt" in w for w in warns)
+
+
+class TestLoadHeadingOutline:
+    def test_absent_sidecar_returns_none(self, tmp_path):
+        assert load_heading_outline(tmp_path) is None
+
+    def test_malformed_sidecar_returns_none(self, tmp_path):
+        (tmp_path / "headings.json").write_text("{not json", encoding="utf-8")
+        assert load_heading_outline(tmp_path) is None
+
+    def test_round_trips_what_ingest_writes(self, tmp_path):
+        (tmp_path / "headings.json").write_text(json.dumps({
+            "version": 1,
+            "headings": [{"level": 2, "text": "A"}, {"level": 3, "text": " B "},
+                         {"level": 2, "text": ""}],
+        }), encoding="utf-8")
+        assert load_heading_outline(tmp_path) == [
+            {"level": 2, "text": "A"}, {"level": 3, "text": "B"}]
+
+
+class TestDroppedSectionsAreReported:
+    """Sections used to vanish between detection and the written files."""
+
+    def test_too_short_section_is_recorded_with_its_size(self):
+        # A title-page fragment: a real heading with almost nothing under it.
+        # It used to be filtered by min_chapter_size and never mentioned again.
+        parts, outline = ["A Half Title", "tiny"], [{"level": 2, "text": "A Half Title"}]
+        for level, t in _titles(6):
+            parts += [t, _STORY]
+            outline.append({"level": level, "text": t})
+        text = "\n\n".join(parts)
+
+        dropped: list = []
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            collect_dropped=dropped)
+        assert len(sections) == 6
+        assert [(d["label"], d["reason"]) for d in dropped] == [
+            ("A Half Title", "too_short")]
+        assert dropped[0]["chars"] == len("tiny")
+
+    def test_section_kept_when_it_clears_min_chapter_size(self):
+        text, outline = _outline_book(_titles(6))
+        dropped: list = []
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline,
+            collect_dropped=dropped)
+        assert len(sections) == 6
+        assert dropped == []
+
+
+class TestCustomRegexCaseSensitivity:
+    _PROSE = "\n\nPoor Mr. Butterfly! He found his wings so wet and crinkled.\n\n"
+
+    def test_ignorecase_is_the_default(self):
+        pat = get_chapter_pattern("custom", r"[A-Z][A-Z ]{4,}")
+        assert pat.search(self._PROSE)
+
+    def test_case_sensitive_stops_matching_prose(self):
+        pat = get_chapter_pattern("custom", r"[A-Z][A-Z ]{4,}", case_sensitive=True)
+        assert not pat.search(self._PROSE)
+        assert pat.search("\n\nTHE ROBINS BUILD A NEST\n\n")

@@ -13,6 +13,7 @@ builder can render them with proper labels.
 
 import json
 import re
+import statistics
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
 
@@ -364,7 +365,12 @@ def int_to_roman(num: int) -> str:
     return result
 
 
-def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str] = None) -> re.Pattern:
+def get_chapter_pattern(
+    pattern_type: str = "roman",
+    custom_regex: Optional[str] = None,
+    *,
+    case_sensitive: bool = False,
+) -> re.Pattern:
     """
     Get compiled regex pattern for chapter detection.
 
@@ -374,6 +380,8 @@ def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str]
     Args:
         pattern_type: Named pattern from split_patterns.json, or "custom"
         custom_regex: Custom regex pattern (required if pattern_type is "custom")
+        case_sensitive: Drop the forced re.IGNORECASE on a "custom" regex.
+            Ignored for named patterns, which carry their own flags.
 
     Returns:
         Compiled regex pattern that matches chapter headers
@@ -384,8 +392,14 @@ def get_chapter_pattern(pattern_type: str = "roman", custom_regex: Optional[str]
     if pattern_type == "custom":
         if not custom_regex:
             raise ValueError("custom_regex is required when pattern_type is 'custom'")
+        # IGNORECASE has always been forced here, and silently changes what a
+        # character class means: under it `[A-Z][A-Z ...]` matches lowercase
+        # too, degrading an all-caps heading matcher into "any run of letters
+        # and spaces" -- i.e. almost every English paragraph. Callers that want
+        # the literal reading pass case_sensitive=True.
+        flags = re.MULTILINE if case_sensitive else re.IGNORECASE | re.MULTILINE
         try:
-            return re.compile(custom_regex, re.IGNORECASE | re.MULTILINE)
+            return re.compile(custom_regex, flags)
         except re.error as e:
             raise ValueError(f"Invalid regex pattern: {e}")
 
@@ -449,12 +463,328 @@ def detect_pattern_from_text(book_text: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Heading-outline splitting
+#
+# The HTML importer already knows where every chapter starts -- it sees the
+# <h1>..<h6> tags -- and writes that outline to headings.json next to
+# source.txt. Anchoring the split on it replaces regex archaeology over
+# flattened prose with the structure the markup declared. When there is no
+# sidecar, or the outline fails the confidence gate below, every caller falls
+# back to the regex patterns unchanged.
+# ---------------------------------------------------------------------------
+
+HEADING_OUTLINE_FILENAME = "headings.json"
+
+# Tuned on the 20-book local corpus. See the module tests for the cases each
+# threshold is holding down.
+_HEADING_MIN_SECTIONS = 5       # fewer than this is a book without an outline
+_HEADING_MIN_MEDIAN = 400       # chars; below this the level is title fragments
+_HEADING_TINY_SPAN = 400        # chars; a section this short is a stub
+_HEADING_MAX_TINY_FRACTION = 0.34
+_HEADING_MERGE_SPAN = 200       # chars of prose under a bare numeral heading
+_HEADING_SKEW_ADVISORY = 4.0    # max/median above this earns a warning, not a veto
+
+# "Chapter I." / "II" / "Part 3:" -- a heading that numbers a chapter without
+# naming it. When one of these has no prose under it, it is a super-title for
+# the heading that follows, not a section of its own.
+_BARE_NUMERAL_HEADING_RE = re.compile(
+    r"^(chapter|book|part|story)?\s*[IVXLCDM\d]+\s*[.:]?\s*$", re.IGNORECASE
+)
+
+
+class _HeadingMatch:
+    """A regex-match lookalike for a located heading.
+
+    ``split_book_into_chapters`` consumes ``re.Match`` objects (``.start()``,
+    ``.end()``, ``.group()``, ``.lastindex``). Wrapping heading anchors in the
+    same shape lets the heading path reuse the entire downstream pipeline --
+    front/back-matter tagging, boilerplate stripping, ``min_chapter_size``,
+    header-image pull-back, the manifest -- instead of forking it.
+    """
+
+    __slots__ = ("_start", "_end", "_text")
+
+    def __init__(self, start: int, end: int, text: str):
+        self._start = start
+        self._end = end
+        self._text = text
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+    def group(self, n: int = 0) -> str:
+        if n in (0, 1):
+            return self._text
+        raise IndexError("no such group")
+
+    @property
+    def lastindex(self) -> int:
+        return 1
+
+
+def load_heading_outline(project_dir) -> Optional[List[dict]]:
+    """
+    Read ``headings.json`` from a project directory.
+
+    Returns the ordered ``[{level, text}, ...]`` list, or ``None`` when the
+    sidecar is absent or unreadable — which is the signal for every caller to
+    use the regex patterns instead. Projects ingested before the sidecar
+    existed take this path and behave exactly as they did before.
+    """
+    path = Path(project_dir) / HEADING_OUTLINE_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    headings = data.get("headings") if isinstance(data, dict) else None
+    if not isinstance(headings, list):
+        return None
+    out = []
+    for h in headings:
+        if not isinstance(h, dict):
+            continue
+        text = (h.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            level = int(h.get("level") or 0)
+        except (TypeError, ValueError):
+            level = 0
+        out.append({"level": level, "text": text})
+    return out or None
+
+
+def locate_headings(
+    book_text: str, outline: List[dict]
+) -> Tuple[List[dict], List[str]]:
+    """
+    Find each outline heading as a standalone line in ``book_text``.
+
+    Returns ``(anchors, unlocated)`` where each anchor is
+    ``{level, text, start, end}`` with ``start`` at the first character of the
+    heading line and ``end`` just past it.
+
+    The scan is sequential — each heading is searched for at or after the
+    previous match — so a title that appears twice (a story that is also an
+    illustration caption, say) anchors on the right occurrence. The importer
+    emits every heading as ``\\n\\n{text}\\n\\n`` and post-processing only
+    collapses runs of blank lines, so the standalone-line invariant holds.
+    A heading that cannot be found (``source.txt`` was hand-edited, most
+    likely) is reported rather than silently shifting every boundary after it.
+    """
+    anchors: List[dict] = []
+    unlocated: List[str] = []
+    cursor = 0
+    for h in outline:
+        text = h["text"]
+        found = _find_standalone_line(book_text, text, cursor)
+        if found is None:
+            unlocated.append(text)
+            continue
+        start, end = found
+        anchors.append({"level": h.get("level", 0), "text": text,
+                        "start": start, "end": end})
+        cursor = end
+    return anchors, unlocated
+
+
+def _find_standalone_line(
+    text: str, target: str, from_pos: int
+) -> Optional[Tuple[int, int]]:
+    """Locate ``target`` as a whole line at or after ``from_pos``."""
+    pos = text.find(target, from_pos)
+    while pos != -1:
+        line_start = text.rfind("\n", 0, pos) + 1
+        line_end = text.find("\n", pos)
+        if line_end == -1:
+            line_end = len(text)
+        if text[line_start:line_end].strip() == target:
+            return (line_start, line_end)
+        pos = text.find(target, pos + 1)
+
+    # Fall back to a whitespace-insensitive line scan: the sidecar collapses
+    # runs of whitespace, and a hand-edited source may not have.
+    needle = re.sub(r"\s+", " ", target).strip()
+    scan = from_pos
+    while scan < len(text):
+        line_end = text.find("\n", scan)
+        if line_end == -1:
+            line_end = len(text)
+        if re.sub(r"\s+", " ", text[scan:line_end]).strip() == needle:
+            return (scan, line_end)
+        scan = line_end + 1
+    return None
+
+
+def _merge_bare_numeral_anchors(
+    anchors: List[dict], total: int
+) -> List[dict]:
+    """
+    Collapse ``Chapter I.`` + ``THE HORSE AND HIS RIDER.`` sibling headings
+    into one section.
+
+    Returns one entry per section: ``{start, end, span, title}`` where ``start``
+    opens the first heading line of the group, ``end`` closes the last, and
+    ``span`` runs to the next section.
+
+    Some books number a chapter in one heading and title it in the next. The
+    merge is deliberately narrow — the leading heading must be a bare numeral
+    *and* have essentially no prose under it — because a span-only rule also
+    eats short standalone pieces (a book of one-page poems collapses from 52
+    correct sections to 37).
+    """
+    bounds = [a["start"] for a in anchors] + [total]
+    out: List[dict] = []
+    i = 0
+    while i < len(anchors):
+        j = i
+        while (
+            j + 1 < len(anchors)
+            and (bounds[j + 1] - bounds[j]) < _HEADING_MERGE_SPAN
+            and _BARE_NUMERAL_HEADING_RE.match(anchors[j]["text"])
+        ):
+            j += 1
+        out.append({
+            "start": anchors[i]["start"],
+            "end": anchors[j]["end"],
+            "span": bounds[j + 1] - anchors[i]["start"],
+            "title": "\n".join(a["text"] for a in anchors[i:j + 1]),
+        })
+        i = j + 1
+    return out
+
+
+def select_heading_level(
+    anchors: List[dict], book_text: str
+) -> dict:
+    """
+    Decide which h-level holds the book's chapters.
+
+    Scores each level by how well its headings partition the text and returns
+    ``{"selected": <level|None>, "reason": str, "levels": {...}}``. ``selected``
+    is ``None`` when no level is convincing — a book with almost no markup
+    structure, or a landing page — and the caller then uses the regex patterns.
+
+    A level qualifies when it has at least ``_HEADING_MIN_SECTIONS`` sections,
+    a median section of at least ``_HEADING_MIN_MEDIAN`` chars, and at most
+    ``_HEADING_MAX_TINY_FRACTION`` of its sections are stubs. Among qualifying
+    levels the densest wins — the deepest level that still describes chapters.
+
+    Section-length *skew* is deliberately not a gate: an anthology's stories
+    legitimately vary 13x, and vetoing on that rejects exactly the books this
+    path helps most. It comes back as an advisory instead.
+    """
+    drop_patterns = _compile_matter_patterns("drop_matter_patterns")
+    total = len(book_text)
+    levels: dict = {}
+
+    for level in sorted({a["level"] for a in anchors}):
+        at_level = [
+            a for a in anchors
+            if a["level"] == level
+            and _matches_builtin_pattern(a["text"], drop_patterns) is None
+        ]
+        if len(at_level) < 2:
+            continue
+        sections = _merge_bare_numeral_anchors(at_level, total)
+        spans = [s["span"] for s in sections]
+        median = statistics.median(spans)
+        tiny = sum(1 for s in spans if s < _HEADING_TINY_SPAN)
+        levels[f"h{level}"] = {
+            "n": len(sections),
+            "median_chars": int(median),
+            "tiny": tiny,
+            "skew": round(max(spans) / median, 1) if median else None,
+        }
+
+    # Densest qualifying level wins. On a tie the deeper level wins, because a
+    # book that numbers chapters at h2 and titles them at h3 should split on the
+    # more specific one.
+    qualifying = [
+        (stats["n"], int(name[1:]), name)
+        for name, stats in levels.items()
+        if stats["n"] >= _HEADING_MIN_SECTIONS
+        and stats["median_chars"] >= _HEADING_MIN_MEDIAN
+        and stats["tiny"] / stats["n"] <= _HEADING_MAX_TINY_FRACTION
+    ]
+    if not qualifying:
+        return {
+            "selected": None,
+            "reason": "no heading level partitions the text convincingly",
+            "levels": levels,
+        }
+
+    *_, selected = max(qualifying)
+    s = levels[selected]
+    return {
+        "selected": selected,
+        "reason": f"n={s['n']} median={s['median_chars']} tiny={s['tiny']}",
+        "levels": levels,
+    }
+
+
+def _normalize_heading_level(level) -> Optional[int]:
+    """Accept ``2``, ``"2"``, or ``"h2"`` as a heading level."""
+    if level is None:
+        return None
+    if isinstance(level, int):
+        return level
+    s = str(level).strip().lower().lstrip("h")
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _heading_matches(
+    book_text: str, anchors: List[dict], level: int
+) -> List[_HeadingMatch]:
+    """Build regex-match lookalikes for one heading level."""
+    at_level = [a for a in anchors if a["level"] == level]
+    if not at_level:
+        return []
+    return [
+        _HeadingMatch(sec["start"], sec["end"], sec["title"])
+        for sec in _merge_bare_numeral_anchors(at_level, len(book_text))
+    ]
+
+
+def resolve_pattern_type(
+    requested: Optional[str],
+    book_text: str,
+    *,
+    outline_report: Optional[dict] = None,
+) -> str:
+    """Resolve an ``auto`` request to the pattern that will actually run.
+
+    Prefers the document's own heading outline when it is convincing, else
+    detects the best-fit regex pattern from the text (the local-source analog
+    of the URL path's ``suggested_pattern``), else falls back to ``roman`` so
+    behavior stays defined. A concrete request passes through untouched.
+
+    Shared by the splitter and by the harness's reporting so ``pattern_used``
+    can never disagree with what the split did.
+    """
+    if requested not in (None, "auto"):
+        return requested
+    if outline_report and outline_report.get("selected"):
+        return "headings"
+    return detect_pattern_from_text(book_text) or "roman"
+
+
 def split_sanity_warnings(
     chapters: List["DetectedChapter"],
     book_text: str,
     *,
     pattern_used: str,
     detected: Optional[str] = None,
+    outline_report: Optional[dict] = None,
 ) -> List[str]:
     """Cheap post-split guardrail: flag results that look mis-split.
 
@@ -466,6 +796,25 @@ def split_sanity_warnings(
     chapter_sections = [c for c in chapters if c.kind == "chapter"]
     n = len(chapter_sections)
     size = len(book_text or "")
+
+    if outline_report:
+        unlocated = outline_report.get("unlocated") or []
+        if unlocated:
+            shown = ", ".join(repr(t) for t in unlocated[:3])
+            more = f" (+{len(unlocated) - 3} more)" if len(unlocated) > 3 else ""
+            warnings.append(
+                f"{len(unlocated)} heading(s) from headings.json were not found "
+                f"in source.txt and were skipped: {shown}{more}. Was source.txt "
+                f"hand-edited after ingest?"
+            )
+        selected = outline_report.get("selected")
+        stats = (outline_report.get("levels") or {}).get(selected or "")
+        if stats and (stats.get("skew") or 0) > _HEADING_SKEW_ADVISORY:
+            warnings.append(
+                f"Largest section is {stats['skew']}x the median — a heading may "
+                f"have been missed, or the book's sections are just uneven. "
+                f"Check the longest section, or try another --heading-level."
+            )
 
     if pattern_used == "roman" and detected is None and size > 20_000:
         # auto found no confident pattern and fell back to 'roman'. This is the
@@ -604,6 +953,10 @@ def split_book_into_chapters(
     auto_detect_back_matter: bool = True,
     auto_strip_boilerplate: bool = True,
     collect_dropped: Optional[List[dict]] = None,
+    heading_outline: Optional[List[dict]] = None,
+    heading_level=None,
+    case_sensitive_custom: bool = False,
+    collect_outline_report: Optional[dict] = None,
 ) -> List[DetectedChapter]:
     """
     Split a full book text into individual chapters and front/back matter.
@@ -636,8 +989,23 @@ def split_book_into_chapters(
             as front matter. Set False to keep a section whose heading happens
             to be one of those words.
         collect_dropped: Optional list the caller supplies to receive a record
-            of each stripped section ({"label": <heading>, "reason":
-            "boilerplate"}) for transparency. Left untouched when None.
+            of each section that was detected but not written ({"label":
+            <heading>, "reason": ...}) for transparency. Reasons are
+            "boilerplate" (navigation stripped by drop_matter_patterns),
+            "too_short" (below min_chapter_size), "empty", and
+            "unparsable_number" (a roman/numeric pattern matched a heading whose
+            numeral won't parse). Left untouched when None.
+        heading_outline: The document's own ``[{level, text}, ...]`` heading
+            outline, as written to headings.json by the HTML importer (see
+            load_heading_outline). Enables pattern_type "headings", and lets
+            "auto" prefer it over the regex patterns when it is convincing.
+        heading_level: Which h-level holds chapters ("h2", 2, ...). Defaults to
+            whatever select_heading_level picks.
+        case_sensitive_custom: Compile a "custom" regex without re.IGNORECASE.
+            Default False preserves the long-standing behavior.
+        collect_outline_report: Optional dict the caller supplies to receive the
+            heading-outline report ({selected, reason, levels, unlocated}) even
+            when the split ends up on the regex path. Left untouched when None.
 
     Returns:
         List of DetectedChapter objects in reading order. position_index is
@@ -653,17 +1021,64 @@ def split_book_into_chapters(
     front_matter_titles = list(front_matter_titles or [])
     back_matter_titles = list(back_matter_titles or [])
 
-    # Resolve "auto" by detecting the best-fit pattern from the text itself
-    # (the local-source analog of the URL path's suggested_pattern). Fall back
-    # to "roman" when nothing matches confidently so behavior stays defined.
+    # Anchor on the document's own heading outline when we have one. This is
+    # ground truth from the markup, so it sidesteps every way flattened prose
+    # can fool a regex: image captions shaped like titles, hand-typeset
+    # multi-line headings, a book that mixes "CHAPTER 1" with "CHAPTER II".
+    anchors: List[dict] = []
+    unlocated: List[str] = []
+    outline_report: Optional[dict] = None
+    if heading_outline:
+        anchors, unlocated = locate_headings(book_text, heading_outline)
+        outline_report = select_heading_level(anchors, book_text)
+        outline_report["unlocated"] = unlocated
+        if collect_outline_report is not None:
+            collect_outline_report.update(outline_report)
+
     if pattern_type in (None, "auto"):
-        pattern_type = detect_pattern_from_text(book_text) or "roman"
+        pattern_type = resolve_pattern_type(
+            pattern_type, book_text, outline_report=outline_report)
 
-    # Get chapter detection pattern
-    pattern = get_chapter_pattern(pattern_type, custom_regex)
+    if pattern_type == "headings":
+        if not anchors:
+            raise ValueError(
+                "Chapter pattern 'headings' needs a heading outline "
+                "(headings.json), but none was found for this project. "
+                "Re-ingest from the source URL, or pick a regex pattern."
+            )
+        level = _normalize_heading_level(heading_level)
+        if level is None:
+            selected = (outline_report or {}).get("selected")
+            level = _normalize_heading_level(selected)
+        elif outline_report is not None:
+            # An explicit level overrides the selector, so the report has to say
+            # so — otherwise the output names one level while the split used
+            # another, and the level table becomes untrustworthy.
+            outline_report["selected"] = f"h{level}"
+            outline_report["reason"] = "explicitly requested via heading_level"
+            if collect_outline_report is not None:
+                collect_outline_report.update(outline_report)
+        if level is None:
+            raise ValueError(
+                "No heading level holds this book's chapters. Pass "
+                "--heading-level explicitly, or pick a regex pattern."
+            )
+        matches = _heading_matches(book_text, anchors, level)
+        if not matches:
+            available = sorted({f"h{a['level']}" for a in anchors})
+            raise ValueError(
+                f"No headings at level h{level}. Available: {', '.join(available)}"
+            )
+        numbering = "sequential"
+    else:
+        # Get chapter detection pattern
+        pattern = get_chapter_pattern(
+            pattern_type, custom_regex, case_sensitive=case_sensitive_custom
+        )
 
-    # Find all chapter headers
-    matches = list(pattern.finditer(book_text))
+        # Find all chapter headers
+        matches = list(pattern.finditer(book_text))
+        numbering = None  # resolved from the pattern definition below
 
     # User-supplied front/back-matter titles take precedence over the chapter
     # regex. Without this, a generic pattern like "allcaps_heading" would
@@ -673,8 +1088,10 @@ def split_book_into_chapters(
     # heading line normalizes to a user-declared front- or back-matter title;
     # _find_matter_sections will then re-tag those lines with the correct
     # kind on its second pass.
+    # The headings path tags matter in place instead (see kind_overrides below),
+    # so it must keep these matches as boundaries rather than dropping them.
     user_matter_titles = [*front_matter_titles, *back_matter_titles]
-    if user_matter_titles and matches:
+    if user_matter_titles and matches and pattern_type != "headings":
         matches = [
             m for m in matches
             if _matches_user_title(m.group(0), user_matter_titles) is None
@@ -685,13 +1102,47 @@ def split_book_into_chapters(
     back_patterns = _compile_matter_patterns("back_matter_patterns") if auto_detect_back_matter else []
     drop_patterns = _compile_matter_patterns("drop_matter_patterns") if auto_strip_boilerplate else []
 
-    # Determine numbering strategy from pattern definition
-    if pattern_type == "custom":
-        numbering = "sequential"
-    else:
-        data = load_split_patterns()
-        defn = data["patterns"].get(pattern_type, {})
-        numbering = defn.get("numbering", "sequential")
+    # On the headings path every heading stays a section boundary and is tagged
+    # in place instead. The regex paths find matter by *position* — everything
+    # before the first chapter is front matter, everything after the last is
+    # back matter — which cannot express matter interleaved with chapters. The
+    # outline routinely is: a half-title sits between a book's dedication and
+    # its prologue, so a positional scan stops at the half-title and the
+    # prologue silently becomes part of its body.
+    #
+    # Tagging by heading also means "Foreword" no longer has to be declared by
+    # hand just because the markup put it at the chapter level (which is what
+    # fused Bambi's foreword into Chapter I). Regex patterns keep their existing
+    # behavior; only this path is affected.
+    kind_overrides: dict[int, Tuple[SectionKind, str]] = {}
+    if pattern_type == "headings":
+        for m in matches:
+            heading = m.group(0)
+            user_label = _matches_user_title(heading, front_matter_titles)
+            if user_label is not None:
+                kind_overrides[m.start()] = ("front_matter", user_label)
+                continue
+            user_label = _matches_user_title(heading, back_matter_titles)
+            if user_label is not None:
+                kind_overrides[m.start()] = ("back_matter", user_label)
+                continue
+            label = _matches_builtin_pattern(heading, front_patterns)
+            if label is not None:
+                kind_overrides[m.start()] = ("front_matter", label)
+                continue
+            label = _matches_builtin_pattern(heading, back_patterns)
+            if label is not None:
+                kind_overrides[m.start()] = ("back_matter", label)
+
+    # Determine numbering strategy from pattern definition ("headings" already
+    # set its own above).
+    if numbering is None:
+        if pattern_type == "custom":
+            numbering = "sequential"
+        else:
+            data = load_split_patterns()
+            defn = data["patterns"].get(pattern_type, {})
+            numbering = defn.get("numbering", "sequential")
 
     # ------------------------------------------------------------------
     # Build the list of sections (front matter + chapters + back matter)
@@ -754,6 +1205,7 @@ def split_book_into_chapters(
             "subtitle": chapter_subtitle,
             "raw_heading": m.group(0).strip(),
             "header_image": header_image[1] if header_image else None,
+            "kind_override": kind_overrides.get(m.start()),
         })
 
     # Sections may now overlap with their predecessor (we pulled match_start
@@ -835,9 +1287,22 @@ def split_book_into_chapters(
         # knows how to handle [IMAGE:...] placeholders.
         if header_image:
             content = f"{header_image}\n\n{content}" if content else header_image
+        # Sections filtered from here on used to vanish with no trace: not
+        # written, not reported, invisible to anyone reading the split output.
+        # That is how a book's dedication disappeared between the chapter count
+        # and the `dropped` list. Record them instead.
+        first_line = ((raw_heading or label or "").splitlines() or [""])[0]
         if len(content) < min_chapter_size and kind == "chapter":
+            if collect_dropped is not None:
+                collect_dropped.append({
+                    "label": first_line,
+                    "reason": "too_short",
+                    "chars": len(content),
+                })
             return  # filter false-positive chapters by size
         if not content:
+            if collect_dropped is not None:
+                collect_dropped.append({"label": first_line, "reason": "empty"})
             return
         start_line = book_text[:section_start].count("\n")
         end_line = book_text[:content_end].count("\n")
@@ -878,6 +1343,13 @@ def split_book_into_chapters(
         if numbering == "roman":
             num = roman_to_int(ident)
             if num is None:
+                # Defensive: unreachable through the shipped patterns, whose
+                # capture groups are [IVXLCDM]+ / \d+ and so always parse. Kept
+                # so a future pattern can't reintroduce a silent `continue`.
+                if collect_dropped is not None:
+                    collect_dropped.append({
+                        "label": cs["raw_heading"], "reason": "unparsable_number",
+                    })
                 continue
             heading = f"Chapter {ident.upper()}"
             if subtitle:
@@ -886,6 +1358,10 @@ def split_book_into_chapters(
             try:
                 num = int(ident)
             except (TypeError, ValueError):
+                if collect_dropped is not None:
+                    collect_dropped.append({
+                        "label": cs["raw_heading"], "reason": "unparsable_number",
+                    })
                 continue
             heading = f"Chapter {num}"
         else:  # sequential
@@ -901,6 +1377,24 @@ def split_book_into_chapters(
             if extracted:
                 subtitle, body_override = extracted
                 heading = f"{heading}\n{subtitle}"
+
+        # A heading tagged as front/back matter keeps its position in reading
+        # order but is emitted with that kind and left unnumbered, so the
+        # chapter sequence skips it (headings path only; see kind_overrides).
+        override = cs.get("kind_override")
+        if override is not None:
+            override_kind, override_label = override
+            _add_section(
+                section_start=cs["match_start"],
+                content_start=cs["start_pos"],
+                content_end=cs["end_pos"],
+                kind=override_kind,
+                raw_heading=cs["raw_heading"],
+                label=override_label,
+                number=None,
+                header_image=cs.get("header_image"),
+            )
+            continue
 
         # Try to add; only bump display sequence if the section was actually added
         before = len(detected)
