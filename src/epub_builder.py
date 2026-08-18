@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from ebooklib import epub
 
+from src.utils.text_utils import is_caption_block, strip_caption_marker
 from src.utils.verse import is_verse_block
 
 logger = logging.getLogger(__name__)
@@ -157,11 +158,12 @@ def _first_nonempty_line(text: str) -> str:
     For front/back matter the splitter prepends the section heading to the body,
     so after translation this line *is* the translated heading (e.g. 'Prólogo').
     Skip ``[IMAGE:...]`` placeholder lines, which the splitter may prepend ahead
-    of the heading: an image token is never a valid section label.
+    of the heading, and ``[CAPTION]`` lines belonging to such an image: neither
+    is ever a valid section label.
     """
     for line in (text or '').split('\n'):
         stripped = line.strip()
-        if stripped and not _IMAGE_RE.match(stripped):
+        if stripped and not _IMAGE_RE.match(stripped) and not is_caption_block(stripped):
             return stripped
     return ''
 
@@ -244,6 +246,20 @@ img { max-width: 100%; height: auto; }
 div.image { text-align: center; margin: 1em 0; }
 h1, h2 { text-align: center; }
 p { text-indent: 1.5em; margin-top: 0.25em; margin-bottom: 0.25em; }
+figure {
+    margin: 1em 0;
+    padding: 0;
+    text-align: center;
+    page-break-inside: avoid;
+    break-inside: avoid;
+}
+figcaption, p.caption {
+    text-align: center;
+    text-indent: 0;
+    font-size: 0.85em;
+    line-height: 1.3;
+    margin: 0.3em 0 0;
+}
 hr { margin: 1.5em auto; width: 40%; }
 div.verse { margin: 1em 1.5em; }
 div.verse p.verse-line {
@@ -342,12 +358,25 @@ def detect_chapter_heading(
         idx += 1
         while idx < len(lines) and not lines[idx].strip():
             idx += 1
+        # A caption belonging to this ornament travels with it. Without this it
+        # would sit between the ornament and the real title, and be promoted to
+        # <h2> as the subtitle.
+        if idx < len(lines) and is_caption_block(lines[idx].strip()):
+            leading_images.append(lines[idx].strip())
+            idx += 1
+            while idx < len(lines) and not lines[idx].strip():
+                idx += 1
 
     subtitle = ''
     if promote_subtitles and idx < len(lines):
         candidate = lines[idx].strip()
-        # Subtitle should be a short text line, not a paragraph or image
-        if candidate and not _IMAGE_RE.match(candidate) and len(candidate) < 200:
+        # Subtitle should be a short text line, not a paragraph, image or caption
+        if (
+            candidate
+            and not _IMAGE_RE.match(candidate)
+            and not is_caption_block(candidate)
+            and len(candidate) < 200
+        ):
             subtitle = candidate
             idx += 1
 
@@ -364,6 +393,16 @@ def detect_chapter_heading(
     return (heading, subtitle, body)
 
 
+def _render_inline(text: str) -> str:
+    """Escape a text run, then promote the pipeline's inline markers.
+
+    Promotes underscore-wrapped runs (the italic marker emitted by the ingest
+    pipeline) to <em>, and {{ENDNOTE:N}} tokens to linked superscripts. Order
+    matters: escape() leaves both untouched, so substituting after it is safe.
+    """
+    return _ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(_EM_REPL, escape(text)))
+
+
 def _render_body_blocks(body: str) -> List[str]:
     """
     Render a plain-text body into a list of XHTML block strings.
@@ -371,15 +410,19 @@ def _render_body_blocks(body: str) -> List[str]:
     Handles:
         - Paragraphs (blank-line separated) -> <p>
         - [IMAGE:...] placeholders (sole-block) -> <img> inside <div class="image">
+        - An [IMAGE:...] block followed by a [CAPTION] block -> paired <figure>
+        - A [CAPTION] block with no image above it -> <p class="caption">
         - --- lines -> <hr />
     """
     out: List[str] = []
-    blocks = re.split(r'\n\s*\n', body)
+    # Drop empties up front so the image branch's one-block lookahead lands on
+    # real content rather than a blank.
+    blocks = [b.strip() for b in re.split(r'\n\s*\n', body)]
+    blocks = [b for b in blocks if b]
 
-    for block in blocks:
-        block = block.strip()
-        if not block:
-            continue
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
 
         # Check if entire block is an image placeholder
         img_match = _IMAGE_RE.fullmatch(block)
@@ -388,16 +431,37 @@ def _render_body_blocks(body: str) -> List[str]:
             alt_text = img_match.group(2) or ''
             # Use just the filename for the src (images are stored flat in EPUB)
             filename = Path(rel_path).name
-            out.append(
-                f'<div class="image">'
-                f'<img src="images/{escape(filename)}" alt="{escape(alt_text)}"/>'
-                f'</div>'
-            )
+            img_tag = f'<img src="images/{escape(filename)}" alt="{escape(alt_text)}"/>'
+
+            # A caption directly below the image is emitted as one <figure> so
+            # the reader keeps the pair together across a page break
+            # (page-break-inside: avoid); margin tuning alone cannot do that.
+            if i + 1 < len(blocks) and is_caption_block(blocks[i + 1]):
+                caption = _render_inline(strip_caption_marker(blocks[i + 1]))
+                out.append(
+                    f'<figure>{img_tag}<figcaption>{caption}</figcaption></figure>'
+                )
+                i += 2
+                continue
+
+            out.append(f'<div class="image">{img_tag}</div>')
+            i += 1
+            continue
+
+        # Caption with no image directly above it (the image was dropped, or the
+        # marker was applied to a standalone line). Dispatched ahead of the verse
+        # branch: is_verse_block fires on two short lines, which would otherwise
+        # render a two-line caption as a stanza.
+        if is_caption_block(block):
+            caption = _render_inline(strip_caption_marker(block))
+            out.append(f'<p class="caption">{caption}</p>')
+            i += 1
             continue
 
         # Check for horizontal rule
         if _HR_RE.match(block):
             out.append('<hr/>')
+            i += 1
             continue
 
         # Verse / stanza block -- preserve every line break as a <p class="verse-line">
@@ -407,23 +471,17 @@ def _render_body_blocks(body: str) -> List[str]:
             _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
         ):
             verse_lines = [
-                f'  <p class="verse-line">'
-                f'{_ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(_EM_REPL, escape(line.strip())))}'
-                f'</p>'
+                f'  <p class="verse-line">{_render_inline(line.strip())}</p>'
                 for line in block.split('\n')
                 if line.strip()
             ]
             out.append('<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>')
+            i += 1
             continue
 
-        # Regular paragraph -- escape HTML entities, then promote
-        # underscore-wrapped runs (the italic marker emitted by the ingest
-        # pipeline) to <em>. Order matters: escape() leaves underscores
-        # untouched, so substituting after it is safe.
-        escaped = escape(block)
-        with_em = _EM_RE.sub(_EM_REPL, escaped)
-        with_notes = _ENDNOTE_RE.sub(_ENDNOTE_SUP, with_em)
-        out.append(f'<p>{with_notes}</p>')
+        # Regular paragraph
+        out.append(f'<p>{_render_inline(block)}</p>')
+        i += 1
 
     return out
 
@@ -556,6 +614,12 @@ def _matter_subtitle_from_text(
         body_start += 1
         while body_start < len(lines) and not lines[body_start].strip():
             body_start += 1
+        # Keep an ornament's caption with it (see detect_chapter_heading).
+        if body_start < len(lines) and is_caption_block(lines[body_start].strip()):
+            leading_images.append(lines[body_start].strip())
+            body_start += 1
+            while body_start < len(lines) and not lines[body_start].strip():
+                body_start += 1
 
     subtitle = ''
     if body_start < len(lines):
@@ -568,6 +632,7 @@ def _matter_subtitle_from_text(
             candidate
             and next_blank
             and not _IMAGE_RE.match(candidate)
+            and not is_caption_block(candidate)
             and len(candidate) <= 100
             and len(candidate.split()) <= 12
             and re.search(r'[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]', candidate)

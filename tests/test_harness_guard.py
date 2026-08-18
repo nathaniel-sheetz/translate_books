@@ -551,3 +551,47 @@ class TestAddressMapNameWarnings:
         assert len(w) == 2
         assert "address-map rename` to apply" in w[0] and "Aunt Polly" in w[0]
         assert "will not clear these" in w[1] and "boys" in w[1]
+
+
+class TestCaptionMarkerParity:
+    """A worker must neither drop nor invent a [CAPTION] block."""
+
+    _SRC_CAP = (
+        "[IMAGE:images/a.jpg]\n\n"
+        "[CAPTION] The lamb with the longest tail.\n\n"
+        "The sun rose over the quiet village and the children ran out to play."
+    )
+
+    def test_preserved_marker_passes(self):
+        translated = (
+            "[IMAGE:images/a.jpg]\n\n"
+            "[CAPTION] El cordero de la cola mas larga.\n\n"
+            "El sol salio sobre el tranquilo pueblo y los ninos corrieron a jugar."
+        )
+        assert guard_translation_draft(_chunk(self._SRC_CAP), translated) == []
+
+    def test_dropped_marker_is_flagged(self):
+        translated = (
+            "[IMAGE:images/a.jpg]\n\n"
+            "El cordero de la cola mas larga.\n\n"
+            "El sol salio sobre el tranquilo pueblo y los ninos corrieron a jugar."
+        )
+        problems = guard_translation_draft(_chunk(self._SRC_CAP), translated)
+        assert any("caption-marker-parity" in p for p in problems)
+        assert any("source has 1" in p and "translation has 0" in p for p in problems)
+
+    def test_hallucinated_marker_is_flagged(self):
+        src = "The sun rose over the quiet village and the children ran out to play."
+        translated = (
+            "[CAPTION] El sol salio sobre el tranquilo pueblo y los ninos "
+            "corrieron a jugar en el aire fresco."
+        )
+        problems = guard_translation_draft(_chunk(src), translated)
+        assert any("caption-marker-parity" in p for p in problems)
+
+    def test_marker_inside_prose_is_not_counted(self):
+        # Only a block-leading marker is structural.
+        src = "He wrote [CAPTION] on the board and the children all laughed loudly."
+        translated = "Escribio [CAPTION] en el pizarron y los ninos se rieron mucho."
+        problems = guard_translation_draft(_chunk(src), translated)
+        assert not any("caption-marker-parity" in p for p in problems)

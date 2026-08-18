@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.47.0.0] - 2026-08-17
+
+### Added
+- **Image captions are a first-class block, not body prose.** A paragraph beginning with the `[CAPTION]` marker renders as a real caption: paired with the image directly above it into a single `<figure>`/`<figcaption>`, centered, smaller, tight to the image, and `page-break-inside: avoid` so the pair never splits across an EPUB page. A caption with no image above it renders as `<p class="caption">`. Previously such a paragraph was indistinguishable from narration — indented body text, often repeating a line from elsewhere in the chapter, which is what made illustrated books look wrong.
+- **Ingest reads captions out of the source HTML.** `<figcaption>` and block elements carrying a caption class emit the marker directly, so new books need no backfill. Container elements that wrap both the image and its text (`<div class="illustration">`, and any container that happens to carry a caption class) are guarded by a `find("img")` check so they cannot swallow their own image.
+- **`harness.py captions`** backfills books ingested before this existed. It sorts every paragraph sitting under an image into confidence tiers — A: repeats the image's alt text, B: fully italicized, C: ALL-CAPS short line, D: short phrase with no terminal punctuation, E: everything else — and writes markers only for what you accept (`--accept-tiers`, `--accept`, `--reject`). Dry-run by default; `--apply` is idempotent, so an interrupted run is simply re-run. Across the 14 illustrated local projects: 46 candidates need no human check, 120 want a glance, 82 default to no.
+- **`[CAPTION]` parity is enforced at commit time.** `guard_translation_draft` counts caption blocks in source and translation and rejects a mismatch, the same way it already does for `[IMAGE:...]` filenames and `[FOOTNOTE:N]` numbers. The marker is a leading atom rather than a wrapping delimiter precisely so this is possible: the one wrapping marker in the pipeline, `_italics_`, is measurably lossy through an LLM round trip (one local chapter goes 17 source pairs to 11; another book hallucinates 2 where the source had 0) and nothing catches it. A wrapper that loses its closing half degrades silently back to a body paragraph — the exact bug captions exist to fix.
+- The reader styles caption paragraphs and hides the marker. `es` is left byte-identical on the wire, because `chunk_offset_start/end` are computed against the real chunk text and corrections slice on them; stripping server-side would shift every offset in the paragraph and corrupt edits.
+
+### Changed
+- The caption instruction rides the existing `{{image_placeholder_instructions}}` prompt slot, which already carries the image and footnote bullets, so no prompt template changed. It is gated on the same `always_include_image_instructions` flag, keeping the cacheable prompt prefix byte-identical across a book.
+- Backfill writes `source.txt` and `chunks/*.json`, never `chapters/*.txt` — chapter files are regenerated from the chunks, so a marker written there is erased by the next combine. Inside a chunk it marks both sides: `translated_text`, which the reader and the EPUB render, and `source_text`, which is what a re-translation of that chunk prompts from — so a later re-translation carries the caption through instead of dropping it. Chapters not yet translated are marked in `source.txt` alone.
+- Grammar and dictionary evaluators blank the marker (offset-preserving) before checking, so `CAPTION` is not reported as a misspelling in every captioned paragraph. The caption's own prose is still checked.
+
+### Fixed
+- **An image placeholder is now emitted as its own blank-line-separated block.** Ingest used single newlines, so anything adjacent — a `<figcaption>`, or text around an inline `<img>` — glued onto the same block, the EPUB builder's `fullmatch` failed, and the raw `[IMAGE:...]` token rendered as escaped body text. Existing `source.txt` files are untouched; this only affects new ingests.
+- A caption is no longer mistaken for a chapter subtitle. `detect_chapter_heading`, the front/back-matter subtitle scan, `_first_nonempty_line`, and the splitter's own subtitle scan all skip caption blocks the way they already skip image ornaments, and a caption belonging to a header ornament travels with it into the body.
+- **A header ornament's caption is no longer deleted by the splitter.** The lookback that pulls an ornament out of the previous chapter moves the section boundary back past the image *and* its caption, but returned only the image as the payload to re-attach — so on the roman/numeric path the caption line ended up in neither chapter. It is now carried with the ornament. Caption detection also keys on the leading `[CAPTION]` marker instead of the block's last character, so a caption ending in a bracket (`[Fig. 1]`) no longer defeats the lookback and strands the pair at the end of the previous chapter.
+- The caption branch is dispatched ahead of the verse check: `is_verse_block` fires on two short lines, so a two-line caption used to render as a stanza.
+
 ## [0.46.0.0] - 2026-08-17
 
 ### Added

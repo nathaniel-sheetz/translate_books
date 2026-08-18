@@ -414,6 +414,30 @@ def test_image_placeholder_with_description_not_flagged(evaluator, base_chunk):
         )
 
 
+def test_caption_marker_not_flagged(evaluator, base_chunk):
+    """[CAPTION] is a structural marker; CAPTION must not be tokenized as unknown."""
+    base_chunk.translated_text = "[CAPTION] El cordero de la cola larga."
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    flagged_words = {issue.message for issue in result.issues}
+    assert not any("caption" in msg.lower() for msg in flagged_words), (
+        f"Caption marker was flagged: {flagged_words}"
+    )
+
+
+def test_caption_prose_is_still_checked(evaluator, base_chunk):
+    """Blanking the marker must not hide real errors in the caption text."""
+    base_chunk.translated_text = "[CAPTION] El xyzzyword no es una palabra."
+
+    result = evaluator.evaluate(base_chunk, {})
+
+    assert result.metadata["unknown_words"] >= 1
+    flagged = " ".join(issue.message for issue in result.issues).lower()
+    assert "xyzzyword" in flagged
+    assert "caption" not in flagged
+
+
 def test_glossary_plural_inflection(evaluator, base_chunk):
     """Plural forms should match singular glossary entries."""
     glossary = Glossary(

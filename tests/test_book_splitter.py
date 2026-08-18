@@ -156,6 +156,75 @@ class TestFrontBackMatterDetection:
         assert ch1.content.count("[IMAGE:images/illus7.jpg]") == 1
         assert "The First Signpost" not in ch1.content
 
+    def test_header_ornament_caption_travels_into_its_chapter(self):
+        """The ornament's caption belongs to the chapter it decorates.
+
+        The boundary moves back past both image and caption, so a caption left
+        out of the payload would be deleted from the book entirely.
+        """
+        text = (
+            "CHAPTER I\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "[IMAGE:images/illus7.jpg]\n\n"
+            "[CAPTION] The mare at the gate.\n\n"
+            "CHAPTER II\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        assert len(sections) == 2
+        ch1, ch2 = sections
+        assert "[CAPTION] The mare at the gate." not in ch1.content
+        assert "[IMAGE:images/illus7.jpg]" not in ch1.content
+        assert "[IMAGE:images/illus7.jpg]" in ch2.content
+        assert "[CAPTION] The mare at the gate." in ch2.content
+        # And the caption did not become the chapter's title.
+        assert ch2.chapter_title == "Chapter II"
+
+    def test_header_ornament_caption_ending_in_bracket_is_still_a_caption(self):
+        """Caption detection is on the leading marker, not the last character."""
+        text = (
+            "CHAPTER I\n\n"
+            + CHAPTER_BODY + "\n\n"
+            "[IMAGE:images/illus7.jpg]\n\n"
+            "[CAPTION] The mare at the gate [Fig. 1]\n\n"
+            "CHAPTER II\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        ch1, ch2 = sections
+        assert "[IMAGE:images/illus7.jpg]" not in ch1.content
+        assert "[CAPTION] The mare at the gate [Fig. 1]" not in ch1.content
+        assert "[IMAGE:images/illus7.jpg]" in ch2.content
+        assert "[CAPTION] The mare at the gate [Fig. 1]" in ch2.content
+
+    def test_caption_before_heading_does_not_become_the_title(self):
+        """[IMAGE]/[CAPTION]/CHAPTER I/title: the real title still wins."""
+        text = (
+            "[IMAGE:images/illus7.jpg]\n\n"
+            "[CAPTION] The mare at the gate.\n\n"
+            "CHAPTER I\n\n"
+            "The First Signpost\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        ch1 = sections[0]
+        assert ch1.chapter_title == "Chapter I\nThe First Signpost"
+        assert "[CAPTION] The mare at the gate." in ch1.content
+        assert "The First Signpost" not in ch1.content
+
+    def test_caption_after_heading_image_does_not_become_the_title(self):
+        """CHAPTER I/[IMAGE]/[CAPTION]: the caption stays in the body."""
+        text = (
+            "CHAPTER I\n\n"
+            "[IMAGE:images/illus01.jpg]\n\n"
+            "[CAPTION] The mare at the gate.\n\n"
+            + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        ch1 = sections[0]
+        assert ch1.chapter_title == "Chapter I"
+        assert "[CAPTION] The mare at the gate." in ch1.content
+
     def test_does_not_promote_paragraph_after_header_image(self):
         """A long prose line after the image must not become a subtitle."""
         long_para = (

@@ -1307,6 +1307,24 @@ body {
     border-radius: 4px;
 }
 
+/* Image captions. Sentences normally flow inline into .reader-content; a
+   caption paragraph gets its own block wrapper so it can be centered as a
+   unit. The negative top margin pulls it up against its image, whose
+   margin-bottom is 1.5em. */
+
+.reader-caption {
+    display: block;
+    text-align: center;
+    font-size: 0.88em;
+    line-height: 1.4;
+    color: var(--text-muted5);
+    margin: 0 0 1.5em;
+}
+
+.reader-image + .reader-caption {
+    margin-top: -1.1em;
+}
+
 /* Paragraph breaks between sentence groups */
 
 .para-break {

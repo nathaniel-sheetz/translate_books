@@ -1509,3 +1509,87 @@ def test_build_epub_cli_prints_scrapeable_error(tmp_path, monkeypatch, capsys):
     assert match is not None
     assert "Project directory not found" in match.group("msg")
 
+
+
+class TestCaptionRendering:
+    """[CAPTION] blocks -> <figure>/<figcaption> (paired) or <p class="caption">."""
+
+    def test_caption_after_image_becomes_a_figure(self):
+        text = (
+            "CHAPTER I\n\nTitle\n\n"
+            "[IMAGE:images/a.jpg:A lamb]\n\n"
+            "[CAPTION] El cordero de la cola mas larga.\n\n"
+            "Cuerpo normal."
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert (
+            '<figure><img src="images/a.jpg" alt="A lamb"/>'
+            '<figcaption>El cordero de la cola mas larga.</figcaption></figure>'
+        ) in xhtml
+        # The image must not also be emitted standalone.
+        assert '<div class="image">' not in xhtml
+        assert "[CAPTION]" not in xhtml
+
+    def test_uncaptioned_image_still_renders_as_div(self):
+        text = "CHAPTER I\n\nTitle\n\n[IMAGE:images/a.jpg]\n\nCuerpo."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<div class="image"><img src="images/a.jpg" alt=""/></div>' in xhtml
+        assert "<figure>" not in xhtml
+
+    def test_caption_without_an_image_above_it(self):
+        text = "CHAPTER I\n\nTitle\n\nCuerpo.\n\n[CAPTION] Sin imagen arriba."
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert '<p class="caption">Sin imagen arriba.</p>' in xhtml
+        assert "[CAPTION]" not in xhtml
+
+    def test_two_line_caption_is_not_rendered_as_verse(self):
+        # is_verse_block fires on two short lines; the caption branch must be
+        # dispatched ahead of it.
+        text = (
+            "CHAPTER I\n\nTitle\n\n"
+            "[IMAGE:images/a.jpg]\n\n"
+            "[CAPTION] Una linea corta\ny otra linea corta"
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<figcaption>" in xhtml
+        assert 'class="verse"' not in xhtml
+        assert 'class="verse-line"' not in xhtml
+
+    def test_italics_inside_a_caption(self):
+        text = (
+            "CHAPTER I\n\nTitle\n\n[IMAGE:images/a.jpg]\n\n"
+            "[CAPTION] _La gente gatuna comia muy bien_"
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "<figcaption><em>La gente gatuna comia muy bien</em></figcaption>" in xhtml
+
+    def test_caption_text_is_html_escaped(self):
+        text = (
+            "CHAPTER I\n\nTitle\n\n[IMAGE:images/a.jpg]\n\n"
+            '[CAPTION] Manana <b>&</b> "tarde"'
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert "&lt;b&gt;&amp;&lt;/b&gt;" in xhtml
+        assert "<b>" not in xhtml
+
+    def test_caption_under_header_ornament_is_not_promoted_to_subtitle(self):
+        heading, subtitle, body = detect_chapter_heading(
+            "[IMAGE:images/orn.jpg]\n\n[CAPTION] Un adorno\n\n"
+            "El primer indicio\n\nCuerpo del capitulo.",
+            chapter_number=3,
+            heading_config={"label": "Capitulo", "numeral_style": "arabic"},
+        )
+        assert subtitle == "El primer indicio"
+        assert "[CAPTION] Un adorno" in body
+        assert "[IMAGE:images/orn.jpg]" in body
+
+    def test_first_nonempty_line_skips_captions(self):
+        assert _first_nonempty_line(
+            "[IMAGE:images/a.jpg]\n[CAPTION] Un adorno\nPrologo\n\nCuerpo."
+        ) == "Prologo"
+
+    def test_default_css_overrides_paragraph_indent_for_captions(self):
+        from src.epub_builder import _DEFAULT_CSS
+        assert "figcaption" in _DEFAULT_CSS
+        assert "text-indent: 0" in _DEFAULT_CSS
+        assert "page-break-inside: avoid" in _DEFAULT_CSS

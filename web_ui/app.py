@@ -52,6 +52,7 @@ from src.utils.text_utils import (
     fold,
     fold_with_map,
     image_placeholder_instruction,
+    is_caption_block,
     kwic_window,
 )
 from src.utils.verse import is_verse_block
@@ -1601,6 +1602,23 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
             if matched:
                 a["verse_line_break"] = True
                 key_idx += 1
+
+    # Tag caption paragraphs. The [CAPTION] marker sits at the start of the
+    # paragraph's first sentence; the flag is propagated across the rest of the
+    # paragraph so the reader styles every sentence of it, not just the first.
+    #
+    # `es` is deliberately left byte-identical. chunk_offset_start/end are
+    # computed against the real chunk text and corrections_apply slices on them,
+    # so stripping the marker here would shift every offset in the paragraph and
+    # silently corrupt edits. reader.js strips it for display only.
+    in_caption = False
+    for a in alignments:
+        if is_caption_block(a.get("es", "")):
+            in_caption = True
+        elif a.get("para_start"):
+            in_caption = False
+        if in_caption:
+            a["caption"] = True
 
     # Insert image records (reverse order to preserve indices)
     for insert_idx, img_record in reversed(insert_queue):

@@ -19,6 +19,8 @@ from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.utils.text_utils import is_caption_block
+
 
 SectionKind = Literal["front_matter", "chapter", "back_matter"]
 
@@ -102,13 +104,19 @@ _HEADER_IMAGE_LINE_RE = re.compile(r'\[IMAGE:images/[^\]]+\]')
 def _find_preceding_header_image(text: str, pos: int) -> Optional[tuple[int, str]]:
     """
     If a single ``[IMAGE:images/...]`` line lies immediately before ``pos``
-    (separated from it only by blank lines), return ``(line_start, image_text)``.
+    (separated from it only by blank lines), return ``(line_start, payload)``.
 
     ``line_start`` is the offset of the first character of the image line —
     suitable for use as the new section boundary so the previous section's
     ``end_pos`` can be shrunk to it. The image is *not* required to be
     preceded by anything in particular (start-of-file is fine), but the
     image line must be the only content on its line.
+
+    ``payload`` is the text the caller re-attaches to the chapter body. When a
+    ``[CAPTION]`` line sits between the ornament and the heading it is part of
+    that payload (``image\\n\\ncaption``): the boundary moves back past both, so
+    a payload of the image alone would delete the caption from the book — it
+    would belong to neither the previous section nor this one.
 
     Returns ``None`` if no such image exists, so callers can use the
     plain heading position unchanged.
@@ -117,12 +125,30 @@ def _find_preceding_header_image(text: str, pos: int) -> Optional[tuple[int, str
     i = pos
     while i > 0 and text[i - 1] in ' \t\r\n':
         i -= 1
-    if i == pos or i == 0 or text[i - 1] != ']':
+    if i == pos or i == 0:
         return None
+
+    # A [CAPTION] line belonging to the ornament may sit between the image and
+    # the heading. Step back over it so the ornament is still found; otherwise
+    # the image and its caption stay glued to the end of the previous section.
+    # Detection is on the block's leading marker, never on its last character:
+    # a caption ending in a bracket ("[Fig. 1]") is still a caption.
+    caption: Optional[str] = None
+    cap_start = text.rfind('\n', 0, i) + 1
+    if is_caption_block(text[cap_start:i]):
+        caption = text[cap_start:i]
+        i = cap_start
+        while i > 0 and text[i - 1] in ' \t\r\n':
+            i -= 1
+        if i == 0:
+            return None
+
     line_start = text.rfind('\n', 0, i) + 1  # 0 if no preceding newline
     candidate = text[line_start:i]
     if not _HEADER_IMAGE_LINE_RE.fullmatch(candidate):
         return None
+    if caption:
+        return (line_start, f"{candidate}\n\n{caption}")
     return (line_start, candidate)
 
 
@@ -131,12 +157,19 @@ def _looks_like_subtitle(candidate: str) -> bool:
     True if a stripped line reads like a short, standalone chapter subtitle
     rather than prose or an image placeholder.
 
-    A subtitle is non-empty, not itself an ``[IMAGE:...]`` line, short in both
-    characters (<=100) and words (<=12), and contains at least one letter.
+    A subtitle is non-empty, not itself an ``[IMAGE:...]`` line or a
+    ``[CAPTION]`` block, short in both characters (<=100) and words (<=12), and
+    contains at least one letter.
+
+    Captions are excluded because an ornament's caption sits exactly where a
+    chapter subtitle does. Promoting one would both invent a chapter title and
+    delete the caption from the body (the title line is removed from it). This
+    mirrors the same guard in the EPUB builder's heading detection.
     """
     return bool(
         candidate
         and not _HEADER_IMAGE_LINE_RE.fullmatch(candidate)
+        and not is_caption_block(candidate)
         and len(candidate) <= 100
         and len(candidate.split()) <= 12
         and re.search(r'[A-Za-z]', candidate)

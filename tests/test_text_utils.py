@@ -678,3 +678,105 @@ class TestImageFilenameCounts:
         from collections import Counter
         text = "[IMAGE:a.jpg] [IMAGE:b.jpg] [IMAGE:a.jpg]"
         assert image_filename_counts(text) == Counter({"a.jpg": 2, "b.jpg": 1})
+
+
+class TestCaptionMarker:
+    def test_block_leading_marker_is_detected(self):
+        from src.utils.text_utils import is_caption_block
+        assert is_caption_block("[CAPTION] A lamb.")
+        assert is_caption_block("  [CAPTION] leading whitespace tolerated")
+        assert is_caption_block("[CAPTION]no space still counts")
+
+    def test_marker_elsewhere_in_prose_is_not_a_caption(self):
+        from src.utils.text_utils import is_caption_block
+        assert not is_caption_block("He wrote [CAPTION] on the board.")
+        assert not is_caption_block("[CAPTIONS] plural is a different token")
+        assert not is_caption_block("")
+
+    def test_strip_removes_marker_and_its_trailing_space(self):
+        from src.utils.text_utils import strip_caption_marker
+        assert strip_caption_marker("[CAPTION] El cordero.") == "El cordero."
+        assert strip_caption_marker("[CAPTION]   El cordero.") == "El cordero."
+        assert strip_caption_marker("Ordinary paragraph.") == "Ordinary paragraph."
+
+    def test_counts_blocks_not_occurrences(self):
+        from src.utils.text_utils import caption_block_count
+        text = (
+            "Body.\n\n[CAPTION] One.\n\nMore body with [CAPTION] inline.\n\n[CAPTION] Two."
+        )
+        assert caption_block_count(text) == 2
+        assert caption_block_count("nothing here") == 0
+        assert caption_block_count("") == 0
+
+    def test_instruction_is_constant_when_always_included(self):
+        from src.utils.text_utils import caption_instruction
+        # Byte-identical regardless of the chunk keeps the cacheable prompt
+        # prefix stable across the book.
+        a = caption_instruction("no captions in this chunk", always_include=True)
+        b = caption_instruction("[CAPTION] one here", always_include=True)
+        assert a == b != ""
+
+    def test_instruction_is_empty_without_captions(self):
+        from src.utils.text_utils import caption_instruction
+        assert caption_instruction("plain prose") == ""
+        assert caption_instruction("") == ""
+        assert caption_instruction("[CAPTION] a caption") != ""
+
+    def test_blank_markers_preserves_offsets(self):
+        from src.utils.text_utils import blank_caption_markers
+        text = "[CAPTION] El cordero."
+        blanked = blank_caption_markers(text)
+        assert len(blanked) == len(text)
+        assert blanked.endswith("El cordero.")
+        assert "CAPTION" not in blanked
+        # The caption's own prose is untouched -- it should still be checked.
+        assert blanked.strip() == "El cordero."
+
+    def test_blank_markers_leaves_inline_text_alone(self):
+        from src.utils.text_utils import blank_caption_markers
+        text = "He wrote [CAPTION] on the board."
+        assert blank_caption_markers(text) == text
+
+    def test_blank_markers_handles_multiple_blocks(self):
+        from src.utils.text_utils import blank_caption_markers
+        text = "[CAPTION] One.\n\nBody.\n\n[CAPTION] Two."
+        blanked = blank_caption_markers(text)
+        assert len(blanked) == len(text)
+        assert "CAPTION" not in blanked
+        assert "Body." in blanked
+
+    def test_marker_ranges_empty(self):
+        from src.utils.text_utils import caption_marker_ranges
+        assert caption_marker_ranges("") == []
+        assert caption_marker_ranges("no markers here") == []
+
+    def test_marker_ranges_span_the_marker_and_its_padding(self):
+        from src.utils.text_utils import caption_marker_ranges
+        text = "[CAPTION] El cordero."
+        ranges = caption_marker_ranges(text)
+        assert len(ranges) == 1
+        start, end = ranges[0]
+        assert text[start:end] == "[CAPTION] "
+
+    def test_marker_ranges_ignore_inline_text(self):
+        from src.utils.text_utils import caption_marker_ranges
+        # Same rule as is_caption_block: only a block-leading marker counts.
+        assert caption_marker_ranges("He wrote [CAPTION] on the board.") == []
+
+    def test_marker_ranges_cover_replacement_whitespace(self):
+        """Every offset inside a blanked marker must fall in a reported range.
+
+        This is the whole point of the function: the whitespace run left by
+        blank_caption_markers trips LanguageTool's repeated-spaces rule, and the
+        evaluator drops those matches by testing their offset against these
+        ranges.
+        """
+        from src.utils.text_utils import blank_caption_markers, caption_marker_ranges
+        text = "[CAPTION] One.\n\nBody.\n\n[CAPTION] Two."
+        blanked = blank_caption_markers(text)
+        ranges = caption_marker_ranges(text)
+        assert len(ranges) == 2
+        for start, end in ranges:
+            assert blanked[start:end].isspace()
+            for offset in range(start, end):
+                assert any(s <= offset < e for s, e in ranges)

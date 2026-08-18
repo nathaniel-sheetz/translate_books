@@ -6,6 +6,7 @@ This module provides utilities for processing chapter text, including:
 - Detecting and extracting paragraphs
 - Counting words and paragraphs consistently with evaluators
 - Detecting and stripping [IMAGE:...] placeholders embedded by source ingestion
+- Detecting [CAPTION] block markers that tag a paragraph as an image caption
 - Accent/case-folded substring search + KWIC windowing (reader concordance and
   the annotation-review book-wide term search share these)
 
@@ -327,6 +328,170 @@ def image_placeholder_instruction(source_text: str, *, always_include: bool = Fa
         return _IMAGE_INSTRUCTION_WITH_DESCRIPTION
 
     return _IMAGE_INSTRUCTION_FILENAME_ONLY
+
+
+# ---------------------------------------------------------------------------
+# [CAPTION] block marker
+#
+# Image captions arrive from source ingestion as ordinary paragraphs sitting
+# directly under their image, which renders them as body prose. The marker tags
+# such a paragraph so the EPUB builder and the reader can style it as a caption.
+#
+# It is a *leading atom*, deliberately not a wrapping delimiter like _italics_:
+# a wrapper's closing half can be lost in an LLM round trip, silently degrading
+# the paragraph back to body prose. A leading atom is countable, which is what
+# lets harness_guard enforce exact parity the way it does for [IMAGE:...] and
+# [FOOTNOTE:N].
+#
+# Only meaningful at the start of a block, so the literal string elsewhere in
+# prose is left alone.
+# ---------------------------------------------------------------------------
+
+CAPTION_MARKER = "[CAPTION]"
+
+# Anchored at block start; trailing horizontal whitespace is part of the marker
+# so stripping it does not leave a leading space on the caption text.
+_CAPTION_BLOCK_RE = re.compile(r"^\[CAPTION\][ \t]*")
+
+# Blank-line block split, matching epub_builder._render_body_blocks.
+_BLOCK_SPLIT_RE = re.compile(r"\n\s*\n")
+
+
+def is_caption_block(block: str) -> bool:
+    """
+    Return True when *block* is a caption paragraph.
+
+    Only a block-leading marker counts; the literal text elsewhere in a
+    paragraph is ordinary prose.
+
+    Example:
+        >>> is_caption_block("[CAPTION] The lamb with the longest tail.")
+        True
+        >>> is_caption_block("  [CAPTION] leading whitespace is tolerated")
+        True
+        >>> is_caption_block("He wrote [CAPTION] on the board.")
+        False
+    """
+    if not block:
+        return False
+    return bool(_CAPTION_BLOCK_RE.match(block.lstrip()))
+
+
+def strip_caption_marker(block: str) -> str:
+    """
+    Return *block* with a leading ``[CAPTION]`` marker removed.
+
+    Non-caption blocks are returned unchanged.
+
+    Example:
+        >>> strip_caption_marker("[CAPTION] El cordero de la cola larga.")
+        'El cordero de la cola larga.'
+        >>> strip_caption_marker("Ordinary paragraph.")
+        'Ordinary paragraph.'
+    """
+    if not block:
+        return block
+    return _CAPTION_BLOCK_RE.sub("", block.lstrip(), count=1)
+
+
+def caption_block_count(text: str) -> int:
+    """
+    Count blank-line-separated blocks in *text* that carry the caption marker.
+
+    This is the parity signal: a translation must contain exactly as many
+    caption blocks as its source. A plain count is sufficient because the
+    marker has no payload to compare (unlike image filenames or footnote
+    numbers).
+
+    Example:
+        >>> caption_block_count("Body.\\n\\n[CAPTION] A dog.\\n\\nMore body.")
+        1
+        >>> caption_block_count("Nothing here.")
+        0
+    """
+    if not text:
+        return 0
+    return sum(1 for block in _BLOCK_SPLIT_RE.split(text) if is_caption_block(block))
+
+
+#: Block-leading marker, matched per line. A caption marker always opens its
+#: block, so a line anchor is equivalent here and far cheaper than re-splitting.
+_CAPTION_MARKER_LINE_RE = re.compile(r"^\[CAPTION\][ \t]*", re.MULTILINE)
+
+
+def caption_marker_ranges(text: str) -> list[tuple[int, int]]:
+    """
+    Return the (start, end) character ranges of all block-leading ``[CAPTION]``
+    markers (end exclusive). Same contract as :func:`image_placeholder_ranges`.
+    """
+    if not text:
+        return []
+    return [(m.start(), m.end()) for m in _CAPTION_MARKER_LINE_RE.finditer(text)]
+
+
+def blank_caption_markers(text: str) -> str:
+    """
+    Replace block-leading ``[CAPTION]`` markers with equal-length whitespace.
+
+    Character offsets are preserved, so evaluators that report positions
+    (LanguageTool, word tokenizers) stay aligned with the original text. Same
+    contract as :func:`strip_image_placeholders`.
+
+    The caption's *text* is left intact — it is real prose and should still be
+    spell- and grammar-checked. Only the marker is blanked, so "CAPTION" is not
+    reported as a misspelling in every captioned paragraph.
+
+    Example:
+        >>> blank_caption_markers("[CAPTION] El cordero.")
+        '          El cordero.'
+    """
+    if not text:
+        return text
+    return _CAPTION_MARKER_LINE_RE.sub(lambda m: " " * len(m.group()), text)
+
+
+_CAPTION_INSTRUCTION = (
+    "   - A paragraph beginning with the [CAPTION] marker is an image caption. "
+    "Keep [CAPTION]\n"
+    "     at the very start of the corresponding paragraph in your translation, "
+    "followed by a\n"
+    "     space, then translate the caption text normally. Never add a [CAPTION] "
+    "marker to a\n"
+    "     paragraph that does not carry one, and never drop one."
+)
+
+
+def caption_instruction(source_text: str, *, always_include: bool = False) -> str:
+    """
+    Build the translation-prompt sub-bullet describing how to handle captions.
+
+    Returns ``""`` when *source_text* carries no caption blocks, otherwise the
+    constant bullet.
+
+    When ``always_include`` is true the bullet is returned regardless of this
+    chunk's own content. Books containing captions anywhere pass
+    ``always_include=True`` for every chunk so the bullet is byte-identical
+    across the book — keeping the fixed prompt prefix cacheable rather than
+    fragmenting it on per-chunk caption presence. This mirrors
+    :func:`image_placeholder_instruction`, and the bullet's wording is a correct
+    no-op on chunks that happen to have no captions.
+
+    The returned bullet includes the leading ``   - `` so it slots directly into
+    the STRUCTURE PRESERVATION section of the translation prompt.
+
+    Args:
+        source_text: The chunk's source text.
+        always_include: Emit the bullet regardless of *source_text*
+            (book-level constant for cache stability).
+
+    Returns:
+        A bullet line (no trailing newline) or an empty string.
+    """
+    if always_include:
+        return _CAPTION_INSTRUCTION
+    if not source_text:
+        return ""
+    return _CAPTION_INSTRUCTION if caption_block_count(source_text) else ""
 
 
 # ---------------------------------------------------------------------------

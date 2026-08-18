@@ -546,6 +546,40 @@ def _build_parser() -> argparse.ArgumentParser:
              "never --bare or --effort>",
     )
 
+    # captions (backfill [CAPTION] markers into an already-translated book) ---
+    cap = sub.add_parser(
+        "captions",
+        help="Find image captions still rendering as body prose and mark them "
+             "with [CAPTION] (dry-run unless --apply)",
+    )
+    add_project(cap)
+    cap.add_argument(
+        "--accept-tiers", default=None,
+        help="Comma-separated confidence tiers to accept. "
+             "A=matches the image's alt text, B=fully italicized paragraph, "
+             "C=ALL-CAPS short line, D=short phrase with no terminal punctuation, "
+             "E=everything else. Default: A,B (the two that need no human check). "
+             "E is never a safe blanket accept — it is where real body prose lands.",
+    )
+    cap.add_argument(
+        "--accept", default=None,
+        help="Comma-separated candidate numbers to accept on top of --accept-tiers",
+    )
+    cap.add_argument(
+        "--reject", default=None,
+        help="Comma-separated candidate numbers to drop from the selection",
+    )
+    cap.add_argument(
+        "--apply", action="store_true",
+        help="Write the markers. Without it the command only reports. "
+             "Writes source.txt and chunks/*.json (never chapters/*.txt, which "
+             "is regenerated from the chunks); idempotent, so it is safe to re-run.",
+    )
+    cap.add_argument(
+        "--dry-run", action="store_true",
+        help="Explicit no-op form of the default behaviour",
+    )
+
     # --schema on every leaf subcommand. The blocks cost real tokens on every
     # call (status alone is ~2KB), so they are opt-in on success — and, per
     # _stamp_schema, automatic on any error, where the caller most needs the
@@ -749,6 +783,10 @@ def _dispatch(args: argparse.Namespace):
         return flow.log_event(args.project, event=args.event, data=args.data)
     if cmd == "config-set":
         return flow.config_set(args.project, key=args.key, value=args.value)
+    if cmd == "captions":
+        return flow.captions(args.project, accept_tiers=args.accept_tiers,
+                             accept=args.accept, reject=args.reject,
+                             apply=args.apply and not args.dry_run)
     raise SystemExit(f"unknown command: {cmd}")
 
 

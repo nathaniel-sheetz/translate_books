@@ -17,7 +17,7 @@ except ImportError:
     ENCHANT_AVAILABLE = False
 
 from ..models import Chunk, EvalResult, Issue, IssueLevel, Glossary
-from ..utils.text_utils import strip_image_placeholders
+from ..utils.text_utils import blank_caption_markers, strip_image_placeholders
 from .base import BaseEvaluator
 
 
@@ -105,6 +105,9 @@ class DictionaryEvaluator(BaseEvaluator):
         # Replace image placeholders with equal-length whitespace before tokenizing
         # (e.g. [IMAGE:images/i010.jpg]) — preserves character offsets for all subsequent words
         text_to_check = strip_image_placeholders(chunk.translated_text)
+        # Blank the [CAPTION] marker too (offsets preserved) so it is not
+        # tokenized as an unknown word. The caption's own prose is still checked.
+        text_to_check = blank_caption_markers(text_to_check)
 
         # Tokenize and get word positions
         words_with_positions = self._tokenize_with_positions(text_to_check)

@@ -890,6 +890,78 @@ class TestImagePlaceholderFiltering:
         assert result.issues[0].severity == IssueLevel.ERROR
 
 
+@skip_if_no_lt
+class TestCaptionMarkerFiltering:
+    """Tests for [CAPTION] marker filtering in grammar evaluation.
+
+    blank_caption_markers replaces the marker with equal-length whitespace,
+    which trips LanguageTool's repeated-spaces rule. Matches whose offset
+    falls inside the marker must be dropped; matches on the caption prose
+    must still be reported.
+    """
+
+    @patch('language_tool_python.LanguageTool')
+    def test_match_inside_caption_marker_range_is_skipped(self, mock_lt_class):
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        text = "[CAPTION] El cordero."
+        marker_start = text.index("[CAPTION]")
+        match_inside = make_mock_match(
+            message="Unknown word: CAPTION",
+            category="TYPOS",
+            rule_id="MORFOLOGIK_RULE_ES",
+            offset=marker_start + 1,
+        )
+        mock_tool.check.return_value = [match_inside]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="[CAPTION] The lamb.",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {})
+
+        assert len(result.issues) == 0
+        assert result.passed
+
+    @patch('language_tool_python.LanguageTool')
+    def test_match_on_caption_prose_is_kept(self, mock_lt_class):
+        pytest.importorskip("language_tool_python")
+
+        mock_tool = Mock()
+        text = "[CAPTION] El cordero."
+        match_prose = make_mock_match(
+            message="Subject-verb agreement error",
+            category="GRAMMAR",
+            rule_id="AGREEMENT_ERROR",
+            offset=text.index("cordero"),
+        )
+        mock_tool.check.return_value = [match_prose]
+        mock_lt_class.return_value = mock_tool
+
+        evaluator = GrammarEvaluator()
+        chunk = Chunk(
+            id="test",
+            source_text="[CAPTION] The lamb.",
+            translated_text=text,
+            chapter_id="test",
+            position=0,
+            metadata=make_metadata(),
+        )
+
+        result = evaluator.evaluate(chunk, {})
+
+        assert len(result.issues) == 1
+        assert result.issues[0].severity == IssueLevel.ERROR
+
+
 class TestBuildContextDefaults:
     """Tests for evaluator context defaults."""
 
