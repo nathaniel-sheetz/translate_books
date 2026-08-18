@@ -6835,6 +6835,35 @@ def save_translator_note(project_id):
     return jsonify({"ok": True})
 
 
+# Characters Windows reserves in a filename. ':' is the dangerous one here --
+# NTFS reads it as the alternate-data-stream separator, so a title like
+# "Bambi: Una vida en el bosque" writes the EPUB into a hidden stream on a
+# 0-byte file named "Bambi", where the glob("*.epub") in epub_status /
+# download_epub can never see it and the UI keeps serving the previous build.
+_UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _epub_filename(title: str, project_id: str) -> str:
+    """Derive a filesystem-safe ``<name>.epub`` from a book title.
+
+    Reserved characters collapse to ``-`` FIRST, before any pathlib call. Order
+    matters on Windows: ``Path("R: The Movie").name`` is ``" The Movie"``,
+    because pathlib reads a leading ``<letter>:`` as a drive spec and discards
+    it -- so sanitizing after ``.name`` would silently eat the first character of
+    such a title. Trailing dots and spaces are stripped because Windows would
+    strip them from a stem that ended that way (the appended ``.epub`` already
+    prevents the *written* name from ending in ``.`` or space). Falls back to
+    *project_id* only when the stem is empty after that (e.g. ``""``, ``"..."``,
+    whitespace) -- a reserved-only title like ``"???"`` becomes ``---.epub``.
+    """
+    stem = _UNSAFE_FILENAME_RE.sub("-", title)
+    # No separator or drive spec survives the substitution above, so ``.name``
+    # cannot truncate a real title here -- it stays as a belt-and-braces
+    # guarantee that the result is a single path component and nothing more.
+    stem = Path(stem).name.rstrip(". ")
+    return f"{stem or project_id}.epub"
+
+
 @app.route("/api/project/<project_id>/build-epub", methods=["POST"])
 def build_epub_route(project_id):
     """Build EPUB from translated chapters.
@@ -6900,7 +6929,7 @@ def build_epub_route(project_id):
 
     try:
         from src.epub_builder import build_epub_from_chunks
-        epub_filename = (Path(title).name or project_id) + ".epub"
+        epub_filename = _epub_filename(title, project_id)
         epub_output = project_dir / epub_filename
         result = build_epub_from_chunks(
             project_path=project_dir,
