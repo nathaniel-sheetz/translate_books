@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.47.1.0] - 2026-08-18
+
+### Fixed
+- **Dashboard EPUB builds no longer vanish into an NTFS alternate data stream.** Titles with a colon (`Bambi: Una vida en el bosque`) used to write the file as a hidden stream on a 0-byte `Bambi`, where `glob("*.epub")` in status/download could never see it, so the UI kept serving the previous build. Reserved filename characters now collapse to `-` before any pathlib call, trailing dots/spaces are stripped, and an empty stem falls back to the project id.
+
 ## [0.47.0.0] - 2026-08-17
 
 ### Added
