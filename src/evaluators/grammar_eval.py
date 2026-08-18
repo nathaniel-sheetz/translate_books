@@ -30,6 +30,7 @@ except ImportError:
 from ..models import Chunk, EvalResult, Issue, IssueLevel, Glossary
 from ..utils.text_utils import (
     blank_caption_markers,
+    caption_marker_ranges,
     image_placeholder_ranges,
     strip_image_placeholders,
 )
@@ -157,7 +158,10 @@ class GrammarEvaluator(BaseEvaluator):
         # Strip [IMAGE:...] placeholders so tokens like "IMAGE", "jpg", and
         # filename fragments don't get flagged as spelling/grammar issues.
         # Equal-length whitespace keeps match.offset aligned to the original text.
-        placeholder_ranges = image_placeholder_ranges(chunk.translated_text)
+        placeholder_ranges = (
+            image_placeholder_ranges(chunk.translated_text)
+            + caption_marker_ranges(chunk.translated_text)
+        )
         text_to_check = strip_image_placeholders(chunk.translated_text)
         # Same treatment for the [CAPTION] marker, or "CAPTION" is reported as a
         # misspelling in every captioned paragraph. The caption's prose stays.

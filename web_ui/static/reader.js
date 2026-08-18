@@ -563,7 +563,7 @@
         if (!el) return;
         const a = alignmentData &&
             alignmentData.alignments.find(x => x.es_idx === Number(esIdx));
-        const esText = a ? a.es : (el.textContent || '').replace(/\s+$/, '');
+        const esText = a ? displayEsOf(a, a.es) : (el.textContent || '').replace(/\s+$/, '');
         el.classList.remove('review-flagged');
         REVIEW_TYPES.forEach(t => el.classList.remove('review-' + t));
         const findings = reviewMap[esIdx];

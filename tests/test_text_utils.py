@@ -744,3 +744,39 @@ class TestCaptionMarker:
         assert len(blanked) == len(text)
         assert "CAPTION" not in blanked
         assert "Body." in blanked
+
+    def test_marker_ranges_empty(self):
+        from src.utils.text_utils import caption_marker_ranges
+        assert caption_marker_ranges("") == []
+        assert caption_marker_ranges("no markers here") == []
+
+    def test_marker_ranges_span_the_marker_and_its_padding(self):
+        from src.utils.text_utils import caption_marker_ranges
+        text = "[CAPTION] El cordero."
+        ranges = caption_marker_ranges(text)
+        assert len(ranges) == 1
+        start, end = ranges[0]
+        assert text[start:end] == "[CAPTION] "
+
+    def test_marker_ranges_ignore_inline_text(self):
+        from src.utils.text_utils import caption_marker_ranges
+        # Same rule as is_caption_block: only a block-leading marker counts.
+        assert caption_marker_ranges("He wrote [CAPTION] on the board.") == []
+
+    def test_marker_ranges_cover_replacement_whitespace(self):
+        """Every offset inside a blanked marker must fall in a reported range.
+
+        This is the whole point of the function: the whitespace run left by
+        blank_caption_markers trips LanguageTool's repeated-spaces rule, and the
+        evaluator drops those matches by testing their offset against these
+        ranges.
+        """
+        from src.utils.text_utils import blank_caption_markers, caption_marker_ranges
+        text = "[CAPTION] One.\n\nBody.\n\n[CAPTION] Two."
+        blanked = blank_caption_markers(text)
+        ranges = caption_marker_ranges(text)
+        assert len(ranges) == 2
+        for start, end in ranges:
+            assert blanked[start:end].isspace()
+            for offset in range(start, end):
+                assert any(s <= offset < e for s, e in ranges)

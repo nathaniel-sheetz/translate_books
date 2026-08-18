@@ -419,6 +419,16 @@ def caption_block_count(text: str) -> int:
 _CAPTION_MARKER_LINE_RE = re.compile(r"^\[CAPTION\][ \t]*", re.MULTILINE)
 
 
+def caption_marker_ranges(text: str) -> list[tuple[int, int]]:
+    """
+    Return the (start, end) character ranges of all block-leading ``[CAPTION]``
+    markers (end exclusive). Same contract as :func:`image_placeholder_ranges`.
+    """
+    if not text:
+        return []
+    return [(m.start(), m.end()) for m in _CAPTION_MARKER_LINE_RE.finditer(text)]
+
+
 def blank_caption_markers(text: str) -> str:
     """
     Replace block-leading ``[CAPTION]`` markers with equal-length whitespace.
