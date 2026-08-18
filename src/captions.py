@@ -18,7 +18,9 @@ Two properties make it safe:
 - Writes go to ``source.txt`` and ``chunks/*.json``, never ``chapters/*.txt``.
   Chapter files are derived (``combiner.combine_chunks`` ->
   ``save_chapters_to_files``), so a marker written there is erased by the next
-  combine.
+  combine. Inside a chunk both sides are marked: ``translated_text`` is what the
+  reader and the EPUB render, ``source_text`` is what a re-translation of that
+  chunk prompts from.
 - Source and translation are paired by IMAGE FILENAME, which
   ``harness_guard.guard_translation_draft`` already enforces as identical across
   the pair. One accept decision therefore marks the English paragraph and the
@@ -46,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from src.utils.text_utils import CAPTION_MARKER, is_caption_block
+from src.utils.text_utils import CAPTION_MARKER, is_caption_block, strip_caption_marker
 
 # Same shape as epub_builder._IMAGE_RE -- an image block is a sole token.
 _IMAGE_RE = re.compile(r'\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]')
@@ -443,8 +445,52 @@ def _insert_all(text: str, offsets: List[int]) -> Tuple[str, int]:
     return text, inserted
 
 
+def _chunk_source_offsets(
+    source_text: str, cands: List[Candidate],
+) -> Tuple[List[int], List[int]]:
+    """Locate each candidate's English paragraph inside a chunk's ``source_text``.
+
+    Returns ``(offsets, unmatched_indices)``. Pairing is by block text, with the
+    preceding ``[IMAGE:...]`` block breaking ties, so a paragraph that repeats
+    inside one chunk still lands under its own image. A block that already
+    carries the marker matches too, and ``_insert_all`` then skips it -- that is
+    what keeps re-applying a stale selection a no-op instead of a "not found".
+    """
+    blocks = list(iter_blocks(source_text))
+    offsets: List[int] = []
+    unmatched: List[int] = []
+    used: set = set()
+    for c in cands:
+        want = (c.source_text or "").strip()
+        matches = [
+            (i, start)
+            for i, (start, _end, block) in enumerate(blocks)
+            if start not in used
+            and (block == want or strip_caption_marker(block) == want)
+        ] if want else []
+        if not matches:
+            unmatched.append(c.index)
+            continue
+        pick = next(
+            (
+                start
+                for i, start in matches
+                if i
+                and (m := _IMAGE_RE.fullmatch(blocks[i - 1][2]))
+                and m.group(1) == c.image
+            ),
+            matches[0][1],
+        )
+        used.add(pick)
+        offsets.append(pick)
+    return offsets, unmatched
+
+
 def apply_marks(project_dir: Path, accepted: List[Candidate]) -> dict:
     """Write ``[CAPTION]`` markers for *accepted* into chunks and source.txt.
+
+    Both sides of a chunk are marked (``translated_text`` and ``source_text``),
+    plus the matching paragraph in ``source.txt``.
 
     Returns a report dict. Idempotent -- re-running with the same selection is a
     no-op, so a partially applied run can simply be repeated.
@@ -453,6 +499,8 @@ def apply_marks(project_dir: Path, accepted: List[Candidate]) -> dict:
     report = {
         "chunks_written": 0,
         "chunk_marks": 0,
+        "chunk_source_marks": 0,
+        "unmatched_chunk_source": [],
         "source_marks": 0,
         "source_written": False,
         "missing_source": [],
@@ -461,27 +509,44 @@ def apply_marks(project_dir: Path, accepted: List[Candidate]) -> dict:
         return report
 
     # --- chunks (skipped for source-only candidates) ---
-    by_chunk: Dict[str, List[int]] = {}
+    by_chunk: Dict[str, List[Candidate]] = {}
     for c in accepted:
         if c.chunk_offset is None or not c.chunk_id:
             continue
-        by_chunk.setdefault(c.chunk_id, []).append(c.chunk_offset)
+        by_chunk.setdefault(c.chunk_id, []).append(c)
 
-    for chunk_id, offsets in by_chunk.items():
+    for chunk_id, cands in by_chunk.items():
         path = project_dir / "chunks" / f"{chunk_id}.json"
         if not path.exists():
             continue
         data = json.loads(path.read_text(encoding="utf-8"))
         original = data.get("translated_text") or ""
-        updated, n = _insert_all(original, offsets)
-        if n:
-            data["translated_text"] = updated
+        updated, n = _insert_all(original, [c.chunk_offset for c in cands])
+
+        # The chunk's own source_text is what a re-translation prompts from, so
+        # it has to carry the marker too. Marking source.txt alone only helps
+        # chunks rebuilt from it: re-translating an existing chunk would see no
+        # caption in its source, emit none, and overwrite the marker just
+        # applied -- and harness_guard would flag the parity gap on the way.
+        src_original = data.get("source_text") or ""
+        src_updated, src_n = src_original, 0
+        if src_original:
+            src_offsets, unmatched = _chunk_source_offsets(src_original, cands)
+            src_updated, src_n = _insert_all(src_original, src_offsets)
+            report["unmatched_chunk_source"].extend(unmatched)
+
+        if n or src_n:
+            if n:
+                data["translated_text"] = updated
+            if src_n:
+                data["source_text"] = src_updated
             path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
             report["chunks_written"] += 1
             report["chunk_marks"] += n
+            report["chunk_source_marks"] += src_n
 
     # --- source.txt ---
     source = project_dir / "source.txt"

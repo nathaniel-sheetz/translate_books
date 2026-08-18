@@ -25,6 +25,7 @@ from src.captions import (
     select,
     tier_counts,
 )
+from src.utils.text_utils import caption_block_count
 
 
 # ---------------------------------------------------------------------------
@@ -134,19 +135,25 @@ class TestSelect:
 # Scanning a project on disk
 # ---------------------------------------------------------------------------
 
-def _make_project(tmp_path, *, source, chapters):
-    """chapters: {chapter_id: [chunk_translated_text, ...]}"""
+def _make_project(tmp_path, *, source, chapters, chunk_sources=None):
+    """chapters: {chapter_id: [chunk_translated_text, ...]}
+
+    chunk_sources: {chapter_id: [chunk_source_text, ...]} -- the English side of
+    each chunk. Omitted (or None for one chunk) writes no ``source_text`` key,
+    which is what pre-caption projects look like on disk.
+    """
     (tmp_path / "chunks").mkdir(parents=True)
     (tmp_path / "source.txt").write_text(source, encoding="utf-8")
     for chapter_id, chunk_texts in chapters.items():
+        srcs = (chunk_sources or {}).get(chapter_id) or []
         for i, text in enumerate(chunk_texts):
             path = tmp_path / "chunks" / f"{chapter_id}_chunk_{i:03d}.json"
-            path.write_text(
-                json.dumps({"id": f"{chapter_id}_chunk_{i:03d}",
-                            "chapter_id": chapter_id,
-                            "translated_text": text}, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            data = {"id": f"{chapter_id}_chunk_{i:03d}",
+                    "chapter_id": chapter_id,
+                    "translated_text": text}
+            if i < len(srcs) and srcs[i] is not None:
+                data["source_text"] = srcs[i]
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return tmp_path
 
 
@@ -365,6 +372,108 @@ class TestApplyMarks:
         )
         assert "[CAPTION] _Uno_" in chunk["translated_text"]
         assert "[CAPTION] _Dos_" in chunk["translated_text"]
+
+
+class TestApplyMarksChunkSource:
+    """A chunk's source_text is what a re-translation prompts from.
+
+    Marked only on the translated side, the next re-translation of the chunk
+    sees no caption in its English source, emits none, and overwrites the
+    marker the backfill just applied.
+    """
+
+    SOURCE = "Before.\n\n[IMAGE:images/a.jpg:A LAMB]\n\nA LAMB.\n\nAfter."
+    SPANISH = "Antes.\n\n[IMAGE:images/a.jpg:UN CORDERO]\n\nUN CORDERO.\n\nDespués."
+
+    @pytest.fixture
+    def project(self, tmp_path):
+        return _make_project(
+            tmp_path,
+            source=self.SOURCE,
+            chapters={"chapter_01": [self.SPANISH]},
+            chunk_sources={"chapter_01": [self.SOURCE]},
+        )
+
+    def _chunk(self, project):
+        return json.loads(
+            (project / "chunks" / "chapter_01_chunk_000.json").read_text(encoding="utf-8")
+        )
+
+    def test_marks_the_english_paragraph_in_the_chunk(self, project):
+        report = apply_marks(project, select(scan_project(project)))
+        assert report["chunk_source_marks"] == 1
+        assert report["unmatched_chunk_source"] == []
+
+        chunk = self._chunk(project)
+        assert "[CAPTION] A LAMB." in chunk["source_text"]
+        assert "[CAPTION] UN CORDERO." in chunk["translated_text"]
+        # Only the caption paragraph is touched.
+        assert chunk["source_text"].replace("[CAPTION] ", "") == self.SOURCE
+
+    def test_marked_source_and_translation_satisfy_caption_parity(self, project):
+        apply_marks(project, select(scan_project(project)))
+        chunk = self._chunk(project)
+        assert (
+            caption_block_count(chunk["source_text"])
+            == caption_block_count(chunk["translated_text"])
+            == 1
+        )
+
+    def test_reapplying_a_stale_selection_is_a_no_op(self, project):
+        stale = select(scan_project(project))
+        apply_marks(project, stale)
+        after_first = self._chunk(project)["source_text"]
+
+        report = apply_marks(project, stale)
+        assert report["chunk_source_marks"] == 0
+        # An already-marked block is recognised, not reported as missing.
+        assert report["unmatched_chunk_source"] == []
+        assert self._chunk(project)["source_text"] == after_first
+
+    def test_chunk_without_source_text_is_left_alone(self, tmp_path):
+        proj = _make_project(
+            tmp_path,
+            source=self.SOURCE,
+            chapters={"chapter_01": [self.SPANISH]},
+        )
+        report = apply_marks(proj, select(scan_project(proj)))
+        assert report["chunk_marks"] == 1
+        assert report["chunk_source_marks"] == 0
+        assert report["unmatched_chunk_source"] == []
+        chunk = json.loads(
+            (proj / "chunks" / "chapter_01_chunk_000.json").read_text(encoding="utf-8")
+        )
+        assert "source_text" not in chunk
+
+    def test_repeated_paragraph_is_paired_by_its_own_image(self, tmp_path):
+        # The same caption text under two different images: each mark must land
+        # under the image it belongs to, not twice under the first one.
+        source = (
+            "[IMAGE:images/a.jpg]\n\n_Ditto_\n\n"
+            "Middle paragraph of body prose.\n\n"
+            "[IMAGE:images/b.jpg]\n\n_Ditto_"
+        )
+        spanish = (
+            "[IMAGE:images/a.jpg]\n\n_Ídem_\n\n"
+            "Párrafo intermedio de prosa.\n\n"
+            "[IMAGE:images/b.jpg]\n\n_Ídem_"
+        )
+        proj = _make_project(
+            tmp_path,
+            source=source,
+            chapters={"chapter_01": [spanish]},
+            chunk_sources={"chapter_01": [source]},
+        )
+        report = apply_marks(proj, select(scan_project(proj)))
+        assert report["chunk_source_marks"] == 2
+        chunk = json.loads(
+            (proj / "chunks" / "chapter_01_chunk_000.json").read_text(encoding="utf-8")
+        )
+        assert chunk["source_text"] == (
+            "[IMAGE:images/a.jpg]\n\n[CAPTION] _Ditto_\n\n"
+            "Middle paragraph of body prose.\n\n"
+            "[IMAGE:images/b.jpg]\n\n[CAPTION] _Ditto_"
+        )
 
 
 class TestTierCounts:
