@@ -1669,3 +1669,50 @@ def test_custom_regex_file_empty_is_rejected(tmp_path: Path):
     path.write_text("   \n", encoding="utf-8")
     with pytest.raises(HarnessValidationError, match="is empty"):
         _resolve_custom_regex(_regex_args(custom_regex_file=str(path)))
+
+
+def _caption_backfill_project(tmp_path: Path) -> Path:
+    """A translated project with one auto-acceptable (tier B) caption candidate."""
+    proj = tmp_path / "captionbook"
+    (proj / "chunks").mkdir(parents=True)
+    (proj / "source.txt").write_text(
+        "Before.\n\n[IMAGE:images/a.jpg]\n\n_A caption_\n\nAfter.",
+        encoding="utf-8",
+    )
+    (proj / "chunks" / "chapter_01_chunk_000.json").write_text(
+        json.dumps({
+            "id": "chapter_01_chunk_000",
+            "chapter_id": "chapter_01",
+            "translated_text": "Antes.\n\n[IMAGE:images/a.jpg]\n\n_Un pie_\n\nDespués.",
+            "source_text": "Before.\n\n[IMAGE:images/a.jpg]\n\n_A caption_\n\nAfter.",
+        }),
+        encoding="utf-8",
+    )
+    return proj
+
+
+def test_captions_rejects_unknown_tier(tmp_path: Path):
+    proj = _caption_backfill_project(tmp_path)
+    with pytest.raises(HarnessValidationError, match="unknown caption tier"):
+        flow.captions(str(proj), accept_tiers="Z")
+
+
+def test_captions_rejects_out_of_range_accept_index(tmp_path: Path):
+    proj = _caption_backfill_project(tmp_path)
+    with pytest.raises(HarnessValidationError, match="no candidate #999"):
+        flow.captions(str(proj), accept="999")
+
+
+def test_captions_dry_run_does_not_write(tmp_path: Path):
+    proj = _caption_backfill_project(tmp_path)
+    before_source = (proj / "source.txt").read_text(encoding="utf-8")
+    before_chunk = (proj / "chunks" / "chapter_01_chunk_000.json").read_text(
+        encoding="utf-8"
+    )
+    result = flow.captions(str(proj), apply=False)
+    assert result["applied"] is False
+    assert result["selected"] == 1
+    assert (proj / "source.txt").read_text(encoding="utf-8") == before_source
+    assert (proj / "chunks" / "chapter_01_chunk_000.json").read_text(
+        encoding="utf-8"
+    ) == before_chunk

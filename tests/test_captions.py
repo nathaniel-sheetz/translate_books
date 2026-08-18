@@ -250,6 +250,39 @@ class TestScanProject:
         assert cands[0].chunk_id == "chapter_01_chunk_001"
         assert cands[0].tier == "B"
 
+    def test_apply_marks_caption_chunk_when_image_is_in_the_previous_chunk(self, tmp_path):
+        # Image at the end of chunk 000, caption at the start of chunk 001.
+        # Both sides of the caption chunk must be marked, or a re-translate of
+        # chunk 001 sees no caption in its English source and overwrites it.
+        source = "Before.\n\n[IMAGE:images/a.jpg]\n\n_A caption_\n\nAfter."
+        proj = _make_project(
+            tmp_path,
+            source=source,
+            chapters={"chapter_01": [
+                "Antes.\n\n[IMAGE:images/a.jpg]",
+                "_Un pie de foto_\n\nDespués.",
+            ]},
+            chunk_sources={"chapter_01": [
+                "Before.\n\n[IMAGE:images/a.jpg]",
+                "_A caption_\n\nAfter.",
+            ]},
+        )
+        report = apply_marks(proj, select(scan_project(proj)))
+        assert report["chunk_marks"] == 1
+        assert report["chunk_source_marks"] == 1
+        assert report["unmatched_chunk_source"] == []
+
+        chunk0 = json.loads(
+            (proj / "chunks" / "chapter_01_chunk_000.json").read_text(encoding="utf-8")
+        )
+        chunk1 = json.loads(
+            (proj / "chunks" / "chapter_01_chunk_001.json").read_text(encoding="utf-8")
+        )
+        assert "[CAPTION]" not in chunk0["translated_text"]
+        assert "[CAPTION]" not in chunk0["source_text"]
+        assert "[CAPTION] _Un pie de foto_" in chunk1["translated_text"]
+        assert "[CAPTION] _A caption_" in chunk1["source_text"]
+
     def test_already_marked_caption_is_not_offered_again(self, tmp_path):
         proj = _make_project(
             tmp_path,
