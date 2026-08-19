@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "translate-books"
 description = "Book translation harness (ingest -> chunk -> translate -> combine -> epub)."
+# Table form, not the PEP 639 SPDX string: that needs setuptools>=77 and the
+# build-system above pins >=64.
+license = { file = "LICENSE" }
 # 3.11 is the floor an actual run has been executed against. It is enforced by the
 # compileall + pytest job in .github/workflows/ci.yml — without that job a 3.12-only
 # construct (e.g. a backslash inside an f-string expression, legal only since PEP 701)

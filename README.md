@@ -270,4 +270,6 @@ pytest --cov=src tests/            # With coverage
 
 ## License
 
-For use with public domain books.
+MIT — see [LICENSE](LICENSE). That covers the code in this repository.
+The books it is built for are public domain, and the translations it produces
+are yours; neither is governed by that license.
