@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.47.2.0] - 2026-08-19
+
+### Added
+- **`docs/TRANSLATE_HARNESS.md`** — the harness now has a document of its own, and it is the entry point the README sends you to first. It covers the stages, the three translation backends, the cost gates, and a "which surface do I want?" table that routes between the harness, the dashboard/reader, and the raw CLI.
+- **`docs/CLI_REFERENCE.md`** — every `scripts/` stage in one place, documented as the substrate the harness and the dashboard sit on rather than as the recommended path. Carries the Windows `python -X utf8` note and an explicit warning never to call `scripts/generate_style_guide.py` from an agent, which is `input()`-per-question and deadlocks a non-interactive caller.
+- **Four test modules pin the docs to the code they describe**, because every enumeration below was a verbatim restatement of a source file with nothing enforcing it: `test_docs_harness_surface.py` reads the real argparse parser via `_build_parser` (not `--help` text) to check which translate verbs accept `--chapters` / `--chunk-ids`; `test_docs_split_surface.py` checks the pattern table, `detection_order`, the `detect_min_ratio` generalists, and the front/back/drop-matter keyword lists against `src/split_patterns.json`; `test_docs_prompt_surface.py` checks the "overridable six" table against `.gitignore` and the feature-detector table against `text_feature_detector.DETECTORS`; `test_docs_links.py` is pure filesystem assertions over links, anchors, and script names.
+
+### Changed
+- **The documentation set leads with the harness instead of the web UI.** The README opened by calling the pipeline wizard "the primary interface" and started with `pip install` + `python -m web_ui.app`; it now opens on what the output is worth reading for, then splits into the two ways to actually use it — `/translate-harness` in Claude Code, or the dashboard and bilingual reader for review. `web_ui/README.md`, `prompts/README.md`, `docs/GETTING_STARTED.md`, `docs/CHUNKING_GUIDE.md`, and `docs/WEB_UI_GUIDE.md` were rewired to match.
+- `docs/PROMPT_GUIDE.md`, `docs/CHAPTER_DETECTION_GUIDE.md`, and `prompts/README.md` were cut down hard — roughly 1,300 lines of duplicated command listings and stale walkthroughs removed in favor of pointing at `CLI_REFERENCE.md`, which is now the single place a command signature is written down.
+- **`docs/BATCH_PIPELINE.md` is deleted.** It documented a batch flow the harness superseded, and roughly twenty cross-references to it across the doc set were rewired to `TRANSLATE_HARNESS.md` or `CLI_REFERENCE.md`.
+
+### Fixed
+- **`TRANSLATE_HARNESS.md` no longer documents flags that do not exist.** The command reference claimed `--chapters` and `--chunk-ids` were interchangeable across all five translate verbs; `translate-commit` accepts neither and `translate-fanout` accepts only `--chunk-ids`, so following the doc produced an argparse error. The scoping flags are now stated per verb, and pinned by test.
+
 ## [0.47.1.0] - 2026-08-18
 
 ### Fixed

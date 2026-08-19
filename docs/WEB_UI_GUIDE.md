@@ -2,13 +2,21 @@
 
 Complete reference for the web-based pipeline dashboard and bilingual reader.
 
+> The dashboard and the [harness](TRANSLATE_HARNESS.md) are two front ends over the same
+> project files. Most books are faster to *translate* in the harness and faster to
+> *review* here; you can switch between them at any point without exporting anything.
+
 ## Starting the Server
 
 ```bash
-cd web_ui && python app.py
+python -m web_ui.app
 ```
 
-Runs on `http://localhost:5000`. Local use only — no authentication.
+Run from the repo root — `web_ui/app.py` imports `web_ui.i18n`, so launching it from
+inside `web_ui/` fails. Set `BOOKS_DEBUG=1` for auto-reload and the Werkzeug debugger.
+
+Runs on `http://localhost:5000`. Local use only — no authentication. For an always-on
+service, use `python scripts/serve.py` (see [`CLI_REFERENCE.md`](CLI_REFERENCE.md)).
 
 ## Routes
 

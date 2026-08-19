@@ -1,438 +1,201 @@
-# Chapter Detection & Previous Chapter Context Guide
+# Chapter Detection
 
-## Overview
+Splitting a book into chapters is the first thing that has to go right — every later
+stage is scoped per chapter. This document covers how detection works, the shipped
+patterns, and what to do when a book doesn't match any of them.
 
-This guide covers the new features for multi-chapter book translation:
-1. **Automatic chapter detection** - Split full books into individual chapters
-2. **Previous chapter context** - Include ending of previous chapter in translation prompts for continuity
-
-## Feature 1: Automatic Chapter Detection
-
-### What It Does
-
-Instead of manually creating 100 separate chapter files, you can now:
-- Upload your full book as a single text file
-- Automatically detect chapter boundaries
-- Generate individual chapter files with standardized naming
-
-### Supported Chapter Patterns
-
-- **Roman numerals with inline subtitle** (`chapter_roman_titled`): `CHAPTER I EARLY BOYHOOD`, `CHAPTER II THE JOURNEY` — the subtitle after the roman numeral is captured separately and written as a second line in the chapter heading (rendered as `<h2>` in the EPUB).
-- **Roman numerals** (`roman`): Chapter I, Chapter II, Chapter III, ..., Chapter C
-- **Numeric**: Chapter 1, Chapter 2, Chapter 3, etc.
-- **All-caps headings** (`allcaps_heading`): `ST. LOUIS`, `PEACE & WAR` — headings containing `.` and `&` are supported.
-- **Custom**: Define your own regex pattern
-
-### Usage
-
-#### Basic Usage (Roman Numerals)
-
-```bash
-python split_book.py full_book.txt --output chapters/
-```
-
-This will:
-- Detect chapters with Roman numeral format (Chapter I, Chapter II, etc.)
-- Create files: `chapters/chapter_01.txt`, `chapters/chapter_02.txt`, etc.
-- Validate chapter sequence (warns about gaps or duplicates)
-- Show detailed statistics
-
-#### Numeric Chapters
-
-```bash
-python split_book.py book.txt --output chapters/ --pattern numeric
-```
-
-Detects: Chapter 1, Chapter 2, Chapter 3, etc.
-
-#### Custom Chapter Patterns
-
-```bash
-python split_book.py book.txt --output chapters/ \
-    --pattern custom --custom-regex "^Part \d+"
-```
-
-Use any regex pattern for unusual chapter formats.
-
-#### Additional Options
-
-```bash
-python split_book.py book.txt --output chapters/ \
-    --prefix princesa \          # Custom filename prefix
-    --min-size 200 \             # Minimum chapter size (chars)
-    --verbose                    # Show detailed output
-```
-
-#### Dry Run (Preview Only)
-
-```bash
-python split_book.py book.txt --output chapters/ --dry-run
-```
-
-Shows what chapters would be created without actually creating files.
-
-### Example Output
-
-```
-[OK] Detected 3 chapters
-
-Chapter Details:
---------------------------------------------------------------------------------
-  Chapter I            |    107 words | Lines    0-   9
-  Chapter II           |    115 words | Lines    9-  20
-  Chapter III          |    113 words | Lines   20-  30
---------------------------------------------------------------------------------
-
-[OK] Created 3 chapter files
-
-Output directory: chapters/
-  chapters/chapter_01.txt
-  chapters/chapter_02.txt
-  chapters/chapter_03.txt
-```
-
-## Feature 2: Previous Chapter Context
-
-### What It Does
-
-When translating Chapter 2 (or any subsequent chapter), the translation prompt can automatically include the **ending of the previous chapter** (translated text).
-
-### Why This Matters
-
-Books often have continuity between chapters:
-- Chapter 2 might start with "The next morning..." referring to events from Chapter 1
-- Character states or emotions carry over
-- Narrative flow is maintained
-
-By including the last few paragraphs of Chapter 1 in the Chapter 2 prompt, the translator (LLM or human) has better context for maintaining continuity.
-
-### Usage
-
-#### Step 1: Translate Chapter 1 (No Previous Context)
-
-```bash
-# Chunk Chapter 1
-python chunk_chapter.py chapters/chapter_01.txt --chapter-id chapter_01
-
-# Generate workbook (no previous chapter yet)
-python generate_workbook.py chunks/chapter_01_*.json \
-    --glossary glossary.json \
-    --output workbook_ch01.md
-
-# Translate manually, then import
-python import_workbook.py workbook_ch01.md --output chunks/translated/
-
-# Combine into final translated chapter
-python combine_chunks.py chunks/translated/chapter_01_*.json \
-    --output chapters/translated/chapter_01.txt
-```
-
-#### Step 2: Translate Chapter 2 (WITH Chapter 1 Context)
-
-```bash
-# Chunk Chapter 2
-python chunk_chapter.py chapters/chapter_02.txt --chapter-id chapter_02
-
-# Generate workbook WITH previous chapter context
-python generate_workbook.py chunks/chapter_02_*.json \
-    --glossary glossary.json \
-    --previous-chapter chapters/translated/chapter_01.txt \
-    --context-paragraphs 2 \
-    --output workbook_ch02.md
-
-# The workbook now includes the last 2 paragraphs from Chapter 1!
-```
-
-#### Step 3: Repeat for Remaining Chapters
-
-```bash
-# Chapter 3 includes Chapter 2 context
-python generate_workbook.py chunks/chapter_03_*.json \
-    --previous-chapter chapters/translated/chapter_02.txt \
-    --output workbook_ch03.md
-
-# And so on...
-```
-
-### Context Options
-
-**By Paragraphs (default):**
-```bash
---context-paragraphs 2    # Include last 2 paragraphs
---context-paragraphs 3    # Include last 3 paragraphs
-```
-
-**By Word Count:**
-```bash
---context-words 150       # Include last 150 words
---context-words 200       # Include last 200 words
-```
-
-### How Context Appears in Prompts
-
-The previous chapter context is inserted in the **BOOK CONTEXT** section of the translation prompt:
-
-```
-================================================================================
-BOOK CONTEXT
-================================================================================
-
-[Your book context here...]
-
-Previous Chapter Ending (Translated):
-─────────────────────────────────────
-[Last 2 paragraphs from Chapter 1 translation]
-─────────────────────────────────────
-
-This provides continuity context for the current chapter's opening.
-
-================================================================================
-```
-
-## Configuration
-
-### Project Configuration (Optional)
-
-You can save chapter detection settings in your project config:
-
-```json
-{
-  "project_name": "little_princess",
-  "source_language": "en",
-  "target_language": "es",
-  "chapter_detection": {
-    "pattern_type": "roman",
-    "include_previous_context": true,
-    "context_paragraphs": 2
-  },
-  "chunking": {
-    "target_size": 1500,
-    "overlap_paragraphs": 2
-  }
-}
-```
-
-## Complete Multi-Chapter Workflow
-
-### For a 100-Chapter Book
-
-```bash
-# === STEP 0: Split the full book ===
-python split_book.py full_book.txt --output chapters/ --verbose
-
-# This creates:
-#   chapters/chapter_01.txt
-#   chapters/chapter_02.txt
-#   ...
-#   chapters/chapter_100.txt
-
-# === CHAPTER 1 ===
-python chunk_chapter.py chapters/chapter_01.txt --chapter-id chapter_01
-python generate_workbook.py chunks/chapter_01_*.json \
-    --glossary glossary.json \
-    --output workbook_ch01.md
-
-# [Translate manually using Claude.ai, ChatGPT, etc.]
-
-python import_workbook.py workbook_ch01.md --output chunks/translated/
-python combine_chunks.py chunks/translated/chapter_01_*.json \
-    --output chapters/translated/chapter_01.txt
-
-# === CHAPTER 2 ===
-python chunk_chapter.py chapters/chapter_02.txt --chapter-id chapter_02
-python generate_workbook.py chunks/chapter_02_*.json \
-    --glossary glossary.json \
-    --previous-chapter chapters/translated/chapter_01.txt \
-    --output workbook_ch02.md
-
-# [Translate manually]
-
-python import_workbook.py workbook_ch02.md --output chunks/translated/
-python combine_chunks.py chunks/translated/chapter_02_*.json \
-    --output chapters/translated/chapter_02.txt
-
-# === CHAPTERS 3-100 ===
-# Repeat the same pattern, each time using the previous chapter's translation
-# for context:
-#   python generate_workbook.py chunks/chapter_N_*.json \
-#       --previous-chapter chapters/translated/chapter_(N-1).txt \
-#       --output workbook_chN.md
-```
-
-## Benefits
-
-### Before (Manual Process)
-1. ❌ Manually split 100-chapter book into 100 separate files
-2. ❌ No context from previous chapter
-3. ❌ Potential continuity issues in translation
-4. ❌ Time-consuming file management
-
-### After (Automated Process)
-1. ✅ One command to split entire book
-2. ✅ Automatic chapter detection and validation
-3. ✅ Previous chapter context for better continuity
-4. ✅ Standardized chapter file naming
-5. ✅ Reduced manual work
-
-## Validation & Error Handling
-
-### Chapter Detection Validation
-
-The system automatically checks for:
-- **Gaps in sequence**: Warns if chapters are missing (e.g., Chapter 1, 2, 4...)
-- **Duplicates**: Warns if same chapter number appears twice
-- **Very short chapters**: Flags chapters < 500 chars as potential false positives
-- **Non-standard numbering**: Warns if first chapter isn't Chapter 1
-
-### Example Validation Output
-
-```
-Warnings:
-  [!] Gap in sequence: Missing chapter(s) [3]
-  [!] Chapter 5 is very short (245 chars). May be a false positive.
-  [!] First chapter is 2, not 1. Book may have prologue or preface.
-```
-
-## Edge Cases
-
-### First Chapter
-- No previous chapter context (empty string)
-- Works normally
-
-### Previous Chapter Not Yet Translated
-- Just skip the `--previous-chapter` flag
-- Or system will return empty context if file doesn't exist
-
-### Large Books
-- Chapter detection handles 100+ chapters
-- Memory efficient (processes line by line)
-- Progress tracking for validation
-
-## Testing
-
-Test with the included sample file:
-
-```bash
-# Test chapter detection
-python split_book.py test_book_sample.txt --output test_chapters/ --verbose
-
-# Test previous chapter context
-python chunk_chapter.py test_chapters/chapter_02.txt --chapter-id chapter_02
-python generate_workbook.py chunks/chapter_02_*.json \
-    --previous-chapter test_chapters/translated/chapter_01.txt \
-    --output test_workbook.md
-
-# Verify context appears in workbook
-grep -A 10 "Previous Chapter" test_workbook.md
-```
-
-## Troubleshooting
-
-### No Chapters Detected
-
-**Problem**: `Error: No chapters detected with pattern type 'roman'`
-
-**Solutions**:
-1. Check your book's chapter format:
-   ```bash
-   head -50 your_book.txt  # Look at first 50 lines
-   ```
-2. Try different pattern:
-   ```bash
-   python split_book.py book.txt --output chapters/ --pattern numeric
-   ```
-3. Use custom regex:
-   ```bash
-   python split_book.py book.txt --output chapters/ \
-       --pattern custom --custom-regex "^CAPÍTULO \d+"
-   ```
-
-### Chapters Too Short
-
-**Problem**: Many warnings about short chapters
-
-**Solutions**:
-1. Adjust minimum size:
-   ```bash
-   python split_book.py book.txt --output chapters/ --min-size 50
-   ```
-2. Check for false positives (e.g., "Chapter" in dialogue)
-
-### Previous Chapter Context Not Appearing
-
-**Problem**: Workbook doesn't show previous chapter context
-
-**Solutions**:
-1. Verify previous chapter file exists:
-   ```bash
-   ls chapters/translated/chapter_01.txt
-   ```
-2. Check file is not empty
-3. Verify you used `--previous-chapter` flag
-
-## Implementation Details
-
-### Files Modified/Created
-
-1. **`src/book_splitter.py`** (NEW)
-   - Chapter detection logic
-   - Roman numeral conversion
-   - Chapter validation
-
-2. **`split_book.py`** (NEW)
-   - CLI interface for book splitting
-
-3. **`src/models.py`** (UPDATED)
-   - Added `ChapterDetectionConfig`
-   - Integrated into `ProjectConfig`
-
-4. **`src/translator.py`** (UPDATED)
-   - Added `extract_previous_chapter_context()` function
-   - Updated `generate_workbook()` to accept previous chapter
-
-5. **`generate_workbook.py`** (UPDATED)
-   - Added `--previous-chapter` flag
-   - Added `--context-paragraphs` and `--context-words` options
-
-6. **`prompts/translation.txt`** (UPDATED)
-   - Added `{{previous_chapter_context}}` variable
-   - Integrated into BOOK CONTEXT section
-
-### Data Flow
-
-```
-Full Book (single file)
-    ↓
-split_book.py
-    ↓
-Individual Chapters (chapter_01.txt, chapter_02.txt, ...)
-    ↓
-chunk_chapter.py (for each chapter)
-    ↓
-Chunks (chapter_01_chunk_000.json, ...)
-    ↓
-generate_workbook.py (with --previous-chapter)
-    ↓
-Workbook with Context (workbook_ch02.md)
-    ↓
-Manual Translation
-    ↓
-import_workbook.py
-    ↓
-Translated Chunks
-    ↓
-combine_chunks.py
-    ↓
-Translated Chapter (chapter_02_translated.txt)
-```
-
-## Related Documentation
-
-- [GETTING_STARTED.md](GETTING_STARTED.md) - Complete workflow guide
-- [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md) - How chapters are split into translation-sized chunks
-- [README.md](README.md) - Project overview
-- [PROMPT_GUIDE.md](PROMPT_GUIDE.md) - Customizing translation prompts
+The pattern registry lives in **`src/split_patterns.json`**. Everything below is read
+from that file, so it stays true as patterns are added.
 
 ---
 
-**Last Updated**: 2026-02-16
+## Two detection strategies
+
+### Heading outline (preferred)
+
+Books ingested from Gutenberg carry an HTML heading outline, saved as `headings.json` at
+ingest. When that outline exists and looks convincing, the splitter anchors on it
+directly — no regex guessing. This is the most reliable path and is what `auto` picks
+whenever it can.
+
+`--heading-level` chooses which level holds the chapters (`h1`..`h6`, or a bare digit).
+The `heading_outline.levels` table in the split output lists every candidate level with
+its section count, so a wrong pick is a one-flag fix rather than a hand-written regex.
+
+### Regex patterns (fallback)
+
+For plain-text sources, or HTML whose outline isn't usable, the splitter scores each
+named pattern against the text and picks the best fit.
+
+---
+
+## Shipped patterns
+
+| Name | Matches | Numbering |
+|---|---|---|
+| `roman` | `Chapter I`, `Chapter II` on their own line | roman |
+| `numeric` | `Chapter 1`, `Chapter 2` on their own line | numeric |
+| `chapter_roman_titled` | `CHAPTER I. WATHO.` — roman numeral plus an optional inline title | roman |
+| `chapter_numeric_titled` | `CHAPTER 1 — THE JOURNEY` — numeric plus an optional inline title | numeric |
+| `allcaps_heading` | `ST. LOUIS`, `PEACE & WAR` — an all-caps line alone in its own paragraph | sequential |
+| `bare_roman` | `I`, `II`, `III` alone on a line, with no "Chapter" | roman |
+
+Plus three meta-values accepted by the `--chapter-pattern` flag:
+
+- **`auto`** (default) — anchor on the heading outline if it looks convincing, otherwise
+  score the regex patterns and pick the best.
+- **`headings`** — force the outline path even if `auto` wouldn't have chosen it.
+- **`custom`** — use your own regex via `--custom-regex`.
+
+The titled variants capture the subtitle separately and write it as a second line in the
+chapter file, which the EPUB builder renders as an `<h2>`.
+
+### Detection order and thresholds
+
+`detection_order` in the registry decides which patterns get tried first when scoring:
+`chapter_roman_titled` → `chapter_numeric_titled` → `bare_roman` → `allcaps_heading`.
+The titled variants come first because they are strictly more specific than the plain
+ones — a book matching `chapter_roman_titled` also matches `roman`, but only the former
+keeps the subtitles.
+
+Two patterns carry a `detect_min_ratio` of `0.5`: `allcaps_heading` and `bare_roman`.
+Both are dangerous generalists — an all-caps line could be a heading or could be emphatic
+prose, and a bare `I` is a pronoun as often as a chapter number. The ratio requires that
+at least half the candidate matches look structurally right before the pattern is
+selected at all.
+
+---
+
+## Front matter, back matter, and boilerplate
+
+The registry also classifies non-chapter sections by heading text:
+
+| Category | Recognized headings |
+|---|---|
+| **Front matter** | Preface, Foreword, Prologue, Introduction, Note to the Reader, Dedication, Acknowledgments, Author's Note |
+| **Back matter** | Epilogue, Afterword, Appendix, Colophon, Bibliography |
+| **Dropped** | Contents, Table of Contents, List of Illustrations, Illustrations, Title Page, Copyright, Transcriber's Note |
+
+Dropped sections are stripped by default; pass `--no-auto-strip` to keep them. Front and
+back matter are kept but tagged, so the EPUB orders them correctly.
+
+Override the classification per book when a heading doesn't match the patterns:
+
+```bash
+python scripts/harness.py split --project projects/my-book \
+    --front-matter-title "A Word Before" \
+    --back-matter-title "Notes on the Text"
+```
+
+`--no-auto-front-matter` / `--no-auto-back-matter` disable the keyword detection
+entirely if it is doing more harm than good.
+
+---
+
+## Previewing before you commit
+
+Always preview. `split-preview` runs the full detection and prints what it found without
+writing a single file:
+
+```bash
+python scripts/harness.py split-preview --project projects/my-book
+python scripts/harness.py split-preview --project projects/my-book --chapter-pattern bare_roman
+```
+
+When it looks right, run the same flags through `split`:
+
+```bash
+python scripts/harness.py split --project projects/my-book --chapter-pattern bare_roman
+```
+
+In the dashboard, Stage 2 does the same thing: **Preview** shows detected chapters with
+word counts, **Confirm & Split** writes the files.
+
+---
+
+## When nothing matches
+
+### Raise the minimum chapter size
+
+Short false matches — a stray heading-looking line in the front matter — are usually
+fixed by requiring more content per chapter:
+
+```bash
+python scripts/harness.py split-preview --project projects/my-book --min-chapter-size 500
+```
+
+Default is 100 characters.
+
+### Write a custom regex
+
+```bash
+python scripts/harness.py split-preview --project projects/my-book \
+    --chapter-pattern custom --custom-regex "^\s*PART\s+([IVX]+)\s*$"
+```
+
+Two traps worth knowing:
+
+- **Custom regexes are compiled with `IGNORECASE` by default.** That means a class like
+  `[A-Z][A-Z ]+` silently means "any run of letters and spaces" and will happily match
+  ordinary prose paragraphs. Pass `--custom-regex-case-sensitive` (or wrap the pattern in
+  `(?-i:...)`) when case is the whole point of the match.
+- **The shell will mangle long alternations** containing quotes, `$`, `|`, or accented
+  characters. Put the pattern in a file and use `--custom-regex-file` instead.
+
+### Add a permanent pattern
+
+If a shape recurs across books, add it to `src/split_patterns.json` rather than retyping
+a custom regex. Each entry needs:
+
+| Key | Purpose |
+|---|---|
+| `label` | Human-readable name shown in the dashboard's pattern dropdown |
+| `regex` | The splitting pattern; capture group 1 is the number, group 2 (optional) the title |
+| `flags` | List of `re` flag names, e.g. `["IGNORECASE", "MULTILINE"]` |
+| `numbering` | `roman`, `numeric`, or `sequential` |
+| `detect_regex` | Cheaper pattern used only for scoring during auto-detection |
+| `detect_min_ratio` | `null`, or a threshold for generalist patterns that need proof |
+
+Add the name to `detection_order` only if `auto` should consider it — specific patterns
+before general ones. The dashboard's dropdown and the harness's `--chapter-pattern`
+choices are both generated from this file, so no other change is needed.
+
+---
+
+## Re-splitting a book you already started
+
+`split` rewrites `chapters/` from `source.txt`. That is safe before chunking, and
+destructive after: chunks and translations are keyed to chapter IDs, so re-splitting a
+partially-translated book will orphan work.
+
+If you need to re-split after translating, treat it as a redo — see the retranslate
+section of [`TRANSLATE_HARNESS.md`](TRANSLATE_HARNESS.md#resuming-redoing-repairing).
+
+---
+
+## Previous-chapter context
+
+Once chapters exist, each chunk's translation prompt automatically receives the tail of
+the previous chapter as `{{previous_chapter_context}}`, so pronouns, running jokes, and
+character voice carry across a chapter boundary. This is handled for you on every backend
+— there is nothing to pass.
+
+---
+
+## The standalone CLI
+
+`scripts/split_book.py` predates the registry and exposes only `roman`, `numeric`, and
+`custom`. It has no heading-outline support and no titled variants. Prefer the harness or
+the dashboard for anything but a plain "Chapter I" book. See
+[`CLI_REFERENCE.md`](CLI_REFERENCE.md).
+
+---
+
+## Related
+
+| Document | Contents |
+|---|---|
+| [`INGEST_GUTENBERG.md`](INGEST_GUTENBERG.md) | Where `headings.json` comes from |
+| [`TRANSLATE_HARNESS.md`](TRANSLATE_HARNESS.md) | `split-preview` / `split` in the pipeline |
+| [`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md) | Stage 2 in the dashboard |
+| [`CHUNKING_GUIDE.md`](CHUNKING_GUIDE.md) | What happens to chapters next |

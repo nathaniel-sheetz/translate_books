@@ -1,36 +1,49 @@
 # web_ui/
 
-Flask web application providing the pipeline dashboard and bilingual reader.
+Flask application providing the pipeline dashboard and the bilingual reader.
 
-## Quick Start
+## Quick start
 
 ```bash
-python app.py
-# Open http://localhost:5000/project/<project_id>
+# From the repo root — not from inside web_ui/
+python -m web_ui.app
+
+# With auto-reload and the Werkzeug debugger (never for a service)
+BOOKS_DEBUG=1 python -m web_ui.app
 ```
 
-## File Structure
+Open `http://localhost:5000`. `app.py` imports `web_ui.i18n`, so it must run as a module
+from the repo root; `cd web_ui && python app.py` fails on that import.
+
+For the always-on service (waitress + rotating logs, driven by the
+`TranslateBooksReader` scheduled task) use `python scripts/serve.py` — see
+[`scripts/reader.ps1`](../scripts/reader.ps1).
+
+## File structure
 
 ```
 web_ui/
-├── app.py              # All routes and API endpoints
-├── i18n.py             # Server-side EN/ES translations
+├── app.py                      # All routes and API endpoints
+├── i18n.py                     # Server-side EN/ES translations
 ├── templates/
-│   ├── dashboard.html  # Pipeline wizard (8-stage stepper)
-│   ├── reader.html     # Bilingual reader + project/chapter lists
-│   └── chunk_edit.html # Full-textarea chunk editor
+│   ├── dashboard.html          # Pipeline wizard (8-stage stepper)
+│   ├── reader.html             # Bilingual reader + project/chapter lists
+│   ├── chunk_edit.html         # Full-textarea chunk editor
+│   └── edit_review_report.html.j2  # Edit-review HTML report (Jinja2)
 └── static/
-    ├── dashboard.js    # Dashboard stage logic, batch SSE, prompts
-    ├── dashboard.css   # Dashboard layout and styles
-    ├── reader.js       # Reader interactions, annotations, corrections
-    ├── reader.css      # Reader serif/reading styles
-    ├── chunk_edit.js   # Chunk editor save flow + caret positioning
-    ├── chunk_edit.css  # Chunk editor layout
-    ├── setup.js        # Style guide + glossary wizard logic
-    └── setup.css       # Setup wizard styles
+    ├── dashboard.js/.css       # Dashboard stage logic, batch SSE, prompts
+    ├── reader.js/.css          # Reader interactions, annotations, corrections
+    ├── reader_sheet_v2.js/.css # Bottom-sheet surface
+    ├── reader_projects.js      # Project list
+    ├── reader_chapters.js      # Chapter list
+    ├── concordance.js/.css     # "Find in book" search surface
+    ├── chunk_edit.js/.css      # Chunk editor save flow + caret positioning
+    ├── setup.js/.css           # Style guide + glossary wizard
+    ├── edit_review_report.css  # Styles for the edit-review report
+    └── manifest.webmanifest    # PWA manifest
 ```
 
-## Key Routes
+## Key routes
 
 | Route | Template | Purpose |
 |---|---|---|
@@ -41,48 +54,29 @@ web_ui/
 | `/read/<id>/<ch>` | reader.html | Bilingual reader |
 | `/read/<id>/<ch>/chunk/<chunk_id>/edit` | chunk_edit.html | Full-chunk text editor |
 
-## API Endpoints
+## API surface
 
-### Dashboard (`/api/project/<id>/...`)
+`app.py` defines 91 routes — 82 under `/api/`, plus the 9 page routes in the table
+above. By prefix:
 
-- `GET /status` — Full project status from filesystem
-- `POST /ingest` — Upload/paste source text
-- `POST /ingest-gutenberg` — Import from Gutenberg URL (fetches HTML, strips boilerplate, downloads images)
-- `POST /split/preview` — Dry-run chapter detection
-- `POST /split` — Execute chapter split
-- `POST /chunk-all` — Chunk all chapters
-- `GET /chapters/<ch>/chunks` — List chunks with status
-- `GET /chunks/<chunk_id>/prompt` — Rendered translation prompt
-- `POST /chunks/<chunk_id>/translate` — Save manual translation (recombines + realigns + re-anchors annotations)
-- `POST /translate/cost-estimate` — Estimate batch cost
-- `POST /translate/realtime` — Single-chunk API translation (recombines + realigns + re-anchors annotations)
-- `POST /translate/batch` — Start batch translation (returns job_id)
-- `GET /translate/sse?job_id=...` — SSE progress stream
-- `POST /combine/<ch>` — Combine chunks into chapter
-- `POST /align/<ch>` — Run sentence alignment
+| Prefix | Count | Covers |
+|---|---|---|
+| `/api/project/<id>/...` | 45 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs |
+| `/api/setup/<id>/...` | 13 | Style guide and glossary wizards |
+| `/api/alignment`, `/api/annotation(s)`, `/api/reviewed`, `/api/correction`, `/api/apply-corrections` | 9 | Reader data and review state |
+| `/api/llm-config`, `/api/llm/models`, `/api/split-patterns`, `/api/edit-tags`, `/api/set-*` | 8 | Config and UI preferences |
+| `/api/sentence/...`, `/api/chunk/...`, `/api/remove-text`, `/api/removal-context` | 5 | Per-sentence and per-chunk editing |
+| `/api/search/<project_id>` | 1 | Concordance ("Find in book") |
+| `/api/projects/create` | 1 | Project creation |
 
-### Setup (`/api/setup/<id>/...`)
+The list is deliberately not enumerated here — it drifts. To see the live surface:
 
-- `POST /prompts/questions` — Generate LLM questions prompt
-- `POST /prompts/style-guide` — Generate style guide prompt
-- `POST /style-guide` — Save style guide
-- `POST /style-guide/fallback` — Generate without LLM
-- `POST /extract-candidates` — Extract glossary candidates
-- `POST /prompts/glossary` — Generate glossary prompt
-- `POST /glossary` — Save glossary
+```bash
+python -c "from web_ui.app import app; [print(r.rule) for r in sorted(app.url_map.iter_rules(), key=lambda r: r.rule)]"
+```
 
-### Reader
-
-- `GET /api/alignment/<id>/<ch>` — Alignment data
-- `POST /api/correction` — Save correction
-- `GET/POST/DELETE /api/annotations/<id>/<ch>` — Annotations
-- `GET/POST/DELETE /api/reviewed/<id>/<ch>` — Reviewed status
-- `POST /api/apply-corrections/<id>` — Batch apply corrections
-- `POST /api/chunk/<id>/<chunk_id>/edit` — Save a full-chunk text edit (recombines + realigns)
-
-## Documentation
-
-See [`docs/WEB_UI_GUIDE.md`](../docs/WEB_UI_GUIDE.md) for full reference.
+Behavior for each stage is documented in
+[`docs/WEB_UI_GUIDE.md`](../docs/WEB_UI_GUIDE.md).
 
 ## Tests
 

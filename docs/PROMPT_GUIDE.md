@@ -1,653 +1,213 @@
-# Prompt Template Guide
+# Prompt Templates
 
-## Table of Contents
-
-1. [Introduction](#introduction)
-2. [Quick Start](#quick-start)
-3. [Template Basics](#template-basics)
-4. [Standard Variables](#standard-variables)
-5. [Creating Custom Prompts](#creating-custom-prompts)
-6. [Project Overrides](#project-overrides)
-7. [Testing Prompts](#testing-prompts)
-8. [Best Practices](#best-practices)
-9. [Examples](#examples)
-10. [Troubleshooting](#troubleshooting)
-11. [Style Guide Feature Detection](#style-guide-feature-detection)
+Every LLM call in this project renders a plain-text template from `prompts/`. Editing
+those files is how you change what the models are told — no code change required.
 
 ---
 
-## Introduction
+## The template format
 
-The Book Translation Workflow uses **Jinja2 template engine** for all LLM prompts. This provides:
+Templates are **plain text with `{{variable}}` placeholders**. Substitution is a literal
+string replace (`render_prompt` in `src/utils/file_io.py`), not Jinja2:
 
-- **Flexibility**: Customize prompts per project without changing code
-- **Consistency**: Standard variables across all prompts
-- **Maintainability**: Version control your prompts alongside code
-- **Reproducibility**: Track which prompt version was used for each translation
+- No conditionals, no loops, no filters, no expressions.
+- A placeholder left unfilled raises `KeyError` naming the variable, so a typo fails
+  loudly instead of shipping `{{styl_guide}}` to the model.
+- Anything you don't recognize, leave alone — the caller decides what gets passed.
 
-Templates support variable substitution, conditional sections, and dynamic content generation.
+(Jinja2 *is* used elsewhere in the repo, for the edit-review HTML report at
+`web_ui/templates/edit_review_report.html.j2`. That is a report template, not a prompt.)
 
----
+### Header comments
 
-## Quick Start
-
-### Using Default Prompts
-
-By default, projects use the global templates in `prompts/`:
-
-```bash
-# Initialize a project (uses default prompts automatically)
-book-translate init my_book
-
-# Translate using default translation prompt
-book-translate translate my_book --mode api
-```
-
-### Customizing a Prompt
-
-To customize a prompt for your specific project:
-
-```bash
-# Copy global template to your project
-cp prompts/translation.txt.jinja projects/my_book/prompts/
-
-# Edit the project-specific version
-nano projects/my_book/prompts/translation.txt.jinja
-
-# System automatically uses your custom version
-book-translate translate my_book --mode api
-```
-
----
-
-## Template Basics
-
-### Jinja2 Syntax Overview
-
-Prompts use Jinja2 template syntax:
-
-**Variables** (substituted with values):
-```jinja2
-{{variable_name}}
-```
-
-**Conditionals** (include section only if variable exists):
-```jinja2
-{% if variable_name %}
-This text only appears if variable_name is provided.
-{% endif %}
-```
-
-**Comments** (not included in rendered output):
-```jinja2
-{# This is a comment explaining the template #}
-```
-
-### Example Template
-
-```jinja2
-{# Basic translation prompt with conditional glossary #}
-You are translating from {{source_language}} to {{target_language}}.
-
-Project: {{project_name}}
-
-{% if glossary %}
-Use these translations consistently:
-{{glossary}}
-{% endif %}
-
-Translate this text:
-{{source_text}}
-```
-
-When rendered with variables:
-- `source_language = "en"`
-- `target_language = "es"`
-- `project_name = "don_quixote"`
-- `glossary = "- Sancho: Sancho\n- Rocinante: Rocinante"`
-- `source_text = "In a village of La Mancha..."`
-
-Result:
-```
-You are translating from en to es.
-
-Project: don_quixote
-
-Use these translations consistently:
-- Sancho: Sancho
-- Rocinante: Rocinante
-
-Translate this text:
-In a village of La Mancha...
-```
-
----
-
-## Standard Variables
-
-All translation prompts have access to these standard variables:
-
-### Core Variables (Always Available)
-
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `project_name` | str | Project identifier | `"don_quixote"` |
-| `source_language` | str | Source language code | `"en"` |
-| `target_language` | str | Target language code | `"es"` |
-| `chunk_id` | str | Current chunk ID | `"ch01_chunk_003"` |
-| `chapter_id` | str | Current chapter ID | `"chapter_01"` |
-
-### Content Variables
-
-| Variable | Type | Description | Required For |
-|----------|------|-------------|--------------|
-| `source_text` | str | Text to translate | Translation prompts |
-| `excerpt` | str | Sample text for analysis | Context generation |
-
-### Optional Enhancement Variables
-
-| Variable | Type | Description | Default |
-|----------|------|-------------|---------|
-| `glossary` | str | Formatted glossary terms | `None` (not included) |
-| `book_context` | str | Book description, genre, style | `None` |
-| `style_guide` | str | Translation style guidelines | `None` |
-
-### Custom Variables
-
-You can add project-specific variables via `config.json`:
-
-```json
-{
-  "translation": {
-    "prompt_template": "translation.txt.jinja",
-    "prompt_variables": {
-      "formality_level": "formal",
-      "target_audience": "adult readers",
-      "preserve_archaisms": true
-    }
-  }
-}
-```
-
-Access in templates:
-```jinja2
-{% if formality_level %}
-Use {{formality_level}} register throughout.
-{% endif %}
-```
-
----
-
-## Creating Custom Prompts
-
-### Step 1: Start with a Template
-
-Begin with an existing prompt:
-
-```bash
-# Copy default translation prompt
-cp prompts/translation.txt.jinja my_custom_prompt.txt.jinja
-```
-
-### Step 2: Modify for Your Needs
-
-Edit the template to match your book's requirements:
-
-```jinja2
-{# Custom prompt for translating poetry #}
-You are translating poetry from {{source_language}} to {{target_language}}.
-
-Project: {{project_name}}
-
-IMPORTANT: This is poetry translation. Focus on:
-- Preserving meter and rhythm where possible
-- Maintaining rhyme schemes when feasible
-- Capturing emotional tone over literal meaning
-- Using natural, flowing {{target_language}}
-
-{% if glossary %}
-Key terms to use consistently:
-{{glossary}}
-{% endif %}
-
-{% if book_context %}
-Context about this poem:
-{{book_context}}
-{% endif %}
-
-Poem to translate:
-{{source_text}}
-
-Provide only the translated poem, maintaining line breaks.
-```
-
-### Step 3: Test the Template
-
-Test your template before using it in production:
-
-```bash
-# Validate syntax
-book-translate validate-prompt my_custom_prompt.txt.jinja
-
-# Test render with sample data
-book-translate test-prompt my_custom_prompt.txt.jinja \
-  --project my_book \
-  --sample-text "The rose is red"
-```
-
-### Step 4: Use in Your Project
-
-Add to your project configuration:
-
-```json
-{
-  "translation": {
-    "prompt_template": "my_custom_prompt.txt.jinja"
-  }
-}
-```
-
----
-
-## Project Overrides
-
-### Override Resolution Order
-
-The system searches for prompts in this order:
-
-1. **Project-specific**: `projects/{project_name}/prompts/{template_name}`
-2. **Global default**: `prompts/{template_name}`
-3. **Error**: If neither found, raises `FileNotFoundError`
-
-### Creating an Override
-
-**Method 1: Manual Copy**
-```bash
-# Copy to project directory
-mkdir -p projects/my_book/prompts
-cp prompts/translation.txt.jinja projects/my_book/prompts/
-
-# Edit project version
-nano projects/my_book/prompts/translation.txt.jinja
-```
-
-**Method 2: Using CLI** (when implemented)
-```bash
-# Create override from default
-book-translate customize-prompt my_book translation.txt.jinja
-
-# Opens editor automatically
-```
-
-**Method 3: Programmatic**
-```python
-from pathlib import Path
-from src.utils.file_io import create_project_prompt_override
-
-create_project_prompt_override(
-    project_path=Path("projects/my_book"),
-    prompt_name="translation.txt.jinja"
-)
-```
-
-### Mixing Defaults and Overrides
-
-You can override some prompts while using defaults for others:
+A prompt file may open with `#` comment lines documenting its version and variables.
+Everything before the first line of eighty `=` characters is stripped before the prompt
+reaches the model, so those notes cost you nothing:
 
 ```
-projects/my_book/
-├── prompts/
-│   └── translation.txt.jinja      ← Custom translation prompt
-└── config.json
+# Translation Prompt Template
+# Version: 1.3
+# Available variables: book_title, source_text, ...
 
-# Context generation still uses default:
-prompts/
-├── translation.txt.jinja           ← Default (unused for my_book)
-└── context_generation.txt.jinja   ← Default (used by my_book)
-```
-
----
-
-## Testing Prompts
-
-### Syntax Validation
-
-Check template syntax without rendering:
-
-```bash
-# Validate single template
-book-translate validate-prompt translation.txt.jinja
-
-# Validate all prompts in project
-book-translate validate-prompts projects/my_book
-```
-
-Returns:
-- ✓ Valid Jinja2 syntax
-- ✓ File exists and is readable
-- ⚠ Warnings for unused variables
-- ✗ Errors for syntax problems
-
-### Test Rendering
-
-Render template with sample data:
-
-```bash
-book-translate test-prompt translation.txt.jinja \
-  --project my_book \
-  --source-text "Sample text to translate" \
-  --glossary glossary.json \
-  --show-variables
-```
-
-Output:
-```
-=== Variables Used ===
-project_name: my_book
-source_language: en
-target_language: es
-glossary: [formatted glossary]
-source_text: Sample text to translate
-
-=== Rendered Prompt ===
-[Full rendered prompt shown here]
-
-=== Stats ===
-Length: 450 characters
-Estimated tokens: ~112
-```
-
-### A/B Testing Prompts
-
-Compare results from different prompts:
-
-```bash
-# Translate same chunk with two prompts
-book-translate translate my_book chunk_01 \
-  --prompt translation_v1.txt.jinja \
-  --output translation_v1.txt
-
-book-translate translate my_book chunk_01 \
-  --prompt translation_v2.txt.jinja \
-  --output translation_v2.txt
-
-# Compare results
-diff translation_v1.txt translation_v2.txt
-```
-
----
-
-## Best Practices
-
-### Template Design
-
-**DO**:
-- ✓ Use conditional blocks for optional variables: `{% if var %}...{% endif %}`
-- ✓ Add comments explaining each section: `{# This section... #}`
-- ✓ Keep prompts focused on single responsibility
-- ✓ Test with missing/partial variables
-- ✓ Keep total length under 2000 tokens when rendered
-- ✓ Use clear, specific instructions
-- ✓ Provide examples in the prompt when helpful
-
-**DON'T**:
-- ✗ Hard-code project-specific details (use variables)
-- ✗ Use undefined variables without conditionals
-- ✗ Make prompts excessively verbose
-- ✗ Include sensitive data in templates
-- ✗ Assume variables will always be present
-- ✗ Use complex logic (if/else chains)—keep templates simple
-
-### Variable Naming
-
-Use descriptive, consistent names:
-- `source_text` not `text` or `input`
-- `book_context` not `context` (ambiguous)
-- `target_language` not `lang` (unclear)
-
-### Documentation
-
-Document your custom prompts:
-
-```jinja2
-{#
-Custom translation prompt for poetry
-Author: Jane Doe
-Version: 2.1
-Last Updated: 2025-01-28
-
-This prompt is optimized for:
-- Poetry and verse translation
-- Maintaining meter and rhyme
-- Preserving emotional resonance
-
-Variables required:
-- source_text (required)
-- project_name (required)
-- glossary (optional)
-- book_context (optional)
-#}
-
-You are translating poetry from {{source_language}} to {{target_language}}.
+================================================================================
+YOUR ROLE
+================================================================================
 ...
 ```
 
-### Version Control
+---
 
-Track prompt changes in git:
+## Customizing a prompt: the `.example.txt` rule
+
+Six prompts are meant to be edited per-user. Each ships as a checked-in
+`<name>.example.txt`, and the loader prefers your own `<name>.txt` when it exists
+(`_resolve_prompt_path` in `src/style_guide_wizard.py`, `_resolve_dialogue_path` in
+`src/utils/text_utils.py`). Your copy is gitignored, so your edits never collide with an
+update to the shipped defaults.
 
 ```bash
-# Commit prompt changes with descriptive messages
-git add projects/my_book/prompts/translation.txt.jinja
-git commit -m "Update translation prompt: add meter preservation instructions"
+# Take ownership of the translation prompt
+cp prompts/translation.example.txt prompts/translation.txt
+
+# Edit it — it is now the one that gets used
 ```
 
-Tag important versions:
-```bash
-git tag -a prompt-v2.0 -m "Translation prompt v2.0 - improved glossary handling"
-```
+The overridable six, exactly as listed in `.gitignore`:
+
+| Your copy (gitignored) | Shipped default | Controls |
+|---|---|---|
+| `prompts/translation.txt` | `translation.example.txt` | The main translation prompt |
+| `prompts/style_guide_generate.txt` | `style_guide_generate.example.txt` | How the style guide is drafted |
+| `prompts/style_guide_questions.txt` / `.json` | `style_guide_questions.example.*` | The style-guide question set |
+| `prompts/glossary_bootstrap.txt` | `glossary_bootstrap.example.txt` | Glossary candidate translation |
+| `prompts/dialogue.txt` | `dialogue.example.txt` | Spanish dialogue formatting rules |
+| `prompts/translator_note_default.txt` | `translator_note_default.example.txt` | Pre-filled "Note from the Translator" |
+
+Every other prompt in `prompts/` is tracked directly — edit it in place and the change is
+a normal commit.
+
+> `prompts/dialogue.txt` is the one the dialogue judge checks translations against. If you
+> change your dialogue conventions, change them here, or the judge will keep flagging
+> prose that matches your actual intent.
 
 ---
 
-## Examples
+## What each prompt does
 
-### Example 1: Basic Translation Prompt
+### Translation
 
-**File**: `prompts/translation.txt.jinja`
+| File | Used by |
+|---|---|
+| `translation.txt` | Every translation call, on all three backends |
+| `retranslate_sentence.txt` | The reader's per-sentence Retranslate button |
+| `dialogue.txt` | Injected into translation prompts as `{{dialogue_instructions}}` |
 
-```jinja2
-{# Default translation prompt for general fiction #}
-You are translating a book from {{source_language}} to {{target_language}}.
+### Setup beats
 
-Project: {{project_name}}
+| File | Used by |
+|---|---|
+| `style_guide_questions.txt` / `.json` | The fixed + conditional question set |
+| `style_guide_generate.txt` | Drafting the style guide from your answers |
+| `glossary_bootstrap.txt` | Proposing translations for glossary candidates |
+| `glossary_bootstrap_word.example.txt` | Single-word glossary variant |
+| `address_map_generate.txt` | Drafting the usted/tú address map |
 
-{% if book_context %}
-Book Context:
-{{book_context}}
-{% endif %}
+### Judges
 
-{% if glossary %}
-Translation Glossary (use these exact translations):
-{{glossary}}
-{% endif %}
+| File | Used by |
+|---|---|
+| `judge_dialogue.txt`, `judge_dialogue_batch.txt` | Dialogue-compliance judge |
+| `judge_address.txt`, `judge_address_batch.txt` | Forms-of-address judge |
+| `address_forms.txt` | The shared usted/tú detection rubric both address judges load |
+| `judge_absolute.txt` + `_full_context` / `_no_voice` | Absolute-score evaluator variants |
+| `judge_pairwise.txt` + `_full_context` / `_no_voice` | Pairwise model comparison |
 
-{% if style_guide %}
-Style Guidelines:
-{{style_guide}}
-{% endif %}
+See [`JUDGES_FRAMEWORK.md`](JUDGES_FRAMEWORK.md) and
+[`LLM_JUDGE_EVALUATOR.md`](LLM_JUDGE_EVALUATOR.md).
 
-Instructions:
-- Preserve paragraph structure exactly
-- Maintain the author's tone and style
-- Use natural, fluent {{target_language}}
-- Keep special formatting (emphasis, etc.)
-- Translate idioms to natural equivalents
+### Annotations
 
-Source Text:
-{{source_text}}
+| File | Used by |
+|---|---|
+| `annotation_word_choice.txt` | Word-choice doubts |
+| `annotation_inconsistency.txt` | Suspected inconsistencies (book-wide verdict) |
+| `annotation_footnote.txt` | Drafting an endnote gloss |
+| `annotation_flag.txt` | Free-form "Other" notes |
 
-Provide only the translated text without explanation.
-```
+See [`ANNOTATION_REVIEW.md`](ANNOTATION_REVIEW.md).
 
-### Example 2: Context Generation Prompt
+### Other
 
-**File**: `prompts/context_generation.txt.jinja`
-
-```jinja2
-{# Generate book context from excerpt #}
-You are preparing context information for translating a book.
-
-Book: {{project_name}}
-Translation: {{source_language}} → {{target_language}}
-
-Based on this excerpt from the book, provide:
-
-1. **Genre & Style**: What genre is this? What's the writing style? (formal/informal, modern/archaic, descriptive/sparse)
-
-2. **Time Period & Setting**: When and where is this set? Are there historical or cultural elements to consider?
-
-3. **Tone**: What's the emotional tone? (serious, humorous, dark, uplifting, etc.)
-
-4. **Translation Considerations**: What specific challenges might arise in {{target_language}} translation?
-
-Excerpt:
-{{excerpt}}
-
-Provide a concise summary (2-3 paragraphs) that will guide consistent translation throughout the book.
-```
-
-### Example 3: Custom Prompt for Technical Books
-
-```jinja2
-{# Technical manual translation #}
-You are translating a technical manual from {{source_language}} to {{target_language}}.
-
-Project: {{project_name}}
-
-{% if glossary %}
-CRITICAL: Use these exact technical terms:
-{{glossary}}
-{% endif %}
-
-Translation Requirements:
-- Accuracy over fluency (precision is critical)
-- Preserve all technical terminology
-- Maintain numbered lists and formatting exactly
-- Keep code snippets, commands, and paths unchanged
-- Translate UI labels as shown in glossary
-- Keep ALL placeholders like {{example}} intact
-
-{% if formality_level %}
-Formality: Use {{formality_level}} register
-{% endif %}
-
-Source Text:
-{{source_text}}
-
-Provide only the translated text. Do not translate code, commands, or placeholders.
-```
+| Path | What it is |
+|---|---|
+| `translator_note_default.txt` | Pre-fills the Export stage's translator note (falls back to `.example.txt` until you create your copy) |
+| `prompts/history/` | Archived prompt versions |
+| `prompts/previous/` | Scratch space for the version you just replaced |
 
 ---
 
-## Troubleshooting
+## Translation prompt variables
 
-### Error: Template Not Found
+`build_translation_prompt` (`src/api_translator.py`) passes exactly these:
 
-**Problem**: `FileNotFoundError: Template 'translation.txt.jinja' not found`
+| Variable | What it holds |
+|---|---|
+| `{{book_title}}` | Project name |
+| `{{source_language}}` | e.g. `English` |
+| `{{target_language}}` | e.g. `Spanish` |
+| `{{source_text}}` | The chunk to translate |
+| `{{glossary}}` | Glossary terms relevant to this chunk, or `No glossary provided.` |
+| `{{style_guide}}` | Style guide content, or `No style guide provided.` |
+| `{{previous_chapter_context}}` | Tail of the previous chapter, for continuity |
+| `{{context}}` | Extra context slot (currently empty) |
+| `{{dialogue_instructions}}` | Rendered from `dialogue.txt` when the chunk has dialogue |
+| `{{image_placeholder_instructions}}` | Structure-preservation rules when the chunk has `[IMAGE:...]` tokens |
 
-**Solutions**:
-1. Check filename spelling (case-sensitive)
-2. Verify template exists in `prompts/` or `projects/{name}/prompts/`
-3. Check config.json `prompt_template` path
+The glossary is **filtered per chunk** — only terms that actually appear in this chunk's
+source text are included, which keeps the prompt small and the cache stable.
+
+### Section order is cache-load-bearing
+
+`prompts/translation.txt` is split into a fixed prefix and a per-chunk suffix so the
+prefix stays byte-identical across every chunk of a book and hits the provider's prompt
+cache. **Reordering sections will silently cost you money** on the API backend by
+invalidating that prefix.
+
+Two per-book switches decide whether volatile blocks live in the cached prefix:
 
 ```bash
-# List available templates
-ls prompts/
-ls projects/my_book/prompts/
+python scripts/harness.py config-set --project projects/my-book \
+    --key always_include_dialogue --value true
+python scripts/harness.py config-set --project projects/my-book \
+    --key always_include_image_instructions --value true
 ```
 
-### Error: Undefined Variable
-
-**Problem**: `jinja2.UndefinedError: 'glossary' is undefined`
-
-**Cause**: Template uses variable without conditional check
-
-**Fix**: Wrap optional variables in conditionals:
-
-❌ **Wrong**:
-```jinja2
-Use these terms:
-{{glossary}}
-```
-
-✓ **Correct**:
-```jinja2
-{% if glossary %}
-Use these terms:
-{{glossary}}
-{% endif %}
-```
-
-### Error: Template Syntax Error
-
-**Problem**: `jinja2.TemplateSyntaxError: unexpected '}'`
-
-**Cause**: Malformed Jinja2 syntax
-
-**Fix**: Check for:
-- Unmatched `{% if %}` without `{% endif %}`
-- Wrong brackets: `{glossary}` should be `{{glossary}}`
-- Missing closing tags
-
-Validate before using:
-```bash
-book-translate validate-prompt my_template.txt.jinja
-```
-
-### Warning: Large Prompt Size
-
-**Problem**: Warning: Rendered prompt is 3500 tokens (recommended: <2000)
-
-**Solutions**:
-1. Simplify instructions
-2. Move detailed guidelines to `style_guide` variable
-3. Reduce glossary to essential terms only
-4. Split into multiple specialized prompts
-
-### Variable Not Substituting
-
-**Problem**: Rendered prompt shows `{{variable_name}}` literally
-
-**Causes**:
-1. Variable not passed to renderer
-2. Typo in variable name
-3. Template loaded as plain text, not Jinja2
-
-**Debug**:
-```bash
-# Show which variables are being passed
-book-translate test-prompt my_template.txt.jinja \
-  --project my_book \
-  --show-variables \
-  --debug
-```
+Both default to auto: on when any chunk in the book has dialogue / images. Forcing them
+on puts the block in the fixed prefix for every chunk, which trades a slightly longer
+prompt for a stable cache. These are also `setup` flags
+(`--always-dialogue` / `--always-images`) and are settable mid-book — you never need to
+re-run `setup` to change them.
 
 ---
 
-## Style Guide Feature Detection
+## Testing a change
 
-The style-guide wizard does not just ask a fixed list of questions. Before any
-prompt is shown, `src/text_feature_detector.py` performs a deterministic
-heuristic scan over the **entire** project source and writes a **feature
-manifest** to `projects/<id>/text_features.json`. The source text is resolved
-by `src/utils/source_text.load_clean_source_text` in this priority order:
-`chunks/*_chunk_*.json` (the `source_text` field — immutable, source-language)
-→ `chapters/<id>.txt` → `source.txt`. Chunks come first so the scan stays in
-the source language even after `chapters/` has been overwritten with
-translated content. The manifest gates which conditional
-questions are surfaced to the user and is also embedded as a compact summary
-in the LLM-generated-questions prompt so the LLM does not duplicate questions
-the wizard already covers.
+There is no separate validation command. The fastest check is to render a real prompt and
+read it:
+
+```bash
+# Renders one prompt file per chunk under .harness/translate/ — no spend
+python scripts/harness.py translate-prepare --project projects/my-book --chapters 1
+```
+
+Then open `projects/my-book/.harness/translate/chapter_01_chunk_000.prompt.txt`. That is
+byte-for-byte what a worker receives.
+
+On the API path, `--dry-run` renders and estimates without spending:
+
+```bash
+python scripts/translate_api.py chunks/chapter_01_chunk_000.json --dry-run
+```
+
+A missing variable surfaces as a `KeyError` naming it. A prompt that renders but produces
+bad output is a prompt problem, not a template problem — iterate on one chunk before
+committing to a wave.
+
+---
+
+## Style guide feature detection
+
+The style-guide wizard does not ask a fixed list of questions. Before any prompt is
+shown, `src/text_feature_detector.py` runs a deterministic heuristic scan over the
+**entire** source and writes a feature manifest to `projects/<id>/text_features.json`.
+The manifest decides which conditional questions you see, and a compact summary of it is
+embedded in the LLM-generated-questions prompt so the model does not re-ask what the
+wizard already covers.
+
+Source text is resolved by `src/utils/source_text.load_clean_source_text` in priority
+order: `chunks/*_chunk_*.json` (the immutable `source_text` field) → `chapters/<id>.txt`
+→ `source.txt`. Chunks come first so the scan stays in the source language even after
+`chapters/` has been overwritten with translated content.
 
 ### Manifest shape
 
@@ -659,173 +219,50 @@ the wizard already covers.
   "total_words": 18626,
   "features": {
     "dialogue":             { "name": "dialogue",             "present": true,  "count": 58, "confidence": 0.50, "evidence": ["..."] },
-    "verse":                { "name": "verse",                "present": true,  "count": 6,  "confidence": 0.33, "evidence": ["..."] },
     "scripture_references": { "name": "scripture_references", "present": true,  "count": 45, "confidence": 1.00, "evidence": ["John 3:16 ..."] },
-    "archaic_language":     { "name": "archaic_language",     "present": true,  "count": 210,"confidence": 1.00, "evidence": ["..."] },
     "footnotes":            { "name": "footnotes",            "present": false, "count": 0,  "confidence": 0.0,  "evidence": [] }
   }
 }
 ```
 
-The cache is invalidated automatically when the source mtime is newer than
-`source_mtime`. Pass `--force-rescan` to `scripts/generate_style_guide.py` to
-re-run unconditionally.
+The cache invalidates automatically when the source mtime is newer than `source_mtime`.
 
 ### Detector library
 
 | Feature | What it looks for |
 |---|---|
-| `dialogue` | Reuses `src/chunker.py` `_is_dialogue()` + paragraphs starting with raya (`—`). Present if `count >= 5` and ratio > 1% of paragraphs. |
-| `verse` | Runs of ≥4 consecutive short (<60-char), non-terminal lines, separated by blank lines / scene breaks. |
-| `footnotes` | `[N]` brackets, `^N. ` runs in the back third of the text, repeated `*` markers. |
-| `epigraphs` | Short (<300-char) paragraph immediately after a chapter heading containing an em-dash attribution. |
-| `letters` | Salutation (`Dear`, `Mi querido`, `Estimado`) + valediction (`Sincerely`, `Atentamente`) within 60 paragraphs. |
-| `scripture_references` | `Book chapter:verse` against a Bible-book wordlist (English + Spanish, including 1/2/3 prefixes). |
-| `archaic_language` | Frequency of `thou/thee/thy/hast/...` (English) or `vos/vuestra merced/heos/...` (Spanish) above 5 per 10K words. |
-| `foreign_passages` | ≥3 distinct `_italic_` / `*italic*` runs of ≥2 words. |
-| `lists` | ≥1 run of ≥3 consecutive lines starting with `-`, `*`, `•`, `1.`, `a)`, etc. |
-| `block_quotes` | Indented (≥4 spaces) long lines or `…:` followed by a long quoted paragraph. |
-| `dramatic_format` | ALL-CAPS speaker names + `:` and/or `[Enter ...]` style stage directions. |
-| `measurements_imperial` | Regex for `\d+ (miles\|feet\|inches\|lbs\|°F\|...)`. |
-| `currency_period` | `$`, `£`, `shilling`, `peso`, `real`, `maravedí`, etc. |
-| `translator_notes` | `[N. del T.`, `[Translator's note`, `[Nota del traductor`. |
+| `dialogue` | Reuses `src/chunker.py` `_is_dialogue()` plus paragraphs opening with a raya (`—`). Present at `count >= 5` and >1% of paragraphs |
+| `verse` | Runs of ≥4 consecutive short (<60-char), non-terminal lines separated by blank lines |
+| `footnotes` | `[N]` brackets, `^N. ` runs in the back third of the text, repeated `*` markers |
+| `epigraphs` | Short (<300-char) paragraph right after a chapter heading with an em-dash attribution |
+| `letters` | Salutation (`Dear`, `Mi querido`, `Estimado`) plus valediction (`Sincerely`, `Atentamente`) within 60 paragraphs |
+| `scripture_references` | `Book chapter:verse` against a Bible-book wordlist (English + Spanish, including 1/2/3 prefixes) |
+| `archaic_language` | `thou/thee/thy/hast/…` or `vos/vuestra merced/heos/…` above 5 per 10K words |
+| `foreign_passages` | ≥3 distinct `_italic_` / `*italic*` runs of ≥2 words |
+| `lists` | ≥1 run of ≥3 consecutive lines starting with `-`, `*`, `•`, `1.`, `a)` |
+| `block_quotes` | Indented (≥4 spaces) long lines, or `…:` followed by a long quoted paragraph |
+| `dramatic_format` | ALL-CAPS speaker names with `:`, and/or `[Enter …]` stage directions |
+| `measurements_imperial` | `\d+ (miles|feet|inches|lbs|°F|…)` |
+| `currency_period` | `$`, `£`, `shilling`, `peso`, `real`, `maravedí` |
+| `translator_notes` | `[N. del T.`, `[Translator's note`, `[Nota del traductor` |
+| `epicene_animal_speakers` | Animal characters whose English source establishes a sex but whose Spanish noun is epicene (one fixed grammatical gender). Confidence rises when the English sex cue *conflicts* with the Spanish noun's gender — the case where a naive translation silently flips a character's apparent sex |
 
-### Conditional questions
+### Adding a conditional question
 
-`prompts/style_guide_questions.json` is now a dict with two arrays:
+`prompts/style_guide_questions.json` holds two arrays: the fixed questions (always asked)
+and the conditional ones, each gated on a predicate over the manifest. To add one, write
+a detector in `src/text_feature_detector.py` returning a `FeatureResult`, register it in
+`detect_all_features`, then add the question with a predicate naming your feature. Each
+conditional question shows a one-line `Detected: …` excerpt so the user can see why it is
+being asked.
 
-```json
-{
-  "fixed":       [ /* dialect, forms_of_address, person_name_handling, place_name_handling */ ],
-  "conditional": [ /* dialogue_formatting, verse_handling, footnote_handling, ... */ ]
-}
-```
+---
 
-Each conditional question carries a `requires` predicate evaluated against the
-manifest:
+## Related
 
-```json
-{
-  "id": "dialogue_formatting",
-  "requires": { "feature": "dialogue", "min_count": 5 },
-  "question": "How should dialogue be formatted?",
-  "options": [ ... ]
-}
-```
-
-Predicate keys:
-
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `feature`        | string | required  | Manifest key to look up. |
-| `present`        | bool   | `true`    | Require the feature's `present` flag. |
-| `min_count`      | int    | none      | Minimum `count` value. |
-| `min_confidence` | float  | none      | Minimum `confidence` (0.0–1.0). |
-
-A legacy flat-list config (the pre-v0.6 format) is still accepted and treated
-as `{"fixed": [...], "conditional": []}`.
-
-### Adding a new conditional question
-
-1. Add a detector in `src/text_feature_detector.py` (a function returning
-   `FeatureResult(name, present, count, confidence, evidence)`) and register
-   it in `DETECTORS`.
-2. Add a unit test in `tests/test_text_feature_detector.py` covering both a
-   positive fixture and a negative case.
-3. Append a question to the `conditional` array in
-   `prompts/style_guide_questions.json` (and the tracked
-   `prompts/style_guide_questions.example.json`) with a `requires` predicate
-   pointing at your new feature key.
-4. The wizard surfaces it automatically — no code change in
-   `scripts/generate_style_guide.py` or `src/style_guide_wizard.py` is
-   required.
-
-### LLM-prompt manifest summary
-
-`prompts/style_guide_questions.txt` exposes a `{{ feature_manifest_summary }}`
-slot. `build_question_prompt(..., manifest=...)` renders a one-line-per-feature
-summary into it; the prompt instructs the LLM that features marked `✓` already
-have dedicated wizard questions and not to duplicate them, and to lean on the
-manifest as ground-truth evidence about content beyond the 15 K-character
-sample.
-
-If `manifest=None` is passed (e.g., for tests or external callers), the slot
-renders `(no manifest available)` so prompt rendering never errors out.
-
-### Public API in `src/style_guide_wizard.py`
-
-| Function | Purpose |
+| Document | Contents |
 |---|---|
-| `load_question_config(path=None)` | Returns `{"fixed": [...], "conditional": [...]}`. Accepts the legacy flat-list format too. |
-| `load_fixed_questions(path=None)` | Back-compat shim — returns only `fixed`. |
-| `load_conditional_questions(path=None)` | Returns only `conditional`. |
-| `get_active_questions(project_dir, *, config_path=None, manifest=None, force=False)` | Convenience: loads the config, runs / loads the manifest, filters conditionals; returns `(fixed, active_conditional, manifest)`. |
-| `build_question_prompt(... manifest=None)` | Renders the LLM prompt with the manifest summary block. |
-
-### Public API in `src/text_feature_detector.py`
-
-| Function / Class | Purpose |
-|---|---|
-| `detect_all_features(project_dir, *, force=False, text=None)` | Run all detectors with on-disk caching; pass `text=` to bypass file loading (for tests). |
-| `build_manifest(full_text)` | Run all detectors against an in-memory string. |
-| `manifest_path(project_dir)` | Return the cache path (`{project_dir}/text_features.json`). |
-| `matches_requires(requires, manifest)` | Evaluate a `requires` predicate against a manifest. |
-| `filter_conditional_questions(conditional, manifest)` | Filter a list of question dicts against a manifest. |
-| `manifest_summary(manifest)` | Compact one-line-per-feature summary for embedding in prompts. |
-| `FeatureManifest`, `FeatureResult` | Dataclasses with `to_dict()` / `from_dict()` for JSON round-trips. |
-
----
-
-## Related Documentation
-
-- **[DESIGN.md](DESIGN.md)**: Architecture and data models (see Prompt Management section)
-- **[prompts/README.md](prompts/README.md)**: Directory structure and available templates
-- **[prompts/VARIABLES.md](prompts/VARIABLES.md)**: Complete variable reference
-- **[GETTING_STARTED.md](GETTING_STARTED.md)**: Customizing prompts tutorial
-
----
-
-## Quick Reference Card
-
-### Common Variable Patterns
-
-```jinja2
-{# Required variable #}
-{{project_name}}
-
-{# Optional variable #}
-{% if glossary %}{{glossary}}{% endif %}
-
-{# Optional section #}
-{% if book_context %}
-Context: {{book_context}}
-{% endif %}
-
-{# Comment #}
-{# This explains the template #}
-
-{# Custom variable with default #}
-Register: {{formality_level | default("neutral")}}
-```
-
-### CLI Commands Quick Reference
-
-```bash
-# Validate syntax
-book-translate validate-prompt <template>
-
-# Test render
-book-translate test-prompt <template> --project <name>
-
-# Create project override
-cp prompts/<template> projects/<name>/prompts/
-
-# List variables in template
-book-translate show-variables <template>
-```
-
----
-
-**Document Version**: 1.0
-**Last Updated**: 2025-01-28
-**For Book Translation Workflow v1.0**
+| [`TRANSLATE_HARNESS.md`](TRANSLATE_HARNESS.md) | How prompts are rendered and committed per stage |
+| [`LLM_PROVIDERS.md`](LLM_PROVIDERS.md) | Providers, models, and prompt caching |
+| [`JUDGES_FRAMEWORK.md`](JUDGES_FRAMEWORK.md) | Judge prompts and how to add a judge |
+| [`GLOSSARY_CANDIDATES.md`](GLOSSARY_CANDIDATES.md) | The bootstrap prompt in context |

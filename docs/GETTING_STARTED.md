@@ -1,6 +1,11 @@
 # Getting Started
 
-This guide walks you through translating your first book using the web dashboard.
+This guide walks you through translating your first book using the **web dashboard**.
+
+> **Looking for the conversational path?** The harness drafts the style guide and glossary
+> with you in Claude Code and runs the pipeline around your approvals — for most books it
+> is the faster route. See [`TRANSLATE_HARNESS.md`](TRANSLATE_HARNESS.md). The two surfaces
+> share the same project files, so you can start in one and finish in the other.
 
 ## Prerequisites
 
@@ -30,8 +35,12 @@ cp my_book.txt projects/my-book/source.txt
 ## Step 1: Start the Server
 
 ```bash
-cd web_ui && python app.py
+python -m web_ui.app
 ```
+
+Run this from the repo root — `web_ui/app.py` imports `web_ui.i18n`, so running it from
+inside `web_ui/` fails. Set `BOOKS_DEBUG=1` for auto-reload and the Werkzeug debugger
+(never for a service).
 
 Open `http://localhost:5000/project/my-book` in your browser. You'll see the pipeline dashboard with 8 stages in a vertical stepper on the left.
 
@@ -168,6 +177,9 @@ Build a downloadable EPUB from your translated chapters.
 - Apply corrections if needed (banner appears on chapter list)
 - Re-export the EPUB after making changes
 
-## CLI Alternative
+## Other ways to run this
 
-Every dashboard stage has a CLI equivalent. See the [README](../README.md#cli-workflow) for commands and [`docs/BATCH_PIPELINE.md`](BATCH_PIPELINE.md) for batch processing.
+- **Conversationally:** [`TRANSLATE_HARNESS.md`](TRANSLATE_HARNESS.md) — the harness drives
+  every stage below from a Claude Code conversation.
+- **From the command line:** [`CLI_REFERENCE.md`](CLI_REFERENCE.md) — every dashboard stage
+  has a script equivalent.
