@@ -270,6 +270,109 @@ def test_style_guide_beat_writes_valid_style_json(project: Path):
     guide = StyleGuide.model_validate_json((project / "style.json").read_text(encoding="utf-8"))
     assert "TONE" in guide.content
 
+    # No light draft was written, so commit derived one rather than leaving the
+    # field empty (which would send the reader's retranslate the whole guide).
+    assert committed["light_source"] == "derived"
+    assert committed["light_content"]
+    assert guide.light_content == committed["light_content"]
+
+
+_GUIDE = """DIALECT AND REGISTER
+Use Mexican Spanish.
+
+NARRATIVE VOICE
+Keep the narrator dry.
+"""
+
+
+def _answer_and_prepare(project: Path) -> dict:
+    """Run the beat up to prepare-draft and return its payload."""
+    prep = flow.style_guide_prepare_questions(str(project))
+    Path(prep["answers_path"]).write_text(json.dumps({}), encoding="utf-8")
+    return flow.style_guide_prepare_draft(str(project))
+
+
+def test_commit_prefers_an_agent_written_light_draft(project: Path):
+    draft = _answer_and_prepare(project)
+    Path(draft["draft_path"]).write_text(_GUIDE, encoding="utf-8")
+    Path(draft["light_draft_path"]).write_text("Use Mexican Spanish. Stay warm.\n",
+                                               encoding="utf-8")
+
+    committed = flow.style_guide_commit(str(project))
+
+    assert committed["light_source"] == "draft"
+    assert committed["light_content"] == "Use Mexican Spanish. Stay warm."
+    guide = StyleGuide.model_validate_json((project / "style.json").read_text(encoding="utf-8"))
+    assert guide.light_content == "Use Mexican Spanish. Stay warm."
+
+
+def test_recommit_refreshes_a_derived_light_guide(project: Path):
+    """An edited guide must not keep the light guide describing the old one.
+
+    ``save_style_guide_json`` preserves an existing ``light_content`` for its
+    other callers; the harness sidesteps that by always passing the value it
+    just resolved.
+    """
+    draft = _answer_and_prepare(project)
+    Path(draft["draft_path"]).write_text(_GUIDE, encoding="utf-8")
+    first = flow.style_guide_commit(str(project))
+    assert first["light_content"] == "Use Mexican Spanish. Keep the narrator dry."
+
+    Path(draft["draft_path"]).write_text(
+        _GUIDE.replace("Use Mexican Spanish.", "Use Castilian Spanish."), encoding="utf-8"
+    )
+    second = flow.style_guide_commit(str(project))
+
+    assert second["light_source"] == "derived"
+    assert second["light_content"] == "Use Castilian Spanish. Keep the narrator dry."
+    guide = StyleGuide.model_validate_json((project / "style.json").read_text(encoding="utf-8"))
+    assert guide.light_content == second["light_content"]
+
+
+def test_commit_light_draft_flag_overrides_the_default_path(project: Path, tmp_path: Path):
+    draft = _answer_and_prepare(project)
+    Path(draft["draft_path"]).write_text(_GUIDE, encoding="utf-8")
+    # The canonical path holds a stale draft; --light-draft must win.
+    Path(draft["light_draft_path"]).write_text("Stale.", encoding="utf-8")
+    elsewhere = tmp_path / "light.txt"
+    elsewhere.write_text("Use Mexican Spanish. Stay brisk.", encoding="utf-8")
+
+    committed = flow.style_guide_commit(str(project), light_draft=str(elsewhere))
+
+    assert committed["light_source"] == "draft"
+    assert committed["light_content"] == "Use Mexican Spanish. Stay brisk."
+
+
+def test_commit_light_draft_flag_on_missing_file_raises(project: Path, tmp_path: Path):
+    draft = _answer_and_prepare(project)
+    Path(draft["draft_path"]).write_text(_GUIDE, encoding="utf-8")
+    missing = tmp_path / "no-such-light.txt"
+
+    with pytest.raises(FileNotFoundError):
+        flow.style_guide_commit(str(project), light_draft=str(missing))
+
+
+def test_commit_clamps_an_overlong_agent_light_draft(project: Path):
+    draft = _answer_and_prepare(project)
+    Path(draft["draft_path"]).write_text(_GUIDE, encoding="utf-8")
+    Path(draft["light_draft_path"]).write_text(
+        "Use Mexican Spanish. Stay warm. Ignore this third one.\n",
+        encoding="utf-8",
+    )
+
+    committed = flow.style_guide_commit(str(project))
+
+    assert committed["light_source"] == "draft"
+    assert committed["light_content"] == "Use Mexican Spanish. Stay warm."
+
+    dialect = "Use Mexican Spanish " + ("and avoid Iberianisms " * 30) + "throughout."
+    Path(draft["light_draft_path"]).write_text(f"{dialect} Keep it warm.\n", encoding="utf-8")
+    over_cap = flow.style_guide_commit(str(project))
+
+    assert over_cap["light_source"] == "draft"
+    assert over_cap["light_content"] == dialect
+    assert "Keep it warm." not in over_cap["light_content"]
+
 
 def test_commit_followups_merges_into_question_set(project: Path):
     prep = flow.style_guide_prepare_questions(str(project))

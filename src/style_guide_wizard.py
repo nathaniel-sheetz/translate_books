@@ -8,6 +8,7 @@ Supports three modes:
 """
 
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +21,17 @@ from src.text_feature_detector import (
     filter_conditional_questions,
     manifest_summary,
 )
-from src.utils.file_io import save_style_guide, render_prompt, load_prompt_template
+from src.utils.file_io import (
+    save_style_guide,
+    load_style_guide,
+    render_prompt,
+    load_prompt_template,
+)
 from src.utils.source_text import load_clean_source_text
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+_log = logging.getLogger(__name__)
 
 
 def _resolve_prompt_path(name: str) -> Path:
@@ -349,13 +357,177 @@ def load_source_sample(project_dir: Path, max_words: int = 10000) -> str:
     return " ".join(words[:max_words])
 
 
-def save_style_guide_json(content: str, output_path: Path) -> None:
-    """Save a style guide to JSON file."""
+# ── light style guide ──────────────────────────────────────────────────────
+#
+# ``light_content`` is the <=2-sentence condensation the reader's single-sentence
+# retranslate prompt uses in place of the full guide (see src/retranslator.py).
+# The harness normally commits an agent-written one; the derivation below is the
+# floor that keeps the field populated when nobody wrote one.
+
+_LIGHT_MAX_CHARS = 400
+
+# The input is 1-3 short declarative English sentences per section (the drafting
+# prompt mandates it), so a narrow lookahead beats a general segmenter here: the
+# repo's pysbd-backed split_sentences() pulls numpy in on Flask request paths and
+# post-splits anything over 50 words, which would hand back a fragment.
+_SENTENCE_SPLIT_RE = re.compile(r"""(?<=[.!?])\s+(?=[A-Z¿¡"'“‘])""")
+
+# Sections are ALL-CAPS-headed blocks. The dialect section supplies sentence one,
+# a voice/tone section sentence two.
+_DIALECT_HEADING_RE = re.compile(r"\b(DIALECT|REGISTER|VARIETY|LANGUAGE)\b")
+# No trailing \b — it would stop NARRAT from matching NARRATOR / NARRATIVE, which
+# silently sends most books to the fallback. RHYTHM is deliberately absent:
+# "SENTENCE RHYTHM" sections are syntax rules ("keep clauses long"), and matching
+# them displaces the real tone sentence.
+_TONE_HEADING_RE = re.compile(r"\b(VOICE|TONE|NARRAT)")
+# "DIALOGUE AND VOICE" / "CHARACTER VOICE" are speech-rule sections, never narrator tone.
+_NOT_TONE_HEADING_RE = re.compile(r"^(DIALOGUE|CHARACTER)\b")
+
+_MAX_HEADING_CHARS = 60
+
+
+def _is_heading_line(line: str) -> bool:
+    return (
+        any(ch.isalpha() for ch in line)
+        and line == line.upper()
+        and len(line) < _MAX_HEADING_CHARS
+        and not line.endswith((".", "!", "?"))
+    )
+
+
+def _split_style_guide_sections(content: str) -> list[tuple[str, str]]:
+    """Split a style guide into ``(heading, body)`` blank-line-separated blocks.
+
+    ``heading`` is "" for a block that does not open with an ALL-CAPS label.
+    A lone ALL-CAPS line is a heading for the next block, not a body — so a
+    markdown-style blank line after the label does not emit the heading as
+    the dialect sentence.
+    """
+    raw: list[list[str]] = []
+    for block in re.split(r"\n\s*\n", content.strip()):
+        lines = [line.strip() for line in block.strip().split("\n") if line.strip()]
+        if lines:
+            raw.append(lines)
+
+    merged: list[list[str]] = []
+    i = 0
+    while i < len(raw):
+        if len(raw[i]) == 1 and _is_heading_line(raw[i][0]) and i + 1 < len(raw):
+            merged.append([raw[i][0], *raw[i + 1]])
+            i += 2
+        else:
+            merged.append(raw[i])
+            i += 1
+
+    sections: list[tuple[str, str]] = []
+    for lines in merged:
+        head = lines[0]
+        if _is_heading_line(head):
+            sections.append((head, " ".join(lines[1:])))
+        else:
+            sections.append(("", " ".join(lines)))
+    return sections
+
+
+def _first_sentences(text: str, n: int) -> list[str]:
+    """Return up to ``n`` sentences from ``text``."""
+    parts = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+    return parts[:n]
+
+
+def clamp_light_style_guide(text: str) -> str:
+    """Keep at most two sentences; over the cap, drop the second rather than cut."""
+    sents = _first_sentences(text, 2)
+    if not sents:
+        return ""
+    light = f"{sents[0]} {sents[1]}".strip() if len(sents) > 1 else sents[0]
+    if len(light) > _LIGHT_MAX_CHARS:
+        light = sents[0]
+    return light.strip()
+
+
+def derive_light_style_guide(content: str) -> str:
+    """Distill a <=2-sentence light style guide out of a full one.
+
+    Sentence one states the dialect, from the guide's DIALECT/REGISTER section —
+    every guide the pipeline writes opens with one, so this half is reliable.
+    Sentence two states the high-level tone, from the first VOICE/TONE/NARRATOR
+    section, falling back to the dialect section's own second sentence when the
+    guide has no such section.
+
+    Returns "" when nothing can be derived.
+    """
+    sections = _split_style_guide_sections(content)
+    if not sections:
+        return ""
+
+    dialect_idx = next(
+        (i for i, (head, _) in enumerate(sections) if _DIALECT_HEADING_RE.search(head)),
+        0,
+    )
+    dialect_sents = _first_sentences(sections[dialect_idx][1], 2)
+    if not dialect_sents:
+        return ""
+
+    tone = ""
+    for i, (head, body) in enumerate(sections):
+        if i == dialect_idx or not head:
+            continue
+        if _NOT_TONE_HEADING_RE.match(head) or not _TONE_HEADING_RE.search(head):
+            continue
+        found = _first_sentences(body, 1)
+        if found:
+            tone = found[0]
+            break
+    if not tone and len(dialect_sents) > 1:
+        tone = dialect_sents[1]
+
+    light = f"{dialect_sents[0]} {tone}".strip() if tone else dialect_sents[0]
+    return clamp_light_style_guide(light)
+
+
+def save_style_guide_json(
+    content: str,
+    output_path: Path,
+    *,
+    light_content: str | None = None,
+) -> None:
+    """Save a style guide to JSON, keeping the fields this call does not own.
+
+    ``light_content`` resolves in three steps: the explicit argument, else a
+    non-blank one already on disk, else one derived from ``content``. Rebuilding
+    the model from scratch used to blank the field — and reset ``created_at``
+    and ``version`` — on every write, silently discarding a light guide saved
+    from the dashboard.
+
+    The derivation lives here rather than in ``save_style_guide`` or on the model
+    so it stays opt-in: the dashboard's own main-guide save builds its StyleGuide
+    inline and must NOT invent a light guide behind the user's back.
+    """
     now = datetime.now()
+    existing_light: Optional[str] = None
+    created_at = None
+    version = None
+    if output_path.exists():
+        try:
+            existing = load_style_guide(output_path)
+            existing_light = existing.light_content
+            created_at = existing.created_at
+            version = existing.version
+        except (OSError, ValueError) as exc:
+            # A corrupt style.json must not block writing a good one over it.
+            # UnicodeDecodeError is a ValueError, so a non-UTF-8 file is covered.
+            _log.warning("Could not read existing style guide at %s: %s", output_path, exc)
+
+    resolved = (light_content or "").strip() or (existing_light or "").strip()
+    if not resolved:
+        resolved = derive_light_style_guide(content)
+
     guide = StyleGuide(
         content=content,
-        version="1.0",
-        created_at=now,
+        light_content=resolved or None,
+        version=version or "1.0",
+        created_at=created_at or now,
         updated_at=now,
     )
     save_style_guide(guide, output_path)

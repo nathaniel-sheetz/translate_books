@@ -151,7 +151,7 @@ The harness writes into your project directory alongside everything the dashboar
 | `.harness/last_output.json` | Structured result of the most recent command — always read this instead of parsing stdout |
 | `.harness/last_output_schema.json` | Per-key documentation for the above |
 | `.harness/translate/` | Rendered per-chunk prompts and worker drafts |
-| `.harness/*_draft.json`, `*_prompt.txt` | In-flight drafts for the style guide, glossary, and address map beats |
+| `.harness/*_draft.json`, `*_draft.txt`, `*_prompt.txt` | In-flight drafts for the style guide (full and light), glossary, and address map beats |
 | `logs/harness_runs.jsonl` | Append-only log of every command, at the repo root |
 
 The pipeline artifacts themselves (`style.json`, `glossary.json`, `address_map.json`,
@@ -203,6 +203,14 @@ overrides. See [`CHAPTER_DETECTION_GUIDE.md`](CHAPTER_DETECTION_GUIDE.md).
 `address-map precheck` answers "does this book have dialogue at all?" and gates whether
 the beat is worth offering; `skip` records that you declined so the router stops asking;
 `rename` applies an approved glossary cast to an already-committed map.
+
+`style-guide commit` settles two fields. Alongside the full guide it writes
+`light_content` — at most two sentences, dialect plus high-level tone — which the reader's
+single-sentence **Retranslate** uses in place of the full guide. The agent normally drafts
+it into `.harness/style_guide_light_draft.txt` (or a path given with `--light-draft`); when
+that file is absent, `commit` distills one from the guide it just saved, so the field is
+never left empty. The result comes back as `light_content` with a `light_source` of `draft`
+or `derived`.
 
 ### Sizing and cost
 

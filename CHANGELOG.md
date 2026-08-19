@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.47.3.0] - 2026-08-19
+
+### Added
+- **The translate harness writes a light style guide on every `style-guide commit`.** `style.json` has carried an optional `light_content` since April — at most a couple of sentences that replace the full guide in the reader's single-sentence Retranslate prompt — but nothing ever generated one, so it was a textarea in the dashboard that 13 of 22 local books had never had filled in. Those books were handing a one-sentence rewrite the entire guide: address tables, name rules, units and all. `commit` now always settles the field. The agent drafts two sentences (dialect, then high-level tone) into `.harness/style_guide_light_draft.txt` or a path passed with the new `--light-draft`; when that file is absent, `commit` distills one from the guide it just saved. The result comes back as `light_content` with a `light_source` of `draft` or `derived`, and the style-guide beat reports it at the existing approval gate — no new beat, no new stop. On Pollyanna the retranslate prompt drops from 1,607 characters of style guide to 183.
+- The derivation takes its first sentence from the guide's DIALECT/REGISTER section and its second from the first VOICE/TONE/NARRATOR section, falling back to the dialect section's own second sentence. `DIALOGUE*` and `CHARACTER VOICE` headings are speech rules, not tone, and a blank line after an ALL-CAPS label is not treated as the dialect sentence. Checked against all 20 local style guides: for `among-the-farmyard-people` it reproduces the light guide a human wrote by hand, byte for byte, which is now the golden test. An agent-written light draft is clamped the same way — at most two sentences, and over 400 characters the tone sentence is dropped rather than cut mid-word — so pasting the full guide into the light file cannot put that full guide back into the retranslate prompt.
+
+### Fixed
+- **Saving a style guide no longer discards the light one.** `save_style_guide_json` rebuilt the model from scratch on every write, so `light_content` silently reverted to null — both on `style-guide commit` and in `scripts/generate_style_guide.py`. The dashboard's own save route had always preserved it and had a regression test for exactly this; the shared helper did not. It now reads the existing file first and keeps what the caller did not set, including `created_at` and a user-bumped `version`. (`scripts/translate_book.py` was never affected — it skips generation entirely when `style.json` exists.)
+- The same rewrite also reset `created_at` to the current time on every save, so a guide's creation date tracked its last edit. It is now preserved.
+- `--light-draft` pointing at a missing file now fails the same way `--draft` does, instead of silently deriving and reporting `light_source: derived`.
+- `docs/READER_RETRANSLATE.md` said the retranslate prompt's `{{style_guide}}` comes from the `content` field. It has preferred `light_content` since the field shipped.
+
 ## [0.47.2.0] - 2026-08-19
 
 ### Added

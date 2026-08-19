@@ -131,10 +131,17 @@ prompt-injection guard as the judge prompts, extended to cover the new
 | Variable | Source |
 |---|---|
 | `{{source_language}}` / `{{target_language}}` | Endpoint defaults (English/Spanish) |
-| `{{style_guide}}` | `projects/<id>/style.json` `content` field, truncated to ~4000 tokens |
+| `{{style_guide}}` | `projects/<id>/style.json` — the `light_content` field when set, else `content`, truncated to ~4000 tokens |
 | `{{glossary}}` | `projects/<id>/glossary.json`, **filtered** to terms appearing in the source span via `filter_glossary_for_chunk()` |
 | `{{context}}` | Surrounding sentences gathered by the front-end (`N` before + `N` after, default `N=1`). Sentinel `(no surrounding context provided)` when empty. The LLM is told to read but not translate this block. |
 | `{{source_text}}` | The user-confirmed source textarea contents |
+
+`light_content` is the short guide — at most two sentences, dialect plus high-level
+tone — that keeps a one-sentence rewrite from being handed the full guide's address
+tables, name rules, and units sections. The translate harness writes one on every
+`style-guide commit` (see [`TRANSLATE_HARNESS.md`](TRANSLATE_HARNESS.md)), and the
+dashboard's Style Guide stage can override it by hand. When it is empty the full
+`content` is used instead, so the field is optional, never required.
 
 The full 115-line `prompts/translation.txt` is **not** used here — its
 chapter context, image-token rules, and previous-chapter-context

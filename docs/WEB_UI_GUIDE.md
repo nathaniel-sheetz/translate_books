@@ -167,6 +167,8 @@ A shared **LLM provider/model selector** appears at the top of the style guide w
 - **Edit** — opens an inline textarea with the current style guide text for direct edits. Save or Cancel with the buttons below.
 - **Rebuild** — discards the current guide and re-runs the full Q&A wizard to regenerate it from scratch.
 
+**Light style guide.** Below the guide sits an optional **Light Style Guide** textarea — at most two sentences (dialect plus high-level tone) that replace the full guide in the reader's single-sentence Retranslate prompt. Books set up through the translate harness arrive with it already filled in; anything typed here overrides that. Clearing it falls back to the full guide. See [Reader Retranslate](READER_RETRANSLATE.md). Editing the main guide never disturbs this field.
+
 **Skipping a question.** Every question (fixed, feature-detected/conditional, or LLM-generated) has a small **Skip** checkbox in the top-right of its block. Ticking it dims the question, disables the radios, and clears any selected answer. Skipped questions are excluded from the style-guide prompt, the no-LLM fallback, the prompt-copy preview, and the Glossary stage's "choose relevant questions" list (the matching row is greyed out and its checkbox disabled). Use this when a question is irrelevant to your book or when an LLM-generated question is off-base. Skip state is session-only — reloading the dashboard clears it.
 
 **APIs:**
@@ -176,6 +178,7 @@ A shared **LLM provider/model selector** appears at the top of the style guide w
 - `POST /api/setup/<id>/style-guide/generate` — generate style guide via direct LLM call; `{ "answers": {...}, "extra_questions": [...], "provider": "...", "model": "..." }`
 - `POST /api/setup/<id>/style-guide` — save style guide JSON
 - `POST /api/setup/<id>/style-guide/fallback` — generate without LLM
+- `POST /api/setup/<id>/style-guide/light` — save the light style guide; `{ "light_content": "..." }`, empty clears it
 
 ---
 
