@@ -88,18 +88,34 @@ Two rules the prompt states and you must hold yourself to while drafting:
   with the definite article in narration (el tío Manuel llegó tarde) and the bare vocative in
   direct address (Oye, tío Manuel, quiero…)"*.
 
+Once they have signed off, and **immediately before** running `commit`, **Write** the *light*
+style guide to the printed `light_draft_path` — **at most two sentences**: one naming the
+dialect/variety, one the high-level tone. This is what replaces the full guide in the reader's
+single-sentence retranslate prompt, so it has to stand alone: no characters, no chapters, no
+terms, no "see above". Write it last, not alongside the first draft, so it reflects the guide
+the user actually approved rather than the one you opened with.
+
 Then:
 ```bash
 python scripts/harness.py style-guide commit --project projects/<slug>
 ```
 This parses, saves `style.json`, and validates it. If it prints a VALIDATION/PARSE error, fix the
-draft and re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort).
+draft, refresh or delete `light_draft_path` (a leftover file still wins on re-commit), and
+re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort). It also settles the light
+guide and echoes it back as `light_content`, with `light_source` naming where it came from:
+`draft` (the light-draft file had content) or `derived` (it was absent, so `commit` distilled
+one from the guide — reliable on dialect, hit-or-miss on tone).
 
-**1e. STOP — G3: approval beat.** Present the final style guide, then **AskUserQuestion with exactly
+**1e. STOP — G3: approval beat.** Present the final style guide. Then, in one line, say the light
+style guide was saved too and quote `light_content` verbatim — if `light_source` is `derived`,
+say it was auto-generated and can be corrected. This is a mention, **not a second gate**: it
+rides on the same approval question. Then **AskUserQuestion with exactly
 two predefined options** — **"Approve all"** and **"Reject & talk it through"**. **Remind the user in
 the question text that to approve *with specific changes* they should pick _Other_ and type the edits
 directly** (e.g. "switch register to tú", "keep place names in English"). A custom (_Other_) answer is
-approve-with-changes: apply the edits to the draft, re-run `style-guide commit`, and continue. This is
+approve-with-changes: apply the edits to the draft, re-run `style-guide commit`, and continue —
+and when the edits touch dialect or tone, refresh `light_draft_path` before re-committing, or the
+light guide will still describe the guide they just changed. This is
 the user's chance to lock in the key decisions (dialect/locale, name conventions, register)
 **before** they shape the glossary.
 

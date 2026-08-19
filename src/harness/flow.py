@@ -920,6 +920,7 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
     return {
         "prompt_path": str(prompt_path),
         "draft_path": str(hdir / "style_guide_draft.txt"),
+        "light_draft_path": str(hdir / "style_guide_light_draft.txt"),
         "carryforward_path": str(hdir / "glossary_carryforward.json"),
         "resolved_answers": resolved,
         "unanswered": unanswered,
@@ -930,25 +931,61 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
             "prompt_path, draft the style-guide prose to draft_path, refine it with the user, "
             "then run `style-guide commit`. Put NO term→translation pairs in the guide: write "
             "any term that needs a fixed translation to carryforward_path as a JSON array of "
-            "{term, why, type_guess} and the glossary beat will pick it up."
+            "{term, why, type_guess} and the glossary beat will pick it up. "
+            "Once the user has signed off, and immediately BEFORE running commit, also write "
+            "light_draft_path: at most two sentences — one naming the dialect, one the "
+            "high-level tone — which replace the full guide in the reader's single-sentence "
+            "retranslate prompt, so they must stand alone and name no characters, chapters, or "
+            "terms. Commit derives one from the guide if you skip it."
         ),
     }
 
 
-def style_guide_commit(project: str, *, draft: str | None = None) -> dict:
-    """Parse, save, and validate the agent-drafted style guide -> style.json."""
+def style_guide_commit(project: str, *, draft: str | None = None,
+                       light_draft: str | None = None) -> dict:
+    """Parse, save, and validate the agent-drafted style guide -> style.json.
+
+    Also settles ``light_content`` — the <=2-sentence guide the reader's
+    single-sentence retranslate uses instead of the full one. The agent's draft
+    wins; otherwise it is derived from the guide just committed. Either way the
+    value is passed explicitly, so a re-commit after an edit refreshes it rather
+    than inheriting the stale one ``save_style_guide_json`` would preserve.
+    """
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
 
-    from src.style_guide_wizard import parse_style_guide_response, save_style_guide_json
+    from src.style_guide_wizard import (
+        clamp_light_style_guide,
+        derive_light_style_guide,
+        parse_style_guide_response,
+        save_style_guide_json,
+    )
     from src.harness_guard import validate_style_guide_file
 
     draft_path = Path(draft) if draft else hdir / "style_guide_draft.txt"
     content = parse_style_guide_response(_read(draft_path))
     out = project_dir / "style.json"
-    save_style_guide_json(content, out)
+
+    if light_draft:
+        # Explicit path is required, same contract as --draft.
+        light = parse_style_guide_response(_read(Path(light_draft))).strip()
+    else:
+        light = parse_style_guide_response(
+            _read_draft_text(hdir / "style_guide_light_draft.txt") or ""
+        ).strip()
+    light = clamp_light_style_guide(light) if light else ""
+    light_source = "draft" if light else "derived"
+    if not light:
+        light = derive_light_style_guide(content)
+
+    save_style_guide_json(content, out, light_content=light)
     validate_style_guide_file(out)  # raises HarnessValidationError -> re-draft
-    return {"style_path": str(out), "chars": len(content)}
+    return {
+        "style_path": str(out),
+        "chars": len(content),
+        "light_content": light,
+        "light_source": light_source,
+    }
 
 
 # ── glossary beat ──────────────────────────────────────────────────────────
@@ -4859,6 +4896,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "style-guide prepare-draft": {
         "prompt_path": "path to the style-guide prompt to read",
         "draft_path": "path to write the drafted style-guide prose to",
+        "light_draft_path": "path to write the <=2-sentence light style guide to (optional; commit derives one if absent)",
         "resolved_answers": "list of {id, question, answer, source} ('option' vs 'custom')",
         "unanswered": "list of question ids with no answer",
         "carryforward_path": "path to write glossary terms surfaced while drafting: [{term, why, type_guess}]",
@@ -4868,6 +4906,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "style-guide commit": {
         "style_path": "path to the written style.json",
         "chars": "character length of the committed style guide",
+        "light_content": "the committed light style guide (<=2 sentences, used by the reader's sentence retranslate)",
+        "light_source": "'draft' when the light-draft file had content, else 'derived'",
     },
     "glossary prepare": {
         "prompt_path": "path to the glossary-proposal prompt to read",

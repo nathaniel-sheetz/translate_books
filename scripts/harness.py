@@ -225,6 +225,9 @@ def _build_parser() -> argparse.ArgumentParser:
             ap.add_argument("--answers", default=None, help="Answers JSON (default: .harness/style_answers.json)")
         if action in ("commit-followups", "commit"):
             ap.add_argument("--draft", default=None, help="Agent draft file (default: canonical .harness/ path)")
+        if action == "commit":
+            ap.add_argument("--light-draft", default=None,
+                            help="Light style-guide draft (default: .harness/style_guide_light_draft.txt)")
 
     # glossary <action> -----------------------------------------------------
     gl = sub.add_parser("glossary", help="Glossary beat (prepare/commit)")
@@ -680,7 +683,8 @@ def _dispatch(args: argparse.Namespace):
         if args.action == "prepare-draft":
             return flow.style_guide_prepare_draft(args.project, answers=args.answers)
         if args.action == "commit":
-            return flow.style_guide_commit(args.project, draft=args.draft)
+            return flow.style_guide_commit(args.project, draft=args.draft,
+                                           light_draft=args.light_draft)
     if cmd == "glossary":
         if args.action == "prepare":
             return flow.glossary_prepare(args.project, max_candidates=args.max_candidates)
