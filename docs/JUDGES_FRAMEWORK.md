@@ -168,6 +168,12 @@ python scripts/run_judges.py run --project understood-betsy \
 python scripts/run_judges.py prepare --project understood-betsy \
     --judge dialogue --scope chapter:chapter_03 [--worker-model sonnet] [--batch-size 5]
 python scripts/run_judges.py commit  --project understood-betsy --persist
+
+# Both judges in ONE manifest, each over its own chapters (tagged scopes)
+python scripts/run_judges.py prepare --project understood-betsy \
+    --judge dialogue --judge address \
+    --scope dialogue:book --scope address:chapter:chapter_04
+python scripts/run_judges.py commit  --project understood-betsy --persist --brief
 ```
 
 `run` `status` is `"ok"`, `"cost_exceeded"` (re-run with `--confirm`), or `"error"`.
@@ -175,14 +181,16 @@ python scripts/run_judges.py commit  --project understood-betsy --persist
 | Subcommand | Flag | Default | Description |
 |---|---|---|---|
 | all | `--project` | — | Project id (under `projects/`) or path |
-| `run`, `prepare` | `--judge` / `--suite` | — | One required; a judge name or suite name |
+| `run`, `prepare` | `--judge` / `--suite` | — | One required; `--judge` repeats (both judges, one manifest) |
 | `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>`, `chapter:<chapter_id>` or `book` |
+| `prepare` | `--scope <judge>:<scope>` | — | Bind a scope to one judge; untagged scopes cover all of them |
 | `run`, `prepare` | `--model` / `--provider` | config | Judge LLM overrides |
 | `run` | `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
 | `run` | `--confirm` | false | Proceed past the cost gate |
 | `prepare` | `--worker-model` | `sonnet` | Tier to pin spawned `judge-worker`s to |
 | `prepare` | `--batch-size` | `5` | Recommended workers to spawn per wave |
 | `run`, `commit` | `--persist` | false | Write findings into `evaluations/<chunk>.json` |
+| `commit` | `--brief` | false | Swap `results[]` for a counts rollup; full payload still on disk |
 | `apply` | `--judge` | `dialogue` | Repeatable: both judges in one run, realigned once |
 | `apply` | `--scope` | — | Repeatable; same three kinds as above |
 | `apply` | `--select` | — | Comma-separated `applicable[].id` / `.qualified_id` to apply |
@@ -217,14 +225,17 @@ launcher) rather than being forced through `JudgeTarget`.
 
 ## Suites
 
-A suite is a named list of judges. Built-in: `default = ["dialogue"]` and
-`address = ["address"]`. The address judge is deliberately kept out of `default`
-because it needs the per-book `address_map.json` prerequisite and is metered — run
-it via `--judge address` or `--suite address`. Override or add suites in
-`app_config.json`:
+A suite is a named list of judges. Built-in: `default = ["dialogue"]`,
+`address = ["address"]`, and `prose = ["dialogue", "address"]`. The address judge
+is deliberately kept out of `default` because it needs the per-book
+`address_map.json` prerequisite and is metered — run it via `--judge address`,
+`--suite address`, or (with the map in place) `--suite prose` for both judges at
+once. Repeatable `--judge` reaches the same pair without a suite; suites exist for
+names worth reusing, not as the only route to two judges. Override or add suites
+in `app_config.json` — note this is **global**, not per-project:
 
 ```json
-{ "judge_suites": { "default": ["dialogue"], "prose": ["dialogue", "address"] } }
+{ "judge_suites": { "default": ["dialogue"], "quick": ["dialogue"] } }
 ```
 
 ## Persistence & feedback

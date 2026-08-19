@@ -115,8 +115,45 @@ Shared flags (`run`, `prepare`):
 - `--project <id|path>` — required.
 - `--judge <name>` **or** `--suite <name>` (`--judge dialogue`, `--suite default`).
   Judges/suites come from `src/judges/registry.py` + `app_config.json`.
+  **`--judge` is repeatable** — see the multi-judge note below.
 - `--scope chunk:<chunk_id>` or `--scope chapter:<chapter_id>` — required.
 - `--model` / `--provider` — judge LLM overrides.
+
+**Both judges go in ONE `prepare`.** `--judge` repeats, exactly as it does on
+`apply`, and that is the right way to run them: one manifest, one wave, one
+`commit`, one `usage_summary` to relay. Two separate cycles means two consent
+gates for one request and two waves each paying the fixed per-process baseline
+again (~17.2k/job on Cursor) — the single most-logged friction in this skill.
+`--suite prose` is the same pair as a named suite.
+```bash
+python scripts/run_judges.py prepare --project pollyanna \
+    --judge dialogue --judge address --scope book --quiet
+```
+
+**Asymmetric scopes: tag a `--scope` with a judge name.** The real request is
+rarely "both judges, same chapters" — it is "dialogue on the ten that owe it,
+address on the eight that owe *that*". Prefix a scope with `<judge>:` to bind it
+to that judge alone; untagged scopes still apply to every named judge, and the
+two forms mix freely. Compute the per-judge gap from `status --detail` **first**
+and tag from it, rather than staging a union that re-judges chapters already
+clean:
+```bash
+python scripts/run_judges.py prepare --project pollyanna \
+    --judge dialogue --judge address \
+    --scope dialogue:book \
+    --scope address:chapter:chapter_04 --scope address:chapter:chapter_09
+```
+A tag naming a judge the run doesn't include is an **error**, not a silent
+no-op — so is leaving a named judge with no scope at all. `prepare` returns
+`scopes_by_judge` (also written into `manifest.json`) so you can check what each
+judge was actually staged over before spawning. Tags are a `prepare` feature:
+`run` takes one `--scope` and applies it to every judge.
+
+**Every command except `status` and `profile` mirrors its JSON to
+`.harness/judges/last_output.json`** (UTF-8, full payload, refreshed per command).
+Read *that* when a payload is too big for the turn — never pipe captured stdout
+through an ad-hoc `python -c` filter, which is what mangled the rayas in the
+first place. (`status` and `profile` write nothing at all, by contract.)
 
 `run` (API backend) adds:
 - `--cost-limit <usd>` (default 0.50) and `--confirm`.
@@ -218,6 +255,10 @@ saying which knob carries it (`argv` / `model_bracket` / `none`).
 - **`address`** — usted/tú (formal vs. informal address) vs. the **per-book
   address map**. **Requires setup** (see below). Run it with `--judge address`
   (or `--suite address`). It is *not* in the `default` suite.
+
+Running **both** is one command, not two: `--judge dialogue --judge address`, or
+`--suite prose`. Gate the pair on `address_map.json` existing (see below) — that
+prerequisite is the only reason the two were ever run apart.
 
 ### The `address` judge needs a map first
 
@@ -334,6 +375,15 @@ python scripts/run_judges.py run --project understood-betsy \
 request, stage **every** chapter in one `prepare` by repeating `--scope` — they
 land in one manifest, one `commit` collects them all, and `usage_summary` is a
 single rollup (no manual summing across calls).
+
+**Stage every judge in that same one `prepare` too.** `--judge` repeats, and for
+a "fill the gaps" request the scopes are usually different per judge — read the
+per-judge `chapters.not_run` / `stale` buckets out of `status --detail` and tag
+the scopes (`--scope address:chapter:chapter_31`) so neither judge re-reads a
+chapter that already has a current verdict. Check `scopes_by_judge` in the
+returned payload before you spawn. Two prepare/fan-out/commit cycles for one
+request is the failure this replaces, and it is not recoverable after the fact:
+re-`prepare` is destructive.
 
 All four decisions were taken together in step 3 — CLI/preset, spawn mode and grouping
 included. This section is the detail behind Q3 and Q4, not a second round of asking.
@@ -549,6 +599,19 @@ waves is also fine. Either way, never start wave N+1 until wave N has finished
 ```bash
 python scripts/run_judges.py commit --project understood-betsy --persist
 ```
+**Past ~6 chapters, add `--brief`.** Without it `commit` echoes one full
+`EvalResult` per (target, judge) — every finding with its excerpt, message and
+suggestion — and a 20-chapter commit truncates mid-`results[]`, before
+`persisted` is even reached. `--brief` prints `results_brief` instead
+(`target_id`, `judge`, `score`, `passed`, `errors`/`warnings`/`info`) and keeps
+`summary`, `counts`, `run_header`, `persisted`. **Nothing is lost**: the full
+payload, findings and all, is written to `.harness/judges/last_output.json` —
+`Read` it (or grep it) for the finding text when you relay. Do not reconstruct it
+by piping stdout through `python -c`.
+
+`summary.issues_by_evaluator` is a per-**judge** total summed across every target
+in the run — not a per-chapter breakdown, and no longer the last chapter's count
+standing in for the whole wave. Per-target counts come from `results_brief[]`.
 Relay `committed` / `failed` / `missing`. **Re-spawn** any `failed` (bad/no JSON) or
 `missing` (no draft) entries — Task: same prompt_path/draft_path; headless:
 `fanout --target-ids <ids>` — then re-run `commit`. Trust `commit`'s lists, not a

@@ -25,6 +25,13 @@ _JUDGE_REGISTRY: dict[str, type[Judge]] = {
 _BUILTIN_SUITES: dict[str, list[str]] = {
     "default": ["dialogue"],
     "address": ["address"],
+    # Both prose judges in one wave. Kept out of ``default`` for the same reason
+    # ``address`` is: the address judge needs a per-book ``address_map.json``, so
+    # this suite is only correct once that map exists — the skill gates on it.
+    # It exists because asking for "both judges" used to mean two full
+    # prepare -> fanout -> commit cycles, each paying the fixed per-process
+    # baseline again (repeatable ``--judge`` is the other half of the fix).
+    "prose": ["dialogue", "address"],
 }
 
 

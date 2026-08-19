@@ -27,6 +27,8 @@ Seven subcommands:
                   processes write drafts from the prepare manifest (no Task workers).
   * ``commit``  — **subagent backend**, phase 2. Collect the workers' JSON drafts,
                   parse them, and (optionally) persist — identical output to ``run``.
+                  ``--brief`` swaps the full ``results[]`` for a counts rollup when a
+                  whole-book commit would otherwise flood the turn.
   * ``apply``   — turn **persisted** findings into chunk edits, behind an explicit
                   ``--select``; omit it for a plan-only dry run.
 
@@ -42,6 +44,10 @@ Cost / usage safety:
     or running a headless wave.
 
 Every command prints one JSON object with a ``_schema`` block documenting its keys.
+All but the two read-only ones (``profile``, ``status``, which write nothing at all)
+also mirror that object to ``<project>/.harness/judges/last_output.json`` (UTF-8) —
+read it back from there rather than filtering captured stdout through another
+interpreter, which is where the Windows raya mojibake came from.
 
 Examples:
     python scripts/run_judges.py profile --project understood-betsy
@@ -226,13 +232,21 @@ _APPLY_SCHEMA = {
 _build_judge_context = build_judge_context
 
 
-def _resolve_project(arg: str) -> Path:
+def _find_project(arg: str) -> Path | None:
+    """Project dir for ``--project`` (a path or a ``projects/<id>`` slug), or None."""
     p = Path(arg)
     if p.is_dir():
         return p
     candidate = _REPO_ROOT / "projects" / arg
     if candidate.is_dir():
         return candidate
+    return None
+
+
+def _resolve_project(arg: str) -> Path:
+    found = _find_project(arg)
+    if found is not None:
+        return found
     raise SystemExit(
         json.dumps(
             {
@@ -243,6 +257,108 @@ def _resolve_project(arg: str) -> Path:
             ensure_ascii=False,
         )
     )
+
+
+# Scope kinds `build_targets` understands. Used only to tell an untagged scope
+# ("chapter:chapter_03", "book") from a judge-tagged one ("address:chapter:…").
+_SCOPE_KINDS = frozenset({"book", "chunk", "chapter", "sentences", "flags", "findings"})
+
+# A judge named after a scope kind would make "<name>:<id>" mean two things and
+# the tag rule below would silently mis-route it. Fail at import, not in a wave.
+_SCOPE_KIND_COLLISIONS = sorted(_SCOPE_KINDS.intersection(available_judges()))
+if _SCOPE_KIND_COLLISIONS:  # pragma: no cover - guards a registry mistake
+    raise RuntimeError(
+        f"judge name(s) collide with --scope kinds: {_SCOPE_KIND_COLLISIONS}; "
+        "rename the judge — '<name>:<id>' cannot mean both a tag and a scope"
+    )
+
+
+def _resolve_judge_names(args: argparse.Namespace) -> list[str]:
+    """``--judge`` (repeatable) XOR ``--suite`` -> the ordered judge list.
+
+    argparse cannot express "repeatable XOR", so the group is gone and the rule
+    is enforced here: exactly one of the two, duplicates in ``--judge`` collapsed
+    but order kept (it decides manifest entry order).
+
+    Raises:
+        ValueError: neither flag, both flags, or an unknown suite/judge.
+    """
+    judges = list(args.judge or [])
+    if judges and args.suite:
+        raise ValueError("--judge and --suite are mutually exclusive; pass one or the other")
+    if not judges and not args.suite:
+        raise ValueError(
+            "one of --judge (repeatable) or --suite is required; judges: "
+            f"{', '.join(available_judges())}"
+        )
+    if args.suite:
+        return resolve_suite(args.suite)
+    names = list(dict.fromkeys(judges))
+    unknown = [n for n in names if n not in available_judges()]
+    if unknown:
+        raise ValueError(
+            f"Unknown judge(s): {unknown}. Available judges: {', '.join(available_judges())}"
+        )
+    return names
+
+
+def _split_scope_tag(scope: str) -> tuple[str | None, str]:
+    """Split ``'<judge>:<scope>'`` into ``(judge, scope)``; untagged -> ``(None, scope)``.
+
+    A scope whose first segment is a known scope kind is untagged — everything
+    else is read as a judge tag, so a typo surfaces as "unknown judge" rather
+    than as an unknown scope kind three frames deeper.
+    """
+    scope = scope.strip()
+    head = scope.partition(":")[0].strip().lower()
+    if head in _SCOPE_KINDS:
+        return None, scope
+    judge, sep, rest = scope.partition(":")
+    return judge.strip(), rest.strip() if sep else ""
+
+
+def _scopes_by_judge(scopes: list[str], judge_names: list[str]) -> dict[str, list[str]]:
+    """Bind each ``--scope`` to the judge(s) it applies to.
+
+    Untagged scopes apply to every named judge (today's meaning, unchanged); a
+    ``'<judge>:<scope>'`` tag binds to that judge alone. A tag naming a judge this
+    run does not include is an **error** — silently dropping it would stage a
+    manifest that quietly judged less than the operator asked for, which is the
+    failure this feature exists to prevent.
+
+    Raises:
+        ValueError: on a malformed tag, a tag naming a judge outside this run, or
+            a judge left with no scope at all.
+    """
+    by_judge: dict[str, list[str]] = {name: [] for name in judge_names}
+    for raw in scopes:
+        tag, scope = _split_scope_tag(raw)
+        if tag is None:
+            for name in judge_names:
+                if scope not in by_judge[name]:
+                    by_judge[name].append(scope)
+            continue
+        if tag not in by_judge:
+            raise ValueError(
+                f"--scope {raw!r}: {tag!r} is neither a scope kind "
+                f"({', '.join(sorted(_SCOPE_KINDS))}) nor a judge this run names "
+                f"({', '.join(judge_names)}). Add --judge {tag}, or drop the tag to "
+                "apply the scope to every judge."
+            )
+        if not scope:
+            raise ValueError(
+                f"--scope {raw!r}: a judge-tagged scope is '<judge>:<scope>', "
+                "e.g. 'address:chapter:chapter_31'"
+            )
+        if scope not in by_judge[tag]:
+            by_judge[tag].append(scope)
+    starved = [name for name in judge_names if not by_judge[name]]
+    if starved:
+        raise ValueError(
+            f"no --scope applies to judge(s) {', '.join(starved)}; every named judge "
+            "needs at least one scope (tagged, or untagged to cover them all)"
+        )
+    return by_judge
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -260,11 +376,26 @@ def _build_parser() -> argparse.ArgumentParser:
         render into one manifest and a single ``commit`` collects them all.
         """
         p.add_argument("--project", required=True, help="Project id (under projects/) or path")
-        group = p.add_mutually_exclusive_group(required=True)
-        group.add_argument(
-            "--judge", help=f"Single judge to run (one of: {', '.join(available_judges())})"
+        # NOT a mutually-exclusive group: argparse can express "one of these two"
+        # or "repeatable", but not "repeatable XOR", and --judge has to repeat —
+        # asking for both judges used to cost two full prepare/spawn/commit
+        # cycles. The XOR is enforced by hand in _resolve_judge_names.
+        p.add_argument(
+            "--judge",
+            action="append",
+            default=None,
+            metavar="JUDGE",
+            help=f"Judge to run (one of: {', '.join(available_judges())}). Repeatable: "
+            "pass --judge twice to run both judges from ONE invocation — one manifest, "
+            "one wave, one commit. Mutually exclusive with --suite; one of the two is "
+            "required.",
         )
-        group.add_argument("--suite", help="Named suite of judges (e.g. 'default')")
+        p.add_argument(
+            "--suite",
+            default=None,
+            help="Named suite of judges (e.g. 'default', 'prose'). Mutually exclusive "
+            "with --judge; one of the two is required.",
+        )
         if multi_scope:
             p.add_argument(
                 "--scope",
@@ -273,7 +404,11 @@ def _build_parser() -> argparse.ArgumentParser:
                 metavar="SCOPE",
                 help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'. "
                 "Repeatable — pass --scope multiple times to stage several chapters "
-                "in one manifest for a single commit.",
+                "in one manifest for a single commit. Prefix a scope with a judge name "
+                "('--scope address:chapter:chapter_31') to bind it to that judge alone; "
+                "untagged scopes apply to every named judge. That is how one manifest "
+                "carries dialogue over ten chapters and address over the eight that "
+                "still owe a verdict, instead of a union that re-judges clean work.",
             )
         else:
             p.add_argument(
@@ -530,6 +665,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write findings into evaluations/<chunk>.json (dashboard badges)",
     )
+    cp.add_argument(
+        "--brief",
+        action="store_true",
+        help="Replace the per-(target,judge) results[] echo with a counts rollup "
+        "(results_brief: target_id, judge, score, passed, errors, warnings, info). A "
+        "20-chapter commit returns 20 full EvalResults — every finding with its excerpt "
+        "and suggestion — which truncates the turn before `persisted` is reached. The "
+        "full payload, findings and all, is written to .harness/judges/last_output.json "
+        "(UTF-8) either way: Read that file for the finding text instead of filtering "
+        "captured stdout.",
+    )
     cp.add_argument("--verbose", action="store_true", help="Debug logging")
 
     # apply — turn approved findings into chunk edits -----------------------
@@ -621,8 +767,58 @@ def _build_parser() -> argparse.ArgumentParser:
 # Set from ``--schema`` in main(). Off by default: see _emit.
 _SHOW_SCHEMA = False
 
+# ``profile`` and ``status`` promise "read-only: no spend, NO WRITES" — that is
+# the contract the skill runs them under before anything is decided, so they are
+# the two commands that must not create a .harness/judges/ on a book that has
+# never been judged. Every other command already writes there.
+_NO_SIDECAR_COMMANDS = frozenset({"profile", "status"})
 
-def _emit(payload: dict, schema: dict | None = None) -> None:
+# ``.harness/judges/`` for the project this invocation names, resolved once in
+# main(). None when --project doesn't resolve (the command is about to fail on
+# it anyway) or the command is read-only — the sidecar is a convenience and
+# never a hard dependency.
+_OUTPUT_DIR: Path | None = None
+
+
+def _set_output_dir(args: argparse.Namespace) -> None:
+    """Point the ``last_output.json`` sidecar at this invocation's project."""
+    global _OUTPUT_DIR
+    _OUTPUT_DIR = None
+    if getattr(args, "command", None) in _NO_SIDECAR_COMMANDS:
+        return
+    project = getattr(args, "project", None)
+    found = _find_project(project) if project else None
+    _OUTPUT_DIR = None if found is None else found / ".harness" / "judges"
+
+
+def _write_output_artifact(payload: dict) -> None:
+    """Mirror a command's JSON result to ``.harness/judges/last_output.json`` (UTF-8).
+
+    ``scripts/harness.py`` grew this contract in response to the same friction and
+    ``run_judges.py`` never got it: a 20-chapter ``commit`` truncated mid-``results[]``,
+    the agent hand-rolled a ``python -c`` filter to recover it, and that filter — not
+    this CLI's stdout, which is UTF-8 — was what mangled every raya. A real file on
+    disk is `Read`-able and `grep`-able without a second interpreter in the loop, and
+    it is what makes ``commit --brief`` safe to use without ``--persist``: dropping
+    ``results[]`` from stdout loses nothing when the full payload is written here.
+
+    Written for every command except the two read-only ones (``profile``,
+    ``status``), whose whole contract is that they touch nothing.
+
+    Best-effort by design: the artifact must never break a command.
+    """
+    if _OUTPUT_DIR is None:
+        return
+    try:
+        _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = _OUTPUT_DIR / "last_output.json"
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"OUTPUT_JSON: {out}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - a convenience, never a hard dependency
+        pass
+
+
+def _emit(payload: dict, schema: dict | None = None, *, full: dict | None = None) -> None:
     """Print exactly one JSON object, with ``_schema`` only where it earns its keep.
 
     The schema blocks are the CLI's self-documentation and they are not free:
@@ -634,16 +830,22 @@ def _emit(payload: dict, schema: dict | None = None) -> None:
 
     Some payloads arrive with ``_schema`` already embedded by the subagent layer;
     that is normalized here so there is one rule, not two.
+
+    Every payload is also mirrored to ``.harness/judges/last_output.json`` — see
+    :func:`_write_output_artifact`. When stdout carries an abridged payload
+    (``commit --brief``), pass the unabridged one as ``full`` so the file keeps
+    everything the terminal dropped.
     """
     embedded = payload.pop("_schema", None)
     schema = schema if schema is not None else embedded
-    if schema is None:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
-    if _SHOW_SCHEMA or payload.get("status") == "error" or payload.get("error"):
-        payload["_schema"] = schema
-    else:
-        payload["_schema_hint"] = "re-run with --schema for per-key documentation"
+    if schema is not None:
+        if _SHOW_SCHEMA or payload.get("status") == "error" or payload.get("error"):
+            payload["_schema"] = schema
+        else:
+            payload["_schema_hint"] = "re-run with --schema for per-key documentation"
+    # ``full`` is the unabridged payload when stdout carries an abridged one
+    # (``commit --brief``); the sidecar always holds everything.
+    _write_output_artifact(full if full is not None else payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -711,9 +913,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
 
     try:
-        judge_names = [args.judge] if args.judge else resolve_suite(args.suite)
+        judge_names = _resolve_judge_names(args)
     except ValueError as exc:
         _emit({"status": "error", "error": str(exc)}, _RUN_SCHEMA)
+        return 1
+
+    # `run` takes exactly one --scope and applies it to every judge, so a judge
+    # tag here could only ever narrow the run to one judge and starve the rest.
+    # Reject it with the pointer rather than resolving something nobody meant.
+    if _split_scope_tag(args.scope)[0] is not None:
+        _emit(
+            {
+                "status": "error",
+                "error": (
+                    f"--scope {args.scope!r}: per-judge scope tags are a `prepare` "
+                    "feature (it takes repeatable --scope); `run` applies its one "
+                    "--scope to every judge named."
+                ),
+                "scope": args.scope,
+            },
+            _RUN_SCHEMA,
+        )
         return 1
 
     try:
@@ -804,9 +1024,10 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
 
     try:
-        judge_names = [args.judge] if args.judge else resolve_suite(args.suite)
+        judge_names = _resolve_judge_names(args)
+        scopes_by_judge = _scopes_by_judge(list(args.scope), judge_names)
     except ValueError as exc:
-        _emit({"status": "error", "error": str(exc)}, _PREPARE_SCHEMA)
+        _emit({"status": "error", "error": str(exc), "scopes": args.scope}, _PREPARE_SCHEMA)
         return 1
 
     context, ctx_error = _build_judge_context(
@@ -819,7 +1040,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         payload = subagent.prepare(
             project_dir,
             judge_names,
-            args.scope,
+            scopes_by_judge,
             context=context,
             worker_model=args.worker_model,
             batch_size=args.batch_size,
@@ -867,7 +1088,13 @@ def _cmd_commit(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     payload = subagent.commit(project_dir, persist=args.persist)
     payload["project"] = str(project_dir)
-    _emit(payload)
+    if args.brief and payload.get("results") is not None:
+        # stdout gets counts; the sidecar keeps the findings (see _emit's `full`).
+        brief = dict(payload)
+        brief["results_brief"] = subagent.brief_results(brief.pop("results"))
+        _emit(brief, full=payload)
+    else:
+        _emit(payload)
     return 1 if payload.get("status") == "error" else 0
 
 
@@ -1646,6 +1873,7 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "verbose", False):
         logging.basicConfig(level=logging.DEBUG)
     _SHOW_SCHEMA = bool(getattr(args, "schema", False))
+    _set_output_dir(args)
     return _DISPATCH[args.command](args)
 
 

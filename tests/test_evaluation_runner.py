@@ -25,6 +25,7 @@ from src.models import (
     ChunkMetadata,
     ChunkStatus,
     EvalResult,
+    Issue,
     IssueLevel,
     EvaluationConfig,
     Glossary,
@@ -507,6 +508,36 @@ class TestAggregateResults:
 
         assert "length" in summary["issues_by_evaluator"]
         assert summary["issues_by_evaluator"]["length"] >= 1
+
+    def test_aggregate_issues_by_evaluator_sums_same_named_results(self):
+        """Same-named results must SUM, not overwrite each other.
+
+        The normal shape of an LLM-judge commit: N chapters, every result named
+        for the judge. A dict comprehension keyed on eval_name kept only the last
+        one, so a clean final chapter reported {"dialogue": 0} beside a non-zero
+        total_issues — the rollup contradicting itself in the same payload.
+        """
+        def _result(target_id: str, issue_count: int) -> EvalResult:
+            return EvalResult(
+                eval_name="dialogue",
+                eval_version="1.0.0",
+                target_id=target_id,
+                target_type="chunk",
+                passed=issue_count == 0,
+                issues=[
+                    Issue(severity=IssueLevel.ERROR, message=f"issue {i}")
+                    for i in range(issue_count)
+                ],
+            )
+
+        summary = aggregate_results([
+            _result("chunk_a", 2),
+            _result("chunk_b", 4),
+            _result("chunk_c", 0),  # the last one used to win the whole rollup
+        ])
+
+        assert summary["issues_by_evaluator"] == {"dialogue": 6}
+        assert summary["issues_by_evaluator"]["dialogue"] == summary["total_issues"]
 
     def test_aggregate_average_score(self, basic_chunk):
         """Should calculate average score correctly."""

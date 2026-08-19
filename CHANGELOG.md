@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.47.4.0] - 2026-08-19
+
+### Added
+- **`run_judges.py prepare` can finally name both judges, and give each its own chapters.** `--judge` is now repeatable on `run` and `prepare` (it already was on `apply` and `status`), and a `--scope` on `prepare` can be tagged with a judge name — `--scope dialogue:book --scope address:chapter:chapter_04` stages one manifest where dialogue covers the whole book and address covers one chapter. Untagged scopes still apply to every named judge, and the two forms mix. This was the single most-logged friction in judge-review: "run both judges" meant two full prepare → fan-out → commit cycles, two consent gates in two turns for one request, and two waves each paying the fixed per-process baseline again (~17.2k/job on Cursor). Repeatable `--judge` alone was not enough, because the real request is asymmetric — the union re-judges chapters that already have a current verdict. A tag naming a judge the run does not include is an error, as is leaving a named judge with no scope; neither is a silent no-op, since both would quietly stage less work than was asked for.
+- `prepare` returns and writes `scopes_by_judge` alongside the existing flat `scopes` union, so you can check what each judge was actually staged over before spawning. `fanout` and `commit` are unchanged — they key off each entry's `judge` already — and an older manifest still reads fine.
+- **A `prose` built-in suite** = `["dialogue", "address"]`, for when the pair is worth a name. It stays out of `default` for the same reason `address` does: it is only correct once the book has an `address_map.json`.
+- **`commit --brief`** replaces the per-`(target, judge)` `results[]` echo with a counts rollup (`results_brief`: `target_id`, `judge`, `score`, `passed`, `errors`/`warnings`/`info`), keeping `summary`, `counts`, `run_header` and `persisted`. A 20-chapter commit returned 20 full `EvalResult`s — every finding with its excerpt and suggestion — and truncated the turn before `persisted` was reached.
+- **`.harness/judges/last_output.json`** — every `run_judges.py` command now mirrors its JSON result to disk in UTF-8, the way `scripts/harness.py` has since it grew the same contract. This is what makes `--brief` safe without `--persist`: the full payload, findings and all, is always on disk. It also closes the mojibake chain the logs kept hitting — a truncated payload forced a hand-rolled `python -c` filter, that filter (not this CLI's stdout, which is already UTF-8) mangled every raya, and recovering cost a temp script and a `python -X utf8` re-run. The two read-only commands, `status` and `profile`, still write nothing at all.
+
+### Fixed
+- **`summary.issues_by_evaluator` no longer reports the last target's issue count as the whole run's.** `aggregate_results` built it with a dict comprehension keyed on `eval_name`, which silently overwrites when results share a name — the normal shape of a judge commit, where all 20 chapters are named `"dialogue"`. A clean final chapter therefore reported `{"dialogue": 0}` beside `total_issues: 6`, the rollup contradicting itself in the same payload. It now sums, so the value is a real per-judge total. No behavior change for `src/evaluators/reporting.py`, where evaluator names are unique per run.
+
 ## [0.47.3.1] - 2026-08-22
 
 ### Changed

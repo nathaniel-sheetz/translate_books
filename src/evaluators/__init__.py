@@ -364,7 +364,9 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
         - overall_passed: True if all evaluators passed
         - total_issues: Total number of issues across all evaluators
         - issues_by_severity: Count of errors, warnings, info
-        - issues_by_evaluator: Issue count per evaluator
+        - issues_by_evaluator: Total issue count per evaluator NAME, summed across
+          every result carrying that name (an LLM-judge run has one result per
+          target, all named for the judge)
         - average_score: Average of non-null scores (0.0-1.0)
         - evaluator_results: List of per-evaluator summaries
 
@@ -399,8 +401,15 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
     total_info = sum(r.info_count for r in results)
     total_issues = sum(len(r.issues) for r in results)
 
-    # Count issues by evaluator
-    issues_by_evaluator = {r.eval_name: len(r.issues) for r in results}
+    # Count issues by evaluator. Accumulate — a dict comprehension keyed on
+    # ``eval_name`` silently overwrites when several results share a name, which
+    # is the normal case for an LLM-judge run: a 20-chapter dialogue commit is 20
+    # results all named "dialogue", so the last chapter's count won the whole
+    # rollup (a clean final chapter reported {"dialogue": 0} beside
+    # total_issues: 6). This is a per-judge/per-evaluator TOTAL.
+    issues_by_evaluator: dict[str, int] = {}
+    for r in results:
+        issues_by_evaluator[r.eval_name] = issues_by_evaluator.get(r.eval_name, 0) + len(r.issues)
 
     # Calculate average score (only for non-null scores)
     scores = [r.score for r in results if r.score is not None]
