@@ -178,5 +178,5 @@ Each chunk is saved as an individual JSON file:
 
 - [GETTING_STARTED.md](GETTING_STARTED.md) - Full workflow including chunking as Step 4
 - [CHAPTER_DETECTION_GUIDE.md](CHAPTER_DETECTION_GUIDE.md) - Splitting books into chapters (the step before chunking)
-- [BATCH_PIPELINE.md](BATCH_PIPELINE.md) - Batch processing of chunks for evaluation and combining
+- [TRANSLATE_HARNESS.md](TRANSLATE_HARNESS.md) - Chunking as a pipeline beat (`harness chunk`)
 - [PROMPT_GUIDE.md](PROMPT_GUIDE.md) - How chunks are turned into translation prompts
