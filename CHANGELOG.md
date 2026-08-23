@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.47.3.1] - 2026-08-22
+
+### Changed
+- **The reader toast for stale judge results now says what happened.** After you edit a chunk, review mode hides that chunk's findings until you re-judge, but the old toast only said `{n} chunk(s) skipped (stale after edit)` and vanished in 2.4 seconds — easy to miss, and easy to read as a load failure. It now explains that some results are hidden because those chunks were edited since the judges ran, tells you to re-judge, and stays up for 6 seconds. Spanish copy updated to match.
+
 ## [0.47.3.0] - 2026-08-19
 
 ### Added
