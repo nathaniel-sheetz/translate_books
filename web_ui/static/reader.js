@@ -192,8 +192,8 @@
                 } else {
                     buildReviewMap(reviewData);
                     if (reviewData && reviewData.stale_chunks > 0) {
-                        const tmpl = i.review_stale_chunks || '{n} chunk(s) skipped (stale after edit)';
-                        showToast(tmpl.replace('{n}', String(reviewData.stale_chunks)));
+                        const tmpl = i.review_stale_chunks || 'Some judge results are hidden: {n} chunk(s) edited since the judges ran. Re-judge to see them.';
+                        showToast(tmpl.replace('{n}', String(reviewData.stale_chunks)), 6000);
                     }
                 }
 
@@ -1022,10 +1022,10 @@
         if (tour.btn) tour.btn.addEventListener('click', () => jumpTour(tour));
     }
 
-    // --- Toast (used by the realign flow; minimal, no deps) ---
+    // --- Toast (non-blocking notifications; minimal, no deps) ---
     let toastEl = null;
     let toastTimer = null;
-    function showToast(msg) {
+    function showToast(msg, ms) {
         if (!toastEl) {
             toastEl = document.createElement('div');
             toastEl.className = 'reader-toast';
@@ -1034,7 +1034,7 @@
         toastEl.textContent = msg;
         toastEl.classList.add('visible');
         if (toastTimer) clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => toastEl.classList.remove('visible'), 2400);
+        toastTimer = setTimeout(() => toastEl.classList.remove('visible'), ms || 2400);
     }
 
     // --- Realign current chapter from inside the reader ---

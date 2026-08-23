@@ -408,6 +408,19 @@ class TestReaderView:
         assert rv.status_code == 200
         assert b"reader-app" in rv.data
 
+    def test_reader_ships_stale_chunk_toast_i18n(self, client, project_with_alignment):
+        html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
+        assert "review_stale_chunks" in html
+        assert "Some judge results are hidden:" in html
+        assert "{n}" in html
+
+    def test_reader_ships_stale_chunk_toast_i18n_es(self, client, project_with_alignment):
+        client.set_cookie("reader_lang", "es")
+        html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
+        assert "review_stale_chunks" in html
+        assert "Algunos resultados de los jueces" in html
+        assert "{n}" in html
+
     def test_chapter_not_found(self, client, project_with_alignment):
         rv = client.get("/read/test-project/chapter_99")
         assert rv.status_code == 404

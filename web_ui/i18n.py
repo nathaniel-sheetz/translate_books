@@ -147,7 +147,7 @@ STRINGS = {
             "review_fb_bad_message": "Bad message",
             "review_fb_missing_context_gap": "Missing context",
             "review_load_failed": "Could not load review findings.",
-            "review_stale_chunks": "{n} chunk(s) skipped (stale after edit)",
+            "review_stale_chunks": "Some judge results are hidden: {n} chunk(s) edited since the judges ran. Re-judge to see them.",
             "review_fb_failed": "Feedback not saved; queued for retry.",
             "review_types": {
                 "blacklist": "Blacklist",
@@ -382,7 +382,7 @@ STRINGS = {
             "review_fb_bad_message": "Mensaje incorrecto",
             "review_fb_missing_context_gap": "Falta contexto",
             "review_load_failed": "No se pudieron cargar los hallazgos de revisi\u00f3n.",
-            "review_stale_chunks": "{n} fragmento(s) omitido(s) (obsoleto tras edici\u00f3n)",
+            "review_stale_chunks": "Algunos resultados de los jueces est\u00e1n ocultos: {n} fragmento(s) editado(s) tras ejecutarlos. Vuelve a ejecutarlos para verlos.",
             "review_fb_failed": "Comentario no guardado; en cola para reintentar.",
             "review_types": {
                 "blacklist": "Lista negra",
