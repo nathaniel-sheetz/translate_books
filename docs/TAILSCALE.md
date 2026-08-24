@@ -38,30 +38,41 @@ One filesystem, one writer process.
 
 1. Install Tailscale on the PC and on the phone, signed in to the same account.
 2. Enable MagicDNS in the admin console so the machine gets a stable name.
-3. If the connection is refused, allow inbound TCP 5000 on the Tailscale adapter in Windows
-   Defender Firewall.
 
-**Verify on cellular data with Wi-Fi off.** Testing over Wi-Fi proves nothing, since that
-already worked.
+`scripts/serve.py` binds 127.0.0.1:5000. Opening TCP 5000 on the Tailscale adapter does not
+reach waitress; `tailscale serve` in Step 2 is the door in.
 
-> **Check:** you can read a chapter of a real book on mobile data.
-
-That is the whole feature. The rest is durability and hygiene.
+> **Check:** from the phone, the PC shows as connected in the Tailscale app (or
+> `tailscale ping <pc-name>` succeeds).
 
 ---
 
 ## Step 2 — HTTPS and a stable name
 
-Run `tailscale serve` (or `tailscale cert`) to front the app at
-`https://<machine>.<tailnet>.ts.net` with a real Let's Encrypt certificate. This also stops the
-raw `100.x` address from moving under you.
+The app must already be listening on 127.0.0.1:5000 (`python scripts/serve.py`, or the
+scheduled task from Step 3 if you have already installed it). Then:
+
+```
+tailscale serve --bg 5000
+```
+
+That proxies HTTPS at `https://<machine>.<tailnet>.ts.net` onto loopback and fetches a Let's
+Encrypt certificate. `tailscale cert` only issues a cert; it does not front the app. This also
+stops the raw `100.x` address from moving under you. Run `tailscale serve status` to see the
+name.
 
 The certificate matters more than it might look. The reader is a PWA — `reader.html` ships
 `apple-mobile-web-app-capable` and a `manifest.webmanifest` with `display: standalone` — and
 Android's manifest-based install wants a secure context. The cert makes "Add to Home Screen"
 behave consistently across platforms.
 
-> **Check:** home-screen install works on the phone and a chapter renders in standalone mode.
+**Verify on cellular data with Wi-Fi off.** Testing over Wi-Fi proves nothing, since that
+already worked.
+
+> **Check:** you can read a chapter of a real book on mobile data. Home-screen install works
+> on the phone and a chapter renders in standalone mode.
+
+That is the whole feature. The rest is durability and hygiene.
 
 ---
 
@@ -117,16 +128,19 @@ The settings the script writes, and why each one is there:
 | No run-time limit (untick "Stop the task if it runs longer than 3 days") | It is a service. |
 | Restart every 1 minute, up to 60 times | The watchdog, paired with `/healthz`. |
 | "Do not start a new instance" | One process only — the in-process caches assume it. |
+| AllowHardTerminate off | The service should not be hard-killed in the middle of writing a translation. |
 | Untick "Stop if the computer switches to battery power" | Unplugging should not kill the reader. |
 | Untick "Start the task only if the computer is on AC power" | Easy to miss. With it set, a reboot on battery does not start the reader at all. |
 
-`scripts\reader.ps1 status` audits the live task against the same definition `install` writes
-and names anything that has moved; `install` backs the previous definition up to `logs/` first.
+`scripts\reader.ps1 status` audits the live task's settings, working directory, serve.py path,
+and at-startup trigger against what `install` writes, and names anything in that set that has
+moved. It does not audit the 1-minute trigger delay or "run whether user is logged on."
+`install` backs the previous definition up to `logs/` first.
 
 ### Manage it
 
 ```powershell
-scripts\reader.ps1 status | start | stop | restart | dev | log | install | spec
+scripts\reader.ps1 status    # or: start, stop, restart, dev, log, install, spec
 ```
 
 Under a service you lose auto-reload, so every code edit needs a bounce — use `restart`. Use
@@ -150,8 +164,10 @@ Under a service you lose auto-reload, so every code edit needs a bounce — use 
 - **SSE under waitress.** The dashboard uses server-sent events for batch progress. `threads=16`
   addresses pool exhaustion, but waitress coalesces small writes and every SSE event here is
   tiny. Watch a real batch-translate run from the dashboard; if events arrive in clumps rather
-  than steadily, fall back to `app.run(debug=False, threaded=True)` under the same task. Keep to
-  one process either way.
+  than steadily, you can fall back to `app.run(debug=False, threaded=True)` under the same
+  task. That path binds `0.0.0.0:5000`, so Flask is reachable on the Tailscale adapter and the
+  LAN, not only through `tailscale serve`. Do not open TCP 5000 to compensate; keep to one
+  process either way.
 - **Back up `projects/`.** Putting the reader on a tailnet does nothing for durability. Your
   translation work lives in `projects/`, and a scheduled off-site backup (restic encrypts by
   default, which matters because the repo root holds a real `.env`) is worth more than any

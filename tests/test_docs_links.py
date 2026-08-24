@@ -79,6 +79,19 @@ def _links_in(path: Path) -> list[str]:
     return links
 
 
+def _is_gitignored(rel: Path) -> bool:
+    """True when ``git check-ignore`` would exclude this repo-relative path."""
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", rel.as_posix()],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 128:
+        raise RuntimeError(result.stderr.strip() or "git check-ignore failed")
+    return result.returncode == 0
+
+
 MARKDOWN_FILES = _tracked_markdown()
 
 
@@ -99,6 +112,33 @@ def test_internal_links_resolve(doc):
         if not resolved.exists():
             broken.append(target)
     assert not broken, f"{doc.relative_to(REPO_ROOT)} links to missing files: {broken}"
+
+
+@pytest.mark.parametrize("doc", MARKDOWN_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
+def test_internal_links_are_tracked(doc):
+    """Relative links must not point at gitignored paths.
+
+    ``exists()`` is not enough: a file that lives only on the author's machine
+    (``docs/design/`` is gitignored as design scratch) makes CI fail and the
+    local run pass. That is how ``README.md`` → ``docs/design/tailscale.md``
+    stayed red after 0.47.2.0.
+    """
+    ignored = []
+    repo = REPO_ROOT.resolve()
+    for target in _links_in(doc):
+        path_part = target.split("#", 1)[0]
+        if not path_part:
+            continue
+        resolved = (doc.parent / path_part).resolve()
+        try:
+            rel = resolved.relative_to(repo)
+        except ValueError:
+            continue  # outside the repo; the exists() test owns dangling links
+        if _is_gitignored(rel):
+            ignored.append(target)
+    assert not ignored, (
+        f"{doc.relative_to(REPO_ROOT)} links to gitignored paths: {ignored}"
+    )
 
 
 @pytest.mark.parametrize("doc", MARKDOWN_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))

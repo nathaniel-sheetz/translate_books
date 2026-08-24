@@ -256,7 +256,7 @@ def test_install_spec_sets_working_directory():
 @requires_powershell
 def test_install_spec_allows_battery_start():
     """The hand-made task disallowed it, so a reboot on battery left the reader
-    down -- the exact case docs/design/tailscale.md Step 3 promises to survive."""
+    down -- the exact case docs/TAILSCALE.md Step 3 promises to survive."""
     spec = _reader_spec()
 
     assert spec["DisallowStartIfOnBatteries"] is False
