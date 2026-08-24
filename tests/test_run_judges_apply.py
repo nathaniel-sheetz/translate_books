@@ -765,6 +765,19 @@ def test_apply_errors_without_persisted_findings(tmp_path, capsys):
     assert "persist" in payload["error"].lower()
 
 
+def test_apply_rejects_a_tagged_scope(project, capsys):
+    """Tags are a prepare feature; apply must not parse 'address' as a kind."""
+    before = load_chunk(project / "chunks" / f"{CHUNK_ID}.json").translated_text
+    rc, payload = _run(
+        capsys,
+        ["apply", "--project", str(project), "--scope", "address:chapter:chapter_01"],
+    )
+    assert rc == 1
+    assert payload["status"] == "error"
+    assert "prepare" in payload["error"]
+    assert load_chunk(project / "chunks" / f"{CHUNK_ID}.json").translated_text == before
+
+
 # --- deferring the expensive tail -------------------------------------------
 
 

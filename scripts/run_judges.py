@@ -43,10 +43,11 @@ Cost / usage safety:
     is the conversational usage check the skill does before spawning N workers
     or running a headless wave.
 
-Every command prints one JSON object with a ``_schema`` block documenting its keys.
-All but the two read-only ones (``profile``, ``status``, which write nothing at all)
-also mirror that object to ``<project>/.harness/judges/last_output.json`` (UTF-8) —
-read it back from there rather than filtering captured stdout through another
+Every command prints one JSON object. ``_schema`` is opt-in (``--schema``) or on
+error; success payloads carry a ``_schema_hint`` instead. All but the two
+read-only ones (``profile``, ``status``, which write nothing at all) also mirror
+that object to ``<project>/.harness/judges/last_output.json`` (UTF-8) — read it
+back from there rather than filtering captured stdout through another
 interpreter, which is where the Windows raya mojibake came from.
 
 Examples:
@@ -307,14 +308,16 @@ def _split_scope_tag(scope: str) -> tuple[str | None, str]:
 
     A scope whose first segment is a known scope kind is untagged — everything
     else is read as a judge tag, so a typo surfaces as "unknown judge" rather
-    than as an unknown scope kind three frames deeper.
+    than as an unknown scope kind three frames deeper. Tags are matched
+    case-insensitively (kinds already were); ``ADDRESS:chapter:…`` binds the
+    same as ``address:chapter:…``.
     """
     scope = scope.strip()
     head = scope.partition(":")[0].strip().lower()
     if head in _SCOPE_KINDS:
         return None, scope
     judge, sep, rest = scope.partition(":")
-    return judge.strip(), rest.strip() if sep else ""
+    return judge.strip().lower(), rest.strip() if sep else ""
 
 
 def _scopes_by_judge(scopes: list[str], judge_names: list[str]) -> dict[str, list[str]]:
@@ -331,6 +334,7 @@ def _scopes_by_judge(scopes: list[str], judge_names: list[str]) -> dict[str, lis
             a judge left with no scope at all.
     """
     by_judge: dict[str, list[str]] = {name: [] for name in judge_names}
+    canonical = {name.lower(): name for name in judge_names}
     for raw in scopes:
         tag, scope = _split_scope_tag(raw)
         if tag is None:
@@ -338,7 +342,7 @@ def _scopes_by_judge(scopes: list[str], judge_names: list[str]) -> dict[str, lis
                 if scope not in by_judge[name]:
                     by_judge[name].append(scope)
             continue
-        if tag not in by_judge:
+        if tag not in canonical:
             raise ValueError(
                 f"--scope {raw!r}: {tag!r} is neither a scope kind "
                 f"({', '.join(sorted(_SCOPE_KINDS))}) nor a judge this run names "
@@ -350,8 +354,9 @@ def _scopes_by_judge(scopes: list[str], judge_names: list[str]) -> dict[str, lis
                 f"--scope {raw!r}: a judge-tagged scope is '<judge>:<scope>', "
                 "e.g. 'address:chapter:chapter_31'"
             )
-        if scope not in by_judge[tag]:
-            by_judge[tag].append(scope)
+        key = canonical[tag]
+        if scope not in by_judge[key]:
+            by_judge[key].append(scope)
     starved = [name for name in judge_names if not by_judge[name]]
     if starved:
         raise ValueError(
@@ -359,6 +364,43 @@ def _scopes_by_judge(scopes: list[str], judge_names: list[str]) -> dict[str, lis
             "needs at least one scope (tagged, or untagged to cover them all)"
         )
     return by_judge
+
+
+def _run_scope(scope: str, judge_names: list[str]) -> str:
+    """Resolve ``run``'s single ``--scope``.
+
+    ``run`` takes one scope and applies it to every named judge. A tag that
+    names the only judge is stripped (prepare copy-paste); any other tag
+    would starve a named judge, so it is an error.
+    """
+    tag, rest = _split_scope_tag(scope)
+    if tag is None:
+        return scope
+    names = [n.lower() for n in judge_names]
+    if len(names) == 1 and tag == names[0] and rest:
+        return rest
+    raise ValueError(
+        f"--scope {scope!r}: per-judge scope tags are a `prepare` feature "
+        "(it takes repeatable --scope); `run` applies its one --scope to every "
+        "judge named. Drop the tag, or use `prepare` for per-judge scopes."
+    )
+
+
+def _tagged_scope_not_for(command: str, scopes: str | list[str] | None) -> str | None:
+    """Error text if any scope carries a prepare-only judge tag; else None."""
+    if not scopes:
+        return None
+    items = [scopes] if isinstance(scopes, str) else list(scopes)
+    for raw in items:
+        if raw is None:
+            continue
+        if _split_scope_tag(str(raw))[0] is not None:
+            return (
+                f"--scope {raw!r}: per-judge scope tags are a `prepare` feature "
+                f"(it takes repeatable --scope); `{command}` does not bind a scope "
+                "to one judge. Drop the tag."
+            )
+    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -386,9 +428,8 @@ def _build_parser() -> argparse.ArgumentParser:
             default=None,
             metavar="JUDGE",
             help=f"Judge to run (one of: {', '.join(available_judges())}). Repeatable: "
-            "pass --judge twice to run both judges from ONE invocation — one manifest, "
-            "one wave, one commit. Mutually exclusive with --suite; one of the two is "
-            "required.",
+            "pass --judge twice to run both from ONE invocation. Mutually exclusive "
+            "with --suite; one of the two is required.",
         )
         p.add_argument(
             "--suite",
@@ -812,10 +853,14 @@ def _write_output_artifact(payload: dict) -> None:
     try:
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         out = _OUTPUT_DIR / "last_output.json"
-        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Never dump `_schema` onto disk — it's the same flood `--brief` exists
+        # to stop, just moved to a file the caller is told to Read.
+        disk = dict(payload)
+        disk.pop("_schema", None)
+        out.write_text(json.dumps(disk, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"OUTPUT_JSON: {out}", file=sys.stderr)
-    except Exception:  # noqa: BLE001 - a convenience, never a hard dependency
-        pass
+    except Exception as exc:  # noqa: BLE001 - a convenience, never a hard dependency
+        print(f"warning: could not write last_output.json: {exc}", file=sys.stderr)
 
 
 def _emit(payload: dict, schema: dict | None = None, *, full: dict | None = None) -> None:
@@ -844,7 +889,8 @@ def _emit(payload: dict, schema: dict | None = None, *, full: dict | None = None
         else:
             payload["_schema_hint"] = "re-run with --schema for per-key documentation"
     # ``full`` is the unabridged payload when stdout carries an abridged one
-    # (``commit --brief``); the sidecar always holds everything.
+    # (``commit --brief``, ``prepare --quiet``); the sidecar always holds
+    # everything the terminal dropped, minus ``_schema`` (stripped on write).
     _write_output_artifact(full if full is not None else payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -891,6 +937,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
     from src.judges.status import StatusScopeError, build_status
 
     project_dir = _resolve_project(args.project)
+    tagged = _tagged_scope_not_for("status", args.scope)
+    if tagged:
+        _emit(
+            {"status": "error", "error": tagged, "scopes": args.scope},
+            _STATUS_SCHEMA,
+        )
+        return 1
     try:
         payload = build_status(
             project_dir,
@@ -918,35 +971,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
         _emit({"status": "error", "error": str(exc)}, _RUN_SCHEMA)
         return 1
 
-    # `run` takes exactly one --scope and applies it to every judge, so a judge
-    # tag here could only ever narrow the run to one judge and starve the rest.
-    # Reject it with the pointer rather than resolving something nobody meant.
-    if _split_scope_tag(args.scope)[0] is not None:
+    try:
+        scope = _run_scope(args.scope, judge_names)
+    except ValueError as exc:
         _emit(
-            {
-                "status": "error",
-                "error": (
-                    f"--scope {args.scope!r}: per-judge scope tags are a `prepare` "
-                    "feature (it takes repeatable --scope); `run` applies its one "
-                    "--scope to every judge named."
-                ),
-                "scope": args.scope,
-            },
+            {"status": "error", "error": str(exc), "scope": args.scope},
             _RUN_SCHEMA,
         )
         return 1
 
     try:
-        targets = build_targets(project_dir, args.scope)
+        targets = build_targets(project_dir, scope)
     except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
-        _emit({"status": "error", "error": str(exc), "scope": args.scope}, _RUN_SCHEMA)
+        _emit({"status": "error", "error": str(exc), "scope": scope}, _RUN_SCHEMA)
         return 1
 
     context, ctx_error = _build_judge_context(
         project_dir, judge_names, args.model, args.provider
     )
     if ctx_error:
-        _emit({"status": "error", "error": ctx_error, "scope": args.scope}, _RUN_SCHEMA)
+        _emit({"status": "error", "error": ctx_error, "scope": scope}, _RUN_SCHEMA)
         return 1
 
     outcome = run_judge_suite(
@@ -963,7 +1007,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "status": "cost_exceeded",
                 "backend": "api",
                 "project": str(project_dir),
-                "scope": args.scope,
+                "scope": scope,
                 "judges": judge_names,
                 "estimated_cost": outcome["estimated_cost"],
                 "cost_limit": outcome["cost_limit"],
@@ -1002,7 +1046,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "status": "ok",
             "backend": "api",
             "project": str(project_dir),
-            "scope": args.scope,
+            "scope": scope,
             "judges": judge_names,
             "estimated_cost": outcome["estimated_cost"],
             "run_header": outcome["run_header"],
@@ -1055,8 +1099,11 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
 
     payload["project"] = str(project_dir)
     if args.quiet:
+        full = dict(payload)
         payload["manifest_entries"] = len(payload.pop("manifest", []))
-    _emit(payload)
+        _emit(payload, full=full)
+    else:
+        _emit(payload)
     return 0
 
 
@@ -1314,6 +1361,11 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         conflict = "--realign-only and --no-realign are opposites; pass neither or one."
     if conflict:
         _emit({"status": "error", "error": conflict, "scopes": args.scope}, _APPLY_SCHEMA)
+        return 1
+
+    tagged = _tagged_scope_not_for("apply", args.scope)
+    if tagged:
+        _emit({"status": "error", "error": tagged, "scopes": args.scope}, _APPLY_SCHEMA)
         return 1
 
     # 1. Resolve scopes -> unique, translated chunk targets (preserve order).

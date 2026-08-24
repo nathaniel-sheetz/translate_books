@@ -198,6 +198,16 @@ def test_tagged_and_untagged_scopes_mix(project, capsys):
     }
 
 
+def test_tagged_scope_is_matched_case_insensitively(project, capsys):
+    out = _prepare(
+        capsys, project,
+        "--judge", "address",
+        "--scope", "ADDRESS:chapter:chapter_01",
+    )
+    assert out["rc"] == 0
+    assert out["scopes_by_judge"] == {"address": ["chapter:chapter_01"]}
+
+
 def test_tag_naming_a_judge_outside_the_run_is_an_error(project, capsys):
     """Never a silent no-op: it would stage less work than was asked for."""
     out = _prepare(
@@ -229,20 +239,45 @@ def test_a_judge_left_with_no_scope_is_an_error(project, capsys):
     assert "address" in out["error"]
 
 
-def test_run_rejects_a_tagged_scope(project, capsys):
-    """`run` takes one --scope for every judge; a tag there could only starve one."""
+def test_run_rejects_a_tagged_scope_that_would_starve(project, capsys):
+    """A tag on a multi-judge `run` would starve the untagged judge."""
     rc = run_judges.main(
-        ["run", "--project", str(project), "--judge", "dialogue", "--scope", "dialogue:book"]
+        [
+            "run", "--project", str(project),
+            "--judge", "dialogue", "--judge", "address",
+            "--scope", "dialogue:book",
+        ]
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert "prepare" in out["error"]
 
 
+def test_run_scope_strips_a_matching_single_judge_tag():
+    """Prepare copy-paste (`--judge address --scope address:chapter:x`) is fine."""
+    assert run_judges._run_scope("address:chapter:chapter_04", ["address"]) == (
+        "chapter:chapter_04"
+    )
+    assert run_judges._run_scope("ADDRESS:chapter:chapter_04", ["address"]) == (
+        "chapter:chapter_04"
+    )
+    assert run_judges._run_scope("chapter:chapter_04", ["address"]) == (
+        "chapter:chapter_04"
+    )
+    with pytest.raises(ValueError, match="prepare"):
+        run_judges._run_scope("dialogue:book", ["address"])
+    with pytest.raises(ValueError, match="prepare"):
+        run_judges._run_scope("dialogue:book", ["dialogue", "address"])
+
+
 def test_scope_tag_helper_leaves_plain_scopes_alone():
     assert run_judges._split_scope_tag("book") == (None, "book")
     assert run_judges._split_scope_tag("chapter:chapter_03") == (None, "chapter:chapter_03")
     assert run_judges._split_scope_tag("address:chapter:chapter_03") == (
+        "address",
+        "chapter:chapter_03",
+    )
+    assert run_judges._split_scope_tag("ADDRESS:chapter:chapter_03") == (
         "address",
         "chapter:chapter_03",
     )
@@ -319,6 +354,10 @@ def test_sidecar_holds_the_full_payload_with_readable_rayas(project, capsys):
     assert saved["results"][0]["issues"][0]["suggestion"] == "—Hola, ¿qué tal?"
     # The bytes on disk are UTF-8, not an escaped ASCII transcription.
     assert "—Hola, ¿qué tal?" in text
+    # `--brief` used to dump `_COMMIT_SCHEMA` here because `full=` bypassed the
+    # stdout schema strip. The findings stay; the docs block does not.
+    assert "results" in saved
+    assert "_schema" not in saved
 
 
 def test_sidecar_is_refreshed_per_command(project, capsys):
@@ -353,3 +392,48 @@ def test_brief_results_helper_maps_the_counts():
             "errors": 2, "warnings": 1, "info": 0,
         }
     ]
+
+
+def test_quiet_prepare_sidecar_keeps_the_manifest(project, capsys):
+    """`--quiet` abridges stdout; last_output.json still holds `manifest`."""
+    rc = run_judges.main([
+        "prepare", "--project", str(project),
+        "--judge", "dialogue", "--scope", "chapter:chapter_01", "--quiet",
+    ])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert "manifest" not in out
+    assert out["manifest_entries"] == 1
+
+    sidecar = json.loads(
+        (project / ".harness" / "judges" / "last_output.json").read_text(encoding="utf-8")
+    )
+    assert len(sidecar["manifest"]) == out["manifest_entries"]
+    assert "_schema" not in sidecar
+
+
+def test_sidecar_write_failure_prints_a_warning(project, capsys, monkeypatch):
+    original = Path.write_text
+
+    def _maybe_boom(self, *args, **kwargs):
+        if self.name == "last_output.json":
+            raise OSError("disk full")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _maybe_boom)
+    rc = run_judges.main([
+        "prepare", "--project", str(project),
+        "--judge", "dialogue", "--scope", "chapter:chapter_01",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert json.loads(captured.out)["status"] == "ok"
+    assert "warning" in captured.err.lower()
+    assert "last_output.json" in captured.err
+
+
+def test_bare_judge_name_as_scope_is_an_error(project, capsys):
+    """`--scope address` is a tag with an empty rest, not a shorthand for book."""
+    out = _prepare(capsys, project, "--judge", "address", "--scope", "address")
+    assert out["rc"] == 1
+    assert "address" in out["error"]

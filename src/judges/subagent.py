@@ -371,7 +371,18 @@ def prepare(
     # and `address` over the eight that still owe a verdict, instead of a union
     # that re-judges what was already clean.
     if isinstance(scopes, dict):
-        scopes_by_judge = {name: list(scopes.get(name) or []) for name in judge_names}
+        scopes_by_judge = {}
+        for name in judge_names:
+            raw = scopes.get(name)
+            if raw is None:
+                raw_list: list[str] = []
+            elif isinstance(raw, str):
+                # A bare string must not go through list(), which iterates
+                # characters: list("book") -> ['b','o','o','k'].
+                raw_list = [raw]
+            else:
+                raw_list = list(raw)
+            scopes_by_judge[name] = raw_list
         unknown = [name for name in scopes if name not in scopes_by_judge]
         if unknown:
             raise ValueError(
