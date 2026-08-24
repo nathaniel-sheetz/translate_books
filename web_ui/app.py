@@ -1939,6 +1939,21 @@ def _ann_for_wire(ann: dict, anchored: Optional[bool] = None) -> dict:
     return out
 
 
+def _as_es_idx(value) -> Optional[int]:
+    """Coerce a stored/alignment ``es_idx`` to int; ``None`` if it isn't one.
+
+    jsonl can carry a string ``"1"`` while alignment JSON carries ``1``. Membership
+    without this is false, so the note is reported unanchored *and* still paints
+    on the live sentence (JS object keys stringify).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _live_es_indices(project_dir: Path, chapter_id: str) -> Optional[set]:
     """The ``es_idx`` values the reader actually renders for a chapter.
 
@@ -1960,7 +1975,7 @@ def _live_es_indices(project_dir: Path, chapter_id: str) -> Optional[set]:
     for a in data.get("alignments", []):
         if not isinstance(a, dict):
             continue
-        idx = a.get("es_idx")
+        idx = _as_es_idx(a.get("es_idx"))
         if idx is None:
             continue
         if _IMAGE_PLACEHOLDER_RE.fullmatch((a.get("es") or "").strip()):
@@ -2048,7 +2063,7 @@ def get_annotations(project_id, chapter):
     a rendered sentence. A ``false`` here is the reader's only way to find a
     note whose sentence has since been renumbered or removed — the sentence
     list can't surface it, so the end-of-chapter overflow bin does, and that is
-    also the only path by which such a note can be edited or deleted again.
+    also the only path by which such a note can be copied or deleted again.
     """
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
@@ -2059,7 +2074,7 @@ def get_annotations(project_id, chapter):
     live = _live_es_indices(project_dir, chapter)
     annotations = _load_annotations(project_dir, chapter)
     flat = [
-        _ann_for_wire(ann, anchored=(live is None or ann.get("es_idx") in live))
+        _ann_for_wire(ann, anchored=(live is None or _as_es_idx(ann.get("es_idx")) in live))
         for lst in annotations.values()
         for ann in lst
     ]
@@ -2113,9 +2128,9 @@ def save_annotation():
         if storage_sub is not None:
             record["sub_id"] = storage_sub
 
-        # Snapshot the sentence as it read when the note was made. es_idx alone
-        # is not an identity — realign renumbers it — so without this a note
-        # that loses its row has nothing left to re-anchor by.
+        # Snapshot the sentence as it read when the note was made. es_idx is a
+        # position, not an identity — if realign drops the row, the overflow
+        # bin still has this excerpt for Find-in-book.
         try:
             es_text = _load_alignment_es_map(project_dir, chapter_id).get(int(es_idx))
         except (TypeError, ValueError):
@@ -5161,6 +5176,8 @@ def _reanchor_annotations_after_realign(
         old_es_text = old_es_map.get(old_idx)
         if old_es_text is None:
             # Annotation references a sentence we don't know about — leave it.
+            # TODO: fall back to record["es_text"] so an already-orphaned note
+            # can still re-anchor on a later realign.
             orphaned.extend(records)
             continue
 
@@ -5817,7 +5834,7 @@ def project_chapter_review(project_id, chapter):
             if loc.get("side") != "target":
                 continue
             char_start = loc.get("char_start")
-            if char_start is None:
+            if not isinstance(char_start, int):
                 continue
             issue_index = ni.get("issue_index")
             if (eval_name, issue_index) in dismissed:

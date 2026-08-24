@@ -496,10 +496,11 @@
     function buildReviewMap(reviewData) {
         reviewMap = {};
         unanchoredList = [];
-        if (!reviewData || !reviewData.by_es_idx) return;
+        if (!reviewData) return;
         const enabled = reviewConfig.types;
-        for (const esIdx in reviewData.by_es_idx) {
-            const list = (reviewData.by_es_idx[esIdx] || [])
+        const byEs = reviewData.by_es_idx || {};
+        for (const esIdx in byEs) {
+            const list = (byEs[esIdx] || [])
                 .filter(f => enabled.indexOf(f.eval_name) !== -1);
             if (list.length) reviewMap[esIdx] = list;
         }
@@ -841,7 +842,6 @@
         const typeLabels = i.review_types || {};
         const item = document.createElement('div');
         item.className = 'overflow-item review-item review-item-' + f.eval_name;
-        item.dataset.findingKey = findingKey(f);
 
         const sev = f.severity || 'info';
         const head = overflowLabelRow(
@@ -894,9 +894,7 @@
                     submitFeedback(null, f, ftype, item, () => {
                         const key = findingKey(f);
                         unanchoredList = unanchoredList.filter(x => findingKey(x) !== key);
-                        const sel = '.overflow-item[data-finding-key="' + key + '"]';
-                        dropOverflowEntries(
-                            Array.prototype.slice.call(content.querySelectorAll(sel)));
+                        dropOverflowEntries([item]);
                     });
                 });
                 fb.appendChild(b);

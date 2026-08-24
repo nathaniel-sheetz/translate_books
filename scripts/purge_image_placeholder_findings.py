@@ -103,6 +103,8 @@ def clean_project(project_dir: Path, apply: bool) -> tuple[int, dict[str, int]]:
             # Survivors keep their stored issue_index verbatim — renumbering
             # would silently re-point every dismissal recorded for this chunk.
             payload["normalized_issues"] = kept
+            # TODO: also rewrite aggregated.total_issues / issues_by_severity so
+            # dashboard badges match reader chips after --apply.
             path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -132,6 +134,7 @@ def main() -> int:
     grand_total = 0
     grand_by_eval: dict[str, int] = {}
 
+    # TODO: walk nested project dirs the way _resolve_project_dir does.
     for project_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         if wanted and project_dir.name not in wanted:
             continue

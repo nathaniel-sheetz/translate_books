@@ -339,3 +339,16 @@ def test_stale_chunks_stay_out_of_the_bin(client, review_project):
     body = client.get("/api/project/revproj/review/chapter_01").get_json()
     assert body["unanchored"] == []
     assert body["stale_chunks"] == 1
+
+
+def test_string_char_start_does_not_500(client, review_project):
+    _save_coded_finding(review_project, char_start=8, char_end=13, match="negro")
+    eval_path = review_project / "evaluations" / "chapter_01_chunk_000.json"
+    payload = json.loads(eval_path.read_text(encoding="utf-8"))
+    payload["normalized_issues"][0]["location"]["char_start"] = "8"
+    eval_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    rv = client.get("/api/project/revproj/review/chapter_01")
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["ok"] is True

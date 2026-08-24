@@ -237,6 +237,19 @@ class TestAnchoring:
         assert anns[0]["anchored"] is False
         assert anns[0]["content"] == "orphan"
 
+    def test_string_es_idx_on_a_live_sentence_reads_anchored(self, client, project):
+        # jsonl can carry "1" while the alignment JSON carries 1; without
+        # coercion that note was unanchored *and* still painted on sentence 1.
+        _write_raw(project, [{
+            "project_id": "test-project", "chapter_id": "chapter_01",
+            "es_idx": "1", "type": "flag", "content": "string idx",
+            "timestamp": "2026-01-01T00:00:00", "sub_id": "u1",
+        }])
+        anns = _get(client)
+        assert len(anns) == 1
+        assert anns[0]["anchored"] is True
+        assert anns[0]["content"] == "string idx"
+
     def test_image_row_reads_unanchored(self, client, project):
         # /api/alignment filters [IMAGE:...] rows out, so a note parked on one
         # renders nowhere. Reporting it anchored would hide it from the bin too.
