@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.48.0.1] - 2026-08-24
+
+### Fixed
+- **CI is green again.** `README.md` linked to `docs/design/tailscale.md`, but `.gitignore` ignores all of `docs/design/` as design scratch, so the file existed only on the author's machine and `tests/test_docs_links.py::test_internal_links_resolve[README.md]` had failed on every run since 0.47.2.0 introduced the link. The setup steps the README promises now ship as `docs/TAILSCALE.md`.
+
+### Added
+- **`docs/TAILSCALE.md`** — how to reach the reader from outside the local Wi-Fi: joining a tailnet, `tailscale serve` for HTTPS and a stable name (which is what makes the PWA home-screen install behave), and running it unattended via `scripts/serve.py` under waitress plus the `TranslateBooksReader` scheduled task, with the reasoning behind each task setting. The planning record it was drawn from stays untracked.
+
 ## [0.48.0.0] - 2026-08-24
 
 ### Added

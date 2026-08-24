@@ -124,7 +124,7 @@ The optional dictionary evaluator needs system spell-check libraries; see
 `python scripts/serve.py` runs the app under waitress on loopback, and
 `scripts/reader.ps1 install|start|stop|restart|status|dev|log` drives the
 `TranslateBooksReader` scheduled task — handy for reading on a phone over Tailscale. See
-[`docs/design/tailscale.md`](docs/design/tailscale.md).
+[`docs/TAILSCALE.md`](docs/TAILSCALE.md).
 
 ---
 
