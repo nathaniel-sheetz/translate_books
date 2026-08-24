@@ -172,7 +172,11 @@ _PREPARE_SCHEMA = {
     "manifest_entries": "--quiet only: entry count, replacing the 'manifest' echo "
     "(fanout reads the manifest from disk, so echoing it here is duplication)",
     "manifest_path": "path to the written manifest.json (commit reads this)",
-    "scopes": "the list of --scope values resolved into this one manifest",
+    "scopes": "the flat UNION of --scope values resolved into this one manifest",
+    "scopes_by_judge": "{judge: [scope, ...]} — which scopes each judge was actually "
+    "resolved over. Untagged --scope values appear under every judge; a "
+    "'<judge>:<scope>' tag appears under that judge only, which is how one manifest "
+    "carries dialogue over ten chapters and address over eight",
     "judges": "judge names rendered",
     "worker_model": "model tier to pin each spawned judge-worker to; unset, it defaults "
     "per headless_cli (sonnet on claude, your selected Cursor model on cursor)",
@@ -226,13 +230,18 @@ _COMMIT_SCHEMA = {
     "missing": "list of {target_id, judge} whose draft file was absent — re-spawn",
     "counts": "{committed, failed, missing}",
     "summary": "aggregate_results() rollup across committed results. Note "
-    "'issues_by_evaluator' is keyed by JUDGE name, so in a multi-target run it reports one "
-    "entry per judge, not per target — use results[] for per-target counts. The parallel "
+    "'issues_by_evaluator' is keyed by JUDGE name and SUMS across targets, so in a "
+    "multi-target run it is one per-judge total, not a per-target breakdown — use "
+    "results[] (or results_brief[]) for per-target counts. The parallel "
     "'evaluator_results' array is omitted here: it carries no target_id, so N same-named "
     "entries could not be attributed and results[] already has everything in it",
     "run_header": "reproducibility metadata: judge versions, prompt hashes, backend "
     "('subagent' for Task workers, 'headless:<cli>' for a CLI wave), worker_model, git_commit",
-    "results": "per committed (target, judge): serialized EvalResult",
+    "results": "per committed (target, judge): serialized EvalResult. Omitted under "
+    "--brief — read it from .harness/judges/last_output.json, which always holds the "
+    "full payload",
+    "results_brief": "--brief only: per committed (target, judge) rollup "
+    "{target_id, judge, score, passed, errors, warnings, info} — counts, no finding text",
     "persisted_dir": "directory the --persist files were written to, else null",
     "persisted": "evaluations/*.json FILENAMES (join with persisted_dir) written when "
     "--persist is set, else null",
@@ -245,10 +254,37 @@ def _judges_dir(project_dir: Path) -> Path:
     return Path(project_dir) / ".harness" / "judges"
 
 
+def brief_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse ``commit``'s serialized ``results[]`` into one counts row per pair.
+
+    A 20-chapter commit returns 20 full ``EvalResult`` objects — every finding
+    with its excerpt, message and suggestion — which truncates the turn before
+    the caller reaches ``persisted``. This is what ``--brief`` prints instead:
+    which pairs came back, whether each passed, and how many issues of each
+    severity. The findings themselves are not lost, they move to
+    ``.harness/judges/last_output.json``, which the CLI writes on every command
+    and which is real UTF-8 on disk — so reading them back needs a ``Read``, not
+    an ad-hoc ``python -c`` filter over captured stdout (the step that kept
+    mangling rayas on Windows).
+    """
+    return [
+        {
+            "target_id": r.get("target_id"),
+            "judge": r.get("eval_name"),
+            "score": r.get("score"),
+            "passed": r.get("passed"),
+            "errors": r.get("error_count"),
+            "warnings": r.get("warning_count"),
+            "info": r.get("info_count"),
+        }
+        for r in results
+    ]
+
+
 def prepare(
     project_dir: Path,
     judge_names: list[str],
-    scopes: str | list[str],
+    scopes: str | list[str] | dict[str, list[str]],
     *,
     context: Optional[dict[str, Any]] = None,
     worker_model: Optional[str] = None,
@@ -265,6 +301,15 @@ def prepare(
     spawn -> ``commit`` (no manifest clobbering). ``(target_id, judge)`` pairs are
     deduped, so overlapping scopes (e.g. ``chapter:X`` + ``chunk:X_chunk_000``)
     render once.
+
+    It may also be a ``{judge_name: [scope, ...]}`` mapping, which is how one
+    manifest carries **asymmetric** scopes — ``dialogue`` over the ten chapters
+    that owe it and ``address`` over the eight that owe *that*. Every named judge
+    needs at least one scope. Without it, "both judges, different gaps" meant
+    either two full prepare -> spawn -> commit cycles (paying the fixed per-process
+    baseline twice) or a union that re-judged chapters already known clean. The
+    per-judge target lists go into ``manifest["scopes_by_judge"]``; the flat
+    ``scopes`` union stays beside it, so a reader that predates this is unaffected.
 
     ``targets_per_worker`` (default 1) enables **density-gated target grouping**:
     with the default, each ``(target, judge)`` renders its own solo prompt via
@@ -319,21 +364,76 @@ def prepare(
     worker_model = prof.worker_model
     batch_size = int(batch_size or _DEFAULT_BATCH_SIZE)
     targets_per_worker = max(1, int(targets_per_worker or 1))
-    scope_list = [scopes] if isinstance(scopes, str) else list(scopes)
 
-    # Resolve every scope into one ordered target list, deduped by target_id so an
-    # overlapping chapter:/chunk: pair doesn't render (or get cost-estimated) twice.
-    targets = []
-    seen_targets: set[str] = set()
-    for scope in scope_list:
-        try:
-            scope_targets = build_targets(project_dir, scope)
-        except (NotImplementedError, FileNotFoundError, ValueError) as exc:
-            # ScopeError subclasses ValueError; surface which scope failed.
-            raise type(exc)(f"scope {scope!r}: {exc}") from exc
-        for target in scope_targets:
-            if target.id not in seen_targets:
-                seen_targets.add(target.id)
+    # Scopes are per judge. A plain string/list means "every named judge, this
+    # scope set" (the old meaning, unchanged); a dict binds each judge to its own
+    # scopes, which is what lets one manifest carry `dialogue` over ten chapters
+    # and `address` over the eight that still owe a verdict, instead of a union
+    # that re-judges what was already clean.
+    if isinstance(scopes, dict):
+        scopes_by_judge = {}
+        for name in judge_names:
+            raw = scopes.get(name)
+            if raw is None:
+                raw_list: list[str] = []
+            elif isinstance(raw, str):
+                # A bare string must not go through list(), which iterates
+                # characters: list("book") -> ['b','o','o','k'].
+                raw_list = [raw]
+            else:
+                raw_list = list(raw)
+            scopes_by_judge[name] = raw_list
+        unknown = [name for name in scopes if name not in scopes_by_judge]
+        if unknown:
+            raise ValueError(
+                f"scopes given for judges not in this run: {unknown}; judges = {judge_names}"
+            )
+    else:
+        shared = [scopes] if isinstance(scopes, str) else list(scopes)
+        scopes_by_judge = {name: list(shared) for name in judge_names}
+
+    empty = [name for name in judge_names if not scopes_by_judge[name]]
+    if empty:
+        raise ValueError(f"no scope given for judge(s): {', '.join(empty)}")
+
+    # Flat, ordered union — kept beside `scopes_by_judge` so anything reading an
+    # older manifest (or the payload) still finds the field it expects.
+    scope_list: list[str] = []
+    for name in judge_names:
+        for scope in scopes_by_judge[name]:
+            if scope not in scope_list:
+                scope_list.append(scope)
+
+    # Resolve each judge's scopes into its own ordered target list, deduped by
+    # target_id so an overlapping chapter:/chunk: pair doesn't render (or get
+    # cost-estimated) twice for that judge. Resolution is cached per scope string:
+    # two judges sharing `book` walk the project once.
+    resolved: dict[str, list[JudgeTarget]] = {}
+    targets_by_judge: dict[str, list[JudgeTarget]] = {}
+    for name in judge_names:
+        judge_targets: list[JudgeTarget] = []
+        seen_targets: set[str] = set()
+        for scope in scopes_by_judge[name]:
+            if scope not in resolved:
+                try:
+                    resolved[scope] = build_targets(project_dir, scope)
+                except (NotImplementedError, FileNotFoundError, ValueError) as exc:
+                    # ScopeError subclasses ValueError; surface which scope failed.
+                    raise type(exc)(f"scope {scope!r}: {exc}") from exc
+            for target in resolved[scope]:
+                if target.id not in seen_targets:
+                    seen_targets.add(target.id)
+                    judge_targets.append(target)
+        targets_by_judge[name] = judge_targets
+
+    # The union across judges — what `targets` used to mean, still the honest
+    # answer to "how many distinct things does this manifest touch?".
+    targets: list[JudgeTarget] = []
+    seen_any: set[str] = set()
+    for name in judge_names:
+        for target in targets_by_judge[name]:
+            if target.id not in seen_any:
+                seen_any.add(target.id)
                 targets.append(target)
 
     for target in targets:
@@ -364,7 +464,7 @@ def prepare(
     for judge_name in judge_names:
         judge = judge_instances[judge_name]
         preamble_path = jdir / f"preamble.{judge_name}.txt"
-        for group in _group_targets(targets, judge, targets_per_worker):
+        for group in _group_targets(targets_by_judge[judge_name], judge, targets_per_worker):
             total_pairs += len(group)
             if len(group) == 1:
                 target = group[0]
@@ -429,7 +529,15 @@ def prepare(
                     }
                 )
 
-    estimated_api_cost = estimate_suite_cost(judge_names, targets, context)
+    # Per judge over ITS targets — a single call over the union would price the
+    # address judge on chapters it was never scoped to.
+    estimated_api_cost = round(
+        sum(
+            estimate_suite_cost([name], targets_by_judge[name], context)
+            for name in judge_names
+        ),
+        6,
+    )
     # The other half of the gate. `estimated_api_cost` prices the API backend; on
     # the headless path what binds is subscription tokens, and the dominant term
     # is not the prompt but the fixed context every child process loads before it
@@ -444,6 +552,10 @@ def prepare(
 
     manifest_doc = {
         "scopes": scope_list,
+        # The flat list above is the union and stays for back-compat (fanout and
+        # commit key off entry["judge"], so neither reads either field); this is
+        # the one that says which judge got which scope.
+        "scopes_by_judge": scopes_by_judge,
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
@@ -475,6 +587,7 @@ def prepare(
         "manifest": entries,
         "manifest_path": str(manifest_path),
         "scopes": scope_list,
+        "scopes_by_judge": scopes_by_judge,
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,

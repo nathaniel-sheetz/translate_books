@@ -418,3 +418,15 @@ def test_cli_and_review_tab_agree_on_every_chapter_state(project, monkeypatch):
             buckets = cli["judges"][group]["chapters"]
             actual = next(s for s in buckets if chapter["id"] in buckets[s])
             assert actual == expected, f"{chapter['id']}/{group}"
+
+
+def test_tagged_scope_is_rejected_with_a_prepare_pointer(project, capsys):
+    """Tags are a prepare feature; status must not parse 'dialogue' as a kind."""
+    run_judges = pytest.importorskip("scripts.run_judges")
+    rc = run_judges.main(
+        ["status", "--project", str(project), "--scope", "dialogue:book"]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert "prepare" in out["error"]
+    assert not (project / ".harness" / "judges").exists()

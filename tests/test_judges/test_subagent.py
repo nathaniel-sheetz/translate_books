@@ -177,6 +177,16 @@ def test_prepare_overlapping_scopes_dedup(tmp_path):
     assert out["usage_summary"]["pairs"] == 1
 
 
+def test_prepare_dict_scopes_accept_a_bare_string(tmp_path):
+    """A string value is one scope — list('book') would iterate characters."""
+    project, cid = _project_with_chunk(tmp_path)
+    out = subagent.prepare(project, ["dialogue"], {"dialogue": "book"})
+
+    assert out["status"] == "ok"
+    assert out["scopes_by_judge"] == {"dialogue": ["book"]}
+    assert {e["target_id"] for e in out["manifest"]} == {cid}
+
+
 def test_prepare_keep_drafts_preserves_existing(tmp_path):
     """--keep-drafts lets a recovery re-prepare retain already-written worker output."""
     project, cid = _project_with_chunk(tmp_path)
