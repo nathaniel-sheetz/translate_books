@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.48.0.0] - 2026-08-24
+
+### Added
+- **Unanchored notes and findings now collect in an end-of-chapter overflow bin.** A note whose `es_idx` no longer names a rendered sentence — realign renumbered it, the sentence was deleted, or it sits on a filtered `[IMAGE:…]` row — used to be counted by the chapter chip and unreachable: every edit and delete path started from tapping the sentence. Findings whose excerpt no longer matches the prose (judge ellipsis, a `char_start` no alignment row covers) had the same hole. The review endpoint now returns them in `unanchored` with a `reason` (`obsolete` or `unplaceable`); annotations carry a per-request `anchored` flag. The bin is Copy + Delete for notes (Edit would rewrite in place at a dead index and drop the `es_text` snapshot) and the usual dismiss buttons for findings. A fully resolved chapter still reads as it did before — the section is omitted when empty.
+- New notes snapshot `es_text` at save time so the bin can show the sentence the reader needs for Find-in-book after a realign. Realign carries that snapshot forward onto the row it lands on.
+- **`scripts/purge_image_placeholder_findings.py`** — one-shot dry-run (or `--apply`) that deletes coded findings whose `char_start` sits inside an `[IMAGE:…]` token. Those are pre-May-2026 leftovers the alignment cannot attach; a grammar rerun would not remove them, because coded `issue_index` is stored and a rerun would re-point every dismissal. Survivors keep their index verbatim.
+
+### Changed
+- A coded finding in the whitespace gap between two sentences (a paragraph break) now attaches to the following sentence instead of falling into the bin, but only when every character in the gap is whitespace. A finding on uncovered prose is not bridged.
+- Annotation tour skips unanchored notes, so the button does not promise a stop `jumpTour` cannot make.
+
+### Fixed
+- String-typed `es_idx` in jsonl (`"1"` vs alignment `1`) no longer reports the note unanchored while JS still paints it on the live sentence.
+- Dismissing a binned finding no longer interpolates `eval_name|issue_index|chunk_id` into a CSS selector.
+- A non-int coded `char_start` no longer 500s the whole chapter review.
+
 ## [0.47.4.0] - 2026-08-23
 
 ### Added

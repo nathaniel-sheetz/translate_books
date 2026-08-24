@@ -66,8 +66,10 @@ from web_ui.evaluations import (
     append_feedback,
     chapter_id_from_chunk_id,
     chapter_judge_status,
+    current_chunk_sha,
     empty_type_counts,
     evaluate_and_persist_chunk,
+    evaluator_freshness_detail,
     iter_chapter_chunks,
     load_all_feedback_by_chunk,
     load_chapter_type_counts,
@@ -1922,12 +1924,64 @@ def _ann_storage_sub_id(sub_id):
     return sub_id
 
 
-def _ann_for_wire(ann: dict) -> dict:
-    """Copy a stored annotation, giving legacy rows a round-trippable sub_id."""
+def _ann_for_wire(ann: dict, anchored: Optional[bool] = None) -> dict:
+    """Copy a stored annotation, giving legacy rows a round-trippable sub_id.
+
+    ``anchored`` (when supplied) says whether the record's ``es_idx`` still
+    names a sentence the reader renders. It is not stored — it is recomputed
+    per request against the current alignment.
+    """
     out = dict(ann)
     if _ann_storage_sub_id(out.get("sub_id")) is None:
         out["sub_id"] = _LEGACY_SUB_ID
+    if anchored is not None:
+        out["anchored"] = anchored
     return out
+
+
+def _as_es_idx(value) -> Optional[int]:
+    """Coerce a stored/alignment ``es_idx`` to int; ``None`` if it isn't one.
+
+    jsonl can carry a string ``"1"`` while alignment JSON carries ``1``. Membership
+    without this is false, so the note is reported unanchored *and* still paints
+    on the live sentence (JS object keys stringify).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_es_indices(project_dir: Path, chapter_id: str) -> Optional[set]:
+    """The ``es_idx`` values the reader actually renders for a chapter.
+
+    Built *after* the same ``[IMAGE:…]`` filter :func:`_enrich_alignment`
+    applies (see the alignment route), because an annotation parked on an image
+    row would otherwise report as anchored and still render nowhere. Returns
+    ``None`` when there is no readable alignment — nothing can be disproved, so
+    callers should treat every record as anchored rather than invent orphans.
+    """
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    if not align_path.exists():
+        return None
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    live = set()
+    for a in data.get("alignments", []):
+        if not isinstance(a, dict):
+            continue
+        idx = _as_es_idx(a.get("es_idx"))
+        if idx is None:
+            continue
+        if _IMAGE_PLACEHOLDER_RE.fullmatch((a.get("es") or "").strip()):
+            continue
+        live.add(idx)
+    return live
 
 
 def _load_annotations(project_dir: Path, chapter_id: str) -> dict[int, list[dict]]:
@@ -2003,15 +2057,27 @@ def _load_annotation_counts(project_dir: Path) -> dict[str, int]:
 
 @app.route("/api/annotations/<project_id>/<chapter>")
 def get_annotations(project_id, chapter):
-    """Return annotations for a chapter."""
+    """Return annotations for a chapter.
+
+    Every record carries ``anchored``: whether its ``es_idx`` still resolves to
+    a rendered sentence. A ``false`` here is the reader's only way to find a
+    note whose sentence has since been renumbered or removed — the sentence
+    list can't surface it, so the end-of-chapter overflow bin does, and that is
+    also the only path by which such a note can be copied or deleted again.
+    """
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
     project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": f"Project not found: {project_id}"}), 404
 
+    live = _live_es_indices(project_dir, chapter)
     annotations = _load_annotations(project_dir, chapter)
-    flat = [_ann_for_wire(ann) for lst in annotations.values() for ann in lst]
+    flat = [
+        _ann_for_wire(ann, anchored=(live is None or _as_es_idx(ann.get("es_idx")) in live))
+        for lst in annotations.values()
+        for ann in lst
+    ]
     return jsonify({"annotations": flat})
 
 
@@ -2061,6 +2127,16 @@ def save_annotation():
         }
         if storage_sub is not None:
             record["sub_id"] = storage_sub
+
+        # Snapshot the sentence as it read when the note was made. es_idx is a
+        # position, not an identity — if realign drops the row, the overflow
+        # bin still has this excerpt for Find-in-book.
+        try:
+            es_text = _load_alignment_es_map(project_dir, chapter_id).get(int(es_idx))
+        except (TypeError, ValueError):
+            es_text = None
+        if es_text:
+            record["es_text"] = es_text
 
         annotations_path = project_dir / "annotations.jsonl"
         with open(annotations_path, "a", encoding="utf-8") as f:
@@ -5100,6 +5176,8 @@ def _reanchor_annotations_after_realign(
         old_es_text = old_es_map.get(old_idx)
         if old_es_text is None:
             # Annotation references a sentence we don't know about — leave it.
+            # TODO: fall back to record["es_text"] so an already-orphaned note
+            # can still re-anchor on a later realign.
             orphaned.extend(records)
             continue
 
@@ -5142,6 +5220,12 @@ def _reanchor_annotations_after_realign(
             for extra in ("origin", "fn_number"):
                 if record.get(extra) is not None:
                     recreate_row[extra] = record[extra]
+            # Carry the sentence snapshot forward, refreshed to the row we just
+            # landed on (the prefix-match tier can move a note onto a sentence
+            # whose text is not byte-identical to the old one).
+            es_text = new_es_map.get(new_idx) or record.get("es_text")
+            if es_text:
+                recreate_row["es_text"] = es_text
             appended.append(remove_row)
             appended.append(recreate_row)
 
@@ -5529,13 +5613,25 @@ _REVIEW_CODED_TYPES = frozenset(REVIEW_CODED_TYPES)
 _REVIEW_JUDGE_TYPES = frozenset(REVIEW_JUDGE_TYPES)
 
 
-def _row_containing_offset(rows_sorted: list[dict], offset: int) -> Optional[dict]:
+def _row_containing_offset(
+    rows_sorted: list[dict], offset: int, chunk_text: str = ""
+) -> Optional[dict]:
     """Return the alignment row whose chunk char span contains ``offset``.
 
     ``rows_sorted`` must be sorted by ``chunk_offset_start``. Uses a half-open
     ``[start, end)`` test — the same coordinate space as the coded evaluators'
     ``char_start`` (both index into the chunk's ``translated_text``).
+
+    Fallback tier: sentence spans do not tile the chunk, so an offset can land
+    in the gap between two rows — most often the blank run a paragraph break
+    leaves behind. Given ``chunk_text``, such an offset is attributed to the
+    *following* row, but only when every character from the offset up to that
+    row's start is whitespace. A finding sitting on the blank run in front of a
+    sentence belongs to that sentence; one sitting on real prose no row covers
+    (an ``[IMAGE:…]`` token, a sentence the splitter dropped) must not silently
+    jump over it, so it stays unanchored and reaches the reader's overflow bin.
     """
+    following = None
     for row in rows_sorted:
         start = row.get("chunk_offset_start")
         end = row.get("chunk_offset_end")
@@ -5543,7 +5639,12 @@ def _row_containing_offset(rows_sorted: list[dict], offset: int) -> Optional[dic
             continue
         if start <= offset < end:
             return row
-    return None
+        if following is None and start > offset:
+            following = row
+    if following is None or not chunk_text or offset < 0:
+        return None
+    gap = chunk_text[offset:following["chunk_offset_start"]]
+    return following if gap and not gap.strip() else None
 
 
 def _locate_match(text_in_chunk: str, match_text: str) -> tuple[Optional[int], Optional[int]]:
@@ -5573,8 +5674,8 @@ def _anchor_judge_excerpt(
     Judges only report an excerpt string, so we locate it inside the chunk's
     ``translated_text`` by searching a short probe (its first non-empty line),
     then map that char offset to the alignment row that contains it. Returns
-    ``None`` when the excerpt can't be located (finding is dropped, not
-    force-attached — see the v1 known limits).
+    ``None`` when the excerpt can't be located — the caller bins it as
+    unanchored rather than force-attaching it to a nearby sentence.
     """
     if not excerpt or not isinstance(excerpt, str) or not translated_text:
         return None
@@ -5592,8 +5693,20 @@ def _anchor_judge_excerpt(
         idx = translated_text.find(short) if len(short) >= 8 else -1
         if idx == -1:
             return None
-    row = _row_containing_offset(rows_sorted, idx)
+    row = _row_containing_offset(rows_sorted, idx, translated_text)
     return row["es_idx"] if row else None
+
+
+def _unanchored_reason(freshness: dict, eval_name: str) -> str:
+    """Why a finding could not be placed on a sentence, for the reader's bin.
+
+    ``"obsolete"`` when the evaluator's run predates the text it quotes — the
+    prose moved on and the excerpt describes a sentence that no longer exists.
+    ``"unplaceable"`` otherwise: the run is current, so the excerpt simply is
+    not verbatim (judges elide with ``…``, or paraphrase).
+    """
+    state = (freshness.get(eval_name) or {}).get("state")
+    return "obsolete" if state == "stale" else "unplaceable"
 
 
 @app.route(
@@ -5611,11 +5724,19 @@ def project_chapter_review(project_id, chapter):
     Response::
 
         { ok, by_es_idx: { "<es_idx>": [finding, ...] },
+          unanchored: [finding, ...],
           type_counts: { blacklist: N, ... }, stale_chunks: N }
 
-    Each finding: ``{eval_name, issue_index, chunk_id, severity, message,
-    suggestion, excerpt, match, match_start, match_end}`` where
+    Each anchored finding: ``{eval_name, issue_index, chunk_id, severity,
+    message, suggestion, excerpt, match, match_start, match_end}`` where
     ``match_start is None`` ⇒ paint a whole-sentence tint.
+
+    A finding that cannot be placed on a sentence at all — a coded ``char_start``
+    no row covers, or a judge excerpt that is not in the prose — goes to
+    ``unanchored`` with the same fields plus ``reason``
+    (:func:`_unanchored_reason`) and no ``match*``. The reader renders those in
+    an end-of-chapter bin, so they are still reachable; they are counted into
+    ``type_counts`` exactly like the anchored ones.
     """
     from collections import defaultdict
 
@@ -5654,19 +5775,20 @@ def project_chapter_review(project_id, chapter):
         # Skip [IMAGE:...] placeholder sentences — the reader filters these out
         # (see _enrich_alignment), so a finding anchored to one would have no
         # sentence to highlight. Their char span is left uncovered, so any
-        # coded finding that lands inside the token is dropped, not misattached.
+        # coded finding that lands inside the token stays unanchored and
+        # reaches the overflow bin instead of being misattached.
         if _IMAGE_PLACEHOLDER_RE.fullmatch((row.get("es") or "").strip()):
             continue
         rows_by_chunk[cid].append(row)
 
     by_es_idx: dict[str, list[dict]] = defaultdict(list)
+    unanchored: list[dict] = []
     type_counts: dict[str, int] = defaultdict(int)
     stale_chunks = 0
 
     from src.utils.text_utils import normalize_newlines
 
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
-    chunk_text_cache: dict[str, str] = {}
 
     for chunk_id, crows in rows_by_chunk.items():
         payload = load_chunk_evaluation(project_dir, chunk_id)
@@ -5682,6 +5804,27 @@ def project_chapter_review(project_id, chapter):
         }
         crows_sorted = sorted(crows, key=lambda r: r["chunk_offset_start"])
 
+        # The chunk text serves two coordinate spaces. `raw_text` is what the
+        # row offsets index (_attach_text_in_chunk walks the file's own bytes),
+        # so the whitespace-gap tier must read gaps out of it. The judges'
+        # excerpt search keeps the newline-normalized form it has always used.
+        raw_text = ""
+        chunk_mtime = None
+        chunk_path = chunks_dir / f"{chunk_id}.json"
+        if chunk_path.exists():
+            try:
+                cdata = json.loads(chunk_path.read_text(encoding="utf-8"))
+                raw_text = cdata.get("translated_text") or ""
+                chunk_mtime = chunk_path.stat().st_mtime
+            except (json.JSONDecodeError, OSError):
+                raw_text = ""
+
+        freshness = evaluator_freshness_detail(
+            payload,
+            current_chunk_sha(project_dir, chunk_id),
+            chunk_mtime=chunk_mtime,
+        )
+
         # Coded evaluators → target-side normalized_issues with a char span.
         for ni in payload.get("normalized_issues") or []:
             eval_name = ni.get("eval_name")
@@ -5691,21 +5834,32 @@ def project_chapter_review(project_id, chapter):
             if loc.get("side") != "target":
                 continue
             char_start = loc.get("char_start")
-            if char_start is None:
+            if not isinstance(char_start, int):
                 continue
             issue_index = ni.get("issue_index")
             if (eval_name, issue_index) in dismissed:
                 continue
-            row = _row_containing_offset(crows_sorted, char_start)
-            if row is None:
-                continue
             match_text = loc.get("match") or ""
-            match_start, match_end = _locate_match(row["text_in_chunk"], match_text)
             excerpt = match_text or (
                 (loc.get("snippet_before") or "")
                 + (loc.get("match") or "")
                 + (loc.get("snippet_after") or "")
             )
+            row = _row_containing_offset(crows_sorted, char_start, raw_text)
+            if row is None:
+                unanchored.append({
+                    "eval_name": eval_name,
+                    "issue_index": issue_index,
+                    "chunk_id": chunk_id,
+                    "severity": ni.get("severity"),
+                    "message": ni.get("message"),
+                    "suggestion": ni.get("suggestion"),
+                    "excerpt": excerpt,
+                    "reason": _unanchored_reason(freshness, eval_name),
+                })
+                type_counts[eval_name] += 1
+                continue
+            match_start, match_end = _locate_match(row["text_in_chunk"], match_text)
             by_es_idx[str(row["es_idx"])].append({
                 "eval_name": eval_name,
                 "issue_index": issue_index,
@@ -5723,19 +5877,7 @@ def project_chapter_review(project_id, chapter):
         # Judges → issues carry only a raw excerpt string; anchor by text.
         judges = payload.get("judges")
         if isinstance(judges, dict) and judges:
-            if chunk_id not in chunk_text_cache:
-                translated_text = ""
-                chunk_path = chunks_dir / f"{chunk_id}.json"
-                if chunk_path.exists():
-                    try:
-                        cdata = json.loads(chunk_path.read_text(encoding="utf-8"))
-                        translated_text = normalize_newlines(
-                            cdata.get("translated_text") or ""
-                        )
-                    except (json.JSONDecodeError, OSError):
-                        translated_text = ""
-                chunk_text_cache[chunk_id] = translated_text
-            translated_text = chunk_text_cache[chunk_id]
+            translated_text = normalize_newlines(raw_text)
             for judge_name, jres in judges.items():
                 if judge_name not in _REVIEW_JUDGE_TYPES or not isinstance(jres, dict):
                     continue
@@ -5747,6 +5889,17 @@ def project_chapter_review(project_id, chapter):
                     excerpt = issue.get("location")
                     es_idx = _anchor_judge_excerpt(excerpt, translated_text, crows_sorted)
                     if es_idx is None:
+                        unanchored.append({
+                            "eval_name": judge_name,
+                            "issue_index": issue_index,
+                            "chunk_id": chunk_id,
+                            "severity": issue.get("severity"),
+                            "message": issue.get("message"),
+                            "suggestion": issue.get("suggestion"),
+                            "excerpt": excerpt or "",
+                            "reason": _unanchored_reason(freshness, judge_name),
+                        })
+                        type_counts[judge_name] += 1
                         continue
                     by_es_idx[str(es_idx)].append({
                         "eval_name": judge_name,
@@ -5765,6 +5918,7 @@ def project_chapter_review(project_id, chapter):
     return jsonify({
         "ok": True,
         "by_es_idx": dict(by_es_idx),
+        "unanchored": unanchored,
         "type_counts": dict(type_counts),
         "stale_chunks": stale_chunks,
     })
