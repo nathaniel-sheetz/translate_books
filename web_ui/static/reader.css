@@ -2082,3 +2082,138 @@ body {
     background: var(--accent-btn-bg);
     color: var(--accent);
 }
+
+/* End-of-chapter overflow bin — findings and notes with no sentence to sit on.
+   Reuses the .review-marker band idiom (rule above, generous top padding) so it
+   reads as part of the same end-of-chapter furniture, and sits immediately
+   before it. #reader-content already reserves the bottom padding both need. */
+
+.reader-overflow {
+    border-top: 1px solid var(--border);
+    margin-top: 2em;
+    padding: 32px 0 8px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.overflow-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    color: var(--text);
+}
+
+.overflow-intro {
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0 0 16px;
+    color: var(--text-muted);
+}
+
+.overflow-item {
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+    background: var(--bg-btn);
+}
+
+.overflow-item-note {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* The excerpt is the reader's handle on an unplaceable item — it is what they
+   paste into Find-in-book — so it stays selectable and wraps rather than
+   truncating. */
+.overflow-excerpt {
+    user-select: text;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.overflow-reason {
+    font-size: 12px;
+    font-style: italic;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+.overflow-ann-type {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg-btn-hover);
+    color: var(--text);
+}
+
+/* Type tint on the pill, from the same palette the in-text highlight uses, so
+   an orphan reads as the same kind of note it was on the page. */
+.overflow-ann.ann-word_choice .overflow-ann-type { background: var(--ann-word-choice); }
+.overflow-ann.ann-inconsistency .overflow-ann-type { background: var(--ann-inconsistency); }
+.overflow-ann.ann-footnote .overflow-ann-type { background: var(--ann-footnote); }
+.overflow-ann.ann-flag .overflow-ann-type { background: var(--ann-flag); }
+
+.overflow-ann-body {
+    font-size: 14px;
+    line-height: 1.5;
+    margin-top: 8px;
+    color: var(--text);
+    white-space: pre-wrap;
+}
+
+.overflow-ann-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.overflow-btn {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 7px 14px;
+    min-height: 34px;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    background: var(--bg-btn);
+    color: var(--text);
+    cursor: pointer;
+}
+
+.overflow-btn:active {
+    background: var(--bg-btn-hover);
+}
+
+.overflow-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.overflow-btn-primary {
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent-border);
+}
+
+.overflow-btn-danger {
+    color: var(--review-blacklist);
+}
+
+.overflow-ann-edit {
+    margin-top: 10px;
+}
+
+.overflow-ann-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 8px 10px;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    resize: vertical;
+}

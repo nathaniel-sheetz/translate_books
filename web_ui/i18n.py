@@ -149,6 +149,20 @@ STRINGS = {
             "review_load_failed": "Could not load review findings.",
             "review_stale_chunks": "Some judge results are hidden: {n} chunk(s) edited since the judges ran. Re-judge to see them.",
             "review_fb_failed": "Feedback not saved; queued for retry.",
+
+            # End-of-chapter overflow bin: findings and notes that belong to the
+            # chapter but anchor to no sentence in it.
+            "overflow": {
+                "title": "Not shown in the text",
+                "intro": "These belong to this chapter but could not be placed on a sentence. Copy an excerpt into Find in book to reach the passage.",
+                "reason_obsolete": "The prose this quotes has since changed.",
+                "reason_unplaceable": "The excerpt does not appear verbatim in this chapter.",
+                "orphan_sentence": "sentence {n} is no longer in this chapter",
+                "edit": "Edit",
+                "remove": "Delete",
+                "save": "Save",
+                "cancel": "Cancel",
+            },
             "review_types": {
                 "blacklist": "Blacklist",
                 "grammar": "Grammar",
@@ -384,6 +398,18 @@ STRINGS = {
             "review_load_failed": "No se pudieron cargar los hallazgos de revisi\u00f3n.",
             "review_stale_chunks": "Algunos resultados de los jueces est\u00e1n ocultos: {n} fragmento(s) editado(s) tras ejecutarlos. Vuelve a ejecutarlos para verlos.",
             "review_fb_failed": "Comentario no guardado; en cola para reintentar.",
+
+            "overflow": {
+                "title": "No mostrado en el texto",
+                "intro": "Pertenecen a este cap\u00edtulo pero no se pudieron ubicar en una oraci\u00f3n. Copie un fragmento en Buscar en el libro para llegar al pasaje.",
+                "reason_obsolete": "El texto que se cita ha cambiado desde entonces.",
+                "reason_unplaceable": "El fragmento no aparece literalmente en este cap\u00edtulo.",
+                "orphan_sentence": "la oraci\u00f3n {n} ya no est\u00e1 en este cap\u00edtulo",
+                "edit": "Editar",
+                "remove": "Eliminar",
+                "save": "Guardar",
+                "cancel": "Cancelar",
+            },
             "review_types": {
                 "blacklist": "Lista negra",
                 "grammar": "Gram\u00e1tica",

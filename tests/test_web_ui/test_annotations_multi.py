@@ -210,3 +210,101 @@ class TestCounts:
         _post(client, es_idx=1, type="inconsistency", content="C")
         counts = _load_annotation_counts(project)
         assert counts == {"chapter_01": 2}
+
+
+class TestAnchoring:
+    """``anchored`` and the ``es_text`` snapshot that survives a realign.
+
+    ``es_idx`` is a position, not an identity: realign renumbers it and an edit
+    can remove the sentence under it. A record whose ``es_idx`` no longer names
+    a rendered sentence used to be invisible *and* undeletable, because every
+    delete path in the reader starts from tapping the sentence. The wire flag is
+    what lets the reader show it in the overflow bin instead.
+    """
+
+    def test_live_sentence_reads_anchored(self, client, project):
+        _post(client, es_idx=1, type="flag", content="on a real sentence")
+        assert _get(client)[0]["anchored"] is True
+
+    def test_missing_sentence_reads_unanchored(self, client, project):
+        _write_raw(project, [{
+            "project_id": "test-project", "chapter_id": "chapter_01",
+            "es_idx": 99, "type": "word_choice", "content": "orphan",
+            "timestamp": "2026-01-01T00:00:00", "sub_id": "u1",
+        }])
+        anns = _get(client)
+        assert len(anns) == 1
+        assert anns[0]["anchored"] is False
+        assert anns[0]["content"] == "orphan"
+
+    def test_image_row_reads_unanchored(self, client, project):
+        # /api/alignment filters [IMAGE:...] rows out, so a note parked on one
+        # renders nowhere. Reporting it anchored would hide it from the bin too.
+        align_path = project / "alignments" / "chapter_01.json"
+        data = json.loads(align_path.read_text(encoding="utf-8"))
+        data["alignments"].append({
+            "es_idx": 2, "en_idx": 2, "es": "[IMAGE:images/i001.jpg]",
+            "en": "", "confidence": "high", "chunk_id": "chapter_01_chunk_000",
+        })
+        align_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        _write_raw(project, [{
+            "project_id": "test-project", "chapter_id": "chapter_01",
+            "es_idx": 2, "type": "flag", "content": "on an image",
+            "timestamp": "2026-01-01T00:00:00", "sub_id": "u1",
+        }])
+        assert _get(client)[0]["anchored"] is False
+
+    def test_no_alignment_leaves_everything_anchored(self, client, project):
+        # Nothing to disprove: inventing orphans here would strand every note in
+        # the bin on a chapter that simply has not been aligned yet.
+        (project / "alignments" / "chapter_01.json").unlink()
+        _write_raw(project, [{
+            "project_id": "test-project", "chapter_id": "chapter_01",
+            "es_idx": 0, "type": "flag", "content": "hi",
+            "timestamp": "2026-01-01T00:00:00", "sub_id": "u1",
+        }])
+        assert _get(client)[0]["anchored"] is True
+
+    def test_saved_annotation_snapshots_the_sentence(self, client, project):
+        _post(client, es_idx=1, type="word_choice", content="dudo de esto")
+        stored = _load_annotations(project, "chapter_01")[1][0]
+        assert stored["es_text"] == "El perro."
+
+    def test_snapshot_omitted_when_the_sentence_is_unknown(self, client, project):
+        # An es_idx with no alignment row has nothing to snapshot; the record
+        # still saves rather than failing.
+        r = _post(client, es_idx=77, type="flag", content="huh")
+        assert r.get_json()["saved"] is True
+        assert "es_text" not in _load_annotations(project, "chapter_01")[77][0]
+
+    def test_realign_carries_the_snapshot_through(self, client, project):
+        from web_ui.app import _reanchor_annotations_after_realign
+
+        _post(client, es_idx=1, type="footnote", content="nota", sub_id="gb1")
+
+        # Realign renumbers: "El perro." moves from es_idx 1 to es_idx 2.
+        align_path = project / "alignments" / "chapter_01.json"
+        data = json.loads(align_path.read_text(encoding="utf-8"))
+        data["alignments"] = [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato.", "en": "The cat.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+            {"es_idx": 1, "en_idx": 1, "es": "Un pajaro.", "en": "A bird.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+            {"es_idx": 2, "en_idx": 2, "es": "El perro.", "en": "The dog.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+        ]
+        align_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        orphaned = _reanchor_annotations_after_realign(
+            project, "chapter_01", {0: "El gato.", 1: "El perro."}
+        )
+        assert orphaned == []
+
+        moved = _load_annotations(project, "chapter_01")
+        assert 1 not in moved
+        rec = moved[2][0]
+        assert rec["content"] == "nota"
+        assert rec["sub_id"] == "gb1"
+        assert rec["es_text"] == "El perro."
+        assert _get(client)[0]["anchored"] is True

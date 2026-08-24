@@ -144,6 +144,7 @@
 
     const reviewConfig = loadReviewConfig();
     let reviewMap = {};   // es_idx (string) -> [finding, ...] filtered to enabled types
+    let unanchoredList = [];  // findings the server could not place on any sentence
 
     // Load alignment data and annotations in parallel.
     // Exposed as a function so the removal flow can re-bootstrap after a
@@ -198,6 +199,11 @@
                 }
 
                 renderSentences(data.alignments);
+                // Must sit inside this sequence: renderSentences() clears
+                // #reader-content and addReviewButton() appends the end band on
+                // every re-bootstrap, so a bin rendered anywhere else is wiped
+                // by the next realign or remove-text reload.
+                renderOverflowBin();
                 addReviewButton();
                 updateStats();
                 if (scrollPrefix) {
@@ -489,6 +495,7 @@
 
     function buildReviewMap(reviewData) {
         reviewMap = {};
+        unanchoredList = [];
         if (!reviewData || !reviewData.by_es_idx) return;
         const enabled = reviewConfig.types;
         for (const esIdx in reviewData.by_es_idx) {
@@ -496,6 +503,10 @@
                 .filter(f => enabled.indexOf(f.eval_name) !== -1);
             if (list.length) reviewMap[esIdx] = list;
         }
+        // Same category filter, so ?review=<type> and the category cookie mean
+        // the same thing in the bin as they do in the prose.
+        unanchoredList = (reviewData.unanchored || [])
+            .filter(f => enabled.indexOf(f.eval_name) !== -1);
     }
 
     // Paint a sentence: wrap each locatable finding's offending text in a
@@ -671,7 +682,9 @@
     // Record feedback on a finding, then drop it (and any sibling locations of
     // the same underlying issue) from the map + highlights. Mirrors the offline
     // enqueue fallback used elsewhere so it still works without a network.
-    function submitFeedback(esIdx, finding, feedbackType, itemEl) {
+    // `esIdx` may be null: the overflow bin dismisses findings that belong to no
+    // sentence, and `onDone` lets it clear its own entry.
+    function submitFeedback(esIdx, finding, feedbackType, itemEl, onDone) {
         const payload = {
             eval_name: finding.eval_name,
             issue_index: finding.issue_index,
@@ -698,6 +711,11 @@
                 if (!reviewMap[key].length) delete reviewMap[key];
             }
             affected.forEach(k => refreshSentenceReview(k));
+            if (onDone) onDone();
+
+            // Everything below re-renders the sheet around a sentence; a bin
+            // dismissal has no sentence to return to.
+            if (esIdx === null || esIdx === undefined) return;
 
             const remaining = reviewMap[esIdx] || [];
             renderErrorsList(esIdx, remaining);
@@ -727,6 +745,259 @@
                 } catch (e) { /* localStorage full — queue unavailable */ }
                 showToast(i.review_fb_failed || 'Feedback not saved; queued for retry.');
             });
+    }
+
+    // ── End-of-chapter overflow bin ───────────────────────────────────────────
+    //
+    // Everything this chapter counts but no sentence can carry: findings whose
+    // excerpt no longer matches the prose, and annotations whose es_idx no
+    // longer names a rendered sentence. Both were previously counted by the
+    // chapter chip and unreachable by scrolling — and an orphaned annotation was
+    // undeletable, because every delete path starts from tapping its sentence.
+    // The bin is that missing surface, and only that one: word-within-sentence
+    // anchoring already degrades to a whole-sentence tint.
+
+    function overflowStrings() {
+        return i.overflow || {};
+    }
+
+    function orphanAnnotations() {
+        const out = [];
+        for (const idx of Object.keys(annotationsMap)) {
+            for (const a of (annotationsMap[idx] || [])) {
+                if (a.anchored === false) out.push(a);
+            }
+        }
+        return out.sort((a, b) => (a.es_idx || 0) - (b.es_idx || 0));
+    }
+
+    // Drop entries and retire the section once it is empty, so a fully resolved
+    // chapter reads exactly as it did before this existed.
+    function dropOverflowEntries(nodes) {
+        const sec = content.querySelector('.reader-overflow');
+        nodes.forEach(n => { if (n && n.parentNode) n.parentNode.removeChild(n); });
+        if (sec && !sec.querySelector('.overflow-item')) sec.remove();
+    }
+
+    function overflowLabelRow(pillText, pillClass, noteText) {
+        const head = document.createElement('div');
+        head.className = 'review-item-head';
+        const pill = document.createElement('span');
+        pill.className = pillClass;
+        pill.textContent = pillText;
+        head.appendChild(pill);
+        if (noteText) {
+            const note = document.createElement('span');
+            note.className = 'overflow-item-note';
+            note.textContent = noteText;
+            head.appendChild(note);
+        }
+        return head;
+    }
+
+    // Verbatim on purpose: with no sentence to scroll to, the excerpt is what
+    // the reader pastes into Find-in-book to reach the passage.
+    function overflowExcerpt(text) {
+        const ex = document.createElement('div');
+        ex.className = 'review-item-excerpt overflow-excerpt';
+        ex.textContent = text;
+        return ex;
+    }
+
+    function findingKey(f) {
+        return [f.eval_name, f.issue_index, f.chunk_id].join('|');
+    }
+
+    function overflowFindingEl(f) {
+        const t = overflowStrings();
+        const typeLabels = i.review_types || {};
+        const item = document.createElement('div');
+        item.className = 'overflow-item review-item review-item-' + f.eval_name;
+        item.dataset.findingKey = findingKey(f);
+
+        const sev = f.severity || 'info';
+        const head = overflowLabelRow(
+            typeLabels[f.eval_name] || f.eval_name,
+            'review-item-type review-' + f.eval_name,
+            null);
+        const sevEl = document.createElement('span');
+        sevEl.className = 'review-item-sev sev-' + sev;
+        sevEl.textContent = i['review_sev_' + sev] || sev;
+        head.appendChild(sevEl);
+        item.appendChild(head);
+
+        if (f.message) {
+            const msg = document.createElement('div');
+            msg.className = 'review-item-msg';
+            msg.textContent = f.message;
+            item.appendChild(msg);
+        }
+        if (f.excerpt) item.appendChild(overflowExcerpt(f.excerpt));
+        if (f.suggestion) {
+            const sug = document.createElement('div');
+            sug.className = 'review-item-suggestion';
+            const lbl = document.createElement('span');
+            lbl.className = 'review-sug-label';
+            lbl.textContent = (i.review_suggestion_label || 'Suggestion:') + ' ';
+            sug.appendChild(lbl);
+            appendSuggestionText(sug, f.suggestion);
+            item.appendChild(sug);
+        }
+
+        const why = document.createElement('div');
+        why.className = 'overflow-reason';
+        why.textContent = f.reason === 'obsolete'
+            ? (t.reason_obsolete || 'The prose this quotes has since changed.')
+            : (t.reason_unplaceable || 'The excerpt does not appear verbatim in this chapter.');
+        item.appendChild(why);
+
+        const fb = document.createElement('div');
+        fb.className = 'review-item-fb';
+        ['resolved', 'false_positive', 'bad_message', 'missing_context_gap']
+            .forEach(ftype => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'review-fb-btn review-fb-' + ftype;
+                b.textContent = i['review_fb_' + ftype] || ftype;
+                b.addEventListener('click', () => {
+                    // Dismissal is keyed by (eval_name, issue_index) for the
+                    // chunk and needs no es_idx, so one call clears this entry
+                    // and every sibling location of the same issue.
+                    submitFeedback(null, f, ftype, item, () => {
+                        const key = findingKey(f);
+                        unanchoredList = unanchoredList.filter(x => findingKey(x) !== key);
+                        const sel = '.overflow-item[data-finding-key="' + key + '"]';
+                        dropOverflowEntries(
+                            Array.prototype.slice.call(content.querySelectorAll(sel)));
+                    });
+                });
+                fb.appendChild(b);
+            });
+        item.appendChild(fb);
+        return item;
+    }
+
+    function overflowAnnotationEl(a) {
+        const t = overflowStrings();
+        const type = a.type || 'flag';
+        const item = document.createElement('div');
+        item.className = 'overflow-item overflow-ann ann-' + type;
+
+        const where = (t.orphan_sentence || 'sentence {n} is no longer in this chapter')
+            .replace('{n}', String(a.es_idx));
+        item.appendChild(overflowLabelRow(
+            i['ann_' + type] || type, 'overflow-ann-type', where));
+
+        const body = document.createElement('div');
+        body.className = 'overflow-ann-body';
+        body.textContent = a.content || '';
+        item.appendChild(body);
+
+        if (a.es_text) item.appendChild(overflowExcerpt(a.es_text));
+
+        const actions = document.createElement('div');
+        actions.className = 'overflow-ann-actions';
+
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'overflow-btn';
+        editBtn.textContent = t.edit || 'Edit';
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'overflow-btn overflow-btn-danger';
+        delBtn.textContent = t.remove || 'Delete';
+
+        // Both endpoints address a record by (project, chapter, es_idx, sub_id)
+        // and never consult the alignment, so an orphan already edits and
+        // deletes correctly — only this UI path was missing. Persistence runs
+        // through the same helpers the sheet uses, so the offline queue and the
+        // fn_number / origin passthrough behave identically.
+        const subId = a.sub_id || null;
+
+        editBtn.addEventListener('click', () => {
+            if (item.querySelector('.overflow-ann-edit')) return;
+            const box = document.createElement('div');
+            box.className = 'overflow-ann-edit';
+            const ta = document.createElement('textarea');
+            ta.className = 'overflow-ann-input';
+            ta.rows = 3;
+            ta.value = a.content || '';
+            box.appendChild(ta);
+            const row = document.createElement('div');
+            row.className = 'overflow-ann-actions';
+            const save = document.createElement('button');
+            save.type = 'button';
+            save.className = 'overflow-btn overflow-btn-primary';
+            save.textContent = t.save || i.save || 'Save';
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'overflow-btn';
+            cancel.textContent = t.cancel || 'Cancel';
+            row.appendChild(save);
+            row.appendChild(cancel);
+            box.appendChild(row);
+            item.insertBefore(box, actions);
+            actions.style.display = 'none';
+            ta.focus();
+
+            const closeEdit = () => {
+                box.remove();
+                actions.style.display = '';
+            };
+            cancel.addEventListener('click', closeEdit);
+            save.addEventListener('click', () => {
+                save.disabled = true;
+                doSaveAnnotation(type, ta.value.trim(), subId, {
+                    esIdx: a.es_idx,
+                    onSettled: () => { save.disabled = false; },
+                    onApplied: (rec) => {
+                        a.content = rec.content;
+                        body.textContent = rec.content;
+                        closeEdit();
+                    },
+                });
+            });
+        });
+
+        delBtn.addEventListener('click', () => {
+            delBtn.disabled = true;
+            doRemoveAnnotation(a.es_idx, subId, {
+                onSettled: () => { delBtn.disabled = false; },
+                onApplied: () => dropOverflowEntries([item]),
+            });
+        });
+
+        actions.appendChild(editBtn);
+        actions.appendChild(delBtn);
+        item.appendChild(actions);
+        return item;
+    }
+
+    function renderOverflowBin() {
+        const findings = reviewConfig.on ? unanchoredList : [];
+        const orphans = orphanAnnotations();
+        if (!findings.length && !orphans.length) return;
+
+        const t = overflowStrings();
+        const sec = document.createElement('section');
+        sec.className = 'reader-overflow';
+
+        const title = document.createElement('h2');
+        title.className = 'overflow-title';
+        title.textContent = t.title || 'Not shown in the text';
+        sec.appendChild(title);
+
+        const intro = document.createElement('p');
+        intro.className = 'overflow-intro';
+        intro.textContent = t.intro ||
+            'These belong to this chapter but could not be placed on a sentence.';
+        sec.appendChild(intro);
+
+        findings.forEach(f => sec.appendChild(overflowFindingEl(f)));
+        orphans.forEach(a => sec.appendChild(overflowAnnotationEl(a)));
+
+        content.appendChild(sec);
     }
 
     if (sheetTabAnnotate) {
@@ -842,10 +1113,14 @@
     // Save annotation. Extracted so the v2 skin can persist directly with an
     // explicit (type, content), while the classic button path (below) keeps
     // reading from selectedAnnType + the note input exactly as before.
-    function doSaveAnnotation(type, text, subId) {
-        if (activeIdx === null || !type) return;
+    // `opts.esIdx` targets a sentence other than the active one (the overflow
+    // bin edits notes whose sentence isn't on screen); `opts.onApplied` replaces
+    // the sheet bookkeeping the bin has no use for.
+    function doSaveAnnotation(type, text, subId, opts) {
+        opts = opts || {};
+        const idx = opts.esIdx !== undefined && opts.esIdx !== null ? opts.esIdx : activeIdx;
+        if (idx === null || !type) return;
 
-        const idx = activeIdx;
         const payload = {
             project_id: projectId,
             chapter_id: chapter,
@@ -859,12 +1134,17 @@
 
         function applySaved(savedSubId) {
             const sid = savedSubId || subId || null;
-            const rec = { es_idx: idx, type: type, content: text, sub_id: sid };
             const list = annotationsMap[idx] || (annotationsMap[idx] = []);
             const pos = sid ? list.findIndex(a => (a.sub_id || null) === sid) : -1;
+            // Merge onto the existing record so server-side fields the client
+            // never sends (notably `anchored`) survive an edit.
+            const rec = Object.assign(
+                { anchored: true }, pos >= 0 ? list[pos] : null,
+                { es_idx: idx, type: type, content: text, sub_id: sid });
             if (pos >= 0) list[pos] = rec; else list.push(rec);
             repaintHighlight(idx);
             updateStats();
+            if (opts.onApplied) { opts.onApplied(rec); return; }
             // v2: keep the sheet open and refresh the card list so the user can
             // add another annotation. Classic: close as before.
             if (V2 && window.ReaderSheetV2) {
@@ -875,8 +1155,10 @@
             }
         }
 
-        btnAnnSave.disabled = true;
-        btnAnnSave.textContent = '...';
+        if (!opts.onApplied) {
+            btnAnnSave.disabled = true;
+            btnAnnSave.textContent = '...';
+        }
 
         fetch('/api/annotation', {
             method: 'POST',
@@ -893,6 +1175,8 @@
                 applySaved(payload.sub_id);
             })
             .finally(() => {
+                if (opts.onSettled) opts.onSettled();
+                if (opts.onApplied) return;
                 btnAnnSave.disabled = false;
                 btnAnnSave.textContent = i.save || 'Save';
             });
@@ -914,8 +1198,9 @@
     });
 
     // Remove one annotation by sub_id (null → the legacy single-slot record).
-    function doRemoveAnnotation(idx, subId) {
+    function doRemoveAnnotation(idx, subId, opts) {
         if (idx === null || idx === undefined) return;
+        opts = opts || {};
 
         const deletePayload = {
             project_id: projectId,
@@ -930,6 +1215,7 @@
             if (next.length) annotationsMap[idx] = next; else delete annotationsMap[idx];
             repaintHighlight(idx);
             updateStats();
+            if (opts.onApplied) { opts.onApplied(); return; }
             // v2: keep the sheet open and refresh; classic: close as before.
             if (V2 && window.ReaderSheetV2) {
                 activeRepSubId = next.length ? (next[next.length - 1].sub_id || null) : null;
@@ -949,7 +1235,8 @@
             .catch(() => {
                 enqueue('/api/annotation', 'DELETE', deletePayload);
                 applyRemoveUI();
-            });
+            })
+            .finally(() => { if (opts.onSettled) opts.onSettled(); });
     }
 
     // Remove annotation (classic single-slot button targets the representative).
@@ -993,7 +1280,11 @@
             let count = 0;
             const stops = [];
             for (const idx of Object.keys(annotationsMap)) {
-                const hits = (annotationsMap[idx] || []).filter(tour.match).length;
+                // Orphans (anchored === false) have no sentence to jump to —
+                // counting them made the button promise a stop jumpTour could
+                // not make, and burned a tour position doing it.
+                const hits = (annotationsMap[idx] || [])
+                    .filter(a => a.anchored !== false && tour.match(a)).length;
                 if (!hits) continue;
                 count += hits;
                 stops.push(Number(idx));
