@@ -779,6 +779,34 @@
         if (sec && !sec.querySelector('.overflow-item')) sec.remove();
     }
 
+    // No clipboard helper existed in the reader; this mirrors setup.js. The
+    // async API is undefined on a plain-http LAN address (not a secure
+    // context), which is how this UI is usually reached, so the off-screen
+    // textarea is the path that actually runs there. Resolves false rather
+    // than throwing, so the button can say it failed instead of lying.
+    function copyText(text) {
+        function fallback() {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                return ok;
+            } catch (e) {
+                return false;
+            }
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text)
+                .then(() => true, () => fallback());
+        }
+        return Promise.resolve(fallback());
+    }
+
     function overflowLabelRow(pillText, pillClass, noteText) {
         const head = document.createElement('div');
         head.className = 'review-item-head';
@@ -898,67 +926,49 @@
         const actions = document.createElement('div');
         actions.className = 'overflow-ann-actions';
 
-        const editBtn = document.createElement('button');
-        editBtn.type = 'button';
-        editBtn.className = 'overflow-btn';
-        editBtn.textContent = t.edit || 'Edit';
+        // Copy, not edit. An edit here could only rewrite the note in place —
+        // it cannot move it, so the note stays stranded — and saving would
+        // re-derive es_text from the current alignment at a dead es_idx,
+        // dropping or falsifying the one snapshot the post-realign re-anchor
+        // matches on (and dropping origin / fn_number with it). The real move
+        // is: copy the text out, annotate the right sentence, delete this. An
+        // empty note has nothing to copy, so it gets Delete only.
+        const copyBtn = a.content ? document.createElement('button') : null;
+        if (copyBtn) {
+            copyBtn.type = 'button';
+            copyBtn.className = 'overflow-btn';
+            copyBtn.textContent = t.copy || 'Copy';
+            // Announce the label swap; there is no other feedback surface here.
+            copyBtn.setAttribute('aria-live', 'polite');
+        }
 
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'overflow-btn overflow-btn-danger';
         delBtn.textContent = t.remove || 'Delete';
 
-        // Both endpoints address a record by (project, chapter, es_idx, sub_id)
-        // and never consult the alignment, so an orphan already edits and
-        // deletes correctly — only this UI path was missing. Persistence runs
-        // through the same helpers the sheet uses, so the offline queue and the
-        // fn_number / origin passthrough behave identically.
+        // Delete addresses a record by (project, chapter, es_idx, sub_id) and
+        // never consults the alignment, so orphans can be removed — only this
+        // UI path was missing.
         const subId = a.sub_id || null;
 
-        editBtn.addEventListener('click', () => {
-            if (item.querySelector('.overflow-ann-edit')) return;
-            const box = document.createElement('div');
-            box.className = 'overflow-ann-edit';
-            const ta = document.createElement('textarea');
-            ta.className = 'overflow-ann-input';
-            ta.rows = 3;
-            ta.value = a.content || '';
-            box.appendChild(ta);
-            const row = document.createElement('div');
-            row.className = 'overflow-ann-actions';
-            const save = document.createElement('button');
-            save.type = 'button';
-            save.className = 'overflow-btn overflow-btn-primary';
-            save.textContent = t.save || i.save || 'Save';
-            const cancel = document.createElement('button');
-            cancel.type = 'button';
-            cancel.className = 'overflow-btn';
-            cancel.textContent = t.cancel || 'Cancel';
-            row.appendChild(save);
-            row.appendChild(cancel);
-            box.appendChild(row);
-            item.insertBefore(box, actions);
-            actions.style.display = 'none';
-            ta.focus();
-
-            const closeEdit = () => {
-                box.remove();
-                actions.style.display = '';
-            };
-            cancel.addEventListener('click', closeEdit);
-            save.addEventListener('click', () => {
-                save.disabled = true;
-                doSaveAnnotation(type, ta.value.trim(), subId, {
-                    esIdx: a.es_idx,
-                    onSettled: () => { save.disabled = false; },
-                    onApplied: (rec) => {
-                        a.content = rec.content;
-                        body.textContent = rec.content;
-                        closeEdit();
-                    },
+        if (copyBtn) {
+            // One timer per button: a second click inside the window restarts
+            // it rather than letting the first restore clobber the new label.
+            let restore = null;
+            copyBtn.addEventListener('click', () => {
+                copyText(a.content).then(ok => {
+                    copyBtn.textContent = ok
+                        ? (t.copied || 'Copied')
+                        : (t.copy_failed || 'Copy failed');
+                    if (restore) clearTimeout(restore);
+                    restore = setTimeout(() => {
+                        copyBtn.textContent = t.copy || 'Copy';
+                        restore = null;
+                    }, 1500);
                 });
             });
-        });
+        }
 
         delBtn.addEventListener('click', () => {
             delBtn.disabled = true;
@@ -968,7 +978,7 @@
             });
         });
 
-        actions.appendChild(editBtn);
+        if (copyBtn) actions.appendChild(copyBtn);
         actions.appendChild(delBtn);
         item.appendChild(actions);
         return item;
@@ -1113,12 +1123,8 @@
     // Save annotation. Extracted so the v2 skin can persist directly with an
     // explicit (type, content), while the classic button path (below) keeps
     // reading from selectedAnnType + the note input exactly as before.
-    // `opts.esIdx` targets a sentence other than the active one (the overflow
-    // bin edits notes whose sentence isn't on screen); `opts.onApplied` replaces
-    // the sheet bookkeeping the bin has no use for.
-    function doSaveAnnotation(type, text, subId, opts) {
-        opts = opts || {};
-        const idx = opts.esIdx !== undefined && opts.esIdx !== null ? opts.esIdx : activeIdx;
+    function doSaveAnnotation(type, text, subId) {
+        const idx = activeIdx;
         if (idx === null || !type) return;
 
         const payload = {
@@ -1144,7 +1150,6 @@
             if (pos >= 0) list[pos] = rec; else list.push(rec);
             repaintHighlight(idx);
             updateStats();
-            if (opts.onApplied) { opts.onApplied(rec); return; }
             // v2: keep the sheet open and refresh the card list so the user can
             // add another annotation. Classic: close as before.
             if (V2 && window.ReaderSheetV2) {
@@ -1155,10 +1160,8 @@
             }
         }
 
-        if (!opts.onApplied) {
-            btnAnnSave.disabled = true;
-            btnAnnSave.textContent = '...';
-        }
+        btnAnnSave.disabled = true;
+        btnAnnSave.textContent = '...';
 
         fetch('/api/annotation', {
             method: 'POST',
@@ -1175,8 +1178,6 @@
                 applySaved(payload.sub_id);
             })
             .finally(() => {
-                if (opts.onSettled) opts.onSettled();
-                if (opts.onApplied) return;
                 btnAnnSave.disabled = false;
                 btnAnnSave.textContent = i.save || 'Save';
             });

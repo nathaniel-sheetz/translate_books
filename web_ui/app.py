@@ -5657,8 +5657,8 @@ def _anchor_judge_excerpt(
     Judges only report an excerpt string, so we locate it inside the chunk's
     ``translated_text`` by searching a short probe (its first non-empty line),
     then map that char offset to the alignment row that contains it. Returns
-    ``None`` when the excerpt can't be located (finding is dropped, not
-    force-attached — see the v1 known limits).
+    ``None`` when the excerpt can't be located — the caller bins it as
+    unanchored rather than force-attaching it to a nearby sentence.
     """
     if not excerpt or not isinstance(excerpt, str) or not translated_text:
         return None
@@ -5758,7 +5758,8 @@ def project_chapter_review(project_id, chapter):
         # Skip [IMAGE:...] placeholder sentences — the reader filters these out
         # (see _enrich_alignment), so a finding anchored to one would have no
         # sentence to highlight. Their char span is left uncovered, so any
-        # coded finding that lands inside the token is dropped, not misattached.
+        # coded finding that lands inside the token stays unanchored and
+        # reaches the overflow bin instead of being misattached.
         if _IMAGE_PLACEHOLDER_RE.fullmatch((row.get("es") or "").strip()):
             continue
         rows_by_chunk[cid].append(row)

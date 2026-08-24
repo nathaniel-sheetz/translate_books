@@ -2190,30 +2190,6 @@ body {
     cursor: not-allowed;
 }
 
-.overflow-btn-primary {
-    background: var(--accent-bg);
-    color: var(--accent);
-    border-color: var(--accent-border);
-}
-
 .overflow-btn-danger {
     color: var(--review-blacklist);
-}
-
-.overflow-ann-edit {
-    margin-top: 10px;
-}
-
-.overflow-ann-input {
-    width: 100%;
-    box-sizing: border-box;
-    font-family: inherit;
-    font-size: 14px;
-    line-height: 1.5;
-    padding: 8px 10px;
-    border: 1px solid var(--border-light);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    resize: vertical;
 }

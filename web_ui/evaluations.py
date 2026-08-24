@@ -763,12 +763,15 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
     coded findings must be target-side with a ``char_start``, and only the six
     :data:`REVIEW_TYPES` categories are counted.
 
-    These counts and the reader agree on the total. A finding the reader cannot
-    anchor to a sentence — a judge excerpt that has drifted from the prose, a
-    ``char_start`` no row covers — is not dropped there any more: it is returned
-    in ``unanchored`` and rendered in the end-of-chapter overflow bin, and
-    counted. So a chapter's chip and its reader always name the same number of
-    reachable findings. (What this walk still cannot say is *where* each one
+    A finding the reader cannot anchor to a sentence — a judge excerpt that
+    has drifted from the prose, a ``char_start`` no row covers — is not
+    dropped there any more: it is returned in ``unanchored`` and rendered in
+    the end-of-chapter overflow bin, and counted.
+
+    The chip can still exceed the bin when a chunk has evaluation results but
+    no usable alignment rows (IMAGE-only, or ``_attach_text_in_chunk`` never
+    set offsets): this walk counts them; ``project_chapter_review`` never
+    visits that chunk. (What this walk still cannot say is *where* each one
     lands, which needs the alignments plus the chunk text — far too expensive
     for a list page.)
 
