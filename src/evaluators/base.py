@@ -47,6 +47,8 @@ class BaseEvaluator(ABC):
         message: str,
         location: str | None = None,
         suggestion: str | None = None,
+        rule_id: str | None = None,
+        category: str | None = None,
     ) -> Issue:
         """
         Helper to create an Issue with consistent formatting.
@@ -56,6 +58,9 @@ class BaseEvaluator(ABC):
             message: Description of the issue
             location: Where the issue was found (optional)
             suggestion: How to fix it (optional)
+            rule_id: The checker's own id for the rule that fired (optional;
+                only checkers with a rule concept supply it)
+            category: The checker's category for that rule (optional)
 
         Returns:
             Issue instance
@@ -65,6 +70,8 @@ class BaseEvaluator(ABC):
             message=message,
             location=location,
             suggestion=suggestion,
+            rule_id=rule_id,
+            category=category,
         )
 
     def calculate_pass_fail(self, issues: list[Issue]) -> bool:

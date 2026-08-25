@@ -90,6 +90,69 @@ class GrammarEvaluator(BaseEvaluator):
         "HUNSPELL_NO_SUGGEST_RULE",
     )
 
+    # Rules that have never once produced a real defect across the local books.
+    #
+    # Derived, not guessed: scripts/replay_grammar_marks.py re-runs this
+    # evaluator over every chunk carrying a human mark in
+    # ``evaluations/_feedback.jsonl``, learns a message-prefix -> rule_id
+    # lexicon, then scores each rule against those labels ("resolved" = the
+    # human fixed a real defect, "false_positive" = noise). A rule earns a place
+    # here only with zero resolved findings and at least two false positives, so
+    # dropping it costs no recall on the measured corpus. Counts are from the
+    # 2026-08-24 run (22 real / 114 false overall, 16% precision):
+    #
+    #   COMMA_ADVERB                 0 real / 10 false
+    #   COMMA_SINO                   0 real /  7 false
+    #   COMMA_PERO                   0 real /  4 false
+    #   QUE_TILDE2                   0 real /  4 false
+    #   EL_TILDE                     0 real /  3 false
+    #   AUN                          0 real /  2 false
+    #   INTERROGATIVOS_CON_TILDE_OS  0 real /  2 false
+    #   QUE_TILDE1                   0 real /  2 false
+    #   SERIA                        0 real /  2 false
+    #
+    # Two comma-placement families and a set of archaic-tilde rules; both fight
+    # the house prose style rather than catching defects. Re-run the script after
+    # more marking to revisit -- a rule with one real catch belongs back in.
+    #
+    # Deliberately NOT here: UPPERCASE_SENTENCE_START and
+    # CAPITALIZATION_AFTER_QUESTION_MARK, which score 0/13 and 0/7 but fail for a
+    # *mechanical* reason (LanguageTool cannot parse raya dialogue) rather than a
+    # stylistic one. They are gated by DIALOGUE_SENSITIVE_RULE_IDS below so they
+    # keep checking narration, where capitalization errors are real -- the
+    # sibling rule MAYUSCULAS_INICIO_FRASE scores 6 real / 0 false.
+    DEFAULT_IGNORE_RULES = frozenset(
+        {
+            "AUN",
+            "COMMA_ADVERB",
+            "COMMA_PERO",
+            "COMMA_SINO",
+            "EL_TILDE",
+            "INTERROGATIVOS_CON_TILDE_OS",
+            "QUE_TILDE1",
+            "QUE_TILDE2",
+            "SERIA",
+        }
+    )
+
+    # Rules suppressed only INSIDE a dialogue paragraph. LanguageTool reads
+    # "--!Ah! ?que? --dijo Ricardo--." as one malformed sentence: the raya is not
+    # a sentence opener it knows, the inciso is not a parenthetical it knows, and
+    # so it demands a capital that Spanish dialogue convention forbids. Measured:
+    # 15 of 19 capitalization false positives sat inside a dialogue paragraph.
+    # Narration keeps the rule.
+    DIALOGUE_SENSITIVE_RULE_IDS = frozenset(
+        {
+            "UPPERCASE_SENTENCE_START",
+            "CAPITALIZATION_AFTER_QUESTION_MARK",
+        }
+    )
+
+    # A paragraph opening with one of these is a spoken turn under the house
+    # dialogue rules (prompts/dialogue.txt): raya for a new turn, guillemet for a
+    # same-speaker continuation.
+    _DIALOGUE_OPENERS = ("—", "»", "«")
+
     def __init__(self, dialect: str = 'es'):
         """
         Initialize Grammar Evaluator with LanguageTool.
@@ -168,6 +231,8 @@ class GrammarEvaluator(BaseEvaluator):
         text_to_check = blank_caption_markers(text_to_check)
 
         # Run LanguageTool check
+        dialogue_ranges = self._dialogue_paragraph_ranges(text_to_check)
+
         matches = self._check_grammar(text_to_check)
 
         # Process matches (deduplicated by rule + flagged word)
@@ -180,7 +245,9 @@ class GrammarEvaluator(BaseEvaluator):
                 continue
 
             # Check if this match should be ignored
-            if self._should_ignore_match(match, context, text_to_check):
+            if self._should_ignore_match(
+                match, context, text_to_check, dialogue_ranges=dialogue_ranges
+            ):
                 continue
 
             rule_id = getattr(match, "rule_id", "") or ""
@@ -223,6 +290,22 @@ class GrammarEvaluator(BaseEvaluator):
                 "dialect": dialect
             }
         )
+
+    def _dialogue_paragraph_ranges(self, text: str) -> list[tuple[int, int]]:
+        """Half-open [start, end) spans of paragraphs that are spoken turns.
+
+        Offsets index the same string LanguageTool checked, so a match can be
+        placed by comparing ``match.offset`` against these spans -- no rewriting
+        of the text, which would shift every other offset the evaluator relies on.
+        """
+        ranges: list[tuple[int, int]] = []
+        pos = 0
+        for paragraph in text.split("\n"):
+            end = pos + len(paragraph)
+            if paragraph.lstrip()[:1] in self._DIALOGUE_OPENERS:
+                ranges.append((pos, end))
+            pos = end + 1  # the newline itself
+        return ranges
 
     def _check_grammar(self, text: str) -> list:
         """
@@ -286,6 +369,8 @@ class GrammarEvaluator(BaseEvaluator):
             message=message,
             location=location,
             suggestion=suggestion,
+            rule_id=getattr(match, "rule_id", None) or None,
+            category=getattr(match, "category", None) or None,
         )
 
     def _determine_severity(self, match) -> IssueLevel:
@@ -305,7 +390,11 @@ class GrammarEvaluator(BaseEvaluator):
         return self.CATEGORY_SEVERITY.get(category, IssueLevel.WARNING)
 
     def _should_ignore_match(
-        self, match, context: dict, text: str = ""
+        self,
+        match,
+        context: dict,
+        text: str = "",
+        dialogue_ranges: Optional[list[tuple[int, int]]] = None,
     ) -> bool:
         """
         Determine if a match should be ignored based on context.
@@ -334,11 +423,28 @@ class GrammarEvaluator(BaseEvaluator):
         if match_category in ignore_categories:
             return True
 
-        # Check ignore_rules
+        # Check ignore_rules. The caller's list extends the measured default
+        # rather than replacing it; pass ignore_defaults=True to opt out of the
+        # built-in list (the replay script does, to score the raw evaluator).
         ignore_rules = context.get('ignore_rules', [])
         rule_id = getattr(match, 'rule_id', None)
         if rule_id in ignore_rules:
             return True
+        measure_raw = context.get('ignore_defaults', False)
+        if not measure_raw and rule_id in self.DEFAULT_IGNORE_RULES:
+            return True
+
+        # Rules that only misfire inside spoken dialogue keep working elsewhere.
+        if (
+            not measure_raw
+            and rule_id in self.DIALOGUE_SENSITIVE_RULE_IDS
+            and dialogue_ranges
+        ):
+            offset = getattr(match, 'offset', None)
+            if offset is not None and any(
+                start <= offset < end for start, end in dialogue_ranges
+            ):
+                return True
 
         # Check glossary for TYPOS category
         if match_category == 'TYPOS':

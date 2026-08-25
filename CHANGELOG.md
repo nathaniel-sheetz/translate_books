@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.49.0.0] - 2026-08-24
+
+### Added
+- **Grammar findings carry their LanguageTool rule id.** `Issue` gained optional `rule_id` / `category`, and `GrammarEvaluator` now passes both through instead of dropping them. It always had them at runtime — it uses `rule_id` for dedup grouping and for `skip_spelling` — but only the localized Spanish message survived onto the persisted issue, which is not a stable key: it changes with the LanguageTool version, and several distinct rules share one message ("Posible error de concordancia." maps to five). Without an id there was no way to suppress a rule, or to measure one.
+- **`GrammarEvaluator.DEFAULT_IGNORE_RULES`** — nine rules that have never once produced a real defect across the local books: `COMMA_ADVERB`, `COMMA_SINO`, `COMMA_PERO`, `QUE_TILDE1`, `QUE_TILDE2`, `EL_TILDE`, `AUN`, `INTERROGATIVOS_CON_TILDE_OS`, `SERIA`. Two comma-placement families and a set of archaic-tilde rules, all of which fight the house prose style rather than catching errors. Derived from the human marks in `evaluations/_feedback.jsonl`, not chosen by hand — a rule qualifies only with zero `resolved` findings and at least two `false_positive`s, so dropping it costs no recall on the measured corpus. `ignore_defaults: True` opts out.
+- **`DIALOGUE_SENSITIVE_RULE_IDS`** — `UPPERCASE_SENTENCE_START` and `CAPITALIZATION_AFTER_QUESTION_MARK` are suppressed only *inside* a spoken turn. LanguageTool reads `—¡Ah! ¿qué? —dijo Ricardo—.` as one malformed sentence: the raya is not a sentence opener it knows and the inciso is not a parenthetical it knows, so it demands a capital that Spanish dialogue convention forbids. 15 of 19 capitalization false positives sat inside a dialogue paragraph. They keep checking narration, where the sibling rule `MAYUSCULAS_INICIO_FRASE` scores 6 real / 0 false — which is why neither was blanket-ignored. The guard compares `match.offset` against paragraph spans rather than rewriting the text, because every other offset the evaluator reports is anchored to that same string.
+- **`scripts/replay_grammar_marks.py`** — re-runs the grammar evaluator over the chunks that already carry marks and scores each rule against those human labels. No API spend. It is what produced the ignore list above, and it is how the next one should be produced: `--min-false` sets the bar, `--simulate-ignore` scores a candidate list, and `real defects lost` must stay 0.
+- **`scripts/backfill_feedback_keys.py`** — one-shot migration stamping `issue_key` onto existing feedback records. Report-only by default; `--write` backs the file up to `_feedback.jsonl.bak` first.
+
+### Fixed
+- **A dismissed finding no longer re-points when its evaluator re-runs.** Feedback records were keyed by `(eval_name, issue_index)` — a *position* in the evaluator issue list, recomputed by `enumerate` at read time. Re-running an evaluator rewrites that list wholesale, so every mark silently slid onto whatever finding took the slot: 87 marks on disk pointed past the end of their list, and any that landed on a *different* finding were undetectable. Marks now carry `issue_key`, a content hash of `(eval_name, severity, message, location)`. The key is resolved server-side in the feedback endpoint, so the dashboard card, reader Review Mode and mobile bottom sheet are unchanged. Records without a key keep matching positionally.
+- **The dashboard eval-card offers `resolved`**, the fourth label the reader has always had and `_ALLOWED_FEEDBACK_TYPES` has always permitted. It is the only label meaning "real defect, fixed", so its absence made the dashboard unable to record the one signal per-rule precision is measured from.
+
+### Changed
+- On the marked corpus, the grammar evaluator now emits 60 fewer findings out of 166 (36%), all from rules with zero measured real defects. Measured precision goes from 16% (22 real / 114 false) to 28%, with no real defect lost.
+
 ## [0.48.0.1] - 2026-08-24
 
 ### Fixed
