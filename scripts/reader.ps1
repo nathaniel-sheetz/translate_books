@@ -145,7 +145,7 @@ function Get-DesiredTask {
         Transcribed from the task as originally registered by hand, with one
         deliberate change. That task carried DisallowStartIfOnBatteries=true, so
         a reboot on battery left the reader down - the exact case Step 3 of
-        docs/design/tailscale.md promises to survive.
+        docs/TAILSCALE.md promises to survive.
 
         Needs a usable interpreter; only `install` calls it.
     #>
@@ -271,7 +271,7 @@ function Install-Reader {
     $desired = Get-DesiredTask
     # "Run whether user is logged on or not" means a stored password: the
     # packages this app needs live in per-user site-packages, so the task has to
-    # carry the user's own identity (see docs/design/tailscale.md, Step 3).
+    # carry the user's own identity (see docs/TAILSCALE.md, Step 3).
     $secure = Read-Host "Windows password for $user" -AsSecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
     $registered = $false

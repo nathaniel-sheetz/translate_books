@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.48.0.1] - 2026-08-24
+
+### Fixed
+- **CI is green again.** `README.md` linked to `docs/design/tailscale.md`, but `.gitignore` ignores all of `docs/design/` as design scratch, so the file existed only on the author's machine and `tests/test_docs_links.py::test_internal_links_resolve[README.md]` had failed on every run since 0.47.2.0 introduced the link. The setup steps the README promises now ship as `docs/TAILSCALE.md`.
+- **`docs/TAILSCALE.md` Step 1 no longer opens TCP 5000 or claims a chapter will load before `tailscale serve` is up.** `scripts/serve.py` binds 127.0.0.1, so that firewall hole never reaches waitress. Step 2 now gives `tailscale serve --bg 5000` (and says `tailscale cert` only issues a cert) and moves the cellular-read check there.
+
+### Added
+- **`docs/TAILSCALE.md`** — how to reach the reader from outside the local Wi-Fi: joining a tailnet, `tailscale serve` for HTTPS and a stable name (which is what makes the PWA home-screen install behave), and running it unattended via `scripts/serve.py` under waitress plus the `TranslateBooksReader` scheduled task, with the reasoning behind each task setting. The planning record it was drawn from stays untracked.
+- **`test_internal_links_are_tracked`** — tracked markdown must not link into a gitignored path, so a `docs/design/` target that exists only on the author's machine cannot pass locally and fail CI.
+
+### Changed
+- The Tailscale guide's manage example is no longer a PowerShell pipeline (`status | start | …` would feed status output into `Start-Process`). `status` documentation now names what the auditor actually checks — settings, working directory, serve.py path, at-startup trigger — and what it does not (trigger delay, "run whether logged on"). The SSE fallback still mentions `app.run(...)` but warns it binds `0.0.0.0`.
+
 ## [0.48.0.0] - 2026-08-24
 
 ### Added
