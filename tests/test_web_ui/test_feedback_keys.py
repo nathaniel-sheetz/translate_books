@@ -138,6 +138,33 @@ class TestDismissalMatching:
             issue = dict(RAW_ISSUE, message=f"finding {i}")
             assert is_dismissed(by_key, by_index, "dialogue", i, issue)
 
+    def test_byte_identical_findings_share_one_dismissal(self, tmp_path):
+        """Two findings identical in severity, message and location hash the
+        same, so dismissing one dismisses both.
+
+        Deliberate, and a behavior change from the positional scheme, where
+        ``enumerate`` kept them distinct. A judge that emits a duplicate row for
+        a repeated excerpt is describing the same defect twice, and marking it
+        twice is busywork; the cost is that a genuine second occurrence sharing
+        an identical location string cannot be marked separately. Pinned here so
+        that trade stays a decision rather than an accident -- reversing it means
+        adding an occurrence ordinal to the key, which invalidates every mark
+        already stamped.
+        """
+        twin = dict(RAW_ISSUE)
+        append_feedback(
+            tmp_path,
+            "ch01_chunk_000",
+            "dialogue",
+            0,
+            "false_positive",
+            key=issue_key("dialogue", RAW_ISSUE),
+        )
+        by_key, by_index = build_dismissed(self._records(tmp_path))
+
+        assert is_dismissed(by_key, by_index, "dialogue", 0, RAW_ISSUE)
+        assert is_dismissed(by_key, by_index, "dialogue", 1, twin)
+
     def test_missing_issue_still_matches_positionally(self, tmp_path):
         """Callers that cannot supply the issue object must not silently lose
         legacy dismissals."""

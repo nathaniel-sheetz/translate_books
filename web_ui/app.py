@@ -5587,7 +5587,7 @@ def _resolve_issue_key(
         judge = (payload.get("judges") or {}).get(eval_name)
         if isinstance(judge, dict):
             issues = judge.get("issues") or []
-    if not issues or issue_index >= len(issues):
+    if not issues or issue_index < 0 or issue_index >= len(issues):
         return None
 
     issue = issues[issue_index]

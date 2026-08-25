@@ -99,48 +99,72 @@ class GrammarEvaluator(BaseEvaluator):
     # human fixed a real defect, "false_positive" = noise). A rule earns a place
     # here only with zero resolved findings and at least two false positives, so
     # dropping it costs no recall on the measured corpus. Counts are from the
-    # 2026-08-24 run (22 real / 114 false overall, 16% precision):
+    # 2026-08-25 run (27 real / 92 false overall, 23% precision):
     #
-    #   COMMA_ADVERB                 0 real / 10 false
-    #   COMMA_SINO                   0 real /  7 false
+    #   MAS                          0 real / 10 false
+    #   COMMA_ADVERB                 0 real /  8 false
     #   COMMA_PERO                   0 real /  4 false
-    #   QUE_TILDE2                   0 real /  4 false
-    #   EL_TILDE                     0 real /  3 false
-    #   AUN                          0 real /  2 false
+    #   AUN2                         0 real /  2 false
+    #   ES_INITIAL_QUESTION_MARK     0 real /  2 false
+    #   HACIA_TILDE                  0 real /  2 false
     #   INTERROGATIVOS_CON_TILDE_OS  0 real /  2 false
-    #   QUE_TILDE1                   0 real /  2 false
-    #   SERIA                        0 real /  2 false
+    #   QUE_TILDE2                   0 real /  2 false
     #
-    # Two comma-placement families and a set of archaic-tilde rules; both fight
-    # the house prose style rather than catching defects. Re-run the script after
+    # A comma-placement family and a set of archaic-tilde rules; both fight the
+    # house prose style rather than catching defects. Suppressing these takes
+    # precision from 23% to 31% with 0 real defects lost. Re-run the script after
     # more marking to revisit -- a rule with one real catch belongs back in.
     #
-    # Deliberately NOT here: UPPERCASE_SENTENCE_START and
-    # CAPITALIZATION_AFTER_QUESTION_MARK, which score 0/13 and 0/7 but fail for a
-    # *mechanical* reason (LanguageTool cannot parse raya dialogue) rather than a
-    # stylistic one. They are gated by DIALOGUE_SENSITIVE_RULE_IDS below so they
-    # keep checking narration, where capitalization errors are real -- the
-    # sibling rule MAYUSCULAS_INICIO_FRASE scores 6 real / 0 false.
+    # These counts supersede a 2026-08-24 run that measured only 72% of the
+    # corpus: it discovered projects with iterdir() and so never saw the books
+    # under projects/.published/ and projects/.macdonald/, double-counted a
+    # .bak snapshot of the-little-duke, and attributed 74 marks by a stale
+    # issue_index. COMMA_SINO left the list because its message prefix is shared
+    # with COMMA_SINO2 and its marks can no longer be attributed to either;
+    # EL_TILDE, QUE_TILDE1 and SERIA left it because they now measure one false
+    # positive each, under the threshold. An under-covered measurement is
+    # recoverable; a wrong suppression is not.
+    #
+    # Deliberately NOT here: UPPERCASE_SENTENCE_START (0 real / 7 false) and
+    # CAPITALIZATION_AFTER_QUESTION_MARK (1 real / 4 false). The first would
+    # qualify, but both fail for a *mechanical* reason (LanguageTool cannot parse
+    # raya dialogue) rather than a stylistic one, so they are gated by
+    # DIALOGUE_SENSITIVE_RULE_IDS below and keep checking narration, where
+    # capitalization errors are real -- the sibling rule MAYUSCULAS_INICIO_FRASE
+    # scores 6 real / 0 false, and CAPITALIZATION_AFTER_QUESTION_MARK's one real
+    # catch is exactly what a flat suppression would have thrown away.
     DEFAULT_IGNORE_RULES = frozenset(
         {
-            "AUN",
+            "AUN2",
             "COMMA_ADVERB",
             "COMMA_PERO",
-            "COMMA_SINO",
-            "EL_TILDE",
+            "ES_INITIAL_QUESTION_MARK",
+            "HACIA_TILDE",
             "INTERROGATIVOS_CON_TILDE_OS",
-            "QUE_TILDE1",
+            "MAS",
             "QUE_TILDE2",
-            "SERIA",
         }
     )
 
     # Rules suppressed only INSIDE a dialogue paragraph. LanguageTool reads
     # "--!Ah! ?que? --dijo Ricardo--." as one malformed sentence: the raya is not
     # a sentence opener it knows, the inciso is not a parenthetical it knows, and
-    # so it demands a capital that Spanish dialogue convention forbids. Measured:
-    # 15 of 19 capitalization false positives sat inside a dialogue paragraph.
-    # Narration keeps the rule.
+    # so it demands a capital that Spanish dialogue convention forbids. Narration
+    # keeps the rule.
+    #
+    # Measured on the 2026-08-25 corpus, placing each marked finding's offset
+    # against _dialogue_paragraph_ranges:
+    #
+    #   UPPERCASE_SENTENCE_START            7 false: 5 inside, 2 outside
+    #   CAPITALIZATION_AFTER_QUESTION_MARK  4 false: 0 inside, 4 outside
+    #                                       1 real:  0 inside, 1 outside
+    #
+    # So the gate is what the first rule needs and is *precautionary* for the
+    # second: the parsing failure is identical for both, but only five marks
+    # exist for the second rule and none of them landed in dialogue. It stays
+    # gated because the gate cannot cost it anything -- its one real catch is in
+    # narration -- and because a raya false positive is the failure the rule is
+    # known to have. Revisit if it accumulates inside-dialogue marks.
     DIALOGUE_SENSITIVE_RULE_IDS = frozenset(
         {
             "UPPERCASE_SENTENCE_START",
@@ -191,7 +215,12 @@ class GrammarEvaluator(BaseEvaluator):
             context: Configuration options:
                 - dialect: str (overrides init dialect)
                 - glossary: Glossary (exclude terms from TYPOS)
-                - ignore_rules: list[str] (specific rule IDs to skip)
+                - ignore_rules: list[str] (specific rule IDs to skip; these
+                  EXTEND DEFAULT_IGNORE_RULES rather than replacing it)
+                - apply_default_ignores: bool (default True; False turns off
+                  both built-in gates, DEFAULT_IGNORE_RULES and
+                  DIALOGUE_SENSITIVE_RULE_IDS, so the raw evaluator can be
+                  scored -- see scripts/replay_grammar_marks.py)
                 - ignore_categories: list[str] (categories to skip, e.g. ['TYPOS'])
                 - skip_spelling: bool (suppress only the unknown-word spell rules
                   MORFOLOGIK_RULE_*/HUNSPELL_*; accent/real-word TYPOS are still
@@ -424,19 +453,20 @@ class GrammarEvaluator(BaseEvaluator):
             return True
 
         # Check ignore_rules. The caller's list extends the measured default
-        # rather than replacing it; pass ignore_defaults=True to opt out of the
-        # built-in list (the replay script does, to score the raw evaluator).
+        # rather than replacing it; pass apply_default_ignores=False to opt out
+        # of both built-in gates (the replay script does, to score the raw
+        # evaluator against the human marks that produced those gates).
         ignore_rules = context.get('ignore_rules', [])
         rule_id = getattr(match, 'rule_id', None)
         if rule_id in ignore_rules:
             return True
-        measure_raw = context.get('ignore_defaults', False)
-        if not measure_raw and rule_id in self.DEFAULT_IGNORE_RULES:
+        apply_defaults = context.get('apply_default_ignores', True)
+        if apply_defaults and rule_id in self.DEFAULT_IGNORE_RULES:
             return True
 
         # Rules that only misfire inside spoken dialogue keep working elsewhere.
         if (
-            not measure_raw
+            apply_defaults
             and rule_id in self.DIALOGUE_SENSITIVE_RULE_IDS
             and dialogue_ranges
         ):

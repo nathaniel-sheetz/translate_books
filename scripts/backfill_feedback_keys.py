@@ -11,8 +11,20 @@ already ambiguous -- the evaluator has re-run and the list moved -- and inventin
 a key for it would freeze a wrong answer in place. They keep matching
 positionally, exactly as they do today.
 
+The same refusal covers marks *older than the evaluator's last run*, which are
+flagged ``key_skipped_stale`` as well: their index still resolves, but to
+whatever finding now occupies the slot, so keying them would convert a
+recoverable ambiguity into a confident wrong answer.
+
+RUN THIS BEFORE RE-EVALUATING ANYTHING. ``GrammarEvaluator.DEFAULT_IGNORE_RULES``
+drops roughly a third of grammar findings, and a re-run renumbers every
+``results[].issues`` list; any un-keyed mark left over at that point is stale by
+the paragraph above and can no longer be keyed at all.
+
 Runs in report-only mode by default; pass --write to modify anything. The
-original file is copied to ``_feedback.jsonl.bak`` before the first write.
+original file is copied to ``_feedback.jsonl.bak`` before the first write, and
+the rewrite goes through a temp file so a concurrent dashboard append or a kill
+mid-write cannot truncate it.
 
 Usage:
     python scripts/backfill_feedback_keys.py
@@ -25,6 +37,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -54,6 +67,24 @@ def find_issue(
     if isinstance(judge, dict):
         issues = judge.get("issues") or []
         return issues[issue_index] if issue_index < len(issues) else None
+    return None
+
+
+def eval_ran_at(evaluation: dict[str, Any], eval_name: str) -> Optional[str]:
+    """ISO timestamp of the last run of ``eval_name`` on this chunk, or None.
+
+    Coded evaluators record ``eval_runs[name].at``; judges record their own
+    ``executed_at``, with ``judges_at`` as the whole-chunk fallback. The strings
+    are ISO-8601 from the same clock, so they compare lexicographically.
+    """
+    run = (evaluation.get("eval_runs") or {}).get(eval_name)
+    if isinstance(run, dict) and run.get("at"):
+        return str(run["at"])
+    judge = (evaluation.get("judges") or {}).get(eval_name)
+    if isinstance(judge, dict) and judge.get("executed_at"):
+        return str(judge["executed_at"])
+    if judge is not None and evaluation.get("judges_at"):
+        return str(evaluation["judges_at"])
     return None
 
 
@@ -98,12 +129,31 @@ def backfill_project(
                     cache[chunk_id] = None
             evaluation = cache[chunk_id]
 
+            # A mark older than the evaluator's last run cannot be trusted to
+            # still name the same finding: that re-run is exactly what rewrote
+            # the issue list out from under its index. Resolving it anyway would
+            # stamp the intruder's hash and freeze a wrong answer, which is
+            # strictly worse than the ambiguity it replaces -- so leave it
+            # positional, the way a dangling index is left.
+            stale = False
+            if isinstance(evaluation, dict):
+                ran_at = eval_ran_at(evaluation, eval_name)
+                ts = record.get("ts")
+                if ran_at and isinstance(ts, str) and ts < ran_at:
+                    stale = True
+
             issue = (
                 find_issue(evaluation, eval_name, record.get("issue_index"))
-                if isinstance(evaluation, dict)
+                if isinstance(evaluation, dict) and not stale
                 else None
             )
-            if isinstance(issue, dict):
+            if stale:
+                record["issue_key"] = None
+                record["key_unresolved"] = True
+                record["key_skipped_stale"] = True
+                stats["stale"] += 1
+                stats[f"unresolved_{eval_name}"] += 1
+            elif isinstance(issue, dict):
                 record["issue_key"] = issue_key(eval_name, issue)
                 stats["keyed"] += 1
                 stats[f"keyed_{eval_name}"] += 1
@@ -118,10 +168,51 @@ def backfill_project(
         backup = path.with_suffix(path.suffix + ".bak")
         if not backup.exists():
             shutil.copy2(path, backup)
-        path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        # Write a sibling and rename over the original. The dashboard is
+        # normally running while this executes -- that is how marks are made --
+        # and a truncate-in-place would let a mark appended between the read
+        # above and the write here vanish, or leave the file half-written if the
+        # process dies mid-rewrite.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
         stats["file_written"] += 1
 
     return out_lines, stats
+
+
+def discover_projects(projects_root: Path) -> list[Path]:
+    """Every project directory holding a ``_feedback.jsonl``.
+
+    rglob, not iterdir: books also live one level down under a hidden group
+    directory (``projects/.published/``, ``projects/.macdonald/``, ...), and
+    skipping those hid 28% of the marked corpus.
+
+    Directories with ``.bak`` in the name are snapshots of another project --
+    ``projects/.backburner/the-little-duke.bak-footnote-migration`` is a copy of
+    ``the-little-duke`` -- so their marks are duplicates, not evidence.
+    """
+    return sorted(
+        p.parent.parent
+        for p in projects_root.rglob("evaluations/_feedback.jsonl")
+        if ".bak" not in p.parent.parent.name
+    )
+
+
+def resolve_project(projects_root: Path, slug: str) -> Path:
+    """Locate a project by slug, including under a hidden group directory.
+
+    Projects live at ``projects/<slug>`` but also at ``projects/.<group>/<slug>``
+    (``.published``, ``.macdonald``, ...), so a bare join misses most of the
+    corpus. Falls back to the plain join so the caller's "missing" message still
+    names something recognizable.
+    """
+    direct = projects_root / slug
+    if direct.is_dir():
+        return direct
+    for path in sorted(projects_root.rglob(f"{slug}/evaluations/_feedback.jsonl")):
+        return path.parent.parent
+    return direct
 
 
 def main() -> int:
@@ -136,13 +227,9 @@ def main() -> int:
 
     projects_root = REPO_ROOT / "projects"
     if args.project:
-        project_dirs = [projects_root / slug for slug in args.project]
+        project_dirs = [resolve_project(projects_root, slug) for slug in args.project]
     else:
-        project_dirs = sorted(
-            p
-            for p in projects_root.rglob("evaluations/_feedback.jsonl")
-        )
-        project_dirs = [p.parent.parent for p in project_dirs]
+        project_dirs = discover_projects(projects_root)
 
     totals: collections.Counter = collections.Counter()
     if not args.write:
@@ -169,14 +256,17 @@ def main() -> int:
             continue
         print(f"  {key}: {totals[key]}")
 
-    unresolved_by_eval = {
-        k[len("unresolved_") :]: v
-        for k, v in totals.items()
-        if k.startswith("unresolved_")
-    }
-    if unresolved_by_eval:
-        print("\n  unresolved by evaluator (these keep matching positionally):")
-        for name, count in sorted(unresolved_by_eval.items(), key=lambda kv: -kv[1]):
+    for prefix, caption in (
+        ("keyed_", "keyed by evaluator:"),
+        ("unresolved_", "unresolved by evaluator (these keep matching positionally):"),
+    ):
+        by_eval = {
+            k[len(prefix) :]: v for k, v in totals.items() if k.startswith(prefix)
+        }
+        if not by_eval:
+            continue
+        print(f"\n  {caption}")
+        for name, count in sorted(by_eval.items(), key=lambda kv: -kv[1]):
             print(f"    {count:>4}  {name}")
     return 0
 

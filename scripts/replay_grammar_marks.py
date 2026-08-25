@@ -26,8 +26,8 @@ known real defects and made every rule look worse than it is. So:
   those stored labels.
 
 Costs nothing to run -- LanguageTool is local. Chunks whose text has drifted
-since the evaluation ran are skipped for lexicon-learning only; their stored
-findings still count toward precision.
+since the evaluation ran are still replayed -- a rule's message is the same
+whatever it fired on -- and are only counted under ``text_drifted``.
 
 Usage:
     python scripts/replay_grammar_marks.py
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import collections
-import hashlib
 import json
 import re
 import sys
@@ -52,6 +51,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.evaluators.grammar_eval import GrammarEvaluator  # noqa: E402
 from src.models import Chunk, Glossary  # noqa: E402
+from scripts.backfill_feedback_keys import (  # noqa: E402
+    discover_projects,
+    eval_ran_at,
+    resolve_project,
+)
+from web_ui.evaluations import chunk_text_sha, issue_key  # noqa: E402
 
 # Only these two labels are ground truth for precision. bad_message and
 # missing_context_gap say the finding was real but poorly reported, which is a
@@ -60,15 +65,22 @@ REAL = "resolved"
 NOISE = "false_positive"
 
 
-def chunk_text_sha(text: str) -> str:
-    """sha256 of the newline-normalized text, matching web_ui.evaluations."""
-    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+def load_marks(project_dir: Path) -> dict[str, list[tuple[str, Any, str, Any]]]:
+    """chunk_id -> [(identity_kind, identity, feedback_type, ts)] in file order.
 
+    ``identity_kind`` is ``"key"`` when the record carries an ``issue_key`` and
+    ``"index"`` otherwise. Preferring the content hash matters here as much as
+    it does in the reader: ``issue_index`` is a position in a list the evaluator
+    rewrites on every run, so a stale index attributes one rule's dismissal to
+    whichever rule now occupies the slot -- and this script is what decides
+    which rules get suppressed on the strength of those dismissals.
 
-def load_marks(project_dir: Path) -> dict[str, dict[int, str]]:
-    """chunk_id -> {issue_index: feedback_type} for grammar marks, latest wins."""
+    File order is preserved rather than collapsed here; the caller resolves each
+    identity to a stored finding first, so that two records naming the same
+    finding by different identities dedupe to one, latest-wins.
+    """
     path = project_dir / "evaluations" / "_feedback.jsonl"
-    marks: dict[str, dict[int, str]] = collections.defaultdict(dict)
+    marks: dict[str, list[tuple[str, Any, str, Any]]] = collections.defaultdict(list)
     if not path.exists():
         return marks
     with path.open(encoding="utf-8") as fh:
@@ -82,9 +94,18 @@ def load_marks(project_dir: Path) -> dict[str, dict[int, str]]:
                 continue
             if rec.get("eval_name") != "grammar":
                 continue
+            chunk_id = rec.get("chunk_id")
+            if not chunk_id:
+                continue
+            feedback = rec.get("feedback_type")
+            ts = rec.get("ts")
+            key = rec.get("issue_key")
+            if key:
+                marks[chunk_id].append(("key", key, feedback, ts))
+                continue
             idx = rec.get("issue_index")
             if isinstance(idx, int):
-                marks[rec["chunk_id"]][idx] = rec.get("feedback_type")
+                marks[chunk_id].append(("index", idx, feedback, ts))
     return marks
 
 
@@ -107,29 +128,6 @@ def stored_grammar_issues(evaluation: dict[str, Any]) -> Optional[list[dict]]:
         if result.get("eval_name") == "grammar":
             return result.get("issues") or []
     return None
-
-
-def match_old_to_new(old: list[dict], new: list) -> dict[int, Any]:
-    """Map stored issue index -> re-run Issue.
-
-    Exact message first (it carries the rule text plus the quoted context, so
-    it is near-unique within a chunk), then location as a fallback for findings
-    whose "(found N time(s))" suffix moved.
-    """
-    by_message: dict[str, Any] = {}
-    by_location: dict[str, Any] = {}
-    for issue in new:
-        by_message.setdefault(issue.message, issue)
-        if issue.location:
-            by_location.setdefault(issue.location, issue)
-    matched: dict[int, Any] = {}
-    for idx, stored in enumerate(old):
-        hit = by_message.get(stored.get("message"))
-        if hit is None and stored.get("location"):
-            hit = by_location.get(stored["location"])
-        if hit is not None:
-            matched[idx] = hit
-    return matched
 
 
 def learn_lexicon(
@@ -160,11 +158,14 @@ def learn_lexicon(
     # Mirror _build_context's grammar-relevant defaults. skip_spelling is what
     # hands unknown-word spelling to the dictionary evaluator; replaying without
     # it would resurrect a class of findings that current runs never emit.
-    # ignore_defaults opts out of GrammarEvaluator.DEFAULT_IGNORE_RULES: this
+    # apply_default_ignores=False turns off GrammarEvaluator's own gates: this
     # script is what measures those rules, so it has to observe the evaluator
     # before its own conclusions are applied, or the next run would report the
     # suppressed rules as simply absent.
-    context: dict[str, Any] = {"skip_spelling": True, "ignore_defaults": True}
+    context: dict[str, Any] = {
+        "skip_spelling": True,
+        "apply_default_ignores": False,
+    }
     if glossary is not None:
         context["glossary"] = glossary
 
@@ -216,14 +217,16 @@ def learn_lexicon(
     return lexicon, stats
 
 
-def collect_stored_marks(project_dir: Path) -> list[tuple[str, str]]:
-    """Every grammar mark on disk as (message_prefix, feedback_type).
+def collect_stored_marks(project_dir: Path) -> tuple[list[tuple[str, str]], int]:
+    """Every usable grammar mark as (message_prefix, feedback_type), plus the
+    number dropped as stale.
 
     Reads the stored findings rather than re-running anything, so a defect the
     human already fixed still counts -- which is the whole point: those are the
     true positives, and they are exactly what a replay-only join loses.
     """
     rows: list[tuple[str, str]] = []
+    stale = 0
     marks = load_marks(project_dir)
     for chunk_id, marked in sorted(marks.items()):
         eval_path = project_dir / "evaluations" / f"{chunk_id}.json"
@@ -236,12 +239,42 @@ def collect_stored_marks(project_dir: Path) -> list[tuple[str, str]]:
         old = stored_grammar_issues(evaluation)
         if not old:
             continue
-        for idx, feedback in marked.items():
-            if feedback not in (REAL, NOISE) or idx >= len(old):
+
+        # First key wins so a duplicated finding keeps the position the reader
+        # would have marked; unresolvable identities are simply dropped.
+        by_key: dict[str, int] = {}
+        for idx, issue in enumerate(old):
+            if isinstance(issue, dict):
+                by_key.setdefault(issue_key("grammar", issue), idx)
+
+        # A mark with no key can only be placed positionally, and a position is
+        # only meaningful if the evaluator has not re-run since the mark was
+        # made. Attributing a stale one would credit its label to whichever rule
+        # now occupies the slot -- and a borrowed false_positive is how a rule
+        # that does catch real defects ends up suppressed.
+        ran_at = eval_ran_at(evaluation, "grammar")
+
+        resolved: dict[int, str] = {}
+        for kind, ident, feedback, ts in marked:
+            if feedback not in (REAL, NOISE):
                 continue
+            if kind == "key":
+                idx = by_key.get(ident)
+            elif ran_at and isinstance(ts, str) and ts < ran_at:
+                stale += 1
+                continue
+            elif 0 <= ident < len(old):
+                idx = ident
+            else:
+                idx = None
+            if idx is None:
+                continue
+            resolved[idx] = feedback
+
+        for idx, feedback in resolved.items():
             message = (old[idx] or {}).get("message") or ""
             rows.append((rule_message_prefix(message), feedback))
-    return rows
+    return rows, stale
 
 
 def precision(real: int, false: int) -> float:
@@ -269,15 +302,11 @@ def main() -> int:
 
     projects_root = REPO_ROOT / "projects"
     if args.project:
-        project_dirs = [projects_root / slug for slug in args.project]
+        project_dirs = [resolve_project(projects_root, slug) for slug in args.project]
     else:
-        project_dirs = sorted(
-            p
-            for p in projects_root.iterdir()
-            if p.is_dir()
-            and not p.name.startswith(".")
-            and (p / "evaluations" / "_feedback.jsonl").exists()
-        )
+        # Shared with the backfill so the two agree on what the corpus is:
+        # hidden group directories are included, .bak snapshots are not.
+        project_dirs = discover_projects(projects_root)
 
     print("Starting LanguageTool (first run downloads the JAR)...", file=sys.stderr)
     evaluator = GrammarEvaluator()
@@ -294,9 +323,10 @@ def main() -> int:
         learned, stats = learn_lexicon(project_dir, evaluator, verbose=args.verbose)
         for prefix, ids in learned.items():
             lexicon[prefix].update(ids)
-        rows = collect_stored_marks(project_dir)
+        rows, stale = collect_stored_marks(project_dir)
         stored.extend(rows)
         totals.update(stats)
+        totals["stored_mark_stale"] += stale
         print(
             f"  {project_dir.name:<30} replayed {stats['chunks_replayed']:>3} chunks, "
             f"stored marks {len(rows):>3}",

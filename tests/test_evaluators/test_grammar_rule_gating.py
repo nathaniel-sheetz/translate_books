@@ -104,7 +104,7 @@ class TestDefaultIgnoreRules:
         rule_ids = {iss.rule_id for iss in result.issues}
         assert rule_ids == {"AGREEMENT_DET_GN"}
 
-    def test_ignore_defaults_restores_the_raw_evaluator(self, mock_lt_class):
+    def test_disabling_default_ignores_restores_the_raw_evaluator(self, mock_lt_class):
         """The replay script measures these rules, so it must be able to see
         them; without this the next measurement would report them as absent."""
         pytest.importorskip("language_tool_python")
@@ -118,7 +118,7 @@ class TestDefaultIgnoreRules:
         chunk = make_chunk("Texto de prueba.")
 
         assert evaluator.evaluate(chunk, {}).issues == []
-        raw = evaluator.evaluate(chunk, {"ignore_defaults": True})
+        raw = evaluator.evaluate(chunk, {"apply_default_ignores": False})
         assert [iss.rule_id for iss in raw.issues] == ["COMMA_ADVERB"]
 
     def test_caller_ignore_rules_extend_rather_than_replace(self, mock_lt_class):
@@ -187,13 +187,13 @@ class TestDialogueSensitiveGating:
         result, _ = self._run(mock_lt_class, offset=0)
         assert [iss.rule_id for iss in result.issues] == ["UPPERCASE_SENTENCE_START"]
 
-    def test_ignore_defaults_bypasses_the_guard_too(self, mock_lt_class):
+    def test_disabling_default_ignores_bypasses_the_guard_too(self, mock_lt_class):
         pytest.importorskip("language_tool_python")
         text = "Narracion sin mayuscula aqui.\n—hola —dijo Ricardo—. Adios."
         result, _ = self._run(
             mock_lt_class,
             offset=text.index("hola"),
-            context={"ignore_defaults": True},
+            context={"apply_default_ignores": False},
         )
         assert [iss.rule_id for iss in result.issues] == ["UPPERCASE_SENTENCE_START"]
 

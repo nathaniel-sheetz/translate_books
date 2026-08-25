@@ -106,6 +106,29 @@ def test_out_of_range_index_still_records_the_mark(client, project):
     assert record["issue_index"] == 99
 
 
+def test_negative_index_does_not_key_the_last_finding(client, project):
+    """Python indexing makes -1 resolve to the *end* of the list, so a negative
+    index silently stamped the mark with a finding the user never touched."""
+    resp = post(
+        client, eval_name="dictionary", issue_index=-1, feedback_type="false_positive"
+    )
+    assert resp.status_code == 200
+
+    record = only_record(project)
+    assert record["issue_key"] is None
+    assert record["issue_key"] != issue_key("dictionary", CODED_ISSUE)
+
+
+def test_large_negative_index_does_not_500(client, project):
+    """``_resolve_issue_key`` runs outside the route's try/except, so an
+    IndexError there took down the request and lost the mark entirely."""
+    resp = post(
+        client, eval_name="dictionary", issue_index=-5, feedback_type="resolved"
+    )
+    assert resp.status_code == 200
+    assert only_record(project)["issue_index"] == -5
+
+
 def test_unknown_evaluator_still_records_the_mark(client, project):
     resp = post(client, eval_name="nosuch", issue_index=0, feedback_type="resolved")
     assert resp.status_code == 200
