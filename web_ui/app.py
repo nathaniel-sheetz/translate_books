@@ -64,12 +64,15 @@ from web_ui.evaluations import (
     REVIEW_JUDGE_TYPES,
     REVIEW_TYPES,
     append_feedback,
+    build_dismissed,
     chapter_id_from_chunk_id,
     chapter_judge_status,
     current_chunk_sha,
     empty_type_counts,
     evaluate_and_persist_chunk,
     evaluator_freshness_detail,
+    is_dismissed,
+    issue_key,
     iter_chapter_chunks,
     load_all_feedback_by_chunk,
     load_chapter_type_counts,
@@ -5559,6 +5562,38 @@ def project_chunk_evaluation_llm_judge(project_id, chunk_id):
     return jsonify({"ok": True, "llm_judge": result_dict})
 
 
+def _resolve_issue_key(
+    project_dir: Path, chunk_id: str, eval_name: str, issue_index: int
+) -> Optional[str]:
+    """Content key for the finding at ``(eval_name, issue_index)``, or None.
+
+    Returns None when the evaluation or the index cannot be resolved; the mark
+    is still recorded, it just falls back to positional matching the way every
+    pre-existing record does.
+    """
+    try:
+        payload = load_chunk_evaluation(project_dir, chunk_id)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    issues = None
+    for result in payload.get("results") or []:
+        if isinstance(result, dict) and result.get("eval_name") == eval_name:
+            issues = result.get("issues") or []
+            break
+    if issues is None:
+        judge = (payload.get("judges") or {}).get(eval_name)
+        if isinstance(judge, dict):
+            issues = judge.get("issues") or []
+    if not issues or issue_index < 0 or issue_index >= len(issues):
+        return None
+
+    issue = issues[issue_index]
+    return issue_key(eval_name, issue) if isinstance(issue, dict) else None
+
+
 @app.route(
     "/api/project/<project_id>/evaluations/<chunk_id>/feedback",
     methods=["POST"],
@@ -5587,6 +5622,12 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
     except (TypeError, ValueError):
         return jsonify({"error": "issue_index must be an integer"}), 400
 
+    # Resolve the finding's content key here rather than in the browser: the
+    # three marking surfaces (dashboard card, reader review mode, mobile sheet)
+    # all already send eval_name + issue_index, and deriving the key server-side
+    # keeps them unchanged while making the stored mark survive a re-run.
+    key = _resolve_issue_key(project_dir, chunk_id, eval_name, issue_index)
+
     try:
         append_feedback(
             project_dir,
@@ -5596,6 +5637,7 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
             feedback_type=feedback_type,
             message=message,
             note=note,
+            key=key,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -5799,9 +5841,7 @@ def project_chapter_review(project_id, chapter):
             continue
 
         feedback = feedback_by_chunk.get(chunk_id, [])
-        dismissed = {
-            (fb.get("eval_name"), fb.get("issue_index")) for fb in feedback
-        }
+        fb_by_key, fb_by_index = build_dismissed(feedback)
         crows_sorted = sorted(crows, key=lambda r: r["chunk_offset_start"])
 
         # The chunk text serves two coordinate spaces. `raw_text` is what the
@@ -5837,7 +5877,7 @@ def project_chapter_review(project_id, chapter):
             if not isinstance(char_start, int):
                 continue
             issue_index = ni.get("issue_index")
-            if (eval_name, issue_index) in dismissed:
+            if is_dismissed(fb_by_key, fb_by_index, eval_name, issue_index, ni):
                 continue
             match_text = loc.get("match") or ""
             excerpt = match_text or (
@@ -5884,7 +5924,9 @@ def project_chapter_review(project_id, chapter):
                 for issue_index, issue in enumerate(jres.get("issues") or []):
                     if not isinstance(issue, dict):
                         continue
-                    if (judge_name, issue_index) in dismissed:
+                    if is_dismissed(
+                        fb_by_key, fb_by_index, judge_name, issue_index, issue
+                    ):
                         continue
                     excerpt = issue.get("location")
                     es_idx = _anchor_judge_excerpt(excerpt, translated_text, crows_sorted)

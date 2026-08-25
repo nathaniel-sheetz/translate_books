@@ -48,11 +48,22 @@ class Issue(BaseModel):
             location="chunk_01",
             suggestion="Check for missing paragraphs"
         )
+
+    ``rule_id`` / ``category`` carry the checker's own identifier for the rule
+    that fired, when it has one (today: LanguageTool, via the grammar
+    evaluator). They exist so a rule can be suppressed or have its precision
+    tracked by a stable key — the human-readable ``message`` is localized
+    Spanish and changes with the LanguageTool version, so it is not one. Both
+    are optional and default to None: evaluators without a rule concept simply
+    omit them, and evaluations persisted before these fields existed still
+    parse.
     """
     severity: IssueLevel
     message: str
     location: Optional[str] = None
     suggestion: Optional[str] = None
+    rule_id: Optional[str] = None
+    category: Optional[str] = None
 
 
 class Annotation(BaseModel):

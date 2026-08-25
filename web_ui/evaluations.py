@@ -34,6 +34,80 @@ _ALLOWED_FEEDBACK_TYPES = frozenset(
     {"false_positive", "bad_message", "missing_context_gap", "resolved"}
 )
 
+# Feedback records used to be keyed only by ``(eval_name, issue_index)`` — a
+# POSITION in the evaluator's issue list, recomputed by ``enumerate`` at read
+# time. Re-running an evaluator rewrites that list wholesale, so a mark silently
+# re-pointed at whatever finding now occupied the slot; 87 marks in the local
+# corpus already pointed past the end of their list when this was found, and any
+# that landed on a *different* issue were undetectable. ``issue_key`` replaces the position with
+# the finding's content, so a mark survives a re-run and stops meaning something
+# it never meant.
+#
+# The separator is a unit separator rather than a common character so that
+# content cannot forge a field boundary and collide with another finding.
+_KEY_FIELD_SEP = "\x1f"
+_KEY_LENGTH = 16
+
+
+def issue_key(eval_name: str, issue: dict[str, Any]) -> str:
+    """Stable content hash for one finding.
+
+    Accepts either a raw evaluator/judge issue (``location`` is a string) or a
+    ``normalized_issues`` entry (``location`` is a dict whose ``raw`` holds that
+    same string), so the key computed when a mark is written matches the one
+    computed when the badge counts are read.
+    """
+    location = issue.get("location")
+    if isinstance(location, dict):
+        location = location.get("raw")
+    parts = [
+        eval_name or "",
+        str(issue.get("severity") or ""),
+        str(issue.get("message") or ""),
+        str(location or ""),
+    ]
+    digest = hashlib.sha256(_KEY_FIELD_SEP.join(parts).encode("utf-8")).hexdigest()
+    return digest[:_KEY_LENGTH]
+
+
+def build_dismissed(
+    feedback_records: Iterable[dict[str, Any]],
+) -> tuple[set[tuple[str, str]], set[tuple[str, Any]]]:
+    """Split feedback into content-keyed and legacy position-keyed lookups.
+
+    Returns ``(by_key, by_index)``. Records written before ``issue_key`` existed
+    have no key and can only be matched positionally, so they land in the second
+    set; everything written since matches on content. Pass both to
+    :func:`is_dismissed`.
+    """
+    by_key: set[tuple[str, str]] = set()
+    by_index: set[tuple[str, Any]] = set()
+    for fb in feedback_records:
+        eval_name = fb.get("eval_name")
+        key = fb.get("issue_key")
+        if key:
+            by_key.add((eval_name, key))
+        else:
+            by_index.add((eval_name, fb.get("issue_index")))
+    return by_key, by_index
+
+
+def is_dismissed(
+    by_key: set[tuple[str, str]],
+    by_index: set[tuple[str, Any]],
+    eval_name: str,
+    issue_index: Any,
+    issue: Optional[dict[str, Any]] = None,
+) -> bool:
+    """True if this finding carries any feedback label.
+
+    All four feedback types count as dismissal — the distinction between them is
+    tuning signal, not display state.
+    """
+    if issue is not None and (eval_name, issue_key(eval_name, issue)) in by_key:
+        return True
+    return (eval_name, issue_index) in by_index
+
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -569,8 +643,14 @@ def append_feedback(
     feedback_type: str,
     message: Optional[str] = None,
     note: Optional[str] = None,
+    key: Optional[str] = None,
 ) -> Path:
     """Append a single feedback record to ``_feedback.jsonl``.
+
+    ``key`` is the :func:`issue_key` content hash of the finding being marked.
+    Callers should always supply it; ``issue_index`` is still recorded, but only
+    as provenance, because it stops being meaningful the moment the evaluator
+    re-runs.
 
     Raises:
         ValueError: If ``feedback_type`` is not one of the allowed labels.
@@ -586,6 +666,7 @@ def append_feedback(
         "chunk_id": chunk_id,
         "eval_name": eval_name,
         "issue_index": issue_index,
+        "issue_key": key,
         "feedback_type": feedback_type,
         "message": message,
         "note": note,
@@ -803,10 +884,7 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
             continue
 
         chunk_id = data.get("chunk_id") or path.stem
-        dismissed = {
-            (fb.get("eval_name"), fb.get("issue_index"))
-            for fb in feedback_by_chunk.get(chunk_id, [])
-        }
+        fb_by_key, fb_by_index = build_dismissed(feedback_by_chunk.get(chunk_id, []))
         counts = by_chapter.setdefault(chapter_id_from_chunk_id(chunk_id), empty_type_counts())
 
         for ni in data.get("normalized_issues") or []:
@@ -818,7 +896,9 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
             loc = ni.get("location") or {}
             if loc.get("side") != "target" or loc.get("char_start") is None:
                 continue
-            if (eval_name, ni.get("issue_index")) in dismissed:
+            if is_dismissed(
+                fb_by_key, fb_by_index, eval_name, ni.get("issue_index"), ni
+            ):
                 continue
             counts[eval_name] += 1
 
@@ -831,7 +911,9 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
             for issue_index, issue in enumerate(jres.get("issues") or []):
                 if not isinstance(issue, dict):
                     continue
-                if (judge_name, issue_index) in dismissed:
+                if is_dismissed(
+                    fb_by_key, fb_by_index, judge_name, issue_index, issue
+                ):
                     continue
                 counts[judge_name] += 1
 
@@ -1232,6 +1314,9 @@ __all__ = [
     "merge_judge_result",
     "mark_evaluation_stale",
     "append_feedback",
+    "issue_key",
+    "build_dismissed",
+    "is_dismissed",
     "load_feedback_for_chunk",
     "load_project_summary",
     "run_coded_evaluators",

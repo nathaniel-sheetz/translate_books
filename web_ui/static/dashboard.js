@@ -2145,7 +2145,12 @@
         }
 
         html += '<div class="eval-issue-actions">';
+        // Same four labels the reader's Review Mode offers. 'resolved' was
+        // missing here, so the same finding could not be marked the same way in
+        // both surfaces -- and it is the only label that means "real defect,
+        // fixed", which is what the per-rule precision measurement counts.
         var feedbackTypes = [
+            { type: 'resolved', label: 'resolved' },
             { type: 'false_positive', label: 'false positive' },
             { type: 'bad_message', label: 'bad message' },
             { type: 'missing_context_gap', label: 'gap' },
