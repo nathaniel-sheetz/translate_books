@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 
 from src.utils.text_utils import (
+    FOOTNOTE_TOKEN_RE,
     normalize_newlines,
     count_words,
     extract_paragraphs,
@@ -57,6 +58,31 @@ class TestFootnoteTokens:
         assert "[FOOTNOTE:N]" in footnote_placeholder_instruction("x[FOOTNOTE:1]")
         # always_include forces the bullet regardless of this chunk's content
         assert "[FOOTNOTE:N]" in footnote_placeholder_instruction("", always_include=True)
+
+    def test_blank_markers_preserves_offsets(self):
+        """The whole contract: same length, so reported positions stay aligned.
+
+        The dictionary evaluator reports a character offset per flagged word,
+        and it blanks these markers before tokenizing. A replacement of any
+        other length would shift every offset after the first footnote.
+        """
+        from src.utils.text_utils import blank_footnote_markers
+        text = "Dijo que sí.[FOOTNOTE:3] Y se fue.[FOOTNOTE:12]"
+        blanked = blank_footnote_markers(text)
+        assert len(blanked) == len(text)
+        assert "FOOTNOTE" not in blanked
+        # Every character outside a marker is untouched, in place.
+        for m in FOOTNOTE_TOKEN_RE.finditer(text):
+            assert blanked[m.start():m.end()].isspace()
+        assert blanked.replace(" ", "") == "Dijoquesí.Ysefue."
+        assert text.index("Y se fue.") == blanked.index("Y se fue.")
+
+    def test_blank_markers_is_a_noop_without_tokens(self):
+        from src.utils.text_utils import blank_footnote_markers
+        assert blank_footnote_markers("plain prose") == "plain prose"
+        assert blank_footnote_markers("") == ""
+        # A bare word, or a malformed marker, is left alone.
+        assert blank_footnote_markers("[FOOTNOTE:x]") == "[FOOTNOTE:x]"
 
 
 class TestNormalizeNewlines:

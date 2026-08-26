@@ -148,6 +148,47 @@ class TestIssueTermRecovery:
         legacy["term"] = None
         assert issue_term("grammar", legacy) is None
 
+    @pytest.mark.parametrize(
+        "word",
+        [
+            # Modern words with an internal apostrophe.
+            "d'Artagnan", "O'Brien", "pa'l", "Nag's",
+            # Legacy rows: the old tokenizer's character class included the
+            # apostrophe, so it swallowed the quote marks around a word.
+            "'Victory'", "'Sí'", "despacio'", "d'oïl_",
+        ],
+    )
+    def test_an_apostrophe_in_the_word_does_not_end_the_term(self, word):
+        """The delimiter is ``': ``, not the first apostrophe.
+
+        Splitting on the apostrophe failed two ways at once. A word with one
+        inside truncated to its first letter (``d'oïl_`` -> ``d``), which is
+        then discarded as a single character; a word with one on its *edge*
+        made the pattern fail outright, so ``issue_term`` returned None and the
+        finding fell out of every term-keyed join without a trace. Both shapes
+        are on disk in the corpus today.
+        """
+        legacy = dict(_dict_issue(word))
+        legacy["term"] = None
+        assert issue_term("dictionary", legacy) == word
+
+    def test_the_term_stops_at_the_first_delimiter(self):
+        """Non-greedy: a reason string that grows a ``': `` of its own must not
+        be swallowed into the term."""
+        legacy = {
+            "term": None,
+            "message": "'casa': Unknown word: see 'nota': below (found 1 time(s))",
+        }
+        assert issue_term("dictionary", legacy) == "casa"
+
+    def test_recovers_from_the_english_word_message_too(self):
+        """The other message shape this evaluator emits."""
+        legacy = {
+            "term": None,
+            "message": "'pa'l': English word in translation (found 2 time(s))",
+        }
+        assert issue_term("dictionary", legacy) == "pa'l"
+
     def test_legacy_dictionary_finding_is_ignorable_without_a_rerun(self):
         ig = IgnoredTerms(
             terms=[IgnoredTerm(term="Sigfridos", eval_name="dictionary")]
@@ -158,6 +199,23 @@ class TestIssueTermRecovery:
 
 
 class TestIsIgnored:
+    def test_ignoring_an_apostrophe_word_does_not_ignore_its_first_letter(self):
+        """The half of the truncated parse that changes what a reader sees.
+
+        ``issue_term`` keys the ignore list as well as the replay join, so a
+        human ignoring ``pa'l`` on a legacy finding used to record ``pa`` --
+        and then every ``pa`` in the book went quiet, book-wide, from one
+        click. The corpus has no apostrophe in any ignore list yet, so this
+        pins the behavior before it can be introduced rather than after.
+        """
+        ig = IgnoredTerms(terms=[IgnoredTerm(term="pa", eval_name="dictionary")])
+        legacy = dict(_dict_issue("pa'l"))
+        legacy["term"] = None
+        assert not is_ignored(ig, "dictionary", legacy)
+
+        exact = IgnoredTerms(terms=[IgnoredTerm(term="pa'l", eval_name="dictionary")])
+        assert is_ignored(exact, "dictionary", legacy)
+
     def test_none_list_ignores_nothing(self):
         assert not is_ignored(None, "dictionary", _dict_issue("x"))
 

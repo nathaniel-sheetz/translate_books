@@ -534,3 +534,286 @@ class TestFoldAccentsPreservingEnye:
         assert _fold_accents_preserving_enye("moño") == "moño"
         # Vowel-accent folding is identical between the two.
         assert naive_strip_all("época") == _fold_accents_preserving_enye("época")
+
+
+class TestTokenizer:
+    """The token boundary is half of this evaluator's precision.
+
+    ``\\w`` includes ``_``, so the original pattern tokenized markdown emphasis
+    together with its delimiters and reported ``_sí_`` -- a correctly spelled,
+    correctly emphasized word -- as an unknown word. It was the single largest
+    source of false positives the evaluator produced.
+    """
+
+    def test_markdown_emphasis_is_not_part_of_the_token(self, evaluator):
+        tokens = dict(evaluator._tokenize_with_positions("Dijo _sí_ y _no_."))
+        assert set(tokens) == {"Dijo", "sí", "y", "no"}
+        # The offset is the inner word's real start, not the underscore's.
+        assert tokens["sí"] == 6
+
+    def test_underscored_word_is_no_longer_flagged(self, evaluator, base_chunk):
+        base_chunk.translated_text = "Dijo _sí_ y luego _usted_ se marchó."
+        result = evaluator.evaluate(base_chunk, {})
+        assert result.metadata["unknown_words"] == 0
+        assert result.issues == []
+        # The same text under the old token boundary produced two findings.
+        assert "_sí_" not in [w for w, _ in
+                              evaluator._tokenize_with_positions(base_chunk.translated_text)]
+
+    def test_internal_apostrophe_keeps_the_word_whole(self, evaluator):
+        tokens = [w for w, _ in evaluator._tokenize_with_positions("d'Artagnan llegó")]
+        assert tokens == ["d'Artagnan", "llegó"]
+
+    @pytest.mark.parametrize("apostrophe", ["'", "’", "ʼ"])
+    def test_every_apostrophe_shape_keeps_the_word_whole(self, evaluator, apostrophe):
+        """Typeset sources carry ’, not the ASCII quote, and a hand-edited
+        chunk can reintroduce one after clean_translation_text has run. Splitting
+        it drops the "d" -- _is_special_case discards single characters -- and
+        leaves "Artagnan" unable to match its glossary entry.
+        """
+        word = f"d{apostrophe}Artagnan"
+        tokens = [w for w, _ in evaluator._tokenize_with_positions(f"{word} llegó")]
+        assert tokens == [word, "llegó"]
+
+    def test_hyphen_splits_deliberately(self, evaluator):
+        """Not a regression: the character class never held a hyphen.
+
+        Splitting is the safe behavior -- "bien" and "amado" are both real
+        words, while hunspell has no entry for the compound.
+        """
+        tokens = [w for w, _ in evaluator._tokenize_with_positions("bien-amado")]
+        assert tokens == ["bien", "amado"]
+
+    def test_digits_never_become_tokens(self, evaluator):
+        # "y" is a real one-letter Spanish word and stays a token; the numbers
+        # do not become tokens at all.
+        tokens = [w for w, _ in evaluator._tokenize_with_positions("3.5 y 1998")]
+        assert tokens == ["y"]
+        # And a digit glued to a word does not drag the word out of shape.
+        tokens = [w for w, _ in evaluator._tokenize_with_positions("mesa_98")]
+        assert tokens == ["mesa"]
+
+    def test_footnote_marker_is_not_flagged(self, evaluator, base_chunk):
+        """Without blanking, "FOOTNOTE" is reported once per footnote in the book."""
+        base_chunk.translated_text = "Dijo que sí.[FOOTNOTE:3] Y se marchó."
+        result = evaluator.evaluate(base_chunk, {})
+        assert result.metadata["unknown_words"] == 0
+        assert "FOOTNOTE" not in " ".join(i.message for i in result.issues)
+
+    def test_footnote_blanking_preserves_reported_offsets(self, evaluator, base_chunk):
+        """A word after a footnote marker must still report its true position."""
+        text = "Dijo que sí.[FOOTNOTE:3] Zzzqqq marchó."
+        base_chunk.translated_text = text
+        result = evaluator.evaluate(base_chunk, {})
+        issue = next(i for i in result.issues if "Zzzqqq" in i.message)
+        assert str(text.index("Zzzqqq")) in issue.location
+
+
+class TestSpanishMorphology:
+    """Productive derivations hunspell does not list.
+
+    A word whose base form is in the dictionary is not a misspelling, so there
+    is nothing to rank here -- unlike the proper-noun bucket, which no feature
+    separates. Each case below names the derivation being undone.
+    """
+
+    @pytest.mark.parametrize(
+        "word",
+        [
+            # -- the keystone: the accent lives on the DICTIONARY side. The stem
+            # a suffix leaves behind is unaccented ("monton"), and only the base
+            # it came from carries the accent ("montón").
+            "montoncito", "arbolito", "ratoncito", "jardincito", "camisoncito",
+            "cojincito", "rinconcito", "tazoncitos", "saloncito", "apretoncito",
+            "camioncitos", "angelita", "rapidito",
+            # -- -cillo/-cilla, and the epenthetic -ec- forms
+            "pastorcillo", "pastorcillos", "piedrecillas", "nubecilla",
+            # -- orthographic alternations: c -> qu and z -> c before the suffix
+            "banquito", "flaquito", "barquitos", "muñequita", "naricita",
+            # -- superlatives (accent required; see TestStillFlagged)
+            "elegantísimo", "elegantísimas", "riquísimo",
+            # -- -mente adverbs
+            "juguetonamente", "inconfundiblemente",
+            # -- the -monos contraction, which deletes the verb's own -s
+            "vámonos", "Vámonos", "marchémonos",
+            # -- regular plurals whose singular is in the dictionary
+            "cacareos",
+        ],
+    )
+    def test_derived_forms_are_accepted(self, evaluator, word):
+        assert evaluator._check_spanish_word(word)
+
+    def test_vamonos_is_the_most_flagged_real_word_in_the_corpus(self, evaluator):
+        """"vámonos" = "vamos" + "nos" with the verb's -s deleted.
+
+        Nothing that only strips a suffix recovers it: [:-5] leaves "vá" and
+        [:-3] leaves "vámo". The -s has to be put back, and the length guard has
+        to apply to that reconstruction rather than to the bare stem -- guarding
+        the stem is exactly what used to kill this word.
+        """
+        assert evaluator._check_spanish_word("vámonos")
+        assert evaluator._check_spanish_word("Vámonos")
+
+    def test_accent_insensitive_lookup_restores_the_dictionary_accent(self, evaluator):
+        """The direction that matters: candidate unaccented, dictionary accented."""
+        assert not evaluator._is_valid("monton")
+        assert evaluator._accent_insensitive_valid("monton")
+        assert not evaluator._is_valid("arbol")
+        assert evaluator._accent_insensitive_valid("arbol")
+
+    def test_accent_folding_still_preserves_enye(self, evaluator):
+        """ñ is a letter, not an accent: "nino" must not reach "niño"."""
+        assert evaluator._is_valid("niño")
+        assert not evaluator._accent_insensitive_valid("nino")
+
+    def test_apply_morphology_false_turns_the_fallback_off(self, evaluator, base_chunk):
+        """The off-switch the replay harness scores against.
+
+        Mirrors grammar_eval's apply_default_ignores: before/after has to be
+        measurable rather than asserted.
+        """
+        base_chunk.translated_text = "Vio un montoncito de piedras."
+        on = evaluator.evaluate(base_chunk, {})
+        off = evaluator.evaluate(base_chunk, {"apply_morphology": False})
+        assert on.metadata["unknown_words"] == 0
+        assert off.metadata["unknown_words"] == 1
+
+    def test_memoized_lookups_agree_with_the_dictionaries(self, evaluator):
+        first = evaluator._is_valid("casa")
+        second = evaluator._is_valid("casa")
+        assert first is second is True
+        assert evaluator._valid_cache["casa"] is True
+        # suggest() is the expensive call and only runs on the fallback path.
+        assert evaluator._suggest_cached("monton") is evaluator._suggest_cached("monton")
+
+
+class TestStillFlagged:
+    """The bound on the morphology fix: real defects it must not swallow.
+
+    Every word here was confirmed against the live es_ES/es_MX dictionaries.
+    They stay flagged for one of two reasons -- either no pass strips a suffix
+    they end in (so the accent-insensitive lookup is never reached), or the pass
+    that would match requires a written accent they lack.
+    """
+
+    @pytest.mark.parametrize(
+        "word, why",
+        [
+            # No suffix any pass strips, so _accent_insensitive_valid is never
+            # called on them. This is the constraint that keeps the fix safe:
+            # a global accent-insensitive lookup WOULD validate all four
+            # ("nívea", "razón", "también", "María" are all real words).
+            ("nivea", "genuine typo the evaluator has actually caught"),
+            ("razon", "missing accent"),
+            ("tambien", "missing accent"),
+            ("Maria", "missing accent"),
+            # No -s/-es strip reaches a valid stem.
+            ("petorales", "genuine typo"),
+            ("princesca", "genuine typo"),
+            ("transmutiría", "genuine typo"),
+            ("rehíciron", "genuine typo"),
+            # Accent on the wrong syllable: "vámonos" is right, this is not, and
+            # endswith("monos") is false for "vamonós".
+            ("vamonós", "accent on the wrong syllable"),
+            # The superlative suffix carries the written í.
+            ("grandisimo", "superlative missing its accent"),
+            # The adverb inherits the adjective's accent, which is why the
+            # -mente pass uses a strict lookup and not the folding one.
+            ("rapidamente", "adverb missing the base adjective's accent"),
+        ],
+    )
+    def test_genuine_defects_stay_flagged(self, evaluator, word, why):
+        assert not evaluator._check_spanish_word(word), why
+
+    def test_the_global_fold_that_is_deliberately_not_applied(self, evaluator):
+        """Pins *why* these stay flagged, so a future widening is loud.
+
+        Each of these validates under an accent-insensitive lookup. They survive
+        only because no suffix pass ever hands them to one.
+        """
+        for word in ("nivea", "razon", "tambien", "maria"):
+            assert evaluator._accent_insensitive_valid(word), word
+            assert not evaluator._check_spanish_word(word), word
+
+    @pytest.mark.parametrize(
+        "word",
+        ["razons", "niveas", "cancions", "tambiens"],
+    )
+    def test_a_plural_s_does_not_launder_an_accent_typo(self, evaluator, word):
+        """The plural pass must not restore accents.
+
+        Each of these is a pinned typo from
+        ``test_genuine_defects_stay_flagged`` wearing a trailing -s. While Pass E
+        called ``_accent_insensitive_valid`` they were all accepted, which
+        defeated the very words this evaluator is best at catching.
+        """
+        assert not evaluator._check_spanish_word(word)
+
+    def test_the_plural_pass_still_earns_its_place(self, evaluator):
+        """Closing the hole above cost no legitimate acceptance: a regular
+        plural absent from hunspell is still recovered from its singular."""
+        assert not evaluator._is_valid("cacareos")
+        assert evaluator._check_spanish_word("cacareos")
+
+    @pytest.mark.parametrize("stem", ["hill", "cos", "cuart", "catarina"])
+    def test_a_case_only_suggestion_is_not_an_accent_difference(self, evaluator, stem):
+        """hunspell offers a capitalized proper noun for a lowercase stem
+        ("hill" -> "Hill"). That is not the vowel-accent difference this method
+        documents, and honouring it let English words validate as Spanish."""
+        assert not evaluator._accent_insensitive_valid(stem)
+
+    @pytest.mark.parametrize("word", ["algomonos", "casimonos"])
+    def test_monos_is_not_a_clitic_suffix(self, evaluator, word):
+        """With "monos" in the clitic table any unknown *monos word whose first
+        three-or-more characters spelled a real word was accepted."""
+        assert not evaluator._check_spanish_word(word)
+
+    @pytest.mark.parametrize(
+        "word",
+        ["vámonos", "Vámonos", "marchémonos", "démonos", "pongámonos",
+         "vayámonos", "sentémonos", "quedémonos"],
+    )
+    def test_dropping_monos_costs_no_real_contraction(self, evaluator, word):
+        """Pass C reconstructs every one of these by restoring the verb's
+        deleted -s, which is why the clitic entry caught nothing of its own."""
+        assert evaluator._check_spanish_word(word)
+
+    @pytest.mark.parametrize(
+        "word",
+        ["vamonos", "marchemonos", "sentemonos", "quedemonos",
+         "vayamonos", "levantemonos", "abracemonos", "contentemonos"],
+    )
+    def test_an_unaccented_monos_form_is_a_misspelling(self, evaluator, word):
+        """Pass C put the verb's -s back and then folded, so every one of these
+        reached "vamos"/"quedemos"/"demos" and validated. The enclitic makes the
+        real form esdrújula, which Spanish always writes with the accent -- so
+        an unaccented -monos word is the contraction misspelled, and this was
+        the one morphological pass that laundered a missing accent."""
+        assert not evaluator._check_spanish_word(word)
+
+    def test_the_diaeresis_is_not_a_stress_accent(self, evaluator):
+        """Pins why the guard names the five acute vowels instead of asking
+        whether the word survives accent folding. "apacigüemonos" is missing
+        its é, but its ü makes it differ from its own folded form, so a
+        fold-based guard would wave it straight through to "apacigüemos"."""
+        assert not evaluator._check_spanish_word("apacigüemonos")
+
+    def test_known_false_negative_left_in_place(self, evaluator):
+        """Documented, not fixed: the clitic pass over-accepts.
+
+        "darselo" is a genuine typo -- Spanish writes "dárselo" -- but stripping
+        the cluster "selo" leaves the valid infinitive "dar". Same for "ninos",
+        where stripping the vosotros enclitic "-os" leaves the real word "nin".
+        Correcting these *adds* findings, which is a different change with a
+        different risk profile; this test records the behavior so the gap is not
+        rediscovered from scratch.
+
+        "demonos" is the same gap reached by a different road, and it is why
+        the -monos accent guard is not a complete fix for that family: Pass C
+        now refuses it, but Pass D still strips the plain "nos" and lands on
+        the real noun "demo". Only the forms whose stem is *not* a word --
+        "vamonos", "quedemonos" and the rest -- are actually caught.
+        """
+        assert evaluator._check_spanish_word("darselo")
+        assert evaluator._check_spanish_word("ninos")
+        assert evaluator._check_spanish_word("demonos")
