@@ -6,9 +6,9 @@ morphological fallback and a silently lost real defect. A mark joined to the
 wrong token, or a ``still_flagged`` that answers the wrong question, would make
 that guard report 0 while defects were being swallowed.
 
-Covered here: the mark-to-token join, and the two token-level predicates. The
-full corpus replay is not -- it reads the real ``projects/`` tree and is run by
-hand.
+Covered here: the mark-to-token join, the two token-level predicates, and
+``replay_project``'s morphology off/on wiring. The full corpus replay is not --
+it reads the real ``projects/`` tree and is run by hand.
 """
 
 import json
@@ -23,9 +23,11 @@ from scripts.replay_dictionary_marks import (  # noqa: E402
     collect_labeled_terms,
     load_marks,
     removal_bucket,
+    replay_project,
     still_flagged,
 )
 from src.evaluators.dictionary_eval import DictionaryEvaluator  # noqa: E402
+from src.models import Chunk, ChunkMetadata, ChunkStatus  # noqa: E402
 from web_ui.evaluations import issue_key  # noqa: E402
 
 
@@ -216,3 +218,43 @@ class TestRemovalBucket:
         assert removal_bucket(evaluator, "montoncito") == "morphology"
         # "casa" was never rejected by anything, so nothing is credited.
         assert removal_bucket(evaluator, "casa") == "other"
+
+
+class TestReplayProject:
+    def test_morphology_off_on_is_how_the_volume_numbers_are_made(
+        self, tmp_path, evaluator
+    ):
+        """replay_project is what the CHANGELOG volume numbers come from.
+
+        still_flagged tests the token; this tests that evaluate() is actually
+        called with apply_morphology off then on. A renamed context key would
+        make both counts identical and the fallback look like a no-op.
+        """
+        proj = make_project(tmp_path, [], [MONTON])
+        chunks = proj / "chunks"
+        chunks.mkdir()
+        chunk = Chunk(
+            id="chapter_01_chunk_000",
+            chapter_id="chapter_01",
+            position=0,
+            source_text="He saw a little pile of stones.",
+            translated_text="Vio un montoncito de piedras.",
+            metadata=ChunkMetadata(
+                char_start=0,
+                char_end=30,
+                overlap_start=0,
+                overlap_end=0,
+                paragraph_count=1,
+                word_count=5,
+            ),
+            status=ChunkStatus.TRANSLATED,
+        )
+        (chunks / "chapter_01_chunk_000.json").write_text(
+            chunk.model_dump_json(), encoding="utf-8"
+        )
+
+        stats = replay_project(proj, evaluator)
+        assert stats["replayed"] == 1
+        assert stats["replay_no_morphology"] >= 1
+        assert stats["replay_with_morphology"] == 0
+        assert stats["replay_current"] == stats["replay_with_morphology"]
