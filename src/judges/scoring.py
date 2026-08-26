@@ -9,12 +9,18 @@ the mapping is identical; only the human-readable default message differs.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, Optional
 
 from src.judges.base import coerce_severity
 from src.models import Issue, IssueLevel
+
+# Unit separator, matching ``web_ui.evaluations`` — content cannot forge a field
+# boundary and collide with a neighbouring field.
+_KEY_FIELD_SEP = "\x1f"
+_KEY_LENGTH = 16
 
 # Severity weights for the compliance score (1.0 = clean).
 SEVERITY_WEIGHT: dict[IssueLevel, float] = {
@@ -52,25 +58,64 @@ def is_nonissue(finding: dict[str, Any]) -> bool:
     return bool(_NONISSUE_RE.search(blob))
 
 
-def finding_to_issue(finding: dict[str, Any], *, default_message: str) -> Issue:
+def finding_key(rule: str, excerpt: str) -> str:
+    """Stable identity for one judge finding: its rule plus the text it quotes.
+
+    This is what a judge hands to :attr:`src.models.Issue.finding_key` so a
+    dismissal survives a re-judge. ``message`` is deliberately excluded — an LLM
+    rewords it every run, which is the whole reason the derived key in
+    ``web_ui.evaluations.issue_key`` does not work for judges. Whitespace in the
+    excerpt is collapsed (a rewrapped quote is the same quote); case and accents
+    are not, because in Spanish prose those are real differences.
+    """
+    normalized = " ".join((excerpt or "").split())
+    blob = f"{(rule or 'other').strip()}{_KEY_FIELD_SEP}{normalized}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:_KEY_LENGTH]
+
+
+def finding_to_issue(
+    finding: dict[str, Any],
+    *,
+    default_message: str,
+    stable_identity: bool = False,
+) -> Issue:
     """Map one judge finding dict to an :class:`Issue`.
 
     The ``rule`` id is prefixed onto the message (``[rule] message``) so the
     reader's finding card shows which rule fired; ``excerpt`` becomes the
     location (the verbatim offending snippet).
+
+    ``stable_identity`` additionally records the finding's ``rule`` as
+    :attr:`Issue.rule_id`, its ``category`` as :attr:`Issue.category`, and a
+    rule+excerpt hash as :attr:`Issue.finding_key`. It is opt-in because
+    ``finding_key`` changes what ``issue_key`` returns, which would orphan every
+    dismissal already recorded against the dialogue and address judges. New
+    judges turn it on from the start; those two stay on the derived key.
     """
     rule = str(finding.get("rule", "other")).strip() or "other"
     base_msg = str(finding.get("message", "")).strip() or default_message
     message = f"[{rule}] {base_msg}"
+    excerpt = (
+        (str(finding.get("excerpt")).strip() or None) if finding.get("excerpt") else None
+    )
+
+    identity: dict[str, Optional[str]] = {}
+    if stable_identity:
+        category = str(finding.get("category", "")).strip() or None
+        identity = {
+            "rule_id": rule,
+            "category": category,
+            "finding_key": finding_key(rule, excerpt or ""),
+        }
+
     return Issue(
         severity=coerce_severity(finding.get("severity")),
         message=message,
-        location=(str(finding.get("excerpt")).strip() or None)
-        if finding.get("excerpt")
-        else None,
+        location=excerpt,
         suggestion=(str(finding.get("suggestion")).strip() or None)
         if finding.get("suggestion")
         else None,
+        **identity,
     )
 
 

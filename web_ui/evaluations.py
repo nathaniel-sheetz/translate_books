@@ -64,7 +64,18 @@ def issue_key(eval_name: str, issue: dict[str, Any]) -> str:
     ``normalized_issues`` entry (``location`` is a dict whose ``raw`` holds that
     same string), so the key computed when a mark is written matches the one
     computed when the badge counts are read.
+
+    A finding that carries its own ``finding_key`` wins outright. The derivation
+    below hashes ``message``, which assumes the checker reproduces it verbatim on
+    a re-run — true of every coded evaluator and false of every LLM judge, which
+    rewords the same defect each time and would drop its dismissals on every run.
+    A judge that can name a stable identity (rule + excerpt) supplies it via
+    :attr:`src.models.Issue.finding_key`; absent, nothing changes.
     """
+    explicit = issue.get("finding_key")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
     location = issue.get("location")
     if isinstance(location, dict):
         location = location.get("raw")
@@ -1126,7 +1137,7 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
 # Coded evaluators whose target-side issues carry a highlightable char span.
 REVIEW_CODED_TYPES: tuple[str, ...] = ("blacklist", "grammar", "dictionary", "completeness")
 # Tailored judges whose issues can be anchored to a sentence by text search.
-REVIEW_JUDGE_TYPES: tuple[str, ...] = ("dialogue", "address")
+REVIEW_JUDGE_TYPES: tuple[str, ...] = ("dialogue", "address", "editorial")
 REVIEW_TYPES: tuple[str, ...] = REVIEW_CODED_TYPES + REVIEW_JUDGE_TYPES
 
 
@@ -1160,6 +1171,7 @@ JUDGE_STATUS_GROUPS: dict[str, tuple[str, ...]] = {
     "coded": CODED_EVAL_NAMES,
     "dialogue": ("dialogue",),
     "address": ("address",),
+    "editorial": ("editorial",),
 }
 
 

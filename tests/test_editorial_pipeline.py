@@ -1,0 +1,651 @@
+"""End-to-end tests for the editorial pipeline's two CLIs, with no LLM anywhere.
+
+``verify_editorial.py`` and ``editorial_metrics.py`` are the parts that touch
+real project directories, so these drive them against a synthetic book on
+``tmp_path``: judge output goes in, drafts are answered by hand, and the metrics
+report reads back what landed.
+
+The properties worth pinning are the ones a caller would notice only after
+spending tokens: that ``status`` refuses to re-bill an already-adjudicated chunk,
+that ``commit`` persists through the same seam the judges use (so the freshness
+ledger and badges follow), and that the precision numbers join marks to findings
+by the explicit key rather than by list position.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from scripts import editorial_metrics, verify_editorial
+from src.judges.scoring import finding_key
+from web_ui.evaluations import append_feedback, merge_judge_result
+
+ES_SENTENCES = [
+    "Pollyanna subió al ático con su maleta.",
+    "El cuarto estaba desnudo y caluroso.",
+    "Miró por la ventana y sonrió.",
+]
+EN_SENTENCES = [
+    "Pollyanna climbed to the attic with her trunk.",
+    "The room was bare and hot.",
+    "She looked out of the window and smiled.",
+]
+SPANISH = " ".join(ES_SENTENCES)
+CHUNK_ID = "chapter_01_chunk_000"
+
+
+@pytest.fixture
+def project(tmp_path):
+    """One translated chunk with a chapter alignment, a style guide and a glossary."""
+    proj = tmp_path / "projects" / "editorialtest"
+    (proj / "chunks").mkdir(parents=True)
+    (proj / "alignments").mkdir(parents=True)
+
+    (proj / "chunks" / f"{CHUNK_ID}.json").write_text(
+        json.dumps(
+            {
+                "id": CHUNK_ID,
+                "chapter_id": "chapter_01",
+                "position": 0,
+                "source_text": " ".join(EN_SENTENCES),
+                "translated_text": SPANISH,
+                "metadata": {
+                    "char_start": 0,
+                    "char_end": len(" ".join(EN_SENTENCES)),
+                    "overlap_start": 0,
+                    "overlap_end": 0,
+                    "paragraph_count": 1,
+                    "word_count": len(" ".join(EN_SENTENCES).split()),
+                },
+                "status": "translated",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (proj / "alignments" / "chapter_01.json").write_text(
+        json.dumps(
+            {
+                "chapter_id": "chapter_01",
+                "alignments": [
+                    {
+                        "es_idx": i,
+                        "en_idx": i,
+                        "es": es,
+                        "en": en,
+                        "similarity": 0.9,
+                        "confidence": "high",
+                        "chunk_id": CHUNK_ID,
+                    }
+                    for i, (es, en) in enumerate(zip(ES_SENTENCES, EN_SENTENCES))
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (proj / "style.json").write_text(
+        json.dumps({"content": "Mexican Spanish. Keep names in English form."}),
+        encoding="utf-8",
+    )
+    (proj / "glossary.json").write_text(
+        json.dumps(
+            {"terms": [{"english": "Pollyanna", "spanish": "Pollyanna", "type": "character"}]}
+        ),
+        encoding="utf-8",
+    )
+    return proj
+
+
+def _candidate(**overrides):
+    candidate = {
+        "rule": "calque-syntax",
+        "category": "NATURALNESS",
+        "severity": "warning",
+        "confidence": "high",
+        "excerpt": "El cuarto estaba desnudo y caluroso.",
+        "message": "Reads as a calque of the English.",
+        "suggestion": "El cuarto era angosto y sofocante.",
+        "source_check": "not_needed",
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def _persist_pass_one(project, candidates):
+    """Write a pass-1 editorial result the way the judge would."""
+    from src.judges.base import JudgeTarget
+    from src.judges.registry import get_judge
+
+    target = JudgeTarget(
+        id=CHUNK_ID,
+        target_type="chunk",
+        source_text=" ".join(EN_SENTENCES),
+        translated_text=SPANISH,
+        context={"chapter_id": "chapter_01"},
+    )
+    raw = json.dumps({"findings": candidates, "summary": "s"}, ensure_ascii=False)
+    result = get_judge("editorial").parse_response(target, raw, {})
+    merge_judge_result(project, CHUNK_ID, "editorial", result.model_dump(mode="json"))
+    return result
+
+
+def _run(argv):
+    return verify_editorial.main(argv)
+
+
+# ---------------------------------------------------------------------------
+# status
+
+
+def test_status_reports_nothing_before_the_judge_has_run(project, capsys):
+    assert _run(["status", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["counts"]["chunks"] == 0
+    # No evaluation file at all, which is a distinct state from one that exists
+    # because the coded evaluators ran but holds no editorial verdict.
+    assert out["skipped"] == {"no_evaluation": 1}
+
+
+def test_status_lists_pending_candidates_and_their_source_requests(project, capsys):
+    _persist_pass_one(
+        project,
+        [
+            _candidate(),
+            _candidate(
+                rule="odd-connector",
+                category="FIDELITY_SUSPECT",
+                source_check="required",
+                excerpt="Miró por la ventana y sonrió.",
+            ),
+        ],
+    )
+
+    assert _run(["status", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["counts"] == {
+        "chunks": 1,
+        "candidates": 2,
+        "source_requested": 1,
+        "source_attached": 1,
+    }
+    assert out["pending_chunks"] == [CHUNK_ID]
+
+
+def test_a_clean_chunk_is_not_pending(project, capsys):
+    """No candidates means nothing to adjudicate — and nothing to bill for."""
+    _persist_pass_one(project, [])
+
+    _run(["status", "--project", str(project)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["counts"]["chunks"] == 0
+    assert out["skipped"] == {"no_candidates": 1}
+
+
+# ---------------------------------------------------------------------------
+# prepare / commit
+
+
+def _prepare(project, capsys, *extra):
+    assert _run(["prepare", "--project", str(project), *extra]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_prepare_writes_a_prompt_a_body_and_a_manifest(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+
+    out = _prepare(project, capsys)
+    entry = out["entries"][0]
+    prompt = (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.prompt.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert out["counts"]["candidates"] == 1
+    assert entry["chunk_id"] == CHUNK_ID
+    assert "<candidate key=" in prompt
+    assert "Mexican Spanish" in prompt
+    # The cacheable split: preamble + body reconstruct the prompt byte for byte.
+    preamble = (project / ".harness" / "editorial" / "preamble.txt").read_text(encoding="utf-8")
+    body = (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.body.txt").read_text(
+        encoding="utf-8"
+    )
+    assert preamble + body == prompt
+
+
+def test_prepare_clears_stale_drafts_unless_asked_to_keep_them(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+    out = _prepare(project, capsys)
+    draft = project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json"
+    draft.write_text("{}", encoding="utf-8")
+
+    _prepare(project, capsys)
+    assert not draft.exists()
+
+    draft.write_text("{}", encoding="utf-8")
+    _prepare(project, capsys, "--keep-drafts")
+    assert draft.exists()
+    assert out  # the first prepare succeeded
+
+
+def test_commit_applies_verdicts_and_persists_through_the_judge_seam(project, capsys):
+    result = _persist_pass_one(project, [_candidate(), _candidate(rule="agreement")])
+    out = _prepare(project, capsys)
+    keys = [i.finding_key for i in result.issues]
+
+    draft = project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json"
+    draft.write_text(
+        json.dumps(
+            {
+                "verdicts": {
+                    keys[0]: {"verdict": "RETRACT", "reason": "idiomatic after all"},
+                    keys[1]: {"verdict": "CONFIRM", "reason": "genuine"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run(["commit", "--project", str(project), "--persist"]) == 0
+    committed = json.loads(capsys.readouterr().out)
+    persisted = json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["judges"]["editorial"]
+
+    assert out["counts"]["candidates"] == 2
+    assert committed["rollup"]["retracted"] == 1
+    assert committed["rollup"]["confirmed"] == 1
+    assert len(persisted["issues"]) == 1
+    assert persisted["metadata"]["verified"] is True
+    # merge_judge_result stamps the ledger, so the badge tracks the chunk's text.
+    assert "editorial" in json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["eval_runs"]
+
+
+def test_commit_reports_a_bad_draft_instead_of_dropping_the_chunk(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        "not json", encoding="utf-8"
+    )
+
+    _run(["commit", "--project", str(project), "--persist"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["committed"] == 0
+    assert out["failed"][0]["chunk_id"] == CHUNK_ID
+    assert "re-run" in out["instructions"]
+
+
+def test_commit_reports_a_missing_draft(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+
+    _run(["commit", "--project", str(project), "--persist"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["missing"] == [CHUNK_ID]
+
+
+def test_a_verified_chunk_is_skipped_until_forced(project, capsys):
+    """Adjudication is not idempotent — a second pass re-decides settled retractions."""
+    result = _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        json.dumps({"verdicts": {result.issues[0].finding_key: {"verdict": "CONFIRM"}}}),
+        encoding="utf-8",
+    )
+    _run(["commit", "--project", str(project), "--persist"])
+    capsys.readouterr()
+
+    _run(["status", "--project", str(project)])
+    assert json.loads(capsys.readouterr().out)["skipped"] == {"already_verified": 1}
+
+    _run(["status", "--project", str(project), "--force"])
+    assert json.loads(capsys.readouterr().out)["counts"]["chunks"] == 1
+
+
+def test_commit_without_a_manifest_is_an_error_not_a_crash(project, capsys):
+    assert _run(["commit", "--project", str(project)]) == 1
+    assert "prepare" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_last_output_mirrors_the_payload(project, capsys):
+    """The Windows raya lesson: read the sidecar, never re-parse captured stdout."""
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+
+    mirrored = json.loads(
+        (project / ".harness" / "editorial" / "last_output.json").read_text(encoding="utf-8")
+    )
+    assert mirrored["command"] == "prepare"
+    assert mirrored["counts"]["candidates"] == 1
+
+
+# ---------------------------------------------------------------------------
+# fanout (job construction only; the launcher itself is stubbed)
+
+
+def _stub_wave(monkeypatch):
+    """Replace the launcher and capture the jobs it was handed."""
+    from src.harness import headless
+
+    captured = {}
+
+    def fake(jobs, **kwargs):
+        captured["jobs"] = jobs
+        captured["kwargs"] = kwargs
+        for job in jobs:
+            Path(job["output_path"]).write_text('{"verdicts": {}}', encoding="utf-8")
+        return {"wrote": [j["id"] for j in jobs], "failed": [], "cwd": ".", "counts": {}}
+
+    monkeypatch.setattr(headless, "run_headless_wave", fake)
+    return captured
+
+
+def test_fanout_hands_the_launcher_one_job_per_prepared_chunk(project, capsys, monkeypatch):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    captured = _stub_wave(monkeypatch)
+
+    assert _run(["fanout", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    job = captured["jobs"][0]
+
+    assert job["id"] == CHUNK_ID
+    assert job["output_path"].endswith(".verify.draft.json")
+    # The cacheable prefix goes as a system prompt, so it is not re-sent per job.
+    assert job["system_prompt_file"].endswith("preamble.txt")
+    assert "<candidate key=" in job["input_text"]
+    assert "Mexican Spanish" not in job["input_text"]
+    # The resolved profile is relayed, so the operator can see what it ran as.
+    assert out["profile"]["cli"]
+    assert out["profile"]["worker_model"]
+
+
+def test_fanout_skips_a_chunk_that_already_has_a_draft(project, capsys, monkeypatch):
+    """Resume rather than re-spend: a non-empty draft is an answered job."""
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys, "--keep-drafts")
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        '{"verdicts": {}}', encoding="utf-8"
+    )
+    captured = _stub_wave(monkeypatch)
+
+    _run(["fanout", "--project", str(project)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["skipped"] == [CHUNK_ID]
+    assert "jobs" not in captured
+
+
+def test_fanout_without_a_manifest_is_an_error(project, capsys):
+    assert _run(["fanout", "--project", str(project)]) == 1
+    assert "prepare" in json.loads(capsys.readouterr().out)["error"]
+
+
+# ---------------------------------------------------------------------------
+# run (API path)
+
+
+def test_run_adjudicates_and_persists(project, capsys, monkeypatch):
+    from src.judges import llm_io
+
+    result = _persist_pass_one(project, [_candidate()])
+    key = result.issues[0].finding_key
+    seen = {}
+
+    def fake(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen["cache_prefix"] = kwargs.get("cache_prefix")
+        return json.dumps({"verdicts": {key: {"verdict": "CONFIRM", "reason": "real"}}})
+
+    monkeypatch.setattr(llm_io, "call_judge", fake)
+
+    assert _run(["run", "--project", str(project), "--persist", "--confirm"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["judges"]["editorial"]
+
+    assert out["rollup"]["confirmed"] == 1
+    assert out["results"][0]["persisted"] is True
+    assert persisted["metadata"]["verified"] is True
+    assert seen["prompt"].startswith(seen["cache_prefix"])
+
+
+def test_run_refuses_to_spend_over_the_cost_limit(project, capsys, monkeypatch):
+    """The gate reports without calling an LLM, exactly like run_judges.py run."""
+    from src.judges import llm_io
+
+    _persist_pass_one(project, [_candidate()])
+    calls = []
+    monkeypatch.setattr(llm_io, "call_judge", lambda p, **kw: calls.append(p) or "{}")
+
+    assert _run(["run", "--project", str(project), "--cost-limit", "0"]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "cost_exceeded"
+    assert "--confirm" in out["instructions"]
+    assert calls == []
+
+
+def test_run_on_an_empty_scope_calls_nothing(project, capsys, monkeypatch):
+    from src.judges import llm_io
+
+    calls = []
+    monkeypatch.setattr(llm_io, "call_judge", lambda p, **kw: calls.append(p) or "{}")
+
+    assert _run(["run", "--project", str(project), "--persist", "--confirm"]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["results"] == []
+    assert calls == []
+
+
+def test_run_leaves_pass_one_intact_when_the_adjudicator_returns_junk(project, capsys, monkeypatch):
+    from src.judges import llm_io
+
+    _persist_pass_one(project, [_candidate()])
+    monkeypatch.setattr(llm_io, "call_judge", lambda p, **kw: "not json")
+
+    assert _run(["run", "--project", str(project), "--persist", "--confirm"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["judges"]["editorial"]
+
+    assert out["results"][0]["status"] == "parse_error"
+    assert out["rollup"]["parse_errors"] == 1
+    assert len(persisted["issues"]) == 1
+    assert persisted["metadata"]["verified"] is False
+
+
+# ---------------------------------------------------------------------------
+# The reader's dismissal route
+
+
+def test_the_feedback_route_records_the_stable_key_for_a_judge_finding(project, monkeypatch):
+    """The load-bearing join: a reader dismissal must key on rule+excerpt.
+
+    ``_resolve_issue_key`` looks the finding up in ``judges[<name>].issues`` and
+    hands the dict to ``issue_key``. If the route fell back to positional
+    matching for this judge, every dismissal would re-point at whatever occupied
+    the slot after the next run — which is the failure ``finding_key`` exists to
+    prevent, and it would be invisible from the UI.
+    """
+    import web_ui.app as app_module
+
+    result = _persist_pass_one(project, [_candidate()])
+    monkeypatch.setattr(app_module, "_get_projects_dir", lambda: project.parent)
+    app_module.app.config["TESTING"] = True
+
+    with app_module.app.test_client() as client:
+        response = client.post(
+            f"/api/project/{project.name}/evaluations/{CHUNK_ID}/feedback",
+            json={"eval_name": "editorial", "issue_index": 0, "feedback_type": "false_positive"},
+        )
+
+    assert response.status_code == 200
+    records = [
+        json.loads(line)
+        for line in (project / "evaluations" / "_feedback.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert records[0]["issue_key"] == result.issues[0].finding_key
+
+
+# ---------------------------------------------------------------------------
+# metrics
+
+
+def test_metrics_report_volume_and_anchoring(project):
+    _persist_pass_one(project, [_candidate()])
+
+    report = editorial_metrics.analyse_project(project)
+
+    assert report["volume"]["chunks_judged"] == 1
+    assert report["volume"]["findings"] == 1
+    assert report["volume"]["clean_chunk_pct"] == 0.0
+    assert report["anchoring"]["anchored"] == 1
+    assert report["anchoring"]["anchor_pct"] == 100.0
+
+
+def test_metrics_count_a_clean_chunk(project):
+    _persist_pass_one(project, [])
+
+    report = editorial_metrics.analyse_project(project)
+
+    assert report["volume"]["clean_chunk_pct"] == 100.0
+    assert report["volume"]["findings"] == 0
+
+
+def test_metrics_join_marks_to_findings_by_the_explicit_key(project):
+    result = _persist_pass_one(project, [_candidate(), _candidate(rule="agreement")])
+    append_feedback(
+        project,
+        CHUNK_ID,
+        "editorial",
+        0,
+        feedback_type="resolved",
+        key=result.issues[0].finding_key,
+    )
+    append_feedback(
+        project,
+        CHUNK_ID,
+        "editorial",
+        1,
+        feedback_type="false_positive",
+        key=result.issues[1].finding_key,
+    )
+
+    report = editorial_metrics.analyse_project(project)
+
+    assert report["precision"]["labelled"] == 2
+    assert report["precision"]["accept_pct"] == 50.0
+    assert report["by_rule"]["calque-syntax"]["resolved"] == 1
+    assert report["by_rule"]["agreement"]["false_positive"] == 1
+
+
+def test_a_mark_survives_the_judge_rewording_its_message(project):
+    """The whole reason for finding_key: a re-judge must not orphan the dismissal."""
+    result = _persist_pass_one(project, [_candidate()])
+    append_feedback(
+        project,
+        CHUNK_ID,
+        "editorial",
+        0,
+        feedback_type="false_positive",
+        key=result.issues[0].finding_key,
+    )
+
+    _persist_pass_one(project, [_candidate(message="The English word order survives here.")])
+    report = editorial_metrics.analyse_project(project)
+
+    assert report["precision"]["false_positive"] == 1
+
+
+def test_examples_bank_separates_accepted_from_dismissed(project):
+    result = _persist_pass_one(project, [_candidate(), _candidate(rule="agreement")])
+    append_feedback(
+        project, CHUNK_ID, "editorial", 0,
+        feedback_type="resolved", key=result.issues[0].finding_key,
+    )
+    append_feedback(
+        project, CHUNK_ID, "editorial", 1,
+        feedback_type="false_positive", key=result.issues[1].finding_key,
+    )
+
+    report = editorial_metrics.analyse_project(project)
+    text = editorial_metrics.render_examples(report["_examples"], 8)
+
+    assert "BELOW THE THRESHOLD" in text
+    assert "AT OR ABOVE THE THRESHOLD" in text
+    assert text.index("BELOW THE THRESHOLD") < text.index("AT OR ABOVE THE THRESHOLD")
+
+
+def test_examples_bank_is_empty_without_marks(project):
+    _persist_pass_one(project, [_candidate()])
+    report = editorial_metrics.analyse_project(project)
+
+    assert editorial_metrics.render_examples(report["_examples"], 8) == ""
+
+
+def test_the_bank_round_trips_into_the_judge_prompt(project):
+    """Stage 3's loop closes: written examples reach the next run's cached prefix."""
+    from src.judges.base import JudgeTarget
+    from src.judges.context import build_judge_context
+    from src.judges.registry import get_judge
+
+    (project / "editorial_examples.txt").write_text(
+        "BELOW THE THRESHOLD\n- [NATURALNESS/calque-syntax] \"una frase\"", encoding="utf-8"
+    )
+    ctx, error = build_judge_context(project, ["editorial"], None, None)
+    target = JudgeTarget(
+        id=CHUNK_ID, target_type="chunk", source_text="x",
+        translated_text=SPANISH, context={"chapter_id": "chapter_01"},
+    )
+    prefix, _ = get_judge("editorial").build_prompt_parts(target, ctx)
+
+    assert error is None
+    assert "BELOW THE THRESHOLD" in prefix
+
+
+def test_adjudication_metrics_come_from_the_verified_metadata(project, capsys):
+    result = _persist_pass_one(project, [_candidate(), _candidate(rule="agreement")])
+    _prepare(project, capsys)
+    keys = [i.finding_key for i in result.issues]
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        json.dumps(
+            {
+                "verdicts": {
+                    keys[0]: {"verdict": "RETRACT", "reason": "fine"},
+                    keys[1]: {"verdict": "CONFIRM", "reason": "real"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _run(["commit", "--project", str(project), "--persist"])
+    capsys.readouterr()
+
+    report = editorial_metrics.analyse_project(project)
+
+    assert report["adjudication"]["verified_chunks"] == 1
+    assert report["adjudication"]["adjudicated"] == 2
+    assert report["adjudication"]["retract_pct"] == 50.0
+
+
+def test_finding_key_helper_matches_what_metrics_join_on(project):
+    result = _persist_pass_one(project, [_candidate()])
+
+    assert result.issues[0].finding_key == finding_key(
+        "calque-syntax", "El cuarto estaba desnudo y caluroso."
+    )

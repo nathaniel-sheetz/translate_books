@@ -12,11 +12,13 @@ from src.app_config import get_judge_suites
 from src.judges.address_judge import AddressComplianceJudge
 from src.judges.base import Judge
 from src.judges.dialogue_judge import DialogueComplianceJudge
+from src.judges.editorial_judge import EditorialJudge
 
 # Registry mapping judge names to classes.
 _JUDGE_REGISTRY: dict[str, type[Judge]] = {
     "dialogue": DialogueComplianceJudge,
     "address": AddressComplianceJudge,
+    "editorial": EditorialJudge,
 }
 
 # Built-in suites (overridable / extendable via app_config.json).
@@ -32,6 +34,12 @@ _BUILTIN_SUITES: dict[str, list[str]] = {
     # prepare -> fanout -> commit cycles, each paying the fixed per-process
     # baseline again (repeatable ``--judge`` is the other half of the fix).
     "prose": ["dialogue", "address"],
+    # Editorial defect detection. Kept out of ``default`` and out of ``prose``
+    # for two reasons: it is the most expensive judge per target (it carries the
+    # style guide and glossary in its prefix), and its findings are advisory
+    # editorial judgement rather than rule compliance, so it wants a deliberate
+    # "review this book editorially" gesture rather than riding along.
+    "editorial": ["editorial"],
 }
 
 

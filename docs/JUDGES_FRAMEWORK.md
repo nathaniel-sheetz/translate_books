@@ -13,6 +13,15 @@ is the reference for a judge whose book-specific expectations are injected via
 `context` (here, the CLI loads the map), while a universal rubric
 (`prompts/address_forms.txt`) stays in the prompt.
 
+The third is the **editorial judge** (`editorial`), which asks a different kind
+of question from the other two — not "does this passage follow rule X?" but
+"would a competent editor stop here and fix this?". It reads the Spanish alone,
+proposes candidates under a findings budget and a confidence floor, and hands
+them to a second, batched adjudication pass that attaches the English original
+only to the candidates that asked for it. It has its own second-pass CLI
+(`scripts/verify_editorial.py`) and its own precision report
+(`scripts/editorial_metrics.py`) — see [EDITORIAL_JUDGE.md](EDITORIAL_JUDGE.md).
+
 This is distinct from the model-comparison **LLM judge** documented in
 [LLM_JUDGE_EVALUATOR.md](LLM_JUDGE_EVALUATOR.md): that one answers "is model A
 better than model B?"; tailored judges answer "does *this* translation comply
@@ -226,7 +235,13 @@ launcher) rather than being forced through `JudgeTarget`.
 ## Suites
 
 A suite is a named list of judges. Built-in: `default = ["dialogue"]`,
-`address = ["address"]`, and `prose = ["dialogue", "address"]`. The address judge
+`address = ["address"]`, `prose = ["dialogue", "address"]`, and
+`editorial = ["editorial"]`. The editorial judge is kept out of `default` *and*
+`prose` for two reasons: it is the most expensive judge per target (its cacheable
+prefix carries the style guide and the glossary), and its findings are advisory
+editorial judgement rather than rule compliance, so it wants a deliberate
+"review this book editorially" gesture rather than riding along with a
+compliance wave. The address judge
 is deliberately kept out of `default` because it needs the per-book
 `address_map.json` prerequisite and is metered — run it via `--judge address`,
 `--suite address`, or (with the map in place) `--suite prose` for both judges at
@@ -327,4 +342,9 @@ conversational usage check the skill makes before spawning workers.
 4. Add a test under `tests/test_judges/` that mocks `llm_io.call_judge` for the API
    path, and (optionally) drives `parse_response` directly for the subagent path.
 
-See `src/judges/dialogue_judge.py` as the reference implementation.
+See `src/judges/dialogue_judge.py` as the reference implementation, and
+`src/judges/editorial_judge.py` for a judge that overrides
+`item_prompt_variables` to *withhold* the English source, filters findings in
+code before mapping them to issues, and opts into a stable `finding_key` so its
+dismissals survive a re-judge (an LLM rewords its `message`, which is what
+`web_ui.evaluations.issue_key` otherwise hashes).

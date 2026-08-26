@@ -3184,18 +3184,19 @@
     // which is far too much work to repeat on every dashboard poll. It is
     // fetched when the stage is opened and after anything that could change it.
     var REVIEW_TYPES = window.DASHBOARD_REVIEW_TYPES ||
-        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
+        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address', 'editorial'];
     var REVIEW_LABELS = window.DASHBOARD_REVIEW_LABELS || {};
     // Short column-friendly tags for the finding chips; the full label is the
     // chip's tooltip.
     var REVIEW_ABBR = {
         blacklist: 'bl', grammar: 'gr', dictionary: 'dic',
-        completeness: 'cmp', dialogue: 'dlg', address: 'adr',
+        completeness: 'cmp', dialogue: 'dlg', address: 'adr', editorial: 'ed',
     };
     var JUDGE_GROUPS = [
         { key: 'coded', tag: 'CD', label: 'Deterministic evaluators' },
         { key: 'dialogue', tag: 'DL', label: 'Dialogue judge' },
         { key: 'address', tag: 'AD', label: 'Address judge' },
+        { key: 'editorial', tag: 'ED', label: 'Editorial judge' },
     ];
     var JUDGE_STATE = {
         done:    { glyph: '✓', cls: 'pip-done', word: 'up to date' },

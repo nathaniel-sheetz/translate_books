@@ -317,13 +317,16 @@ One row per translated chapter: **Chapter · Findings · Judges · Notes · Acti
 checkbox column for selecting a subset.
 
 - **Findings** — one chip per non-zero review category (blacklist, grammar, dictionary,
-  completeness, dialogue, address). Each chip links to `/read/<id>/<chapter>?review=<category>`,
+  completeness, dialogue, address, editorial). Each chip links to `/read/<id>/<chapter>?review=<category>`,
   which opens the reader in Review Mode with just that category lit *for that page load*
   — it writes neither the per-book on/off switch (localStorage) nor the global category
   cookie, so a deep link can't reset your reader settings. The reader stays the place
   findings are read and acted on.
-- **Judges** — three status pips: `CD` (the deterministic evaluators, which always run as
-  one set), `DL` (dialogue judge), `AD` (address judge). Each is `✓ done`, `◑ partial`,
+- **Judges** — four status pips: `CD` (the deterministic evaluators, which always run as
+  one set), `DL` (dialogue judge), `AD` (address judge), `ED` (editorial judge — see
+  [EDITORIAL_JUDGE.md](EDITORIAL_JUDGE.md); its adjudication pass is a separate CLI, so a
+  green `ED` pip means pass one ran, not that its findings have been second-guessed).
+  Each is `✓ done`, `◑ partial`,
   `⚠ stale`, or `○ not run`, with a `3/5 chunks fresh` tooltip. "Stale" comes from the
   per-evaluator content hash described in
   [JUDGES_FRAMEWORK.md](JUDGES_FRAMEWORK.md#freshness-ledger-eval_runs): edit a chunk

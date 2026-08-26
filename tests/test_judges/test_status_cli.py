@@ -18,7 +18,11 @@ import json
 import pytest
 
 from src.judges.status import StatusScopeError, build_status
-from web_ui.evaluations import merge_judge_result, save_chunk_evaluation
+from web_ui.evaluations import (
+    JUDGE_STATUS_GROUPS,
+    merge_judge_result,
+    save_chunk_evaluation,
+)
 
 
 @pytest.fixture
@@ -96,8 +100,11 @@ def test_nothing_evaluated_reads_not_run_without_the_trap_warning(project):
     """A chapter with no evaluation file at all is a gap, not a trap."""
     out = build_status(project)
 
+    # Derived from the registry, not spelled out: the group list grows whenever a
+    # judge is added, and this assertion is about the *state* of every group, not
+    # about which judges happen to exist today.
     assert {g: e["state"] for g, e in out["judges"].items()} == {
-        "coded": "not_run", "dialogue": "not_run", "address": "not_run",
+        group: "not_run" for group in JUDGE_STATUS_GROUPS
     }
     assert out["warnings"] is None
     assert out["needs"]["dialogue"] == {"not_run": 3}

@@ -16,6 +16,7 @@ from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocati
 from web_ui.app import app
 from web_ui.project_cards import build_project_card, clear_card_cache, derive_status
 from web_ui.evaluations import (
+    REVIEW_TYPES,
     append_feedback,
     mark_evaluation_stale,
     merge_judge_result,
@@ -321,7 +322,7 @@ def test_flag_chip_respects_category_cookie(client, card_project):
     # Only the selected category is ticked in the picker. Scoped to that popup:
     # the Status picker beside it has ticked boxes of its own.
     popup = html.split('id="review-types-popup"')[1].split('class="project-grid"')[0]
-    assert popup.count('class="review-type-cb"') == 6
+    assert popup.count('class="review-type-cb"') == len(REVIEW_TYPES)
     assert popup.count("checked") == 1
 
 
