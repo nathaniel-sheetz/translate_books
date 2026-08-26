@@ -341,6 +341,56 @@ whether a chapter is aligned at all, which the Align/Realign action already says
 **Judges…**. The toolbar runs the same two actions over the ticked chapters, or over the
 whole book when nothing is ticked. Both run as background jobs with a progress modal.
 
+### Ignored terms
+
+Below the table: every term this book has told the reader to stop flagging, stored in
+`projects/<id>/ignored_terms.json`. **This is where they are cleared** — the reader can
+only add. Each row shows the term, which check it came from (plus the rule id for
+grammar), where and when it was added, and **`hides`**, the number of live findings it is
+currently suppressing. A term that is also a glossary term is flagged as redundant, since
+the glossary already suppresses it before the evaluator ever produces a finding.
+
+`hides` counts **only what clearing the entry would bring back**, so it deliberately
+excludes findings you had already dismissed by hand — a dismissal hides those whether or
+not the entry survives. That is why the number is usually lower than a plain text search
+for the word, and why a term you dismissed everywhere before ignoring it reads as `0`. Those
+findings are not lost: a count with dismissals behind it is marked with a `*` and names them
+on hover (`6 manually dismissed`). Only `hides` of 0 with **no** asterisk means the entry has
+outlived the text it was written against and is safe to remove — a dismissal is keyed on the
+finding's message and raw location, so it stops matching the moment the chunk is edited and
+re-evaluated, at which point the ignore entry is the only thing still holding those findings
+down.
+
+A second, smaller reason the number can trail a text search: the dictionary and grammar
+evaluators truncate their position list at three (`Character positions: 378, 1539, 2113,
+... (4 total)`), so a word occurring four or more times in one chunk yields at most three
+anchored findings to count.
+
+Two things this is deliberately not:
+
+- **Not the glossary.** Nothing here reaches the translator. The glossary is a translation
+  contract for the recurring cast (median 14 occurrences per book); these are the hapax
+  tail (median 1) — proper nouns, Latin, French place names, with nothing to be
+  *consistent* about. Putting them in `glossary.json` does suppress the findings, which is
+  why it was the workaround, but it mixes review state into the translation contract and
+  leaves no way to see or undo it.
+- **Not an evaluator setting.** The filter runs at read time, so adding or removing an
+  entry takes effect immediately and symmetrically, with no rerun on either side. The
+  stored evaluation still records everything the checker found — which means the
+  evaluator's own `score` / `passed` / `metadata` in `evaluations/<chunk_id>.json` do
+  **not** move when a term is ignored, only the finding counts and lists do. That matches
+  how dismissals already behave, and it keeps the per-rule precision measurement honest.
+
+Removal is a dashboard-only affordance, not a security boundary: the app has no
+authentication, so every route is reachable by anything that can reach the port.
+
+**Spelling is keyed on the word; grammar on the `(rule_id, word)` pair.** A grammar
+finding is a rule firing on a word, not a fact about the word, and the words reviewers
+actually ignore there are function words — `el` occurs 1412 times in one book. A word-only
+grammar entry would silence every present and future rule on that token. A grammar finding
+with no `rule_id` therefore cannot be ignored at all; evaluations written before rule ids
+were persisted stay in that state until the chunk is re-evaluated.
+
 ### The LLM judge panel: two backends
 
 The **Backend** picker chooses how the same judges, over the same scope, actually run:
@@ -521,6 +571,15 @@ Sentences are displayed as a vertical list of Spanish text. Tap any sentence to 
 
 Annotated sentences get a subtle colored background tint. Each annotation has an optional note field.
 
+When Review Mode is on, the sheet's Issues tab lists that sentence's findings with the four
+feedback labels (resolved / false positive / bad message / missing context), each of which
+marks **that one finding**. Spelling and grammar findings also get an **Ignore in this
+book** button below them, which silences the term everywhere in the book at once — see
+[Ignored terms](#ignored-terms). It writes one `false_positive` mark for the finding in
+hand and one ignore-list entry; it deliberately does not synthesize a mark per hidden
+finding, because `_feedback.jsonl` is the corpus per-rule precision is measured from. The
+reader cannot undo an ignore — that lives on the dashboard's Review stage.
+
 Once you have read a book and left annotations, `scripts/review_annotations.py`
 resolves them in bulk: it researches each note against the style guide, glossary and
 the whole book, writes a dated report, and — with your explicit selection — appends
@@ -577,6 +636,17 @@ The reader also shows a **Realign** button (topbar icon, right of chapter naviga
 | `/api/project/<id>/align/<chapter>` | POST | Apply pending corrections to chunks, then recombine + realign (used by the reader Realign button) |
 | `/api/edit-tags` | GET | Returns the `EDIT_TAGS` vocabulary list for the edit-review report tag UI |
 | `/api/project/<id>/edit-tag` | POST | Persist a tag for a diff hunk; appends to `projects/<id>/edit_review_tags.jsonl` |
+| `/api/project/<id>/ignored-terms` | GET | The book's ignore list, each row with a live `hides` count, a `dismissed` count, and an `in_glossary` flag |
+| `/api/project/<id>/ignored-terms` | POST | Add a term (`{term, eval_name, rule_id?, added_from?, note?}`); idempotent, and `rule_id` is required for `grammar` |
+| `/api/project/<id>/ignored-terms` | DELETE | Remove one entry; the term travels in the JSON body, not the path |
+
+Both write routes answer **409** when `ignored_terms.json` exists but cannot be
+read — malformed JSON, or a schema `version` this build does not understand.
+The file is rewritten wholesale on every add and remove, so treating an
+unreadable list as an empty one would replace it with the single entry in hand;
+repair or delete the file to proceed. The read path is deliberately more
+forgiving: it degrades to "nothing is ignored" so a malformed file cannot blank
+the review queue.
 
 ---
 
@@ -618,6 +688,7 @@ projects/<id>/
 ├── evaluations/            # Per-chunk evaluator output
 │   ├── <chunk_id>.json     # Aggregated coded-evaluator + optional LLM-judge result
 │   └── _feedback.jsonl     # Append-only user feedback on individual issues
+├── ignored_terms.json      # Per-book ignore list (spelling/grammar findings the reader silenced; rewritten in place, not append-only)
 ├── images/                 # Downloaded images (Gutenberg)
 ├── translator_note.json    # Optional "Note from the Translator" (heading + body, Stage 8)
 ├── reports/                # Generated edit-review HTML reports (review_edits.py output)

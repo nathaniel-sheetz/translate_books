@@ -675,9 +675,158 @@
                     fb.appendChild(b);
                 });
             item.appendChild(fb);
+            appendIgnoreButton(item, f, () => ignoreTerm(esIdx, f, item));
 
             sheetErrors.appendChild(item);
         });
+    }
+
+    // Remove every finding matching `pred` from the review map and repaint the
+    // sentences that lost one. Shared by the two removal paths, which differ
+    // only in how wide they reach: a dismissal clears one issue in one chunk,
+    // an ignore clears one term across the whole chapter in view. Covers the
+    // anchored findings only -- see dropFromOverflowBin for the rest.
+    function dropFromReviewMap(pred) {
+        const affected = [];
+        for (const key in reviewMap) {
+            const before = reviewMap[key].length;
+            reviewMap[key] = reviewMap[key].filter(x => !pred(x));
+            if (reviewMap[key].length !== before) affected.push(key);
+            if (!reviewMap[key].length) delete reviewMap[key];
+        }
+        affected.forEach(k => refreshSentenceReview(k));
+        return affected;
+    }
+
+    // The bin is a second, independent findings surface: the server sends any
+    // finding it could not anchor to a sentence in `unanchored`, so a term with
+    // three occurrences can have one in reviewMap and two here. Sweeping only
+    // reviewMap left those rows on screen with live feedback buttons, and
+    // marking one wrote feedback for a finding the server no longer serves.
+    function dropFromOverflowBin(pred) {
+        const doomed = unanchoredList.filter(pred);
+        if (!doomed.length) return 0;
+        const keys = new Set(doomed.map(findingKey));
+        unanchoredList = unanchoredList.filter(x => !keys.has(findingKey(x)));
+        const nodes = [];
+        keys.forEach(k => {
+            content.querySelectorAll('.overflow-item[data-finding-key]').forEach(n => {
+                if (n.dataset.findingKey === k) nodes.push(n);
+            });
+        });
+        dropOverflowEntries(nodes);
+        return doomed.length;
+    }
+
+    // Case-fold for the optimistic client-side sweep only. The server's
+    // casefold() is authoritative and re-decides on the next load; this just
+    // needs to agree for Spanish surface forms.
+    function foldTerm(t) {
+        return String(t == null ? '' : t).trim().toLowerCase();
+    }
+
+    // Can this finding be ignored book-wide? Spelling needs a word; grammar
+    // needs the (rule, word) pair, because the words reviewers ignore there are
+    // function words and a word-only entry would silence every rule on them.
+    function canIgnoreFinding(f) {
+        if (!f || !f.term) return false;
+        if (f.eval_name === 'grammar') return !!f.rule_id;
+        return f.eval_name === 'dictionary';
+    }
+
+    // split/join, not .replace(): a term is raw source text, and $& / $` / $'
+    // in a String.replace replacement are substitution patterns, so a finding
+    // on a term containing '$' would render a label naming a different string
+    // than the one the button actually sends.
+    function fillSlot(s, slot, value) {
+        return s.split(slot).join(value);
+    }
+
+    function ignoreLabel(f) {
+        if (f.eval_name === 'grammar') {
+            var t = i.review_ignore_rule || 'Ignore {rule} on “{term}” in this book';
+            return fillSlot(fillSlot(t, '{rule}', f.rule_id), '{term}', f.term);
+        }
+        return fillSlot(
+            i.review_ignore_word || 'Ignore “{term}” in this book',
+            '{term}', f.term);
+    }
+
+    // Render the ignore control on a finding row, or nothing when the finding
+    // has no stable identity to ignore. Its own line below the feedback labels:
+    // those four say something about ONE finding, this says something about a
+    // term across the whole book, and it is not reversible from here.
+    function appendIgnoreButton(itemEl, f, onClick) {
+        if (!canIgnoreFinding(f)) return null;
+        const row = document.createElement('div');
+        row.className = 'review-item-ignore';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'review-ignore-btn';
+        b.textContent = ignoreLabel(f);
+        b.title = i.review_ignore_title || '';
+        b.addEventListener('click', onClick);
+        row.appendChild(b);
+        itemEl.appendChild(row);
+        return row;
+    }
+
+    // Put a term on the book's ignore list: one feedback mark for the finding
+    // actually in hand (a real judgment on a real finding), then the list entry
+    // that covers the rest. Deliberately NOT one synthesized mark per hidden
+    // finding — `_feedback.jsonl` is the corpus per-rule precision is measured
+    // from, and bulk labels would corrupt it.
+    function ignoreTerm(esIdx, finding, itemEl, onDone) {
+        if (!canIgnoreFinding(finding)) return;
+        if (itemEl) itemEl.querySelectorAll('button').forEach(b => { b.disabled = true; });
+
+        const fbUrl = `/api/project/${projectId}/evaluations/${finding.chunk_id}/feedback`;
+        const fbPayload = {
+            eval_name: finding.eval_name,
+            issue_index: finding.issue_index,
+            feedback_type: 'false_positive',
+        };
+        const ignUrl = `/api/project/${projectId}/ignored-terms`;
+        const ignPayload = {
+            term: finding.term,
+            eval_name: finding.eval_name,
+            rule_id: finding.rule_id || null,
+            added_from: finding.chunk_id,
+        };
+
+        const post = (url, body) => fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }).then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); });
+
+        post(ignUrl, ignPayload)
+            .then(() => post(fbUrl, fbPayload).catch(() => {
+                // The list entry is what hides the findings; a lost mark only
+                // costs one row of tuning signal, so don't fail the action.
+                try { enqueue(fbUrl, 'POST', fbPayload); } catch (e) { /* queue full */ }
+            }))
+            .then(() => {
+                const folded = foldTerm(finding.term);
+                const sameTerm = x => (
+                    x.eval_name === finding.eval_name &&
+                    foldTerm(x.term) === folded &&
+                    (finding.eval_name !== 'grammar' || x.rule_id === finding.rule_id)
+                );
+                dropFromReviewMap(sameTerm);
+                dropFromOverflowBin(sameTerm);
+                if (onDone) onDone();
+                showToast(i.review_ignore_done || 'Ignored in this book.');
+                if (esIdx === null || esIdx === undefined) return;
+                const remaining = reviewMap[esIdx] || [];
+                renderErrorsList(esIdx, remaining);
+                updateErrorsTabCount(remaining.length);
+                if (!remaining.length) closeSheet(esIdx);
+            })
+            .catch(() => {
+                if (itemEl) itemEl.querySelectorAll('button').forEach(b => { b.disabled = false; });
+                showToast(i.review_ignore_failed || 'Could not add to the ignore list.');
+            });
     }
 
     // Record feedback on a finding, then drop it (and any sibling locations of
@@ -700,18 +849,11 @@
         const finish = () => {
             // Server dismisses by (eval_name, issue_index) for the chunk, so a
             // fanned-out issue with multiple locations clears everywhere at once.
-            const affected = [];
-            for (const key in reviewMap) {
-                const before = reviewMap[key].length;
-                reviewMap[key] = reviewMap[key].filter(x => !(
-                    x.eval_name === finding.eval_name &&
-                    x.issue_index === finding.issue_index &&
-                    x.chunk_id === finding.chunk_id
-                ));
-                if (reviewMap[key].length !== before) affected.push(key);
-                if (!reviewMap[key].length) delete reviewMap[key];
-            }
-            affected.forEach(k => refreshSentenceReview(k));
+            dropFromReviewMap(x => (
+                x.eval_name === finding.eval_name &&
+                x.issue_index === finding.issue_index &&
+                x.chunk_id === finding.chunk_id
+            ));
             if (onDone) onDone();
 
             // Everything below re-renders the sheet around a sentence; a bin
@@ -842,6 +984,7 @@
         const typeLabels = i.review_types || {};
         const item = document.createElement('div');
         item.className = 'overflow-item review-item review-item-' + f.eval_name;
+        item.dataset.findingKey = findingKey(f);
 
         const sev = f.severity || 'info';
         const head = overflowLabelRow(
@@ -900,6 +1043,11 @@
                 fb.appendChild(b);
             });
         item.appendChild(fb);
+        appendIgnoreButton(item, f, () => ignoreTerm(null, f, item, () => {
+            const key = findingKey(f);
+            unanchoredList = unanchoredList.filter(x => findingKey(x) !== key);
+            dropOverflowEntries([item]);
+        }));
         return item;
     }
 
@@ -2531,6 +2679,15 @@
             submitFeedback(esIdx, finding, feedbackType) {
                 submitFeedback(esIdx, finding, feedbackType, null);
             },
+            // Book-wide ignore for the finding's term. `canIgnore`/`ignoreLabel`
+            // are exposed too so the v2 sheet decides whether to draw the
+            // control from the same rule this file applies.
+            ignoreTerm(esIdx, finding) {
+                ignoreTerm(esIdx, finding, null);
+            },
+            canIgnore(finding) { return canIgnoreFinding(finding); },
+            ignoreLabel(finding) { return ignoreLabel(finding); },
+            ignoreTitle() { return i.review_ignore_title || ''; },
             // Chunk-level actions open the shared modals via the hidden classic
             // controls, so the whole retranslate / remove / boundary flow is reused.
             retranslate() { if (retransBtn) retransBtn.click(); },

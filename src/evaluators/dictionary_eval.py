@@ -454,7 +454,8 @@ class DictionaryEvaluator(BaseEvaluator):
             severity=severity,
             message=message,
             location=location,
-            suggestion=suggestion
+            suggestion=suggestion,
+            term=word,
         )
 
     def _calculate_score(self, total_words: int, flagged_words: int) -> float:

@@ -43,6 +43,20 @@ class TestIssueKey:
     def test_same_issue_under_different_evaluators_differs(self):
         assert issue_key("dictionary", RAW_ISSUE) != issue_key("grammar", RAW_ISSUE)
 
+    def test_new_identity_fields_do_not_perturb_the_key(self):
+        """``rule_id``/``category``/``term`` are carried on the issue but are
+        NOT part of the key, so adding them cannot dangle a stored mark.
+
+        This is the whole migration: 1,028 marks were stamped with keys derived
+        from four fields. If a later field ever joined the hash, every one of
+        them would stop matching the finding it labels -- silently, since a
+        mark that matches nothing looks exactly like a finding nobody marked.
+        """
+        enriched = dict(
+            RAW_ISSUE, rule_id="MORFOLOGIK_RULE_ES", category="TYPOS", term="Bothon"
+        )
+        assert issue_key("dictionary", enriched) == issue_key("dictionary", RAW_ISSUE)
+
     def test_changed_message_changes_key(self):
         other = dict(RAW_ISSUE, message="something else")
         assert issue_key("dictionary", other) != issue_key("dictionary", RAW_ISSUE)

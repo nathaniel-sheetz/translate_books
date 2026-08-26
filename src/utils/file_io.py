@@ -11,7 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.models import AddressMap, Blacklist, Chunk, Glossary, ProjectState, StyleGuide
+from src.models import (
+    AddressMap,
+    Blacklist,
+    Chunk,
+    Glossary,
+    IgnoredTerms,
+    ProjectState,
+    StyleGuide,
+)
 
 # Anchored to this file, not to cwd (same convention as text_utils._PROMPTS_DIR).
 # The shipped prompts live in the repo whatever directory the process was
@@ -165,6 +173,83 @@ def save_glossary(glossary: Glossary, output_path: Path) -> None:
         temp_path.replace(output_path)
     except Exception:
         # Clean up temp file on error
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def load_ignored_terms(path: Path) -> IgnoredTerms:
+    """
+    Load a per-book ignore list from JSON file.
+
+    Args:
+        path: Path to ``projects/<id>/ignored_terms.json``
+
+    Returns:
+        Loaded IgnoredTerms object
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        json.JSONDecodeError: If the file contains invalid JSON
+        ValueError: If the JSON doesn't match the IgnoredTerms schema, or
+            declares a ``version`` this build does not understand
+
+    Example:
+        >>> ignored = load_ignored_terms(Path("projects/my_book/ignored_terms.json"))
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Ignored-terms file not found: {path}")
+
+    try:
+        with path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(
+            f"Invalid JSON in ignored-terms file {path}: {e.msg}", e.doc, e.pos
+        )
+
+    try:
+        ignored = IgnoredTerms.model_validate(data)
+    except Exception as e:
+        raise ValueError(f"Invalid IgnoredTerms data in {path}: {e}")
+
+    # Refuse a schema this build does not know rather than loading it lossily:
+    # pydantic drops unknown fields, and every add and remove rewrites the file
+    # wholesale, so a silently-downgraded load would persist the loss on the
+    # next write. Callers on the write path turn this into a 409.
+    if ignored.version != 1:
+        raise ValueError(
+            f"Unsupported ignored-terms schema version {ignored.version} in "
+            f"{path}: this build understands version 1"
+        )
+    return ignored
+
+
+def save_ignored_terms(ignored: IgnoredTerms, output_path: Path) -> None:
+    """
+    Save a per-book ignore list to JSON file with atomic write.
+
+    Same temp-file-and-rename pattern as :func:`save_glossary`. This file is
+    rewritten wholesale on every add and remove -- unlike ``_feedback.jsonl``,
+    which is append-only -- so that clearing an entry is a real delete rather
+    than a tombstone the readers have to replay.
+
+    Args:
+        ignored: The IgnoredTerms object to save
+        output_path: Path where the JSON should be saved
+
+    Raises:
+        OSError: If there are permission or disk space issues
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data = ignored.model_dump(mode='json')
+
+    temp_path = output_path.with_suffix('.tmp')
+    try:
+        with temp_path.open('w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write('\n')
+        temp_path.replace(output_path)
+    except Exception:
         temp_path.unlink(missing_ok=True)
         raise
 

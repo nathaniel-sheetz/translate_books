@@ -49,6 +49,7 @@ class BaseEvaluator(ABC):
         suggestion: str | None = None,
         rule_id: str | None = None,
         category: str | None = None,
+        term: str | None = None,
     ) -> Issue:
         """
         Helper to create an Issue with consistent formatting.
@@ -61,6 +62,8 @@ class BaseEvaluator(ABC):
             rule_id: The checker's own id for the rule that fired (optional;
                 only checkers with a rule concept supply it)
             category: The checker's category for that rule (optional)
+            term: The surface form the finding is about, when it is about one
+                (optional; the flagged word)
 
         Returns:
             Issue instance
@@ -72,6 +75,7 @@ class BaseEvaluator(ABC):
             suggestion=suggestion,
             rule_id=rule_id,
             category=category,
+            term=term,
         )
 
     def calculate_pass_fail(self, issues: list[Issue]) -> bool:

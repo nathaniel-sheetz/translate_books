@@ -2115,15 +2115,24 @@
             ? feedbackMap[evalName + '\x00' + issueIdx]
             : undefined;
         var labeledClass = feedbackType ? ' labeled' : '';
-        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + labeledClass + '" ' +
+        // Ignored findings are marked, not hidden. This card shows what the
+        // checker actually found; dropping the row would leave the Review
+        // stage's lower count with no visible explanation. Same treatment as a
+        // dismissal, which is already shown-but-marked via `labeled`.
+        var ignoredClass = issue.ignored ? ' ignored' : '';
+        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + labeledClass + ignoredClass + '" ' +
             'data-eval-name="' + escapeHtml(evalName) + '" ' +
             'data-issue-index="' + issueIdx + '"' +
+            (issue.ignored ? ' data-ignored="1"' : '') +
             (feedbackType ? ' data-feedback-type="' + escapeHtml(feedbackType) + '"' : '') +
             '>';
 
         html += '<div class="eval-issue-head">';
         html += '<span class="eval-severity-icon ' + escapeHtml(sev) + '">' + sevIcon + '</span>';
         html += '<span class="eval-evaluator-tag">' + escapeHtml(evalName) + '</span>';
+        if (issue.ignored) {
+            html += '<span class="eval-ignored-tag" title="On this book’s ignore list — not counted in Review. Clear it from the Ignored terms panel.">ignored</span>';
+        }
         html += '<span class="eval-issue-message">' + escapeHtml(issue.message || '') + '</span>';
         html += '</div>';
 
@@ -3288,6 +3297,10 @@
                     renderReviewTable(data);
                     updateReviewBadge(data);
                 }
+                // Ride along with the Review stage's own on-demand fetch: the
+                // ignore list only makes sense next to the findings it hides,
+                // and its `hides` counts come from the same walk.
+                refreshIgnoredTerms();
                 return drainPendingReviewStatus(data);
             })
             .catch(function(e) {
@@ -3299,6 +3312,10 @@
                     tbody.innerHTML = '<tr><td colspan="6">Could not load review status: ' +
                         escapeHtml(String(e && e.message ? e.message : e)) + '</td></tr>';
                 }
+                // The ignore list is served by its own route, so a failed
+                // review-status walk says nothing about it. Without this the
+                // panel stays empty and reads as "nothing is ignored".
+                refreshIgnoredTerms();
                 return drainPendingReviewStatus(null);
             });
     }
@@ -3319,6 +3336,147 @@
         badge.textContent = findings
             ? findings + (findings === 1 ? ' finding' : ' findings')
             : '✓ clean';
+    }
+
+    // ── Ignored terms panel (Review stage) ───────────────────────────────────
+
+    function refreshIgnoredTerms() {
+        var body = document.getElementById('ignored-terms-body');
+        if (!body) return Promise.resolve();
+        return apiGet('/api/project/' + PROJECT + '/ignored-terms')
+            .then(function(data) {
+                // apiGet resolves on 4xx/5xx too -- it only parses the body --
+                // so an error payload would otherwise render as "Nothing
+                // ignored.", which is the blank panel this catch exists to avoid.
+                if (!data || data.error || !data.ok) {
+                    throw new Error(String((data && data.error) || 'bad response'));
+                }
+                setStatus('ignored-terms-status', '', '');
+                renderIgnoredTerms(data.terms || []);
+            })
+            .catch(function() {
+                // Same discipline as the review table: say so rather than
+                // leaving a blank panel that reads as "nothing is ignored".
+                body.innerHTML = '';
+                setIgnoredCount(null);
+                setStatus('ignored-terms-status', 'Could not load the ignore list.', 'error');
+            });
+    }
+
+    function setIgnoredCount(n) {
+        var el = document.getElementById('ignored-terms-count');
+        if (el) el.textContent = (n === null || n === undefined) ? '' : '(' + n + ')';
+    }
+
+    function renderIgnoredTerms(terms) {
+        var body = document.getElementById('ignored-terms-body');
+        if (!body) return;
+        setIgnoredCount(terms.length);
+        body.innerHTML = '';
+        if (!terms.length) {
+            body.innerHTML = '<p class="ignored-terms-empty">Nothing ignored. ' +
+                'Use &ldquo;Ignore in this book&rdquo; on a finding in the reader to add one.</p>';
+            return;
+        }
+
+        var table = document.createElement('table');
+        table.className = 'ignored-terms-table';
+        table.innerHTML =
+            '<thead><tr>' +
+            '<th>Term</th><th>Check</th><th>Added</th><th>Hides</th><th></th>' +
+            '</tr></thead>';
+        var tbody = document.createElement('tbody');
+
+        terms.forEach(function(t) {
+            var tr = document.createElement('tr');
+
+            // Static cells via innerHTML + escapeHtml; the interactive cell is
+            // built as DOM nodes below. Same split the batch-jobs table uses.
+            var check = escapeHtml(t.eval_name) +
+                (t.rule_id ? ' <code class="ignored-rule">' + escapeHtml(t.rule_id) + '</code>' : '');
+            var added = [t.added_from ? escapeHtml(t.added_from) : '',
+                         t.added_at ? escapeHtml(String(t.added_at).slice(0, 10)) : '']
+                .filter(Boolean).join(' · ') || '&mdash;';
+            var flag = t.in_glossary
+                ? ' <span class="ignored-warn" title="Already suppressed by the glossary — this entry is redundant">also a glossary term</span>'
+                : '';
+            // The count is what comes back if the entry is cleared, so
+            // findings already dismissed by hand are not in it. They are worth
+            // surfacing on hover: a 0 next to a pile of dismissals means the
+            // dismissal got there first, not that the term went quiet.
+            var dismissed = t.dismissed || 0;
+            var hideTitle = dismissed
+                ? dismissed + (t.hides === 0 ? ' manually dismissed' : ' more manually dismissed') +
+                  ' — already hidden by the dismissal, so removing this entry ' +
+                  'would not bring them back'
+                : (t.hides === 0
+                    ? 'Nothing in the book trips this. Safe to remove.'
+                    : '');
+            var hides = '<span class="' + (t.hides === 0 ? 'ignored-zero' : 'ignored-live') + '"' +
+                (hideTitle ? ' title="' + escapeHtml(hideTitle) + '"' : '') + '>' +
+                escapeHtml(String(t.hides)) +
+                (dismissed ? '<span class="ignored-dismissed-mark">*</span>' : '') +
+                '</span>';
+
+            tr.innerHTML =
+                '<td class="ignored-term"><strong>' + escapeHtml(t.term) + '</strong>' + flag +
+                (t.note ? '<div class="ignored-note">' + escapeHtml(t.note) + '</div>' : '') + '</td>' +
+                '<td>' + check + '</td>' +
+                '<td class="ignored-added">' + added + '</td>' +
+                '<td class="ignored-hides">' + hides + '</td>';
+
+            var actions = document.createElement('td');
+            actions.className = 'ignored-actions';
+            var rm = document.createElement('button');
+            rm.className = 'btn-small';
+            rm.title = 'Stop ignoring — its findings come back immediately';
+            rm.textContent = '×';
+            rm.addEventListener('click', function() {
+                rm.disabled = true;
+                removeIgnoredTerm(t);
+            });
+            actions.appendChild(rm);
+            tr.appendChild(actions);
+            tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        body.appendChild(table);
+    }
+
+    function removeIgnoredTerm(t) {
+        setStatus('ignored-terms-status', '', '');
+        return fetch('/api/project/' + PROJECT + '/ignored-terms', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                term: t.term,
+                eval_name: t.eval_name,
+                rule_id: t.rule_id || null,
+            }),
+        }).then(function(r) {
+            if (!r.ok) throw new Error('http ' + r.status);
+            return r.json();
+        }).then(function(data) {
+            // Refresh the review status, not just this panel: the findings the
+            // entry was hiding are live again, so the chapter chips above it
+            // are now wrong. That call re-renders this panel on its way through.
+            var missed = !!(data && data.removed === 0);
+            return refreshReviewStatus().then(function() {
+                // A no-op delete is a 200 with removed: 0 (removing something
+                // absent is deliberately not an error). Left unsaid, the row
+                // re-renders unchanged and the click reads as having done
+                // nothing. Set after the refresh, which clears this element.
+                if (missed) {
+                    setStatus('ignored-terms-status',
+                        'That entry was not found -- the list may have changed elsewhere.',
+                        'error');
+                }
+            });
+        }).catch(function() {
+            setStatus('ignored-terms-status', 'Could not remove that term.', 'error');
+            refreshIgnoredTerms();
+        });
     }
 
     function renderReviewTable(data) {

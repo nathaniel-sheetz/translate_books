@@ -15,16 +15,24 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import is_dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, NamedTuple, Optional
 
 from src.app_config import get_enabled_evaluators, get_blacklist_path
 from src.evaluators import aggregate_results, run_all_evaluators
 from src.evaluators.location_normalizer import NormalizedIssue, fan_out_issues
-from src.models import Blacklist, Chunk, EvalResult, EvaluationConfig, Glossary
-from src.utils.file_io import load_blacklist, load_glossary
+from src.models import (
+    Blacklist,
+    Chunk,
+    EvalResult,
+    EvaluationConfig,
+    Glossary,
+    IgnoredTerms,
+)
+from src.utils.file_io import load_blacklist, load_glossary, load_ignored_terms
 from src.utils.text_utils import normalize_newlines
 
 logger = logging.getLogger(__name__)
@@ -107,6 +115,63 @@ def is_dismissed(
     if issue is not None and (eval_name, issue_key(eval_name, issue)) in by_key:
         return True
     return (eval_name, issue_index) in by_index
+
+
+# ``Issue.term`` is newer than the persisted corpus: every evaluation written
+# before it existed has ``term: null``, which would make the ignore list inert
+# on ~20 books until each was re-evaluated. The dictionary evaluator has always
+# opened its message with the flagged word in single quotes
+# (``'Sigfridos': Unknown word...``) -- the same convention
+# ``location_normalizer._resolve_match_length`` already parses to size its
+# highlight -- so the word is recoverable for exactly the findings that need it.
+#
+# Scoped to ``dictionary`` on purpose. ``blacklist`` shares the message shape
+# but is not ignorable, and ``grammar``'s message is LanguageTool's localized
+# Spanish prose, which never carries the token; grammar keeps needing a re-run
+# to gain a ``rule_id`` regardless, and without one it is never suppressed.
+_QUOTED_TERM_RE = re.compile(r"^'([^']+)'")
+
+
+def issue_term(eval_name: str, issue: dict[str, Any]) -> Optional[str]:
+    """The surface form a finding is about, preferring the stored field."""
+    term = issue.get("term")
+    if term:
+        return term
+    if eval_name == "dictionary":
+        m = _QUOTED_TERM_RE.match(str(issue.get("message") or ""))
+        if m:
+            return m.group(1)
+    return None
+
+
+def is_ignored(
+    ignored: Optional[IgnoredTerms],
+    eval_name: str,
+    issue: Optional[dict[str, Any]],
+) -> bool:
+    """True if this finding names a term the book has put on its ignore list.
+
+    A *sibling* of :func:`is_dismissed`, not a replacement. A dismissal is one
+    human judgment about one finding; an ignore is one judgment about a term,
+    applied to every finding that names it, book-wide.
+
+    Deliberately filtered here at read time rather than suppressed inside the
+    evaluator (which is what putting the word in the glossary does):
+
+    - Add and remove stay symmetric. Evaluate-time suppression can only be
+      undone by another full rerun, because the finding is no longer in the
+      stored evaluation to bring back.
+    - ``evaluations/<chunk_id>.json`` keeps recording what the checker actually
+      found, so the per-rule precision arithmetic stays measurable.
+    - It is free: ``dictionary`` is a local enchant lookup, not an API call.
+
+    The cost, matching how dismissals already behave: the evaluator's own
+    ``score`` / ``passed`` / ``metadata`` still count ignored words. Only the
+    finding counts and lists respond.
+    """
+    if not ignored or not ignored.terms or not issue:
+        return False
+    return ignored.matches(eval_name, issue_term(eval_name, issue), issue.get("rule_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +935,7 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
     coded_types = frozenset(REVIEW_CODED_TYPES)
     judge_types = frozenset(REVIEW_JUDGE_TYPES)
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    ignored = load_project_ignored_terms(project_dir)
 
     for path in sorted(eval_dir.glob("*.json")):
         if path.name.startswith("_"):
@@ -900,6 +966,8 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
                 fb_by_key, fb_by_index, eval_name, ni.get("issue_index"), ni
             ):
                 continue
+            if is_ignored(ignored, eval_name, ni):
+                continue
             counts[eval_name] += 1
 
         judges = data.get("judges")
@@ -918,6 +986,103 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
                 counts[judge_name] += 1
 
     return by_chapter
+
+
+class IgnoreHits(NamedTuple):
+    """What one ignore entry is holding down, split by who is holding it.
+
+    ``live`` is what the entry alone suppresses -- exactly what comes back if
+    the entry is cleared. ``dismissed`` is the findings that name the same term
+    but already carry a feedback label, so the dismissal would keep them hidden
+    either way and clearing the entry does not restore them.
+
+    The split matters because a dismissal is keyed on the finding's message and
+    raw location (:func:`issue_key`), so it stops matching the moment the chunk
+    is edited and re-evaluated -- at which point the ignore entry becomes the
+    only thing still suppressing those findings. ``live == 0`` therefore does
+    not mean "inert"; only ``live == 0 and dismissed == 0`` does.
+    """
+
+    live: int = 0
+    dismissed: int = 0
+
+
+def count_ignored_hits(
+    project_dir: Path, ignored: Optional[IgnoredTerms]
+) -> dict[tuple[str, str, Optional[str]], IgnoreHits]:
+    """How many findings each ignore entry covers, split live vs. dismissed.
+
+    Keyed by :meth:`IgnoredTerm.identity`. "Live" means the same thing it means
+    to the review badges: a target-anchored coded finding in a non-stale chunk
+    that carries no feedback label. Only a ``live == 0 and dismissed == 0`` row
+    is the signal that the list has outlived the text it was written against;
+    a zero beside a non-zero ``dismissed`` means you dismissed those findings by
+    hand before the term was ignored, and the dismissal simply got there first.
+
+    Same walk as :func:`load_chapter_type_counts`; one pass over the project's
+    evaluations, only paid for when the Review stage asks for it.
+    """
+    hits: dict[tuple[str, str, Optional[str]], IgnoreHits] = {}
+    if not ignored or not ignored.terms:
+        return hits
+
+    # Pre-index the entries so each finding costs a dict lookup, not a scan.
+    by_identity = {entry.identity(): entry for entry in ignored.terms}
+    for identity in by_identity:
+        hits[identity] = IgnoreHits()
+
+    eval_dir = _eval_results_dir(project_dir)
+    if not eval_dir.exists():
+        return hits
+
+    coded_types = frozenset(REVIEW_CODED_TYPES)
+    feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+
+    for path in sorted(eval_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug("Skipping unreadable evaluation %s: %s", path, e)
+            continue
+        if not isinstance(data, dict) or data.get("stale"):
+            continue
+
+        chunk_id = data.get("chunk_id") or path.stem
+        fb_by_key, fb_by_index = build_dismissed(feedback_by_chunk.get(chunk_id, []))
+
+        for ni in data.get("normalized_issues") or []:
+            if not isinstance(ni, dict):
+                continue
+            eval_name = ni.get("eval_name")
+            if eval_name not in coded_types:
+                continue
+            term = issue_term(eval_name, ni)
+            if not term:
+                continue
+            loc = ni.get("location") or {}
+            if loc.get("side") != "target" or loc.get("char_start") is None:
+                continue
+            # Mirror IgnoredTerms.matches: grammar is keyed on the pair and
+            # is unsuppressable without a rule id; every other evaluator is
+            # keyed on the word alone, so its rule slot is always None.
+            rule_id = (ni.get("rule_id") or None) if eval_name == "grammar" else None
+            if eval_name == "grammar" and not rule_id:
+                continue
+            identity = (eval_name, term.strip().casefold(), rule_id)
+            current = hits.get(identity)
+            if current is None:
+                continue
+            if is_dismissed(
+                fb_by_key, fb_by_index, eval_name, ni.get("issue_index"), ni
+            ):
+                hits[identity] = current._replace(dismissed=current.dismissed + 1)
+            else:
+                hits[identity] = current._replace(live=current.live + 1)
+
+    return hits
 
 
 def load_project_type_counts(project_dir: Path) -> dict[str, int]:
@@ -1133,6 +1298,24 @@ def _load_project_glossary(project_dir: Path) -> Optional[Glossary]:
         return None
 
 
+def load_project_ignored_terms(project_dir: Path) -> Optional[IgnoredTerms]:
+    """Best-effort ignore-list load from ``projects/<id>/ignored_terms.json``.
+
+    Public, unlike its glossary/blacklist siblings, because the routes that add
+    and remove entries need it too. Returns ``None`` when absent or unreadable
+    so a malformed file degrades to "nothing is ignored" rather than blanking
+    the review queue.
+    """
+    path = Path(project_dir) / "ignored_terms.json"
+    if not path.exists():
+        return None
+    try:
+        return load_ignored_terms(path)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Failed to load ignored terms from %s: %s", path, e)
+        return None
+
+
 def _load_project_blacklist(project_dir: Path) -> Optional[Blacklist]:
     """Best-effort blacklist load.
 
@@ -1317,6 +1500,11 @@ __all__ = [
     "issue_key",
     "build_dismissed",
     "is_dismissed",
+    "is_ignored",
+    "issue_term",
+    "count_ignored_hits",
+    "IgnoreHits",
+    "load_project_ignored_terms",
     "load_feedback_for_chunk",
     "load_project_summary",
     "run_coded_evaluators",

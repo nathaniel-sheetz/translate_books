@@ -1232,6 +1232,20 @@
 .eval-issue.severity-info { border-left-color: #1a73e8; }
 .eval-issue.labeled { opacity: 0.55; }
 
+/* Same dimming as a dismissal -- both mean "still here, no longer counted". */
+.eval-issue.ignored { opacity: 0.55; }
+
+.eval-ignored-tag {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border, #d0d0d0);
+    color: var(--text-muted, #666);
+    white-space: nowrap;
+}
+
 .eval-issue-head {
     display: flex;
     gap: 6px;
@@ -1431,4 +1445,100 @@
     .dash-main {
         padding: 20px 16px;
     }
+}
+
+
+/* ── Ignored terms panel (Review stage) ──────────────────────────────────── */
+
+.ignored-terms {
+    margin-top: 32px;
+    padding-top: 20px;
+    border-top: 1px solid #e0dcd7;
+}
+
+.ignored-terms-title {
+    font-size: 15px;
+    margin: 0 0 4px 0;
+}
+
+.ignored-terms-count {
+    color: #888;
+    font-weight: 400;
+}
+
+.ignored-terms-empty {
+    color: #888;
+    font-size: 13px;
+    margin: 8px 0 0 0;
+}
+
+.ignored-terms-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    margin-top: 10px;
+}
+
+.ignored-terms-table th {
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: #888;
+    text-transform: uppercase;
+    padding: 8px 10px;
+    border-bottom: 2px solid #e0dcd7;
+}
+
+.ignored-terms-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #eee;
+    vertical-align: top;
+}
+
+.ignored-rule {
+    font-size: 12px;
+    background: #f4f1ec;
+    border-radius: 3px;
+    padding: 1px 5px;
+}
+
+.ignored-added {
+    color: #888;
+    font-size: 13px;
+}
+
+.ignored-note {
+    color: #888;
+    font-size: 13px;
+    margin-top: 2px;
+}
+
+/* Redundant with the glossary, which already suppresses the word. */
+.ignored-warn {
+    color: #d4a017;
+    font-size: 12px;
+    margin-left: 6px;
+}
+
+/* Nothing in the book trips this any more -- the entry has outlived its text. */
+.ignored-zero {
+    color: #888;
+}
+
+/* A count with dismissed findings behind it carries a hover explanation, so it
+   needs to look hoverable; the bare counts stay plain. */
+.ignored-zero[title],
+.ignored-live[title] {
+    cursor: help;
+    border-bottom: 1px dotted #bbb;
+}
+
+.ignored-dismissed-mark {
+    color: #888;
+    margin-left: 1px;
+}
+
+.ignored-actions {
+    text-align: right;
+    width: 40px;
 }
