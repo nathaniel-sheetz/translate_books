@@ -590,6 +590,26 @@
                 </thead>
                 <tbody id="review-tbody"></tbody>
             </table>
+
+            <!-- The only surface that can clear an ignore. The reader adds
+                 them; removal lives here so a book-wide suppression is not one
+                 stray tap away from being undone, and so the list is somewhere
+                 you actually look at it. -->
+            <div class="ignored-terms" id="ignored-terms">
+                <h3 class="ignored-terms-title">
+                    Ignored terms <span class="ignored-terms-count" id="ignored-terms-count"></span>
+                </h3>
+                <p class="stage-subtitle">
+                    Findings you told the reader to stop flagging for this book. Not the
+                    glossary &mdash; nothing here reaches the translator. Removing an entry
+                    brings its findings straight back; no rerun needed.
+                    <strong>Hides</strong> counts only what would come back &mdash; findings
+                    you had already dismissed by hand stay hidden either way, so they are
+                    marked with a * and shown on hover instead.
+                </p>
+                <span class="status-msg" id="ignored-terms-status"></span>
+                <div id="ignored-terms-body"></div>
+            </div>
         </div>
 
         <!-- ============================================================ -->

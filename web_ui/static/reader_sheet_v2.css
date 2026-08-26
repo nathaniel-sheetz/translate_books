@@ -612,6 +612,29 @@
 .rv2-fb-btn:hover { background: var(--rv2-filter); color: var(--rv2-text); }
 .rv2-fb-btn:disabled { opacity: 0.5; cursor: default; }
 
+/* Full-width row so the ignore action breaks out of the button strip: it is
+   about a term across the whole book, not about this finding. */
+.rv2-issue-ignore { flex-basis: 100%; margin-top: 6px; }
+.rv2-ignore-btn {
+  background: none;
+  border: 1px dashed var(--rv2-border-light);
+  border-radius: 8px;
+  padding: 0 11px;
+  min-height: 44px;
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--rv2-muted3);
+  cursor: pointer;
+  text-align: left;
+}
+.rv2-ignore-btn:hover {
+  background: var(--rv2-filter);
+  border-style: solid;
+  color: var(--rv2-text);
+}
+.rv2-ignore-btn:disabled { opacity: 0.5; cursor: default; }
+
 .rv2-empty {
   color: var(--rv2-muted2);
   font-size: 12.5px;

@@ -30,7 +30,14 @@ from src.annotations import (
     is_effectively_blank,
     load_active,
 )
-from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
+from src.models import (
+    Chunk,
+    ChunkStatus,
+    Glossary,
+    IgnoredTerm,
+    IgnoredTerms,
+    StyleGuide,
+)
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
     format_glossary_for_prompt,
@@ -38,6 +45,7 @@ from src.utils.file_io import (
     load_glossary,
     load_prompt_template,
     load_style_guide,
+    save_ignored_terms,
     render_prompt,
     save_chunk,
     save_glossary,
@@ -63,21 +71,26 @@ from web_ui.evaluations import (
     REVIEW_CODED_TYPES,
     REVIEW_JUDGE_TYPES,
     REVIEW_TYPES,
+    IgnoreHits,
     append_feedback,
     build_dismissed,
     chapter_id_from_chunk_id,
     chapter_judge_status,
+    count_ignored_hits,
     current_chunk_sha,
     empty_type_counts,
     evaluate_and_persist_chunk,
     evaluator_freshness_detail,
     is_dismissed,
+    is_ignored,
     issue_key,
+    issue_term,
     iter_chapter_chunks,
     load_all_feedback_by_chunk,
     load_chapter_type_counts,
     load_chunk_evaluation,
     load_feedback_for_chunk,
+    load_project_ignored_terms,
     load_project_summary,
     merge_llm_judge_result,
     rollup_group_state,
@@ -5460,6 +5473,18 @@ def project_chunk_evaluation_get(project_id, chunk_id):
     if payload is None:
         return jsonify({"error": "No evaluation yet"}), 404
     payload["feedback"] = load_feedback_for_chunk(project_dir, chunk_id)
+
+    # Flag rather than filter, matching how this card already treats a
+    # dismissal: the card is the one findings surface where the reviewer is
+    # looking at what the checker actually found, so silently dropping a row
+    # would make the Review stage's count unexplainable from here. Costs one
+    # ignore-list read, not the corpus walk /review-status does.
+    ignored_terms = load_project_ignored_terms(project_dir)
+    if ignored_terms and ignored_terms.terms:
+        for ni in payload.get("normalized_issues") or []:
+            if isinstance(ni, dict):
+                ni["ignored"] = is_ignored(ignored_terms, ni.get("eval_name"), ni)
+
     return jsonify(payload)
 
 
@@ -5760,8 +5785,10 @@ def project_chapter_review(project_id, chapter):
 
     Powers the reader's opt-in Review Mode. Reuses the alignment builder and
     the persisted per-chunk evaluations — no new persistence format. Findings
-    that already have feedback are treated as dismissed and omitted; chunks
-    marked ``stale`` (edited after the run) are skipped and only counted.
+    that already have feedback are treated as dismissed and omitted, as are
+    those naming a term on the book's ignore list
+    (``projects/<id>/ignored_terms.json``); chunks marked ``stale`` (edited
+    after the run) are skipped and only counted.
 
     Response::
 
@@ -5770,8 +5797,11 @@ def project_chapter_review(project_id, chapter):
           type_counts: { blacklist: N, ... }, stale_chunks: N }
 
     Each anchored finding: ``{eval_name, issue_index, chunk_id, severity,
-    message, suggestion, excerpt, match, match_start, match_end}`` where
-    ``match_start is None`` ⇒ paint a whole-sentence tint.
+    message, suggestion, excerpt, match, match_start, match_end, term,
+    rule_id}`` where ``match_start is None`` ⇒ paint a whole-sentence tint.
+    ``term``/``rule_id`` are the finding's stable identity, present only on
+    coded findings that have one; the reader uses them to offer "ignore this
+    for the whole book".
 
     A finding that cannot be placed on a sentence at all — a coded ``char_start``
     no row covers, or a judge excerpt that is not in the prose — goes to
@@ -5831,6 +5861,7 @@ def project_chapter_review(project_id, chapter):
     from src.utils.text_utils import normalize_newlines
 
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    ignored_terms = load_project_ignored_terms(project_dir)
 
     for chunk_id, crows in rows_by_chunk.items():
         payload = load_chunk_evaluation(project_dir, chunk_id)
@@ -5879,6 +5910,8 @@ def project_chapter_review(project_id, chapter):
             issue_index = ni.get("issue_index")
             if is_dismissed(fb_by_key, fb_by_index, eval_name, issue_index, ni):
                 continue
+            if is_ignored(ignored_terms, eval_name, ni):
+                continue
             match_text = loc.get("match") or ""
             excerpt = match_text or (
                 (loc.get("snippet_before") or "")
@@ -5896,6 +5929,8 @@ def project_chapter_review(project_id, chapter):
                     "suggestion": ni.get("suggestion"),
                     "excerpt": excerpt,
                     "reason": _unanchored_reason(freshness, eval_name),
+                    "term": issue_term(eval_name, ni),
+                    "rule_id": ni.get("rule_id"),
                 })
                 type_counts[eval_name] += 1
                 continue
@@ -5911,6 +5946,8 @@ def project_chapter_review(project_id, chapter):
                 "match": match_text,
                 "match_start": match_start,
                 "match_end": match_end,
+                "term": issue_term(eval_name, ni),
+                "rule_id": ni.get("rule_id"),
             })
             type_counts[eval_name] += 1
 
@@ -5964,6 +6001,201 @@ def project_chapter_review(project_id, chapter):
         "type_counts": dict(type_counts),
         "stale_chunks": stale_chunks,
     })
+
+
+# ── Review tab: the per-book ignore list ─────────────────────────────────────
+
+_IGNORABLE_EVALS = frozenset({"dictionary", "grammar"})
+
+
+def _ignored_terms_path(project_dir: Path) -> Path:
+    return project_dir / "ignored_terms.json"
+
+
+def _ignored_terms_for_write(project_dir: Path):
+    """Load the ignore list for a route that is about to rewrite it.
+
+    Returns ``(ignored, None)`` on success or ``(None, response)`` to return.
+
+    Deliberately *not* :func:`load_project_ignored_terms`, whose ``None`` means
+    "absent or unreadable" -- a fine degradation for the read path, where it
+    shows nothing as ignored, and a destructive one here: every add and remove
+    rewrites the file wholesale, so treating an unreadable file as an empty one
+    would replace the reviewer's whole list with the single entry in hand and
+    report success. An unreadable file is a conflict, not an empty list.
+    """
+    path = _ignored_terms_path(project_dir)
+    if not path.exists():
+        return IgnoredTerms(), None
+    ignored = load_project_ignored_terms(project_dir)
+    if ignored is None:
+        return None, (jsonify({
+            "error": "The ignore list for this book could not be read, so it "
+                     "cannot be modified without discarding it. Repair or "
+                     "remove ignored_terms.json.",
+        }), 409)
+    return ignored, None
+
+
+def _ignored_term_row(entry, hits, glossary):
+    """One list row, decorated with what the reviewer needs to judge it."""
+    counts = hits.get(entry.identity()) or IgnoreHits()
+    return {
+        "term": entry.term,
+        "eval_name": entry.eval_name,
+        "rule_id": entry.rule_id,
+        "added_at": entry.added_at.isoformat() if entry.added_at else None,
+        "added_from": entry.added_from,
+        "note": entry.note,
+        # What clearing the entry would actually bring back. Findings already
+        # dismissed by hand ride along in ``dismissed`` -- they name the term
+        # but the dismissal, not the ignore, is what is hiding them today.
+        "hides": counts.live,
+        "dismissed": counts.dismissed,
+        # A term that is also a glossary term is already suppressed by the
+        # glossary, so its ignore entry is redundant -- and it is a hint that
+        # the translation contract and the review list have drifted apart.
+        "in_glossary": bool(glossary and glossary.matches_word(entry.term)),
+    }
+
+
+@app.route("/api/project/<project_id>/ignored-terms", methods=["GET"])
+def project_ignored_terms(project_id):
+    """The book's ignore list, with a live suppression count per entry.
+
+    Powers the Review stage's management panel — the only surface that can
+    clear an entry. Note this is a UI affordance, not a boundary: the app has
+    no authentication, so every route here is reachable by anything that can
+    reach the port.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    ignored = load_project_ignored_terms(project_dir)
+    if not ignored or not ignored.terms:
+        return jsonify({"ok": True, "terms": []})
+
+    from web_ui.evaluations import _load_project_glossary
+
+    hits = count_ignored_hits(project_dir, ignored)
+    glossary = _load_project_glossary(project_dir)
+    rows = [_ignored_term_row(e, hits, glossary) for e in ignored.terms]
+    rows.sort(key=lambda r: (r["eval_name"], r["term"].casefold()))
+    return jsonify({"ok": True, "terms": rows})
+
+
+@app.route("/api/project/<project_id>/ignored-terms", methods=["POST"])
+def project_ignored_terms_add(project_id):
+    """Add one term to the book's ignore list.
+
+    Idempotent on ``(eval_name, folded term, rule_id)`` so a double-tap in the
+    reader cannot produce two rows the user then has to clear twice.
+
+    ``rule_id`` is **required** for ``grammar`` and dropped for everything else:
+    a grammar finding is a rule firing on a word, and the words reviewers
+    actually ignore there are function words, so a word-only entry would
+    silence every present and future rule on that token.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    term = (data.get("term") or "").strip()
+    eval_name = (data.get("eval_name") or "").strip()
+    rule_id = (data.get("rule_id") or "").strip() or None
+
+    if not term:
+        return jsonify({"error": "term is required"}), 400
+    if eval_name not in _IGNORABLE_EVALS:
+        return jsonify({
+            "error": f"eval_name must be one of {sorted(_IGNORABLE_EVALS)}"
+        }), 400
+    if eval_name == "grammar" and not rule_id:
+        return jsonify({
+            "error": "rule_id is required for grammar; a word-only grammar "
+                     "ignore would suppress every rule on that word"
+        }), 400
+    if eval_name != "grammar":
+        rule_id = None
+
+    ignored, err = _ignored_terms_for_write(project_dir)
+    if err:
+        return err
+    entry = IgnoredTerm(
+        term=term,
+        eval_name=eval_name,
+        rule_id=rule_id,
+        added_at=datetime.now(),
+        added_from=(data.get("added_from") or "").strip() or None,
+        note=(data.get("note") or "").strip() or None,
+    )
+    existing = {e.identity() for e in ignored.terms}
+    added = entry.identity() not in existing
+    if added:
+        ignored.terms.append(entry)
+        try:
+            save_ignored_terms(ignored, _ignored_terms_path(project_dir))
+        except Exception as e:
+            # Same shape as project_chunk_evaluation_feedback: every route on
+            # this blueprint answers in JSON, and a bare raise would hand the
+            # reader Werkzeug's HTML 500.
+            app.logger.exception("Failed to save ignored terms for %s", project_id)
+            return jsonify({"error": f"Could not save the ignore list: {e}"}), 500
+
+    return jsonify({"ok": True, "added": added, "total": len(ignored.terms)})
+
+
+@app.route("/api/project/<project_id>/ignored-terms", methods=["DELETE"])
+def project_ignored_terms_remove(project_id):
+    """Remove one entry, restoring its findings immediately.
+
+    The term travels in the JSON body rather than the path: these are Spanish,
+    Latin and French surface forms, and URL-encoding them into a path segment
+    is fragile for no gain.
+
+    No rerun is needed on either side of this — the filter runs at read time,
+    which is the whole reason it is not implemented as evaluator-level
+    suppression the way the glossary workaround was.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    term = (data.get("term") or "").strip()
+    eval_name = (data.get("eval_name") or "").strip()
+    rule_id = (data.get("rule_id") or "").strip() or None
+    if not term or not eval_name:
+        return jsonify({"error": "term and eval_name are required"}), 400
+    if eval_name != "grammar":
+        rule_id = None
+
+    ignored, err = _ignored_terms_for_write(project_dir)
+    if err:
+        return err
+    if not ignored.terms:
+        return jsonify({"ok": True, "removed": 0, "total": 0})
+
+    target = (eval_name, term.casefold(), rule_id)
+    kept = [e for e in ignored.terms if e.identity() != target]
+    removed = len(ignored.terms) - len(kept)
+    if removed:
+        ignored.terms = kept
+        try:
+            save_ignored_terms(ignored, _ignored_terms_path(project_dir))
+        except Exception as e:
+            app.logger.exception("Failed to save ignored terms for %s", project_id)
+            return jsonify({"error": f"Could not save the ignore list: {e}"}), 500
+
+    return jsonify({"ok": True, "removed": removed, "total": len(ignored.terms)})
 
 
 # ── Review tab: per-chapter status + bulk reruns ─────────────────────────────

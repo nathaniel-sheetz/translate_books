@@ -430,8 +430,48 @@
             });
             acts.appendChild(b);
         });
+        // Book-wide ignore, on its own row and last. The four buttons above
+        // label ONE finding; this one silences a term everywhere in the book
+        // and can only be undone from the dashboard's Review stage, so it does
+        // not sit in the same row pretending to be a fifth label.
+        if (core().canIgnore && core().canIgnore(f)) {
+            const ignoreRow = document.createElement('div');
+            ignoreRow.className = 'rv2-issue-ignore';
+            const ig = document.createElement('button');
+            ig.type = 'button';
+            ig.className = 'rv2-ignore-btn';
+            ig.textContent = core().ignoreLabel(f);
+            ig.title = core().ignoreTitle ? core().ignoreTitle() : '';
+            ig.addEventListener('click', function (e) {
+                e.stopPropagation();
+                acts.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+                ig.disabled = true;
+                if (core().ignoreTerm) core().ignoreTerm(cur.esIdx, f);
+                dropIssuesByTerm(f);
+            });
+            ignoreRow.appendChild(ig);
+            acts.appendChild(ignoreRow);
+        }
         wrap.appendChild(acts);
         return wrap;
+    }
+    // An ignore is about the term, so it clears every sibling finding on the
+    // same term in this sheet -- not just the row that was clicked.
+    function dropIssuesByTerm(finding) {
+        const folded = String(finding.term == null ? '' : finding.term).trim().toLowerCase();
+        if (cur && cur.findings) {
+            cur.findings = cur.findings.filter((x) => !(
+                x.eval_name === finding.eval_name &&
+                String(x.term == null ? '' : x.term).trim().toLowerCase() === folded &&
+                (finding.eval_name !== 'grammar' || x.rule_id === finding.rule_id)
+            ));
+        }
+        renderIssues();
+        updateCounts();
+        if (cur && (!cur.findings || !cur.findings.length)
+            && panels.issues.classList.contains('active')) {
+            setTab('annotate');
+        }
     }
     function dropIssue(wrap, finding) {
         wrap.remove();

@@ -70,6 +70,13 @@ class NormalizedIssue:
     multiple entries. ``issue_index`` refers to the index of the *original*
     ``Issue`` in ``EvalResult.issues`` so that feedback can reference back to
     it unambiguously.
+
+    ``rule_id`` / ``category`` / ``term`` are carried straight off the
+    :class:`Issue`. They used to stop here — this view is what reaches
+    ``normalized_issues[]``, the reader and the dashboard, so dropping them
+    meant no UI could see a finding's stable identity and had to regex the word
+    back out of ``message``. Every fanned-out entry from one ``Issue`` carries
+    the same values, which is what lets a suppression match all of them at once.
     """
 
     eval_name: str
@@ -80,6 +87,9 @@ class NormalizedIssue:
     suggestion: Optional[str]
     location: Optional[NormalizedLocation]
     metadata_excerpt: dict[str, Any] = field(default_factory=dict)
+    rule_id: Optional[str] = None
+    category: Optional[str] = None
+    term: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -91,6 +101,9 @@ class NormalizedIssue:
             "suggestion": self.suggestion,
             "location": self.location.to_dict() if self.location else None,
             "metadata_excerpt": self.metadata_excerpt,
+            "rule_id": self.rule_id,
+            "category": self.category,
+            "term": self.term,
         }
         return data
 
@@ -227,7 +240,10 @@ def _metadata_excerpt(eval_name: str, metadata: dict[str, Any]) -> dict[str, Any
         "glossary": ["term", "variants_used"],
         "completeness": ["missing_markers", "truncation_indicators"],
         "blacklist": ["category", "word"],
-        "grammar": ["rule_id", "category", "replacements"],
+        # No "grammar" entry: it listed rule_id/category/replacements, none of
+        # which are in GrammarEvaluator's result metadata ({checks_performed,
+        # issues_reported, dialect}), so it never matched anything. rule_id and
+        # category are real NormalizedIssue fields now, off the Issue itself.
         "llm_judge": ["fluency", "fidelity", "regional", "voice"],
     }
 
@@ -471,6 +487,9 @@ def fan_out_issues(result: EvalResult, chunk: Chunk) -> list[NormalizedIssue]:
                     suggestion=issue.suggestion,
                     location=None,
                     metadata_excerpt=excerpt,
+                    rule_id=issue.rule_id,
+                    category=issue.category,
+                    term=issue.term,
                 )
             )
             continue
@@ -488,6 +507,9 @@ def fan_out_issues(result: EvalResult, chunk: Chunk) -> list[NormalizedIssue]:
                     suggestion=issue.suggestion,
                     location=location,
                     metadata_excerpt=excerpt,
+                    rule_id=issue.rule_id,
+                    category=issue.category,
+                    term=issue.term,
                 )
             )
 

@@ -2068,6 +2068,37 @@ body {
     color: var(--text);
 }
 
+/* Book-wide ignore: its own line under the four per-finding labels, and
+   visually quieter than them, because it is the wider and less reversible
+   action of the two and should not read as a fifth label. */
+.review-item-ignore {
+    margin-top: 6px;
+}
+
+.review-ignore-btn {
+    font-size: 12px;
+    font-family: inherit;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-light);
+    background: none;
+    color: var(--text-muted3);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.review-ignore-btn:hover {
+    background: var(--bg-btn-hover);
+    border-style: solid;
+    color: var(--text);
+}
+
+.review-ignore-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
 .review-fb-btn:disabled {
     opacity: 0.5;
     cursor: default;

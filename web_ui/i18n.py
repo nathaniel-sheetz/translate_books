@@ -150,6 +150,17 @@ STRINGS = {
             "review_stale_chunks": "Some judge results are hidden: {n} chunk(s) edited since the judges ran. Re-judge to see them.",
             "review_fb_failed": "Feedback not saved; queued for retry.",
 
+            # "Ignore for the whole book" -- a judgment about a TERM, not about
+            # one finding, so the label names what it will silence. Spelling is
+            # keyed on the word; grammar on the (rule, word) pair, because the
+            # words reviewers ignore there are function words and a word-only
+            # entry would silence every present and future rule on that token.
+            "review_ignore_word": "Ignore “{term}” in this book",
+            "review_ignore_rule": "Ignore {rule} on “{term}” in this book",
+            "review_ignore_title": "Stop flagging this everywhere in this book. Clear it from the dashboard's Review stage.",
+            "review_ignore_done": "Ignored in this book.",
+            "review_ignore_failed": "Could not add to the ignore list.",
+
             # End-of-chapter overflow bin: findings and notes that belong to the
             # chapter but anchor to no sentence in it.
             "overflow": {
@@ -398,6 +409,12 @@ STRINGS = {
             "review_load_failed": "No se pudieron cargar los hallazgos de revisi\u00f3n.",
             "review_stale_chunks": "Algunos resultados de los jueces est\u00e1n ocultos: {n} fragmento(s) editado(s) tras ejecutarlos. Vuelve a ejecutarlos para verlos.",
             "review_fb_failed": "Comentario no guardado; en cola para reintentar.",
+
+            "review_ignore_word": "Ignorar «{term}» en este libro",
+            "review_ignore_rule": "Ignorar {rule} en «{term}» en este libro",
+            "review_ignore_title": "Dejar de señalarlo en todo el libro. Se puede quitar desde la etapa Revisión del panel.",
+            "review_ignore_done": "Ignorado en este libro.",
+            "review_ignore_failed": "No se pudo añadir a la lista de ignorados.",
 
             "overflow": {
                 "title": "No mostrado en el texto",

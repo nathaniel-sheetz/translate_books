@@ -352,3 +352,149 @@ def test_string_char_start_does_not_500(client, review_project):
     assert rv.status_code == 200
     body = rv.get_json()
     assert body["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# The per-book ignore list
+#
+# A dismissal hides one finding; an ignore hides every finding naming a term,
+# book-wide. Both are applied here, at read time, so an ignore takes effect and
+# is undone without re-evaluating anything.
+# ---------------------------------------------------------------------------
+
+
+def _save_dictionary_finding(proj_dir, word="negro", char_start=8, rule_id=None,
+                             eval_name="dictionary"):
+    issue = NormalizedIssue(
+        eval_name=eval_name,
+        eval_version="1.0.0",
+        issue_index=0,
+        severity="warning",
+        message="'" + word + "': Unknown word (found 1 time(s))",
+        suggestion=None,
+        location=NormalizedLocation(
+            raw="Character position " + str(char_start),
+            side="target",
+            char_start=char_start,
+            char_end=char_start + len(word),
+            match=word,
+        ),
+        term=word,
+        rule_id=rule_id,
+    )
+    save_chunk_evaluation(
+        proj_dir, "chapter_01_chunk_000",
+        results=[], aggregated={}, normalized_issues=[issue],
+    )
+
+
+def _write_ignore_list(proj_dir, entries):
+    (proj_dir / "ignored_terms.json").write_text(
+        json.dumps({"version": 1, "terms": entries}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_review_hides_an_ignored_term(client, review_project):
+    _save_dictionary_finding(review_project)
+    assert client.get("/api/project/revproj/review/chapter_01").get_json()[
+        "type_counts"
+    ].get("dictionary") == 1
+
+    _write_ignore_list(review_project, [{"term": "negro", "eval_name": "dictionary"}])
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["type_counts"].get("dictionary", 0) == 0
+    assert body["by_es_idx"] == {}
+
+
+def test_review_ignore_is_case_insensitive(client, review_project):
+    _save_dictionary_finding(review_project)
+    _write_ignore_list(review_project, [{"term": "NEGRO", "eval_name": "dictionary"}])
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["type_counts"].get("dictionary", 0) == 0
+
+
+def test_review_ignore_does_not_cross_evaluators(client, review_project):
+    """An entry made from a spelling finding must not silence a grammar one."""
+    _save_dictionary_finding(review_project, eval_name="grammar", rule_id="SOME_RULE")
+    _write_ignore_list(review_project, [{"term": "negro", "eval_name": "dictionary"}])
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["type_counts"].get("grammar") == 1
+
+
+def test_review_grammar_ignore_needs_the_matching_rule(client, review_project):
+    _save_dictionary_finding(review_project, eval_name="grammar", rule_id="AUN")
+
+    _write_ignore_list(review_project, [
+        {"term": "negro", "eval_name": "grammar", "rule_id": "COMMA_ADVERB"},
+    ])
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["type_counts"].get("grammar") == 1, "a different rule must still fire"
+
+    _write_ignore_list(review_project, [
+        {"term": "negro", "eval_name": "grammar", "rule_id": "AUN"},
+    ])
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["type_counts"].get("grammar", 0) == 0
+
+
+def test_review_findings_carry_their_identity(client, review_project):
+    """The reader needs term/rule_id on the wire to offer the ignore action."""
+    _save_dictionary_finding(review_project)
+    f = client.get("/api/project/revproj/review/chapter_01").get_json()["by_es_idx"]["0"][0]
+    assert f["term"] == "negro"
+    assert f["rule_id"] is None
+
+
+def test_review_recovers_the_term_on_a_legacy_finding(client, review_project):
+    """Evaluations written before Issue.term still support an ignore: the word
+    is parsed back out of the dictionary evaluator's own message format."""
+    _save_dictionary_finding(review_project)
+    path = review_project / "evaluations" / "chapter_01_chunk_000.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for ni in data["normalized_issues"]:
+        ni["term"] = None
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    f = client.get("/api/project/revproj/review/chapter_01").get_json()["by_es_idx"]["0"][0]
+    assert f["term"] == "negro"
+
+    _write_ignore_list(review_project, [{"term": "negro", "eval_name": "dictionary"}])
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["type_counts"].get("dictionary", 0) == 0
+
+
+def test_removing_an_ignore_restores_the_finding_with_no_rerun(client, review_project):
+    _save_dictionary_finding(review_project)
+    stored = (review_project / "evaluations" / "chapter_01_chunk_000.json").read_text(
+        encoding="utf-8"
+    )
+
+    _write_ignore_list(review_project, [{"term": "negro", "eval_name": "dictionary"}])
+    assert client.get("/api/project/revproj/review/chapter_01").get_json()[
+        "type_counts"
+    ].get("dictionary", 0) == 0
+
+    _write_ignore_list(review_project, [])
+    assert client.get("/api/project/revproj/review/chapter_01").get_json()[
+        "type_counts"
+    ].get("dictionary") == 1
+
+    after = (review_project / "evaluations" / "chapter_01_chunk_000.json").read_text(
+        encoding="utf-8"
+    )
+    assert stored == after, "read-time filtering must never touch the evaluation"
+
+
+def test_chapter_badge_counts_respect_the_ignore_list(client, review_project):
+    """The Review stage's per-chapter chips read a different walk than the
+    reader feed, so they need their own coverage or they drift."""
+    from web_ui.evaluations import load_chapter_type_counts
+
+    _save_dictionary_finding(review_project)
+    before = load_chapter_type_counts(review_project)
+    assert before["chapter_01"]["dictionary"] == 1
+
+    _write_ignore_list(review_project, [{"term": "negro", "eval_name": "dictionary"}])
+    after = load_chapter_type_counts(review_project)
+    assert after["chapter_01"]["dictionary"] == 0

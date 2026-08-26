@@ -57,6 +57,12 @@ class Issue(BaseModel):
     are optional and default to None: evaluators without a rule concept simply
     omit them, and evaluations persisted before these fields existed still
     parse.
+
+    ``term`` is the surface form the finding is *about*, when the finding is
+    about one — the flagged word for the dictionary evaluator, the flagged token
+    for a grammar match. It exists for the same reason: it was previously
+    recoverable only by regex-parsing the quoted word back out of ``message``,
+    which makes it unusable as a key. Same optional/additive contract.
     """
     severity: IssueLevel
     message: str
@@ -64,6 +70,7 @@ class Issue(BaseModel):
     suggestion: Optional[str] = None
     rule_id: Optional[str] = None
     category: Optional[str] = None
+    term: Optional[str] = None
 
 
 class Annotation(BaseModel):
@@ -459,6 +466,94 @@ class Blacklist(BaseModel):
     """
     entries: list[BlacklistEntry] = Field(default_factory=list)
     version: str = "1.0"
+
+
+class IgnoredTerm(BaseModel):
+    """One finding the reviewer has decided is noise for a whole book.
+
+    Written from the reader, cleared from the desktop dashboard. Deliberately
+    NOT a glossary entry: the glossary is a translation contract for the
+    recurring cast (median 14 occurrences per book), while these are the hapax
+    tail (median 1) -- proper nouns, Latin, French place names that the
+    dictionary cannot know and that there is nothing to be *consistent* about.
+
+    ``rule_id`` is required for ``eval_name="grammar"`` and unused for
+    ``"dictionary"``. A grammar finding is about a rule firing on a word, not
+    about the word: the words reviewers actually ignore there are function words
+    (``el`` occurs 1412x in one book), so a word-only key would silence every
+    present and future rule on that token. Keying on the pair bounds it to the
+    one rule -- and on the marked corpus it cost half as many real defects for
+    identical benefit.
+    """
+    term: str
+    eval_name: str
+    rule_id: Optional[str] = None
+    added_at: Optional[datetime] = None
+    added_from: Optional[str] = None
+    note: Optional[str] = None
+
+    def identity(self) -> tuple[str, str, Optional[str]]:
+        """Dedup/removal key: evaluator, case-folded term, rule.
+
+        The rule slot is populated for ``grammar`` only, mirroring
+        :meth:`IgnoredTerms.matches`. Keying on ``rule_id`` unconditionally
+        would let a non-grammar entry that carries one -- from a hand-edited
+        file, a restored backup, or a future client -- suppress findings via
+        ``matches`` while being unreachable by the removal route, which nulls
+        the rule slot for everything but grammar. That entry could then never
+        be cleared through the UI.
+        """
+        rule = self.rule_id or None if self.eval_name == "grammar" else None
+        return (self.eval_name, self.term.strip().casefold(), rule)
+
+
+class IgnoredTerms(BaseModel):
+    """Per-book ignore list, stored at ``projects/<id>/ignored_terms.json``."""
+    version: int = 1
+    terms: list[IgnoredTerm] = Field(default_factory=list)
+
+    def matches(
+        self,
+        eval_name: str,
+        term: Optional[str],
+        rule_id: Optional[str] = None,
+    ) -> bool:
+        """Is this finding ignored for this book?
+
+        Case-insensitive, **accent-sensitive**, and with no plural expansion --
+        all three deliberately unlike :meth:`Glossary.matches_word`. A glossary
+        term is a curated identity, so folding accents and generating plurals
+        helps it; an ignore entry means "this exact surface form is fine", so
+        the same tolerance would over-suppress. Folding accents would make
+        ignoring ``nivea`` also silence ``nivea``-with-a-tilde, and a missing
+        tilde is one of the few genuine Spanish typos the dictionary evaluator
+        actually catches. Measured on the marked corpus, the tolerant matcher's
+        two over-suppression modes are accent folding (an unaccented entry
+        silencing its accented neighbour, which is usually the real typo) and
+        plural generation (a singular entry silencing an unrelated longer word),
+        and neither buys any additional true suppression on the hapax tail these
+        entries live on.
+
+        A grammar finding with no ``rule_id`` is never ignored: without it there
+        is no bounded thing to suppress. Evaluations written before rule ids
+        were persisted are in that state until the chunk is re-evaluated.
+        """
+        if not term:
+            return False
+        if eval_name == "grammar" and not rule_id:
+            return False
+        folded = term.strip().casefold()
+        if not folded:
+            return False
+        for entry in self.terms:
+            if entry.eval_name != eval_name:
+                continue
+            if entry.term.strip().casefold() != folded:
+                continue
+            if eval_name == "grammar" and (entry.rule_id or None) != rule_id:
+                continue
+            return True
+        return False
 
 
 class PromptMetadata(BaseModel):

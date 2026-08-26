@@ -292,8 +292,12 @@ class GrammarEvaluator(BaseEvaluator):
             grouped_matches[key].append(match)
 
         issues: list[Issue] = []
-        for match_group in grouped_matches.values():
-            issue = self._convert_match_group_to_issue(match_group)
+        for key, match_group in grouped_matches.items():
+            # key[1] is the flagged word for both key shapes -- the ("", "",
+            # offset) fallback only fires when it was empty anyway -- so the
+            # word reaches the Issue without re-running the extraction, which
+            # can fail.
+            issue = self._convert_match_group_to_issue(match_group, flagged_word=key[1])
             issues.append(issue)
 
         # Apply max_issues limit
@@ -356,12 +360,17 @@ class GrammarEvaluator(BaseEvaluator):
             logging.warning(f"LanguageTool check failed: {e}")
             return []
 
-    def _convert_match_group_to_issue(self, matches: list) -> Issue:
+    def _convert_match_group_to_issue(
+        self, matches: list, flagged_word: str = ""
+    ) -> Issue:
         """
         Convert one or more LanguageTool matches (same rule + word) to a single Issue.
 
         Args:
             matches: Group of LanguageTool Match objects
+            flagged_word: The word the group is keyed on, passed in by the
+                caller rather than re-extracted (extraction can fail, and the
+                caller already paid for it when building the group key)
 
         Returns:
             Issue instance
@@ -400,6 +409,7 @@ class GrammarEvaluator(BaseEvaluator):
             suggestion=suggestion,
             rule_id=getattr(match, "rule_id", None) or None,
             category=getattr(match, "category", None) or None,
+            term=flagged_word or None,
         )
 
     def _determine_severity(self, match) -> IssueLevel:
