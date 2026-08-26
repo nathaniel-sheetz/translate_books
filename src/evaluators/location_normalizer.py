@@ -204,7 +204,10 @@ def _resolve_match_length(
     a single-char highlight so the UI still shows a caret.
     """
     # Try to pull the quoted token out of the message (dictionary/blacklist).
-    m = re.match(r"^'([^']+)'", message or "")
+    # Delimited by ``': ``, not by the first apostrophe: words carry their own
+    # ("Nag's", "d'Artagnan"), and splitting on those underlined a single
+    # character instead of the word. Same parse as ``evaluations.issue_term``.
+    m = re.match(r"^'(.+?)':", message or "")
     if m:
         candidate = m.group(1)
         if text[char_start:char_start + len(candidate)] == candidate:

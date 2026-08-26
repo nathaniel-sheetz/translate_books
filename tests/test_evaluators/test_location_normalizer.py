@@ -140,6 +140,24 @@ def test_dictionary_multiple_positions_fan_out(chunk):
     assert locs[1].char_start == 35
 
 
+def test_dictionary_apostrophe_word_is_highlighted_whole(chunk):
+    """The highlight is sized from the quoted word, delimited by ``': ``.
+
+    Splitting on the first apostrophe instead returned ``d``, and the length
+    guard happily confirmed it -- the target really does start with a ``d``
+    there -- so the reader underlined one character of a ten-character name.
+    """
+    chunk.translated_text = "Era d'Artagnan, el mosquetero."
+    issue = _issue(
+        "'d'Artagnan': Unknown word (not in Spanish or English dictionary)"
+        " (found 1 time(s))",
+        "Character position 4",
+    )
+    locs = normalize_issue_location(issue, chunk, "dictionary")
+    assert len(locs) == 1
+    assert locs[0].match == "d'Artagnan"
+
+
 def test_dictionary_truncated_positions(chunk):
     issue = _issue(
         "'x': reason (found 10 time(s))",

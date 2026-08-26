@@ -125,11 +125,25 @@ def is_dismissed(
 # ``location_normalizer._resolve_match_length`` already parses to size its
 # highlight -- so the word is recoverable for exactly the findings that need it.
 #
+# The delimiter is ``': ``, not the first apostrophe. Words carry apostrophes of
+# their own -- modern ones internally ("Nag's", "d'Artagnan"), and legacy rows
+# on their edges, because the old tokenizer's character class swallowed the
+# surrounding quote marks ("'Victory'", "'Sí'", "despacio'"). Splitting on the
+# first apostrophe mangled all of them: ``d'oïl_`` parsed as ``d``, which is
+# then discarded as a single character, and a leading apostrophe made the
+# pattern fail outright, so ``issue_term`` returned None and the finding
+# dropped out of every term-keyed join silently.
+#
+# Non-greedy on purpose. A tokenized word can never contain ``': ``, so the
+# first one always ends the term, whereas a greedy ``.+`` would run on to the
+# last one and swallow any reason string that ever grew a colon-quote of its
+# own.
+#
 # Scoped to ``dictionary`` on purpose. ``blacklist`` shares the message shape
 # but is not ignorable, and ``grammar``'s message is LanguageTool's localized
 # Spanish prose, which never carries the token; grammar keeps needing a re-run
 # to gain a ``rule_id`` regardless, and without one it is never suppressed.
-_QUOTED_TERM_RE = re.compile(r"^'([^']+)'")
+_QUOTED_TERM_RE = re.compile(r"^'(.+?)':")
 
 
 def issue_term(eval_name: str, issue: dict[str, Any]) -> Optional[str]:

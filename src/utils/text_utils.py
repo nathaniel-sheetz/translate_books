@@ -7,6 +7,7 @@ This module provides utilities for processing chapter text, including:
 - Counting words and paragraphs consistently with evaluators
 - Detecting and stripping [IMAGE:...] placeholders embedded by source ingestion
 - Detecting [CAPTION] block markers that tag a paragraph as an image caption
+- Blanking [FOOTNOTE:N] markers so read-only checkers do not tokenize FOOTNOTE
 - Accent/case-folded substring search + KWIC windowing (reader concordance and
   the annotation-review book-wide term search share these)
 
@@ -448,6 +449,32 @@ def blank_caption_markers(text: str) -> str:
     if not text:
         return text
     return _CAPTION_MARKER_LINE_RE.sub(lambda m: " " * len(m.group()), text)
+
+
+def blank_footnote_markers(text: str) -> str:
+    """
+    Replace ``[FOOTNOTE:N]`` tokens with equal-length whitespace.
+
+    Same contract as :func:`blank_caption_markers`: character offsets are
+    preserved, so evaluators that report positions stay aligned with the
+    original text.
+
+    Unlike :func:`strip_footnote_tokens` -- which removes the tokens and hands
+    back where they sat, because the conversion step needs to re-anchor real
+    footnotes -- this is for read-only checkers that must not see the marker at
+    all. Without it a word tokenizer reads "FOOTNOTE" as an unknown word and
+    reports one spelling finding per footnote reference in the book.
+
+    (``FOOTNOTE_TOKEN_RE`` is defined further down, in the footnote-token
+    section; it is resolved at call time, so the ordering is fine.)
+
+    Example:
+        >>> blank_footnote_markers("Dijo que sí.[FOOTNOTE:3] Y se fue.")
+        'Dijo que sí.             Y se fue.'
+    """
+    if not text:
+        return text
+    return FOOTNOTE_TOKEN_RE.sub(lambda m: " " * len(m.group()), text)
 
 
 _CAPTION_INSTRUCTION = (
