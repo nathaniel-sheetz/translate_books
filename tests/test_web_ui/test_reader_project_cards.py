@@ -316,7 +316,8 @@ def test_flag_chip_respects_category_cookie(client, card_project):
     _dialogue_finding(card_project)
     clear_card_cache()
 
-    client.set_cookie("reader_review_types", "dialogue")
+    client.set_cookie("reader_review_types_off",
+                      ",".join(t for t in REVIEW_TYPES if t != "dialogue"))
     html = client.get("/read/").data.decode("utf-8")
     assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
     # Only the selected category is ticked in the picker. Scoped to that popup:
@@ -331,9 +332,27 @@ def test_unknown_cookie_categories_fall_back_to_all(client, card_project):
     _dialogue_finding(card_project)
     clear_card_cache()
 
-    client.set_cookie("reader_review_types", "nonsense")
+    client.set_cookie("reader_review_types_off", "nonsense")
     html = client.get("/read/").data.decode("utf-8")
     assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
+
+
+def test_legacy_selection_cookie_does_not_hide_categories(client, card_project):
+    """The pre-inversion cookie is ignored, not read as a selection.
+
+    It listed what was *on*, so every category added after it was written —
+    the editorial judge, and whatever comes next — read as deselected and
+    vanished from the reader while its dashboard badges still showed.
+    """
+    _blacklist_finding(card_project)
+    _dialogue_finding(card_project)
+    clear_card_cache()
+
+    client.set_cookie("reader_review_types", "dialogue")
+    html = client.get("/read/").data.decode("utf-8")
+    assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
+    popup = html.split('id="review-types-popup"')[1].split('class="project-grid"')[0]
+    assert popup.count("checked") == len(REVIEW_TYPES)
 
 
 # ── 7. Cache invalidation ────────────────────────────────────────────────────
@@ -527,6 +546,9 @@ def test_set_review_types_round_trips(client, card_project):
     assert rv.status_code == 200
     # Normalized to REVIEW_TYPES order, not the caller's.
     assert rv.get_json()["types"] == ["grammar", "dialogue"]
+    # Stored inverted, so a category added later is on until it is unticked.
+    off = client.get_cookie("reader_review_types_off").decoded_value.split(",")
+    assert set(off) == {t for t in REVIEW_TYPES if t not in ("grammar", "dialogue")}
 
     _blacklist_finding(card_project)
     _dialogue_finding(card_project)

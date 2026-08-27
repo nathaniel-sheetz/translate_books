@@ -931,7 +931,7 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
     category rather than severity, and gated exactly the way the reader's
     Review Mode gates them (``web_ui/app.py:project_chapter_review``): stale
     chunks are skipped, dismissed findings (``_feedback.jsonl``) are subtracted,
-    coded findings must be target-side with a ``char_start``, and only the six
+    coded findings must be target-side with a ``char_start``, and only the
     :data:`REVIEW_TYPES` categories are counted.
 
     A finding the reader cannot anchor to a sentence — a judge excerpt that
@@ -947,8 +947,8 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
     for a list page.)
 
     Returns:
-        ``{chapter_id: {category: count}}``, each inner dict holding all six
-        :data:`REVIEW_TYPES` keys zero-filled. Chapters with no live findings
+        ``{chapter_id: {category: count}}``, each inner dict holding every
+        :data:`REVIEW_TYPES` key, zero-filled. Chapters with no live findings
         are absent — callers wanting a row for every chapter should fall back
         to :func:`empty_type_counts`.
     """
@@ -1116,7 +1116,7 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
     Same walk, same gating, same upper-bound caveat — see that function.
 
     Returns:
-        All six :data:`REVIEW_TYPES` keys, zero-filled.
+        Every :data:`REVIEW_TYPES` key, zero-filled.
     """
     totals = empty_type_counts()
     for counts in load_chapter_type_counts(project_dir).values():

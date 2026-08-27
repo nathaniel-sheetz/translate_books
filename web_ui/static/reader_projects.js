@@ -244,7 +244,7 @@
 
     /* ── Review-category picker ──
      *
-     * The counts for all six categories ship with the page in each card's
+     * The counts for every category ship with the page in each card's
      * data-flags, so re-summing on a checkbox change is instant and local; the
      * POST only persists the choice (globally, via cookie) for the next load
      * and for the chapter-list page.

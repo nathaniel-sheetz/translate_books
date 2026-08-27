@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import threading
 
 import pytest
 
 from web_ui import jobs
 from web_ui.app import app
+from web_ui.evaluations import REVIEW_JUDGE_TYPES
 
 
 @pytest.fixture(autouse=True)
@@ -397,6 +399,24 @@ def test_run_judges_rejects_an_unknown_backend(client, project):
                      json={"judges": ["dialogue"], "backend": "telepathy"})
     assert rv.status_code == 400
     assert "backend" in rv.get_json()["error"]
+
+
+def test_the_judge_picker_offers_every_judge_the_endpoint_accepts(client, project):
+    """The modal's checkboxes are the only way the browser names a judge.
+
+    ``selectedJudges()`` reads ``#judges-modal .judge-pick:checked`` and
+    ``postJudges`` refuses an empty list, so a judge with no checkbox is
+    unreachable from the UI no matter how completely it is wired everywhere
+    else — which is exactly how ``editorial`` shipped registered, persisted and
+    pipped, but unrunnable. Derived from ``REVIEW_JUDGE_TYPES`` rather than
+    spelled out: the next judge added to that tuple fails here until it has a
+    box to tick.
+    """
+    html = client.get("/project/jobproj").data.decode("utf-8")
+    picker = html.split('id="judges-modal"')[1].split("</div>")[0]
+    offered = set(re.findall(r'class="judge-pick" value="([^"]+)"', picker))
+
+    assert offered == set(REVIEW_JUDGE_TYPES)
 
 
 # ── run-judges: the headless CLI backend ─────────────────────────────────────

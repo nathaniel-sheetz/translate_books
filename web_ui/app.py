@@ -407,28 +407,38 @@ def set_ui_version():
 
 
 # Which evaluator/judge categories count as "errors I care about". Global, not
-# per project: the same six categories mean the same thing in every book, and
-# the home page needs the selection before you have picked a book. Mirrors the
-# two cookies above. The review-mode *on/off* switch stays per project in
-# localStorage — that one is a per-book reading preference.
-_REVIEW_TYPES_COOKIE = "reader_review_types"
+# per project: a category means the same thing in every book, and the home page
+# needs the selection before you have picked a book. Mirrors the two cookies
+# above. The review-mode *on/off* switch stays per project in localStorage —
+# that one is a per-book reading preference.
+#
+# The cookie records what is *deselected*, not what is selected, so a category
+# added to :data:`REVIEW_TYPES` after the cookie was written is on by default.
+# The old selection cookie did the opposite, which silently hid every new
+# judge from anyone who had ever opened the picker (that is how `editorial`
+# was invisible in the reader while its badges showed on the dashboard). Its
+# values cannot be migrated — "not in the list" is exactly the ambiguity — so
+# the rename resets the picker once and is then future-proof.
+_REVIEW_TYPES_COOKIE = "reader_review_types_off"
+_LEGACY_REVIEW_TYPES_COOKIE = "reader_review_types"
 
 
 def _get_review_types() -> list[str]:
-    """Read the selected review categories from cookie, default to all six.
+    """Read the selected review categories from cookie, default to all of them.
 
     Order follows :data:`REVIEW_TYPES`, not the cookie, so the UI is stable.
-    An absent, empty, or fully unrecognized cookie means "show everything" —
-    the same thing the checkboxes show on a first visit.
+    An absent cookie — or one that switches every category off — means "show
+    everything", the same thing the checkboxes show on a first visit.
     """
     raw = request.cookies.get(_REVIEW_TYPES_COOKIE, "")
-    selected = [t for t in REVIEW_TYPES if t in set(raw.split(","))]
+    off = set(raw.split(","))
+    selected = [t for t in REVIEW_TYPES if t not in off]
     return selected or list(REVIEW_TYPES)
 
 
 @app.route("/api/set-review-types", methods=["POST"])
 def set_review_types():
-    """Persist the selected review categories via cookie."""
+    """Persist the selected review categories via cookie (stored inverted)."""
     raw = (request.json or {}).get("types")
     if not isinstance(raw, list):
         return jsonify({"error": "types must be a list"}), 400
@@ -436,11 +446,15 @@ def set_review_types():
     if unknown:
         return jsonify({"error": f"Unknown review types: {', '.join(map(str, unknown))}"}), 400
     types = [t for t in REVIEW_TYPES if t in set(raw)]
+    off = [t for t in REVIEW_TYPES if t not in set(types)]
     resp = make_response(jsonify({"ok": True, "types": types}))
     resp.set_cookie(
-        _REVIEW_TYPES_COOKIE, ",".join(types),
+        _REVIEW_TYPES_COOKIE, ",".join(off),
         max_age=365 * 24 * 3600, samesite="Lax",
     )
+    # Drop the superseded cookie so a stale selection cannot come back if the
+    # inverted one is ever cleared on its own.
+    resp.set_cookie(_LEGACY_REVIEW_TYPES_COOKIE, "", max_age=0, samesite="Lax")
     return resp
 
 
@@ -1174,7 +1188,7 @@ def reader_chapters(project_id):
     project_dir = _resolve_project_dir(project_id)
     all_annotations = _chapter_annotation_state(project_dir)
 
-    # Evaluator/judge findings in the six review categories, bucketed by
+    # Evaluator/judge findings in the review categories, bucketed by
     # chapter. One extra walk of evaluations/*.json — cheap next to the
     # alignments this route already opens in full.
     flag_counts_by_chapter = load_chapter_type_counts(project_dir)

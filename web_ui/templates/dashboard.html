@@ -797,6 +797,12 @@
             <label>Judges</label>
             <label class="judges-check"><input type="checkbox" class="judge-pick" value="dialogue" checked> Dialogue formatting</label>
             <label class="judges-check"><input type="checkbox" class="judge-pick" value="address"> Forms of address (usted/t&uacute;)</label>
+            <!-- Unchecked by default, for the reason the registry keeps `editorial`
+                 out of the `default` and `prose` suites: it is the most expensive
+                 judge per target, and its findings are editorial judgement rather
+                 than rule compliance, so it wants a deliberate tick. Pass one only
+                 — the adjudication pass is `scripts/verify_editorial.py`. -->
+            <label class="judges-check"><input type="checkbox" class="judge-pick" value="editorial"> Editorial defects (unadjudicated)</label>
         </div>
         <div class="dash-field">
             <label>Backend</label>
