@@ -71,6 +71,7 @@ import os
 import sys
 import time
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -166,6 +167,8 @@ _STATUS_SCHEMA = {
     "makes the group stale), chunks{fresh,stale,missing}, chapters{stale,partial,not_run,done} "
     "(the chapter ids in each bucket — this is the 'what's left' answer), last_run, "
     "worker_models, and stale_basis{flag,hash,mtime} when anything is stale",
+    "wave": "--drafts only: the prepared manifest's mtime plus {written, pending} draft "
+    "counts and pending_ids — whether a fan-out has actually started/finished",
     "needs": "per group that still owes work, how many chapters are in each owed bucket "
     "(stale / partial / not_run). The ids themselves are in judges[<group>].chapters — this "
     "is the headline, not a second copy of them. Absent for a group that owes nothing",
@@ -234,14 +237,19 @@ _build_judge_context = build_judge_context
 
 
 def _find_project(arg: str) -> Path | None:
-    """Project dir for ``--project`` (a path or a ``projects/<id>`` slug), or None."""
-    p = Path(arg)
-    if p.is_dir():
-        return p
-    candidate = _REPO_ROOT / "projects" / arg
-    if candidate.is_dir():
-        return candidate
-    return None
+    """Project dir for ``--project``: a path, a flat slug, or a nested one.
+
+    ``harness.state.resolve_project_dir`` is the one lookup, so a book filed
+    under a grouping folder (``projects/.macdonald/photogen-nycteris``) answers
+    to its bare slug here exactly as it does to ``harness.py``. The local
+    version checked ``projects/<id>`` and stopped, so every grouped book's first
+    command of a session returned "Project not found" and cost a round-trip of
+    listing the grouping folders by hand.
+    """
+    try:
+        return hstate.resolve_project_dir(arg)
+    except FileNotFoundError:
+        return None
 
 
 def _resolve_project(arg: str) -> Path:
@@ -252,8 +260,8 @@ def _resolve_project(arg: str) -> Path:
         json.dumps(
             {
                 "status": "error",
-                "error": f"Project not found: {arg!r} (looked for a directory and "
-                f"projects/{arg}).",
+                "error": f"Project not found: {arg!r} (looked for a directory, "
+                f"projects/{arg}, and projects/*/{arg}).",
             },
             ensure_ascii=False,
         )
@@ -531,6 +539,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Add the per-chapter rows: when each group last ran, which worker model ran "
         "it, and the chunk ids behind a partial/stale verdict. Off by default — the "
         "bucketed chapter lists answer 'what's left?' for a fraction of the tokens.",
+    )
+    stp.add_argument(
+        "--drafts",
+        action="store_true",
+        help="Also report the prepared manifest's entries with/without a draft — the "
+        "read-only answer to 'did the wave start / is it still going?'",
     )
     stp.add_argument("--verbose", action="store_true", help="Debug logging")
 
@@ -932,6 +946,50 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _draft_progress(project_dir: Path) -> dict:
+    """Manifest entries with a draft vs without — "is the wave still going?".
+
+    A read-only answer to the question that otherwise costs a directory listing
+    sorted by mtime and a guess. On 2026-08-26 an announced wave had never
+    started, and it took eight minutes and a user prompt to notice; the giveaway
+    would have been N prepared entries, zero drafts, and a manifest whose mtime
+    had not moved. Keyed by ``_entry_fanout_id`` so a grouped ``batch_id`` entry
+    counts once, the same unit ``fanout --target-ids`` takes.
+    """
+    from src.judges.subagent import _entry_fanout_id
+
+    path = project_dir / ".harness" / "judges" / "manifest.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"manifest_at": None, "note": "no manifest — run `prepare` first"}
+
+    entries = doc.get("entries") or []
+    pending = []
+    for entry in entries:
+        draft = Path(entry.get("draft_path") or "")
+        try:
+            written = bool(draft.read_text(encoding="utf-8").strip())
+        except OSError:
+            written = False
+        if not written:
+            pending.append(_entry_fanout_id(entry) or entry.get("target_id"))
+    try:
+        at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:  # pragma: no cover - defensive
+        at = None
+    return {
+        "manifest_at": at,
+        "drafts": {"written": len(entries) - len(pending), "pending": len(pending)},
+        "pending_ids": pending,
+        "note": (
+            "every prepared entry has a draft — run `commit`"
+            if not pending
+            else f"{len(pending)} of {len(entries)} entries have no draft yet"
+        ),
+    }
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     """Read-only judge-coverage report: done / stale / partial / not_run."""
     from src.judges.status import StatusScopeError, build_status
@@ -957,6 +1015,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             _STATUS_SCHEMA,
         )
         return 1
+    if args.drafts:
+        payload["wave"] = _draft_progress(project_dir)
     _emit(payload, _STATUS_SCHEMA)
     return 0
 

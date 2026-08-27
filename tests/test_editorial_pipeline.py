@@ -389,6 +389,224 @@ def test_fanout_without_a_manifest_is_an_error(project, capsys):
     assert "prepare" in json.loads(capsys.readouterr().out)["error"]
 
 
+def test_fanout_defaults_its_concurrency_before_the_launcher_sees_it(
+    project, capsys, monkeypatch
+):
+    """The documented bare ``fanout`` used to be a TypeError.
+
+    ``--concurrency`` defaults to None and went straight into
+    ``run_headless_wave``, which does ``if concurrency < 1``. Pass 2's first
+    fan-out died in ~11s before job 1 (2026-08-26). The launcher is stubbed in
+    this file, so only asserting on the value it is *handed* can catch it.
+    """
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    captured = _stub_wave(monkeypatch)
+
+    assert _run(["fanout", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert captured["kwargs"]["concurrency"] == 5
+    assert isinstance(captured["kwargs"]["concurrency"], int)
+    assert out["concurrency"] == 5
+
+
+def test_fanout_refuses_a_concurrency_below_one_without_spawning(
+    project, capsys, monkeypatch
+):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    captured = _stub_wave(monkeypatch)
+
+    assert _run(["fanout", "--project", str(project), "--concurrency", "0"]) == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "error"
+    assert "concurrency" in out["error"]
+    assert "jobs" not in captured
+
+
+def test_fanout_inherits_the_profile_prepare_consented_to(project, capsys, monkeypatch):
+    """A bare ``fanout`` reproduces the wave whose number was approved."""
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys, "--cli", "cursor", "--worker-model", "grok-4.5")
+    manifest = json.loads(
+        (project / ".harness" / "editorial" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["cli"] == "cursor"
+    assert manifest["worker_model"] == "grok-4.5"
+
+    captured = _stub_wave(monkeypatch)
+    assert _run(["fanout", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["profile"]["cli"] == "cursor"
+    assert out["profile"]["cli_source"] == "manifest"
+    assert captured["kwargs"]["model"] == "grok-4.5"
+
+
+def test_a_worker_model_override_on_fanout_is_written_back(project, capsys, monkeypatch):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys, "--cli", "cursor")
+    _stub_wave(monkeypatch)
+
+    _run(["fanout", "--project", str(project), "--worker-model", "grok-4.6"])
+    capsys.readouterr()
+    manifest = json.loads(
+        (project / ".harness" / "editorial" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    # The resolver may append the effort bracket; what is pinned here is that the
+    # override reached the manifest, since `commit` reads it back.
+    assert manifest["worker_model"].startswith("grok-4.6")
+
+
+# ---------------------------------------------------------------------------
+# prepare as the consent surface
+
+
+def test_prepare_quotes_what_the_wave_will_cost(project, capsys):
+    """Pass 2 used to start on "yes do pass 2", never on an approved number."""
+    _persist_pass_one(project, [_candidate()])
+
+    out = _prepare(project, capsys, "--cli", "cursor")
+    usage = out["usage_summary"]
+
+    assert out["effective"]["cli"] == "cursor"
+    assert out["effective"]["baseline_tokens"] > 0
+    # The per-job fixed overhead is the dominant term, so the headless number
+    # must exceed the prompt it is built from — that gap IS the thing being
+    # consented to.
+    assert usage["estimated_prompt_tokens"] > 0
+    assert usage["estimated_headless_tokens"] > usage["estimated_prompt_tokens"]
+    assert usage["estimated_headless_tokens"] == (
+        usage["estimated_prompt_tokens"] + 1 * usage["headless_baseline_tokens"]
+    )
+    assert usage["chunks"] == 1 and usage["candidates"] == 1
+    assert usage["headless_effort_channel"] in {"argv", "model_bracket", "none"}
+
+
+def test_prepare_quiet_keeps_the_gate_and_drops_the_echo(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+
+    out = _prepare(project, capsys, "--quiet")
+
+    assert "entries" not in out
+    assert out["manifest"].endswith("manifest.json")
+    assert out["usage_summary"]["estimated_headless_tokens"] > 0
+
+
+def test_the_baseline_falls_back_to_the_pass_one_log_until_pass_two_has_rows(
+    project, capsys
+):
+    """A first adjudication wave should not quote a probe constant.
+
+    ``.harness/editorial/usage.jsonl`` is empty on wave 1, while the judges log
+    next door holds this machine's measured rows for the same CLI. Borrow that
+    rather than the 2026-08-10 probe, and say the number is borrowed.
+    """
+    _persist_pass_one(project, [_candidate()])
+    judges_log = project / ".harness" / "judges" / "usage.jsonl"
+    judges_log.parent.mkdir(parents=True, exist_ok=True)
+    judges_log.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "cli": "cursor",
+                    "rc": 0,
+                    "input": 20000,
+                    "output": 100,
+                    "prompt_sent": 1638,
+                }
+            )
+            for _ in range(6)
+        ),
+        encoding="utf-8",
+    )
+
+    out = _prepare(project, capsys, "--cli", "cursor")
+    source = out["usage_summary"]["headless_baseline_source"]
+
+    assert out["usage_summary"]["headless_baseline_tokens"] == 18362
+    assert "pass-1 log" in source
+    assert out["effective"]["baseline_source"] == source
+
+    # Once adjudication has logged its own jobs, the borrowed number steps aside.
+    editorial_log = project / ".harness" / "editorial" / "usage.jsonl"
+    editorial_log.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "cli": "cursor",
+                    "rc": 0,
+                    "input": 12000,
+                    "output": 100,
+                    "prompt_sent": 2000,
+                }
+            )
+            for _ in range(6)
+        ),
+        encoding="utf-8",
+    )
+    out = _prepare(project, capsys, "--cli", "cursor", "--keep-drafts")
+
+    assert out["usage_summary"]["headless_baseline_tokens"] == 10000
+    assert "pass-1 log" not in out["usage_summary"]["headless_baseline_source"]
+
+
+# ---------------------------------------------------------------------------
+# status --drafts, and the nested-slug lookup
+
+
+def test_status_drafts_answers_whether_the_wave_has_started(project, capsys):
+    """The read-only answer to "is it still going?" (2026-08-26, ~8 min lost)."""
+    _persist_pass_one(project, [_candidate()])
+
+    assert _run(["status", "--project", str(project), "--drafts"]) == 0
+    wave = json.loads(capsys.readouterr().out)["wave"]
+    assert wave["manifest_at"] is None
+    assert "no manifest" in wave["note"]
+
+    _prepare(project, capsys)
+    _run(["status", "--project", str(project), "--drafts"])
+    wave = json.loads(capsys.readouterr().out)["wave"]
+
+    assert wave["drafts"] == {"written": 0, "pending": 1}
+    assert wave["pending_ids"] == [CHUNK_ID]
+    assert wave["manifest_at"]
+
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        '{"verdicts": {}}', encoding="utf-8"
+    )
+    _run(["status", "--project", str(project), "--drafts"])
+    wave = json.loads(capsys.readouterr().out)["wave"]
+
+    assert wave["drafts"] == {"written": 1, "pending": 0}
+    assert "commit" in wave["note"]
+
+
+def test_a_grouped_book_answers_to_its_bare_slug(project, capsys, monkeypatch):
+    """``projects/.macdonald/photogen-nycteris`` is addressed as its slug.
+
+    Both CLIs used to check ``projects/<id>`` and stop, so the first command of
+    every session on a grouped book returned "Project not found" and cost a
+    round-trip of listing the grouping folders by hand.
+    """
+    from src.harness import state as hstate
+
+    grouped = project.parent / ".macdonald" / "photogen-nycteris"
+    grouped.parent.mkdir(parents=True, exist_ok=True)
+    project.rename(grouped)
+    monkeypatch.setattr(hstate, "REPO_ROOT", project.parent.parent)
+
+    assert _run(["status", "--project", "photogen-nycteris"]) == 0
+    assert json.loads(capsys.readouterr().out)["project"] == "photogen-nycteris"
+
+    from scripts import run_judges
+
+    assert run_judges._find_project("photogen-nycteris") == grouped
+
+
 # ---------------------------------------------------------------------------
 # run (API path)
 

@@ -14,26 +14,34 @@ plumbing — ``llm_io`` for the call and the JSON parse, ``harness.headless`` fo
 the subscription wave, the same draft/commit split — rather than being forced
 through a shape that does not fit.
 
-Four subcommands:
+Five subcommands:
 
-  * ``status``  — **read-only**. Which chunks carry unverified candidates. No
-                  spend, no writes.
+  * ``status``  — **read-only**. Which chunks carry unverified candidates, and
+                  with ``--drafts``, how far a prepared wave has got. No spend,
+                  no writes.
   * ``run``     — **API backend**. Adjudicate now, one call per chunk, behind a
                   dollar cost gate.
   * ``prepare`` — **draft backend**, phase 1. Render one prompt file per chunk
-                  plus a manifest, for a headless wave or spawned workers.
-                  Zero spend.
+                  plus a manifest, for a headless wave or spawned workers. Zero
+                  spend, and the wave's **consent gate**: it returns
+                  ``effective`` + ``usage_summary``, and takes the ``--cli`` /
+                  ``--worker-model`` / ``--effort`` that decide them.
   * ``fanout``  — **draft backend**, opt-in headless wave over the manifest.
+                  Inherits the profile ``prepare`` consented to; the flags are
+                  overrides, not the primary knobs.
   * ``commit``  — **draft backend**, phase 2. Parse the drafts and persist.
 
-Every command prints exactly one JSON object and mirrors it to
-``<project>/.harness/editorial/last_output.json``.
+Every command prints exactly one JSON object; every command but ``status``
+mirrors it to ``<project>/.harness/editorial/last_output.json`` and prints an
+``OUTPUT_JSON:`` pointer to stderr.
 
 Examples:
     python scripts/verify_editorial.py status  --project pollyanna
+    python scripts/verify_editorial.py status  --project pollyanna --drafts
     python scripts/verify_editorial.py run     --project pollyanna \\
         --scope chapter:chapter_01 --persist --confirm
-    python scripts/verify_editorial.py prepare --project pollyanna --scope book
+    python scripts/verify_editorial.py prepare --project pollyanna --scope book \\
+        --cli cursor --quiet
     python scripts/verify_editorial.py fanout  --project pollyanna
     python scripts/verify_editorial.py commit  --project pollyanna --persist
 """
@@ -44,6 +52,8 @@ import argparse
 import json
 import logging
 import sys
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -51,6 +61,22 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# Windows captured stdout defaults to the locale codec (cp1252), which mangles
+# every raya/guillemet/accent in the JSON we print — and pass 2 quotes the same
+# Spanish excerpts pass 1 does. ``run_judges.py`` forces UTF-8 for exactly this
+# reason; the hasattr guard keeps it safe under pytest's captured streams.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
+# Silence the urllib3/chardet version-mismatch warning ``requests`` emits at
+# import time. Every pass-2 command used to open with a RequestsDependencyWarning
+# — the same "stderr that is not an error" the judges CLI already paid to kill,
+# and every such line trains a reader to skim the stream real progress goes to.
+warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
+
+from src.harness import state as hstate  # noqa: E402
+from src.harness.usage import approx_tokens, baseline_tokens  # noqa: E402
 from src.judges import editorial_verify as ev  # noqa: E402
 from src.judges import llm_io  # noqa: E402
 from src.judges.context import build_judge_context  # noqa: E402
@@ -60,6 +86,12 @@ logger = logging.getLogger(__name__)
 
 JUDGE_NAME = "editorial"
 _NO_SIDECAR_COMMANDS = frozenset({"status"})
+
+#: Parallel headless processes when neither ``--concurrency`` nor the manifest
+#: says. ``None`` used to be handed straight to ``run_headless_wave``, which
+#: does ``if concurrency < 1`` — so the *documented* bare ``fanout`` was a
+#: TypeError before job 1. Every sibling launcher resolves this before the call.
+_DEFAULT_CONCURRENCY = 5
 
 #: Completion-token allowance per candidate when estimating cost. An
 #: adjudication verdict is a decision plus one sentence of reason, occasionally
@@ -72,39 +104,65 @@ _TOKENS_PER_VERDICT = 120
 # Project + IO helpers
 
 
-def _find_project(arg: str) -> Optional[Path]:
-    path = Path(arg)
-    if path.is_dir():
-        return path
-    candidate = _REPO_ROOT / "projects" / arg
-    if candidate.is_dir():
-        return candidate
-    for parent in sorted((_REPO_ROOT / "projects").glob("*")):
-        nested = parent / arg
-        if parent.is_dir() and nested.is_dir():
-            return nested
-    return None
-
-
 def _resolve_project(arg: str) -> Path:
-    found = _find_project(arg)
-    if found is not None:
-        return found
-    raise SystemExit(
-        json.dumps(
-            {
-                "status": "error",
-                "error": f"Project not found: {arg!r} (looked for a directory and "
-                f"projects/{arg}).",
-            },
-            ensure_ascii=False,
-        )
-    )
+    """Project dir for ``--project``: a path, a flat slug, or a nested one.
+
+    Routed through :func:`harness.state.resolve_project_dir` rather than a local
+    lookup, so a book filed under a grouping folder
+    (``projects/.macdonald/photogen-nycteris``) answers to its bare slug here
+    exactly as it does everywhere else in the harness. The local version globbed
+    one level, and ``glob("*")`` skips dot-directories — which is precisely where
+    the grouped books live, so the first command of every session 404'd.
+    """
+    try:
+        return hstate.resolve_project_dir(arg)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
+        ) from exc
 
 
 def work_dir(project_dir: Path) -> Path:
     """Where prompts, drafts and the manifest live for this pipeline."""
     return Path(project_dir) / ".harness" / "editorial"
+
+
+def _usage_log(project_dir: Path) -> Path:
+    """This pipeline's own per-job usage rows."""
+    return work_dir(project_dir) / "usage.jsonl"
+
+
+def _baseline_for(project_dir: Path, cli: str) -> tuple[int, str]:
+    """Per-job token overhead for the consent gate, and where the number is from.
+
+    Adjudication keeps its own ``usage.jsonl`` on purpose: a verdict-shaped job
+    is a different shape from a pass-1 finding-shaped one, so the estimate
+    self-calibrates on its own history rather than on the judge's. But on a
+    book's *first* adjudication wave that history is empty, and the constant it
+    falls back to is a probe taken on another machine — while
+    ``.harness/judges/usage.jsonl`` next door holds dozens of measured rows for
+    the same CLI on this box (photogen: 39 rows at 18,362 against a 17,200
+    constant). Borrow that rather than quote the constant, and label it as
+    borrowed. The fallback stops firing on its own once adjudication has logged
+    enough jobs of its own.
+    """
+    tokens, source = baseline_tokens(_usage_log(project_dir), cli=cli)
+    if source.startswith("default:"):
+        alt, alt_source = baseline_tokens(
+            Path(project_dir) / ".harness" / "judges" / "usage.jsonl", cli=cli
+        )
+        if not alt_source.startswith("default:"):
+            return alt, f"{alt_source} (pass-1 log; no adjudication rows yet)"
+    return tokens, source
+
+
+def _draft_written(entry: dict[str, Any]) -> bool:
+    """Has this manifest entry been answered? (the test ``fanout`` itself applies)"""
+    path = Path(entry.get("draft_path") or "")
+    try:
+        return bool(path.read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
 
 
 def _write_output_artifact(project_dir: Optional[Path], payload: dict) -> None:
@@ -119,9 +177,12 @@ def _write_output_artifact(project_dir: Optional[Path], payload: dict) -> None:
     try:
         directory = work_dir(project_dir)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "last_output.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        out = directory / "last_output.json"
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Say where it landed, on stderr, the way ``run_judges.py`` does. Without
+        # the pointer a caller has to match on the JSON body to know a command
+        # finished, and has to guess the path to read the full payload back.
+        print(f"OUTPUT_JSON: {out}", file=sys.stderr)
     except OSError as exc:  # pragma: no cover - defensive
         logger.debug("Could not write last_output.json: %s", exc)
 
@@ -207,24 +268,55 @@ def _counts(pending: list[dict[str, Any]]) -> dict[str, int]:
 # Commands
 
 
+def _draft_progress(project_dir: Path) -> dict[str, Any]:
+    """Manifest entries with a draft vs without — "is the wave still going?".
+
+    A read-only answer to the question that otherwise costs a directory listing
+    sorted by mtime and a guess. On 2026-08-26 an announced wave had never
+    started, and it took eight minutes and a user prompt to notice; the giveaway
+    would have been six prepared entries, zero drafts, and a manifest whose
+    mtime had not moved.
+    """
+    manifest = _load_manifest(project_dir)
+    if manifest is None:
+        return {"manifest_at": None, "note": "no manifest — run `prepare` first"}
+    entries = manifest.get("entries") or []
+    pending = [e["chunk_id"] for e in entries if not _draft_written(e)]
+    path = work_dir(project_dir) / "manifest.json"
+    try:
+        at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:  # pragma: no cover - defensive
+        at = None
+    return {
+        "manifest_at": at,
+        "drafts": {"written": len(entries) - len(pending), "pending": len(pending)},
+        "pending_ids": pending,
+        "note": (
+            "every prepared entry has a draft — run `commit --persist`"
+            if not pending
+            else f"{len(pending)} of {len(entries)} entries have no draft yet"
+        ),
+    }
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     pending, skipped = collect_pending(project_dir, args.scope, include_verified=args.force)
     reasons: dict[str, int] = {}
     for entry in skipped:
         reasons[entry["reason"]] = reasons.get(entry["reason"], 0) + 1
-    return _emit(
-        None,
-        {
-            "status": "ok",
-            "command": "status",
-            "project": project_dir.name,
-            "scope": args.scope,
-            "counts": _counts(pending),
-            "skipped": reasons,
-            "pending_chunks": [e["chunk_id"] for e in pending],
-        },
-    )
+    payload = {
+        "status": "ok",
+        "command": "status",
+        "project": project_dir.name,
+        "scope": args.scope,
+        "counts": _counts(pending),
+        "skipped": reasons,
+        "pending_chunks": [e["chunk_id"] for e in pending],
+    }
+    if args.drafts:
+        payload["wave"] = _draft_progress(project_dir)
+    return _emit(None, payload)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -340,16 +432,36 @@ def _persist(project_dir: Path, chunk_id: str, patched: dict[str, Any]) -> None:
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
+    from src.harness.profile import resolve_profile
+
     project_dir = _resolve_project(args.project)
     context, error = build_judge_context(project_dir, [JUDGE_NAME], args.model, args.provider)
     if error:
         return _emit(project_dir, {"status": "error", "command": "prepare", "error": error})
+
+    # The consent gate lives here now, not on ``fanout``. Pass 1 puts ``--cli``
+    # on ``prepare``; pass 2 putting it on ``fanout`` meant a Cursor operator had
+    # to remember which sibling took which flag — and meant the wave was
+    # approved, when it was approved at all, on no number: ``prepare`` returned
+    # paths and candidate counts and nothing about what answering them costs.
+    cfg = hstate.load_config(project_dir)
+    prof = resolve_profile(
+        project_dir,
+        command="judges",
+        cli=args.cli,
+        worker_model=args.worker_model,
+        effort=args.effort,
+        cfg=cfg,
+        usage_log=_usage_log(project_dir),
+    )
 
     pending, skipped = collect_pending(project_dir, args.scope, include_verified=args.force)
     directory = work_dir(project_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
     entries = []
+    prompt_tokens = 0
+    api_cost = 0.0
     preamble_path = directory / "preamble.txt"
     wrote_preamble = False
 
@@ -361,6 +473,17 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         draft_path = directory / f"{chunk_id}.verify.draft.json"
 
         prompt_path.write_text(prefix + suffix, encoding="utf-8")
+        # What a worker actually receives, and what the same call would cost
+        # metered. Both come off the parts already in hand: ``prefix + suffix``
+        # is byte-identical to ``build_prompt``, so re-rendering to price it
+        # would be duplicate work.
+        prompt_tokens += approx_tokens(prefix + suffix)
+        api_cost += llm_io.estimate_call_cost(
+            prefix + suffix,
+            provider=args.provider,
+            model=args.model,
+            completion_tokens=_TOKENS_PER_VERDICT * max(1, len(entry["candidates"])),
+        )
         if prefix:
             if not wrote_preamble:
                 preamble_path.write_text(prefix, encoding="utf-8")
@@ -386,29 +509,72 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         "judge": JUDGE_NAME,
         "model": args.model,
         "provider": args.provider,
+        # The resolved profile, so a bare ``fanout`` reproduces the wave the
+        # operator consented to instead of re-resolving from scratch — and so a
+        # wrong pin is visible on disk, not only in a payload that scrolled away.
+        "cli": prof.cli,
+        "worker_model": prof.worker_model,
+        "effort": prof.effort,
+        "effort_channel": prof.effort_channel,
+        "batch_size": _DEFAULT_CONCURRENCY,
         "entries": entries,
     }
     (directory / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    return _emit(
-        project_dir,
-        {
-            "status": "ok",
-            "command": "prepare",
-            "project": project_dir.name,
-            "counts": _counts(pending),
-            "skipped_count": len(skipped),
-            "manifest": str(directory / "manifest.json"),
-            "entries": entries,
-            "instructions": (
-                "Either run `fanout` for a headless wave, or spawn one worker per "
-                "entry: read prompt_path, write ONLY the JSON verdict object to "
-                "draft_path. Then run `commit --persist`."
-            ),
+    baseline, baseline_source = _baseline_for(project_dir, prof.cli)
+    effective = prof.to_payload()
+    # The profile resolved its baseline against this pipeline's own (usually
+    # empty) log; ``_baseline_for`` is allowed to borrow pass 1's. Patch the
+    # payload rather than the profile so both halves of the gate quote one
+    # number.
+    effective["baseline_tokens"] = baseline
+    effective["baseline_source"] = baseline_source
+
+    # Also on stderr: a mis-resolved CLI is worth seeing even when the caller
+    # only skims stdout, and this is the last moment before the wave.
+    for warning in prof.warnings:
+        print(f"[prepare] warning: {warning}", file=sys.stderr)
+
+    counts = _counts(pending)
+    payload = {
+        "status": "ok",
+        "command": "prepare",
+        "project": project_dir.name,
+        "counts": counts,
+        "skipped_count": len(skipped),
+        "manifest": str(directory / "manifest.json"),
+        "effective": effective,
+        "usage_summary": {
+            "chunks": counts["chunks"],
+            "candidates": counts["candidates"],
+            "source_requested": counts["source_requested"],
+            "cli": prof.cli,
+            "worker_model": prof.worker_model,
+            "batch_size": _DEFAULT_CONCURRENCY,
+            "estimated_api_cost": round(api_cost, 6),
+            "estimated_prompt_tokens": prompt_tokens,
+            "headless_baseline_tokens": baseline,
+            "headless_baseline_source": baseline_source,
+            "estimated_headless_tokens": prompt_tokens + len(entries) * baseline,
+            "headless_effort": prof.effort,
+            "headless_effort_source": prof.effort_source,
+            "headless_effort_channel": prof.effort_channel,
         },
-    )
+        "warnings": list(prof.warnings),
+        "instructions": (
+            "Relay `effective` + `usage_summary` and get approval, THEN run "
+            "`fanout` for a headless wave — or spawn one worker per entry: read "
+            "prompt_path, write ONLY the JSON verdict object to draft_path. Then "
+            "run `commit --persist`."
+            if entries
+            else "Nothing to adjudicate in this scope."
+        ),
+    }
+    if not args.quiet:
+        payload["entries"] = entries
+    return _emit(project_dir, payload)
 
 
 def _load_manifest(project_dir: Path) -> Optional[dict[str, Any]]:
@@ -421,7 +587,6 @@ def _load_manifest(project_dir: Path) -> Optional[dict[str, Any]]:
 
 
 def cmd_fanout(args: argparse.Namespace) -> int:
-    from src.harness import state as hstate
     from src.harness.headless import run_headless_wave
     from src.harness.profile import resolve_profile
 
@@ -444,15 +609,30 @@ def cmd_fanout(args: argparse.Namespace) -> int:
     # (``headless_effort_judges``); only the usage log is its own, so the
     # baseline self-calibrates on adjudication jobs rather than on pass-1 ones,
     # which are a different shape.
+    #
+    # Resolved against the *manifest* first: ``prepare`` wrote the CLI, model and
+    # effort the operator consented to, so a bare ``fanout`` reproduces that wave
+    # exactly. Flags still win, for the one-flag correction of a bad pin. Effort
+    # is inherited only when the CLI has not flipped — a level resolved for
+    # Claude is a Claude-table number, and carrying it onto Cursor would write an
+    # ``[effort=…]`` bracket the resolver deliberately refuses to invent.
     cfg = hstate.load_config(project_dir)
+    inherited_effort, inherited_effort_source = args.effort, "cli"
+    cli_unchanged = (args.cli or manifest.get("cli")) == manifest.get("cli")
+    if not args.effort and "effort" in manifest and cli_unchanged:
+        inherited_effort = manifest["effort"] or "default"
+        inherited_effort_source = "manifest"
     profile = resolve_profile(
         project_dir,
         command="judges",
-        cli=args.cli,
-        worker_model=args.worker_model,
-        effort=args.effort,
+        cli=args.cli or manifest.get("cli"),
+        cli_source="cli" if args.cli else "manifest",
+        worker_model=args.worker_model or manifest.get("worker_model"),
+        worker_model_source="cli" if args.worker_model else "manifest",
+        effort=inherited_effort,
+        effort_source=inherited_effort_source,
         cfg=cfg,
-        usage_log=work_dir(project_dir) / "usage.jsonl",
+        usage_log=_usage_log(project_dir),
     )
     cli_name = profile.cli
     worker_model = profile.worker_model
@@ -463,10 +643,52 @@ def cmd_fanout(args: argparse.Namespace) -> int:
     for warning in profile.warnings:
         print(warning, file=sys.stderr)
 
+    # An override that changes the wave must reach the manifest — ``commit``
+    # and any later bare ``fanout`` both read it back. Profile fields only:
+    # entries and drafts are untouched, so this is not the destructive
+    # re-``prepare``.
+    if (
+        manifest.get("cli") != profile.cli
+        or manifest.get("worker_model") != profile.worker_model
+        or manifest.get("effort") != profile.effort
+    ):
+        manifest["cli"] = profile.cli
+        manifest["worker_model"] = profile.worker_model
+        manifest["effort"] = profile.effort
+        manifest["effort_channel"] = profile.effort_channel
+        try:
+            (work_dir(project_dir) / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:  # pragma: no cover - disk failure
+            print(f"could not update the editorial manifest: {exc}", file=sys.stderr)
+
+    # Resolve the wave width BEFORE the launcher sees it. ``run_headless_wave``
+    # does ``if concurrency < 1``, so handing it the argparse default of ``None``
+    # is a TypeError before job 1 — which is exactly what the documented bare
+    # ``fanout`` did. Every sibling launcher resolves this first; this one did
+    # not, and its test stubs the launcher, so CI never ran the comparison.
+    concurrency = args.concurrency
+    if concurrency is None:
+        try:
+            concurrency = int(manifest.get("batch_size") or _DEFAULT_CONCURRENCY)
+        except (TypeError, ValueError):
+            concurrency = _DEFAULT_CONCURRENCY
+    if concurrency < 1:
+        return _emit(
+            project_dir,
+            {
+                "status": "error",
+                "command": "fanout",
+                "project": project_dir.name,
+                "error": f"invalid concurrency {concurrency!r}; must be >= 1",
+            },
+        )
+
     jobs, skipped = [], []
     for entry in manifest.get("entries") or []:
         draft_path = Path(entry["draft_path"])
-        if draft_path.exists() and draft_path.read_text(encoding="utf-8").strip():
+        if _draft_written(entry):
             skipped.append(entry["chunk_id"])
             continue
         preamble = entry.get("preamble_path")
@@ -498,6 +720,7 @@ def cmd_fanout(args: argparse.Namespace) -> int:
                 "command": "fanout",
                 "project": project_dir.name,
                 "profile": profile.to_payload(),
+                "concurrency": concurrency,
                 "wrote": [],
                 "skipped": skipped,
                 "instructions": "Nothing to fan out — run `commit --persist`.",
@@ -507,10 +730,10 @@ def cmd_fanout(args: argparse.Namespace) -> int:
     wave = run_headless_wave(
         jobs,
         model=worker_model,
-        concurrency=args.concurrency,
+        concurrency=concurrency,
         cli=cli_name,
         cli_bin=args.cli_bin,
-        usage_log=work_dir(project_dir) / "usage.jsonl",
+        usage_log=_usage_log(project_dir),
         extra_flags=extra_flags,
         effort=effort,
     )
@@ -521,6 +744,7 @@ def cmd_fanout(args: argparse.Namespace) -> int:
             "command": "fanout",
             "project": project_dir.name,
             "profile": profile.to_payload(),
+            "concurrency": concurrency,
             "skipped": skipped,
             **{k: v for k, v in wave.items() if k != "_schema"},
             "instructions": "Run `commit --persist` to land the verdicts.",
@@ -633,6 +857,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="read-only: which chunks await adjudication")
     common(p_status)
     p_status.add_argument("--force", action="store_true", help="Include already-verified chunks")
+    p_status.add_argument(
+        "--drafts",
+        action="store_true",
+        help="Also report manifest entries with/without a draft (is the wave still going?)",
+    )
 
     p_run = sub.add_parser("run", help="API backend: adjudicate now, one call per chunk")
     common(p_run)
@@ -645,13 +874,30 @@ def build_parser() -> argparse.ArgumentParser:
     common(p_prepare)
     p_prepare.add_argument("--keep-drafts", action="store_true", help="Do not clear old drafts")
     p_prepare.add_argument("--force", action="store_true", help="Re-verify verified chunks")
+    # The same four ``run_judges.py prepare`` carries. This is the consent
+    # surface: whichever CLI is going to run the wave has to be known here, or
+    # the tokens quoted are for a wave that never happens.
+    p_prepare.add_argument("--cli", default=None, choices=["claude", "cursor"])
+    p_prepare.add_argument("--worker-model", default=None, help="Pin the worker model")
+    p_prepare.add_argument("--effort", default=None, help="Per-run effort override")
+    p_prepare.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Omit entries[] from stdout, keeping manifest + effective + usage_summary",
+    )
 
     p_fanout = sub.add_parser("fanout", help="draft backend: headless wave over the manifest")
     common(p_fanout, scope=False)
     p_fanout.add_argument("--cli", default=None, choices=["claude", "cursor"])
     p_fanout.add_argument("--cli-bin", default=None, help="Path to the CLI binary")
     p_fanout.add_argument("--worker-model", default=None, help="Pin the worker model")
-    p_fanout.add_argument("--concurrency", type=int, default=None)
+    p_fanout.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="Max parallel headless processes "
+        f"(default: the manifest's batch_size, else {_DEFAULT_CONCURRENCY})",
+    )
     p_fanout.add_argument("--effort", default=None, help="Per-run effort override")
 
     p_commit = sub.add_parser("commit", help="draft backend: parse drafts and persist")

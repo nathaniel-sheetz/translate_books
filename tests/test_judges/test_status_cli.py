@@ -437,3 +437,56 @@ def test_tagged_scope_is_rejected_with_a_prepare_pointer(project, capsys):
     assert rc == 1
     assert "prepare" in out["error"]
     assert not (project / ".harness" / "judges").exists()
+
+
+def test_drafts_reports_whether_a_prepared_wave_has_started(project, capsys):
+    """The read-only "is it still going?" answer.
+
+    On 2026-08-26 an announced fan-out had never been launched and it took eight
+    minutes to notice. One prepared entry with no draft is the signal; a grouped
+    entry counts once, since ``batch_id`` is the unit ``fanout`` takes.
+    """
+    run_judges = pytest.importorskip("scripts.run_judges")
+    jdir = project / ".harness" / "judges"
+    jdir.mkdir(parents=True)
+    (jdir / "chapter_02.draft.json").write_text('{"issues": []}', encoding="utf-8")
+    (jdir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "target_id": "chapter_01_chunk_000",
+                        "judge": "dialogue",
+                        "draft_path": str(jdir / "chapter_01.draft.json"),
+                    },
+                    {
+                        "batch_id": "batch_000",
+                        "judge": "dialogue",
+                        "draft_path": str(jdir / "chapter_02.draft.json"),
+                        "members": [
+                            {"target_id": "chapter_02_chunk_000"},
+                            {"target_id": "chapter_03_chunk_000"},
+                        ],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert run_judges.main(["status", "--project", str(project), "--drafts"]) == 0
+    wave = json.loads(capsys.readouterr().out)["wave"]
+
+    assert wave["drafts"] == {"written": 1, "pending": 1}
+    assert wave["pending_ids"] == ["chapter_01_chunk_000"]
+    assert wave["manifest_at"]
+
+
+def test_drafts_says_so_when_nothing_was_ever_prepared(project, capsys):
+    run_judges = pytest.importorskip("scripts.run_judges")
+
+    assert run_judges.main(["status", "--project", str(project), "--drafts"]) == 0
+    wave = json.loads(capsys.readouterr().out)["wave"]
+
+    assert wave["manifest_at"] is None
+    assert "prepare" in wave["note"]

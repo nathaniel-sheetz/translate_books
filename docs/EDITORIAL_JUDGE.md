@@ -253,14 +253,16 @@ python scripts/run_judges.py prepare --project pollyanna --judge editorial \
 python scripts/run_judges.py fanout  --project pollyanna
 python scripts/run_judges.py commit  --project pollyanna --persist
 
-# Pass 2 — what is waiting (read-only)
-python scripts/verify_editorial.py status --project pollyanna
+# Pass 2 — what is waiting (read-only); --drafts adds "has the wave started?"
+python scripts/verify_editorial.py status --project pollyanna [--drafts]
 
 # Pass 2 — API
 python scripts/verify_editorial.py run --project pollyanna --persist --confirm
 
-# Pass 2 — headless
-python scripts/verify_editorial.py prepare --project pollyanna
+# Pass 2 — headless. `prepare` is the consent gate: it returns `effective` +
+# `usage_summary` and takes the --cli/--worker-model/--effort that decide them.
+# `fanout` inherits that profile from the manifest — run it bare.
+python scripts/verify_editorial.py prepare --project pollyanna --cli cursor --quiet
 python scripts/verify_editorial.py fanout  --project pollyanna
 python scripts/verify_editorial.py commit  --project pollyanna --persist
 
@@ -306,6 +308,7 @@ src/judges/editorial_judge.py            EditorialJudge (registered as "editoria
 src/judges/editorial_verify.py           build / parse / apply seams for pass 2
 src/judges/neighborhood.py               English window from alignments/
 scripts/verify_editorial.py              pass 2 CLI (run | prepare | fanout | commit | status)
+.claude/skills/judge-review/references/editorial.md   how the agent drives both passes
 scripts/editorial_metrics.py             precision, volume, adjudication, anchoring
 tests/test_judges/test_editorial_judge.py
 tests/test_judges/test_editorial_verify.py
@@ -313,4 +316,7 @@ tests/test_editorial_pipeline.py
 ```
 
 See [JUDGES_FRAMEWORK.md](JUDGES_FRAMEWORK.md) for the shared judge plumbing and
-[ADDRESS_JUDGE.md](ADDRESS_JUDGE.md) for the other per-book judge.
+[ADDRESS_JUDGE.md](ADDRESS_JUDGE.md) for the other per-book judge. The operating
+procedure an agent follows to run both passes — which questions to ask, where the
+two consent gates are, and why `apply` waits for `verified: true` — is
+[`.claude/skills/judge-review/references/editorial.md`](../.claude/skills/judge-review/references/editorial.md).

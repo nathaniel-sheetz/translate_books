@@ -3,11 +3,15 @@ name: judge-review
 description: |
   Run tailored LLM judges over a translated chunk or chapter, relay the findings,
   and (with approval) persist them so the dashboard badges update. Ships the
-  dialogue-compliance judge (Spanish dialogue formatting vs. prompts/dialogue.txt)
-  and the address judge (usted/tú vs. the per-book address_map.json). Two
-  interchangeable backends: an API path (metered) and a subagent path (no API spend).
+  dialogue-compliance judge (Spanish dialogue formatting vs. prompts/dialogue.txt),
+  the address judge (usted/tú vs. the per-book address_map.json) and the two-pass
+  editorial judge (clarity/naturalness/fidelity defects, adjudicated against the
+  English). Two interchangeable backends: an API path (metered) and a subagent path
+  (no API spend).
   Use when asked to "run the dialogue judge", "check dialogue compliance", "run the
-  usted/tú judge", "check forms of address", "run the judges on chapter N", or "judge-review".
+  usted/tú judge", "check forms of address", "run the editorial judge", "review this
+  translation editorially", "adjudicate the editorial findings", "run pass 2",
+  "run the judges on chapter N", or "judge-review".
 allowed-tools:
   - Bash
   - Read
@@ -80,9 +84,15 @@ python scripts/run_judges.py status --project fabre2 --judge dialogue \
 ```
 
 Read-only, no spend, no writes. Flags: `--judge` (repeatable — `coded`, `dialogue`,
-`address`; default all), `--scope` (repeatable **filter**, not a target resolver:
-`chapter:<id>`, the inclusive range `chapter:<first>..<last>`, `chunk:<id>`, `book`; a
-chapter with no translated chunks is *reported*, not an error), and `--detail`.
+`address`, `editorial`; default all), `--scope` (repeatable **filter**, not a target
+resolver: `chapter:<id>`, the inclusive range `chapter:<first>..<last>`, `chunk:<id>`,
+`book`; a chapter with no translated chunks is *reported*, not an error), `--detail`,
+and `--drafts`.
+
+**`--drafts` answers "did the wave actually start?"** in one free call: it reads the
+prepared manifest and reports its mtime plus `{written, pending}` draft counts and the
+ids still owing one. Use it the moment a user asks whether a fan-out is still running —
+never answer that by listing draft files by mtime, and never answer it from memory.
 
 It returns, per group: `state` (`done` | `partial` | `stale` | `not_run`), `chunks`
 ({fresh, stale, missing}), `chapters` — **the four buckets of chapter ids, which is the
@@ -233,6 +243,7 @@ saying which knob carries it (`argv` / `model_bracket` / `none`).
 
 `apply` (turn approved findings into chunk edits) adds:
 - `--judge <name>` (default `dialogue`; **repeatable**) — whose **persisted** findings to consider.
+  `--judge editorial` is valid, but only on adjudicated results (see the gate in C).
 - `--scope chunk:<id>` / `--scope chapter:<id>` / `--scope book` — **repeatable**.
 - `--select <id,id,...>` — the `applicable[].id`s (or `qualified_id`s) to apply. **Omit for a plan-only dry-run.**
 - `--rebuild-epub` — rebuild the EPUB after applying (implies recombine + realign; incompatible with `--no-realign`).
@@ -255,10 +266,26 @@ saying which knob carries it (`argv` / `model_bracket` / `none`).
 - **`address`** — usted/tú (formal vs. informal address) vs. the **per-book
   address map**. **Requires setup** (see below). Run it with `--judge address`
   (or `--suite address`). It is *not* in the `default` suite.
+- **`editorial`** — the clarity, naturalness, fidelity and style-guide defects no
+  rulebook enumerates: *"would a competent editor stop here?"*. **It is two
+  passes** — pass 1 (`--judge editorial`, or `--suite editorial`) reads the
+  Spanish alone and proposes candidates; pass 2 (`scripts/verify_editorial.py`)
+  adjudicates every candidate against the English and stamps `verified: true`.
+  It is in **neither** `default` nor `prose`: it wants a deliberate "review this
+  book editorially" gesture rather than riding along on a dialogue wave.
 
-Running **both** is one command, not two: `--judge dialogue --judge address`, or
-`--suite prose`. Gate the pair on `address_map.json` existing (see below) — that
-prerequisite is the only reason the two were ever run apart.
+  > **Before staging it, Read
+  > [`references/editorial.md`](references/editorial.md).** The second pass is
+  > part of the run, not a follow-up request, and `apply` must not be offered on
+  > a result whose `metadata.verified` is not `true` — pass-1 findings are
+  > proposals. That file also carries the pass-2 CLI surface and the two-gate
+  > consent script; `docs/EDITORIAL_JUDGE.md` has the design rationale.
+
+Running dialogue and address **both** is one command, not two: `--judge dialogue
+--judge address`, or `--suite prose`. Gate the pair on `address_map.json`
+existing (see below) — that prerequisite is the only reason the two were ever run
+apart. `editorial` may ride in the same `prepare` as well (`--judge` repeats, and
+tagged scopes work the same way), but its second pass is still its own gate.
 
 ### The `address` judge needs a map first
 
@@ -522,6 +549,14 @@ Wave contract (fan-out width = `batch_size`, default 5; throttle down on 529):
 
 ### Option [2] Headless fan-out
 
+> **The sentence announcing a wave and the Bash call are the SAME message.**
+> Never write "starting the headless wave now" and end the turn without the tool
+> call in it — on 2026-08-26 that cost the operator eight minutes on a wave that
+> had never launched, and it is invisible from the outside because a running
+> wave and an unstarted one both look like silence. If you are ever asked
+> whether a wave is still going, answer with `status --drafts` (zero drafts and
+> an unmoved manifest mtime means it never started), not from memory.
+
 Run one wave via the CLI (bounded parallelism, neutral cwd, no Task turns). Pass
 `--target-ids` when recovering a subset; omit it to fan out every still-undrafted
 manifest entry. `--estimate` projects the cost and spawns nothing:
@@ -622,7 +657,20 @@ affected chunk(s) as a **solo** scope (default `--targets-per-worker 1`, with
 drags its group-mates. Cap re-spawns at ~3 per entry, then surface for manual
 review. Then relay findings the same way the API branch does.
 
+**If `editorial` was in this wave, the run is not over.** Its findings are
+candidates. After relaying them, go to pass 2 — `verify_editorial status` +
+`prepare` are both free, so run them and quote the number before asking — not to
+§C. See [`references/editorial.md`](references/editorial.md).
+
 ### C. Apply fixes (optional — after relaying findings)
+
+> **Editorial: not until pass 2 has run.** A pass-1 editorial result carries
+> `metadata.verified: false`, and its `issues[]` are candidates an adjudication
+> pass has not seen. Offering `apply` there proposes edits from the half of the
+> pipeline that was built to over-propose. The next step after a pass-1 `commit`
+> is `scripts/verify_editorial.py` — see
+> [`references/editorial.md`](references/editorial.md). The dialogue and address
+> judges have no second pass; this gate is editorial-only.
 
 Offer this only **after** findings are relayed and **persisted** (`--persist`). It rewrites
 `translated_text` in place, so it is careful and user-gated: it only ever proposes clean,
@@ -772,6 +820,12 @@ later: `append_feedback(project_dir, chunk_id, "dialogue", issue_index,
 ## Notes
 
 - The dialogue judge reads the rules from `prompts/dialogue.txt` automatically.
+- The editorial judge is the only two-pass one. `scripts/verify_editorial.py` is
+  its second half and shares this CLI's shapes (`status` / `prepare` / `fanout` /
+  `commit`, plus an API `run`), but not its flags — read
+  [`references/editorial.md`](references/editorial.md) rather than assuming.
+  Nested project slugs work on both CLIs: `--project photogen-nycteris` resolves
+  even when the book lives at `projects/.macdonald/photogen-nycteris`.
 - The address judge reads the per-book expectations from `address_map.json` (the
   CLI injects them) plus the universal detection rubric in
   `prompts/address_forms.txt`. It needs the address-map setup beat first; the CLI
