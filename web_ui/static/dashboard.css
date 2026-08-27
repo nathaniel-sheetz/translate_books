@@ -935,6 +935,28 @@
     color: #888;
 }
 
+/* Repair banner: the editorial judge's second pass, offered only when a chunk
+   is still carrying candidates pass 2 never settled. Amber rather than red —
+   nothing is broken, a run is unfinished. */
+.review-adjudicate {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: -4px 0 12px;
+    padding: 8px 12px;
+    border: 1px solid #f0d9a8;
+    border-radius: 6px;
+    background: #fdf7ec;
+    font-size: 13px;
+    color: #7a5a1e;
+}
+
+.review-adjudicate button {
+    padding: 3px 10px;
+    font-size: 12px;
+}
+
 .review-actions button,
 .review-actions a {
     padding: 3px 10px;

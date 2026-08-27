@@ -1292,6 +1292,56 @@ def chapter_chunk_states(
     return out
 
 
+def editorial_unadjudicated(evaluation: Optional[dict]) -> bool:
+    """Did the editorial judge propose findings here that pass 2 never settled?
+
+    Pass 1 writes ``metadata.verified: false`` alongside its candidates; the
+    adjudication pass rewrites ``issues`` with the survivors and flips it true.
+    A chunk pass 1 found clean has nothing to adjudicate and is *not* pending —
+    ``no_candidates`` is a clean chunk, not a gap, and reporting it as one would
+    make every book look permanently half-finished.
+
+    Read straight off the persisted record: no ``build_targets`` walk and no
+    English-window retrieval, so a caller that already has the payload in hand
+    (the Review tab does) pays nothing for the answer.
+    """
+    if not isinstance(evaluation, dict):
+        return False
+    result = (evaluation.get("judges") or {}).get("editorial")
+    if not isinstance(result, dict):
+        return False
+    metadata = result.get("metadata") or {}
+    if metadata.get("verified"):
+        return False
+    # ``candidates`` is the pre-adjudication set; ``issues`` is the fallback for
+    # a result written before that key existed, which is exactly what
+    # ``editorial_verify.collect_candidates`` reconstructs from.
+    return bool(metadata.get("candidates") or result.get("issues"))
+
+
+def chapter_judge_status_detail(
+    project_dir: Path,
+    chunks: list[tuple[str, dict]],
+    *,
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> tuple[dict[str, dict], list[dict[str, str]], list[dict[str, Any]]]:
+    """:func:`chapter_judge_status`, plus the per-chunk records it rolled up.
+
+    The records carry the persisted ``evaluation`` payload, so a caller wanting
+    something the group states do not encode — the Review tab wants the count of
+    chunks awaiting editorial adjudication — can have it without a second walk
+    over ``chunks/`` and ``evaluations/``, which is the expensive half of this
+    call.
+    """
+    records = chapter_chunk_states(project_dir, chunks, groups=groups)
+    per_chunk = [rec["states"] for rec in records]
+    by_group = {
+        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
+        for group in (groups or JUDGE_STATUS_GROUPS)
+    }
+    return by_group, per_chunk, records
+
+
 def chapter_judge_status(
     project_dir: Path,
     chunks: list[tuple[str, dict]],
@@ -1304,11 +1354,9 @@ def chapter_judge_status(
     so the book-wide totals can be rolled up from the same per-chunk verdicts
     rather than from an average of chapter verdicts.
     """
-    per_chunk = [rec["states"] for rec in chapter_chunk_states(project_dir, chunks, groups=groups)]
-    by_group = {
-        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
-        for group in (groups or JUDGE_STATUS_GROUPS)
-    }
+    by_group, per_chunk, _ = chapter_judge_status_detail(
+        project_dir, chunks, groups=groups
+    )
     return by_group, per_chunk
 
 

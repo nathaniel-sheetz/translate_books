@@ -279,6 +279,23 @@ Adjudication is **not** idempotent the way `apply` is: a second pass re-decides
 retractions the first already removed from `issues`, and costs another call. So
 a verified chunk is skipped until `--force`.
 
+### From the web UI
+
+The Review tab runs both passes as **one job**: tick *Editorial defects* in
+`Run LLM judges…` and the wave is `prepare → fanout → commit` followed by
+`adjudicate_prepare → adjudicate → adjudicate_commit`, on either backend. The
+consent gate quotes pass 2 as a ceiling, since its real size is not knowable
+until pass 1 has proposed something.
+
+Both halves go through `src/judges/editorial_wave.py`, not through this CLI:
+that module is where the wave actually lives, and `scripts/verify_editorial.py`
+is the argparse shell over it. Anything added to one is available to the other
+by construction.
+
+A banner in the Review toolbar offers pass 2 on its own when a chunk is left
+carrying candidates — a job killed between the passes, or a pass 1 run from the
+command line. See [WEB_UI_GUIDE.md](WEB_UI_GUIDE.md#stage-7-review).
+
 ## Calibration
 
 `--write-examples` turns the marked corpus into
@@ -306,8 +323,9 @@ prompts/judge_editorial_batch.txt        pass 1, several chunks per worker
 prompts/judge_editorial_verify.txt       pass 2
 src/judges/editorial_judge.py            EditorialJudge (registered as "editorial")
 src/judges/editorial_verify.py           build / parse / apply seams for pass 2
+src/judges/editorial_wave.py             the pass-2 wave, shared by CLI and web UI
 src/judges/neighborhood.py               English window from alignments/
-scripts/verify_editorial.py              pass 2 CLI (run | prepare | fanout | commit | status)
+scripts/verify_editorial.py              pass 2 CLI, an argparse shell over editorial_wave
 .claude/skills/judge-review/references/editorial.md   how the agent drives both passes
 scripts/editorial_metrics.py             precision, volume, adjudication, anchoring
 tests/test_judges/test_editorial_judge.py

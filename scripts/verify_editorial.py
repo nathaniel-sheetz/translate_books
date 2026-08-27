@@ -53,9 +53,8 @@ import json
 import logging
 import sys
 import warnings
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -76,28 +75,21 @@ for _stream in (sys.stdout, sys.stderr):
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 
 from src.harness import state as hstate  # noqa: E402
-from src.harness.usage import approx_tokens, baseline_tokens  # noqa: E402
-from src.judges import editorial_verify as ev  # noqa: E402
-from src.judges import llm_io  # noqa: E402
-from src.judges.context import build_judge_context  # noqa: E402
-from src.judges.scope import ScopeError, build_targets  # noqa: E402
+from src.judges import editorial_wave as wave  # noqa: E402
+from src.judges.scope import ScopeError  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-JUDGE_NAME = "editorial"
+# Re-exported rather than redefined. The wave module is where pass 2 actually
+# lives now — this file is the argparse shell over it — and two copies of
+# ``JUDGE_NAME`` or of the concurrency default is exactly the drift the move was
+# meant to end. The parser's help text quotes the same number the launcher uses.
+JUDGE_NAME = wave.JUDGE_NAME
+work_dir = wave.work_dir
+collect_pending = wave.collect_pending
+_DEFAULT_CONCURRENCY = wave.DEFAULT_CONCURRENCY
+_TOKENS_PER_VERDICT = wave.TOKENS_PER_VERDICT
 _NO_SIDECAR_COMMANDS = frozenset({"status"})
-
-#: Parallel headless processes when neither ``--concurrency`` nor the manifest
-#: says. ``None`` used to be handed straight to ``run_headless_wave``, which
-#: does ``if concurrency < 1`` — so the *documented* bare ``fanout`` was a
-#: TypeError before job 1. Every sibling launcher resolves this before the call.
-_DEFAULT_CONCURRENCY = 5
-
-#: Completion-token allowance per candidate when estimating cost. An
-#: adjudication verdict is a decision plus one sentence of reason, occasionally
-#: a corrected fix — far shorter than a judge's finding, which carries an
-#: excerpt and a suggestion.
-_TOKENS_PER_VERDICT = 120
 
 
 # ---------------------------------------------------------------------------
@@ -120,49 +112,6 @@ def _resolve_project(arg: str) -> Path:
         raise SystemExit(
             json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
         ) from exc
-
-
-def work_dir(project_dir: Path) -> Path:
-    """Where prompts, drafts and the manifest live for this pipeline."""
-    return Path(project_dir) / ".harness" / "editorial"
-
-
-def _usage_log(project_dir: Path) -> Path:
-    """This pipeline's own per-job usage rows."""
-    return work_dir(project_dir) / "usage.jsonl"
-
-
-def _baseline_for(project_dir: Path, cli: str) -> tuple[int, str]:
-    """Per-job token overhead for the consent gate, and where the number is from.
-
-    Adjudication keeps its own ``usage.jsonl`` on purpose: a verdict-shaped job
-    is a different shape from a pass-1 finding-shaped one, so the estimate
-    self-calibrates on its own history rather than on the judge's. But on a
-    book's *first* adjudication wave that history is empty, and the constant it
-    falls back to is a probe taken on another machine — while
-    ``.harness/judges/usage.jsonl`` next door holds dozens of measured rows for
-    the same CLI on this box (photogen: 39 rows at 18,362 against a 17,200
-    constant). Borrow that rather than quote the constant, and label it as
-    borrowed. The fallback stops firing on its own once adjudication has logged
-    enough jobs of its own.
-    """
-    tokens, source = baseline_tokens(_usage_log(project_dir), cli=cli)
-    if source.startswith("default:"):
-        alt, alt_source = baseline_tokens(
-            Path(project_dir) / ".harness" / "judges" / "usage.jsonl", cli=cli
-        )
-        if not alt_source.startswith("default:"):
-            return alt, f"{alt_source} (pass-1 log; no adjudication rows yet)"
-    return tokens, source
-
-
-def _draft_written(entry: dict[str, Any]) -> bool:
-    """Has this manifest entry been answered? (the test ``fanout`` itself applies)"""
-    path = Path(entry.get("draft_path") or "")
-    try:
-        return bool(path.read_text(encoding="utf-8").strip())
-    except OSError:
-        return False
 
 
 def _write_output_artifact(project_dir: Optional[Path], payload: dict) -> None:
@@ -194,645 +143,97 @@ def _emit(project_dir: Optional[Path], payload: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Loading unverified work
-
-
-def _load_evaluation(project_dir: Path, chunk_id: str) -> Optional[dict[str, Any]]:
-    path = Path(project_dir) / "evaluations" / f"{chunk_id}.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def collect_pending(
-    project_dir: Path, scope: str, *, include_verified: bool = False
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Chunks in ``scope`` carrying editorial candidates, and why others were skipped.
-
-    A chunk is pending when it has an editorial result with at least one
-    candidate and ``metadata.verified`` is false. Re-verifying an already
-    adjudicated chunk needs ``--force``: the pass is not idempotent in the way
-    ``apply`` is — a second adjudication re-decides retractions that the first
-    one already removed from ``issues``, and it costs another call.
-    """
-    targets = build_targets(project_dir, scope)
-    pending: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-
-    for target in targets:
-        payload = _load_evaluation(project_dir, target.id)
-        if payload is None:
-            skipped.append({"chunk_id": target.id, "reason": "no_evaluation"})
-            continue
-        result = (payload.get("judges") or {}).get(JUDGE_NAME)
-        if not isinstance(result, dict):
-            skipped.append({"chunk_id": target.id, "reason": "judge_not_run"})
-            continue
-        metadata = result.get("metadata") or {}
-        if metadata.get("verified") and not include_verified:
-            skipped.append({"chunk_id": target.id, "reason": "already_verified"})
-            continue
-
-        candidates = ev.attach_context(
-            project_dir,
-            ev.collect_candidates(result, target.id, target.translated_text),
-        )
-        if not candidates:
-            skipped.append({"chunk_id": target.id, "reason": "no_candidates"})
-            continue
-
-        pending.append(
-            {
-                "chunk_id": target.id,
-                "chapter_id": target.context.get("chapter_id"),
-                "result": result,
-                "candidates": candidates,
-            }
-        )
-    return pending, skipped
-
-
-def _counts(pending: list[dict[str, Any]]) -> dict[str, int]:
-    candidates = [c for entry in pending for c in entry["candidates"]]
-    return {
-        "chunks": len(pending),
-        "candidates": len(candidates),
-        "source_requested": sum(1 for c in candidates if c.get("_source_requested")),
-        "source_attached": sum(1 for c in candidates if c.get("_source_available")),
-    }
-
-
-# ---------------------------------------------------------------------------
 # Commands
+#
+# Each one resolves the project, calls the matching :mod:`src.judges.editorial_wave`
+# function, and emits what came back. The payloads are the wave's, unchanged: a
+# divergence here would mean this CLI and the Review tab reporting different
+# things about the same run, which is the drift the move exists to prevent.
 
 
-def _draft_progress(project_dir: Path) -> dict[str, Any]:
-    """Manifest entries with a draft vs without — "is the wave still going?".
+def _scopes(args: argparse.Namespace) -> list[str]:
+    """The wave takes a list of scopes; ``--scope`` is single-valued and stays so."""
+    return [args.scope]
 
-    A read-only answer to the question that otherwise costs a directory listing
-    sorted by mtime and a guess. On 2026-08-26 an announced wave had never
-    started, and it took eight minutes and a user prompt to notice; the giveaway
-    would have been six prepared entries, zero drafts, and a manifest whose
-    mtime had not moved.
-    """
-    manifest = _load_manifest(project_dir)
-    if manifest is None:
-        return {"manifest_at": None, "note": "no manifest — run `prepare` first"}
-    entries = manifest.get("entries") or []
-    pending = [e["chunk_id"] for e in entries if not _draft_written(e)]
-    path = work_dir(project_dir) / "manifest.json"
-    try:
-        at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
-    except OSError:  # pragma: no cover - defensive
-        at = None
-    return {
-        "manifest_at": at,
-        "drafts": {"written": len(entries) - len(pending), "pending": len(pending)},
-        "pending_ids": pending,
-        "note": (
-            "every prepared entry has a draft — run `commit --persist`"
-            if not pending
-            else f"{len(pending)} of {len(entries)} entries have no draft yet"
-        ),
-    }
+
+def _warn(payload: dict, prefix: str = "") -> None:
+    """Relay the wave's warnings to stderr, where a skimmed stdout cannot hide them."""
+    for warning in payload.get("warnings") or []:
+        print(f"{prefix}{warning}", file=sys.stderr)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
-    pending, skipped = collect_pending(project_dir, args.scope, include_verified=args.force)
-    reasons: dict[str, int] = {}
-    for entry in skipped:
-        reasons[entry["reason"]] = reasons.get(entry["reason"], 0) + 1
-    payload = {
-        "status": "ok",
-        "command": "status",
-        "project": project_dir.name,
-        "scope": args.scope,
-        "counts": _counts(pending),
-        "skipped": reasons,
-        "pending_chunks": [e["chunk_id"] for e in pending],
-    }
-    if args.drafts:
-        payload["wave"] = _draft_progress(project_dir)
-    return _emit(None, payload)
+    # ``None`` as the sidecar target: ``status`` is the one read-only command,
+    # and writing last_output.json for it would clobber the record of whatever
+    # mutating command ran before it.
+    return _emit(
+        None,
+        wave.status(
+            project_dir, _scopes(args), include_verified=args.force, drafts=args.drafts
+        ),
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
-    context, error = build_judge_context(project_dir, [JUDGE_NAME], args.model, args.provider)
-    if error:
-        return _emit(project_dir, {"status": "error", "command": "run", "error": error})
-
-    pending, skipped = collect_pending(project_dir, args.scope, include_verified=args.force)
-    counts = _counts(pending)
-    if not pending:
-        return _emit(
-            project_dir,
-            {
-                "status": "ok",
-                "command": "run",
-                "project": project_dir.name,
-                "counts": counts,
-                "results": [],
-                "instructions": "Nothing to adjudicate in this scope.",
-            },
-        )
-
-    estimate = _estimate_cost(pending, context, args.model, args.provider)
-    if estimate > args.cost_limit and not args.confirm:
-        return _emit(
-            project_dir,
-            {
-                "status": "cost_exceeded",
-                "command": "run",
-                "project": project_dir.name,
-                "counts": counts,
-                "estimated_cost_usd": round(estimate, 4),
-                "cost_limit": args.cost_limit,
-                "instructions": (
-                    f"Estimated ${estimate:.4f} exceeds --cost-limit "
-                    f"${args.cost_limit:.2f}. Re-run with --confirm to proceed, or "
-                    "use prepare/fanout/commit for a subscription wave."
-                ),
-            },
-        )
-
-    results = []
-    for entry in pending:
-        patched, info = ev.verify_result(
-            project_dir,
-            entry["chunk_id"],
-            entry["result"],
-            "",  # context already attached; verify_result re-derives from candidates
-            context,
-            candidates=entry["candidates"],
-        )
-        if info.get("status") == "ok" and args.persist:
-            _persist(project_dir, entry["chunk_id"], patched)
-            info["persisted"] = True
-        results.append(info)
-
     return _emit(
         project_dir,
-        {
-            "status": "ok",
-            "command": "run",
-            "project": project_dir.name,
-            "backend": "api",
-            "counts": counts,
-            "skipped_count": len(skipped),
-            "persisted": bool(args.persist),
-            "results": results,
-            "rollup": _rollup(results),
-        },
+        wave.run_api(
+            project_dir,
+            _scopes(args),
+            persist=args.persist,
+            confirm=args.confirm,
+            force=args.force,
+            cost_limit=args.cost_limit,
+            model=args.model,
+            provider=args.provider,
+        ),
     )
-
-
-def _estimate_cost(
-    pending: list[dict[str, Any]],
-    context: dict[str, Any],
-    model: Optional[str],
-    provider: Optional[str],
-) -> float:
-    total = 0.0
-    for entry in pending:
-        prompt = ev.build_prompt(entry["candidates"], context)
-        completion = _TOKENS_PER_VERDICT * max(1, len(entry["candidates"]))
-        total += llm_io.estimate_call_cost(
-            prompt, provider=provider, model=model, completion_tokens=completion
-        )
-    return total
-
-
-def _rollup(results: list[dict[str, Any]]) -> dict[str, int]:
-    def total(field: str) -> int:
-        return sum(int(r.get(field) or 0) for r in results if r.get("status") == "ok")
-
-    return {
-        "adjudicated": total("adjudicated"),
-        "confirmed": total("confirmed"),
-        "reclassified": total("reclassified"),
-        "retracted": total("retracted"),
-        "source_attached": total("source_attached"),
-        "source_used": total("source_used"),
-        "parse_errors": sum(1 for r in results if r.get("status") == "parse_error"),
-    }
-
-
-def _persist(project_dir: Path, chunk_id: str, patched: dict[str, Any]) -> None:
-    from web_ui.evaluations import merge_judge_result
-
-    merge_judge_result(project_dir, chunk_id, JUDGE_NAME, patched)
-
-
-# ---------------------------------------------------------------------------
-# Draft backend: prepare / fanout / commit
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
-    from src.harness.profile import resolve_profile
-
     project_dir = _resolve_project(args.project)
-    context, error = build_judge_context(project_dir, [JUDGE_NAME], args.model, args.provider)
-    if error:
-        return _emit(project_dir, {"status": "error", "command": "prepare", "error": error})
-
-    # The consent gate lives here now, not on ``fanout``. Pass 1 puts ``--cli``
-    # on ``prepare``; pass 2 putting it on ``fanout`` meant a Cursor operator had
-    # to remember which sibling took which flag — and meant the wave was
-    # approved, when it was approved at all, on no number: ``prepare`` returned
-    # paths and candidate counts and nothing about what answering them costs.
-    cfg = hstate.load_config(project_dir)
-    prof = resolve_profile(
+    payload = wave.prepare(
         project_dir,
-        command="judges",
+        _scopes(args),
+        model=args.model,
+        provider=args.provider,
         cli=args.cli,
         worker_model=args.worker_model,
         effort=args.effort,
-        cfg=cfg,
-        usage_log=_usage_log(project_dir),
+        force=args.force,
+        keep_drafts=args.keep_drafts,
+        quiet=args.quiet,
     )
-
-    pending, skipped = collect_pending(project_dir, args.scope, include_verified=args.force)
-    directory = work_dir(project_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-
-    entries = []
-    prompt_tokens = 0
-    api_cost = 0.0
-    preamble_path = directory / "preamble.txt"
-    wrote_preamble = False
-
-    for entry in pending:
-        chunk_id = entry["chunk_id"]
-        prefix, suffix = ev.build_prompt_parts(entry["candidates"], context)
-        prompt_path = directory / f"{chunk_id}.verify.prompt.txt"
-        body_path = directory / f"{chunk_id}.verify.body.txt"
-        draft_path = directory / f"{chunk_id}.verify.draft.json"
-
-        prompt_path.write_text(prefix + suffix, encoding="utf-8")
-        # What a worker actually receives, and what the same call would cost
-        # metered. Both come off the parts already in hand: ``prefix + suffix``
-        # is byte-identical to ``build_prompt``, so re-rendering to price it
-        # would be duplicate work.
-        prompt_tokens += approx_tokens(prefix + suffix)
-        api_cost += llm_io.estimate_call_cost(
-            prefix + suffix,
-            provider=args.provider,
-            model=args.model,
-            completion_tokens=_TOKENS_PER_VERDICT * max(1, len(entry["candidates"])),
-        )
-        if prefix:
-            if not wrote_preamble:
-                preamble_path.write_text(prefix, encoding="utf-8")
-                wrote_preamble = True
-            body_path.write_text(suffix, encoding="utf-8")
-        if not args.keep_drafts and draft_path.exists():
-            draft_path.unlink()
-
-        entries.append(
-            {
-                "chunk_id": chunk_id,
-                "chapter_id": entry["chapter_id"],
-                "candidates": len(entry["candidates"]),
-                "prompt_path": str(prompt_path),
-                "body_path": str(body_path) if prefix else None,
-                "preamble_path": str(preamble_path) if prefix else None,
-                "draft_path": str(draft_path),
-            }
-        )
-
-    manifest = {
-        "scope": args.scope,
-        "judge": JUDGE_NAME,
-        "model": args.model,
-        "provider": args.provider,
-        # The resolved profile, so a bare ``fanout`` reproduces the wave the
-        # operator consented to instead of re-resolving from scratch — and so a
-        # wrong pin is visible on disk, not only in a payload that scrolled away.
-        "cli": prof.cli,
-        "worker_model": prof.worker_model,
-        "effort": prof.effort,
-        "effort_channel": prof.effort_channel,
-        "batch_size": _DEFAULT_CONCURRENCY,
-        "entries": entries,
-    }
-    (directory / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    baseline, baseline_source = _baseline_for(project_dir, prof.cli)
-    effective = prof.to_payload()
-    # The profile resolved its baseline against this pipeline's own (usually
-    # empty) log; ``_baseline_for`` is allowed to borrow pass 1's. Patch the
-    # payload rather than the profile so both halves of the gate quote one
-    # number.
-    effective["baseline_tokens"] = baseline
-    effective["baseline_source"] = baseline_source
-
     # Also on stderr: a mis-resolved CLI is worth seeing even when the caller
     # only skims stdout, and this is the last moment before the wave.
-    for warning in prof.warnings:
-        print(f"[prepare] warning: {warning}", file=sys.stderr)
-
-    counts = _counts(pending)
-    payload = {
-        "status": "ok",
-        "command": "prepare",
-        "project": project_dir.name,
-        "counts": counts,
-        "skipped_count": len(skipped),
-        "manifest": str(directory / "manifest.json"),
-        "effective": effective,
-        "usage_summary": {
-            "chunks": counts["chunks"],
-            "candidates": counts["candidates"],
-            "source_requested": counts["source_requested"],
-            "cli": prof.cli,
-            "worker_model": prof.worker_model,
-            "batch_size": _DEFAULT_CONCURRENCY,
-            "estimated_api_cost": round(api_cost, 6),
-            "estimated_prompt_tokens": prompt_tokens,
-            "headless_baseline_tokens": baseline,
-            "headless_baseline_source": baseline_source,
-            "estimated_headless_tokens": prompt_tokens + len(entries) * baseline,
-            "headless_effort": prof.effort,
-            "headless_effort_source": prof.effort_source,
-            "headless_effort_channel": prof.effort_channel,
-        },
-        "warnings": list(prof.warnings),
-        "instructions": (
-            "Relay `effective` + `usage_summary` and get approval, THEN run "
-            "`fanout` for a headless wave — or spawn one worker per entry: read "
-            "prompt_path, write ONLY the JSON verdict object to draft_path. Then "
-            "run `commit --persist`."
-            if entries
-            else "Nothing to adjudicate in this scope."
-        ),
-    }
-    if not args.quiet:
-        payload["entries"] = entries
+    _warn(payload, prefix="[prepare] warning: ")
     return _emit(project_dir, payload)
 
 
-def _load_manifest(project_dir: Path) -> Optional[dict[str, Any]]:
-    path = work_dir(project_dir) / "manifest.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def cmd_fanout(args: argparse.Namespace) -> int:
-    from src.harness.headless import run_headless_wave
-    from src.harness.profile import resolve_profile
-
     project_dir = _resolve_project(args.project)
-    manifest = _load_manifest(project_dir)
-    if manifest is None:
-        return _emit(
-            project_dir,
-            {
-                "status": "error",
-                "command": "fanout",
-                "error": "no editorial manifest — run `prepare` first",
-            },
-        )
-
-    # One resolved profile for the wave, through the same seam every other
-    # fan-out uses, so a Cursor operator gets Cursor's worker model and its
-    # per-process baseline rather than a Claude alias. ``command="judges"``
-    # because this is a judge wave for effort-config purposes
-    # (``headless_effort_judges``); only the usage log is its own, so the
-    # baseline self-calibrates on adjudication jobs rather than on pass-1 ones,
-    # which are a different shape.
-    #
-    # Resolved against the *manifest* first: ``prepare`` wrote the CLI, model and
-    # effort the operator consented to, so a bare ``fanout`` reproduces that wave
-    # exactly. Flags still win, for the one-flag correction of a bad pin. Effort
-    # is inherited only when the CLI has not flipped — a level resolved for
-    # Claude is a Claude-table number, and carrying it onto Cursor would write an
-    # ``[effort=…]`` bracket the resolver deliberately refuses to invent.
-    cfg = hstate.load_config(project_dir)
-    inherited_effort, inherited_effort_source = args.effort, "cli"
-    cli_unchanged = (args.cli or manifest.get("cli")) == manifest.get("cli")
-    if not args.effort and "effort" in manifest and cli_unchanged:
-        inherited_effort = manifest["effort"] or "default"
-        inherited_effort_source = "manifest"
-    profile = resolve_profile(
+    payload = wave.fanout(
         project_dir,
-        command="judges",
-        cli=args.cli or manifest.get("cli"),
-        cli_source="cli" if args.cli else "manifest",
-        worker_model=args.worker_model or manifest.get("worker_model"),
-        worker_model_source="cli" if args.worker_model else "manifest",
-        effort=inherited_effort,
-        effort_source=inherited_effort_source,
-        cfg=cfg,
-        usage_log=_usage_log(project_dir),
-    )
-    cli_name = profile.cli
-    worker_model = profile.worker_model
-    effort = profile.effort
-    extra_flags = hstate.compose_headless_argv(
-        cfg, effort if profile.effort_channel == "argv" else None
-    )
-    for warning in profile.warnings:
-        print(warning, file=sys.stderr)
-
-    # An override that changes the wave must reach the manifest — ``commit``
-    # and any later bare ``fanout`` both read it back. Profile fields only:
-    # entries and drafts are untouched, so this is not the destructive
-    # re-``prepare``.
-    if (
-        manifest.get("cli") != profile.cli
-        or manifest.get("worker_model") != profile.worker_model
-        or manifest.get("effort") != profile.effort
-    ):
-        manifest["cli"] = profile.cli
-        manifest["worker_model"] = profile.worker_model
-        manifest["effort"] = profile.effort
-        manifest["effort_channel"] = profile.effort_channel
-        try:
-            (work_dir(project_dir) / "manifest.json").write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except OSError as exc:  # pragma: no cover - disk failure
-            print(f"could not update the editorial manifest: {exc}", file=sys.stderr)
-
-    # Resolve the wave width BEFORE the launcher sees it. ``run_headless_wave``
-    # does ``if concurrency < 1``, so handing it the argparse default of ``None``
-    # is a TypeError before job 1 — which is exactly what the documented bare
-    # ``fanout`` did. Every sibling launcher resolves this first; this one did
-    # not, and its test stubs the launcher, so CI never ran the comparison.
-    concurrency = args.concurrency
-    if concurrency is None:
-        try:
-            concurrency = int(manifest.get("batch_size") or _DEFAULT_CONCURRENCY)
-        except (TypeError, ValueError):
-            concurrency = _DEFAULT_CONCURRENCY
-    if concurrency < 1:
-        return _emit(
-            project_dir,
-            {
-                "status": "error",
-                "command": "fanout",
-                "project": project_dir.name,
-                "error": f"invalid concurrency {concurrency!r}; must be >= 1",
-            },
-        )
-
-    jobs, skipped = [], []
-    for entry in manifest.get("entries") or []:
-        draft_path = Path(entry["draft_path"])
-        if _draft_written(entry):
-            skipped.append(entry["chunk_id"])
-            continue
-        preamble = entry.get("preamble_path")
-        body = entry.get("body_path")
-        if preamble and body and Path(preamble).exists() and Path(body).exists():
-            jobs.append(
-                {
-                    "id": entry["chunk_id"],
-                    "input_text": Path(body).read_text(encoding="utf-8"),
-                    "output_path": str(draft_path),
-                    "system_prompt_file": preamble,
-                }
-            )
-        else:
-            jobs.append(
-                {
-                    "id": entry["chunk_id"],
-                    "input_text": Path(entry["prompt_path"]).read_text(encoding="utf-8"),
-                    "output_path": str(draft_path),
-                    "system_prompt_file": None,
-                }
-            )
-
-    if not jobs:
-        return _emit(
-            project_dir,
-            {
-                "status": "ok",
-                "command": "fanout",
-                "project": project_dir.name,
-                "profile": profile.to_payload(),
-                "concurrency": concurrency,
-                "wrote": [],
-                "skipped": skipped,
-                "instructions": "Nothing to fan out — run `commit --persist`.",
-            },
-        )
-
-    wave = run_headless_wave(
-        jobs,
-        model=worker_model,
-        concurrency=concurrency,
-        cli=cli_name,
+        cli=args.cli,
         cli_bin=args.cli_bin,
-        usage_log=_usage_log(project_dir),
-        extra_flags=extra_flags,
-        effort=effort,
+        worker_model=args.worker_model,
+        effort=args.effort,
+        concurrency=args.concurrency,
+        # Printed the moment the profile resolves rather than from the returned
+        # payload: a wave on the wrong CLI can run for ten minutes, and a warning
+        # that arrives with the result is a warning that arrived too late.
+        on_profile=lambda prof: _warn(prof),
     )
-    return _emit(
-        project_dir,
-        {
-            "status": "error" if wave.get("error") else "ok",
-            "command": "fanout",
-            "project": project_dir.name,
-            "profile": profile.to_payload(),
-            "concurrency": concurrency,
-            "skipped": skipped,
-            **{k: v for k, v in wave.items() if k != "_schema"},
-            "instructions": "Run `commit --persist` to land the verdicts.",
-        },
-    )
+    return _emit(project_dir, payload)
 
 
 def cmd_commit(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
-    manifest = _load_manifest(project_dir)
-    if manifest is None:
-        return _emit(
-            project_dir,
-            {
-                "status": "error",
-                "command": "commit",
-                "error": "no editorial manifest — run `prepare` first",
-            },
-        )
-
-    context, _ = build_judge_context(project_dir, [JUDGE_NAME], args.model, args.provider)
-    results, failed, missing = [], [], []
-
-    for entry in manifest.get("entries") or []:
-        chunk_id = entry["chunk_id"]
-        draft_path = Path(entry["draft_path"])
-        if not draft_path.exists():
-            missing.append(chunk_id)
-            continue
-        raw = draft_path.read_text(encoding="utf-8").strip()
-        if not raw:
-            missing.append(chunk_id)
-            continue
-
-        payload = _load_evaluation(project_dir, chunk_id)
-        result = (payload or {}).get("judges", {}).get(JUDGE_NAME)
-        if not isinstance(result, dict):
-            failed.append({"chunk_id": chunk_id, "error": "editorial result gone"})
-            continue
-
-        targets = build_targets(project_dir, f"chunk:{chunk_id}")
-        translated = targets[0].translated_text if targets else ""
-        candidates = ev.attach_context(
-            project_dir, ev.collect_candidates(result, chunk_id, translated)
-        )
-        try:
-            verdicts = ev.parse_verdicts(raw)
-        except llm_io.JudgeParseError as exc:
-            failed.append({"chunk_id": chunk_id, "error": str(exc)})
-            continue
-
-        patched = ev.apply_verdicts(result, candidates, verdicts)
-        metadata = patched.get("metadata") or {}
-        if args.persist:
-            _persist(project_dir, chunk_id, patched)
-        results.append(
-            {
-                "chunk_id": chunk_id,
-                "status": "ok",
-                "adjudicated": metadata.get("candidates_adjudicated"),
-                "confirmed": metadata.get("confirmed"),
-                "reclassified": metadata.get("reclassified"),
-                "retracted": metadata.get("retracted_count"),
-                "source_attached": metadata.get("source_attached"),
-                "source_used": metadata.get("source_used"),
-                "persisted": bool(args.persist),
-            }
-        )
-
     return _emit(
         project_dir,
-        {
-            "status": "ok",
-            "command": "commit",
-            "project": project_dir.name,
-            "backend": "draft",
-            "persisted": bool(args.persist),
-            "committed": len(results),
-            "failed": failed,
-            "missing": missing,
-            "results": [] if args.brief else results,
-            "rollup": _rollup(results),
-            "instructions": (
-                "Re-spawn the failed/missing entries and re-run `commit`."
-                if (failed or missing)
-                else "Done. Findings in evaluations/<chunk>.json are adjudicated."
-            ),
-        },
+        wave.commit(project_dir, persist=args.persist, brief=args.brief),
     )
 
 

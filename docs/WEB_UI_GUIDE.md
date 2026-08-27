@@ -324,9 +324,7 @@ checkbox column for selecting a subset.
   findings are read and acted on.
 - **Judges** — four status pips: `CD` (the deterministic evaluators, which always run as
   one set), `DL` (dialogue judge), `AD` (address judge), `ED` (editorial judge — see
-  [EDITORIAL_JUDGE.md](EDITORIAL_JUDGE.md); its adjudication pass is a separate CLI, so a
-  green `ED` pip means pass one ran, not that its findings have been second-guessed).
-  Each is `✓ done`, `◑ partial`,
+  [EDITORIAL_JUDGE.md](EDITORIAL_JUDGE.md)). Each is `✓ done`, `◑ partial`,
   `⚠ stale`, or `○ not run`, with a `3/5 chunks fresh` tooltip. "Stale" comes from the
   per-evaluator content hash described in
   [JUDGES_FRAMEWORK.md](JUDGES_FRAMEWORK.md#freshness-ledger-eval_runs): edit a chunk
@@ -343,6 +341,34 @@ whether a chapter is aligned at all, which the Align/Realign action already says
 **Actions:** Align / Realign, Read, **Rerun** (deterministic evaluators for that chapter),
 **Judges…**. The toolbar runs the same two actions over the ticked chapters, or over the
 whole book when nothing is ticked. Both run as background jobs with a progress modal.
+
+### The editorial judge runs both of its passes
+
+Ticking **Editorial defects** runs pass 1 *and* its adjudication pass as one job:
+`prepare → fanout → commit`, then `adjudicate_prepare → adjudicate → adjudicate_commit`,
+with the progress modal naming each. A pass-1 result is a set of *proposals* — the judge
+reads the Spanish alone and over-proposes on purpose — and only pass 2 decides which of
+them survive against the English. Two reasons the GUI does not stop between them:
+
+- A badge lit by un-adjudicated candidates over-counts by the retract rate, which on a
+  fresh book is the whole reason the second pass exists.
+- `merge_judge_result` replaces a judge's result wholesale, so "finish it later by
+  re-running the judge" would silently discard the adjudication that *had* landed.
+
+Pass 2's size cannot be measured before pass 1 has proposed anything, and you are asked
+once, before either wave. So the estimate quotes it as a **ceiling** — one job per chunk
+in scope at this pipeline's own measured per-job baseline (borrowed from the pass-1 log
+until adjudication has rows of its own), or on the API backend a cost that assumes every
+chunk comes back at its full findings budget. Both read high on purpose.
+
+A green `ED` pip therefore means both passes ran. When something leaves candidates
+unsettled — a job killed between the passes, a fan-out whose drafts never landed, or a
+pass 1 run from `run_judges.py` on the command line — the Review toolbar grows a banner
+(*"3 chunks carry editorial findings that were never adjudicated"*) whose **Adjudicate…**
+button runs pass 2 alone through the same modal. That gate quotes an *exact* number,
+because the candidates already exist. The `ED` tooltip carries the same count per chapter.
+Adjudication is not idempotent, so an already-verified chunk is skipped rather than
+re-decided.
 
 ### Ignored terms
 
