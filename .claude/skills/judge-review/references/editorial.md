@@ -25,7 +25,7 @@ pass 2 exists. So:
 > **Never offer `apply` on an editorial result whose `metadata.verified` is not
 > `true`.** After a pass-1 `commit`, the next step is pass 2 — not §C.
 
-## Pass 1 — the normal flow, with three notes
+## Pass 1 — the normal flow, with four notes
 
 Stage it exactly as `SKILL.md` describes, with `--judge editorial` (or
 `--suite editorial`). It is **not** in `default` or `prose`: it wants a
@@ -39,6 +39,14 @@ dialogue wave.
   examples + the coded findings, versus the dialogue judge's ~1.7k rulebook.
   Expect a higher Cursor `overhead_ratio` — a real 6-chunk wave measured
   **0.837** against dialogue's 0.78. That is the prompt, not a fault.
+- **The findings ceiling is not yours to move.** Pass 1 caps findings at 6
+  per 1,000 translated words (floored at 2 on very short chunks) — tuned, and
+  stated in the prompt as well as enforced in code. **Do not ask about it and
+  do not raise it on your own initiative**, including when a chunk comes back
+  at its ceiling. Pass `--max-findings-per-1000 N` to `prepare`/`run` only
+  when the user named a number, and quote that number back at gate 1 when you
+  do. `verify_editorial` has no such flag — pass 2 adjudicates whatever pass 1
+  proposed.
 - **Say at gate 1 that a second pass follows.** One clause, with a bound:
   *"a second adjudication pass then runs over whatever it finds — at most
   `<chunks> × <baseline_tokens>` more."* The exact number cannot be known until
@@ -56,7 +64,7 @@ python scripts/verify_editorial.py status  --project <slug> [--scope …] [--dra
 python scripts/verify_editorial.py prepare --project <slug> [--scope …] \
     [--cli cursor] [--worker-model …] [--effort …] [--quiet]
 python scripts/verify_editorial.py fanout  --project <slug> [--concurrency N]
-python scripts/verify_editorial.py commit  --project <slug> --persist [--brief]
+python scripts/verify_editorial.py commit  --project <slug> --persist
 python scripts/verify_editorial.py run     --project <slug> --persist --confirm   # API backend
 ```
 
@@ -74,11 +82,21 @@ python scripts/verify_editorial.py run     --project <slug> --persist --confirm 
   model override is written back to the manifest.
 - **`commit --persist`** rewrites `evaluations/<chunk>.json` with the
   adjudicated set and stamps `verified: true`. Relay `rollup`: `confirmed` /
-  `reclassified` / `retracted` / `source_attached` / `source_used`.
+  `reclassified` / `retracted` / `source_attached` / `source_used` — **and say
+  which findings moved**, from the payload's `verdict_detail` (every retraction
+  and reclassification, tagged with its `chunk_id` and its reason; confirmations
+  are omitted because they changed nothing). There is **no `--brief` here**: this
+  CLI's `results[]` is nine counts per chunk, so nothing floods the turn, and the
+  answer to "which two were retracted?" is in the payload rather than ten
+  evaluation files.
 
 `--scope` takes the same `chunk:` / `chapter:` / `chapter:<a>..<b>` / `book`
-forms. Default is `book`, which is usually right — pass 2's scope is "whatever
-pass 1 just proposed", and `status`'s skip reasons already exclude the rest.
+forms, and it **repeats** — `status`, `run` and `prepare` union every flag, the
+way `run_judges prepare` does. Default is `book`, which is usually right — pass
+2's scope is "whatever pass 1 just proposed", and `status`'s skip reasons already
+exclude the rest. A scope that resolves to nothing is a **warning on stderr and a
+`scope_error` skip**, not a failure, so one untranslated chapter cannot refuse
+the run — which also means a typo silently narrows it. Read the warnings.
 
 ## Do not re-ask the four questions
 
@@ -89,7 +107,10 @@ tax this file exists to remove.
 - Q1 backend → API is `verify_editorial run`; subagent is
   `prepare` → `fanout` (or `judge-worker` Task subagents on
   `prompt_path`/`draft_path`) → `commit`.
-- Q2 CLI → pass it to `prepare --cli`, same as pass 1.
+- Q2 CLI → pass it to `prepare --cli`, same as pass 1 — **unless `profile`
+  already reported `cli_source: config` for the CLI you want**. `--cli` outranks
+  the pin and rewrites `cli_source` to `cli`, so passing it on a pinned book
+  changes nothing about the wave and hides the pin from the consent block.
 - Q3 spawn mode → same answer; **Cursor is still headless-only**.
 - Q4 grouping → pass 2 has no `--targets-per-worker`. The unit is already one
   chunk's whole candidate set, which is the grouping.
@@ -101,7 +122,8 @@ tax this file exists to remove.
 python scripts/run_judges.py status  --project <slug> --judge editorial --detail
 python scripts/run_judges.py profile --project <slug>
 python scripts/run_judges.py prepare --project <slug> --judge editorial \
-    --scope chapter:chapter_01..chapter_06 --cli cursor --quiet
+    --scope chapter:chapter_01..chapter_06 --cli cursor --quiet \
+    [--max-findings-per-1000 N]   # ONLY if the user named a number
 #    relay effective + usage_summary + "a second pass follows" → END THE TURN
 
 # 2. the wave — announcement and tool call in the SAME message
@@ -117,7 +139,8 @@ python scripts/verify_editorial.py prepare --project <slug> --cli cursor --quiet
 # 4. adjudicate
 python scripts/verify_editorial.py fanout --project <slug>
 python scripts/verify_editorial.py commit --project <slug> --persist
-#    relay the rollup. NOW §C apply is on the table.
+#    relay the rollup AND name what moved, from `verdict_detail`.
+#    NOW §C apply is on the table.
 ```
 
 Steps 1 and 3 each end the turn on a number. Step 3's is exact, and it is
@@ -164,6 +187,9 @@ before you present a plan:
 
 - **A RECLASSIFIED finding's severity moved but its suggestion did not.** Read
   `old → new` against the reclassified category before treating it as approved.
+  Both sides are recorded: `metadata.reclassified_findings` (and the wave's
+  `verdict_detail`) carry `severity`/`new_severity` and `category`/`new_category`
+  per finding — the survivor in `issues[]` keeps only the new one.
 - **`FIDELITY_SUSPECT` survivors are the ones to read against the source**, not
   just against the Spanish — pass 2 attached the English for exactly these, and
   `source_used` says whether it actually changed a verdict.

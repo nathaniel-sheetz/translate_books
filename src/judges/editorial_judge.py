@@ -42,12 +42,17 @@ from src.models import EvalResult, Issue, IssueLevel
 
 logger = logging.getLogger(__name__)
 
-#: Findings allowed per 1,000 translated words. A ceiling, not a target: the
-#: measured density of the existing checkers is 0.8-3.2 findings per chunk, and
-#: this judge aims below that. It exists to stop a model that has decided to be
-#: thorough from emitting fifteen marginal notes on one passage — at which point
-#: ranking and dropping is the correct behaviour, and the prompt says so.
-FINDINGS_PER_1000_WORDS = 3
+#: Default findings allowed per 1,000 translated words. A ceiling, not a target:
+#: it exists to stop a model that has decided to be thorough from emitting fifteen
+#: marginal notes on one passage — at which point ranking and dropping is the
+#: correct behaviour, and the prompt says so. It is not a precision gate; that is
+#: the confidence floor, the non-issue filter and the adjudication pass. Stage 1
+#: ran this at 3, chosen to sit under the coded checkers' measured 0.8-3.2 per
+#: chunk, and it truncated real findings on long chunks — so the default is now 6
+#: and the ceiling is a per-run parameter: override it with
+#: ``--max-findings-per-1000`` on ``run_judges.py run``/``prepare``, or the
+#: ``editorial_findings_per_1000`` context key.
+FINDINGS_PER_1000_WORDS = 6
 
 #: Floor for very short chunks (some books chunk at ~76 words a piece), so the
 #: budget never rounds down to zero and forbids a real finding.
@@ -89,10 +94,66 @@ _NO_EXAMPLES = (
 )
 
 
-def findings_budget(word_count: int) -> int:
-    """Maximum findings allowed for a passage of ``word_count`` words."""
-    scaled = round((max(word_count, 0) / 1000.0) * FINDINGS_PER_1000_WORDS)
+def resolve_findings_per_1000(context: dict[str, Any]) -> int:
+    """The per-1,000-word ceiling this run judges under.
+
+    Reads the ``editorial_findings_per_1000`` context key, falling back to
+    :data:`FINDINGS_PER_1000_WORDS`. Anything unparseable or non-positive reads
+    as the default rather than as "no ceiling": the same posture as
+    :func:`normalize_confidence`, because a malformed field must never widen a
+    gate that exists to be narrow.
+    """
+    raw = context.get("editorial_findings_per_1000")
+    if raw is None:
+        return FINDINGS_PER_1000_WORDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring unusable editorial_findings_per_1000=%r; using %d.",
+            raw,
+            FINDINGS_PER_1000_WORDS,
+        )
+        return FINDINGS_PER_1000_WORDS
+    if value <= 0:
+        logger.warning(
+            "Ignoring non-positive editorial_findings_per_1000=%d; using %d.",
+            value,
+            FINDINGS_PER_1000_WORDS,
+        )
+        return FINDINGS_PER_1000_WORDS
+    return value
+
+
+def findings_budget(
+    word_count: int, per_1000: int = FINDINGS_PER_1000_WORDS
+) -> int:
+    """Maximum findings allowed for a passage of ``word_count`` words.
+
+    ``per_1000`` defaults to the module constant so every caller that does not
+    care about the override keeps working; callers that hold a judge context
+    should pass :func:`resolve_findings_per_1000` of it.
+    """
+    scaled = round((max(word_count, 0) / 1000.0) * max(int(per_1000), 1))
     return max(MIN_FINDINGS_BUDGET, int(scaled))
+
+
+def resolve_budget(target: JudgeTarget, context: dict[str, Any]) -> int:
+    """The ceiling to enforce for ``target`` — the same one its prompt stated.
+
+    ``max_findings_override`` wins when present. That key is not a user knob: it
+    is how the subagent backend carries the number ``prepare`` rendered into the
+    prompt across to ``commit``, which rebuilds targets with empty text and would
+    otherwise re-derive a budget of :data:`MIN_FINDINGS_BUDGET` from zero words
+    and truncate a long chunk's findings to the floor.
+    """
+    override = context.get("max_findings_override")
+    if isinstance(override, bool):  # bool is an int; a flag is not a ceiling
+        override = None
+    if isinstance(override, int) and override > 0:
+        return override
+    words = len((target.translated_text or "").split())
+    return findings_budget(words, resolve_findings_per_1000(context))
 
 
 def normalize_confidence(value: Any) -> str:
@@ -208,14 +269,17 @@ class EditorialJudge(VerdictJudge):
         Context keys consumed (optional):
             ``coded_findings`` (dict): ``{target_id: [str, ...]}`` — live
                 findings the coded evaluators already reported for that chunk.
+            ``editorial_findings_per_1000`` (int) / ``max_findings_override``
+                (int): the ceiling, via :func:`resolve_budget`. The number
+                rendered here is the number ``select_findings`` enforces, which
+                is the whole reason both go through one function.
         """
         coded = context.get("coded_findings") or {}
         entries = coded.get(target.id) if isinstance(coded, dict) else None
-        word_count = len((target.translated_text or "").split())
         return {
             "translation_text": target.translated_text,
             "already_reported": format_already_reported(list(entries or [])),
-            "max_findings": str(findings_budget(word_count)),
+            "max_findings": str(resolve_budget(target, context)),
         }
 
     def select_findings(
@@ -231,10 +295,13 @@ class EditorialJudge(VerdictJudge):
            inspection ("this is fine") and tags it with a severity anyway.
         2. the confidence floor.
         3. the per-passage budget, applied last and by severity so that
-           truncation drops the least serious rather than the last-listed.
+           truncation drops the least serious rather than the last-listed. It is
+           resolved by :func:`resolve_budget` — the same call
+           ``item_prompt_variables`` made — so code enforces exactly the ceiling
+           the prompt stated, on either backend.
         """
         minimum = str(context.get("editorial_min_confidence") or DEFAULT_MIN_CONFIDENCE)
-        budget = findings_budget(len((target.translated_text or "").split()))
+        budget = resolve_budget(target, context)
 
         kept = [f for f in raw_findings if not is_nonissue(f)]
         dropped_nonissue = len(raw_findings) - len(kept)
@@ -311,6 +378,7 @@ class EditorialJudge(VerdictJudge):
                 "filtered_low_confidence": drops["dropped_confidence"],
                 "filtered_over_budget": drops["dropped_budget"],
                 "findings_budget": drops["budget"],
+                "findings_per_1000": resolve_findings_per_1000(context),
                 "min_confidence": str(
                     context.get("editorial_min_confidence") or DEFAULT_MIN_CONFIDENCE
                 ),
@@ -336,7 +404,8 @@ class EditorialJudge(VerdictJudge):
 
         Context keys consumed (all optional): ``style_guide``, ``style_rules``,
         ``glossary``, ``calibration_examples``, ``coded_findings``,
-        ``editorial_min_confidence``, and ``judge_model`` / ``judge_provider``.
+        ``editorial_min_confidence``, ``editorial_findings_per_1000``, and
+        ``judge_model`` / ``judge_provider``.
         On an unparseable response it retries once with a stricter JSON-only
         suffix, then returns a single error issue if it still cannot parse.
         """

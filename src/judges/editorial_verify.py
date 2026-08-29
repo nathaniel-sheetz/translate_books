@@ -242,7 +242,9 @@ def apply_verdicts(
     """Fold adjudication verdicts into a persisted editorial ``EvalResult`` dict.
 
     Survivors become ``issues``; retracted findings move to
-    ``metadata.retracted`` with their reason. ``metadata.candidates`` is left
+    ``metadata.retracted`` with their reason and reclassified ones to
+    ``metadata.reclassified_findings`` with both severities.
+    ``metadata.candidates`` is left
     exactly as the first pass wrote it — the pre-adjudication set is the only
     record of what was proposed, and the retraction rate is measured against it.
 
@@ -252,7 +254,7 @@ def apply_verdicts(
     """
     survivors: list[dict[str, Any]] = []
     retracted: list[dict[str, Any]] = []
-    reclassified = 0
+    reclassified_findings: list[dict[str, Any]] = []
     source_used = 0
 
     for candidate in candidates:
@@ -282,13 +284,32 @@ def apply_verdicts(
 
         updated = _clean(candidate)
         if decision == "RECLASSIFY":
-            reclassified += 1
+            # Record the move before applying it: ``updated`` is overwritten in
+            # place below, and the survivor that reaches ``issues`` keeps only the
+            # new severity. Without this a reclassification is a bare count, and
+            # "read old -> new before treating the suggestion as approved" is an
+            # instruction nothing on disk can answer.
+            old_category = normalize_category(candidate.get("category"))
+            old_severity = str(candidate.get("severity") or "").strip().lower()
             if verdict.get("category"):
                 updated["category"] = normalize_category(verdict.get("category"))
             if verdict.get("severity"):
                 updated["severity"] = str(verdict["severity"]).strip().lower()
             if str(verdict.get("message") or "").strip():
                 updated["message"] = str(verdict["message"]).strip()
+            reclassified_findings.append(
+                {
+                    "finding_key": key,
+                    "rule": candidate.get("rule"),
+                    "excerpt": candidate.get("_excerpt") or candidate.get("excerpt"),
+                    "category": old_category,
+                    "new_category": updated.get("category"),
+                    "severity": old_severity,
+                    "new_severity": updated.get("severity"),
+                    "reason": str(verdict.get("reason") or "").strip(),
+                    "used_source": bool(verdict.get("used_source")),
+                }
+            )
         if str(verdict.get("suggestion") or "").strip():
             updated["suggestion"] = str(verdict["suggestion"]).strip()
         updated["verdict"] = decision
@@ -313,8 +334,14 @@ def apply_verdicts(
             "verified_at": datetime.now().isoformat(),
             "verify_prompt_version": llm_io.prompt_version(VERIFY_TEMPLATE),
             "candidates_adjudicated": len(candidates),
-            "confirmed": len(survivors) - reclassified,
-            "reclassified": reclassified,
+            "confirmed": len(survivors) - len(reclassified_findings),
+            # ``reclassified`` stays an int and the detail arrives beside it under
+            # a new key, rather than mirroring ``retracted``/``retracted_count``:
+            # six consumers already read this one as a number (editorial_metrics,
+            # the wave rollup, /review-status, the dashboard tooltip), and the
+            # asymmetry is cheaper than a coordinated rename.
+            "reclassified": len(reclassified_findings),
+            "reclassified_findings": reclassified_findings,
             "retracted": retracted,
             "retracted_count": len(retracted),
             "source_requested": requested,
@@ -334,6 +361,22 @@ def apply_verdicts(
 def _clean(candidate: dict[str, Any]) -> dict[str, Any]:
     """Drop the underscore-prefixed working fields before persisting."""
     return {k: v for k, v in candidate.items() if not k.startswith("_")}
+
+
+def verdict_detail(chunk_id: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """The findings this chunk's adjudication actually moved, tagged with the chunk.
+
+    Everything a wave-level report needs to say *which* ones changed, without
+    walking one ``evaluations/<chunk>.json`` per chunk to find out. Confirmations
+    are omitted on purpose: they are the majority and the outcome that changed
+    nothing, so a list of them is the flood, not the signal.
+    """
+    detail: list[dict[str, Any]] = []
+    for record in metadata.get("retracted") or []:
+        detail.append({"chunk_id": chunk_id, "verdict": "RETRACT", **record})
+    for record in metadata.get("reclassified_findings") or []:
+        detail.append({"chunk_id": chunk_id, "verdict": "RECLASSIFY", **record})
+    return detail
 
 
 def verify_result(
@@ -392,6 +435,7 @@ def verify_result(
         "retracted": meta.get("retracted_count"),
         "source_attached": meta.get("source_attached"),
         "source_used": meta.get("source_used"),
+        "verdict_detail": verdict_detail(chunk_id, meta),
     }
 
 
@@ -404,5 +448,6 @@ __all__ = [
     "build_prompt_parts",
     "collect_candidates",
     "parse_verdicts",
+    "verdict_detail",
     "verify_result",
 ]

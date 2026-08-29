@@ -184,6 +184,42 @@ def test_untagged_scope_still_applies_to_every_judge(project, capsys):
     }
 
 
+def test_prepare_accepts_the_range_status_prints(project, capsys):
+    """The 2026-08-27 friction: `status` took this form and `prepare` rejected it.
+
+    Same targets as repeating the flag, so an operator can copy the scope off a
+    status report into the command that stages the wave.
+    """
+    ranged = _prepare(
+        capsys, project,
+        "--judge", "dialogue",
+        "--scope", "chapter:chapter_01..chapter_02",
+    )
+    repeated = _prepare(
+        capsys, project,
+        "--judge", "dialogue",
+        "--scope", "chapter:chapter_01", "--scope", "chapter:chapter_02",
+    )
+    assert _pairs(ranged) == _pairs(repeated) == {
+        ("chapter_01_chunk_000", "dialogue"),
+        ("chapter_02_chunk_000", "dialogue"),
+    }
+
+
+def test_a_tagged_scope_can_carry_a_range(project, capsys):
+    out = _prepare(
+        capsys, project,
+        "--judge", "dialogue", "--judge", "address",
+        "--scope", "dialogue:chapter:chapter_01..chapter_02",
+        "--scope", "address:chapter:chapter_01",
+    )
+    assert _pairs(out) == {
+        ("chapter_01_chunk_000", "dialogue"),
+        ("chapter_02_chunk_000", "dialogue"),
+        ("chapter_01_chunk_000", "address"),
+    }
+
+
 def test_tagged_and_untagged_scopes_mix(project, capsys):
     out = _prepare(
         capsys, project,
@@ -437,3 +473,69 @@ def test_bare_judge_name_as_scope_is_an_error(project, capsys):
     out = _prepare(capsys, project, "--judge", "address", "--scope", "address")
     assert out["rc"] == 1
     assert "address" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# --max-findings-per-1000
+#
+# The only CLI value that travels in the judge `context` rather than as a kwarg,
+# because the ceiling is read inside the judge — once when the prompt is
+# rendered and again when findings are selected.
+# ---------------------------------------------------------------------------
+
+
+def _long_chunk(project: Path, cid: str = "chapter_03_chunk_000") -> str:
+    """A 1,000-word chunk, so the rate binds rather than the short-chunk floor."""
+    chunk = _chunk(cid, "chapter_03")
+    chunk.translated_text = "palabra " * 1000
+    save_chunk(chunk, project / "chunks" / f"{cid}.json")
+    return cid
+
+
+@pytest.mark.parametrize("flag,expected", [(None, 6), ("12", 12), ("3", 3)])
+def test_the_findings_cap_flag_reaches_the_rendered_prompt(
+    project, capsys, flag, expected
+):
+    cid = _long_chunk(project)
+    args = ["--judge", "editorial", "--scope", f"chunk:{cid}"]
+    if flag is not None:
+        args += ["--max-findings-per-1000", flag]
+
+    out = _prepare(capsys, project, *args)
+
+    assert out["rc"] == 0
+    entry = out["manifest"][0]
+    assert entry["max_findings"] == expected
+    assert f"at most {expected} findings" in Path(entry["prompt_path"]).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_the_findings_cap_defaults_to_unset(project, capsys):
+    out = _prepare(capsys, project, "--judge", "editorial", "--scope", "book")
+
+    assert out["rc"] == 0
+    manifest = json.loads(
+        (project / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["editorial_findings_per_1000"] is None
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_a_non_positive_findings_cap_is_rejected(project, capsys, value):
+    """argparse would take 0 and the judge would silently use the default —
+    which reads as the flag having been honoured."""
+    out = _prepare(
+        capsys,
+        project,
+        "--judge",
+        "editorial",
+        "--scope",
+        "book",
+        "--max-findings-per-1000",
+        value,
+    )
+
+    assert out["rc"] == 1
+    assert out["status"] == "error"
+    assert "--max-findings-per-1000" in out["error"]

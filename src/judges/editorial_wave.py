@@ -115,8 +115,9 @@ def _scope_repr(scopes: list[str]) -> Any:
     """What goes in a payload's ``scope`` field.
 
     A single scope stays a bare string so the CLI's output is byte-identical to
-    what it printed before this module existed; a multi-scope run (only the GUI
-    makes one) reports the list it was given.
+    what it printed before this module existed; a multi-scope run — the GUI's
+    ticked chapters, or repeated ``--scope`` flags since 0.53.1.0 — reports the
+    list it was given.
     """
     return scopes[0] if len(scopes) == 1 else list(scopes)
 
@@ -148,9 +149,11 @@ def collect_pending(
     A scope that cannot be resolved — an untranslated chapter ticked in the
     Review table — is reported as a skip rather than raising, so one bad entry
     in a multi-chapter selection does not refuse the whole run. But when *every*
-    scope fails the error is re-raised: a single-scope caller (the CLI, which
-    always passes one) must still fail loudly on a typo rather than report a
-    cheerful "nothing to adjudicate".
+    scope fails the error is re-raised, so a lone typo still fails loudly rather
+    than reporting a cheerful "nothing to adjudicate". Between those two — a typo
+    beside a good scope — the demotion is silent in the counts, so callers surface
+    it through :func:`scope_warnings`; the CLI can no longer be assumed to pass
+    exactly one scope.
     """
     pending: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -288,6 +291,22 @@ def draft_progress(project_dir: Path) -> dict[str, Any]:
     }
 
 
+def scope_warnings(skipped: list[dict[str, Any]]) -> list[str]:
+    """One warning per scope that resolved to nothing.
+
+    ``collect_pending`` demotes an unresolvable scope to a skip so one
+    untranslated chapter in a ticked selection does not refuse the whole run —
+    but a demotion nobody is told about is a wave that quietly ran over half the
+    book. The counts alone cannot say it: a bad scope contributes nothing to
+    them, so the payload looks like a smaller job rather than a wrong one.
+    """
+    return [
+        f"scope {entry.get('scope')!r} resolved to nothing: {entry.get('error')}"
+        for entry in skipped
+        if entry.get("reason") == "scope_error"
+    ]
+
+
 def status(
     project_dir: Path,
     scopes: list[str],
@@ -309,6 +328,7 @@ def status(
         "scope": _scope_repr(scopes),
         "counts": counts(pending),
         "skipped": reasons,
+        "warnings": scope_warnings(skipped),
         "pending_chunks": [e["chunk_id"] for e in pending],
     }
     if drafts:
@@ -354,12 +374,13 @@ def estimate_cost_bound(
     the shared prefix without an LLM call, and each hypothetical candidate adds
     a fixed block allowance plus its verdict's completion tokens.
     """
-    from src.judges.editorial_judge import findings_budget
+    from src.judges.editorial_judge import findings_budget, resolve_findings_per_1000
 
+    per_1000 = resolve_findings_per_1000(context)
     prefix = ev.build_prompt([], context)
     total = 0.0
     for words in chunk_word_counts.values():
-        budget = findings_budget(words)
+        budget = findings_budget(words, per_1000)
         padded = prefix + ("x" * _CANDIDATE_BLOCK_CHARS * budget)
         total += llm_io.estimate_call_cost(
             padded,
@@ -402,6 +423,7 @@ def run_api(
             "command": "run",
             "project": project_dir.name,
             "counts": totals,
+            "warnings": scope_warnings(skipped),
             "results": [],
             "instructions": "Nothing to adjudicate in this scope.",
         }
@@ -444,9 +466,17 @@ def run_api(
         "backend": "api",
         "counts": totals,
         "skipped_count": len(skipped),
+        "warnings": scope_warnings(skipped),
         "persisted": bool(persist),
         "results": results,
         "rollup": _rollup(results),
+        # Same key the draft backend returns, for the same reason: the counts say
+        # how many verdicts moved, this says which findings they were.
+        "verdict_detail": [
+            record
+            for info in results
+            for record in (info.get("verdict_detail") or [])
+        ],
     }
 
 
@@ -598,7 +628,7 @@ def prepare(
             "headless_effort_source": prof.effort_source,
             "headless_effort_channel": prof.effort_channel,
         },
-        "warnings": list(prof.warnings),
+        "warnings": scope_warnings(skipped) + list(prof.warnings),
         "instructions": (
             "Relay `effective` + `usage_summary` and get approval, THEN run "
             "`fanout` for a headless wave — or spawn one worker per entry: read "
@@ -790,9 +820,7 @@ def fanout(
     }
 
 
-def commit(
-    project_dir: Path, *, persist: bool = False, brief: bool = False
-) -> dict[str, Any]:
+def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     """Parse every written draft and fold its verdicts into the persisted result.
 
     Takes no judge context, unlike its siblings. The verdicts were rendered
@@ -810,6 +838,7 @@ def commit(
         }
 
     results, failed, missing = [], [], []
+    detail: list[dict[str, Any]] = []
 
     for entry in manifest.get("entries") or []:
         chunk_id = entry["chunk_id"]
@@ -843,6 +872,7 @@ def commit(
         metadata = patched.get("metadata") or {}
         if persist:
             _persist(project_dir, chunk_id, patched)
+        detail.extend(ev.verdict_detail(chunk_id, metadata))
         results.append(
             {
                 "chunk_id": chunk_id,
@@ -866,8 +896,14 @@ def commit(
         "committed": len(results),
         "failed": failed,
         "missing": missing,
-        "results": [] if brief else results,
+        "results": results,
         "rollup": _rollup(results),
+        # Which findings moved, not just how many. ``results[]`` is nine counts
+        # per chunk and ``rollup`` sums them, so before this the only answer to
+        # "which two were retracted?" was to open ten evaluation files by hand.
+        # Confirmations are excluded, so this is as long as the wave changed
+        # something and no longer.
+        "verdict_detail": detail,
         "instructions": (
             "Re-spawn the failed/missing entries and re-run `commit`."
             if (failed or missing)

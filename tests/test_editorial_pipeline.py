@@ -176,6 +176,101 @@ def test_status_lists_pending_candidates_and_their_source_requests(project, caps
     assert out["pending_chunks"] == [CHUNK_ID]
 
 
+def _second_chapter(project):
+    """A second translated chapter, so a multi-scope call has something to union."""
+    chunk_id = "chapter_02_chunk_000"
+    payload = json.loads((project / "chunks" / f"{CHUNK_ID}.json").read_text(encoding="utf-8"))
+    payload["id"] = chunk_id
+    payload["chapter_id"] = "chapter_02"
+    (project / "chunks" / f"{chunk_id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    return chunk_id
+
+
+def _persist_pass_one_for(project, chunk_id, candidates):
+    from src.judges.base import JudgeTarget
+    from src.judges.registry import get_judge
+
+    target = JudgeTarget(
+        id=chunk_id,
+        target_type="chunk",
+        source_text=" ".join(EN_SENTENCES),
+        translated_text=SPANISH,
+        context={"chapter_id": chunk_id.rsplit("_chunk_", 1)[0]},
+    )
+    raw = json.dumps({"findings": candidates, "summary": "s"}, ensure_ascii=False)
+    result = get_judge("editorial").parse_response(target, raw, {})
+    merge_judge_result(project, chunk_id, "editorial", result.model_dump(mode="json"))
+    return result
+
+
+def test_repeated_scope_flags_union_rather_than_last_wins(project, capsys):
+    """The 2026-08-27 friction: seven --scope flags staged the seventh chapter.
+
+    The wave has taken a list since the Review tab started ticking chapters;
+    argparse was the only seam that hadn't caught up.
+    """
+    second = _second_chapter(project)
+    _persist_pass_one(project, [_candidate()])
+    _persist_pass_one_for(project, second, [_candidate()])
+
+    _run([
+        "status", "--project", str(project),
+        "--scope", "chapter:chapter_01", "--scope", "chapter:chapter_02",
+    ])
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["counts"]["chunks"] == 2
+    assert sorted(out["pending_chunks"]) == [CHUNK_ID, second]
+    assert out["scope"] == ["chapter:chapter_01", "chapter:chapter_02"]
+
+
+def test_a_chapter_range_reaches_pass_two(project, capsys):
+    second = _second_chapter(project)
+    _persist_pass_one(project, [_candidate()])
+    _persist_pass_one_for(project, second, [_candidate()])
+
+    _run(["status", "--project", str(project), "--scope", "chapter:chapter_01..chapter_02"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert sorted(out["pending_chunks"]) == [CHUNK_ID, second]
+
+
+def test_the_default_scope_is_still_the_whole_book(project, capsys):
+    """``append`` with a non-None default would silently prepend 'book'."""
+    _persist_pass_one(project, [_candidate()])
+
+    _run(["status", "--project", str(project)])
+    assert json.loads(capsys.readouterr().out)["scope"] == "book"
+
+
+def test_one_bad_scope_beside_a_good_one_warns_instead_of_narrowing_silently(
+    project, capsys
+):
+    """``collect_pending`` demotes an unresolvable scope to a skip.
+
+    Safe while the CLI passed exactly one scope; now that it can pass several,
+    the demotion has to be audible or a typo quietly halves the wave.
+    """
+    _persist_pass_one(project, [_candidate()])
+
+    _run([
+        "status", "--project", str(project),
+        "--scope", "chapter:chapter_01", "--scope", "chapter:chpater_02",
+    ])
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out)["counts"]["chunks"] == 1
+    assert "chapter:chpater_02" in captured.err
+
+
+def test_a_lone_bad_scope_still_fails_loudly(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+    assert _run(["status", "--project", str(project), "--scope", "chapter:chpater_02"]) == 1
+    assert "error" in json.loads(capsys.readouterr().out)
+
+
 def test_a_clean_chunk_is_not_pending(project, capsys):
     """No candidates means nothing to adjudicate — and nothing to bill for."""
     _persist_pass_one(project, [])
@@ -265,6 +360,62 @@ def test_commit_applies_verdicts_and_persists_through_the_judge_seam(project, ca
     assert "editorial" in json.loads(
         (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
     )["eval_runs"]
+
+
+def test_commit_names_the_findings_the_verdicts_moved(project, capsys):
+    """The rollup counts them; ``verdict_detail`` says which ones.
+
+    2026-08-27: a wave came back 16 confirm / 1 reclassify / 2 retract and the
+    only way to answer "which two?" was to open ten evaluation files by hand.
+    """
+    result = _persist_pass_one(project, [_candidate(), _candidate(rule="agreement")])
+    _prepare(project, capsys)
+    keys = [i.finding_key for i in result.issues]
+
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        json.dumps(
+            {
+                "verdicts": {
+                    keys[0]: {"verdict": "RETRACT", "reason": "idiomatic after all"},
+                    keys[1]: {
+                        "verdict": "RECLASSIFY",
+                        "severity": "error",
+                        "reason": "the English confirms a real omission",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run(["commit", "--project", str(project), "--persist"]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    detail = {d["verdict"]: d for d in out["verdict_detail"]}
+    assert set(detail) == {"RETRACT", "RECLASSIFY"}
+    assert detail["RETRACT"]["reason"] == "idiomatic after all"
+    assert detail["RETRACT"]["chunk_id"] == CHUNK_ID
+    # The severity move, which the survivor itself no longer remembers.
+    assert detail["RECLASSIFY"]["severity"] == "warning"
+    assert detail["RECLASSIFY"]["new_severity"] == "error"
+    assert detail["RECLASSIFY"]["rule"] == "agreement"
+
+    # And it survives on disk, where the skill's post-pass-2 veto reads it.
+    persisted = json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["judges"]["editorial"]["metadata"]
+    assert persisted["reclassified"] == 1
+    assert persisted["reclassified_findings"][0]["new_severity"] == "error"
+
+
+def test_commit_has_no_brief_flag(project, capsys):
+    """Pass 2's results[] is nine counts per chunk — there was no flood to stop.
+
+    Dropping it only removed the per-chunk breakdown, which ``rollup`` cannot
+    reconstruct. Pass 1 keeps its ``--brief``; this CLI never needed one.
+    """
+    with pytest.raises(SystemExit):
+        _run(["commit", "--project", str(project), "--brief"])
 
 
 def test_commit_reports_a_bad_draft_instead_of_dropping_the_chunk(project, capsys):

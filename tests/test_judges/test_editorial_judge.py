@@ -21,11 +21,13 @@ import pytest
 from src.judges import llm_io
 from src.judges.base import JudgeTarget
 from src.judges.editorial_judge import (
+    FINDINGS_PER_1000_WORDS,
     EditorialJudge,
     findings_budget,
     normalize_category,
     normalize_confidence,
     normalize_source_check,
+    resolve_findings_per_1000,
 )
 from src.judges.scoring import finding_key
 from src.models import IssueLevel
@@ -204,10 +206,87 @@ def test_budget_truncates_by_severity_not_by_order():
 
 @pytest.mark.parametrize(
     "words,expected",
-    [(0, 2), (76, 2), (400, 2), (1000, 3), (1246, 4), (2866, 9)],
+    [(0, 2), (76, 2), (400, 2), (1000, 6), (1246, 7), (2866, 17)],
 )
 def test_findings_budget_scales_with_length_and_floors_at_two(words, expected):
     assert findings_budget(words) == expected
+
+
+@pytest.mark.parametrize(
+    "words,per_1000,expected",
+    [(1000, 3, 3), (1000, 12, 12), (2866, 3, 9), (76, 12, 2)],
+)
+def test_findings_budget_takes_a_rate(words, per_1000, expected):
+    """The rate is a parameter; the short-chunk floor is not."""
+    assert findings_budget(words, per_1000) == expected
+
+
+@pytest.mark.parametrize("raw", [None, 0, -4, "", "lots", [3]])
+def test_a_bad_rate_falls_back_to_the_default(raw):
+    """A malformed knob must never widen a gate that exists to be narrow."""
+    assert resolve_findings_per_1000({"editorial_findings_per_1000": raw}) == (
+        FINDINGS_PER_1000_WORDS
+    )
+    assert resolve_findings_per_1000({}) == FINDINGS_PER_1000_WORDS
+
+
+def test_a_rate_given_as_a_string_still_reads():
+    """The CLI types it as int, but a manifest or a JSON payload may not."""
+    assert resolve_findings_per_1000({"editorial_findings_per_1000": "9"}) == 9
+
+
+def test_the_rate_reaches_both_the_prompt_and_the_truncation():
+    """The number the prompt states is the number code enforces."""
+    judge = EditorialJudge()
+    target = _target("palabra " * 1000)  # 1000 words
+    ctx = _ctx(editorial_findings_per_1000=4)
+
+    prompt = judge.build_prompt(target, ctx)
+    assert "at most 4 findings" in prompt
+
+    raw = _response([_finding(rule=str(i)) for i in range(6)])
+    result = judge.parse_response(target, raw, ctx)
+
+    assert result.metadata["findings_budget"] == 4
+    assert result.metadata["findings_per_1000"] == 4
+    assert result.metadata["filtered_over_budget"] == 2
+    assert len(result.issues) == 4
+
+
+def test_an_explicit_override_beats_the_word_count():
+    """How the subagent backend carries `prepare`'s ceiling across to `commit`.
+
+    `commit` rebuilds targets with empty text, so without the override a long
+    chunk's findings would be truncated to the short-chunk floor.
+    """
+    judge = EditorialJudge()
+    empty = JudgeTarget(
+        id="chapter_01_chunk_000",
+        target_type="chunk",
+        source_text="",
+        translated_text="",
+        context={},
+    )
+    raw = _response([_finding(rule=str(i)) for i in range(5)])
+
+    assert len(judge.parse_response(empty, raw, _ctx()).issues) == 2  # the floor
+
+    ctx = _ctx(max_findings_override=5)
+    result = judge.parse_response(empty, raw, ctx)
+    assert result.metadata["findings_budget"] == 5
+    assert result.metadata["filtered_over_budget"] == 0
+    assert len(result.issues) == 5
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "5", None])
+def test_a_bad_override_is_ignored_rather_than_obeyed(bad):
+    judge = EditorialJudge()
+    target = _target("palabra " * 1000)
+    raw = _response([_finding()])
+
+    result = judge.parse_response(target, raw, _ctx(max_findings_override=bad))
+
+    assert result.metadata["findings_budget"] == findings_budget(1000)
 
 
 # ---------------------------------------------------------------------------

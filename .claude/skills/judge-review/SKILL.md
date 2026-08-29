@@ -84,10 +84,11 @@ python scripts/run_judges.py status --project fabre2 --judge dialogue \
 ```
 
 Read-only, no spend, no writes. Flags: `--judge` (repeatable — `coded`, `dialogue`,
-`address`, `editorial`; default all), `--scope` (repeatable **filter**, not a target
-resolver: `chapter:<id>`, the inclusive range `chapter:<first>..<last>`, `chunk:<id>`,
-`book`; a chapter with no translated chunks is *reported*, not an error), `--detail`,
-and `--drafts`.
+`address`, `editorial`; default all), `--scope` (repeatable; same grammar the other
+subcommands take — `chapter:<id>`, the inclusive range `chapter:<first>..<last>`,
+`chunk:<id>`, `book`), `--detail`, and `--drafts`. Here it is a **filter**, not a
+target resolver: a chapter with no translated chunks is *reported*, not an error,
+because a report whose job is to show gaps cannot refuse to describe one.
 
 **`--drafts` answers "did the wave actually start?"** in one free call: it reads the
 prepared manifest and reports its mtime plus `{written, pending}` draft counts and the
@@ -126,7 +127,9 @@ Shared flags (`run`, `prepare`):
 - `--judge <name>` **or** `--suite <name>` (`--judge dialogue`, `--suite default`).
   Judges/suites come from `src/judges/registry.py` + `app_config.json`.
   **`--judge` is repeatable** — see the multi-judge note below.
-- `--scope chunk:<chunk_id>` or `--scope chapter:<chapter_id>` — required.
+- `--scope chunk:<chunk_id>`, `--scope chapter:<chapter_id>` or the inclusive
+  range `--scope chapter:<first>..<last>` — required. Same grammar `status`
+  takes, so a scope read off a status report runs here unchanged.
 - `--model` / `--provider` — judge LLM overrides.
 
 **Both judges go in ONE `prepare`.** `--judge` repeats, exactly as it does on
@@ -175,7 +178,10 @@ first place. (`status` and `profile` write nothing at all, by contract.)
 - `--cli {claude,cursor}` — which CLI this manifest is for. **Pass it whenever the
   wave is not Claude.** It picks the default worker model *and* the per-job token
   baseline the consent number is built from (Cursor's is ~4.4× Claude's), and it is
-  written into the manifest so `fanout` inherits it.
+  written into the manifest so `fanout` inherits it. **Don't pass it when `profile`
+  already said `cli_source: config` for that same CLI** — the flag outranks the pin
+  and rewrites `cli_source` to `cli`, so it changes nothing about the wave and
+  removes the one line at the gate saying the book is pinned.
 - `--effort <level>` — per-run effort. Delivered as `--effort` on claude and inside
   the model's `[effort=…]` bracket on cursor; either way `effective.effort` is the
   one true answer.
@@ -239,7 +245,9 @@ saying which knob carries it (`argv` / `model_bracket` / `none`).
 > An `effort_channel: "none"` means *nothing* carries the level — that happens on the
 > `auto` model, which takes no bracket; pin a concrete model to control effort.
 
-`commit` (subagent backend) takes only `--project` and `--persist`.
+`commit` (subagent backend) takes `--project`, `--persist` and `--brief`
+(see 5b). Pass 2's `verify_editorial commit` has no `--brief` — its
+`results[]` is a handful of counts per chunk, not an `EvalResult` per pair.
 
 `apply` (turn approved findings into chunk edits) adds:
 - `--judge <name>` (default `dialogue`; **repeatable**) — whose **persisted** findings to consider.
@@ -450,8 +458,13 @@ manifest from disk, so echoing it into the conversation is pure duplication:
 python scripts/run_judges.py prepare --project understood-betsy --judge dialogue \
     --scope chapter:chapter_05 --scope chapter:chapter_06 --cli cursor \
     [--targets-per-worker 3] [--effort high] [--worker-model grok-4.5] \
-    [--batch-size 5] [--quiet]
+    [--batch-size 5] [--quiet] [--max-findings-per-1000 N]
 ```
+
+`--max-findings-per-1000` is **editorial-only** (it caps findings per 1,000
+translated words; default 6). Do not ask about it and do not raise it yourself —
+pass it only when the user named a number. See
+[`references/editorial.md`](references/editorial.md).
 
 **Relay ONE consent block, built from `effective` + `usage_summary`.** They price
 different things and neither bounds the other:
@@ -553,7 +566,9 @@ Wave contract (fan-out width = `batch_size`, default 5; throttle down on 529):
 > Never write "starting the headless wave now" and end the turn without the tool
 > call in it — on 2026-08-26 that cost the operator eight minutes on a wave that
 > had never launched, and it is invisible from the outside because a running
-> wave and an unstarted one both look like silence. If you are ever asked
+> wave and an unstarted one both look like silence. **Nothing goes between the
+> two, either** — not a grep of the launcher, not a re-check that last release's
+> fix landed. If a shipped fix needs verifying, `fanout` failing is the report. If you are ever asked
 > whether a wave is still going, answer with `status --drafts` (zero drafts and
 > an unmoved manifest mtime means it never started), not from memory.
 

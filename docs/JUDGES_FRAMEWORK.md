@@ -16,7 +16,8 @@ is the reference for a judge whose book-specific expectations are injected via
 The third is the **editorial judge** (`editorial`), which asks a different kind
 of question from the other two — not "does this passage follow rule X?" but
 "would a competent editor stop here and fix this?". It reads the Spanish alone,
-proposes candidates under a findings budget and a confidence floor, and hands
+proposes candidates under a findings budget (`--max-findings-per-1000`, default
+6) and a confidence floor, and hands
 them to a second, batched adjudication pass that attaches the English original
 only to the candidates that asked for it. It has its own second-pass CLI
 (`scripts/verify_editorial.py`) and its own precision report
@@ -191,9 +192,10 @@ python scripts/run_judges.py commit  --project understood-betsy --persist --brie
 |---|---|---|---|
 | all | `--project` | — | Project id (under `projects/`) or path |
 | `run`, `prepare` | `--judge` / `--suite` | — | One required; `--judge` repeats (both judges, one manifest) |
-| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>`, `chapter:<chapter_id>` or `book` |
+| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>`, `chapter:<chapter_id>`, `chapter:<first>..<last>` or `book` |
 | `prepare` | `--scope <judge>:<scope>` | — | Bind a scope to one judge; untagged scopes cover all of them |
 | `run`, `prepare` | `--model` / `--provider` | config | Judge LLM overrides |
+| `run`, `prepare` | `--max-findings-per-1000` | `6` | Editorial judge only: findings allowed per 1,000 translated words, floored at 2 for very short chunks |
 | `run` | `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
 | `run` | `--confirm` | false | Proceed past the cost gate |
 | `prepare` | `--worker-model` | `sonnet` | Tier to pin spawned `judge-worker`s to |
@@ -201,7 +203,7 @@ python scripts/run_judges.py commit  --project understood-betsy --persist --brie
 | `run`, `commit` | `--persist` | false | Write findings into `evaluations/<chunk>.json` |
 | `commit` | `--brief` | false | Swap `results[]` for a counts rollup; full payload still on disk |
 | `apply` | `--judge` | `dialogue` | Repeatable: both judges in one run, realigned once |
-| `apply` | `--scope` | — | Repeatable; same three kinds as above |
+| `apply` | `--scope` | — | Repeatable; same four kinds as above |
 | `apply` | `--select` | — | Comma-separated `applicable[].id` / `.qualified_id` to apply |
 | `apply` | `--dry-run` | false | Preview the plan, change nothing |
 | `apply` | `--rebuild-epub` | false | Rebuild the EPUB after applying |
@@ -214,6 +216,13 @@ python scripts/run_judges.py commit  --project understood-betsy --persist --brie
 - `chunk:<chunk_id>` — one chunk.
 - `chapter:<chapter_id>` — every translated chunk in the chapter, one target
   each (results stay keyed per chunk so persistence + badges work).
+- `chapter:<first>..<last>` — the inclusive span between two chapters, resolved
+  by position in the enumerated chapter list (so it works on a book whose
+  chapters are not zero-padded, and a reversed range is the same span). The form
+  `status` reports in, so a scope read off a status report also runs on `run` /
+  `prepare` / `apply` / `verify_editorial`. A chapter inside the span with
+  nothing translated is skipped rather than refusing the whole range — unlike
+  `chapter:<id>` alone, which the caller vouched for by naming it.
 - `book` (or `book:`) — every translated chunk in the project, in reading order.
   Added for `apply`, where a full-book pass otherwise meant one `--scope
   chapter:` flag per chapter built by a shell loop, and a chapter missing from

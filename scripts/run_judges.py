@@ -110,6 +110,10 @@ from src.harness import state as hstate  # noqa: E402
 from src.harness.profile import resolve_profile  # noqa: E402
 from src.judges import subagent  # noqa: E402
 from src.judges.context import build_judge_context  # noqa: E402
+from src.judges.editorial_judge import (  # noqa: E402
+    FINDINGS_PER_1000_WORDS,
+    MIN_FINDINGS_BUDGET,
+)
 from src.judges.registry import available_judges  # noqa: E402
 from src.judges.subagent import _PREPARE_SCHEMA  # noqa: E402
 
@@ -451,7 +455,9 @@ def _build_parser() -> argparse.ArgumentParser:
                 required=True,
                 action="append",
                 metavar="SCOPE",
-                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'. "
+                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>', "
+                "'chapter:<first>..<last>' (inclusive range, the same form status takes) "
+                "or 'book'. "
                 "Repeatable — pass --scope multiple times to stage several chapters "
                 "in one manifest for a single commit. Prefix a scope with a judge name "
                 "('--scope address:chapter:chapter_31') to bind it to that judge alone; "
@@ -463,10 +469,23 @@ def _build_parser() -> argparse.ArgumentParser:
             p.add_argument(
                 "--scope",
                 required=True,
-                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'",
+                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>', "
+                "'chapter:<first>..<last>' (inclusive range) or 'book'",
             )
         p.add_argument("--model", default=None, help="Judge model id override")
         p.add_argument("--provider", default=None, help="Judge provider override")
+        p.add_argument(
+            "--max-findings-per-1000",
+            dest="max_findings_per_1000",
+            type=int,
+            default=None,
+            help=f"Editorial judge only: findings the judge may report per 1,000 "
+            f"translated words (default {FINDINGS_PER_1000_WORDS}; floored at "
+            f"{MIN_FINDINGS_BUDGET} for very short chunks). A ceiling, not a target — "
+            "raise it when the judge is visibly truncating real defects on long "
+            "chunks, lower it to tighten an untuned book. Stated in the prompt and "
+            "enforced in code, on both backends. Ignored by the other judges.",
+        )
 
     # profile — read-only "what would this wave run as?" ---------------------
     prof_p = sub.add_parser(
@@ -755,7 +774,8 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         action="append",
         metavar="SCOPE",
-        help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book' (the whole "
+        help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>', "
+        "'chapter:<first>..<last>' (inclusive range) or 'book' (the whole "
         "project). Repeatable.",
     )
     ap.add_argument(
@@ -1021,6 +1041,25 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_findings_cap(args: argparse.Namespace, context: dict) -> str | None:
+    """Put ``--max-findings-per-1000`` on the judge context, or say why not.
+
+    The only CLI value that travels in ``context`` rather than as a kwarg: the
+    ceiling is read inside the judge, at prompt-render time and again at
+    selection time, and ``context`` is the one thing both backends hand to it.
+    Returns an error string for a non-positive value — argparse would otherwise
+    accept 0 and the judge would silently fall back to the default, which reads
+    as the flag having been honoured.
+    """
+    value = getattr(args, "max_findings_per_1000", None)
+    if value is None:
+        return None
+    if value <= 0:
+        return f"--max-findings-per-1000 must be a positive integer (got {value})"
+    context["editorial_findings_per_1000"] = value
+    return None
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """API backend: cost-gated suite run, optional persist (the original behavior)."""
     project_dir = _resolve_project(args.project)
@@ -1051,6 +1090,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if ctx_error:
         _emit({"status": "error", "error": ctx_error, "scope": scope}, _RUN_SCHEMA)
+        return 1
+    cap_error = _apply_findings_cap(args, context)
+    if cap_error:
+        _emit({"status": "error", "error": cap_error, "scope": scope}, _RUN_SCHEMA)
         return 1
 
     outcome = run_judge_suite(
@@ -1139,6 +1182,10 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     )
     if ctx_error:
         _emit({"status": "error", "error": ctx_error, "scopes": args.scope}, _PREPARE_SCHEMA)
+        return 1
+    cap_error = _apply_findings_cap(args, context)
+    if cap_error:
+        _emit({"status": "error", "error": cap_error, "scopes": args.scope}, _PREPARE_SCHEMA)
         return 1
     try:
         payload = subagent.prepare(

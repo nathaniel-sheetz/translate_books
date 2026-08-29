@@ -126,9 +126,16 @@ def _entry_members(entry: dict[str, Any]) -> list[dict[str, Any]]:
             m for m in entry["members"] if isinstance(m, dict) and m.get("target_id")
         ]
     if entry.get("target_id"):
-        return [
-            {"target_id": entry["target_id"], "target_type": entry.get("target_type", "chunk")}
-        ]
+        member = {
+            "target_id": entry["target_id"],
+            "target_type": entry.get("target_type", "chunk"),
+        }
+        # Only when `prepare` recorded one, so an entry from a judge that states
+        # no ceiling — and an older manifest written before it was recorded —
+        # keeps exactly the shape it had.
+        if entry.get("max_findings") is not None:
+            member["max_findings"] = entry["max_findings"]
+        return [member]
     return []
 
 
@@ -166,8 +173,10 @@ _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
     "manifest": "list of work entries (one worker each). Solo: {target_id, target_type, judge, "
     "prompt_path, draft_path, source_word_count, optional preamble_path+body_path for headless "
-    "cache}. Grouped (targets-per-worker > 1): "
-    "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count}]} "
+    "cache, optional max_findings when the judge states a per-passage ceiling}. "
+    "Grouped (targets-per-worker > 1): "
+    "{batch_id, judge, prompt_path, draft_path, members:[{target_id, target_type, source_word_count, "
+    "optional max_findings}]} "
     "(no preamble/body — cache is solo-only)",
     "manifest_entries": "--quiet only: entry count, replacing the 'manifest' echo "
     "(fanout reads the manifest from disk, so echoing it here is duplication)",
@@ -484,6 +493,9 @@ def prepare(
                     "draft_path": str(draft_path),
                     "source_word_count": words,
                 }
+                ceiling = _stated_ceiling(judge, target, context)
+                if ceiling is not None:
+                    entry["max_findings"] = ceiling
                 # Cache split: only when the prefix is non-empty and matches the
                 # per-judge shared preamble (or establishes it). Mismatch → omit
                 # paths so fan-out uses the full prompt.txt.
@@ -512,13 +524,15 @@ def prepare(
                 for target in group:
                     words = len((target.source_text or "").split())
                     total_words += words
-                    members.append(
-                        {
-                            "target_id": target.id,
-                            "target_type": target.target_type,
-                            "source_word_count": words,
-                        }
-                    )
+                    member: dict[str, Any] = {
+                        "target_id": target.id,
+                        "target_type": target.target_type,
+                        "source_word_count": words,
+                    }
+                    ceiling = _stated_ceiling(judge, target, context)
+                    if ceiling is not None:
+                        member["max_findings"] = ceiling
+                    members.append(member)
                 entries.append(
                     {
                         "batch_id": batch_id,
@@ -562,6 +576,10 @@ def prepare(
         "targets_per_worker": targets_per_worker,
         "model": context.get("judge_model"),
         "provider": context.get("judge_provider"),
+        # Per-entry `max_findings` is what `commit` enforces; this records the
+        # rate those ceilings came from so the persisted verdict can say which
+        # setting the book was judged under.
+        "editorial_findings_per_1000": context.get("editorial_findings_per_1000"),
         # The resolved profile, so `fanout` inherits it without the operator
         # re-passing --cli (and so a wrong pin is visible on disk, not just in a
         # payload that scrolled away).
@@ -1058,6 +1076,26 @@ def fanout(
     return _with_profile(out)
 
 
+def _stated_ceiling(judge: Any, target: JudgeTarget, context: dict[str, Any]) -> int | None:
+    """The ``max_findings`` this judge rendered into ``target``'s prompt, if any.
+
+    Recorded on the manifest entry so ``commit`` enforces the same number rather
+    than re-deriving one: it rebuilds targets with empty text, which for the
+    editorial judge means a budget of the short-chunk floor regardless of how
+    long the chunk actually was. Read generically off ``item_prompt_variables``
+    — the dialogue and address judges carry no such key and get no such field.
+    """
+    try:
+        raw = judge.item_prompt_variables(target, context).get("max_findings")
+    except Exception:  # noqa: BLE001 - a manifest nicety must never fail prepare
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def commit(
     project_dir: Path, *, persist: bool = False, backend: str | None = None
 ) -> dict[str, Any]:
@@ -1134,6 +1172,7 @@ def commit(
     context = {
         "judge_model": doc.get("model"),
         "judge_provider": doc.get("provider"),
+        "editorial_findings_per_1000": doc.get("editorial_findings_per_1000"),
     }
 
     committed: list[dict[str, str]] = []
@@ -1145,13 +1184,26 @@ def commit(
     judge_cache: dict[str, Any] = {}
 
     def _commit_member(
-        target_id: str, target_type: str, judge_name: str, verdict_raw: str
+        target_id: str,
+        target_type: str,
+        judge_name: str,
+        verdict_raw: str,
+        max_findings: Any = None,
     ) -> None:
         """Parse one member's verdict, stamp it, record it, and optionally persist.
 
         Shared by the solo path (whole draft = one verdict) and the batch path
         (one verdict split from the ``verdicts`` object) so both go through the
         same ``parse_response`` seam the API path uses.
+
+        The target is rebuilt with empty text — the drafts are verdicts, not
+        passages — so any judge that sizes a gate off the passage would re-derive
+        it from zero words here. ``max_findings``, recorded by ``prepare`` from
+        the prompt it actually rendered, is handed back through the context so
+        the ceiling ``commit`` enforces is the ceiling the worker was given. A
+        manifest without it (an older one) keeps the previous behaviour: the
+        judge re-derives, and for the editorial judge that means the short-chunk
+        floor. Re-run ``prepare`` — it re-renders the drafts anyway.
         """
         target = JudgeTarget(
             id=target_id,
@@ -1160,9 +1212,14 @@ def commit(
             translated_text="",
             context={},
         )
+        # A fresh dict per member: `context` is shared across every entry in the
+        # manifest, and a ceiling is per target.
+        member_context = context
+        if isinstance(max_findings, int) and not isinstance(max_findings, bool) and max_findings > 0:
+            member_context = {**context, "max_findings_override": max_findings}
         try:
             judge = judge_cache.setdefault(judge_name, get_judge(judge_name))
-            result = judge.parse_response(target, verdict_raw, context)
+            result = judge.parse_response(target, verdict_raw, member_context)
         except JudgeParseError as exc:
             failed.append({"target_id": target_id, "judge": judge_name, "problem": str(exc)})
             return
@@ -1260,10 +1317,17 @@ def commit(
                     member.get("target_type", "chunk"),
                     judge_name,
                     json.dumps(verdict, ensure_ascii=False),
+                    member.get("max_findings"),
                 )
         else:
             member = members[0]
-            _commit_member(member["target_id"], member.get("target_type", "chunk"), judge_name, raw)
+            _commit_member(
+                member["target_id"],
+                member.get("target_type", "chunk"),
+                judge_name,
+                raw,
+                member.get("max_findings"),
+            )
 
     judge_names = doc.get("judges") or list(
         dict.fromkeys(e.get("judge") for e in entries if isinstance(e, dict) and e.get("judge"))

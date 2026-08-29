@@ -38,10 +38,27 @@ A judge in that range gets ignored, correctly. So the threshold is defended in
 code, not only in the prompt — the dialogue judge already has a carefully worded
 prompt-only threshold and still runs 45% false positive. Four gates, in order:
 
-1. **A findings budget.** `FINDINGS_PER_1000_WORDS = 3`, floored at 2 for very
-   short chunks. Stated in the prompt and enforced in `select_findings`, which
-   truncates by severity so a truncation drops the least serious rather than
-   whatever was listed last.
+1. **A findings budget.** `FINDINGS_PER_1000_WORDS = 6`, floored at
+   `MIN_FINDINGS_BUDGET = 2` for very short chunks. Stated in the prompt and
+   enforced in `select_findings`, which truncates by severity so a truncation
+   drops the least serious rather than whatever was listed last. Both halves go
+   through one function, `resolve_budget`, so the number the prompt states is
+   always the number the code enforces.
+
+   The rate is a **per-run parameter**, not a fixed property of the judge:
+   `--max-findings-per-1000 N` on `run_judges.py run` / `prepare`, or the
+   `editorial_findings_per_1000` context key. It shipped at 3 — chosen to sit
+   under the coded checkers' measured 0.8-3.2 findings per chunk — and truncated
+   real defects on long chunks, so the default is now 6. Raise it when the judge
+   is visibly hitting the ceiling; lower it to tighten an untuned book. It is not
+   the precision gate. The confidence floor, the non-issue filter and pass 2 are.
+
+   On the subagent backend the ceiling travels in the manifest: `prepare` records
+   the `max_findings` it rendered on each entry (and each grouped member), and
+   `commit` hands it back through `max_findings_override`. Without that, `commit`
+   — which rebuilds targets with empty text — re-derives a budget from zero words
+   and truncates every chunk to the floor of 2 regardless of what the worker was
+   asked for.
 2. **A confidence floor.** The judge returns `high` or `medium` — there is no
    `low`, because a low-confidence finding is not a finding. Stage 1 keeps
    `high` only; relax it with the `editorial_min_confidence` context key once
@@ -63,7 +80,9 @@ the *weakest* allowed value, and an unrecognized `source_check` reads as
 | accept rate | ≥ 70% | dialogue 55% · address 66% |
 | excerpt anchor rate (fresh chunks) | ≥ 95% | existing judges 98.2% |
 
-`scripts/editorial_metrics.py` reports all four, free.
+`scripts/editorial_metrics.py` reports all four, free. The first row is a
+target for the judge's *measured* density — what it should average across a
+book — not the per-passage ceiling above, which is a cap on the worst case.
 
 ## Why pass one is blind to the English
 
@@ -212,11 +231,29 @@ drifted: **163 of 165 located (98.8%)**, median window 7 rows, max 12.
 "metadata": {
   "candidates": [ … pass-1 findings, pre-adjudication … ],
   "retracted": [ {"finding_key": "…", "reason": "…", "used_source": true} ],
+  "reclassified_findings": [
+    {"finding_key": "…", "rule": "…", "excerpt": "…", "reason": "…",
+     "category": "NATURALNESS", "new_category": "FIDELITY_SUSPECT",
+     "severity": "warning", "new_severity": "error"}
+  ],
   "verified": true,
   "candidates_adjudicated": 4, "confirmed": 2, "reclassified": 1, "retracted_count": 1,
   "source_requested": 2, "source_attached": 2, "source_used": 1
 }
 ```
+
+`reclassified_findings` records the move *before* it is applied. A reclassified
+survivor keeps only its new severity — `issues[]` is the adjudicated set, not a
+diff — so without this the pass could say a finding changed class but not from
+what, which is exactly what a reviewer needs before accepting a suggestion the
+second pass did not rewrite. It is a list beside an int rather than the
+`retracted`/`retracted_count` pair: six consumers already read `reclassified` as
+a number.
+
+`commit` and `run` also return a wave-level `verdict_detail` — the retracted and
+reclassified records across every chunk, each tagged with its `chunk_id`.
+Confirmations are omitted: they are the majority and the outcome that changed
+nothing, so the list stays as long as the wave actually moved something.
 
 `issues[]` holds the survivors, so the badges and the reader see the adjudicated
 set. `metadata.candidates` is left exactly as pass one wrote it — the

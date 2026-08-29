@@ -152,12 +152,25 @@ def _emit(project_dir: Optional[Path], payload: dict) -> int:
 
 
 def _scopes(args: argparse.Namespace) -> list[str]:
-    """The wave takes a list of scopes; ``--scope`` is single-valued and stays so."""
-    return [args.scope]
+    """The ``--scope`` flags, or the default.
+
+    Repeatable, because the wave has always taken a list and the Review tab
+    passes one per ticked chapter. Before 0.53.1.0 argparse was single-valued
+    here, so repeating the flag was last-wins: seven ``--scope chapter:`` flags
+    staged the seventh chapter alone.
+    """
+    return list(args.scope) if args.scope else ["book"]
 
 
 def _warn(payload: dict, prefix: str = "") -> None:
-    """Relay the wave's warnings to stderr, where a skimmed stdout cannot hide them."""
+    """Relay the wave's warnings to stderr, where a skimmed stdout cannot hide them.
+
+    A scope that resolves to nothing is one of them. ``collect_pending`` demotes
+    an unresolvable scope to ``skipped`` and only raises when *every* scope fails
+    — safe while the CLI passed exactly one, which it no longer does. A typo
+    beside six good chapters would otherwise narrow the wave silently, reported
+    only inside a JSON body nobody reads line by line.
+    """
     for warning in payload.get("warnings") or []:
         print(f"{prefix}{warning}", file=sys.stderr)
 
@@ -167,29 +180,29 @@ def cmd_status(args: argparse.Namespace) -> int:
     # ``None`` as the sidecar target: ``status`` is the one read-only command,
     # and writing last_output.json for it would clobber the record of whatever
     # mutating command ran before it.
-    return _emit(
-        None,
-        wave.status(
-            project_dir, _scopes(args), include_verified=args.force, drafts=args.drafts
-        ),
+    payload = wave.status(
+        project_dir, _scopes(args), include_verified=args.force, drafts=args.drafts
     )
+    # ``status`` is where an operator reads the pending set off the screen, so a
+    # scope that resolved to nothing has to be louder than a row in ``skipped``.
+    _warn(payload, prefix="[status] warning: ")
+    return _emit(None, payload)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
-    return _emit(
+    payload = wave.run_api(
         project_dir,
-        wave.run_api(
-            project_dir,
-            _scopes(args),
-            persist=args.persist,
-            confirm=args.confirm,
-            force=args.force,
-            cost_limit=args.cost_limit,
-            model=args.model,
-            provider=args.provider,
-        ),
+        _scopes(args),
+        persist=args.persist,
+        confirm=args.confirm,
+        force=args.force,
+        cost_limit=args.cost_limit,
+        model=args.model,
+        provider=args.provider,
     )
+    _warn(payload, prefix="[run] warning: ")
+    return _emit(project_dir, payload)
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
@@ -233,7 +246,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     return _emit(
         project_dir,
-        wave.commit(project_dir, persist=args.persist, brief=args.brief),
+        wave.commit(project_dir, persist=args.persist),
     )
 
 
@@ -250,7 +263,18 @@ def build_parser() -> argparse.ArgumentParser:
     def common(p: argparse.ArgumentParser, *, scope: bool = True) -> None:
         p.add_argument("--project", required=True, help="Project id (under projects/) or path")
         if scope:
-            p.add_argument("--scope", default="book", help="chunk:<id>, chapter:<id> or book")
+            # ``default=None``, not ``"book"``: an ``append`` action appends *to*
+            # its default, so a non-None one would make every explicit scope read
+            # ``["book", ...]`` — the whole project, quietly. ``_scopes`` supplies
+            # the default instead.
+            p.add_argument(
+                "--scope",
+                action="append",
+                default=None,
+                metavar="SCOPE",
+                help="chunk:<id>, chapter:<id>, chapter:<first>..<last> (inclusive) "
+                "or book. Repeatable — the wave unions them (default: book)",
+            )
         p.add_argument("--model", default=None, help="Adjudicator model override")
         p.add_argument("--provider", default=None, help="Adjudicator provider override")
         p.add_argument("--verbose", action="store_true", help="Enable debug logging")
@@ -304,7 +328,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_commit = sub.add_parser("commit", help="draft backend: parse drafts and persist")
     common(p_commit, scope=False)
     p_commit.add_argument("--persist", action="store_true", help="Write the adjudicated results")
-    p_commit.add_argument("--brief", action="store_true", help="Drop results[] from stdout")
+    # No ``--brief`` here, unlike ``run_judges.py commit``. Pass 2's results[] is
+    # nine counts per chunk, not an EvalResult per (target, judge) — there is no
+    # flood to stop, and dropping it took the per-chunk breakdown with it while
+    # ``rollup`` cannot reconstruct one. The findings that moved are in
+    # ``verdict_detail``, which is only as long as the wave actually changed.
 
     return parser
 
