@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from web_ui.app import app
+from web_ui.evaluations import REVIEW_TYPES
 
 
 @pytest.fixture
@@ -122,7 +123,9 @@ class TestReaderProjectList:
     def test_category_picker_rendered_in_filter_bar(self, client, project_with_alignment):
         html = client.get("/read/").data.decode("utf-8")
         assert 'id="review-types-popup"' in html
-        assert html.count('class="review-type-cb"') == 6
+        # One checkbox per review category. Counted from REVIEW_TYPES rather than
+        # spelled out, so adding a judge does not fail a test about the picker.
+        assert html.count('class="review-type-cb"') == len(REVIEW_TYPES)
 
     def test_status_picker_replaced_the_filter_buttons(self, client, project_with_alignment):
         html = client.get("/read/").data.decode("utf-8")

@@ -235,6 +235,7 @@ pytest --cov=src tests/         # with coverage
 |---|---|
 | [`docs/JUDGES_FRAMEWORK.md`](docs/JUDGES_FRAMEWORK.md) | Tailored LLM judges: run them, add them, configure suites |
 | [`docs/ADDRESS_JUDGE.md`](docs/ADDRESS_JUDGE.md) | The address map and the usted/tú judge |
+| [`docs/EDITORIAL_JUDGE.md`](docs/EDITORIAL_JUDGE.md) | The editorial defect judge and its adjudication pass |
 | [`docs/ANNOTATION_REVIEW.md`](docs/ANNOTATION_REVIEW.md) | Resolving reader annotations and drafting footnote glosses |
 | [`docs/EDIT_REVIEW.md`](docs/EDIT_REVIEW.md) | Comparing translations against LLM baselines, tagging hunks |
 | [`docs/LLM_JUDGE_EVALUATOR.md`](docs/LLM_JUDGE_EVALUATOR.md) | LLM-judge evaluator + model comparison harness |

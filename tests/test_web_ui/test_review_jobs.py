@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import threading
 
 import pytest
 
 from web_ui import jobs
 from web_ui.app import app
+from web_ui.evaluations import REVIEW_JUDGE_TYPES
 
 
 @pytest.fixture(autouse=True)
@@ -397,6 +399,24 @@ def test_run_judges_rejects_an_unknown_backend(client, project):
                      json={"judges": ["dialogue"], "backend": "telepathy"})
     assert rv.status_code == 400
     assert "backend" in rv.get_json()["error"]
+
+
+def test_the_judge_picker_offers_every_judge_the_endpoint_accepts(client, project):
+    """The modal's checkboxes are the only way the browser names a judge.
+
+    ``selectedJudges()`` reads ``#judges-modal .judge-pick:checked`` and
+    ``postJudges`` refuses an empty list, so a judge with no checkbox is
+    unreachable from the UI no matter how completely it is wired everywhere
+    else — which is exactly how ``editorial`` shipped registered, persisted and
+    pipped, but unrunnable. Derived from ``REVIEW_JUDGE_TYPES`` rather than
+    spelled out: the next judge added to that tuple fails here until it has a
+    box to tick.
+    """
+    html = client.get("/project/jobproj").data.decode("utf-8")
+    picker = html.split('id="judges-modal"')[1].split("</div>")[0]
+    offered = set(re.findall(r'class="judge-pick" value="([^"]+)"', picker))
+
+    assert offered == set(REVIEW_JUDGE_TYPES)
 
 
 # ── run-judges: the headless CLI backend ─────────────────────────────────────
@@ -872,6 +892,370 @@ def test_bad_headless_knobs_are_400(client, project, monkeypatch, payload):
     assert calls == []
 
 
+# ── The editorial judge's second pass ────────────────────────────────────────
+#
+# Pass 1 writes proposals; only pass 2 turns them into findings. The Review tab
+# runs both as one job, so what is pinned here is that the second half actually
+# happens, that it cannot turn a successful pass 1 into a reported failure, and
+# that the repair route which finishes an interrupted one is gated exactly like
+# the wave it re-runs.
+
+
+def _editorial_result(*, verified=False, candidates=1, excerpt="El gato negro."):
+    """A persisted pass-1 editorial result, with or without adjudication."""
+    metadata = {"verified": verified, "candidates": [
+        {
+            "rule": "naturalness",
+            "category": "NATURALNESS",
+            "severity": "warning",
+            "confidence": "high",
+            "excerpt": excerpt,
+            "message": "Reads as translationese.",
+            "suggestion": "El gato es negro.",
+            "source_check": "not_needed",
+        }
+        for _ in range(candidates)
+    ]}
+    return {
+        "eval_name": "editorial",
+        "passed": False,
+        "score": 80.0,
+        "issues": [
+            {"severity": "warning", "message": "[naturalness] Reads as translationese.",
+             "location": excerpt, "finding_key": f"k{i}"}
+            for i in range(candidates)
+        ],
+        "metadata": metadata,
+    }
+
+
+def _write_editorial(proj, chunk_id, **kwargs):
+    evals = proj / "evaluations"
+    evals.mkdir(parents=True, exist_ok=True)
+    (evals / f"{chunk_id}.json").write_text(json.dumps({
+        "chunk_id": chunk_id,
+        "judges": {"editorial": _editorial_result(**kwargs)},
+    }), encoding="utf-8")
+
+
+def _stub_wave(monkeypatch, *, chunks=2, prepare_error=None, fanout_error=None,
+               commit_result=None, boom=None):
+    """Stub the pass-2 wave verbs and record the call order."""
+    from src.judges import editorial_wave
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_prepare(project_dir, scopes, **kwargs):
+        calls.append(("prepare", {"scopes": list(scopes), **kwargs}))
+        if boom == "prepare":
+            raise RuntimeError("prepare exploded")
+        if prepare_error:
+            return {"status": "error", "error": prepare_error}
+        return {"status": "ok", "counts": {"chunks": chunks, "candidates": chunks}}
+
+    def fake_fanout(project_dir, **kwargs):
+        calls.append(("fanout", dict(kwargs)))
+        hook = kwargs.get("on_job_done")
+        if hook:
+            for i in range(chunks):
+                hook({"id": f"c{i}", "ok": True, "done": i + 1, "total": chunks})
+        return {"error": fanout_error} if fanout_error else {"wrote": ["c0", "c1"]}
+
+    def fake_commit(project_dir, **kwargs):
+        calls.append(("commit", dict(kwargs)))
+        if commit_result is not None:
+            return commit_result
+        return {
+            "status": "ok", "committed": chunks, "failed": [], "missing": [],
+            "rollup": {"confirmed": 3, "retracted": 1, "reclassified": 0,
+                       "source_used": 1},
+        }
+
+    monkeypatch.setattr(editorial_wave, "prepare", fake_prepare)
+    monkeypatch.setattr(editorial_wave, "fanout", fake_fanout)
+    monkeypatch.setattr(editorial_wave, "commit", fake_commit)
+    return calls
+
+
+def _phases(events):
+    return [e["phase"] for e in events if "phase" in e]
+
+
+def test_a_headless_editorial_run_adjudicates_in_the_same_job(
+    client, project, monkeypatch
+):
+    """Pass 1's `issues[]` are proposals: `metadata.verified` stays false until
+    the adjudication pass has settled them. A GUI that stopped after `commit`
+    would light a dashboard badge from un-second-guessed candidates — and because
+    `merge_judge_result` replaces a judge's whole result, finishing the job later
+    by re-running the judge would discard any adjudication that *had* landed."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+    wave_calls = _stub_wave(monkeypatch)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "backend": "headless", "judges": ["editorial"], "confirm": True,
+    })
+    assert rv.status_code == 200
+    events = drain(client, rv.get_json()["job_id"])
+
+    assert _phases(events) == [
+        "prepare", "fanout", "commit",
+        "adjudicate_prepare", "adjudicate", "adjudicate_commit",
+    ]
+    assert [name for name, _ in wave_calls] == ["prepare", "fanout", "commit"]
+    # Never `force`: pass 1 has just rewritten these results, so `verified` is
+    # false again and the pending set is exactly what it proposed. Forcing would
+    # re-decide retractions an *earlier* pass had already made.
+    assert wave_calls[0][1].get("force") in (None, False)
+    assert wave_calls[2][1]["persist"] is True
+
+    done = events[-1]
+    assert done["adjudication"] == {
+        "chunks": 2, "confirmed": 3, "reclassified": 0,
+        "retracted": 1, "source_used": 1, "unverified": 0,
+    }
+    assert done["error_count"] == 0
+
+
+def test_a_wave_without_the_editorial_judge_runs_no_second_pass(
+    client, project, monkeypatch
+):
+    """The other two judges are single-pass. Adjudication must not ride along."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+    wave_calls = _stub_wave(monkeypatch)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "backend": "headless", "judges": ["dialogue"], "confirm": True,
+    })
+    events = drain(client, rv.get_json()["job_id"])
+
+    assert _phases(events) == ["prepare", "fanout", "commit"]
+    assert wave_calls == []
+    assert events[-1]["adjudication"] is None
+
+
+def test_a_clean_pass_one_skips_the_adjudication_wave(client, project, monkeypatch):
+    """`no_candidates` is a clean chunk, not a gap. A book pass 1 found nothing
+    in must not pay for a second wave to confirm it."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+    wave_calls = _stub_wave(monkeypatch, chunks=0)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "backend": "headless", "judges": ["editorial"], "confirm": True,
+    })
+    events = drain(client, rv.get_json()["job_id"])
+
+    assert _phases(events) == ["prepare", "fanout", "commit", "adjudicate_prepare"]
+    assert [name for name, _ in wave_calls] == ["prepare"]
+    assert events[-1]["adjudication"]["chunks"] == 0
+    assert events[-1]["error_count"] == 0
+
+
+def test_a_failed_second_pass_does_not_stop_a_successful_first_one(
+    client, project, monkeypatch
+):
+    """Pass 1's findings are already on disk when adjudication starts. Reporting
+    the whole wave as `Stopped` would hide them behind a failure that lost
+    nothing — the fix is the Review tab's banner, not a re-run of pass 1."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+    _stub_wave(monkeypatch, boom="prepare")
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "backend": "headless", "judges": ["editorial"], "confirm": True,
+    })
+    done = drain(client, rv.get_json()["job_id"])[-1]
+
+    assert "fatal" not in done
+    assert done["ran"] == 2                      # pass 1 still landed
+    assert done["error_count"] == 1
+    assert "prepare exploded" in done["errors"][0]
+
+
+def test_the_estimate_quotes_pass_two_as_a_ceiling(client, project, monkeypatch):
+    """Pass 2's size cannot be measured before pass 1 has proposed anything, and
+    the operator is asked once, before either wave. So the gate quotes a bound:
+    one job per chunk in scope at this pipeline's own per-job baseline."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "backend": "headless", "judges": ["editorial"], "estimate": True,
+    })
+    body = rv.get_json()
+    assert body["status"] == "estimate"
+    adj = body["adjudication"]
+    assert adj["jobs_max"] == 2                  # two translated chunks in scope
+    assert adj["tokens_max"] == 2 * adj["baseline_tokens"]
+    assert adj["baseline_source"]
+
+    # ...and a wave without it says nothing about a pass that will not run.
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "backend": "headless", "judges": ["dialogue"], "estimate": True,
+    })
+    assert rv.get_json()["adjudication"] is None
+
+
+def test_the_api_gate_covers_both_passes(client, project, monkeypatch):
+    """One confirmation has to cover the whole run: the second pass starts inside
+    a background job, where there is nobody left to ask. Its exact price is not
+    knowable before pass 1 has proposed anything, so the quote assumes every
+    chunk comes back at its full findings budget — high, which is the only safe
+    direction for a spend gate."""
+    _no_llm(monkeypatch)
+
+    with_ed = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue", "editorial"], "dry_run": True,
+    }).get_json()
+    without = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["dialogue"], "dry_run": True,
+    }).get_json()
+
+    assert with_ed["adjudication_cost"] > 0
+    assert without["adjudication_cost"] == 0
+    # The bound is added to the number the gate compares against, not reported
+    # beside it — a limit that only covers pass 1 is not a limit.
+    assert with_ed["estimated_cost"] > without["estimated_cost"] + with_ed["adjudication_cost"] * 0.5
+
+
+def test_the_api_backend_adjudicates_after_its_own_pass_one(
+    client, project, monkeypatch
+):
+    _no_spawn(monkeypatch)
+    import src.judges.runner as runner
+    from src.judges import editorial_wave
+    from src.models import EvalResult
+
+    monkeypatch.setattr(runner, "run_judge", lambda name, target, context: EvalResult(
+        eval_name=name, eval_version="1.0.0", target_id=target.id,
+        target_type="chunk", passed=True, score=1.0, issues=[],
+    ))
+
+    seen = {}
+
+    def fake_run_api(project_dir, scopes, **kwargs):
+        seen.update({"scopes": list(scopes), **kwargs})
+        return {
+            "status": "ok",
+            "counts": {"chunks": 1},
+            "results": [{"chunk_id": "chapter_01_chunk_000", "status": "ok"}],
+            "rollup": {"confirmed": 2, "retracted": 1, "reclassified": 0,
+                       "source_used": 0},
+        }
+
+    monkeypatch.setattr(editorial_wave, "run_api", fake_run_api)
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={
+        "judges": ["editorial"], "confirm": True,
+    })
+    events = drain(client, rv.get_json()["job_id"])
+
+    assert _phases(events) == ["adjudicate"]
+    assert seen["persist"] is True
+    # The caller already gated on an estimate covering both passes; a second
+    # dollar gate inside a running job has nobody to ask.
+    assert seen["confirm"] is True
+    assert events[-1]["adjudication"]["retracted"] == 1
+
+
+# ── The repair route ─────────────────────────────────────────────────────────
+
+
+def test_review_status_counts_chunks_awaiting_adjudication(client, project):
+    """The banner's number. A chunk pass 1 found clean has nothing to adjudicate
+    and must not be counted, or every book reads as permanently half-finished."""
+    _write_editorial(project, "chapter_01_chunk_000")
+    _write_editorial(project, "chapter_01_chunk_001", verified=True)
+
+    body = client.get("/api/project/jobproj/review-status").get_json()
+    assert body["editorial_pending"] == {
+        "chunks": 1, "by_chapter": {"chapter_01": 1},
+    }
+    assert body["chapters"][0]["editorial_pending"] == 1
+
+
+def test_review_status_ignores_a_chunk_with_no_candidates(client, project):
+    _write_editorial(project, "chapter_01_chunk_000", candidates=0)
+
+    body = client.get("/api/project/jobproj/review-status").get_json()
+    assert body["editorial_pending"]["chunks"] == 0
+
+
+def test_adjudicate_route_walks_the_three_gate_states(client, project, monkeypatch):
+    """Same ladder as the pass-1 gate — nothing spends without an explicit
+    confirmation — except that this one can quote an exact number, because the
+    candidates it would adjudicate already exist."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+    _write_editorial(project, "chapter_01_chunk_000")
+
+    def post(**body):
+        return client.post(
+            "/api/project/jobproj/review/adjudicate-editorial",
+            json={"backend": "headless", **body},
+        ).get_json()
+
+    assert post()["status"] == "needs_confirm"
+
+    wave_calls = _stub_wave(monkeypatch, chunks=1)
+    estimate = post(estimate=True)
+    assert estimate["status"] == "estimate"
+    assert [name for name, _ in wave_calls] == ["prepare"]
+
+    started = post(confirm=True)
+    assert started["status"] == "started"
+    events = drain(client, started["job_id"])
+    assert _phases(events) == [
+        "adjudicate_prepare", "adjudicate", "adjudicate_commit",
+    ]
+
+
+def test_adjudicate_route_reports_nothing_pending_rather_than_failing(
+    client, project, monkeypatch
+):
+    """The banner can be a poll behind, or another session may have finished the
+    work. A request that is correct and merely unnecessary is not an error."""
+    _no_spawn(monkeypatch)
+    _write_editorial(project, "chapter_01_chunk_000", verified=True)
+
+    rv = client.post("/api/project/jobproj/review/adjudicate-editorial",
+                     json={"backend": "api", "confirm": True})
+    assert rv.status_code == 200
+    assert rv.get_json()["status"] == "nothing_pending"
+
+
+def test_adjudicate_route_refuses_while_a_job_is_running(
+    client, project, monkeypatch
+):
+    """`prepare` unlinks the drafts it re-renders, so firing one while a wave is
+    in fan-out deletes work in flight. `start_job` refuses a second run only
+    after this request would already have done the damage."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude")
+    _stub_headless(monkeypatch)
+    _write_editorial(project, "chapter_01_chunk_000")
+    wave_calls = _stub_wave(monkeypatch, chunks=1)
+
+    release = threading.Event()
+    jobs.start_job("jobproj", "review-judges", lambda emit: release.wait(30))
+    try:
+        rv = client.post("/api/project/jobproj/review/adjudicate-editorial",
+                         json={"backend": "headless", "estimate": True})
+        assert rv.status_code == 409
+        assert wave_calls == []
+    finally:
+        release.set()
+
+
 # ── The SSE route ────────────────────────────────────────────────────────────
 
 
@@ -879,3 +1263,32 @@ def test_sse_404s_for_an_unknown_or_foreign_job(client, project):
     job_id = jobs.start_job("otherproject", "review-coded", lambda emit: None)
     assert client.get("/api/project/jobproj/jobs/nosuch/sse").status_code == 404
     assert client.get(f"/api/project/jobproj/jobs/{job_id}/sse").status_code == 404
+
+
+def test_the_default_judge_set_leaves_the_editorial_judge_out(client, project, monkeypatch):
+    """A caller that names no judges must not buy the two-pass editorial wave.
+
+    The route defaulted to ``REVIEW_JUDGE_TYPES``, which is the reader's
+    *display* tuple — adding ``editorial`` to it for the pips silently widened
+    this default to the most expensive judge plus its adjudication pass, which
+    ``registry._BUILTIN_SUITES`` keeps out of ``default`` and ``prose`` on
+    purpose. The dashboard always sends ``judges``; a script does not.
+    """
+    _no_llm(monkeypatch)
+    # The default set includes the address judge, which refuses to build a
+    # context without this — a 409 would hide what the set actually was.
+    (project / "address_map.json").write_text(
+        json.dumps({
+            "content": "Betsy->Frances usted; Frances->Betsy tú.",
+            "pairs": [],
+            "global_rules": "usted between non-intimate adults.",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={"dry_run": True})
+
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert "editorial" not in body["judges"]
+    assert body["adjudication_cost"] == 0.0

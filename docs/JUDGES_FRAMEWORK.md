@@ -13,6 +13,16 @@ is the reference for a judge whose book-specific expectations are injected via
 `context` (here, the CLI loads the map), while a universal rubric
 (`prompts/address_forms.txt`) stays in the prompt.
 
+The third is the **editorial judge** (`editorial`), which asks a different kind
+of question from the other two — not "does this passage follow rule X?" but
+"would a competent editor stop here and fix this?". It reads the Spanish alone,
+proposes candidates under a findings budget (`--max-findings-per-1000`, default
+6) and a confidence floor, and hands
+them to a second, batched adjudication pass that attaches the English original
+only to the candidates that asked for it. It has its own second-pass CLI
+(`scripts/verify_editorial.py`) and its own precision report
+(`scripts/editorial_metrics.py`) — see [EDITORIAL_JUDGE.md](EDITORIAL_JUDGE.md).
+
 This is distinct from the model-comparison **LLM judge** documented in
 [LLM_JUDGE_EVALUATOR.md](LLM_JUDGE_EVALUATOR.md): that one answers "is model A
 better than model B?"; tailored judges answer "does *this* translation comply
@@ -182,9 +192,10 @@ python scripts/run_judges.py commit  --project understood-betsy --persist --brie
 |---|---|---|---|
 | all | `--project` | — | Project id (under `projects/`) or path |
 | `run`, `prepare` | `--judge` / `--suite` | — | One required; `--judge` repeats (both judges, one manifest) |
-| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>`, `chapter:<chapter_id>` or `book` |
+| `run`, `prepare` | `--scope` | — | `chunk:<chunk_id>`, `chapter:<chapter_id>`, `chapter:<first>..<last>` or `book` |
 | `prepare` | `--scope <judge>:<scope>` | — | Bind a scope to one judge; untagged scopes cover all of them |
 | `run`, `prepare` | `--model` / `--provider` | config | Judge LLM overrides |
+| `run`, `prepare` | `--max-findings-per-1000` | `6` | Editorial judge only: findings allowed per 1,000 translated words, floored at 2 for very short chunks |
 | `run` | `--cost-limit` | `0.50` | Max estimated USD before `--confirm` is required |
 | `run` | `--confirm` | false | Proceed past the cost gate |
 | `prepare` | `--worker-model` | `sonnet` | Tier to pin spawned `judge-worker`s to |
@@ -192,7 +203,7 @@ python scripts/run_judges.py commit  --project understood-betsy --persist --brie
 | `run`, `commit` | `--persist` | false | Write findings into `evaluations/<chunk>.json` |
 | `commit` | `--brief` | false | Swap `results[]` for a counts rollup; full payload still on disk |
 | `apply` | `--judge` | `dialogue` | Repeatable: both judges in one run, realigned once |
-| `apply` | `--scope` | — | Repeatable; same three kinds as above |
+| `apply` | `--scope` | — | Repeatable; same four kinds as above |
 | `apply` | `--select` | — | Comma-separated `applicable[].id` / `.qualified_id` to apply |
 | `apply` | `--dry-run` | false | Preview the plan, change nothing |
 | `apply` | `--rebuild-epub` | false | Rebuild the EPUB after applying |
@@ -205,6 +216,13 @@ python scripts/run_judges.py commit  --project understood-betsy --persist --brie
 - `chunk:<chunk_id>` — one chunk.
 - `chapter:<chapter_id>` — every translated chunk in the chapter, one target
   each (results stay keyed per chunk so persistence + badges work).
+- `chapter:<first>..<last>` — the inclusive span between two chapters, resolved
+  by position in the enumerated chapter list (so it works on a book whose
+  chapters are not zero-padded, and a reversed range is the same span). The form
+  `status` reports in, so a scope read off a status report also runs on `run` /
+  `prepare` / `apply` / `verify_editorial`. A chapter inside the span with
+  nothing translated is skipped rather than refusing the whole range — unlike
+  `chapter:<id>` alone, which the caller vouched for by naming it.
 - `book` (or `book:`) — every translated chunk in the project, in reading order.
   Added for `apply`, where a full-book pass otherwise meant one `--scope
   chapter:` flag per chapter built by a shell loop, and a chapter missing from
@@ -226,7 +244,13 @@ launcher) rather than being forced through `JudgeTarget`.
 ## Suites
 
 A suite is a named list of judges. Built-in: `default = ["dialogue"]`,
-`address = ["address"]`, and `prose = ["dialogue", "address"]`. The address judge
+`address = ["address"]`, `prose = ["dialogue", "address"]`, and
+`editorial = ["editorial"]`. The editorial judge is kept out of `default` *and*
+`prose` for two reasons: it is the most expensive judge per target (its cacheable
+prefix carries the style guide and the glossary), and its findings are advisory
+editorial judgement rather than rule compliance, so it wants a deliberate
+"review this book editorially" gesture rather than riding along with a
+compliance wave. The address judge
 is deliberately kept out of `default` because it needs the per-book
 `address_map.json` prerequisite and is metered — run it via `--judge address`,
 `--suite address`, or (with the map in place) `--suite prose` for both judges at
@@ -327,4 +351,9 @@ conversational usage check the skill makes before spawning workers.
 4. Add a test under `tests/test_judges/` that mocks `llm_io.call_judge` for the API
    path, and (optionally) drives `parse_response` directly for the subagent path.
 
-See `src/judges/dialogue_judge.py` as the reference implementation.
+See `src/judges/dialogue_judge.py` as the reference implementation, and
+`src/judges/editorial_judge.py` for a judge that overrides
+`item_prompt_variables` to *withhold* the English source, filters findings in
+code before mapping them to issues, and opts into a stable `finding_key` so its
+dismissals survive a re-judge (an LLM rewords its `message`, which is what
+`web_ui.evaluations.issue_key` otherwise hashes).

@@ -3184,18 +3184,19 @@
     // which is far too much work to repeat on every dashboard poll. It is
     // fetched when the stage is opened and after anything that could change it.
     var REVIEW_TYPES = window.DASHBOARD_REVIEW_TYPES ||
-        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
+        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address', 'editorial'];
     var REVIEW_LABELS = window.DASHBOARD_REVIEW_LABELS || {};
     // Short column-friendly tags for the finding chips; the full label is the
     // chip's tooltip.
     var REVIEW_ABBR = {
         blacklist: 'bl', grammar: 'gr', dictionary: 'dic',
-        completeness: 'cmp', dialogue: 'dlg', address: 'adr',
+        completeness: 'cmp', dialogue: 'dlg', address: 'adr', editorial: 'ed',
     };
     var JUDGE_GROUPS = [
         { key: 'coded', tag: 'CD', label: 'Deterministic evaluators' },
         { key: 'dialogue', tag: 'DL', label: 'Dialogue judge' },
         { key: 'address', tag: 'AD', label: 'Address judge' },
+        { key: 'editorial', tag: 'ED', label: 'Editorial judge' },
     ];
     var JUDGE_STATE = {
         done:    { glyph: '✓', cls: 'pip-done', word: 'up to date' },
@@ -3258,9 +3259,36 @@
             var tip = g.label + ': ' + meta.word +
                 (total && info.state !== 'not_run'
                     ? ' — ' + (info.fresh || 0) + '/' + total + ' chunks fresh' : '');
+            // The editorial judge is the only one whose run is not over when its
+            // findings land: pass 1 proposes, pass 2 adjudicates. The glyph stays
+            // freshness-only so ED reads like every other pip, but a chunk still
+            // carrying un-second-guessed candidates has to say so somewhere.
+            if (g.key === 'editorial' && ch.editorial_pending) {
+                tip += ' · ' + ch.editorial_pending + ' unadjudicated';
+            }
             return '<span class="judge-pip ' + meta.cls + '" title="' + escapeHtml(tip) + '">' +
                 g.tag + meta.glyph + '</span>';
         }).join(' ');
+    }
+
+    // Repair, not a step in the flow: running the editorial judge from the
+    // modal runs both of its passes in one job. This appears only when
+    // something left candidates unsettled — a job killed between the passes, a
+    // fan-out whose drafts never landed, or a pass 1 run from the command line.
+    function renderAdjudicateBanner(data) {
+        var el = document.getElementById('review-adjudicate');
+        if (!el) return;
+        var pending = (data && data.editorial_pending) || {};
+        var n = pending.chunks || 0;
+        if (!n) { el.style.display = 'none'; return; }
+        var chapters = Object.keys(pending.by_chapter || {}).length;
+        document.getElementById('review-adjudicate-text').textContent =
+            n + (n === 1 ? ' chunk carries' : ' chunks carry') +
+            ' editorial findings that were never adjudicated' +
+            (chapters ? ' (' + chapters +
+                (chapters === 1 ? ' chapter' : ' chapters') + ')' : '') +
+            ' — until pass 2 runs, they are proposals rather than findings.';
+        el.style.display = '';
     }
 
     function notesCellHtml(ch) {
@@ -3295,6 +3323,7 @@
                 if (data && data.ok) {
                     reviewStatus = data;
                     renderReviewTable(data);
+                    renderAdjudicateBanner(data);
                     updateReviewBadge(data);
                 }
                 // Ride along with the Review stage's own on-demand fetch: the
@@ -3709,6 +3738,18 @@
                 ((data.evaluated !== undefined ? data.evaluated : data.ran || 0) +
                  ' of ' + (data.total || total) + ' done');
             if (data.estimated_cost) summary += ' (~$' + Number(data.estimated_cost).toFixed(4) + ')';
+            // The half of an editorial run that decides which findings were
+            // real. Without it the modal reports "6 of 6 done" for a wave whose
+            // whole point was that some of those six would not survive.
+            if (data.adjudication && data.adjudication.chunks) {
+                var adj = data.adjudication;
+                var parts = [(adj.confirmed || 0) + ' confirmed',
+                             (adj.retracted || 0) + ' retracted'];
+                if (adj.reclassified) parts.push(adj.reclassified + ' reclassified');
+                if (adj.unverified) parts.push(adj.unverified + ' not adjudicated');
+                summary += ' · adjudicated ' + adj.chunks + ' chunk(s): ' +
+                    parts.join(', ');
+            }
             // What the wave actually consumed, so the token estimate the user
             // confirmed can be checked against the run rather than trusted.
             // `input` alone is the *uncached* slice (4 tokens on a cached wave)
@@ -3757,6 +3798,12 @@
     // ── Review: LLM judge panel ──
 
     var judgesScope = null;    // chapter ids for the pending run, or null = book
+    // 'judges' runs the picker's selection (the editorial judge's two passes
+    // included); 'adjudicate' runs only the editorial second pass over what an
+    // earlier run left unsettled. Everything between the two modes — backend,
+    // CLI, worker model, effort, prompt cache, and the profile fetch behind
+    // them — is identical, which is why they share one modal.
+    var judgesMode = 'judges';
     var judgesProfile = null;  // last `judges/profile` payload, verbatim
     var judgesCliTouched = false;  // has the user picked a CLI in this modal?
     var judgesEstimate = null; // last CLI estimate, or null once invalidated
@@ -3949,6 +3996,21 @@
                 ' (' + (eff.effort_source || '?') + ')']
         ];
         if (data.cache) rows.push(['Prompt cache', data.cache]);
+        // A ceiling, not a measurement: pass 2 fires one job per chunk that came
+        // back carrying candidates, and which chunks those are is not knowable
+        // until pass 1 has run. Quoting the bound is what stops the second wave
+        // arriving as a surprise against a subscription's context budget.
+        if (data.adjudication) {
+            rows.push(['Adjudication (pass 2)',
+                '≤ ' + (data.adjudication.jobs_max || 0) + ' jobs · ≤ ' +
+                formatTokens(data.adjudication.tokens_max) + ' tokens (' +
+                (data.adjudication.baseline_source || '?') +
+                ') — runs automatically after pass 1']);
+        }
+        if (data.candidates) {
+            rows.push(['Candidates', formatTokens(data.candidates) +
+                ' across ' + (data.jobs || 0) + ' chunk(s)']);
+        }
 
         var dl = document.createElement('dl');
         rows.forEach(function(row) {
@@ -3966,7 +4028,11 @@
         note.style.margin = '8px 0 0';
         note.style.color = '#666';
         note.textContent = 'Subscription tokens, no dollars. Nothing has run yet — ' +
-            'a wave can take several minutes and blocks other Review runs.';
+            'a wave can take several minutes and blocks other Review runs.' +
+            (data.adjudication
+                ? ' The editorial judge runs both of its passes in this one job:' +
+                  ' its pass-1 findings are proposals until pass 2 has settled them.'
+                : '');
         body.appendChild(note);
 
         if (data.argv && data.argv.length) {
@@ -3987,10 +4053,24 @@
         document.getElementById('btn-judges-run').disabled = false;
     }
 
-    function openJudgesModal(chapterIds) {
+    function openJudgesModal(chapterIds, mode) {
+        judgesMode = mode === 'adjudicate' ? 'adjudicate' : 'judges';
         judgesScope = chapterIds && chapterIds.length ? chapterIds : reviewScope();
         document.getElementById('judges-scope').textContent =
             'Scope: ' + (judgesScope ? judgesScope.join(', ') : 'whole book');
+        var adjudicating = judgesMode === 'adjudicate';
+        document.getElementById('judges-pick-field').style.display =
+            adjudicating ? 'none' : '';
+        document.getElementById('judges-modal-title').textContent =
+            adjudicating ? 'Adjudicate editorial findings' : 'Run LLM judges';
+        document.getElementById('btn-judges-run').textContent =
+            adjudicating ? 'Adjudicate' : 'Run judges';
+        document.getElementById('judges-modal-blurb').textContent = adjudicating
+            ? 'One call per chunk over the candidates an earlier run left ' +
+              'unsettled. Each is confirmed, retracted or reclassified against ' +
+              'the English original; survivors stay in the reader.'
+            : 'One run per chunk per judge — metered API calls, or your CLI ' +
+              'subscription. Findings land in the reader’s Review Mode.';
         judgesCliTouched = false;
         clearJudgesEstimate();
         setStatus('judges-modal-status', '', '');
@@ -4009,9 +4089,12 @@
     function judgesRequestBody(extra) {
         var body = {
             chapter_ids: judgesScope,
-            judges: selectedJudges(),
             backend: judgesBackend()
         };
+        // The adjudication endpoint judges nothing new — its work is whatever
+        // pass 1 already proposed — so sending a judge list would be sending a
+        // key it has no use for.
+        if (judgesMode !== 'adjudicate') body.judges = selectedJudges();
         if (body.backend === 'headless') {
             if (judgesCliTouched) body.cli = document.getElementById('judges-cli').value;
             var worker = (document.getElementById('judges-worker-model').value || '').trim();
@@ -4033,22 +4116,34 @@
     }
 
     function postJudges(extra) {
-        if (!selectedJudges().length) {
+        if (judgesMode !== 'adjudicate' && !selectedJudges().length) {
             setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
             return Promise.resolve(null);
         }
-        return apiPost('/api/project/' + PROJECT + '/review/run-judges',
-                       judgesRequestBody(extra));
+        var route = judgesMode === 'adjudicate'
+            ? '/review/adjudicate-editorial' : '/review/run-judges';
+        return apiPost('/api/project/' + PROJECT + route, judgesRequestBody(extra));
     }
 
     function startJudgesRun(data) {
+        // The adjudication endpoint answers `nothing_pending` when the banner
+        // was a poll behind, or another session finished the work. Correct and
+        // merely unnecessary is not an error.
+        if (data.status === 'nothing_pending') {
+            setStatus('judges-modal-status',
+                'Nothing left to adjudicate in this scope.', 'info');
+            refreshReviewStatus();
+            return;
+        }
         if (!data.job_id) {
             setStatus('judges-modal-status', 'No job started.', 'error');
             return;
         }
+        var adjudicating = judgesMode === 'adjudicate';
         document.getElementById('judges-modal').classList.remove('visible');
-        openJobModal('Running LLM judges');
-        streamJob(data.job_id, data.total, 'Judged');
+        openJobModal(adjudicating
+            ? 'Adjudicating editorial findings' : 'Running LLM judges');
+        streamJob(data.job_id, data.total, adjudicating ? 'Adjudicated' : 'Judged');
     }
 
     function initReviewControls() {
@@ -4067,6 +4162,17 @@
 
         var judgesBtn = document.getElementById('btn-run-judges');
         if (judgesBtn) judgesBtn.addEventListener('click', function() { openJudgesModal(null); });
+
+        var adjudicateBtn = document.getElementById('btn-adjudicate-editorial');
+        if (adjudicateBtn) {
+            adjudicateBtn.addEventListener('click', function() {
+                // Same scope rule as every other Review control: the ticked
+                // chapters, or the whole book. `collect_pending` skips anything
+                // in scope that has nothing to adjudicate, so a book-wide run is
+                // the cheap default rather than the expensive one.
+                openJudgesModal(null, 'adjudicate');
+            });
+        }
 
         // Bound once, here rather than in openJudgesModal: the modal is a single
         // DOM node reopened from two entry points, so binding on open would stack
@@ -4180,7 +4286,7 @@
         var estimateBtn = document.getElementById('btn-judges-estimate');
         if (estimateBtn) {
             estimateBtn.addEventListener('click', function() {
-                if (!selectedJudges().length) {
+                if (judgesMode !== 'adjudicate' && !selectedJudges().length) {
                     setStatus('judges-modal-status', 'Pick at least one judge.', 'error');
                     return;
                 }
@@ -4207,7 +4313,14 @@
                         } else {
                             showJudgesEstimateText(
                                 'Estimated $' + Number(data.estimated_cost || 0).toFixed(4) +
-                                ' over ' + (data.target_count || 0) + ' chunks.');
+                                ' over ' + (data.target_count || 0) + ' chunks.' +
+                                (data.adjudication_cost
+                                    ? ' Includes up to $' +
+                                      Number(data.adjudication_cost).toFixed(4) +
+                                      " for the editorial judge's second pass, which" +
+                                      ' runs in the same job — the ceiling assumes every' +
+                                      ' chunk comes back at its full findings budget.'
+                                    : ''));
                         }
                     }).catch(function(e) {
                         clearJudgesEstimate();

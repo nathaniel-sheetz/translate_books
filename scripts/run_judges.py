@@ -71,6 +71,7 @@ import os
 import sys
 import time
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -109,6 +110,10 @@ from src.harness import state as hstate  # noqa: E402
 from src.harness.profile import resolve_profile  # noqa: E402
 from src.judges import subagent  # noqa: E402
 from src.judges.context import build_judge_context  # noqa: E402
+from src.judges.editorial_judge import (  # noqa: E402
+    FINDINGS_PER_1000_WORDS,
+    MIN_FINDINGS_BUDGET,
+)
 from src.judges.registry import available_judges  # noqa: E402
 from src.judges.subagent import _PREPARE_SCHEMA  # noqa: E402
 
@@ -166,6 +171,8 @@ _STATUS_SCHEMA = {
     "makes the group stale), chunks{fresh,stale,missing}, chapters{stale,partial,not_run,done} "
     "(the chapter ids in each bucket — this is the 'what's left' answer), last_run, "
     "worker_models, and stale_basis{flag,hash,mtime} when anything is stale",
+    "wave": "--drafts only: the prepared manifest's mtime plus {written, pending} draft "
+    "counts and pending_ids — whether a fan-out has actually started/finished",
     "needs": "per group that still owes work, how many chapters are in each owed bucket "
     "(stale / partial / not_run). The ids themselves are in judges[<group>].chapters — this "
     "is the headline, not a second copy of them. Absent for a group that owes nothing",
@@ -234,14 +241,19 @@ _build_judge_context = build_judge_context
 
 
 def _find_project(arg: str) -> Path | None:
-    """Project dir for ``--project`` (a path or a ``projects/<id>`` slug), or None."""
-    p = Path(arg)
-    if p.is_dir():
-        return p
-    candidate = _REPO_ROOT / "projects" / arg
-    if candidate.is_dir():
-        return candidate
-    return None
+    """Project dir for ``--project``: a path, a flat slug, or a nested one.
+
+    ``harness.state.resolve_project_dir`` is the one lookup, so a book filed
+    under a grouping folder (``projects/.macdonald/photogen-nycteris``) answers
+    to its bare slug here exactly as it does to ``harness.py``. The local
+    version checked ``projects/<id>`` and stopped, so every grouped book's first
+    command of a session returned "Project not found" and cost a round-trip of
+    listing the grouping folders by hand.
+    """
+    try:
+        return hstate.resolve_project_dir(arg)
+    except FileNotFoundError:
+        return None
 
 
 def _resolve_project(arg: str) -> Path:
@@ -252,8 +264,8 @@ def _resolve_project(arg: str) -> Path:
         json.dumps(
             {
                 "status": "error",
-                "error": f"Project not found: {arg!r} (looked for a directory and "
-                f"projects/{arg}).",
+                "error": f"Project not found: {arg!r} (looked for a directory, "
+                f"projects/{arg}, and projects/*/{arg}).",
             },
             ensure_ascii=False,
         )
@@ -443,7 +455,9 @@ def _build_parser() -> argparse.ArgumentParser:
                 required=True,
                 action="append",
                 metavar="SCOPE",
-                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'. "
+                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>', "
+                "'chapter:<first>..<last>' (inclusive range, the same form status takes) "
+                "or 'book'. "
                 "Repeatable — pass --scope multiple times to stage several chapters "
                 "in one manifest for a single commit. Prefix a scope with a judge name "
                 "('--scope address:chapter:chapter_31') to bind it to that judge alone; "
@@ -455,10 +469,23 @@ def _build_parser() -> argparse.ArgumentParser:
             p.add_argument(
                 "--scope",
                 required=True,
-                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book'",
+                help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>', "
+                "'chapter:<first>..<last>' (inclusive range) or 'book'",
             )
         p.add_argument("--model", default=None, help="Judge model id override")
         p.add_argument("--provider", default=None, help="Judge provider override")
+        p.add_argument(
+            "--max-findings-per-1000",
+            dest="max_findings_per_1000",
+            type=int,
+            default=None,
+            help=f"Editorial judge only: findings the judge may report per 1,000 "
+            f"translated words (default {FINDINGS_PER_1000_WORDS}; floored at "
+            f"{MIN_FINDINGS_BUDGET} for very short chunks). A ceiling, not a target — "
+            "raise it when the judge is visibly truncating real defects on long "
+            "chunks, lower it to tighten an untuned book. Stated in the prompt and "
+            "enforced in code, on both backends. Ignored by the other judges.",
+        )
 
     # profile — read-only "what would this wave run as?" ---------------------
     prof_p = sub.add_parser(
@@ -531,6 +558,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Add the per-chapter rows: when each group last ran, which worker model ran "
         "it, and the chunk ids behind a partial/stale verdict. Off by default — the "
         "bucketed chapter lists answer 'what's left?' for a fraction of the tokens.",
+    )
+    stp.add_argument(
+        "--drafts",
+        action="store_true",
+        help="Also report the prepared manifest's entries with/without a draft — the "
+        "read-only answer to 'did the wave start / is it still going?'",
     )
     stp.add_argument("--verbose", action="store_true", help="Debug logging")
 
@@ -741,7 +774,8 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         action="append",
         metavar="SCOPE",
-        help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>' or 'book' (the whole "
+        help="Target scope: 'chunk:<chunk_id>', 'chapter:<chapter_id>', "
+        "'chapter:<first>..<last>' (inclusive range) or 'book' (the whole "
         "project). Repeatable.",
     )
     ap.add_argument(
@@ -932,6 +966,50 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _draft_progress(project_dir: Path) -> dict:
+    """Manifest entries with a draft vs without — "is the wave still going?".
+
+    A read-only answer to the question that otherwise costs a directory listing
+    sorted by mtime and a guess. On 2026-08-26 an announced wave had never
+    started, and it took eight minutes and a user prompt to notice; the giveaway
+    would have been N prepared entries, zero drafts, and a manifest whose mtime
+    had not moved. Keyed by ``_entry_fanout_id`` so a grouped ``batch_id`` entry
+    counts once, the same unit ``fanout --target-ids`` takes.
+    """
+    from src.judges.subagent import _entry_fanout_id
+
+    path = project_dir / ".harness" / "judges" / "manifest.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"manifest_at": None, "note": "no manifest — run `prepare` first"}
+
+    entries = doc.get("entries") or []
+    pending = []
+    for entry in entries:
+        draft = Path(entry.get("draft_path") or "")
+        try:
+            written = bool(draft.read_text(encoding="utf-8").strip())
+        except OSError:
+            written = False
+        if not written:
+            pending.append(_entry_fanout_id(entry) or entry.get("target_id"))
+    try:
+        at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:  # pragma: no cover - defensive
+        at = None
+    return {
+        "manifest_at": at,
+        "drafts": {"written": len(entries) - len(pending), "pending": len(pending)},
+        "pending_ids": pending,
+        "note": (
+            "every prepared entry has a draft — run `commit`"
+            if not pending
+            else f"{len(pending)} of {len(entries)} entries have no draft yet"
+        ),
+    }
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     """Read-only judge-coverage report: done / stale / partial / not_run."""
     from src.judges.status import StatusScopeError, build_status
@@ -957,8 +1035,29 @@ def _cmd_status(args: argparse.Namespace) -> int:
             _STATUS_SCHEMA,
         )
         return 1
+    if args.drafts:
+        payload["wave"] = _draft_progress(project_dir)
     _emit(payload, _STATUS_SCHEMA)
     return 0
+
+
+def _apply_findings_cap(args: argparse.Namespace, context: dict) -> str | None:
+    """Put ``--max-findings-per-1000`` on the judge context, or say why not.
+
+    The only CLI value that travels in ``context`` rather than as a kwarg: the
+    ceiling is read inside the judge, at prompt-render time and again at
+    selection time, and ``context`` is the one thing both backends hand to it.
+    Returns an error string for a non-positive value — argparse would otherwise
+    accept 0 and the judge would silently fall back to the default, which reads
+    as the flag having been honoured.
+    """
+    value = getattr(args, "max_findings_per_1000", None)
+    if value is None:
+        return None
+    if value <= 0:
+        return f"--max-findings-per-1000 must be a positive integer (got {value})"
+    context["editorial_findings_per_1000"] = value
+    return None
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -991,6 +1090,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if ctx_error:
         _emit({"status": "error", "error": ctx_error, "scope": scope}, _RUN_SCHEMA)
+        return 1
+    cap_error = _apply_findings_cap(args, context)
+    if cap_error:
+        _emit({"status": "error", "error": cap_error, "scope": scope}, _RUN_SCHEMA)
         return 1
 
     outcome = run_judge_suite(
@@ -1079,6 +1182,10 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     )
     if ctx_error:
         _emit({"status": "error", "error": ctx_error, "scopes": args.scope}, _PREPARE_SCHEMA)
+        return 1
+    cap_error = _apply_findings_cap(args, context)
+    if cap_error:
+        _emit({"status": "error", "error": cap_error, "scopes": args.scope}, _PREPARE_SCHEMA)
         return 1
     try:
         payload = subagent.prepare(

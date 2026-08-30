@@ -9,6 +9,11 @@ the three scopes the dialogue judge needs:
                               each (keeps results keyed per chunk so the
                               existing ``evaluations/<chunk>.json`` persistence
                               and dashboard badges work).
+- ``chapter:<a>..<b>``      — the inclusive span from chapter ``a`` to chapter
+                              ``b``, resolved by position in the enumerated
+                              chapter list. The same form ``status`` accepts, so
+                              the command an operator reads off a status report
+                              also runs on ``prepare`` / ``run`` / ``apply``.
 - ``book`` / ``book:``      — every translated chunk in the project, in reading
                               order. Added so a whole-book ``run_judges.py
                               apply`` is one invocation instead of one
@@ -105,6 +110,79 @@ def _build_chapter_targets(project_dir: Path, chapter_id: str) -> list[JudgeTarg
     return targets
 
 
+def _known_chapters(chunks_dir: Path) -> list[str]:
+    """Every chapter that has at least one chunk file, in reading order.
+
+    The ordered universe an inclusive range resolves against. ``status.py`` builds
+    the same list from ``iter_chapter_chunks`` unioned with ``chapters/*.txt``,
+    because a status report must describe a chapter with nothing translated in it.
+    Here the chunk glob is the whole answer — ``build_targets`` only ever judges
+    chunks that exist — and it keeps ``src/judges`` from importing ``web_ui``.
+    """
+    return sorted(
+        {path.name.rsplit("_chunk_", 1)[0] for path in chunks_dir.glob("*_chunk_*.json")}
+    )
+
+
+def _build_chapter_range_targets(
+    project_dir: Path, first: str, last: str
+) -> list[JudgeTarget]:
+    """Resolve ``chapter:<first>..<last>`` (inclusive) into JudgeTargets.
+
+    Same semantics as ``status.py::_filter_chapters``, deliberately: the range
+    resolves against the *enumerated* chapter list by position rather than by
+    comparing ids, and a reversed range (``chapter_09..chapter_03``) is the same
+    span. Keeping the two implementations identical is the point — a form that
+    ``status`` accepts and ``prepare`` rejects is what cost a turn on 2026-08-27.
+
+    That enumeration is a lexicographic ``sorted()`` on both sides, so it does
+    *not* rescue a book whose chapters are unpadded: ``chapter_1..chapter_2``
+    would span ``chapter_1, chapter_10, …, chapter_19, chapter_2``. Every
+    project in the corpus is zero-padded; correcting it means correcting
+    ``status.py`` in the same change, or the two grammars drift apart again.
+
+    One case ``status`` does not face: a chapter inside the span with chunks but
+    no translation is *skipped*, not fatal. A range names a span, not a list the
+    caller vouched for, and refusing the other six chapters over one untranslated
+    interior chapter is the behaviour ``collect_pending`` already rejected for the
+    multi-chapter GUI selection. An empty span is still a ``ScopeError``.
+    """
+    for endpoint in (first, last):
+        if not _ID_RE.match(endpoint):
+            raise ScopeError(
+                f"Invalid chapter_id {endpoint!r}: only letters, digits, underscores, "
+                "and hyphens allowed."
+            )
+
+    chunks_dir = _chunks_dir(project_dir)
+    if not chunks_dir.exists():
+        raise ScopeError(f"No chunks/ directory in {project_dir}")
+
+    known = _known_chapters(chunks_dir)
+    absent = [c for c in (first, last) if c not in known]
+    if absent:
+        span = f" Known chapters run {known[0]}..{known[-1]}." if known else ""
+        raise ScopeError(
+            f"Range endpoint(s) not in this project: {', '.join(absent)}.{span}"
+        )
+
+    lo, hi = sorted((known.index(first), known.index(last)))
+    targets: list[JudgeTarget] = []
+    for chapter_id in known[lo : hi + 1]:
+        for path in sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json")):
+            target = _target_from_chunk_path(path)
+            if target is not None:
+                targets.append(target)
+
+    if not targets:
+        raise ScopeError(f"No translated chunks in chapters {first}..{last}.")
+
+    targets.sort(
+        key=lambda t: (t.context.get("chapter_id") or "", t.context.get("position", 0))
+    )
+    return targets
+
+
 def _build_book_targets(project_dir: Path) -> list[JudgeTarget]:
     """Every translated chunk in the project, in reading order."""
     chunks_dir = _chunks_dir(project_dir)
@@ -136,7 +214,8 @@ def build_targets(project_dir: Path, scope: str) -> list[JudgeTarget]:
     Args:
         project_dir: ``projects/<id>/`` directory.
         scope: e.g. ``"chunk:chapter_01_chunk_000"``, ``"chapter:chapter_03"``,
-            or ``"book"`` / ``"book:"`` for the whole project.
+            the inclusive range ``"chapter:chapter_03..chapter_09"``, or
+            ``"book"`` / ``"book:"`` for the whole project.
 
     Raises:
         ScopeError: For unknown/malformed scopes or empty resolutions.
@@ -158,6 +237,11 @@ def build_targets(project_dir: Path, scope: str) -> list[JudgeTarget]:
     if kind == "chunk":
         return _build_chunk_targets(Path(project_dir), rest)
     if kind == "chapter":
+        if ".." in rest:
+            first, _, last = rest.partition("..")
+            return _build_chapter_range_targets(
+                Path(project_dir), first.strip(), last.strip()
+            )
         return _build_chapter_targets(Path(project_dir), rest)
     if kind == "book":
         raise ScopeError(

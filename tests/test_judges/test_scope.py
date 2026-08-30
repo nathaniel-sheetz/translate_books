@@ -160,3 +160,71 @@ def test_chapter_scope_rejects_invalid_ids(tmp_path, bad_id):
     (tmp_path / "chunks").mkdir()
     with pytest.raises(ScopeError, match="Invalid chapter_id"):
         build_targets(tmp_path, f"chapter:{bad_id}")
+
+
+# ── chapter:<first>..<last> — the form `status` has always accepted ──────────
+
+
+def _three_chapters(tmp_path):
+    for n in (1, 2, 3):
+        _write(tmp_path, _chunk(f"chapter_0{n}_chunk_000", f"chapter_0{n}", 0))
+        _write(tmp_path, _chunk(f"chapter_0{n}_chunk_001", f"chapter_0{n}", 1))
+
+
+def test_chapter_range_is_inclusive_and_in_reading_order(tmp_path):
+    _three_chapters(tmp_path)
+    targets = build_targets(tmp_path, "chapter:chapter_01..chapter_02")
+    assert [t.id for t in targets] == [
+        "chapter_01_chunk_000",
+        "chapter_01_chunk_001",
+        "chapter_02_chunk_000",
+        "chapter_02_chunk_001",
+    ]
+
+
+def test_a_reversed_range_is_the_same_span(tmp_path):
+    """Positional endpoints, sorted — same rule status.py applies."""
+    _three_chapters(tmp_path)
+    forward = build_targets(tmp_path, "chapter:chapter_01..chapter_03")
+    backward = build_targets(tmp_path, "chapter:chapter_03..chapter_01")
+    assert [t.id for t in forward] == [t.id for t in backward]
+
+
+def test_a_range_endpoint_that_does_not_exist_names_the_span(tmp_path):
+    _three_chapters(tmp_path)
+    with pytest.raises(ScopeError, match="Known chapters run chapter_01..chapter_03"):
+        build_targets(tmp_path, "chapter:chapter_01..chapter_09")
+
+
+def test_an_untranslated_chapter_inside_a_range_is_skipped_not_fatal(tmp_path):
+    """A range names a span, not a list the caller vouched for chapter by chapter."""
+    _three_chapters(tmp_path)
+    _write(tmp_path, _chunk("chapter_02_chunk_000", "chapter_02", 0, translated=None))
+    _write(tmp_path, _chunk("chapter_02_chunk_001", "chapter_02", 1, translated=None))
+
+    targets = build_targets(tmp_path, "chapter:chapter_01..chapter_03")
+
+    assert [t.id for t in targets] == [
+        "chapter_01_chunk_000",
+        "chapter_01_chunk_001",
+        "chapter_03_chunk_000",
+        "chapter_03_chunk_001",
+    ]
+    # ...but the single-chapter scope still refuses, unchanged.
+    with pytest.raises(ScopeError, match="none are translated"):
+        build_targets(tmp_path, "chapter:chapter_02")
+
+
+def test_a_range_with_nothing_translated_raises(tmp_path):
+    _write(tmp_path, _chunk("chapter_01_chunk_000", "chapter_01", 0, translated=None))
+    _write(tmp_path, _chunk("chapter_02_chunk_000", "chapter_02", 0, translated=None))
+    with pytest.raises(ScopeError, match="No translated chunks in chapters"):
+        build_targets(tmp_path, "chapter:chapter_01..chapter_02")
+
+
+@pytest.mark.parametrize("bad_id", ["../etc", "../../passwd", "x y", "a/b"])
+def test_a_range_endpoint_cannot_smuggle_a_path(tmp_path, bad_id):
+    """Splitting on '..' must not become a hole in the traversal guard."""
+    _three_chapters(tmp_path)
+    with pytest.raises(ScopeError, match="Invalid chapter_id"):
+        build_targets(tmp_path, f"chapter:{bad_id}..chapter_02")

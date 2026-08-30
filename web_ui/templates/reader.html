@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=6">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
     <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=18">
@@ -790,7 +790,7 @@
 <script>window.REVIEW_TYPES = {{ review_types | tojson }};
 window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};
 window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=31"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=32"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
 <script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=10"></script>

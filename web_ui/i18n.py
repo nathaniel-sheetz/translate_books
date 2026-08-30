@@ -72,6 +72,7 @@ STRINGS = {
             "completeness": "Completeness",
             "dialogue": "Dialogue",
             "address": "Address (usted/tú)",
+            "editorial": "Editorial",
         },
 
         # Reader view
@@ -181,6 +182,7 @@ STRINGS = {
                 "completeness": "Completeness",
                 "dialogue": "Dialogue",
                 "address": "Address (usted/tú)",
+                "editorial": "Editorial",
             },
             "remove_chars": "{n} char selected",
             "remove_empty": "Select text to remove",
@@ -332,6 +334,7 @@ STRINGS = {
             "completeness": "Completitud",
             "dialogue": "Diálogo",
             "address": "Tratamiento (usted/tú)",
+            "editorial": "Edición",
         },
 
         # Reader view
@@ -434,6 +437,7 @@ STRINGS = {
                 "completeness": "Completitud",
                 "dialogue": "Di\u00e1logo",
                 "address": "Tratamiento (usted/t\u00fa)",
+                "editorial": "Edición",
             },
             "remove_chars": "{n} caracteres selec.",
             "remove_empty": "Seleccione texto a eliminar",

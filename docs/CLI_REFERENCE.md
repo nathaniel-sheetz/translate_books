@@ -234,9 +234,41 @@ python scripts/run_judges.py commit  --project my-book --persist
 
 Sub-verbs: `profile`, `status`, `run`, `prepare`, `fanout`, `commit`, `apply`. Full
 reference including how to add a judge: [`JUDGES_FRAMEWORK.md`](JUDGES_FRAMEWORK.md).
-The usted/tú judge has its own guide: [`ADDRESS_JUDGE.md`](ADDRESS_JUDGE.md).
+The usted/tú judge has its own guide: [`ADDRESS_JUDGE.md`](ADDRESS_JUDGE.md), and so
+does the editorial judge: [`EDITORIAL_JUDGE.md`](EDITORIAL_JUDGE.md).
 
 *Skill equivalent:* `/judge-review`
+
+### `verify_editorial.py` — adjudicate the editorial judge's candidates
+
+```bash
+# Read-only: which chunks carry candidates nobody has second-guessed
+python scripts/verify_editorial.py status --project my-book
+
+# API backend (cost-gated), one call per chunk
+python scripts/verify_editorial.py run --project my-book --persist --confirm
+
+# Subscription backend: prepare → (fanout | spawn workers) → commit
+python scripts/verify_editorial.py prepare --project my-book
+python scripts/verify_editorial.py commit  --project my-book --persist
+```
+
+Pass two of the editorial judge: CONFIRM / RETRACT / RECLASSIFY over every
+candidate, with the English original attached to the ones whose `source_check`
+asked for it. Not idempotent — a verified chunk is skipped until `--force`.
+Full reference: [`EDITORIAL_JUDGE.md`](EDITORIAL_JUDGE.md).
+
+### `editorial_metrics.py` — editorial judge precision report
+
+```bash
+python scripts/editorial_metrics.py --project my-book
+python scripts/editorial_metrics.py --project my-book --write-examples
+```
+
+Volume, precision against the human marks, adjudication deltas and excerpt
+anchoring. Costs nothing: it scores what is already persisted rather than
+re-running the judge. `--write-examples` turns the marked corpus into the
+few-shot bank the judge reads back on its next run.
 
 ### `review_annotations.py` — resolve reader annotations
 

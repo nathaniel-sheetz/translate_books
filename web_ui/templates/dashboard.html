@@ -577,6 +577,17 @@
                 <span class="review-scope-hint" id="review-scope-hint">whole book</span>
             </div>
 
+            <!-- Repair, not a step. Running the editorial judge from the modal
+                 above runs both of its passes as one job, so this only appears
+                 when something left candidates un-adjudicated: a job killed
+                 between the passes, a fan-out whose drafts never landed, or a
+                 pass 1 run from `run_judges.py` on the command line. Hidden
+                 whenever `review-status` reports nothing pending. -->
+            <div class="review-adjudicate" id="review-adjudicate" style="display:none">
+                <span id="review-adjudicate-text"></span>
+                <button class="btn-secondary" id="btn-adjudicate-editorial">Adjudicate&hellip;</button>
+            </div>
+
             <table class="review-table" id="review-table">
                 <thead>
                     <tr>
@@ -787,16 +798,31 @@
 <div class="modal-overlay" id="judges-modal">
     <div class="modal">
         <button class="modal-close" id="judges-modal-close">&times;</button>
-        <h3>Run LLM judges</h3>
-        <p style="font-size:13px; color:#666; margin-top:0;">
+        <h3 id="judges-modal-title">Run LLM judges</h3>
+        <p style="font-size:13px; color:#666; margin-top:0;" id="judges-modal-blurb">
             One run per chunk per judge &mdash; metered API calls, or your CLI subscription.
             Findings land in the reader's Review Mode.
         </p>
 
-        <div class="dash-field">
+        <!-- Hidden in adjudicate-only mode: the judge is not in question there,
+             only whether to spend on settling what it already proposed. The
+             backend, CLI, effort and cache controls below are identical for both
+             modes, which is why the repair path reuses this modal rather than
+             growing a second copy of them. -->
+        <div class="dash-field" id="judges-pick-field">
             <label>Judges</label>
             <label class="judges-check"><input type="checkbox" class="judge-pick" value="dialogue" checked> Dialogue formatting</label>
             <label class="judges-check"><input type="checkbox" class="judge-pick" value="address"> Forms of address (usted/t&uacute;)</label>
+            <!-- Unchecked by default, for the reason the registry keeps `editorial`
+                 out of the `default` and `prose` suites: it is the most expensive
+                 judge per target, and its findings are editorial judgement rather
+                 than rule compliance, so it wants a deliberate tick. Ticking it
+                 runs BOTH of its passes in one job — pass 1 proposes candidates
+                 reading the Spanish alone, pass 2 adjudicates them against the
+                 English — because a pass-1 result is proposals, not findings, and
+                 re-running the judge later to finish the job would discard any
+                 adjudication that had already landed. -->
+            <label class="judges-check"><input type="checkbox" class="judge-pick" value="editorial"> Editorial defects</label>
         </div>
         <div class="dash-field">
             <label>Backend</label>

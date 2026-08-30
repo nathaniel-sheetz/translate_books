@@ -1189,3 +1189,150 @@ def test_commit_drops_the_unattributable_evaluator_results_array(tmp_path):
     # Paths collapse to one directory plus basenames.
     assert committed["persisted"] == [f"{cid}.json"]
     assert committed["persisted_dir"].endswith("evaluations")
+
+
+# ---------------------------------------------------------------------------
+# The findings ceiling survives prepare -> commit
+#
+# `commit` rebuilds targets with empty text, so a judge that sizes a gate off
+# the passage re-derives it from zero words. For the editorial judge that meant
+# every chunk's budget collapsed to the short-chunk floor at commit time, no
+# matter what its prompt told the worker — which made the ceiling unraisable on
+# the backend the skill actually uses.
+# ---------------------------------------------------------------------------
+
+
+def _long_chunk_project(tmp_path, words: int = 1000):
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir(exist_ok=True)
+    cid = "chapter_01_chunk_000"
+    save_chunk(
+        _chunk(cid, "chapter_01", 0, "palabra " * words), chunks_dir / f"{cid}.json"
+    )
+    return tmp_path, cid
+
+
+def _editorial_verdict(n: int) -> str:
+    return json.dumps(
+        {
+            "findings": [
+                {
+                    "rule": f"defect-{i}",
+                    "category": "NATURALNESS",
+                    "severity": "warning",
+                    "confidence": "high",
+                    "excerpt": f"palabra {i}",
+                    "message": f"Awkward phrasing {i}.",
+                    "suggestion": f"mejor {i}",
+                    "source_check": "not_needed",
+                }
+                for i in range(n)
+            ],
+            "summary": f"{n} issues",
+        }
+    )
+
+
+def test_prepare_records_the_ceiling_it_stated(tmp_path):
+    """The number in the prompt goes onto the manifest entry, verbatim."""
+    project, cid = _long_chunk_project(tmp_path)
+
+    out = subagent.prepare(project, ["editorial"], f"chunk:{cid}")
+
+    entry = out["manifest"][0]
+    assert entry["max_findings"] == 6  # 1000 words at the default rate
+    prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
+    assert "at most 6 findings" in prompt
+
+
+def test_prepare_records_a_configured_ceiling(tmp_path):
+    project, cid = _long_chunk_project(tmp_path)
+
+    out = subagent.prepare(
+        project,
+        ["editorial"],
+        f"chunk:{cid}",
+        context={"editorial_findings_per_1000": 12},
+    )
+
+    entry = out["manifest"][0]
+    assert entry["max_findings"] == 12
+    assert "at most 12 findings" in Path(entry["prompt_path"]).read_text(encoding="utf-8")
+    manifest = json.loads(
+        (tmp_path / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["editorial_findings_per_1000"] == 12
+
+
+def test_prepare_omits_the_ceiling_for_judges_that_state_none(tmp_path):
+    """It is read off `item_prompt_variables`, not special-cased per judge."""
+    project, cid = _project_with_chunk(tmp_path)
+
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    assert "max_findings" not in out["manifest"][0]
+
+
+def test_commit_enforces_the_ceiling_prepare_stated(tmp_path):
+    """Six high-confidence findings on a 1,000-word chunk all survive commit."""
+    project, cid = _long_chunk_project(tmp_path)
+    subagent.prepare(project, ["editorial"], f"chunk:{cid}")
+    _write_draft(tmp_path, cid, "editorial", _editorial_verdict(6))
+
+    out = subagent.commit(project, persist=True)
+
+    assert out["counts"] == {"committed": 1, "failed": 0, "missing": 0}
+    meta = out["results"][0]["metadata"]
+    assert meta["findings_budget"] == 6
+    assert meta["filtered_over_budget"] == 0
+    assert len(out["results"][0]["issues"]) == 6
+
+
+def test_commit_without_a_recorded_ceiling_falls_back_to_the_floor(tmp_path):
+    """An older manifest keeps the old behaviour rather than losing the gate."""
+    project, cid = _long_chunk_project(tmp_path)
+    subagent.prepare(project, ["editorial"], f"chunk:{cid}")
+
+    manifest_path = tmp_path / ".harness" / "judges" / "manifest.json"
+    doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    doc["entries"][0].pop("max_findings")
+    manifest_path.write_text(json.dumps(doc), encoding="utf-8")
+    _write_draft(tmp_path, cid, "editorial", _editorial_verdict(6))
+
+    out = subagent.commit(project)
+
+    assert out["results"][0]["metadata"]["findings_budget"] == 2
+
+
+def test_commit_batch_members_carry_their_own_ceilings(tmp_path):
+    """Grouped entries record a ceiling per member, and commit honours each."""
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir(exist_ok=True)
+    long_id, short_id = "chapter_01_chunk_000", "chapter_01_chunk_001"
+    save_chunk(_chunk(long_id, "chapter_01", 0, "palabra " * 1000), chunks_dir / f"{long_id}.json")
+    save_chunk(_chunk(short_id, "chapter_01", 1, "palabra " * 50), chunks_dir / f"{short_id}.json")
+
+    out = subagent.prepare(
+        tmp_path, ["editorial"], "chapter:chapter_01", targets_per_worker=2
+    )
+    batch = [e for e in out["manifest"] if "members" in e][0]
+    ceilings = {m["target_id"]: m["max_findings"] for m in batch["members"]}
+    assert ceilings == {long_id: 6, short_id: 2}
+
+    draft = json.dumps(
+        {
+            "verdicts": {
+                long_id: json.loads(_editorial_verdict(6)),
+                short_id: json.loads(_editorial_verdict(6)),
+            }
+        }
+    )
+    (tmp_path / ".harness" / "judges" / f"{batch['batch_id']}.editorial.draft.json").write_text(
+        draft, encoding="utf-8"
+    )
+
+    committed = subagent.commit(tmp_path)
+
+    by_id = {r["target_id"]: r for r in committed["results"]}
+    assert len(by_id[long_id]["issues"]) == 6
+    assert len(by_id[short_id]["issues"]) == 2  # the short-chunk floor

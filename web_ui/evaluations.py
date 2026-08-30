@@ -64,7 +64,18 @@ def issue_key(eval_name: str, issue: dict[str, Any]) -> str:
     ``normalized_issues`` entry (``location`` is a dict whose ``raw`` holds that
     same string), so the key computed when a mark is written matches the one
     computed when the badge counts are read.
+
+    A finding that carries its own ``finding_key`` wins outright. The derivation
+    below hashes ``message``, which assumes the checker reproduces it verbatim on
+    a re-run — true of every coded evaluator and false of every LLM judge, which
+    rewords the same defect each time and would drop its dismissals on every run.
+    A judge that can name a stable identity (rule + excerpt) supplies it via
+    :attr:`src.models.Issue.finding_key`; absent, nothing changes.
     """
+    explicit = issue.get("finding_key")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
     location = issue.get("location")
     if isinstance(location, dict):
         location = location.get("raw")
@@ -920,7 +931,7 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
     category rather than severity, and gated exactly the way the reader's
     Review Mode gates them (``web_ui/app.py:project_chapter_review``): stale
     chunks are skipped, dismissed findings (``_feedback.jsonl``) are subtracted,
-    coded findings must be target-side with a ``char_start``, and only the six
+    coded findings must be target-side with a ``char_start``, and only the
     :data:`REVIEW_TYPES` categories are counted.
 
     A finding the reader cannot anchor to a sentence — a judge excerpt that
@@ -936,8 +947,8 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
     for a list page.)
 
     Returns:
-        ``{chapter_id: {category: count}}``, each inner dict holding all six
-        :data:`REVIEW_TYPES` keys zero-filled. Chapters with no live findings
+        ``{chapter_id: {category: count}}``, each inner dict holding every
+        :data:`REVIEW_TYPES` key, zero-filled. Chapters with no live findings
         are absent — callers wanting a row for every chapter should fall back
         to :func:`empty_type_counts`.
     """
@@ -1105,7 +1116,7 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
     Same walk, same gating, same upper-bound caveat — see that function.
 
     Returns:
-        All six :data:`REVIEW_TYPES` keys, zero-filled.
+        Every :data:`REVIEW_TYPES` key, zero-filled.
     """
     totals = empty_type_counts()
     for counts in load_chapter_type_counts(project_dir).values():
@@ -1126,7 +1137,7 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
 # Coded evaluators whose target-side issues carry a highlightable char span.
 REVIEW_CODED_TYPES: tuple[str, ...] = ("blacklist", "grammar", "dictionary", "completeness")
 # Tailored judges whose issues can be anchored to a sentence by text search.
-REVIEW_JUDGE_TYPES: tuple[str, ...] = ("dialogue", "address")
+REVIEW_JUDGE_TYPES: tuple[str, ...] = ("dialogue", "address", "editorial")
 REVIEW_TYPES: tuple[str, ...] = REVIEW_CODED_TYPES + REVIEW_JUDGE_TYPES
 
 
@@ -1160,6 +1171,7 @@ JUDGE_STATUS_GROUPS: dict[str, tuple[str, ...]] = {
     "coded": CODED_EVAL_NAMES,
     "dialogue": ("dialogue",),
     "address": ("address",),
+    "editorial": ("editorial",),
 }
 
 
@@ -1280,6 +1292,56 @@ def chapter_chunk_states(
     return out
 
 
+def editorial_unadjudicated(evaluation: Optional[dict]) -> bool:
+    """Did the editorial judge propose findings here that pass 2 never settled?
+
+    Pass 1 writes ``metadata.verified: false`` alongside its candidates; the
+    adjudication pass rewrites ``issues`` with the survivors and flips it true.
+    A chunk pass 1 found clean has nothing to adjudicate and is *not* pending —
+    ``no_candidates`` is a clean chunk, not a gap, and reporting it as one would
+    make every book look permanently half-finished.
+
+    Read straight off the persisted record: no ``build_targets`` walk and no
+    English-window retrieval, so a caller that already has the payload in hand
+    (the Review tab does) pays nothing for the answer.
+    """
+    if not isinstance(evaluation, dict):
+        return False
+    result = (evaluation.get("judges") or {}).get("editorial")
+    if not isinstance(result, dict):
+        return False
+    metadata = result.get("metadata") or {}
+    if metadata.get("verified"):
+        return False
+    # ``candidates`` is the pre-adjudication set; ``issues`` is the fallback for
+    # a result written before that key existed, which is exactly what
+    # ``editorial_verify.collect_candidates`` reconstructs from.
+    return bool(metadata.get("candidates") or result.get("issues"))
+
+
+def chapter_judge_status_detail(
+    project_dir: Path,
+    chunks: list[tuple[str, dict]],
+    *,
+    groups: Optional[dict[str, tuple[str, ...]]] = None,
+) -> tuple[dict[str, dict], list[dict[str, str]], list[dict[str, Any]]]:
+    """:func:`chapter_judge_status`, plus the per-chunk records it rolled up.
+
+    The records carry the persisted ``evaluation`` payload, so a caller wanting
+    something the group states do not encode — the Review tab wants the count of
+    chunks awaiting editorial adjudication — can have it without a second walk
+    over ``chunks/`` and ``evaluations/``, which is the expensive half of this
+    call.
+    """
+    records = chapter_chunk_states(project_dir, chunks, groups=groups)
+    per_chunk = [rec["states"] for rec in records]
+    by_group = {
+        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
+        for group in (groups or JUDGE_STATUS_GROUPS)
+    }
+    return by_group, per_chunk, records
+
+
 def chapter_judge_status(
     project_dir: Path,
     chunks: list[tuple[str, dict]],
@@ -1292,11 +1354,9 @@ def chapter_judge_status(
     so the book-wide totals can be rolled up from the same per-chunk verdicts
     rather than from an average of chapter verdicts.
     """
-    per_chunk = [rec["states"] for rec in chapter_chunk_states(project_dir, chunks, groups=groups)]
-    by_group = {
-        group: rollup_group_state(states.get(group, "missing") for states in per_chunk)
-        for group in (groups or JUDGE_STATUS_GROUPS)
-    }
+    by_group, per_chunk, _ = chapter_judge_status_detail(
+        project_dir, chunks, groups=groups
+    )
     return by_group, per_chunk
 
 

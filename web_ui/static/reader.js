@@ -120,7 +120,7 @@
     // category selection is global (cookie, rendered into the page by the
     // server). When off, the reader behaves exactly as before.
     const REVIEW_TYPES = window.REVIEW_TYPES ||
-        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address'];
+        ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address', 'editorial'];
 
     function loadReviewConfig() {
         const types = Array.isArray(window.REVIEW_TYPES_SELECTED) && window.REVIEW_TYPES_SELECTED.length

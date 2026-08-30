@@ -75,9 +75,10 @@ from web_ui.evaluations import (
     append_feedback,
     build_dismissed,
     chapter_id_from_chunk_id,
-    chapter_judge_status,
+    chapter_judge_status_detail,
     count_ignored_hits,
     current_chunk_sha,
+    editorial_unadjudicated,
     empty_type_counts,
     evaluate_and_persist_chunk,
     evaluator_freshness_detail,
@@ -407,28 +408,38 @@ def set_ui_version():
 
 
 # Which evaluator/judge categories count as "errors I care about". Global, not
-# per project: the same six categories mean the same thing in every book, and
-# the home page needs the selection before you have picked a book. Mirrors the
-# two cookies above. The review-mode *on/off* switch stays per project in
-# localStorage — that one is a per-book reading preference.
-_REVIEW_TYPES_COOKIE = "reader_review_types"
+# per project: a category means the same thing in every book, and the home page
+# needs the selection before you have picked a book. Mirrors the two cookies
+# above. The review-mode *on/off* switch stays per project in localStorage —
+# that one is a per-book reading preference.
+#
+# The cookie records what is *deselected*, not what is selected, so a category
+# added to :data:`REVIEW_TYPES` after the cookie was written is on by default.
+# The old selection cookie did the opposite, which silently hid every new
+# judge from anyone who had ever opened the picker (that is how `editorial`
+# was invisible in the reader while its badges showed on the dashboard). Its
+# values cannot be migrated — "not in the list" is exactly the ambiguity — so
+# the rename resets the picker once and is then future-proof.
+_REVIEW_TYPES_COOKIE = "reader_review_types_off"
+_LEGACY_REVIEW_TYPES_COOKIE = "reader_review_types"
 
 
 def _get_review_types() -> list[str]:
-    """Read the selected review categories from cookie, default to all six.
+    """Read the selected review categories from cookie, default to all of them.
 
     Order follows :data:`REVIEW_TYPES`, not the cookie, so the UI is stable.
-    An absent, empty, or fully unrecognized cookie means "show everything" —
-    the same thing the checkboxes show on a first visit.
+    An absent cookie — or one that switches every category off — means "show
+    everything", the same thing the checkboxes show on a first visit.
     """
     raw = request.cookies.get(_REVIEW_TYPES_COOKIE, "")
-    selected = [t for t in REVIEW_TYPES if t in set(raw.split(","))]
+    off = set(raw.split(","))
+    selected = [t for t in REVIEW_TYPES if t not in off]
     return selected or list(REVIEW_TYPES)
 
 
 @app.route("/api/set-review-types", methods=["POST"])
 def set_review_types():
-    """Persist the selected review categories via cookie."""
+    """Persist the selected review categories via cookie (stored inverted)."""
     raw = (request.json or {}).get("types")
     if not isinstance(raw, list):
         return jsonify({"error": "types must be a list"}), 400
@@ -436,11 +447,15 @@ def set_review_types():
     if unknown:
         return jsonify({"error": f"Unknown review types: {', '.join(map(str, unknown))}"}), 400
     types = [t for t in REVIEW_TYPES if t in set(raw)]
+    off = [t for t in REVIEW_TYPES if t not in set(types)]
     resp = make_response(jsonify({"ok": True, "types": types}))
     resp.set_cookie(
-        _REVIEW_TYPES_COOKIE, ",".join(types),
+        _REVIEW_TYPES_COOKIE, ",".join(off),
         max_age=365 * 24 * 3600, samesite="Lax",
     )
+    # Drop the superseded cookie so a stale selection cannot come back if the
+    # inverted one is ever cleared on its own.
+    resp.set_cookie(_LEGACY_REVIEW_TYPES_COOKIE, "", max_age=0, samesite="Lax")
     return resp
 
 
@@ -1174,7 +1189,7 @@ def reader_chapters(project_id):
     project_dir = _resolve_project_dir(project_id)
     all_annotations = _chapter_annotation_state(project_dir)
 
-    # Evaluator/judge findings in the six review categories, bucketed by
+    # Evaluator/judge findings in the review categories, bucketed by
     # chapter. One extra walk of evaluations/*.json — cheap next to the
     # alignments this route already opens in full.
     flag_counts_by_chapter = load_chapter_type_counts(project_dir)
@@ -6239,6 +6254,8 @@ def project_review_status(project_id):
     totals_flags = empty_type_counts()
     totals_ann = _empty_annotation_state()
     totals = {"chunk_count": 0, "translated_count": 0, "gap_count": 0, "gap_chars": 0}
+    editorial_pending_total = 0
+    editorial_pending_by_chapter: dict[str, int] = {}
 
     for ch_id in chapter_ids:
         chunks = chunks_by_chapter.get(ch_id, [])
@@ -6255,8 +6272,20 @@ def project_review_status(project_id):
             except (json.JSONDecodeError, OSError, TypeError):
                 pass
 
-        judges, per_chunk = chapter_judge_status(project_dir, chunks)
+        judges, per_chunk, chunk_records = chapter_judge_status_detail(
+            project_dir, chunks
+        )
         all_chunk_states.extend(per_chunk)
+        # Free: the records are already open. Pass 1 can leave candidates behind
+        # (a job killed mid-adjudication, or a `run_judges.py` run from the CLI),
+        # and nothing else in this payload distinguishes a proposal from a
+        # finding.
+        ed_pending = sum(
+            1 for rec in chunk_records if editorial_unadjudicated(rec["evaluation"])
+        )
+        editorial_pending_total += ed_pending
+        if ed_pending:
+            editorial_pending_by_chapter[ch_id] = ed_pending
 
         ch_flags = flag_counts.get(ch_id) or empty_type_counts()
         ch_ann = annotations.get(ch_id) or _empty_annotation_state()
@@ -6279,6 +6308,7 @@ def project_review_status(project_id):
             },
             "reviewed": ch_id in reviewed,
             "judges": judges,
+            "editorial_pending": ed_pending,
         })
 
         for name, n in ch_flags.items():
@@ -6293,6 +6323,10 @@ def project_review_status(project_id):
     return jsonify({
         "ok": True,
         "chapters": chapters,
+        "editorial_pending": {
+            "chunks": editorial_pending_total,
+            "by_chapter": editorial_pending_by_chapter,
+        },
         "totals": {
             **totals,
             "flag_counts": totals_flags,
@@ -6582,7 +6616,7 @@ def project_review_run_judges(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     from src.judges import ScopeError, build_judge_context, build_targets
-    from src.judges.registry import available_judges
+    from src.judges.registry import available_judges, resolve_suite
 
     data = request.json or {}
     backend = str(data.get("backend") or "api").strip().lower()
@@ -6595,7 +6629,15 @@ def project_review_run_judges(project_id):
     if err:
         return jsonify({"error": err}), 400
 
-    judge_names = data.get("judges") or list(REVIEW_JUDGE_TYPES)
+    # The ``prose`` suite, not ``REVIEW_JUDGE_TYPES``: that tuple is the reader's
+    # *display* categories (it decides which pips render and which issues anchor
+    # to a sentence), and adding ``editorial`` to it silently widened this
+    # default to the most expensive judge plus its whole adjudication wave —
+    # which is precisely what ``registry._BUILTIN_SUITES`` keeps out of
+    # ``default`` and ``prose`` on purpose. The dashboard always sends
+    # ``judges``, so the only caller this reaches is a scripted one, which is
+    # the caller least able to notice the bill.
+    judge_names = data.get("judges") or resolve_suite("prose")
     if not isinstance(judge_names, list) or not judge_names:
         return jsonify({"error": "judges must be a non-empty list"}), 400
     known = set(available_judges())
@@ -6639,19 +6681,165 @@ def project_review_run_judges(project_id):
     if ctx_error:
         return jsonify({"error": ctx_error}), 409
 
+    live_scopes = [s for s in scopes if s not in {sk["scope"] for sk in skipped}]
     if backend == "headless":
-        live_scopes = [s for s in scopes if s not in {sk["scope"] for sk in skipped}]
         return _run_judges_headless(
             project_id, project_dir, data, judge_names, live_scopes, targets,
             context, skipped,
         )
     return _run_judges_api(
-        project_id, project_dir, data, judge_names, targets, context, skipped
+        project_id, project_dir, data, judge_names, live_scopes, targets,
+        context, skipped,
+    )
+
+
+def _adjudicate_editorial(
+    project_dir, scopes, emit, *, backend, context,
+    cli=None, worker_model=None, effort=None, prompt_cache="auto",
+):
+    """Pass 2 of the editorial judge, run inline after pass 1 in the same job.
+
+    Pass 1's ``issues[]`` are *proposals*: the judge reads the Spanish alone and
+    over-proposes on purpose, and ``metadata.verified`` stays false until this
+    pass has adjudicated them against the English. Leaving that gap open in the
+    GUI would light a dashboard badge from un-adjudicated candidates — and
+    because :func:`web_ui.evaluations.merge_judge_result` replaces a judge's
+    whole result, the obvious repair (re-run the judge later) silently discards
+    whatever adjudication *had* landed. So the two passes are one gesture here.
+
+    No ``force``: pass 1 has just rewritten these results, so ``verified`` is
+    false again and every chunk carrying candidates is naturally pending. A
+    chunk pass 1 found clean is skipped as ``no_candidates`` — a clean chunk,
+    not a gap.
+
+    Never raises. Pass 1's findings are already persisted by the time this runs,
+    and a failure to second-guess them is not a reason to report the whole wave
+    as stopped; the caller folds ``errors`` into the job summary and the Review
+    tab's banner offers the retry. Returns ``(summary, errors)``.
+    """
+    from src.judges import editorial_wave as wave
+
+    errors: list[str] = []
+
+    def summary(rollup=None, *, chunks=0, unverified=0):
+        rollup = rollup or {}
+        return {
+            "chunks": chunks,
+            "confirmed": rollup.get("confirmed", 0),
+            "reclassified": rollup.get("reclassified", 0),
+            "retracted": rollup.get("retracted", 0),
+            "source_used": rollup.get("source_used", 0),
+            "unverified": unverified,
+        }
+
+    try:
+        if backend == "api":
+            emit("phase", phase="adjudicate", message="Adjudicating findings…")
+            # ``confirm`` because the caller already gated on an estimate that
+            # included this pass; a second dollar gate inside a running job has
+            # nobody to ask.
+            out = wave.run_api(
+                project_dir, scopes, context=context, persist=True, confirm=True
+            )
+            if out.get("status") == "error":
+                errors.append(f"adjudication: {out.get('error')}")
+                return summary(), errors
+            results = out.get("results") or []
+            chunks = (out.get("counts") or {}).get("chunks", 0)
+            for record in results:
+                if record.get("status") != "ok":
+                    errors.append(
+                        f"{record.get('chunk_id')}: adjudication "
+                        f"{record.get('status') or 'failed'}"
+                    )
+            landed = sum(1 for r in results if r.get("status") == "ok")
+            return (
+                summary(out.get("rollup"), chunks=chunks,
+                        unverified=max(0, chunks - landed)),
+                errors,
+            )
+
+        emit("phase", phase="adjudicate_prepare", message="Preparing adjudication…")
+        prep = wave.prepare(
+            project_dir, scopes, context=context,
+            cli=cli, worker_model=worker_model, effort=effort, quiet=True,
+        )
+        if prep.get("status") == "error":
+            errors.append(f"adjudication: {prep.get('error')}")
+            return summary(), errors
+        chunks = (prep.get("counts") or {}).get("chunks", 0)
+        if not chunks:
+            # Pass 1 proposed nothing anywhere in scope. That is a clean book,
+            # not a failure, and it costs no wave.
+            return summary(), errors
+
+        emit(
+            "phase", phase="adjudicate",
+            message=f"Adjudicating {chunks} chunk(s)…", total=chunks,
+        )
+        out = wave.fanout(
+            project_dir,
+            cache=prompt_cache,
+            on_job_done=lambda rec: emit(
+                "target_done",
+                target_id=rec.get("id"),
+                index=rec.get("done"),
+                total=rec.get("total"),
+                ok=rec.get("ok"),
+            ),
+        )
+        if out.get("error"):
+            errors.append(f"adjudication: {out['error']}")
+            return summary(chunks=chunks, unverified=chunks), errors
+
+        emit("phase", phase="adjudicate_commit", message="Committing verdicts…")
+        landed = wave.commit(project_dir, persist=True)
+        if landed.get("status") == "error":
+            errors.append(
+                f"adjudication commit failed: {landed.get('error') or 'unknown error'}"
+            )
+            return summary(chunks=chunks, unverified=chunks), errors
+
+        errors += [
+            f"{f.get('chunk_id')}: {f.get('error')}" for f in landed.get("failed") or []
+        ]
+        errors += [
+            f"{m}: adjudication draft missing" for m in landed.get("missing") or []
+        ]
+        committed = landed.get("committed", 0)
+        return (
+            summary(landed.get("rollup"), chunks=chunks,
+                    unverified=max(0, chunks - committed)),
+            errors,
+        )
+    except Exception as exc:  # noqa: BLE001 - pass 1 is already persisted
+        app.logger.exception("Editorial adjudication failed for %s", project_dir)
+        errors.append(f"adjudication: {exc}")
+        return summary(), errors
+
+
+def _editorial_pass_two_cost(targets, context, data):
+    """Upper bound on what the editorial judge's second pass could cost.
+
+    Quoted *before* pass 1 runs, so there are no candidates to price: the bound
+    assumes every chunk comes back carrying its full findings budget. Real
+    chunks average one or two findings against a floor of two, so it reads high
+    — the only safe direction for a gate that has to hold for a run the user
+    approves once and then cannot be asked about again.
+    """
+    from src.judges import editorial_wave as wave
+
+    word_counts = {
+        t.id: len((t.translated_text or "").split()) for t in targets
+    }
+    return wave.estimate_cost_bound(
+        word_counts, context,
+        data.get("model") or None, data.get("provider") or None,
     )
 
 
 def _run_judges_api(
-    project_id, project_dir, data, judge_names, targets, context, skipped
+    project_id, project_dir, data, judge_names, scopes, targets, context, skipped
 ):
     """Metered API backend: one LLM call per (target, judge), behind a $ gate."""
     from src.judges import estimate_suite_cost
@@ -6662,6 +6850,13 @@ def _run_judges_api(
         return jsonify({"error": "cost_limit must be a number"}), 400
 
     estimated_cost = estimate_suite_cost(judge_names, targets, context)
+    # The editorial judge's run is not over when its findings land, and the same
+    # confirmation has to cover both passes — the second one starts inside a
+    # background job, where there is nobody left to ask.
+    adjudication_cost = 0.0
+    if "editorial" in judge_names:
+        adjudication_cost = _editorial_pass_two_cost(targets, context, data)
+        estimated_cost += adjudication_cost
     # An explicit flag, not `cost_limit: 0` relying on `estimated_cost > limit`:
     # a zero-priced provider in llm_config.json makes `0.0 > 0` false, and the
     # "estimate" would silently start a real metered run.
@@ -6670,6 +6865,7 @@ def _run_judges_api(
             "ok": True,
             "status": "estimate",
             "estimated_cost": estimated_cost,
+            "adjudication_cost": round(adjudication_cost, 6),
             "cost_limit": cost_limit,
             "target_count": len(targets),
             "judges": judge_names,
@@ -6680,6 +6876,7 @@ def _run_judges_api(
             "ok": True,
             "status": "needs_confirm",
             "estimated_cost": estimated_cost,
+            "adjudication_cost": round(adjudication_cost, 6),
             "cost_limit": cost_limit,
             "target_count": len(targets),
             "judges": judge_names,
@@ -6717,9 +6914,18 @@ def _run_judges_api(
                     "target_done", target_id=target.id, judge=judge_name,
                     index=done, total=total, estimated_cost=round(spent, 6),
                 )
+
+        adjudication = None
+        if "editorial" in judge_names:
+            adjudication, adj_errors = _adjudicate_editorial(
+                project_dir, scopes, emit, backend="api", context=context,
+            )
+            errors += adj_errors
+
         return {
             "ran": done, "total": total,
             "estimated_cost": round(spent, 6),
+            "adjudication": adjudication,
             "error_count": len(errors), "errors": errors[:5],
         }
 
@@ -6847,9 +7053,26 @@ def _run_judges_headless(
         if out.get("error"):
             return jsonify({"error": out["error"]}), 400
         estimate = out.get("estimate") or {}
+        # Pass 2 cannot be measured before pass 1 has proposed anything, so it is
+        # quoted as a ceiling: one job per chunk in scope (a chunk pass 1 finds
+        # clean costs nothing) at this pipeline's own measured per-job baseline.
+        # Announcing the shape is what stops the second wave arriving as a
+        # surprise on a subscription's context budget.
+        adjudication = None
+        if "editorial" in judge_names:
+            from src.judges import editorial_wave as wave
+
+            adj_baseline, adj_source = wave.baseline_for(project_dir, prof.cli)
+            adjudication = {
+                "jobs_max": len(targets),
+                "tokens_max": len(targets) * adj_baseline,
+                "baseline_tokens": adj_baseline,
+                "baseline_source": adj_source,
+            }
         return jsonify({
             "ok": True,
             "status": "estimate",
+            "adjudication": adjudication,
             # Relayed whole: `baseline_tokens` means nothing without `cli`, and
             # `effort` means nothing without `effort_channel`.
             "effective": out.get("effective") or prof.to_payload(),
@@ -6925,12 +7148,23 @@ def _run_judges_headless(
         ]
         errors += list(landed.get("persist_errors") or [])
         counts = landed.get("counts") or {}
+
+        adjudication = None
+        if "editorial" in judge_names:
+            adjudication, adj_errors = _adjudicate_editorial(
+                project_dir, scopes, emit, backend="headless", context=context,
+                cli=cli, worker_model=worker_model, effort=effort,
+                prompt_cache=prompt_cache or "auto",
+            )
+            errors += adj_errors
+
         return {
             "ran": counts.get("committed", 0),
             "total": entries or total,
             "wrote": len(out.get("wrote") or []),
             "failed": len(out.get("failed") or []),
             "missing": len(missing),
+            "adjudication": adjudication,
             "error_count": len(errors),
             "errors": errors[:5],
             # The wave's *measured* overhead_ratio, not the projection — the
@@ -6955,6 +7189,214 @@ def _run_judges_headless(
         "skipped": skipped,
     })
 
+@app.route(
+    "/api/project/<project_id>/review/adjudicate-editorial", methods=["POST"]
+)
+def project_review_adjudicate_editorial(project_id):
+    """Run the editorial judge's second pass alone, over what pass 1 left behind.
+
+    The Review tab runs both passes as one job, so this is a **repair** surface
+    rather than a step in the normal flow: it is for a wave that died between
+    the passes, for drafts a fan-out never answered, and for a book whose pass 1
+    was run from ``run_judges.py`` on the command line. The banner that offers it
+    appears only when ``review-status`` reports unadjudicated chunks.
+
+    Unlike pass 1's gate, this one quotes an **exact** number rather than a
+    ceiling: the candidates already exist, so ``prepare`` prices the real
+    prompts. Everything else — the three states, the job lock before the
+    destructive ``prepare``, the CLI preflight — is the pass-1 gate's shape,
+    because it is the same wave with a shorter manifest.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    from src.judges import ScopeError, build_judge_context
+    from src.judges import editorial_wave as wave
+
+    data = request.json or {}
+    backend = str(data.get("backend") or "api").strip().lower()
+    if backend not in _JUDGE_BACKENDS:
+        return jsonify({
+            "error": f"backend must be one of {', '.join(_JUDGE_BACKENDS)}"
+        }), 400
+
+    chapter_ids, err = _parse_chapter_ids(data)
+    if err:
+        return jsonify({"error": err}), 400
+    scopes = ["book"] if chapter_ids is None else [f"chapter:{c}" for c in chapter_ids]
+
+    context, ctx_error = build_judge_context(
+        project_dir,
+        ["editorial"],
+        (data.get("model") or None) if backend == "api" else None,
+        (data.get("provider") or None) if backend == "api" else None,
+    )
+    if ctx_error:
+        return jsonify({"error": ctx_error}), 409
+
+    try:
+        pending, _skipped = wave.collect_pending(project_dir, scopes)
+    except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not pending:
+        # Not an error. The banner can be a poll behind, or another session may
+        # have finished the work — a request that is correct and merely
+        # unnecessary should not read as a failure.
+        return jsonify({"ok": True, "status": "nothing_pending", "target_count": 0})
+
+    # Priced before the gate rather than inside the spending branch: the
+    # `needs_confirm` the Run button hits first has to carry the number it is
+    # asking about, and pricing costs nothing — the candidates already exist, so
+    # this renders real prompts rather than guessing at a ceiling.
+    cost_limit = _JUDGE_COST_LIMIT_DEFAULT
+    estimated_cost = 0.0
+    if backend == "api":
+        try:
+            cost_limit = float(data.get("cost_limit", _JUDGE_COST_LIMIT_DEFAULT))
+        except (TypeError, ValueError):
+            return jsonify({"error": "cost_limit must be a number"}), 400
+        estimated_cost = wave.estimate_cost(
+            pending, context, data.get("model") or None, data.get("provider") or None
+        )
+
+    dry_run = bool(data.get("dry_run"))
+    want_estimate = bool(data.get("estimate")) or dry_run
+    want_run = bool(data.get("confirm")) and not dry_run
+    if not want_estimate and not want_run:
+        return jsonify({
+            "ok": True,
+            "status": "needs_confirm",
+            "target_count": len(pending),
+            "backend": backend,
+            "estimated_cost": estimated_cost,
+            "cost_limit": cost_limit,
+        })
+
+    if backend == "api":
+        if want_estimate:
+            return jsonify({
+                "ok": True,
+                "status": "estimate",
+                "estimated_cost": estimated_cost,
+                "cost_limit": cost_limit,
+                "target_count": len(pending),
+            })
+
+        def body(emit):
+            summary, errors = _adjudicate_editorial(
+                project_dir, scopes, emit, backend="api", context=context,
+            )
+            return {
+                "ran": summary["chunks"] - summary["unverified"],
+                "total": summary["chunks"] or len(pending),
+                "adjudication": summary,
+                "error_count": len(errors),
+                "errors": errors[:5],
+            }
+
+        started_extra = {"estimated_cost": estimated_cost}
+    else:
+        from src.harness.headless import preflight_error
+        from src.harness.profile import resolve_profile
+
+        overrides, err = _parse_headless_overrides(data)
+        if err:
+            return jsonify({"error": err}), 400
+        cli = overrides["cli"]
+        worker_model = overrides["worker_model"]
+        effort = overrides["effort"]
+        prompt_cache = overrides["prompt_cache"]
+
+        # Both gates below run `prepare`, which unlinks drafts and rewrites
+        # manifest.json. Firing one while a wave is in fanout/commit deletes work
+        # in flight, so the check has to happen before either gate touches disk —
+        # `start_job` refuses a second run only on the confirm path, and only
+        # after this request has already done its damage.
+        running = jobs.active_job(project_id)
+        if running:
+            return jsonify({
+                "error": "A review job is already running for this project.",
+                "job_id": running,
+            }), 409
+
+        prof = resolve_profile(
+            project_dir,
+            command="judges",
+            cli=cli,
+            worker_model=worker_model,
+            effort=effort,
+        )
+        # Fail closed here, for both gates: a logged-out CLI would otherwise read
+        # as a green light on the estimate, and on the confirm path the launcher
+        # is not reached until after the destructive `prepare`.
+        auth_error = preflight_error(prof.cli, model=prof.worker_model)
+        if auth_error:
+            return jsonify({
+                "error": auth_error,
+                "effective": prof.to_payload(),
+            }), 409
+
+        if want_estimate:
+            try:
+                prep = wave.prepare(
+                    project_dir, scopes, context=context,
+                    cli=cli, worker_model=worker_model, effort=effort, quiet=True,
+                )
+            except (OSError, ValueError, NotImplementedError) as exc:
+                app.logger.exception("Adjudication estimate failed for %s", project_id)
+                return jsonify({"error": f"Could not estimate: {exc}"}), 400
+            if prep.get("status") == "error":
+                return jsonify({"error": prep.get("error")}), 400
+            usage = prep.get("usage_summary") or {}
+            # Keyed the way the pass-1 estimate is, so the modal renders both
+            # with one function rather than growing a second shape to maintain.
+            return jsonify({
+                "ok": True,
+                "status": "estimate",
+                "effective": prep.get("effective") or prof.to_payload(),
+                "jobs": usage.get("chunks", 0),
+                "candidates": usage.get("candidates", 0),
+                "prompt_tokens": usage.get("estimated_prompt_tokens", 0),
+                "projected_tokens": usage.get("estimated_headless_tokens", 0),
+                "baseline_tokens": usage.get("headless_baseline_tokens", 0),
+                "baseline_source": usage.get("headless_baseline_source"),
+                "warnings": prep.get("warnings") or [],
+                "target_count": len(pending),
+            })
+
+        def body(emit):
+            summary, errors = _adjudicate_editorial(
+                project_dir, scopes, emit, backend="headless", context=context,
+                cli=cli, worker_model=worker_model, effort=effort,
+                prompt_cache=prompt_cache or "auto",
+            )
+            return {
+                "ran": summary["chunks"] - summary["unverified"],
+                "total": summary["chunks"] or len(pending),
+                "adjudication": summary,
+                "error_count": len(errors),
+                "errors": errors[:5],
+            }
+
+        started_extra = {"effective": prof.to_payload()}
+
+    try:
+        job_id = jobs.start_job(project_id, "review-adjudicate", body)
+    except jobs.JobConflict as conflict:
+        return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
+
+    return jsonify({
+        "ok": True,
+        "status": "started",
+        "job_id": job_id,
+        "total": len(pending),
+        "target_count": len(pending),
+        "backend": backend,
+        **started_extra,
+    })
 
 @app.route("/api/project/<project_id>/jobs/<job_id>/sse")
 def project_job_sse(project_id, job_id):

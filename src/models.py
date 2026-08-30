@@ -63,6 +63,16 @@ class Issue(BaseModel):
     for a grammar match. It exists for the same reason: it was previously
     recoverable only by regex-parsing the quoted word back out of ``message``,
     which makes it unusable as a key. Same optional/additive contract.
+
+    ``finding_key`` is an explicit, checker-supplied content hash that overrides
+    the one ``web_ui.evaluations.issue_key`` derives from
+    ``(severity, message, location)``. It exists for LLM judges: a deterministic
+    checker reproduces its ``message`` verbatim on a re-run, but a judge rewords
+    it, so a dismissal keyed on the message silently stops matching and the
+    calibration corpus is lost. A judge that can name a stable identity for a
+    finding (rule + excerpt) puts it here. Optional and additive like the three
+    above: absent means the legacy derivation, which is what every evaluator and
+    the two original judges still use.
     """
     severity: IssueLevel
     message: str
@@ -71,6 +81,7 @@ class Issue(BaseModel):
     rule_id: Optional[str] = None
     category: Optional[str] = None
     term: Optional[str] = None
+    finding_key: Optional[str] = None
 
 
 class Annotation(BaseModel):
