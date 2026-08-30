@@ -1018,3 +1018,95 @@ def test_finding_key_helper_matches_what_metrics_join_on(project):
     assert result.issues[0].finding_key == finding_key(
         "calque-syntax", "El cuarto estaba desnudo y caluroso."
     )
+
+
+# ---------------------------------------------------------------------------
+# Adjudicating prose that has moved
+
+
+def _edit_translation(project, text, chunk_id=CHUNK_ID):
+    """Rewrite a chunk's Spanish, the way a reader correction or `apply` would."""
+    path = project / "chunks" / f"{chunk_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["translated_text"] = text
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_a_chunk_edited_after_pass_one_is_not_adjudicated(project, capsys):
+    """Pass 2 never reads the prose, but persisting it re-stamps the ledger.
+
+    So adjudicating a chunk whose Spanish moved after pass 1 cleared ``stale``
+    and wrote a ``text_sha`` matching text no judge had seen — findings still
+    anchored to the old sentence, badge and anchoring check both reading fresh.
+    Edited text needs a new pass 1, not a second opinion on the old one.
+    """
+    _persist_pass_one(project, [_candidate()])
+    _edit_translation(project, "El cuarto era angosto y sofocante. " + SPANISH)
+
+    assert _run(["status", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["pending_chunks"] == []
+    assert out["skipped"] == {"stale": 1}
+
+
+def test_force_does_not_reopen_a_stale_chunk(project, capsys):
+    """``force`` means "re-decide what pass 2 settled", not "judge moved prose"."""
+    _persist_pass_one(project, [_candidate()])
+    _edit_translation(project, "Otra cosa por completo distinta.")
+
+    assert _run(["status", "--project", str(project), "--force"]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["pending_chunks"] == []
+    assert out["skipped"] == {"stale": 1}
+
+
+def test_an_evaluation_with_no_ledger_is_still_adjudicated(project, capsys):
+    """Only hash and flag staleness gate the wave; mtime staleness is a suspicion.
+
+    An evaluation written before ``eval_runs`` existed has no sha to compare, and
+    ``evaluator_freshness_detail`` falls back to a timestamp rule that a git
+    checkout or a byte-identical rewrite trips. Refusing to adjudicate a legacy
+    book on that costs more than the laundering it would prevent.
+    """
+    _persist_pass_one(project, [_candidate()])
+    path = project / "evaluations" / f"{CHUNK_ID}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("eval_runs", None)
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    _edit_translation(project, "Texto reescrito por completo.")
+
+    assert _run(["status", "--project", str(project)]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["pending_chunks"] == [CHUNK_ID]
+
+
+def test_commit_lands_the_other_drafts_when_one_chunk_has_vanished(project, capsys):
+    """A chunk re-chunked between ``prepare`` and ``commit`` abandoned the wave.
+
+    ``build_targets`` raised straight out of the loop, so every draft after it in
+    the manifest went uncommitted and the CLI exited 1 having landed nothing —
+    a fan-out already paid for, discarded because one chunk moved. The verdicts
+    answer ``metadata.candidates``, which is still on disk, so they still land.
+    """
+    second = _second_chapter(project)
+    first_result = _persist_pass_one(project, [_candidate()])
+    second_result = _persist_pass_one_for(project, second, [_candidate()])
+    _prepare(project, capsys)
+
+    drafts = project / ".harness" / "editorial"
+    for chunk_id, result in ((CHUNK_ID, first_result), (second, second_result)):
+        (drafts / f"{chunk_id}.verify.draft.json").write_text(
+            json.dumps({"verdicts": {result.issues[0].finding_key: {"verdict": "CONFIRM"}}}),
+            encoding="utf-8",
+        )
+    (project / "chunks" / f"{CHUNK_ID}.json").unlink()
+
+    assert _run(["commit", "--project", str(project), "--persist"]) == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["committed"] == 2
+    assert out["failed"] == []
+    assert sorted(r["chunk_id"] for r in out["results"]) == sorted([CHUNK_ID, second])

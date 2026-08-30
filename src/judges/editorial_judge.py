@@ -205,6 +205,40 @@ def _finding_to_issue(finding: dict[str, Any]) -> Issue:
     )
 
 
+def _disambiguate_keys(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give findings that would share an identity a distinct one.
+
+    :func:`src.judges.scoring.finding_key` hashes ``rule`` + ``excerpt`` and
+    deliberately omits ``message``, because an LLM rewords the message every run
+    and a dismissal has to survive a re-judge. The cost is a collision: two
+    findings quoting the same sentence under the same rule hash to one key. That
+    is not a corner case here — this judge is *asked* to over-propose, a sentence
+    carrying both a clarity and a fidelity defect is ordinary, and ``rule`` falls
+    back to ``other`` whenever the model omits it. One key for two findings meant
+    one pass-2 ``RETRACT`` deleted both (``retracted_count: 2``, ``issues: 0``)
+    and one reader dismissal dismissed both.
+
+    Only the second and later members of a colliding group are marked, so a
+    finding that collides with nothing hashes exactly as it did before this
+    existed and every dismissal already on disk still resolves. The ordinal
+    rides on the finding dict itself — ``key_ordinal``, no leading underscore,
+    so it survives ``editorial_verify._clean`` into ``metadata.candidates`` and
+    pass 2 re-derives the same key pass 1 minted.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    out: list[dict[str, Any]] = []
+    for finding in findings:
+        rule = str(finding.get("rule", "other")).strip() or "other"
+        excerpt = " ".join(str(finding.get("excerpt") or "").split())
+        ordinal = seen.get((rule, excerpt), 0)
+        seen[(rule, excerpt)] = ordinal + 1
+        if ordinal:
+            finding = dict(finding)
+            finding["key_ordinal"] = ordinal
+        out.append(finding)
+    return out
+
+
 def format_already_reported(entries: list[str]) -> str:
     """Render the coded evaluators' live findings as a do-not-repeat list."""
     cleaned = [str(e).strip() for e in entries if str(e or "").strip()]
@@ -299,6 +333,10 @@ class EditorialJudge(VerdictJudge):
            resolved by :func:`resolve_budget` — the same call
            ``item_prompt_variables`` made — so code enforces exactly the ceiling
            the prompt stated, on either backend.
+
+        The survivors then pass through :func:`_disambiguate_keys`, after
+        truncation so that a finding dropped by the budget cannot consume an
+        ordinal the survivors need.
         """
         minimum = str(context.get("editorial_min_confidence") or DEFAULT_MIN_CONFIDENCE)
         budget = resolve_budget(target, context)
@@ -319,6 +357,7 @@ class EditorialJudge(VerdictJudge):
                 ),
             )[:budget]
         dropped_budget = len(kept) - dropped_confidence - len(confident)
+        confident = _disambiguate_keys(confident)
 
         return confident, {
             "dropped_nonissue": dropped_nonissue,

@@ -471,3 +471,45 @@ def test_batch_prompt_carries_one_item_per_target_and_shares_the_book_inputs():
     assert first.translated_text in prompt
     assert second.translated_text in prompt
     assert first.source_text not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Finding identity
+
+
+def test_two_findings_on_one_sentence_keep_separate_identities():
+    """``finding_key`` is rule+excerpt, and this judge is asked to over-propose.
+
+    A sentence carrying both a clarity and a fidelity defect is ordinary output,
+    and ``rule`` falls back to ``other`` whenever the model omits it. Sharing one
+    key meant one pass-2 RETRACT deleted both findings and one reader dismissal
+    dismissed both.
+    """
+    judge, target, ctx = EditorialJudge(), _target(), _ctx()
+    raw = _response(
+        [
+            _finding(message="Calqued English word order."),
+            _finding(message="Drops the emphasis of the original.", category="FIDELITY_SUSPECT"),
+        ]
+    )
+
+    result = judge.parse_response(target, raw, ctx)
+
+    assert len(result.issues) == 2
+    assert len({i.finding_key for i in result.issues}) == 2
+
+
+def test_a_finding_that_collides_with_nothing_keeps_its_historical_key():
+    """The ordinal is appended only on a collision, so recorded dismissals resolve.
+
+    Salting every key would orphan every dismissal already on disk — the exact
+    breakage ``stable_identity`` is opt-in to avoid.
+    """
+    judge, target, ctx = EditorialJudge(), _target(), _ctx()
+
+    result = judge.parse_response(target, _response([_finding()]), ctx)
+
+    assert result.issues[0].finding_key == finding_key(
+        "calque-syntax", "La habitación estaba desnuda y calurosa"
+    )
+    assert "key_ordinal" not in result.metadata["candidates"][0]

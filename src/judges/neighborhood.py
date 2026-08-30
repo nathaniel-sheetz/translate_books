@@ -93,7 +93,12 @@ class EnglishWindow:
 def load_alignment_rows(
     project_dir: Path, chapter_id: str, chunk_id: Optional[str] = None
 ) -> list[dict[str, Any]]:
-    """Alignment rows for a chapter, in ``es_idx`` order.
+    """Alignment rows for a chapter, in the order the alignment file lists them.
+
+    Nothing here re-sorts. The aligner writes rows in ``es_idx`` order and the
+    window slicing takes that as given — ``es_idx_start``/``es_idx_end`` are read
+    off the first and last row of a run — so a hand-edited alignment out of
+    ``es_idx`` order yields a window with the wrong bounds rather than an error.
 
     Restricting to ``chunk_id`` is what keeps a repeated line ("—Sí —dijo.")
     from matching in the wrong part of the chapter: the judge always names the

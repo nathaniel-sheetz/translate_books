@@ -135,16 +135,50 @@ def _load_evaluation(project_dir: Path, chunk_id: str) -> Optional[dict[str, Any
     return payload if isinstance(payload, dict) else None
 
 
+def _judge_is_stale(project_dir: Path, chunk_id: str, payload: dict[str, Any]) -> bool:
+    """Has the Spanish moved since pass 1 judged it?
+
+    Pass 2 never reads the prose — it adjudicates pass 1's candidates against the
+    *English*. But persisting it goes through ``merge_judge_result``, which
+    re-stamps the freshness ledger with the chunk's current sha and clears the
+    ``stale`` flag. So adjudicating a chunk whose translation was edited after
+    pass 1 laundered it green: a ``text_sha`` matching prose no judge has read,
+    with findings still anchored to sentences that may no longer be there. The
+    sequence is not hypothetical — pass 1 alone (a CLI run, or a GUI job killed
+    between the passes) is exactly what the repair banner exists to finish.
+
+    Only ``hash`` and ``flag`` staleness counts. ``mtime`` staleness is the
+    fallback for evaluations written before ``eval_runs`` existed, where a git
+    checkout or a byte-identical rewrite bumps the file — a *suspicion*, in
+    ``evaluator_freshness_detail``'s own words, and refusing to adjudicate a
+    legacy book on a suspicion costs more than it saves.
+    """
+    from web_ui.evaluations import current_chunk_sha, evaluator_freshness_detail
+
+    detail = evaluator_freshness_detail(
+        payload, current_chunk_sha(project_dir, chunk_id), names=[JUDGE_NAME]
+    ).get(JUDGE_NAME) or {}
+    return detail.get("state") == "stale" and detail.get("basis") in ("hash", "flag")
+
+
 def collect_pending(
     project_dir: Path, scopes: list[str], *, include_verified: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Chunks in ``scopes`` carrying editorial candidates, and why others were skipped.
 
     A chunk is pending when it has an editorial result with at least one
-    candidate and ``metadata.verified`` is false. Re-verifying an already
-    adjudicated chunk needs ``force``: the pass is not idempotent in the way
-    ``apply`` is — a second adjudication re-decides retractions that the first
-    one already removed from ``issues``, and it costs another call.
+    candidate, ``metadata.verified`` is false, and the translation has not moved
+    under pass 1's findings (see :func:`_judge_is_stale`). Re-verifying an
+    already adjudicated chunk needs ``force``: the pass is not idempotent in the
+    way ``apply`` is — a second adjudication re-decides retractions that the
+    first one already removed from ``issues``, and it costs another call.
+
+    ``web_ui.evaluations.editorial_unadjudicated`` — what lights the repair
+    banner — deliberately does not make the staleness check: it answers off the
+    persisted payload alone, with no ``chunks/`` read, which is the whole reason
+    the Review tab can afford it per chunk. So the banner can quote a number
+    larger than the wave adjudicates. That is the safe direction, and the
+    difference arrives as ``skipped[{"reason": "stale"}]`` rather than silently.
 
     A scope that cannot be resolved — an untranslated chapter ticked in the
     Review table — is reported as a skip rather than raising, so one bad entry
@@ -186,6 +220,13 @@ def collect_pending(
         metadata = result.get("metadata") or {}
         if metadata.get("verified") and not include_verified:
             skipped.append({"chunk_id": target.id, "reason": "already_verified"})
+            continue
+        # Not gated on ``include_verified``: ``force`` means "re-decide a chunk
+        # pass 2 already settled", which is a different question from "these
+        # candidates describe prose that no longer exists". Edited text needs a
+        # fresh pass 1, not a second opinion on the old one.
+        if _judge_is_stale(project_dir, target.id, payload):
+            skipped.append({"chunk_id": target.id, "reason": "stale"})
             continue
 
         candidates = ev.attach_context(
@@ -357,7 +398,6 @@ def estimate_cost(
 
 
 def estimate_cost_bound(
-    project_dir: Path,
     chunk_word_counts: dict[str, int],
     context: dict[str, Any],
     model: Optional[str],
@@ -857,7 +897,16 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
             failed.append({"chunk_id": chunk_id, "error": "editorial result gone"})
             continue
 
-        targets = build_targets(project_dir, f"chunk:{chunk_id}")
+        try:
+            targets = build_targets(project_dir, f"chunk:{chunk_id}")
+        except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
+            # Re-chunked or reverted to untranslated between ``prepare`` and
+            # ``commit``. Only ``collect_candidates``' pre-``metadata.candidates``
+            # fallback reads this text, so losing it costs that fallback rather
+            # than the wave — and raising here abandoned every draft later in the
+            # manifest, discarding a fan-out that had already been paid for.
+            logger.warning("No target for %s at commit: %s", chunk_id, exc)
+            targets = []
         translated = targets[0].translated_text if targets else ""
         candidates = ev.attach_context(
             project_dir, ev.collect_candidates(result, chunk_id, translated)

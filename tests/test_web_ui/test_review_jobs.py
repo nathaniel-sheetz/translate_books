@@ -1263,3 +1263,32 @@ def test_sse_404s_for_an_unknown_or_foreign_job(client, project):
     job_id = jobs.start_job("otherproject", "review-coded", lambda emit: None)
     assert client.get("/api/project/jobproj/jobs/nosuch/sse").status_code == 404
     assert client.get(f"/api/project/jobproj/jobs/{job_id}/sse").status_code == 404
+
+
+def test_the_default_judge_set_leaves_the_editorial_judge_out(client, project, monkeypatch):
+    """A caller that names no judges must not buy the two-pass editorial wave.
+
+    The route defaulted to ``REVIEW_JUDGE_TYPES``, which is the reader's
+    *display* tuple — adding ``editorial`` to it for the pips silently widened
+    this default to the most expensive judge plus its adjudication pass, which
+    ``registry._BUILTIN_SUITES`` keeps out of ``default`` and ``prose`` on
+    purpose. The dashboard always sends ``judges``; a script does not.
+    """
+    _no_llm(monkeypatch)
+    # The default set includes the address judge, which refuses to build a
+    # context without this — a 409 would hide what the set actually was.
+    (project / "address_map.json").write_text(
+        json.dumps({
+            "content": "Betsy->Frances usted; Frances->Betsy tú.",
+            "pairs": [],
+            "global_rules": "usted between non-intimate adults.",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    rv = client.post("/api/project/jobproj/review/run-judges", json={"dry_run": True})
+
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert "editorial" not in body["judges"]
+    assert body["adjudication_cost"] == 0.0

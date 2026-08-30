@@ -334,7 +334,15 @@ def apply_verdicts(
             "verified_at": datetime.now().isoformat(),
             "verify_prompt_version": llm_io.prompt_version(VERIFY_TEMPLATE),
             "candidates_adjudicated": len(candidates),
-            "confirmed": len(survivors) - len(reclassified_findings),
+            # Survivors carrying an actual CONFIRM, not "everything left over":
+            # a candidate the model never answered is deliberately kept (above),
+            # and counting it here scored "the adjudicator lost it" as "the
+            # adjudicator agreed with it" — straight into ``editorial_metrics``'
+            # retract/reclassify rates, the one number that pass exists to
+            # produce. Reported separately instead, so the rate has a denominator
+            # that means something.
+            "confirmed": sum(1 for s in survivors if s.get("verdict") == "CONFIRM"),
+            "unanswered": sum(1 for s in survivors if not s.get("verdict")),
             # ``reclassified`` stays an int and the detail arrives beside it under
             # a new key, rather than mirroring ``retracted``/``retracted_count``:
             # six consumers already read this one as a number (editorial_metrics,

@@ -89,7 +89,6 @@ work_dir = wave.work_dir
 collect_pending = wave.collect_pending
 _DEFAULT_CONCURRENCY = wave.DEFAULT_CONCURRENCY
 _TOKENS_PER_VERDICT = wave.TOKENS_PER_VERDICT
-_NO_SIDECAR_COMMANDS = frozenset({"status"})
 
 
 # ---------------------------------------------------------------------------

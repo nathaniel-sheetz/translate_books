@@ -58,7 +58,7 @@ def is_nonissue(finding: dict[str, Any]) -> bool:
     return bool(_NONISSUE_RE.search(blob))
 
 
-def finding_key(rule: str, excerpt: str) -> str:
+def finding_key(rule: str, excerpt: str, ordinal: int = 0) -> str:
     """Stable identity for one judge finding: its rule plus the text it quotes.
 
     This is what a judge hands to :attr:`src.models.Issue.finding_key` so a
@@ -67,10 +67,26 @@ def finding_key(rule: str, excerpt: str) -> str:
     ``web_ui.evaluations.issue_key`` does not work for judges. Whitespace in the
     excerpt is collapsed (a rewrapped quote is the same quote); case and accents
     are not, because in Spanish prose those are real differences.
+
+    ``ordinal`` disambiguates findings that would otherwise share an identity —
+    two defects quoting the same sentence under the same rule. It is appended
+    only when non-zero, so every key minted before this parameter existed still
+    hashes to the same value and no recorded dismissal moves. See
+    :func:`src.judges.editorial_judge._disambiguate_keys` for who assigns it.
     """
     normalized = " ".join((excerpt or "").split())
     blob = f"{(rule or 'other').strip()}{_KEY_FIELD_SEP}{normalized}"
+    if ordinal:
+        blob = f"{blob}{_KEY_FIELD_SEP}{int(ordinal)}"
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:_KEY_LENGTH]
+
+
+def key_ordinal(finding: dict[str, Any]) -> int:
+    """The finding's disambiguating ordinal, or 0 when it carries none."""
+    try:
+        return max(0, int(finding.get("key_ordinal") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def finding_to_issue(
@@ -105,7 +121,7 @@ def finding_to_issue(
         identity = {
             "rule_id": rule,
             "category": category,
-            "finding_key": finding_key(rule, excerpt or ""),
+            "finding_key": finding_key(rule, excerpt or "", key_ordinal(finding)),
         }
 
     return Issue(

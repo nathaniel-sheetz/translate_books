@@ -131,10 +131,15 @@ def _build_chapter_range_targets(
 
     Same semantics as ``status.py::_filter_chapters``, deliberately: the range
     resolves against the *enumerated* chapter list by position rather than by
-    comparing ids, so it works on a book whose chapters are not zero-padded, and
-    a reversed range (``chapter_09..chapter_03``) is the same span. Keeping the
-    two implementations identical is the point — a form that ``status`` accepts
-    and ``prepare`` rejects is what cost a turn on 2026-08-27.
+    comparing ids, and a reversed range (``chapter_09..chapter_03``) is the same
+    span. Keeping the two implementations identical is the point — a form that
+    ``status`` accepts and ``prepare`` rejects is what cost a turn on 2026-08-27.
+
+    That enumeration is a lexicographic ``sorted()`` on both sides, so it does
+    *not* rescue a book whose chapters are unpadded: ``chapter_1..chapter_2``
+    would span ``chapter_1, chapter_10, …, chapter_19, chapter_2``. Every
+    project in the corpus is zero-padded; correcting it means correcting
+    ``status.py`` in the same change, or the two grammars drift apart again.
 
     One case ``status`` does not face: a chapter inside the span with chunks but
     no translation is *skipped*, not fatal. A range names a span, not a list the

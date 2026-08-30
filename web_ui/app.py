@@ -6616,7 +6616,7 @@ def project_review_run_judges(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     from src.judges import ScopeError, build_judge_context, build_targets
-    from src.judges.registry import available_judges
+    from src.judges.registry import available_judges, resolve_suite
 
     data = request.json or {}
     backend = str(data.get("backend") or "api").strip().lower()
@@ -6629,7 +6629,15 @@ def project_review_run_judges(project_id):
     if err:
         return jsonify({"error": err}), 400
 
-    judge_names = data.get("judges") or list(REVIEW_JUDGE_TYPES)
+    # The ``prose`` suite, not ``REVIEW_JUDGE_TYPES``: that tuple is the reader's
+    # *display* categories (it decides which pips render and which issues anchor
+    # to a sentence), and adding ``editorial`` to it silently widened this
+    # default to the most expensive judge plus its whole adjudication wave —
+    # which is precisely what ``registry._BUILTIN_SUITES`` keeps out of
+    # ``default`` and ``prose`` on purpose. The dashboard always sends
+    # ``judges``, so the only caller this reaches is a scripted one, which is
+    # the caller least able to notice the bill.
+    judge_names = data.get("judges") or resolve_suite("prose")
     if not isinstance(judge_names, list) or not judge_names:
         return jsonify({"error": "judges must be a non-empty list"}), 400
     known = set(available_judges())
@@ -6810,7 +6818,7 @@ def _adjudicate_editorial(
         return summary(), errors
 
 
-def _editorial_pass_two_cost(project_dir, targets, context, data):
+def _editorial_pass_two_cost(targets, context, data):
     """Upper bound on what the editorial judge's second pass could cost.
 
     Quoted *before* pass 1 runs, so there are no candidates to price: the bound
@@ -6825,7 +6833,7 @@ def _editorial_pass_two_cost(project_dir, targets, context, data):
         t.id: len((t.translated_text or "").split()) for t in targets
     }
     return wave.estimate_cost_bound(
-        project_dir, word_counts, context,
+        word_counts, context,
         data.get("model") or None, data.get("provider") or None,
     )
 
@@ -6847,9 +6855,7 @@ def _run_judges_api(
     # background job, where there is nobody left to ask.
     adjudication_cost = 0.0
     if "editorial" in judge_names:
-        adjudication_cost = _editorial_pass_two_cost(
-            project_dir, targets, context, data
-        )
+        adjudication_cost = _editorial_pass_two_cost(targets, context, data)
         estimated_cost += adjudication_cost
     # An explicit flag, not `cost_limit: 0` relying on `estimated_cost > limit`:
     # a zero-priced provider in llm_config.json makes `0.0 > 0` false, and the

@@ -108,7 +108,7 @@ def load_marks(project_dir: Path) -> dict[str, dict[str, str]]:
 
 
 def _iter_editorial_results(project_dir: Path):
-    """Yield ``(chunk_id, result, chunk)`` for every persisted editorial verdict."""
+    """Yield ``(chunk_id, result, chunk, payload)`` per persisted editorial verdict."""
     evaluations = project_dir / "evaluations"
     if not evaluations.exists():
         return

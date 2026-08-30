@@ -20,6 +20,7 @@ import pytest
 
 from src.judges import editorial_verify as ev
 from src.judges import llm_io
+from src.judges.editorial_judge import _disambiguate_keys
 from src.judges.neighborhood import MAX_WINDOW_ROWS, english_window, load_alignment_rows
 
 ES = [
@@ -483,3 +484,49 @@ def test_verify_result_round_trip(tmp_path):
     assert info["retracted"] == 1
     assert info["confirmed"] == 1
     assert len(patched["issues"]) == 1
+
+
+def test_a_retract_on_one_twin_does_not_delete_the_other(tmp_path):
+    """Two defects quoting one sentence are two findings, settled one at a time.
+
+    Before ``_disambiguate_keys`` both hashed to the same ``finding_key``, so a
+    single RETRACT verdict removed both and reported ``retracted_count: 2`` —
+    the surviving real defect deleted with no trace but a duplicated record.
+    """
+    findings = _disambiguate_keys(
+        [
+            _finding(message="Reads as a calque."),
+            _finding(message="Drops the emphasis of the original.", category="FIDELITY_SUSPECT"),
+        ]
+    )
+    candidates = _candidates(tmp_path, findings)
+    assert candidates[0]["key"] != candidates[1]["key"]
+
+    verdicts = {candidates[0]["key"]: {"verdict": "RETRACT", "reason": "idiomatic after all"}}
+    patched = ev.apply_verdicts(_result(findings), candidates, verdicts)
+
+    assert patched["metadata"]["retracted_count"] == 1
+    assert len(patched["issues"]) == 1
+    assert "emphasis" in patched["issues"][0]["message"]
+    # The ordinal has to survive ``_clean`` into the re-derived issue, or a
+    # dismissal recorded against the survivor stops resolving after pass 2.
+    assert patched["issues"][0]["finding_key"] == candidates[1]["key"]
+
+
+def test_an_unanswered_candidate_is_not_counted_as_confirmed(tmp_path):
+    """``confirmed`` feeds the retract rate; "the model lost it" is not "it agreed".
+
+    A candidate whose key the adjudicator omitted is deliberately kept, so it
+    lands in ``survivors`` — and counting the whole leftover set as confirmed
+    fed ``editorial_metrics`` a precision number better than the run earned.
+    """
+    findings = [_finding(rule="calque-syntax"), _finding(rule="agreement")]
+    candidates = _candidates(tmp_path, findings)
+    verdicts = {candidates[0]["key"]: {"verdict": "CONFIRM", "reason": "genuine"}}
+
+    patched = ev.apply_verdicts(_result(findings), candidates, verdicts)
+
+    assert patched["metadata"]["candidates_adjudicated"] == 2
+    assert patched["metadata"]["confirmed"] == 1
+    assert patched["metadata"]["unanswered"] == 1
+    assert len(patched["issues"]) == 2
