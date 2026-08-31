@@ -30,6 +30,8 @@ from src.annotations import (
     is_effectively_blank,
     load_active,
 )
+from src.harness import locks
+from src.harness import state as hstate
 from src.models import (
     Chunk,
     ChunkStatus,
@@ -156,30 +158,19 @@ def _get_projects_dir() -> Path:
     return _PROJECT_ROOT / "projects"
 
 
-def _is_project_dir(p: Path) -> bool:
-    """A project dir has chunks/ or source.txt (matches existing discovery filter)."""
-    return p.is_dir() and ((p / "chunks").exists() or (p / "source.txt").exists())
+# The project walker lives in src.harness.state so the CLI, the automation
+# driver and the dashboard all agree on what counts as a book and which folders
+# are merely grouping. These aliases keep app.py's (and its tests') call sites
+# unchanged; ``_get_projects_dir`` stays the web UI's own root resolution.
+_is_project_dir = hstate.is_project_dir
 
 
 def _iter_project_dirs(root: Optional[Path] = None, _depth: int = 0):
     """Yield project dirs under projects/, descending through grouping subfolders
     but never into a project itself. Order is stable (sorted)."""
-    root = root or _get_projects_dir()
-    if not root.exists() or _depth > 20:
-        return
-    try:
-        entries = sorted(root.iterdir())
-    except OSError:
-        return
-    for entry in entries:
-        if entry.is_symlink():      # skip symlinks to avoid infinite recursion on cycles
-            continue
-        if not entry.is_dir():
-            continue
-        if _is_project_dir(entry):
-            yield entry
-        else:                       # grouping/container folder -> recurse
-            yield from _iter_project_dirs(entry, _depth + 1)
+    return hstate.iter_project_dirs(
+        root if root is not None else _get_projects_dir(), _depth
+    )
 
 
 _NESTED_PROJECT_CACHE: dict[str, Path] = {}
@@ -6453,12 +6444,67 @@ def project_review_run_coded(project_id):
             "error_count": len(errors), "errors": errors[:5],
         }
 
+    conflict_response = _lock_conflict(project_dir)
+    if conflict_response is not None:
+        return conflict_response
+
     try:
-        job_id = jobs.start_job(project_id, "review-coded", body)
+        job_id = jobs.start_job(
+            project_id, "review-coded", _locked_body(project_dir, "review-coded", body)
+        )
     except jobs.JobConflict as conflict:
         return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
 
     return jsonify({"ok": True, "job_id": job_id, "total": total})
+
+
+def _lock_conflict(project_dir: Path):
+    """A 409 response when a CLI or nightly wave holds this book's lock.
+
+    ``jobs.JobConflict`` only sees jobs *this Flask process* started, so a wave
+    launched from the CLI or by the scheduled nightly pass is invisible to it —
+    and the dashboard would happily run a ``prepare`` that unlinks the drafts
+    that wave is still writing. :func:`src.harness.locks.holder_of` sees across
+    processes; the shape returned here matches the JobConflict 409 so the
+    front-end needs no new branch.
+    """
+    holder = locks.holder_of(project_dir)
+    if holder is None:
+        return None
+    # A lock this very process holds is one of our own job bodies (see
+    # :func:`_locked_body`), and ``jobs.JobConflict`` below answers that case
+    # better — it knows the job id, which a lock body does not carry. This guard
+    # is for the waves ``jobs`` cannot see: the CLI and the nightly pass.
+    if locks.held_by_this_process(holder):
+        return None
+    kind = holder.get("kind") or "background"
+    return jsonify({
+        "error": (
+            f"A {kind} run started outside the dashboard (pid {holder.get('pid')} "
+            f"on {holder.get('host')}) is working on this project. "
+            "Wait for it to finish, or stop it, and try again."
+        ),
+        "job_id": holder.get("run_id"),
+        "lock": holder,
+    }), 409
+
+
+def _locked_body(project_dir: Path, kind: str, body):
+    """Wrap a job body so it holds the book's cross-process lock while it runs.
+
+    The route-level :func:`_lock_conflict` check is the fast, friendly half; this
+    is the half that actually closes the race. Without it the dashboard holds no
+    lock of its own, so the nightly pass would find the book free the moment
+    after a job started and re-prepare underneath it.
+
+    A :class:`~src.harness.locks.LockBusy` raised in here surfaces through
+    ``jobs``' own terminal ``complete`` event, the same as any other failure.
+    """
+    def wrapped(emit):
+        with locks.project_lock(project_dir, kind=kind):
+            return body(emit)
+
+    return wrapped
 
 
 _JUDGE_COST_LIMIT_DEFAULT = 0.50
@@ -6929,8 +6975,14 @@ def _run_judges_api(
             "error_count": len(errors), "errors": errors[:5],
         }
 
+    conflict_response = _lock_conflict(project_dir)
+    if conflict_response is not None:
+        return conflict_response
+
     try:
-        job_id = jobs.start_job(project_id, "review-judges", body)
+        job_id = jobs.start_job(
+            project_id, "review-judges", _locked_body(project_dir, "review-judges", body)
+        )
     except jobs.JobConflict as conflict:
         return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
 
@@ -7173,8 +7225,14 @@ def _run_judges_headless(
             "effective": out.get("effective"),
         }
 
+    conflict_response = _lock_conflict(project_dir)
+    if conflict_response is not None:
+        return conflict_response
+
     try:
-        job_id = jobs.start_job(project_id, "review-judges", body)
+        job_id = jobs.start_job(
+            project_id, "review-judges", _locked_body(project_dir, "review-judges", body)
+        )
     except jobs.JobConflict as conflict:
         return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
 
@@ -7383,8 +7441,14 @@ def project_review_adjudicate_editorial(project_id):
 
         started_extra = {"effective": prof.to_payload()}
 
+    conflict_response = _lock_conflict(project_dir)
+    if conflict_response is not None:
+        return conflict_response
+
     try:
-        job_id = jobs.start_job(project_id, "review-adjudicate", body)
+        job_id = jobs.start_job(
+            project_id, "review-adjudicate", _locked_body(project_dir, "review-adjudicate", body)
+        )
     except jobs.JobConflict as conflict:
         return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
 
@@ -7846,6 +7910,271 @@ def download_epub(project_id):
     # Use the most recently modified epub
     epub_file = max(epub_files, key=lambda p: p.stat().st_mtime)
     return send_from_directory(str(project_dir), epub_file.name, as_attachment=True)
+
+
+# ============================================================================
+# Review inbox - the cross-book annotation funnel
+# ============================================================================
+#
+# Generating annotation reviews was never the bottleneck: the logged jobs median
+# under ten seconds each, so the whole backlog is minutes of machine time. What
+# stalled was *landing* them - `review.apply` was reachable only from a chat
+# session, one book at a time, and the last hand-run pass applied 9 of the ~48
+# resolutions it produced. This page is the other end of that funnel: every
+# book's outstanding plan on one screen, with a checkbox per resolution.
+#
+# Nothing here reviews anything. It renders `review.apply(dry_run=True)` - the
+# plan that already exists on disk - and hands a selection back to
+# `review.apply(select=...)`, which is the only writer and re-checks each note
+# against its live text before touching it.
+
+_INBOX_PREVIEW_CHARS = 600
+
+
+def _inbox_chapter_of(key: str) -> Optional[str]:
+    """The chapter id encoded in an annotation key.
+
+    ``store.target_key`` builds ``<chapter_id>__<es_idx>__<sub_id>``; splitting
+    from the right keeps a chapter id containing ``__`` intact. Returns ``None``
+    for a key that does not have that shape, so a link is simply not offered
+    rather than pointing somewhere wrong.
+    """
+    parts = (key or "").rsplit("__", 2)
+    return parts[0] if len(parts) == 3 and parts[0] else None
+
+
+def _inbox_live_content(project_dir: Path) -> dict[str, str]:
+    """``{annotation key: its content right now}`` for one book.
+
+    ``review.apply(dry_run=True)`` plans off ``results.json`` alone, which is
+    right for a planner — it is a record of what the review decided — but wrong
+    for an inbox, which must show what is still *outstanding*. Without this, a
+    resolution stayed on the page after being applied (until the next `prepare`
+    dropped it as already_reviewed), so a reload re-offered finished work.
+    """
+    from src.annotations import store
+
+    return {
+        store.target_key(record): (record.get("content") or "")
+        for record in load_active(project_dir)
+    }
+
+
+def _inbox_state(item: dict, live: dict[str, str]) -> str:
+    """``"open"`` / ``"applied"`` / ``"stale"`` / ``"gone"`` for one plan entry.
+
+    The same three comparisons ``review.apply`` makes before it writes, done
+    ahead of the click so the page never offers a button that will fail. Applied
+    entries are dropped; a stale one is shown, disabled, and explained — it is
+    real outstanding work, just work whose review no longer describes the text.
+    """
+    current = live.get(item["key"])
+    if current is None:
+        return "gone"
+    if current == item.get("new"):
+        return "applied"
+    if current != (item.get("old") or ""):
+        return "stale"
+    return "open"
+
+
+def _inbox_flags(item: dict) -> list[str]:
+    """Why a human should look harder at this one before ticking it.
+
+    Two rules, both mechanical, both matching what the annotation-review skill
+    already requires of a relay: a reviewer that was unsure of itself, and any
+    footnote - whose write is a *replace* whose text :mod:`src.endnotes`
+    publishes into the book, and which is exactly where an invented date or
+    measurement would end up in print.
+    """
+    flags: list[str] = []
+    if str(item.get("confidence") or "").lower() == "low":
+        flags.append("low confidence")
+    if item.get("mode") == "replace" or item.get("type") == "footnote":
+        flags.append("published into the EPUB - verify every hard fact")
+    return flags
+
+
+def _inbox_truncate(text: str, limit: int = _INBOX_PREVIEW_CHARS) -> str:
+    """Cap a preview. The full text is always one click away in the reader."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _build_inbox(only_project: Optional[str] = None) -> dict:
+    """Every in-scope book's outstanding review plan, ready to render.
+
+    Read-only and free of spend: each book contributes one ``results.json`` read
+    plus one ``annotations.jsonl`` read. Books with no reviewed results yet
+    contribute nothing.
+    """
+    from src.actions import scope as ascope
+    from src.annotations import review as annreview
+
+    # Rooted at the web UI's own projects dir, not the actions module's default:
+    # `_get_projects_dir` is what every other route resolves against, and two
+    # roots would make the inbox list books the rest of the dashboard cannot open.
+    scope_result = ascope.in_scope(_get_projects_dir())
+    books: list[dict] = []
+    totals = {"applicable": 0, "manual": 0, "orphaned": 0, "flagged": 0, "stale": 0}
+
+    for entry in scope_result.projects:
+        if only_project and entry.project_id != only_project:
+            continue
+
+        plan = annreview.apply(entry.project_dir, dry_run=True)
+        if plan.get("status") != "ok":
+            continue                       # no reviewed results for this book yet
+
+        live = _inbox_live_content(entry.project_dir)
+
+        applicable = []
+        for item in plan.get("applicable") or []:
+            state = _inbox_state(item, live)
+            if state in ("applied", "gone"):
+                continue                   # already landed, or no longer there
+            flags = _inbox_flags(item)
+            if state == "stale":
+                flags.append(
+                    "edited in the reader since the review — re-run the review"
+                )
+            applicable.append({
+                "key": item["key"],
+                "type": item.get("type"),
+                "mode": item.get("mode"),
+                "confidence": item.get("confidence"),
+                "state": state,
+                "chapter_id": _inbox_chapter_of(item["key"]),
+                "old": _inbox_truncate(item.get("old") or ""),
+                "new": _inbox_truncate(item.get("new") or ""),
+                "recommendation": _inbox_truncate(item.get("recommendation") or ""),
+                "flags": flags,
+            })
+            totals["flagged"] += 1 if flags else 0
+            totals["stale"] += 1 if state == "stale" else 0
+
+        manual = [
+            {
+                "key": item["key"],
+                "type": item.get("type"),
+                "reason": item.get("reason"),
+                "chapter_id": _inbox_chapter_of(item["key"]),
+                "recommendation": _inbox_truncate(item.get("recommendation") or ""),
+            }
+            for item in (plan.get("manual") or [])
+        ]
+        orphaned = [
+            {
+                "key": row.get("key"),
+                "type": row.get("type"),
+                "chapter_id": row.get("chapter_id") or _inbox_chapter_of(row.get("key") or ""),
+                "content": _inbox_truncate(row.get("content") or ""),
+            }
+            for row in annreview.results_skipped(entry.project_dir, reason="orphaned")
+        ]
+
+        if not (applicable or manual or orphaned):
+            continue
+
+        # Grouped by type inside a book: you work through one kind of decision
+        # at a time (all the word choices, then all the footnotes), rather than
+        # down a list that alternates between them.
+        by_type: dict[str, list[dict]] = {}
+        for item in applicable:
+            by_type.setdefault(item["type"] or "flag", []).append(item)
+
+        books.append({
+            "project_id": entry.project_id,
+            "group": entry.group,
+            "title": _load_project_config(entry.project_id).get("title") or entry.project_id,
+            "applicable": applicable,
+            # ``entries`` rather than ``items``: in Jinja ``group.items`` resolves
+            # to the dict's own ``items`` method before the key, so the template
+            # would silently render a bound method instead of the list.
+            "applicable_by_type": [
+                {"type": key, "entries": by_type[key]} for key in sorted(by_type)
+            ],
+            "manual": manual,
+            "orphaned": orphaned,
+            "locked": locks.holder_of(entry.project_dir) is not None,
+        })
+        totals["applicable"] += len(applicable)
+        totals["manual"] += len(manual)
+        totals["orphaned"] += len(orphaned)
+
+    return {"books": books, "totals": totals}
+
+
+@app.route("/review-inbox")
+def review_inbox():
+    """Every book's outstanding annotation resolutions, on one page."""
+    return render_template(
+        "review_inbox.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        inbox=_build_inbox(request.args.get("project") or None),
+        only_project=request.args.get("project") or None,
+    )
+
+
+@app.route("/api/review-inbox", methods=["GET"])
+def review_inbox_data():
+    """The same payload as JSON, for the page's own refresh and for tests."""
+    return jsonify(_build_inbox(request.args.get("project") or None))
+
+
+@app.route("/api/review-inbox/apply", methods=["POST"])
+def review_inbox_apply():
+    """Write back the selected resolutions for one book.
+
+    Held under the book's cross-process lock, because ``apply`` reads
+    ``results.json`` and appends to ``annotations.jsonl`` - and a nightly
+    ``prepare`` running at the same moment rewrites the first of those.
+
+    Relays ``review.apply``'s own four outcomes unchanged. ``stale`` is the one
+    worth reading: it means the note was edited in the reader since the review,
+    so the resolution no longer describes the text on disk and was skipped
+    rather than overwriting it.
+    """
+    data = request.get_json(silent=True) or {}
+    project_id = data.get("project_id")
+    keys = data.get("keys")
+
+    if not project_id or not _safe_id(str(project_id)):
+        return jsonify({"error": "Bad request"}), 400
+    if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+        return jsonify({"error": "keys must be a non-empty list of strings"}), 400
+
+    project_dir = _resolve_project_dir(str(project_id))
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    from src.annotations import review as annreview
+
+    try:
+        with locks.project_lock(project_dir, kind="review-inbox"):
+            result = annreview.apply(project_dir, select=keys)
+    except locks.LockBusy as busy:
+        return jsonify({"error": str(busy), "lock": busy.holder}), 409
+
+    if result.get("status") != "ok":
+        return jsonify({"error": result.get("error") or "apply failed"}), 400
+
+    # An applied *replace* is a footnote, and its text only reaches the book on
+    # the next build - so say so, and let the page offer the rebuild.
+    applied = set(result.get("applied") or [])
+    plan = {item["key"]: item for item in (result.get("applicable") or [])}
+    needs_epub = any(plan.get(key, {}).get("mode") == "replace" for key in applied)
+
+    return jsonify({
+        "ok": True,
+        "applied": result.get("applied") or [],
+        "already_applied": result.get("already_applied") or [],
+        "stale": result.get("stale") or [],
+        "unknown_ids": result.get("unknown_ids") or [],
+        "counts": result.get("counts") or {},
+        "needs_epub_rebuild": needs_epub,
+    })
 
 
 # ============================================================================

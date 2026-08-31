@@ -165,8 +165,9 @@ book_translation/
 │   ├── text_feature_detector.py # Heuristic feature scan → conditional questions
 │   ├── glossary_bootstrap.py   # Glossary candidate extraction
 │   ├── epub_builder.py         # EPUB export
-│   ├── harness/                # translate-harness backend (flow.py, state.py, headless.py)
+│   ├── harness/                # translate-harness backend (flow.py, state.py, headless.py, locks.py)
 │   ├── harness_guard.py        # Validation guards for harness artifacts
+│   ├── actions/                # Unattended work units for the nightly pass
 │   ├── evaluators/             # Pluggable quality evaluators
 │   ├── judges/                 # Tailored LLM judges
 │   └── utils/                  # File I/O, text utilities, source loaders
@@ -187,7 +188,7 @@ book_translation/
         ├── alignments/         # Sentence alignment JSON
         ├── annotations.jsonl   # Reader annotations
         ├── difficulty.json     # Cached difficulty scores
-        ├── .harness/           # Harness state, prompts, and worker drafts
+        ├── .harness/           # Harness state, prompts, worker drafts, and .lock
         └── images/             # Downloaded images
 ```
 
@@ -237,6 +238,7 @@ pytest --cov=src tests/         # with coverage
 | [`docs/ADDRESS_JUDGE.md`](docs/ADDRESS_JUDGE.md) | The address map and the usted/tú judge |
 | [`docs/EDITORIAL_JUDGE.md`](docs/EDITORIAL_JUDGE.md) | The editorial defect judge and its adjudication pass |
 | [`docs/ANNOTATION_REVIEW.md`](docs/ANNOTATION_REVIEW.md) | Resolving reader annotations and drafting footnote glosses |
+| [`docs/NIGHTLY_PASS.md`](docs/NIGHTLY_PASS.md) | The scheduled cross-book pass, its locks, and the `/review-inbox` funnel |
 | [`docs/EDIT_REVIEW.md`](docs/EDIT_REVIEW.md) | Comparing translations against LLM baselines, tagging hunks |
 | [`docs/LLM_JUDGE_EVALUATOR.md`](docs/LLM_JUDGE_EVALUATOR.md) | LLM-judge evaluator + model comparison harness |
 

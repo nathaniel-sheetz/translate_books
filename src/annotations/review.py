@@ -1117,6 +1117,33 @@ _APPLY_SCHEMA = {
 }
 
 
+def results_skipped(
+    project_dir: Path, *, reason: Optional[str] = None
+) -> list[dict[str, Any]]:
+    """The annotations ``prepare`` gated out, as ``commit`` recorded them.
+
+    Read off ``results.json`` rather than recomputed with ``build_targets``: the
+    inbox needs the *orphans* — notes whose anchor sentence no longer exists, so
+    no run will ever reach them — beside the results of the run that skipped
+    them, and re-walking every book's alignments to rediscover that would turn a
+    page render into a scan.
+
+    Returns ``[]`` when there is no results file yet or it cannot be read.
+    """
+    results_path = _results_path(Path(project_dir))
+    try:
+        doc = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = doc.get("skipped") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return []
+    out = [r for r in rows if isinstance(r, dict)]
+    if reason is not None:
+        out = [r for r in out if r.get("reason") == reason]
+    return out
+
+
 def _live_records(project_dir: Path) -> dict[str, dict]:
     """Live annotations keyed by target key, for drift detection at apply time."""
     return {store.target_key(r): r for r in store.load_active(project_dir)}

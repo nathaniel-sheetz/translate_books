@@ -61,6 +61,37 @@ STRINGS = {
         "badge_gap_title": "characters of source text with no translation",
         "badge_unread": "unread",
 
+        # Review inbox (/review-inbox) — the cross-book annotation funnel.
+        # `inbox_summary` is filled by three `| replace` calls in the template
+        # rather than `str.format`, so a translator can reorder the clauses
+        # without the placeholders having to stay in position.
+        "inbox_title": "Review inbox",
+        "inbox_link": "Review inbox",
+        "inbox_summary": "{applicable} resolution(s) ready to apply, {manual} needing a hand, "
+                         "{orphaned} orphaned.",
+        "inbox_needs_care": "need a closer look",
+        "inbox_empty": "Nothing waiting. Run the nightly pass to review pending notes.",
+        "inbox_filtered": "Showing only",
+        "inbox_show_all": "Show every book",
+        "inbox_locked": "in use by another run",
+        "inbox_select_all": "Select all",
+        "inbox_apply": "Apply selected",
+        "inbox_no_text": "(no original text)",
+        "inbox_manual": "need a hand (not writable automatically)",
+        "inbox_orphaned": "orphaned",
+        "inbox_orphaned_help": "The sentence these were anchored to no longer exists, so no "
+                               "review run will reach them. Re-anchor them in the reader.",
+        "inbox_epub_stale": "A footnote changed — the book needs rebuilding for it to appear.",
+        "inbox_rebuild": "Rebuild EPUB",
+        # Annotation-type headings on the inbox. Deliberately not the `review_types`
+        # map below, which names evaluator categories (blacklist, grammar, ...).
+        "inbox_types": {
+            "word_choice": "Word choice",
+            "inconsistency": "Inconsistency",
+            "footnote": "Footnote",
+            "flag": "Other",
+        },
+
         # Review mode (chapter-list controls; type labels shared with the reader)
         "review_mode_label": "Review mode",
         "review_options_label": "Review error types",
@@ -322,6 +353,32 @@ STRINGS = {
         "badge_gap": "hueco",
         "badge_gap_title": "caracteres del texto original sin traducción",
         "badge_unread": "sin leer",
+
+        # Bandeja de revisi\u00f3n (/review-inbox)
+        "inbox_title": "Bandeja de revisi\u00f3n",
+        "inbox_link": "Bandeja de revisi\u00f3n",
+        "inbox_summary": "{applicable} resoluci\u00f3n(es) listas para aplicar, {manual} que "
+                         "requieren intervenci\u00f3n, {orphaned} hu\u00e9rfanas.",
+        "inbox_needs_care": "requieren atenci\u00f3n",
+        "inbox_empty": "Nada pendiente. Ejecute el pase nocturno para revisar las notas.",
+        "inbox_filtered": "Mostrando solo",
+        "inbox_show_all": "Mostrar todos los libros",
+        "inbox_locked": "en uso por otra ejecuci\u00f3n",
+        "inbox_select_all": "Seleccionar todo",
+        "inbox_apply": "Aplicar selecci\u00f3n",
+        "inbox_no_text": "(sin texto original)",
+        "inbox_manual": "requieren intervenci\u00f3n (no se pueden escribir autom\u00e1ticamente)",
+        "inbox_orphaned": "hu\u00e9rfanas",
+        "inbox_orphaned_help": "La oraci\u00f3n a la que estaban ancladas ya no existe, as\u00ed que "
+                               "ninguna revisi\u00f3n las alcanzar\u00e1. Re-anc\u00falelas en el lector.",
+        "inbox_epub_stale": "Cambi\u00f3 una nota al pie: hay que reconstruir el libro para que aparezca.",
+        "inbox_rebuild": "Reconstruir EPUB",
+        "inbox_types": {
+            "word_choice": "Elecci\u00f3n de palabra",
+            "inconsistency": "Inconsistencia",
+            "footnote": "Nota al pie",
+            "flag": "Otro",
+        },
 
         # Review mode (chapter-list controls; type labels shared with the reader)
         "review_mode_label": "Modo revisión",

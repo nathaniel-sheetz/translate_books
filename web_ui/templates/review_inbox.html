@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t.inbox_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='review_inbox.css') }}?v=1">
+</head>
+<body>
+<script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
+
+<div class="nav-page inbox-page">
+    <div class="nav-header">
+        <h1>{{ t.inbox_title }}</h1>
+        <div class="nav-header-actions">
+            <a class="btn-new-project" href="/read/">{{ t.projects_back }}</a>
+        </div>
+    </div>
+
+    {#- The numbers first, because the page's job is to be cleared in one
+        sitting and "how much is left" is the only thing you need before you
+        start. `flagged` is a subset of `applicable`, not an addition. -#}
+    <p class="inbox-summary">
+        {{ t.inbox_summary
+           | replace('{applicable}', inbox.totals.applicable | string)
+           | replace('{manual}', inbox.totals.manual | string)
+           | replace('{orphaned}', inbox.totals.orphaned | string) }}
+        {% if inbox.totals.flagged %}
+        <span class="inbox-flag-total">{{ inbox.totals.flagged }} {{ t.inbox_needs_care }}</span>
+        {% endif %}
+    </p>
+
+    {% if only_project %}
+    <p class="inbox-filter-note">
+        {{ t.inbox_filtered }} <code>{{ only_project }}</code> ·
+        <a href="/review-inbox">{{ t.inbox_show_all }}</a>
+    </p>
+    {% endif %}
+
+    {% if not inbox.books %}
+    <p class="empty-state">{{ t.inbox_empty }}</p>
+    {% endif %}
+
+    {% for book in inbox.books %}
+    <section class="inbox-book" data-project="{{ book.project_id }}">
+        <div class="inbox-book-header">
+            <h2>
+                <a href="/read/{{ book.project_id }}">{{ book.title }}</a>
+                {% if book.group %}<span class="inbox-group">{{ book.group }}</span>{% endif %}
+            </h2>
+            {#- A lock means a CLI or nightly wave owns this book right now.
+                Applying would be refused by the server anyway, so say it here
+                rather than after the click. -#}
+            {% if book.locked %}
+            <span class="badge badge-warn">{{ t.inbox_locked }}</span>
+            {% endif %}
+        </div>
+
+        {% if book.applicable %}
+        <form class="inbox-form" data-project="{{ book.project_id }}">
+            {% for group in book.applicable_by_type %}
+            <h3 class="inbox-type-heading">
+                {{ t.inbox_types.get(group.type, group.type) }}
+                <span class="inbox-count">{{ group.entries | length }}</span>
+            </h3>
+            {% for item in group.entries %}
+            {#- Nothing is pre-ticked, on purpose: this page exists because a
+                previous pass applied 9 of ~48 resolutions, and the fix for that
+                is making each one easy to read, not making them default to
+                yes. -#}
+            {#- A stale row is shown but not tickable: `review.apply` would refuse
+                it, and offering a button that fails is worse than saying why. -#}
+            <label class="inbox-item{% if item.flags %} inbox-item-flagged{% endif %}{% if item.state == 'stale' %} inbox-item-stale{% endif %}">
+                <input type="checkbox" class="inbox-cb" value="{{ item.key }}"
+                       {% if book.locked or item.state == 'stale' %}disabled{% endif %}>
+                <div class="inbox-item-body">
+                    <div class="inbox-item-meta">
+                        <span class="inbox-conf inbox-conf-{{ item.confidence }}">{{ item.confidence }}</span>
+                        {% if item.chapter_id %}
+                        <a class="inbox-chapter" href="/read/{{ book.project_id }}/{{ item.chapter_id }}">{{ item.chapter_id }}</a>
+                        {% endif %}
+                        {% for flag in item.flags %}
+                        <span class="inbox-flag">{{ flag }}</span>
+                        {% endfor %}
+                    </div>
+                    {% if item.recommendation %}
+                    <p class="inbox-reco">{{ item.recommendation }}</p>
+                    {% endif %}
+                    <div class="inbox-diff">
+                        <div class="inbox-old">{{ item.old or t.inbox_no_text }}</div>
+                        <div class="inbox-new">{{ item.new }}</div>
+                    </div>
+                </div>
+            </label>
+            {% endfor %}
+            {% endfor %}
+
+            <div class="inbox-actions">
+                <button type="button" class="inbox-select-all" data-project="{{ book.project_id }}">{{ t.inbox_select_all }}</button>
+                <button type="submit" class="inbox-apply" {% if book.locked %}disabled{% endif %}>{{ t.inbox_apply }}</button>
+                <span class="inbox-status" role="status" aria-live="polite"></span>
+            </div>
+            {#- Only shown once an applied key was a footnote: an appended note
+                is never published, but a footnote's text is, and it only
+                reaches the book on the next build. -#}
+            <div class="inbox-epub" hidden>
+                <span>{{ t.inbox_epub_stale }}</span>
+                <button type="button" class="inbox-rebuild" data-project="{{ book.project_id }}">{{ t.inbox_rebuild }}</button>
+            </div>
+        </form>
+        {% endif %}
+
+        {% if book.manual %}
+        <details class="inbox-secondary">
+            <summary>{{ book.manual | length }} {{ t.inbox_manual }}</summary>
+            <ul>
+                {% for item in book.manual %}
+                <li>
+                    <code>{{ item.reason }}</code>
+                    {% if item.chapter_id %}
+                    <a href="/read/{{ book.project_id }}/{{ item.chapter_id }}">{{ item.chapter_id }}</a>
+                    {% endif %}
+                    <span>{{ item.recommendation }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+
+        {% if book.orphaned %}
+        <details class="inbox-secondary inbox-orphaned">
+            <summary>{{ book.orphaned | length }} {{ t.inbox_orphaned }}</summary>
+            <p class="inbox-orphan-help">{{ t.inbox_orphaned_help }}</p>
+            <ul>
+                {% for item in book.orphaned %}
+                <li>
+                    {% if item.chapter_id %}
+                    <a href="/read/{{ book.project_id }}/{{ item.chapter_id }}">{{ item.chapter_id }}</a>
+                    {% endif %}
+                    <span>{{ item.content }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+    </section>
+    {% endfor %}
+</div>
+
+<script src="{{ url_for('static', filename='review_inbox.js') }}?v=1"></script>
+</body>
+</html>

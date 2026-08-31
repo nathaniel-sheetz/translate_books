@@ -191,6 +191,21 @@ Applied records look like:
 writing, it compares each annotation's live content to what the review saw and
 reports a mismatch as `stale` rather than overwriting it.
 
+### Landing the results
+
+Two surfaces reach `apply` without a chat session:
+
+- **`/review-inbox`** — every book's outstanding plan on one page, with a checkbox
+  per resolution. Nothing is pre-ticked; low-confidence resolutions and every
+  footnote are flagged. This is the funnel: the last hand-run pass reviewed ~48
+  notes and applied 9 of them.
+- **`scripts/daily_pass.py`** — the scheduled sweep, which applies only the safe
+  subset (`word_choice` / `inconsistency` / `flag`, `mode: "append"`, `high`
+  confidence) and leaves the rest in the inbox. Footnotes are never automatic:
+  their write is a *replace* whose text is published.
+
+See [`NIGHTLY_PASS.md`](NIGHTLY_PASS.md).
+
 ## Reports
 
 `projects/<slug>/reports/annotations_<YYYYmmdd_HHMMSS>.md`, dated so a book
@@ -247,6 +262,8 @@ book".
 
 ## Related
 
+- [`NIGHTLY_PASS.md`](NIGHTLY_PASS.md) — running this over every book unattended,
+  and `/review-inbox`, the surface that lands the results.
 - `docs/JUDGES_FRAMEWORK.md` — the pre-review pass. Separate persistence: annotation
   results never touch `evaluations/*.json` or the dashboard badges.
 - `docs/WEB_UI_GUIDE.md` — where annotations come from.

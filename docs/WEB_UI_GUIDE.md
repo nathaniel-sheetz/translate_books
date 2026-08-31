@@ -28,6 +28,7 @@ service, use `python scripts/serve.py` (see [`CLI_REFERENCE.md`](CLI_REFERENCE.m
 | `/read/<id>` | Chapter list for a project |
 | `/read/<id>/<chapter>` | Bilingual reader view |
 | `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
+| `/review-inbox` | Cross-book annotation resolutions awaiting a decision |
 | `/reports/<project_id>/<filename>` | Serves generated edit-review HTML reports (same-origin for tag API) |
 
 ---
@@ -572,6 +573,48 @@ The Export panel ships with a "Note from the Translator" — Amazon KDP-ready en
 - `GET /api/project/<id>/download-epub` — serves the EPUB file as a download
 
 **Backend:** `build_epub_from_chunks()`, `build_epub()`, `note_text_to_xhtml()`, `_DEFAULT_TRANSLATOR_HEADING` from `src/epub_builder.py`; `_load_translator_note` / `_save_translator_note` / `_read_translator_note_template` from `web_ui/app.py`.
+
+---
+
+## Review Inbox
+
+Served at `/review-inbox`, linked from the header of the project list. Every
+in-scope book's outstanding annotation resolutions on one page, grouped by book
+and by annotation type, with `old → new` and a checkbox per resolution.
+
+It renders `review.apply(project_dir, dry_run=True)` — the plan already on disk
+from a `commit` — and hands a selection back to `review.apply(select=…)`, the only
+writer to `annotations.jsonl`. Nothing here reviews anything, and nothing spends.
+
+- **Nothing is pre-ticked.** The page exists because the previous funnel (one book
+  per chat session) applied 9 of ~48 resolutions.
+- **Flagged** — every `low`-confidence resolution, and every footnote, whose text
+  is published into the EPUB and so is where an invented fact would print.
+- **Needing a hand** — `manual[]` entries with their reason (`multi_anchor`,
+  `no_note_text`), which no automatic write will ever land.
+- **Orphaned** — notes whose anchor sentence no longer exists. No review run will
+  reach them; re-anchor them in the reader.
+- **The list is what is still outstanding.** `review.apply(dry_run=True)` plans
+  off `results.json`, which keeps a resolution until the next `prepare` drops it
+  as `already_reviewed`, so the page compares each entry against the note's live
+  text first: applied and deleted entries drop out, and a note edited since the
+  review is shown as **stale**, explained, and not tickable. `apply` makes the
+  same checks again before writing. Re-applying the same selection is a no-op.
+- Applying a footnote reveals a **Rebuild EPUB** button: a replacing write only
+  reaches the book on the next build.
+- A book a CLI or scheduled wave is working on shows *in use by another run*, and
+  applying is refused with a 409 rather than racing it.
+
+Populated by the nightly pass — see [`NIGHTLY_PASS.md`](NIGHTLY_PASS.md).
+
+### Concurrency with background waves
+
+The dashboard's job-starting routes (`review/run-coded`, `review/run-judges`,
+`review/adjudicate`) hold the book's cross-process lock
+(`projects/<slug>/.harness/.lock`) for the duration of the job, and return a 409
+when a CLI or scheduled wave already holds it. Before this, a wave started outside
+Flask had no job record, so `jobs.JobConflict` never fired and a click here would
+run a `prepare` that unlinked the drafts that wave was still writing.
 
 ---
 

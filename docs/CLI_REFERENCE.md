@@ -283,6 +283,33 @@ Sub-verbs: `prepare`, `fanout`, `commit`, `run`, `apply`. `apply` is the only wr
 
 *Skill equivalent:* `/annotation-review`
 
+### `pending_work.py` — what unattended work is available
+
+```bash
+python scripts/pending_work.py scan
+python scripts/pending_work.py scan --json --project my-book
+python scripts/pending_work.py scan --default-cli cursor   # preview the flip
+```
+
+Read-only and zero spend: per-book pending counts by type, the resolved CLI and
+worker model with their provenance, skip reasons, and blockers (a missing
+`.harness/config.json`, a pinned CLI whose binary is not on PATH, orphaned notes no
+run will reach). Safe to run mid-wave. See [`NIGHTLY_PASS.md`](NIGHTLY_PASS.md).
+
+### `daily_pass.py` — the nightly unattended pass
+
+```bash
+python scripts/daily_pass.py --dry-run
+python scripts/daily_pass.py --project my-book
+python scripts/daily_pass.py --max-books 3 --no-apply
+```
+
+Per in-scope book, under that book's cross-process lock: `prepare(keep_drafts=True)`
+→ `fanout` → `commit` → auto-apply the safe subset. Writes a digest to
+`reports/nightly/` and a row to `logs/nightly.jsonl`. `--cli` forces a family past
+every book's pin and is for debugging only; the scheduled task never passes it.
+Full reference: [`NIGHTLY_PASS.md`](NIGHTLY_PASS.md).
+
 ### `review_edits.py` — edit-review diff report
 
 ```bash
@@ -339,6 +366,21 @@ Runs the app under waitress on loopback with rotating logs to `logs/web_ui.log`.
 what the `TranslateBooksReader` scheduled task runs; `scripts/reader.ps1
 install|start|stop|restart|status|dev|log` drives that task. For development use
 `python -m web_ui.app` instead (set `BOOKS_DEBUG=1` for auto-reload).
+
+### `nightly.ps1` — the nightly scheduled task
+
+```powershell
+scripts\nightly.ps1 install     # register TranslateBooksNightly, daily at 06:30
+scripts\nightly.ps1 status      # audit the live task against this script
+scripts\nightly.ps1 run         # force one execution now
+scripts\nightly.ps1 log         # last passes + the newest digest
+scripts\nightly.ps1 spec        # what install would write, as JSON
+```
+
+Sibling to `reader.ps1`, driving `daily_pass.py`. Unlike the reader task it carries
+an `ExecutionTimeLimit` (PT2H) — a batch needs a ceiling — and no restart-on-failure,
+because a missed night is a night's work, not an outage, and the next run resumes
+exactly where it stopped.
 
 ---
 
