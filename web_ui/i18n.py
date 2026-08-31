@@ -76,6 +76,15 @@ STRINGS = {
         "inbox_locked": "in use by another run",
         "inbox_select_all": "Select all",
         "inbox_apply": "Apply selected",
+        # Reject is per row and has no bulk twin, deliberately: declining is a
+        # judgement about one suggestion, and the note keeps its own text either
+        # way — only the proposal is refused.
+        "inbox_reject": "Reject",
+        "inbox_reject_help": "Decline this suggestion. The note keeps its text and "
+                             "no future run will propose this again, unless you edit "
+                             "the note in the reader.",
+        "inbox_rejected": "rejected",
+        "inbox_undo": "Undo",
         "inbox_no_text": "(no original text)",
         "inbox_manual": "need a hand (not writable automatically)",
         "inbox_orphaned": "orphaned",
@@ -366,6 +375,12 @@ STRINGS = {
         "inbox_locked": "en uso por otra ejecuci\u00f3n",
         "inbox_select_all": "Seleccionar todo",
         "inbox_apply": "Aplicar selecci\u00f3n",
+        "inbox_reject": "Rechazar",
+        "inbox_reject_help": "Descartar esta sugerencia. La nota conserva su texto y "
+                             "ninguna revisi\u00f3n futura volver\u00e1 a proponerla, salvo "
+                             "que edite la nota en el lector.",
+        "inbox_rejected": "rechazada",
+        "inbox_undo": "Deshacer",
         "inbox_no_text": "(sin texto original)",
         "inbox_manual": "requieren intervenci\u00f3n (no se pueden escribir autom\u00e1ticamente)",
         "inbox_orphaned": "hu\u00e9rfanas",

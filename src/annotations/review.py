@@ -15,7 +15,11 @@ All three build prompts with ``prompts.build_prompt_parts`` and parse with
 :func:`commit` and :func:`run` write ``results.json`` plus a dated markdown
 report; neither touches ``annotations.jsonl``. :func:`apply` is the only writer,
 it requires an explicit selection, and it re-checks that each annotation still
-holds the text ``commit`` saw before replacing it.
+holds the text ``commit`` saw before replacing it. It has three outcomes —
+``applied`` (write the proposal), ``retired`` (the model found nothing to do) and
+``rejected`` (you declined the proposal) — of which only the first changes a
+note's text; the other two exist so a note stops being re-detected for ever.
+:func:`unreject` lifts a rejection.
 """
 
 from __future__ import annotations
@@ -1103,7 +1107,7 @@ def run(
 
 _APPLY_SCHEMA = {
     "status": "'ok' | 'error'",
-    "dry_run": "true when nothing was written (no --select, or --dry-run)",
+    "dry_run": "true when nothing was written (no --select/--reject, or --dry-run)",
     "applicable": "every writable fix on a dry run: {key, type, mode, old, new, confidence, "
     "recommendation}. On a real apply, only keys that diverged from that plan (`stale`) — the "
     "rest are reported by `applied`/`already_applied`; --full prints them all",
@@ -1113,11 +1117,13 @@ _APPLY_SCHEMA = {
     "recommendation}; a real apply drops the recommendation (the report has it), --full keeps it",
     "applied": "keys actually written this run",
     "retired": "keys stamped reviewed without changing their text (`resolved` selections)",
-    "already_applied": "keys whose annotation already holds the planned text (no-op)",
+    "rejected": "keys declined by the reviewer: stamped reviewed, text untouched, the "
+    "proposal recorded in the sidecar's `rejected_content` (`--reject` selections)",
+    "already_applied": "keys already settled by a prior apply/retire/reject (no-op)",
     "stale": "keys whose annotation changed since the review — re-run prepare for these",
     "unknown_ids": "selected keys with no reviewed result",
-    "annotations_path": "the file appended to, when anything was applied or retired",
-    "counts": "{applicable, resolved, manual, applied, retired, already_applied, stale}",
+    "annotations_path": "the file appended to, when anything was applied, retired or rejected",
+    "counts": "{applicable, resolved, manual, applied, retired, rejected, already_applied, stale}",
 }
 
 
@@ -1153,31 +1159,80 @@ def _live_records(project_dir: Path) -> dict[str, dict]:
     return {store.target_key(r): r for r in store.load_active(project_dir)}
 
 
+def _successor_record(
+    project_dir: Path,
+    record: dict,
+    content: str,
+    sidecar: Optional[dict],
+    now: str,
+) -> dict:
+    """The next append-only record for ``record``, carrying ``sidecar``.
+
+    Built from a fixed key set rather than by copying, mirroring
+    ``POST /api/annotation``: anything the reader does not round-trip must not
+    survive a write, or a stale field would outlive the edit that dropped it.
+
+    ``sidecar=None`` omits the ``ai_review`` key entirely, which is how
+    :func:`unreject` un-stamps a record — the same shape an edit in the reader
+    produces, and the reason ``already_reviewed`` goes false again.
+    """
+    new_record = {
+        "project_id": record.get("project_id") or Path(project_dir).name,
+        "chapter_id": record.get("chapter_id"),
+        "es_idx": record.get("es_idx"),
+        "type": record.get("type"),
+        "content": content,
+        "timestamp": now,
+    }
+    sub = store.storage_sub_id(record.get("sub_id"))
+    if sub is not None:
+        new_record["sub_id"] = sub
+    if record.get("origin"):
+        new_record["origin"] = record["origin"]
+    if sidecar is not None:
+        new_record[store.AI_REVIEW_KEY] = sidecar
+    return new_record
+
+
 def apply(
     project_dir: Path,
     *,
     select: Optional[Iterable[str]] = None,
+    reject: Optional[Iterable[str]] = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Write reviewed notes back into ``annotations.jsonl``.
 
-    The only writer in this package. Requires an explicit ``select``; without one
-    it plans and writes nothing.
+    The only writer in this package. Requires an explicit ``select`` or
+    ``reject``; without either it plans and writes nothing.
 
-    Two kinds of selection are honoured, and they are reported separately because
-    they mean different things to a reader:
+    Three kinds of selection are honoured, and they are reported separately
+    because they mean different things to a reader:
 
-    ``applicable`` -> ``applied``  the reviewer proposed text; it is written.
-    ``resolved``   -> ``retired``  the reviewer read the note and left it alone;
-                                   the same content is re-appended with an
-                                   ``ai_review`` sidecar, so ``build_targets``
-                                   stops re-detecting a note that needs nothing.
+    ``applicable`` -> ``applied``   the reviewer proposed text; it is written.
+    ``resolved``   -> ``retired``   the reviewer read the note and left it alone;
+                                    the same content is re-appended with an
+                                    ``ai_review`` sidecar, so ``build_targets``
+                                    stops re-detecting a note that needs nothing.
+    ``applicable`` -> ``rejected``  *you* read the proposal and declined it. The
+                                    write is the retire write — the note's own
+                                    content, byte-for-byte — with the declined
+                                    text kept in the sidecar as ``rejected_content``.
+
+    Rejection needs no store of its own because the gate it has to satisfy is
+    already content-shaped: :func:`~src.annotations.targets.already_reviewed`
+    compares the sidecar's ``written_content`` against the live note, so stamping
+    the *unchanged* content is exactly what stops the note being re-detected. An
+    edit in the reader drops the sidecar (``POST /api/annotation`` rebuilds the
+    record from a fixed key set), which correctly re-opens the question — a
+    rejection is scoped to the text that was reviewed, not to the note forever.
 
     Before writing, each annotation's *live* content is compared against what the
     review saw. A note edited in the reader since then is reported ``stale`` and
     skipped rather than silently overwritten — the review it is based on no longer
-    describes the text on disk. That check guards the retire path too: an edit
-    since the review may well have turned a finished note back into a question.
+    describes the text on disk. That check guards the retire and reject paths too:
+    an edit since the review may well have turned a finished note back into a
+    question, or made the proposal you are declining moot.
     """
     project_dir = Path(project_dir)
     results_path = _results_path(project_dir)
@@ -1245,7 +1300,16 @@ def apply(
         if not r.get("writable") and r["key"] not in resolved_keys
     ]
 
-    plan_only = dry_run or not select
+    # Materialised before `plan_only` is decided: an exhaustible iterable would
+    # otherwise test truthy here and be empty by the time it is iterated.
+    selected = list(dict.fromkeys(select or ()))
+    to_reject = list(dict.fromkeys(reject or ()))
+    # A key named on both sides means one thing — do not write the proposal — so
+    # reject wins and the key is reported once, under `rejected`.
+    reject_set = set(to_reject)
+    selected = [key for key in selected if key not in reject_set]
+
+    plan_only = dry_run or not (selected or to_reject)
     base = {
         "status": "ok",
         "dry_run": plan_only,
@@ -1259,6 +1323,7 @@ def apply(
             **base,
             "applied": [],
             "retired": [],
+            "rejected": [],
             "already_applied": [],
             "stale": [],
             "unknown_ids": [],
@@ -1268,17 +1333,19 @@ def apply(
                 "manual": len(manual),
                 "applied": 0,
                 "retired": 0,
+                "rejected": 0,
                 "already_applied": 0,
                 "stale": 0,
             },
             "instructions": (
-                "Plan only — nothing written. Re-run with --select <key,key,...> to apply."
+                "Plan only — nothing written. Re-run with --select <key,key,...> to apply, "
+                "or --reject <key,key,...> to decline without writing."
             ),
         }
 
-    selected = list(dict.fromkeys(select))
     applied: list[str] = []
     retired: list[str] = []
+    rejected: list[str] = []
     already_applied: list[str] = []
     stale: list[dict[str, str]] = []
     unknown: list[str] = []
@@ -1286,29 +1353,55 @@ def apply(
     run_id = doc.get("committed_at") or datetime.now().isoformat()
     now = datetime.now().isoformat()
 
-    def _successor(record: dict, content: str, sidecar: dict) -> dict:
-        """The next append-only record for ``record``, carrying ``sidecar``.
+    def _successor(record: dict, content: str, sidecar: Optional[dict]) -> dict:
+        return _successor_record(project_dir, record, content, sidecar, now)
 
-        Built from a fixed key set rather than by copying, mirroring
-        ``POST /api/annotation``: anything the reader does not round-trip must
-        not survive a write, or a stale field would outlive the edit that
-        dropped it.
-        """
-        new_record = {
-            "project_id": record.get("project_id") or project_dir.name,
-            "chapter_id": record.get("chapter_id"),
-            "es_idx": record.get("es_idx"),
-            "type": record.get("type"),
-            "content": content,
-            "timestamp": now,
-        }
-        sub = store.storage_sub_id(record.get("sub_id"))
-        if sub is not None:
-            new_record["sub_id"] = sub
-        if record.get("origin"):
-            new_record["origin"] = record["origin"]
-        new_record[store.AI_REVIEW_KEY] = sidecar
-        return new_record
+    # Rejections first, so a key named on both sides can never be written before
+    # the decline that supersedes it is recorded.
+    for key in to_reject:
+        result = results.get(key)
+        if result is None or not result.get("writable"):
+            # Only a proposal can be declined. A `resolved` or `manual` entry has
+            # no proposed text to refuse, and an entry already stamped by a prior
+            # run is settled — both read better as no-ops than as errors.
+            record = live.get(key)
+            if record is not None and already_reviewed(record):
+                already_applied.append(key)
+            else:
+                unknown.append(key)
+            continue
+        record = live.get(key)
+        if record is None:
+            stale.append({"key": key, "reason": "annotation no longer present"})
+            continue
+        if already_reviewed(record):
+            already_applied.append(key)
+            continue
+        current = record.get("content") or ""
+        if current != (result.get("content") or ""):
+            stale.append({"key": key, "reason": "annotation edited since the review"})
+            continue
+
+        store.append_record(
+            project_dir,
+            _successor(
+                record,
+                current,
+                {
+                    "run_id": run_id,
+                    "at": now,
+                    "mode": "noop",
+                    "state": "rejected",
+                    "prompt_version": result.get("prompt_version"),
+                    "original_content": current,
+                    "written_content": current,
+                    # The whole audit trail of a decline: what was proposed, kept
+                    # beside the note that refused it, in an append-only file.
+                    "rejected_content": result["new_content"],
+                },
+            ),
+        )
+        rejected.append(key)
 
     for key in selected:
         result = results.get(key)
@@ -1363,6 +1456,15 @@ def apply(
         if record is None:
             stale.append({"key": key, "reason": "annotation no longer present"})
             continue
+        if already_reviewed(record):
+            # Settled by a prior apply, retire or *reject*, and a rejection leaves
+            # the content unchanged — so without this the two checks below would
+            # both pass and the proposal would be written over the decline. That
+            # is not hypothetical: `auto_apply` runs even when the night's `run`
+            # errored (scripts/daily_pass.py), off whatever results.json is on
+            # disk, so a book whose CLI is logged out would re-apply a stale plan.
+            already_applied.append(key)
+            continue
 
         current = record.get("content") or ""
         if current == result["new_content"]:
@@ -1395,11 +1497,14 @@ def apply(
         "dry_run": False,
         "applied": applied,
         "retired": retired,
+        "rejected": rejected,
         "already_applied": already_applied,
         "stale": stale,
         "unknown_ids": unknown,
         "annotations_path": (
-            str(store.annotations_path(project_dir)) if (applied or retired) else None
+            str(store.annotations_path(project_dir))
+            if (applied or retired or rejected)
+            else None
         ),
         "counts": {
             "applicable": len(applicable),
@@ -1407,13 +1512,59 @@ def apply(
             "manual": len(manual),
             "applied": len(applied),
             "retired": len(retired),
+            "rejected": len(rejected),
             "already_applied": len(already_applied),
             "stale": len(stale),
         },
         "instructions": (
             "Applied notes are appended records; the originals remain in the "
             "append-only log. Re-run `prepare` to confirm they now report "
-            "already_reviewed. Rebuild the EPUB if footnotes changed."
+            "already_reviewed. Rebuild the EPUB if footnotes changed. Rejected "
+            "notes keep their text and drop out of every future run until the "
+            "note itself is edited."
+        ),
+    }
+
+
+def unreject(project_dir: Path, key: str) -> dict[str, Any]:
+    """Undo one rejection: un-stamp the record so the note is reviewable again.
+
+    Deliberately not part of :func:`apply`. ``apply`` is the only writer of
+    *review results*, and this writes none — it appends the note's own content
+    with **no** ``ai_review`` sidecar, which is byte-for-byte the shape an edit
+    through ``POST /api/annotation`` produces. ``already_reviewed`` then goes
+    false and the next ``prepare`` picks the note up again.
+
+    Refuses anything that is not a live rejection, so an undo can never quietly
+    re-open a note that was applied or retired.
+    """
+    project_dir = Path(project_dir)
+    record = _live_records(project_dir).get(key)
+    if record is None:
+        return {"status": "error", "error": f"no live annotation for {key}"}
+
+    sidecar = record.get(store.AI_REVIEW_KEY)
+    if not isinstance(sidecar, dict) or sidecar.get("state") != "rejected":
+        return {"status": "error", "error": f"{key} is not a rejected annotation"}
+    if not already_reviewed(record):
+        # Stamped, but the text has moved on since — the note is already open.
+        return {"status": "error", "error": f"{key} was edited since it was rejected"}
+
+    content = record.get("content") or ""
+    path = store.append_record(
+        project_dir,
+        _successor_record(
+            project_dir, record, content, None, datetime.now().isoformat()
+        ),
+    )
+    return {
+        "status": "ok",
+        "key": key,
+        "annotations_path": str(path),
+        "restored_content": content,
+        "instructions": (
+            "The rejection is lifted. The note is a target again on the next "
+            "`prepare`; the rejected proposal remains in the append-only log."
         ),
     }
 

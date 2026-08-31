@@ -39,6 +39,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -217,13 +218,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+def _split_keys(raw: Optional[str]) -> Optional[list[str]]:
+    return [s.strip() for s in raw.split(",") if s.strip()] if raw else None
+
+
 def _cmd_apply(args: argparse.Namespace) -> int:
-    select = (
-        [s.strip() for s in args.select.split(",") if s.strip()] if args.select else None
-    )
     out = review.apply(
         _resolve_project(args.project),
-        select=select,
+        select=_split_keys(args.select),
+        reject=_split_keys(args.reject),
         dry_run=args.dry_run,
     )
     _emit(review.apply_relay_view(out, full=args.full))
@@ -300,7 +303,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_apply = sub.add_parser("apply", help="write reviewed notes back into annotations.jsonl")
     p_apply.add_argument("--project", required=True, help="project id or path")
     p_apply.add_argument("--select", help="comma-separated keys to apply; omit for a plan-only dry run")
-    p_apply.add_argument("--dry-run", action="store_true", help="force plan mode even with --select")
+    p_apply.add_argument(
+        "--reject",
+        help="comma-separated keys to decline: the note keeps its text, the proposal is "
+             "recorded, and no future run re-detects it (until the note is edited)",
+    )
+    p_apply.add_argument(
+        "--dry-run", action="store_true",
+        help="force plan mode even with --select/--reject",
+    )
     _add_full(p_apply)
 
     return parser

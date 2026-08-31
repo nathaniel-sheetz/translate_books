@@ -279,7 +279,9 @@ python scripts/review_annotations.py apply   --project my-book
 ```
 
 Sub-verbs: `prepare`, `fanout`, `commit`, `run`, `apply`. `apply` is the only writer to
-`annotations.jsonl`. Full reference: [`ANNOTATION_REVIEW.md`](ANNOTATION_REVIEW.md).
+`annotations.jsonl`; it takes `--select` to write a resolution and `--reject` to
+decline one for good (the note keeps its text, and no later run re-proposes it).
+Full reference: [`ANNOTATION_REVIEW.md`](ANNOTATION_REVIEW.md).
 
 *Skill equivalent:* `/annotation-review`
 

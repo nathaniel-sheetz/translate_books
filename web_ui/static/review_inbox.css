@@ -178,6 +178,12 @@
     color: var(--text-muted3);
 }
 
+/* An author `display` beats the UA's `[hidden] { display: none }`, so without
+   this the panel announced a stale EPUB on every page load — including books
+   where nothing had been applied at all. The JS toggles `hidden`, so the
+   attribute has to be the thing that wins. */
+.inbox-epub[hidden] { display: none; }
+
 .inbox-secondary {
     margin-top: 12px;
     font-size: 13px;
@@ -196,3 +202,60 @@
    work) but not tickable — `review.apply` would refuse it. */
 .inbox-item-stale { opacity: 0.6; cursor: default; }
 .inbox-item-stale:hover { background: none; }
+
+/* One row = the label (which is the whole click target for the checkbox) plus
+   its side controls. Reject cannot live inside the label: a button inside a
+   label activates that label's control, so the click meant to decline a
+   suggestion would tick the box that applies it. */
+.inbox-item-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.inbox-item-row > .inbox-item { flex: 1; min-width: 0; }
+
+.inbox-item-side {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: 6px;
+    padding-top: 10px;
+}
+
+/* Quiet until you reach for it. Rejecting is the irreversible-feeling half of
+   this page, and it must not compete with Apply for attention. */
+.inbox-reject,
+.inbox-unreject {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-muted3);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 8px;
+}
+
+.inbox-reject:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-light);
+    color: #b4483c;
+}
+
+.inbox-unreject:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-light);
+    color: var(--text);
+}
+
+.inbox-reject:disabled { opacity: 0.4; cursor: default; }
+
+.inbox-rejected-tag { color: #b4483c; font-size: 12px; }
+
+/* Rejected: already written and durable on disk. The row stays until you reload
+   so you can see what you just did — and undo it if the click was a slip. The
+   strike-through is on the proposal only; the note's own text is untouched, and
+   showing that is the point. */
+.inbox-item-rejected > .inbox-item { opacity: 0.5; cursor: default; }
+.inbox-item-rejected > .inbox-item:hover { background: none; }
+.inbox-item-rejected .inbox-new { text-decoration: line-through; }

@@ -580,14 +580,22 @@ The Export panel ships with a "Note from the Translator" — Amazon KDP-ready en
 
 Served at `/review-inbox`, linked from the header of the project list. Every
 in-scope book's outstanding annotation resolutions on one page, grouped by book
-and by annotation type, with `old → new` and a checkbox per resolution.
+and by annotation type, with `old → new`, a checkbox, and a **Reject** button per
+resolution.
 
 It renders `review.apply(project_dir, dry_run=True)` — the plan already on disk
-from a `commit` — and hands a selection back to `review.apply(select=…)`, the only
-writer to `annotations.jsonl`. Nothing here reviews anything, and nothing spends.
+from a `commit` — and hands a selection back to `review.apply(select=…)` or
+`review.apply(reject=…)`, the only writer to `annotations.jsonl`. Nothing here
+reviews anything, and nothing spends.
 
 - **Nothing is pre-ticked.** The page exists because the previous funnel (one book
   per chat session) applied 9 of ~48 resolutions.
+- **Reject is per row, and there is no bulk reject.** Applying is a batch decision;
+  declining is a judgement about one suggestion, and a "reject all" button is the
+  gesture that empties a queue nobody read. A rejected note keeps its own text —
+  only the *proposal* is refused — and no future run re-detects it. The row greys
+  out with an **Undo** beside it, which lasts until you reload; the write itself is
+  durable from the moment it lands.
 - **Flagged** — every `low`-confidence resolution, and every footnote, whose text
   is published into the EPUB and so is where an invented fact would print.
 - **Needing a hand** — `manual[]` entries with their reason (`multi_anchor`,
@@ -597,9 +605,11 @@ writer to `annotations.jsonl`. Nothing here reviews anything, and nothing spends
 - **The list is what is still outstanding.** `review.apply(dry_run=True)` plans
   off `results.json`, which keeps a resolution until the next `prepare` drops it
   as `already_reviewed`, so the page compares each entry against the note's live
-  text first: applied and deleted entries drop out, and a note edited since the
-  review is shown as **stale**, explained, and not tickable. `apply` makes the
-  same checks again before writing. Re-applying the same selection is a no-op.
+  *record* first: applied, rejected and deleted entries drop out, and a note edited
+  since the review is shown as **stale**, explained, and not tickable. `apply`
+  makes the same checks again before writing. Re-applying the same selection is a
+  no-op. The record rather than its text, because a rejection changes no text —
+  comparing content alone would put every rejected row straight back on the page.
 - Applying a footnote reveals a **Rebuild EPUB** button: a replacing write only
   reaches the book on the next build.
 - A book a CLI or scheduled wave is working on shows *in use by another run*, and

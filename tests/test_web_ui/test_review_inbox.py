@@ -403,6 +403,133 @@ def test_apply_errors_when_there_are_no_reviewed_results(client, books):
 
 
 # ---------------------------------------------------------------------------
+# Rejecting
+# ---------------------------------------------------------------------------
+#
+# `held` used to have one exit — apply it — so a suggestion you disagreed with
+# came back every night for the life of the book. These pin the second exit: the
+# note keeps its own text, the page stops offering the proposal, and the undo
+# puts it back.
+
+
+def _reject(client, project_id, key, *, undo=False):
+    route = "unreject" if undo else "reject"
+    return client.post(
+        f"/api/review-inbox/{route}",
+        json={"project_id": project_id, "key": key},
+    )
+
+
+def test_reject_stamps_the_note_without_changing_it(client, books):
+    book = make_book(books)
+    plant_results(book)
+
+    response = _reject(client, book.name, "chapter_01__0__u1")
+
+    assert response.status_code == 200
+    assert response.get_json()["rejected"] == ["chapter_01__0__u1"]
+
+    records = [
+        json.loads(line)
+        for line in (book / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 2                      # append-only, as ever
+    assert records[-1]["content"] == "poyo"       # the reader's note, untouched
+    assert records[-1]["ai_review"]["state"] == "rejected"
+    assert records[-1]["ai_review"]["rejected_content"] == "poyo\n— IA: usa 'banca'"
+
+
+def test_a_rejected_resolution_leaves_the_inbox(client, books):
+    """The load-bearing assertion: a rejection survives a reload.
+
+    The note's text does not change, so nothing but the stamp distinguishes a
+    rejected row from an open one — miss that and the row comes straight back.
+    """
+    book = make_book(books)
+    plant_results(book)
+    assert client.get("/api/review-inbox").get_json()["totals"]["applicable"] == 1
+
+    _reject(client, book.name, "chapter_01__0__u1")
+
+    data = client.get("/api/review-inbox").get_json()
+    assert data["books"] == []
+    assert data["totals"]["applicable"] == 0
+
+
+def test_undo_puts_a_rejected_resolution_back(client, books):
+    book = make_book(books)
+    plant_results(book)
+    _reject(client, book.name, "chapter_01__0__u1")
+
+    response = _reject(client, book.name, "chapter_01__0__u1", undo=True)
+
+    assert response.status_code == 200
+    data = client.get("/api/review-inbox").get_json()
+    assert [item["key"] for item in data["books"][0]["applicable"]] == ["chapter_01__0__u1"]
+
+
+def test_undo_refuses_an_applied_resolution(client, books):
+    book = make_book(books)
+    plant_results(book)
+    _apply(client, book.name, ["chapter_01__0__u1"])
+
+    response = _reject(client, book.name, "chapter_01__0__u1", undo=True)
+    assert response.status_code == 400
+
+
+def test_applying_a_rejected_key_never_writes_the_proposal(client, books):
+    """A stale page, or a night whose `run` failed, must not undo the decision."""
+    book = make_book(books)
+    plant_results(book)
+    _reject(client, book.name, "chapter_01__0__u1")
+
+    payload = _apply(client, book.name, ["chapter_01__0__u1"]).get_json()
+
+    assert payload["applied"] == []
+    assert payload["already_applied"] == ["chapter_01__0__u1"]
+    records = (book / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(records[-1])["content"] == "poyo"
+
+
+def test_reject_is_refused_while_a_wave_holds_the_lock(client, books):
+    book = make_book(books)
+    plant_results(book)
+
+    with locks.project_lock(book, kind="annotations", run_id="nightly"):
+        response = _reject(client, book.name, "chapter_01__0__u1")
+
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize("body", [
+    {},
+    {"project_id": "inboxbook"},
+    {"project_id": "inboxbook", "key": ""},
+    {"project_id": "inboxbook", "key": ["chapter_01__0__u1"]},
+    {"project_id": "../escape", "key": "k"},
+])
+def test_reject_rejects_a_malformed_body(client, books, body):
+    make_book(books)
+    response = client.post("/api/review-inbox/reject", json=body)
+    assert response.status_code == 400
+
+
+def test_reject_404s_on_an_unknown_project(client, books):
+    assert _reject(client, "no-such-book", "k").status_code == 404
+
+
+def test_the_page_offers_a_reject_button_per_row(client, books):
+    plant_results(make_book(books))
+
+    body = client.get("/review-inbox").data.decode("utf-8")
+
+    assert 'class="inbox-reject"' in body
+    # Outside the label, or the click would tick the box that applies it.
+    assert body.index('</label>') < body.index('class="inbox-reject"')
+
+
+# ---------------------------------------------------------------------------
 # The link from the home page
 # ---------------------------------------------------------------------------
 

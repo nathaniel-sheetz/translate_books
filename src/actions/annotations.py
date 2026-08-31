@@ -37,13 +37,27 @@ from pathlib import Path
 from typing import Any
 
 from src.actions.registry import Action, ActionState, ApplyResult, Budget, Policy, RunResult
-from src.annotations import review
-from src.annotations.targets import SKIP_ORPHANED, build_targets
+from src.annotations import review, store
+from src.annotations.targets import SKIP_ORPHANED, already_reviewed, build_targets
 from src.harness import state as hstate
 
 logger = logging.getLogger(__name__)
 
 ACTION_NAME = "annotations"
+
+
+def _settled_keys(project_dir: Path) -> set[str]:
+    """Target keys whose live annotation already carries a review stamp.
+
+    Applied, retired or rejected — the gate does not distinguish, and neither
+    should any caller: all three mean the note is done and must not be written
+    again. One read of ``annotations.jsonl``.
+    """
+    return {
+        store.target_key(record)
+        for record in store.load_active(project_dir)
+        if already_reviewed(record)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -283,10 +297,24 @@ def auto_apply(project_dir: Path, policy: Policy) -> ApplyResult:
             errors=[str(plan.get("error") or "apply plan failed")],
         )
 
-    applicable = plan.get("applicable") or []
+    # Drop anything already settled before the policy ever sees it. `run` normally
+    # clears these — a stamped note is skipped by `build_targets` and so drops out
+    # of results.json — but `auto_apply` runs even when `run` errored
+    # (scripts/daily_pass.py), off whatever plan is on disk. Without this a note
+    # you rejected in the inbox would be re-applied by the next night's pass, and
+    # a rejected note would keep inflating `held` in the digest, which is the only
+    # notification surface there is.
+    settled = _settled_keys(project_dir)
+    applicable = [
+        item for item in (plan.get("applicable") or []) if item["key"] not in settled
+    ]
     selected = [item["key"] for item in applicable if policy.accepts(item)]
     held = [item["key"] for item in applicable if not policy.accepts(item)]
-    manual = [item["key"] for item in (plan.get("manual") or [])]
+    manual = [
+        item["key"]
+        for item in (plan.get("manual") or [])
+        if item["key"] not in settled
+    ]
 
     # Retiring an `already_resolved` note is not governed by the policy, and
     # deliberately so: the policy exists to keep a model's *words* out of the
@@ -294,7 +322,11 @@ def auto_apply(project_dir: Path, policy: Policy) -> ApplyResult:
     # content and refuses on any drift. What it adds is the sidecar, without
     # which a finished note is re-reviewed every night for the life of the book.
     # That is why footnotes are safe here despite being excluded from the policy.
-    retirable = [item["key"] for item in (plan.get("resolved") or [])]
+    retirable = [
+        item["key"]
+        for item in (plan.get("resolved") or [])
+        if item["key"] not in settled
+    ]
 
     if policy.dry_run or not (selected or retirable):
         return ApplyResult(

@@ -325,14 +325,47 @@ def test_auto_apply_dry_run_writes_nothing(project, budget):
 
 
 def test_auto_apply_is_idempotent(project, budget):
+    """A second pass over the same plan writes nothing — and claims nothing.
+
+    The settled key drops out of the plan before the policy sees it, so it is
+    reported as neither applied nor held rather than as ``already_applied``. That
+    distinction is the whole point: a stamped note is not work, and counting it
+    as held is what would keep a rejected suggestion in the digest for ever.
+    """
     write_annotations(project, [_ann(sub_id="u1")])
     _reviewed(project, budget)
+    before = (project / "annotations.jsonl").read_text(encoding="utf-8")
     first = action.auto_apply(project, Policy())
+    after_first = (project / "annotations.jsonl").read_text(encoding="utf-8")
     second = action.auto_apply(project, Policy())
 
     assert len(first.applied) == 1
+    assert after_first != before
     assert second.applied == []
-    assert second.already_applied == first.applied
+    assert second.held == []
+    assert second.already_applied == []
+    assert (project / "annotations.jsonl").read_text(encoding="utf-8") == after_first
+
+
+def test_auto_apply_never_overrides_a_rejection(project, budget):
+    """The night after you reject something in the inbox.
+
+    Normally ``run`` clears it — a stamped note is skipped by ``build_targets``
+    and so drops out of ``results.json`` — but ``auto_apply`` runs even when
+    ``run`` errored, off whatever plan is on disk. So the rejection has to hold
+    against the plan that still names it.
+    """
+    write_annotations(project, [_ann(sub_id="u1")])
+    _reviewed(project, budget)
+    key = "chapter_01__0__u1"
+    review.apply(project, reject=[key])
+    after_reject = (project / "annotations.jsonl").read_text(encoding="utf-8")
+
+    result = action.auto_apply(project, Policy())
+
+    assert result.applied == []
+    assert result.held == []                      # not work, so not backlog either
+    assert (project / "annotations.jsonl").read_text(encoding="utf-8") == after_reject
 
 
 def test_auto_apply_skips_a_note_edited_since_the_review(project, budget):

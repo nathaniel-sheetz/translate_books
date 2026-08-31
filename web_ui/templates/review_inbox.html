@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ t.inbox_title }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
-    <link rel="stylesheet" href="{{ url_for('static', filename='review_inbox.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='review_inbox.css') }}?v=2">
 </head>
 <body>
 <script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
@@ -71,6 +71,10 @@
                 yes. -#}
             {#- A stale row is shown but not tickable: `review.apply` would refuse
                 it, and offering a button that fails is worse than saying why. -#}
+            {#- Reject sits *outside* the label, not inside it: a button inside a
+                label activates that label's control, so a click meant to decline
+                a suggestion would tick the box that applies it. -#}
+            <div class="inbox-item-row">
             <label class="inbox-item{% if item.flags %} inbox-item-flagged{% endif %}{% if item.state == 'stale' %} inbox-item-stale{% endif %}">
                 <input type="checkbox" class="inbox-cb" value="{{ item.key }}"
                        {% if book.locked or item.state == 'stale' %}disabled{% endif %}>
@@ -93,6 +97,17 @@
                     </div>
                 </div>
             </label>
+            {#- Both buttons and the tag are rendered here, hidden, rather than
+                built in JS: the labels stay translatable server-side, which is
+                where every other string on this page comes from. -#}
+            <div class="inbox-item-side">
+                <button type="button" class="inbox-reject" data-key="{{ item.key }}"
+                        title="{{ t.inbox_reject_help }}"
+                        {% if book.locked or item.state == 'stale' %}disabled{% endif %}>{{ t.inbox_reject }}</button>
+                <span class="inbox-rejected-tag" hidden>{{ t.inbox_rejected }}</span>
+                <button type="button" class="inbox-unreject" data-key="{{ item.key }}" hidden>{{ t.inbox_undo }}</button>
+            </div>
+            </div>
             {% endfor %}
             {% endfor %}
 
@@ -148,6 +163,6 @@
     {% endfor %}
 </div>
 
-<script src="{{ url_for('static', filename='review_inbox.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='review_inbox.js') }}?v=2"></script>
 </body>
 </html>

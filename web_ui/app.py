@@ -7925,8 +7925,15 @@ def download_epub(project_id):
 #
 # Nothing here reviews anything. It renders `review.apply(dry_run=True)` - the
 # plan that already exists on disk - and hands a selection back to
-# `review.apply(select=...)`, which is the only writer and re-checks each note
-# against its live text before touching it.
+# `review.apply(select=...)` or `review.apply(reject=...)`, which is the only
+# writer and re-checks each note against its live text before touching it.
+#
+# A row therefore leaves this page one of three ways: applied, rejected, or
+# edited in the reader. All three are the same underlying fact - the note now
+# carries a review stamp, or no longer matches the plan - which is why
+# `_inbox_state` is the single place that decides what is still outstanding.
+
+from src.annotations.targets import already_reviewed  # noqa: E402
 
 _INBOX_PREVIEW_CHARS = 600
 
@@ -7961,19 +7968,28 @@ def _inbox_live_records(project_dir: Path) -> dict[str, dict]:
     return {store.target_key(record): record for record in load_active(project_dir)}
 
 
-def _inbox_state(item: dict, live: dict[str, str]) -> str:
-    """``"open"`` / ``"applied"`` / ``"stale"`` / ``"gone"`` for one plan entry.
+def _inbox_state(item: dict, records: dict[str, dict]) -> str:
+    """``"open"`` / ``"applied"`` / ``"settled"`` / ``"stale"`` / ``"gone"``.
 
-    The same three comparisons ``review.apply`` makes before it writes, done
-    ahead of the click so the page never offers a button that will fail. Applied
-    entries are dropped; a stale one is shown, disabled, and explained — it is
-    real outstanding work, just work whose review no longer describes the text.
+    The same comparisons ``review.apply`` makes before it writes, done ahead of
+    the click so the page never offers a button that will fail. Applied and
+    settled entries are dropped; a stale one is shown, disabled, and explained —
+    it is real outstanding work, just work whose review no longer describes the
+    text.
+
+    ``settled`` is the one that cannot be read off the content alone. A rejection
+    leaves the note's text *unchanged*, so without the stamp check a rejected row
+    would compare equal to ``old`` and come straight back as ``open`` on the next
+    reload — which is the whole feature, undone.
     """
-    current = live.get(item["key"])
-    if current is None:
+    record = records.get(item["key"])
+    if record is None:
         return "gone"
+    current = record.get("content") or ""
     if current == item.get("new"):
         return "applied"
+    if already_reviewed(record):
+        return "settled"
     if current != (item.get("old") or ""):
         return "stale"
     return "open"
@@ -8036,13 +8052,12 @@ def _build_inbox(only_project: Optional[str] = None) -> dict:
             continue                       # no reviewed results for this book yet
 
         records = _inbox_live_records(entry.project_dir)
-        live = {key: (rec.get("content") or "") for key, rec in records.items()}
 
         applicable = []
         for item in plan.get("applicable") or []:
-            state = _inbox_state(item, live)
-            if state in ("applied", "gone"):
-                continue                   # already landed, or no longer there
+            state = _inbox_state(item, records)
+            if state in ("applied", "gone", "settled"):
+                continue                   # landed, rejected, or no longer there
             flags = _inbox_flags(item)
             if state == "stale":
                 flags.append(
@@ -8088,8 +8103,6 @@ def _build_inbox(only_project: Optional[str] = None) -> dict:
         # notes the nightly pass has already retired as though they were still
         # queued. Counted before the early exit below, because a book whose
         # whole queue is resolved notes renders no card at all.
-        from src.annotations.targets import already_reviewed
-
         totals["resolved"] += sum(
             1
             for item in (plan.get("resolved") or [])
@@ -8198,6 +8211,85 @@ def review_inbox_apply():
         "counts": result.get("counts") or {},
         "needs_epub_rebuild": needs_epub,
     })
+
+
+def _inbox_one_key(data: dict) -> tuple[Optional[Path], Optional[str], Optional[tuple]]:
+    """Validate a ``{project_id, key}`` body for the reject/undo routes.
+
+    Returns ``(project_dir, key, error_response)`` with exactly one of the first
+    pair or the last filled in. One key, not a list: rejecting is a per-row
+    decision, and there is deliberately no bulk reject to accidentally fire.
+    """
+    project_id = data.get("project_id")
+    key = data.get("key")
+    if not project_id or not _safe_id(str(project_id)):
+        return None, None, (jsonify({"error": "Bad request"}), 400)
+    if not isinstance(key, str) or not key.strip():
+        return None, None, (jsonify({"error": "key must be a non-empty string"}), 400)
+
+    project_dir = _resolve_project_dir(str(project_id))
+    if not project_dir.exists():
+        return None, None, (jsonify({"error": "Project not found"}), 404)
+    return project_dir, key.strip(), None
+
+
+@app.route("/api/review-inbox/reject", methods=["POST"])
+def review_inbox_reject():
+    """Decline one resolution, so no future run proposes it again.
+
+    The write is the note's own text, byte-for-byte — a rejection is a stamp, not
+    an edit — with the declined proposal kept in the record's ``ai_review``
+    sidecar. Held under the same lock as apply, for the same reason: a nightly
+    ``prepare`` rewrites the ``results.json`` this reads.
+    """
+    project_dir, key, error = _inbox_one_key(request.get_json(silent=True) or {})
+    if error is not None:
+        return error
+
+    from src.annotations import review as annreview
+
+    try:
+        with locks.project_lock(project_dir, kind="review-inbox"):
+            result = annreview.apply(project_dir, reject=[key])
+    except locks.LockBusy as busy:
+        return jsonify({"error": str(busy), "lock": busy.holder}), 409
+
+    if result.get("status") != "ok":
+        return jsonify({"error": result.get("error") or "reject failed"}), 400
+
+    return jsonify({
+        "ok": True,
+        "rejected": result.get("rejected") or [],
+        "already_applied": result.get("already_applied") or [],
+        "stale": result.get("stale") or [],
+        "unknown_ids": result.get("unknown_ids") or [],
+    })
+
+
+@app.route("/api/review-inbox/unreject", methods=["POST"])
+def review_inbox_unreject():
+    """Undo one rejection — the misclick escape hatch behind the inbox's Undo.
+
+    Appends the note's own content with no review sidecar, which is the same
+    shape an edit in the reader produces, so the note is a target again on the
+    next ``prepare``.
+    """
+    project_dir, key, error = _inbox_one_key(request.get_json(silent=True) or {})
+    if error is not None:
+        return error
+
+    from src.annotations import review as annreview
+
+    try:
+        with locks.project_lock(project_dir, kind="review-inbox"):
+            result = annreview.unreject(project_dir, key)
+    except locks.LockBusy as busy:
+        return jsonify({"error": str(busy), "lock": busy.holder}), 409
+
+    if result.get("status") != "ok":
+        return jsonify({"error": result.get("error") or "undo failed"}), 400
+
+    return jsonify({"ok": True, "key": result.get("key")})
 
 
 # ============================================================================

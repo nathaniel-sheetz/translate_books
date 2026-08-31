@@ -136,7 +136,12 @@ policy checks the mode as well as the type list, so adding `"footnote"` to
 either way.
 
 Everything the policy refuses is `held`, which is not a failure: it is the
-inbox's queue.
+inbox's queue. `held` has two exits — apply it, or **reject** it. A rejection is
+the same append-only noop write as a retire (the note's own text, plus a stamp),
+so the suggestion stops being re-detected without anything being written into the
+book. Nothing the pass does can override one: `apply` refuses to write over any
+record that already carries a stamp, which matters because `auto_apply` runs even
+when the night's `run` errored, off whatever `results.json` is on disk.
 
 ---
 
@@ -202,10 +207,14 @@ the job. The driver waits 60 s for a busy book, then skips it for the night.
 ## `/review-inbox`
 
 Every in-scope book's outstanding plan on one page, grouped by book and by
-annotation type, with `old → new` and a checkbox per resolution.
+annotation type, with `old → new`, a checkbox and a Reject button per resolution.
 
 - **Nothing is pre-ticked.** The page exists because the previous funnel applied
   9 of ~48; the fix is making each one readable, not defaulting them to yes.
+- **Reject is per row; there is no bulk reject.** It stamps the note without
+  changing a character of it, so the suggestion never returns — until you edit the
+  note in the reader, which drops the stamp and reopens the question. Undo is
+  offered in place until you reload.
 - **Flagged**: every `low`-confidence resolution, and every footnote — whose text
   is published, and so is where an invented date or measurement would print.
 - **Needing a hand**: `manual[]` with its reason (`multi_anchor`, `no_note_text`).

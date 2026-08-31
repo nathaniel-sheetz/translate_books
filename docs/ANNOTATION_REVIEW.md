@@ -45,6 +45,7 @@ python scripts/review_annotations.py run --project fabre2 [--cost-limit 0.50] [-
 # Write reviewed notes back. The only writer to annotations.jsonl.
 python scripts/review_annotations.py apply --project fabre2 --dry-run
 python scripts/review_annotations.py apply --project fabre2 --select <key,key,...> [--full]
+python scripts/review_annotations.py apply --project fabre2 --reject <key,key,...>
 ```
 
 Every subcommand prints exactly one JSON object with a `_schema` block. Keys are
@@ -187,18 +188,47 @@ Applied records look like:
                "written_content": "[Sancerre] Ciudad del centro de Francia…"}}
 ```
 
-`apply` requires an explicit `--select`; omitting it is a plan-only dry run. Before
-writing, it compares each annotation's live content to what the review saw and
-reports a mismatch as `stale` rather than overwriting it.
+`apply` requires an explicit `--select` or `--reject`; omitting both is a plan-only
+dry run. Before writing, it compares each annotation's live content to what the
+review saw and reports a mismatch as `stale` rather than overwriting it.
+
+### Declining a suggestion
+
+`apply` has three outcomes, and only the first changes a note's text:
+
+| Selection | Outcome | What is written |
+|---|---|---|
+| `--select` on an `applicable` entry | `applied` | the proposed text |
+| `--select` on a `resolved` entry | `retired` | the note's own text, unchanged |
+| `--reject` on an `applicable` entry | `rejected` | the note's own text, unchanged |
+
+The last two exist for the same reason: without a stamp, a note is re-detected,
+re-prompted and re-listed on every run for the life of the book. `retired` is the
+*model* saying the note needed nothing; `rejected` is **you** saying its proposal is
+wrong. A rejected record keeps the declined text in its sidecar:
+
+```json
+"ai_review": {"mode": "noop", "state": "rejected",
+              "original_content": "poyo", "written_content": "poyo",
+              "rejected_content": "poyo\n— IA: usa «marco»."}
+```
+
+`written_content == content` is what makes Layer 1 skip it, so no new gate and no new
+key scheme is involved — and because a reader edit drops the sidecar, a rejection is
+scoped to the text that was reviewed rather than to the note for ever. `review.unreject`
+lifts one.
+
+Rejecting is per row in `/review-inbox` (there is no bulk reject) or
+`--reject <key,key,...>` on the CLI.
 
 ### Landing the results
 
 Two surfaces reach `apply` without a chat session:
 
 - **`/review-inbox`** — every book's outstanding plan on one page, with a checkbox
-  per resolution. Nothing is pre-ticked; low-confidence resolutions and every
-  footnote are flagged. This is the funnel: the last hand-run pass reviewed ~48
-  notes and applied 9 of them.
+  and a Reject button per resolution. Nothing is pre-ticked; low-confidence
+  resolutions and every footnote are flagged. This is the funnel: the last hand-run
+  pass reviewed ~48 notes and applied 9 of them.
 - **`scripts/daily_pass.py`** — the scheduled sweep, which applies only the safe
   subset (`word_choice` / `inconsistency` / `flag`, `mode: "append"`, `high`
   confidence) and leaves the rest in the inbox. Footnotes are never automatic:

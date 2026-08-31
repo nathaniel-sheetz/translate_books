@@ -72,7 +72,7 @@ Scope flags (`prepare`, `run`):
 
 `run` adds `--model`, `--provider`, `--cost-limit` (default 0.50), `--confirm`.
 
-`apply` takes `--select <key,key,...>` and `--dry-run`.
+`apply` takes `--select <key,key,...>`, `--reject <key,key,...>` and `--dry-run`.
 
 **`commit`, `run` and `apply` print a summary, not the content.** Each annotation's
 recommendation, gloss and evidence goes to the dated report and to `results.json`
@@ -248,7 +248,9 @@ Two write modes, and the difference matters:
 7c. **Get an explicit selection.** The user picks which keys to apply — **never
 apply without an explicit pick.** Use `AskUserQuestion` (multiSelect, ≤4 options)
 when there are ≤4; otherwise present a numbered list and have the user reply with
-keys. Hand-check each footnote gloss you offer: it is going into the book.
+keys. Hand-check each footnote gloss you offer: it is going into the book. If the
+user rules any of them out, capture those keys too — they are a `--reject` list, not
+silence (see step 8c).
 
 8c. **Apply the picked keys.**
 ```bash
@@ -263,6 +265,21 @@ mismatch is legible. `counts.applicable` still reports the whole plan's size.
 longer describes what is on disk, so it was skipped rather than overwritten.
 Re-`prepare` those. Re-running the same `--select` is a no-op (`already_applied`),
 not a double write.
+
+**If the user declines a suggestion, reject it — do not just leave it.** An
+unselected resolution is not "declined": it carries no trace of the decision, so the
+next run re-detects, re-prompts and re-lists it, for the life of the book.
+```bash
+python scripts/review_annotations.py apply --project fabre2 --reject chapter_09__2__legacy
+```
+That writes the note's own text back, byte-for-byte, plus a stamp recording what was
+refused — so the note is untouched and the suggestion never returns. Relay
+`rejected`. Only an `applicable` entry can be rejected; a `resolved` one is retired
+by `--select` instead. A key named in both is rejected, not written.
+
+Never propose a resolution the user has already rejected. Editing the note in the
+reader drops the stamp and legitimately reopens it — that is the user's call, not a
+reason to re-raise it yourself.
 
 9c. **Rebuild the EPUB if footnotes changed.** Applied glosses only reach the book
 on the next build:
