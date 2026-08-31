@@ -57,16 +57,45 @@ def test_extract_json_malformed_falls_back_to_stripped():
 
 def test_extract_json_broken_opener_returns_stripped():
     """When the first { has invalid JSON (not a valid object), extract_json
-    continues past it (``except json.JSONDecodeError: continue``).
+    gives up on that candidate (``except json.JSONDecodeError: continue``).
 
-    With no other valid opener found, the function falls through to
+    With no further candidate to try, the function falls through to
     ``return stripped`` — exercising the JSONDecodeError continue branch AND
     the final fallback in the same path.
     """
     raw = "  {broken: not valid json}  "
     result = extract_json(raw)
-    # raw_decode fails on the broken { → continue; no [ found → return stripped
+    # raw_decode fails on the broken { → no candidates left → return stripped
     assert result == raw.strip()
+
+
+# A real annotation draft that broke the nightly pass: the recommendation
+# string quotes a phrase without escaping the inner quotes, so the object is
+# invalid JSON — and it carries a nested array after the break.
+_UNESCAPED_QUOTE_DRAFT = """{
+  "key": "chapter_12__15",
+  "state": "needs_help",
+  "recommendation": "El publicano estuvo "de pie y a cierta distancia" de los demás.",
+  "evidence": ["compared translation to source", "noted missing verb"]
+}"""
+
+
+def test_extract_json_broken_object_does_not_return_nested_array():
+    """A nested array must never stand in for the object that failed to parse.
+
+    Decoding at a later '[' reaches inside the broken object and returns its
+    "evidence" array, which makes the caller report the wrong fault.
+    """
+    result = extract_json(_UNESCAPED_QUOTE_DRAFT)
+    assert not result.lstrip().startswith("[")
+    assert result == _UNESCAPED_QUOTE_DRAFT.strip()
+
+
+def test_parse_judge_json_reports_invalid_json_not_list():
+    """The malformed draft must surface as a syntax error, not "got list"."""
+    with pytest.raises(JudgeParseError, match="Invalid JSON") as exc_info:
+        parse_judge_json(_UNESCAPED_QUOTE_DRAFT, ["key", "state"])
+    assert "Expected a JSON object" not in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
