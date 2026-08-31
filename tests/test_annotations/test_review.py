@@ -511,6 +511,113 @@ def test_apply_refuses_a_note_edited_since_the_review(project):
     assert [s["key"] for s in out["stale"]] == [key]
 
 
+def test_already_resolved_is_planned_as_resolved_not_manual(project):
+    """A finished note is not "needs a hand" — it is its own bucket."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido: se queda", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project)
+    assert [item["key"] for item in out["resolved"]] == [key]
+    assert out["manual"] == []
+    assert out["applicable"] == []
+
+
+def test_retiring_stamps_the_sidecar_without_touching_the_text(project):
+    content = "poyo — ya decidido: se queda"
+    write_annotations(project, [_ann(es_idx=1, content=content, sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project, select=[key])
+    assert out["retired"] == [key]
+    assert out["applied"] == []
+
+    record = store.load_active(project)[0]
+    # The reader's words are untouched; only the sidecar is new.
+    assert record["content"] == content
+    sidecar = record[store.AI_REVIEW_KEY]
+    assert sidecar["mode"] == "noop"
+    assert sidecar["state"] == "already_resolved"
+    assert sidecar["written_content"] == content
+    assert sidecar["original_content"] == content
+
+
+def test_retired_notes_are_skipped_on_the_next_run(project):
+    """The whole point: a finished note stops being re-detected forever."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido: se queda", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    review.apply(project, select=[prep["manifest"][0]["key"]])
+
+    again = review.prepare(project)
+    assert again["manifest"] == []
+    assert [s["reason"] for s in again["skipped"]] == ["already_reviewed"]
+
+
+def test_re_retiring_the_same_note_is_a_no_op(project):
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+    review.apply(project, select=[key])
+
+    lines = len((project / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines())
+    out = review.apply(project, select=[key])
+    assert out["already_applied"] == [key]
+    assert out["retired"] == []
+    assert len(
+        (project / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ) == lines
+
+
+def test_retiring_refuses_a_note_edited_since_the_review(project):
+    """An edit may have turned a finished note back into a question."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    store.append_record(
+        project,
+        _ann(es_idx=1, content="poyo — ¿o poyete?", sub_id="u1",
+             timestamp="2026-03-01T00:00:00"),
+    )
+    out = review.apply(project, select=[key])
+    assert out["retired"] == []
+    assert [s["key"] for s in out["stale"]] == [key]
+
+
+def test_multi_anchor_footnote_stays_manual_even_when_resolved(project):
+    """Its text may be fine; publishing only its first bracket still is not."""
+    write_annotations(
+        project,
+        [_ann(es_idx=2, type="footnote", content="[Sancerre]; [Esaú,]", sub_id="u1")],
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+
+    out = review.apply(project)
+    assert out["resolved"] == []
+    assert [item["reason"] for item in out["manual"]] == ["multi_anchor"]
+
+
 def test_apply_reports_an_unknown_key(project):
     write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
     prep = review.prepare(project)

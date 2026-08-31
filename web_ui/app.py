@@ -7943,21 +7943,22 @@ def _inbox_chapter_of(key: str) -> Optional[str]:
     return parts[0] if len(parts) == 3 and parts[0] else None
 
 
-def _inbox_live_content(project_dir: Path) -> dict[str, str]:
-    """``{annotation key: its content right now}`` for one book.
+def _inbox_live_records(project_dir: Path) -> dict[str, dict]:
+    """``{annotation key: its record right now}`` for one book.
 
     ``review.apply(dry_run=True)`` plans off ``results.json`` alone, which is
     right for a planner — it is a record of what the review decided — but wrong
     for an inbox, which must show what is still *outstanding*. Without this, a
     resolution stayed on the page after being applied (until the next `prepare`
     dropped it as already_reviewed), so a reload re-offered finished work.
+
+    The whole record rather than just its content, because two questions are
+    asked of it: what the note says now (drift against the plan) and whether it
+    already carries an ``ai_review`` stamp (retired, so not backlog).
     """
     from src.annotations import store
 
-    return {
-        store.target_key(record): (record.get("content") or "")
-        for record in load_active(project_dir)
-    }
+    return {store.target_key(record): record for record in load_active(project_dir)}
 
 
 def _inbox_state(item: dict, live: dict[str, str]) -> str:
@@ -8016,7 +8017,15 @@ def _build_inbox(only_project: Optional[str] = None) -> dict:
     # roots would make the inbox list books the rest of the dashboard cannot open.
     scope_result = ascope.in_scope(_get_projects_dir())
     books: list[dict] = []
-    totals = {"applicable": 0, "manual": 0, "orphaned": 0, "flagged": 0, "stale": 0}
+    # `resolved` is counted but never rendered as a row: a note the reviewer read
+    # and left alone is not outstanding work, and listing it here is what made
+    # "needing a hand" read as ~46 when ~11 of those actually needed one. The
+    # nightly pass retires them (review.apply -> `retired`), so the count is a
+    # backlog gauge, not a queue.
+    totals = {
+        "applicable": 0, "resolved": 0, "manual": 0,
+        "orphaned": 0, "flagged": 0, "stale": 0,
+    }
 
     for entry in scope_result.projects:
         if only_project and entry.project_id != only_project:
@@ -8026,7 +8035,8 @@ def _build_inbox(only_project: Optional[str] = None) -> dict:
         if plan.get("status") != "ok":
             continue                       # no reviewed results for this book yet
 
-        live = _inbox_live_content(entry.project_dir)
+        records = _inbox_live_records(entry.project_dir)
+        live = {key: (rec.get("content") or "") for key, rec in records.items()}
 
         applicable = []
         for item in plan.get("applicable") or []:
@@ -8072,6 +8082,19 @@ def _build_inbox(only_project: Optional[str] = None) -> dict:
             }
             for row in annreview.results_skipped(entry.project_dir, reason="orphaned")
         ]
+
+        # Only the ones still awaiting a stamp: results.json keeps a resolved
+        # result for the life of the book, so counting the raw plan would report
+        # notes the nightly pass has already retired as though they were still
+        # queued. Counted before the early exit below, because a book whose
+        # whole queue is resolved notes renders no card at all.
+        from src.annotations.targets import already_reviewed
+
+        totals["resolved"] += sum(
+            1
+            for item in (plan.get("resolved") or [])
+            if not already_reviewed(records.get(item["key"]) or {})
+        )
 
         if not (applicable or manual or orphaned):
             continue

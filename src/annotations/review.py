@@ -34,6 +34,7 @@ from src.annotations.targets import (
     MANUAL_MULTI_ANCHOR,
     AnnotationTarget,
     SkippedAnnotation,
+    already_reviewed,
     build_targets,
 )
 from src.judges.llm_io import (
@@ -1106,14 +1107,17 @@ _APPLY_SCHEMA = {
     "applicable": "every writable fix on a dry run: {key, type, mode, old, new, confidence, "
     "recommendation}. On a real apply, only keys that diverged from that plan (`stale`) — the "
     "rest are reported by `applied`/`already_applied`; --full prints them all",
-    "manual": "reviewed but not auto-writable: {key, type, reason, recommendation}; a real apply "
-    "drops the recommendation (the report has it), --full keeps it",
+    "resolved": "reviewed and deliberately left alone — the note was already finished: "
+    "{key, type, content, recommendation}. Selecting one retires it (see `retired`)",
+    "manual": "reviewed but not auto-writable and still real work: {key, type, reason, "
+    "recommendation}; a real apply drops the recommendation (the report has it), --full keeps it",
     "applied": "keys actually written this run",
+    "retired": "keys stamped reviewed without changing their text (`resolved` selections)",
     "already_applied": "keys whose annotation already holds the planned text (no-op)",
     "stale": "keys whose annotation changed since the review — re-run prepare for these",
     "unknown_ids": "selected keys with no reviewed result",
-    "annotations_path": "the file appended to, when anything was applied",
-    "counts": "{applicable, manual, applied, already_applied, stale}",
+    "annotations_path": "the file appended to, when anything was applied or retired",
+    "counts": "{applicable, resolved, manual, applied, retired, already_applied, stale}",
 }
 
 
@@ -1160,10 +1164,20 @@ def apply(
     The only writer in this package. Requires an explicit ``select``; without one
     it plans and writes nothing.
 
+    Two kinds of selection are honoured, and they are reported separately because
+    they mean different things to a reader:
+
+    ``applicable`` -> ``applied``  the reviewer proposed text; it is written.
+    ``resolved``   -> ``retired``  the reviewer read the note and left it alone;
+                                   the same content is re-appended with an
+                                   ``ai_review`` sidecar, so ``build_targets``
+                                   stops re-detecting a note that needs nothing.
+
     Before writing, each annotation's *live* content is compared against what the
     review saw. A note edited in the reader since then is reported ``stale`` and
     skipped rather than silently overwritten — the review it is based on no longer
-    describes the text on disk.
+    describes the text on disk. That check guards the retire path too: an edit
+    since the review may well have turned a finished note back into a question.
     """
     project_dir = Path(project_dir)
     results_path = _results_path(project_dir)
@@ -1198,6 +1212,26 @@ def apply(
         for r in results.values()
         if r.get("writable")
     ]
+    # `resolved` and `manual` split what used to be one "not writable" bucket,
+    # on the same axis src/annotations/report.py already reports: a note the
+    # reviewer left alone because it was finished is not work, and counting it
+    # as "needs a hand" made the inbox's headline number mostly noise. A
+    # manual_reason still wins - a multi-anchor footnote is a human's call
+    # whether or not its text is already good, because endnotes.py publishes
+    # only its first bracket.
+    resolved = [
+        {
+            "key": r["key"],
+            "type": r["type"],
+            "content": r.get("content") or "",
+            "recommendation": r["recommendation"],
+        }
+        for r in results.values()
+        if not r.get("writable")
+        and r["state"] == "already_resolved"
+        and not r.get("manual_reason")
+    ]
+    resolved_keys = {item["key"] for item in resolved}
     manual = [
         {
             "key": r["key"],
@@ -1208,7 +1242,7 @@ def apply(
             "recommendation": r["recommendation"],
         }
         for r in results.values()
-        if not r.get("writable")
+        if not r.get("writable") and r["key"] not in resolved_keys
     ]
 
     plan_only = dry_run or not select
@@ -1216,6 +1250,7 @@ def apply(
         "status": "ok",
         "dry_run": plan_only,
         "applicable": applicable,
+        "resolved": resolved,
         "manual": manual,
         "_schema": _APPLY_SCHEMA,
     }
@@ -1223,13 +1258,16 @@ def apply(
         return {
             **base,
             "applied": [],
+            "retired": [],
             "already_applied": [],
             "stale": [],
             "unknown_ids": [],
             "counts": {
                 "applicable": len(applicable),
+                "resolved": len(resolved),
                 "manual": len(manual),
                 "applied": 0,
+                "retired": 0,
                 "already_applied": 0,
                 "stale": 0,
             },
@@ -1240,6 +1278,7 @@ def apply(
 
     selected = list(dict.fromkeys(select))
     applied: list[str] = []
+    retired: list[str] = []
     already_applied: list[str] = []
     stale: list[dict[str, str]] = []
     unknown: list[str] = []
@@ -1247,18 +1286,75 @@ def apply(
     run_id = doc.get("committed_at") or datetime.now().isoformat()
     now = datetime.now().isoformat()
 
+    def _successor(record: dict, content: str, sidecar: dict) -> dict:
+        """The next append-only record for ``record``, carrying ``sidecar``.
+
+        Built from a fixed key set rather than by copying, mirroring
+        ``POST /api/annotation``: anything the reader does not round-trip must
+        not survive a write, or a stale field would outlive the edit that
+        dropped it.
+        """
+        new_record = {
+            "project_id": record.get("project_id") or project_dir.name,
+            "chapter_id": record.get("chapter_id"),
+            "es_idx": record.get("es_idx"),
+            "type": record.get("type"),
+            "content": content,
+            "timestamp": now,
+        }
+        sub = store.storage_sub_id(record.get("sub_id"))
+        if sub is not None:
+            new_record["sub_id"] = sub
+        if record.get("origin"):
+            new_record["origin"] = record["origin"]
+        new_record[store.AI_REVIEW_KEY] = sidecar
+        return new_record
+
     for key in selected:
         result = results.get(key)
+
+        # Retiring an `already_resolved` note: the reviewer read it and chose to
+        # leave it alone, so the write is the *same* content plus the sidecar
+        # that records the reading. Without this the note carries no trace of
+        # having been reviewed and `build_targets` re-detects it every run.
+        if result is not None and key in resolved_keys:
+            record = live.get(key)
+            if record is None:
+                stale.append({"key": key, "reason": "annotation no longer present"})
+                continue
+            if already_reviewed(record):
+                already_applied.append(key)
+                continue
+            current = record.get("content") or ""
+            if current != (result.get("content") or ""):
+                stale.append({"key": key, "reason": "annotation edited since the review"})
+                continue
+            store.append_record(
+                project_dir,
+                _successor(
+                    record,
+                    current,
+                    {
+                        "run_id": run_id,
+                        "at": now,
+                        "mode": "noop",
+                        "state": "already_resolved",
+                        "prompt_version": result.get("prompt_version"),
+                        "original_content": current,
+                        "written_content": current,
+                    },
+                ),
+            )
+            retired.append(key)
+            continue
+
         if result is None or not result.get("writable"):
             # Not in the current plan. Before calling it unknown, check whether a
             # previous run already wrote it — after a re-prepare an applied note
             # is skipped as already_reviewed and so drops out of results.json,
             # and reporting that as a bad key would read like a failure.
             record = live.get(key)
-            sidecar = (record or {}).get(store.AI_REVIEW_KEY)
-            if isinstance(sidecar, dict) and sidecar.get("written_content") == (
-                record.get("content") or ""
-            ):
+            if record is not None and already_reviewed(record):
                 already_applied.append(key)
             else:
                 unknown.append(key)
@@ -1277,42 +1373,40 @@ def apply(
             stale.append({"key": key, "reason": "annotation edited since the review"})
             continue
 
-        new_record = {
-            "project_id": record.get("project_id") or project_dir.name,
-            "chapter_id": record.get("chapter_id"),
-            "es_idx": record.get("es_idx"),
-            "type": record.get("type"),
-            "content": result["new_content"],
-            "timestamp": now,
-        }
-        sub = store.storage_sub_id(record.get("sub_id"))
-        if sub is not None:
-            new_record["sub_id"] = sub
-        if record.get("origin"):
-            new_record["origin"] = record["origin"]
-        new_record[store.AI_REVIEW_KEY] = {
-            "run_id": run_id,
-            "at": now,
-            "mode": result["mode"],
-            "prompt_version": result.get("prompt_version"),
-            "original_content": result.get("content") or "",
-            "written_content": result["new_content"],
-        }
-        store.append_record(project_dir, new_record)
+        store.append_record(
+            project_dir,
+            _successor(
+                record,
+                result["new_content"],
+                {
+                    "run_id": run_id,
+                    "at": now,
+                    "mode": result["mode"],
+                    "prompt_version": result.get("prompt_version"),
+                    "original_content": result.get("content") or "",
+                    "written_content": result["new_content"],
+                },
+            ),
+        )
         applied.append(key)
 
     return {
         **base,
         "dry_run": False,
         "applied": applied,
+        "retired": retired,
         "already_applied": already_applied,
         "stale": stale,
         "unknown_ids": unknown,
-        "annotations_path": str(store.annotations_path(project_dir)) if applied else None,
+        "annotations_path": (
+            str(store.annotations_path(project_dir)) if (applied or retired) else None
+        ),
         "counts": {
             "applicable": len(applicable),
+            "resolved": len(resolved),
             "manual": len(manual),
             "applied": len(applied),
+            "retired": len(retired),
             "already_applied": len(already_applied),
             "stale": len(stale),
         },
@@ -1412,6 +1506,17 @@ def apply_relay_view(payload: dict[str, Any], *, full: bool = False) -> dict[str
             item
             for item in applicable
             if isinstance(item, dict) and item.get("key") in diverged
+        ]
+
+    # `resolved` carries each note's full content for the preview. Once the call
+    # has actually run, `retired` says what happened to it and the content is
+    # dead weight - trimmed like `manual`, and for the same reason.
+    resolved = payload.get("resolved")
+    if isinstance(resolved, list):
+        out["resolved"] = [
+            {"key": item.get("key"), "type": item.get("type")}
+            for item in resolved
+            if isinstance(item, dict)
         ]
 
     manual = payload.get("manual")

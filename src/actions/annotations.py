@@ -13,12 +13,20 @@ unlinks the drafts of every entry it re-renders, which is right for a human
 starting over and catastrophic for an unattended pass that may be resuming a
 wave the previous night's deadline cut short.
 
-**``auto_apply`` never writes a footnote.** :func:`~src.annotations.review._planned_content`
+**``auto_apply`` never writes a footnote's text.** :func:`~src.annotations.review._planned_content`
 gives ``footnote`` ``mode: "replace"`` because its content *is* the published
 endnote text, so an automatic write would put a model's gloss into the book.
 Every other type is an append after an ``— IA:`` marker into an append-only log,
 which the reader can see and undo. The policy checks both the type list and the
 mode, so a mistyped ``app_config.json`` cannot promote a footnote.
+
+It does, however, **retire** an ``already_resolved`` note of any type, footnotes
+included. That write carries no model prose at all — ``apply`` re-appends the
+note's own content byte-for-byte and reports ``stale`` on any drift — so the
+policy has nothing to protect against. It exists because the alternative is
+worse than harmless: a reader-written gloss the reviewer correctly left alone
+carried no record of having been read, so it was re-detected, re-prompted and
+re-listed as outstanding work on every run, for the life of the book.
 """
 
 from __future__ import annotations
@@ -280,7 +288,15 @@ def auto_apply(project_dir: Path, policy: Policy) -> ApplyResult:
     held = [item["key"] for item in applicable if not policy.accepts(item)]
     manual = [item["key"] for item in (plan.get("manual") or [])]
 
-    if policy.dry_run or not selected:
+    # Retiring an `already_resolved` note is not governed by the policy, and
+    # deliberately so: the policy exists to keep a model's *words* out of the
+    # book unwatched, and this write has none — `apply` re-appends byte-identical
+    # content and refuses on any drift. What it adds is the sidecar, without
+    # which a finished note is re-reviewed every night for the life of the book.
+    # That is why footnotes are safe here despite being excluded from the policy.
+    retirable = [item["key"] for item in (plan.get("resolved") or [])]
+
+    if policy.dry_run or not (selected or retirable):
         return ApplyResult(
             action=ACTION_NAME,
             status="ok",
@@ -290,12 +306,13 @@ def auto_apply(project_dir: Path, policy: Policy) -> ApplyResult:
             detail={
                 "dry_run": True,
                 "would_apply": selected,
+                "would_retire": retirable,
                 "manual": manual,
                 "policy": policy.to_payload(),
             },
         )
 
-    written = review.apply(project_dir, select=selected)
+    written = review.apply(project_dir, select=selected + retirable)
     if written.get("status") == "error":
         return ApplyResult(
             action=ACTION_NAME, status="error", held=held,
@@ -313,6 +330,7 @@ def auto_apply(project_dir: Path, policy: Policy) -> ApplyResult:
         stale=[str(s) for s in stale],
         errors=[f"unknown key after commit: {k}" for k in unknown],
         detail={
+            "retired": list(written.get("retired") or []),
             "manual": manual,
             "policy": policy.to_payload(),
             "annotations_path": written.get("annotations_path"),

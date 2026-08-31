@@ -33,7 +33,7 @@ def _ann(es_idx=0, ann_type="word_choice", content="poyo", **kw):
     return base
 
 
-def _verdict_runner(*, confidence="high", note_text="texto de la IA"):
+def _verdict_runner(*, confidence="high", note_text="texto de la IA", state="needs_help"):
     """A runner that answers every job with one well-formed verdict.
 
     No ``key`` field: ``commit`` treats an echoed key that disagrees with the
@@ -43,7 +43,7 @@ def _verdict_runner(*, confidence="high", note_text="texto de la IA"):
     """
     def runner(cmd, *, input_text, cwd):
         return 0, json.dumps({
-            "state": "needs_help",
+            "state": state,
             "state_reason": "r",
             "recommendation": "usa 'banca'",
             "note_text": note_text,
@@ -238,6 +238,53 @@ def test_auto_apply_never_writes_a_footnote(project, budget):
 
     assert result.applied == []
     assert len(result.held) == 1
+
+
+def test_auto_apply_retires_an_already_resolved_footnote(project, budget):
+    """The one footnote write that is safe: the reader's own text, unchanged.
+
+    Excluded from the policy like every footnote, but retiring carries no model
+    prose — without it the note is re-reviewed on every run, forever.
+    """
+    content = "[1] Sancerre, ciudad del centro de Francia."
+    write_annotations(
+        project, [_ann(ann_type="footnote", content=content, sub_id="u1")]
+    )
+    _reviewed(project, budget, state="already_resolved", note_text="")
+
+    result = action.auto_apply(project, Policy())
+
+    assert result.applied == []
+    assert result.held == []
+    assert len(result.detail["retired"]) == 1
+
+    live = [
+        json.loads(line)
+        for line in (project / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert live[-1]["content"] == content       # not one character of it changed
+    assert live[-1]["ai_review"]["mode"] == "noop"
+
+
+def test_a_retired_note_is_not_reviewed_again(project, budget):
+    write_annotations(project, [_ann(sub_id="u1")])
+    _reviewed(project, budget, state="already_resolved", note_text="")
+    action.auto_apply(project, Policy())
+
+    assert action.detect(project).pending == 0
+
+
+def test_auto_apply_dry_run_retires_nothing(project, budget):
+    content = "poyo — ya decidido"
+    write_annotations(project, [_ann(content=content, sub_id="u1")])
+    _reviewed(project, budget, state="already_resolved", note_text="")
+
+    before = (project / "annotations.jsonl").read_text(encoding="utf-8")
+    result = action.auto_apply(project, Policy(dry_run=True))
+
+    assert len(result.detail["would_retire"]) == 1
+    assert (project / "annotations.jsonl").read_text(encoding="utf-8") == before
 
 
 def test_a_footnote_stays_held_even_if_its_type_is_configured_in(project, budget):
