@@ -11,9 +11,14 @@
 
     Sibling to scripts/reader.ps1, with three deliberate differences:
 
-      * ExecutionTimeLimit is PT2H, not PT0S. The reader is a service and must
-        never be killed; this is a batch and needs a ceiling, matched to
-        `automation.deadline_minutes` in app_config.json.
+      * ExecutionTimeLimit is PT3H, not PT0S. The reader is a service and must
+        never be killed; this is a batch and needs a ceiling. Deliberately
+        *above* `automation.deadline_minutes` (120) rather than equal to it: the
+        driver checks its deadline between books, so a long last book can carry
+        it past the mark, and it still has a digest to write afterwards. Matched
+        exactly, the scheduler would win that race every time — killing the pass
+        with both locks still on disk and no digest, which is the whole
+        notification surface.
       * A daily trigger at 06:30 rather than at-startup.
       * No restart-on-failure. A failed night is a night's work missed, not an
         outage, and the next run picks up exactly where it stopped (`prepare`
@@ -78,7 +83,7 @@ function Get-DesiredSettings {
     #>
     $settings = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
         -StartWhenAvailable `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries
@@ -174,7 +179,21 @@ function Install-Nightly {
     $python = Get-PythonPath
     # Cheaper to fail here than to register a task that dies every morning at
     # 06:30 leaving one line in a log nobody is watching.
-    & $python -c "import sys; sys.path.insert(0, r'$RepoRoot'); import src.actions" | Out-Null
+    # $RepoRoot goes in as an *argument*, never interpolated into the source: a
+    # path holding an apostrophe would break the literal, and one ending in a
+    # backslash (a clone at a drive root) makes r'C:' a SyntaxError — both of
+    # which would surface below as the misleading "pip install" advice.
+    #
+    # And the probe runs with $ErrorActionPreference relaxed: under 'Stop', any
+    # line python writes to stderr (a deprecation warning is enough) becomes a
+    # terminating NativeCommandError in PS 5.1, bypassing the check entirely.
+    $probe = 'import sys; sys.path.insert(0, sys.argv[1]); import src.actions'
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $python -c $probe $RepoRoot 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = 'Stop'
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "$python cannot import src.actions from $RepoRoot. Run: pip install -r requirements.txt"
     }
@@ -279,8 +298,8 @@ switch ($Command) {
     }
 
     'run' {
-        # Force one execution now. The task still holds the repo lock, so this
-        # cannot overlap a scheduled run already in flight.
+        # Force one execution now. IgnoreNew plus the driver's own repo lock
+        # prevent an overlap with a scheduled run already in flight.
         schtasks /run /tn $TaskName
         Write-Host "Started. Watch it with 'scripts\nightly.ps1 log'." -ForegroundColor Green
     }

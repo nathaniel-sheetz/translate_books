@@ -197,6 +197,35 @@ def test_run_with_nothing_pending_is_a_clean_no_op(project, budget):
     assert result.targets == 0
 
 
+def test_a_profile_warning_is_reported_without_failing_the_run(project, budget,
+                                                              monkeypatch):
+    """Provenance notes colour nothing; only real failures make a run partial.
+
+    `errors` forces `status: "partial"` and the digest prints each entry as
+    "- error:", so folding warnings in filed a clean run as a failure — every
+    night, for exactly the un-pinned books this pass exists to serve.
+    """
+    from dataclasses import replace as _replace
+    from src.actions import scope as ascope
+
+    real = ascope.book_profile
+
+    def _warned(project_dir, **kwargs):
+        prof = real(project_dir, **kwargs)
+        return _replace(prof, warnings=["this book's previous waves ran on cursor"])
+
+    # `run` imports it from the module at call time, so patch it there.
+    monkeypatch.setattr("src.actions.scope.book_profile", _warned)
+
+    write_annotations(project, [_ann(sub_id="u1")])
+    result = action.run(project, budget, runner=_verdict_runner())
+
+    assert result.status == "ok"
+    assert result.errors == []
+    assert result.warnings == ["this book's previous waves ran on cursor"]
+    assert "warnings" in result.to_payload()
+
+
 # ---------------------------------------------------------------------------
 # auto_apply — the policy
 # ---------------------------------------------------------------------------
@@ -322,6 +351,23 @@ def test_auto_apply_dry_run_writes_nothing(project, budget):
     assert result.applied == []
     assert len(result.detail["would_apply"]) == 1
     assert (project / "annotations.jsonl").read_text(encoding="utf-8") == before
+
+
+def test_an_empty_queue_is_not_reported_as_a_dry_run(project, budget):
+    """`dry_run` in the payload must mean the flag, not "nothing to do".
+
+    The same branch answers both, and it is what `logs/nightly.jsonl` records —
+    a real pass over a book whose plan was already settled would otherwise file
+    itself as a dry run for ever.
+    """
+    write_annotations(project, [_ann(sub_id="u1")])
+    _reviewed(project, budget)
+    action.auto_apply(project, Policy())          # everything lands
+
+    again = action.auto_apply(project, Policy())  # nothing left to do
+
+    assert again.detail["dry_run"] is False
+    assert again.detail["would_apply"] == []
 
 
 def test_auto_apply_is_idempotent(project, budget):

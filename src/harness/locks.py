@@ -53,6 +53,19 @@ DEFAULT_STALE_AFTER_S = 3 * 60 * 60
 # would only burn CPU.
 _POLL_INTERVAL_S = 0.5
 
+# A body that will not parse is normally the signature of a process killed
+# mid-write — but it is also what our *own* creation looks like for the instant
+# between `O_EXCL` and the write, so a racing acquirer must not read that
+# instant as an abandoned lock and break it. Inside this window an unparseable
+# body is treated as fresh; past it, the writer really did die.
+_EMPTY_BODY_GRACE_S = 5.0
+
+# A release can lose to a sharing violation on Windows while any reader has the
+# body open (`read_holder` runs on every dashboard render). Giving up on the
+# first failure leaks the lock until the staleness ceiling, so retry briefly.
+_RELEASE_ATTEMPTS = 4
+_RELEASE_BACKOFF_S = 0.05
+
 LOCK_FILENAME = ".lock"
 
 
@@ -186,18 +199,44 @@ def _age_seconds(holder: dict[str, Any]) -> Optional[float]:
         started = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    return (datetime.now() - started).total_seconds()
+    # Compare in the body's own frame. A hand-edited lock, or one written by a
+    # version that moves to `datetime.now(timezone.utc)`, is offset-aware, and
+    # subtracting it from a naive `now` raises TypeError out of every acquire.
+    now = datetime.now(started.tzinfo) if started.tzinfo is not None else datetime.now()
+    return (now - started).total_seconds()
 
 
-def is_stale(holder: Optional[dict[str, Any]], *, stale_after: float) -> bool:
+def _body_written_within_grace(path: Optional[Path]) -> bool:
+    """True when ``path`` was written inside ``_EMPTY_BODY_GRACE_S``.
+
+    Only meaningful for an unparseable body: it separates "a writer is between
+    its create and its write, right now" from "a process died mid-write".
+    """
+    if path is None:
+        return False
+    try:
+        age = time.time() - Path(path).stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < _EMPTY_BODY_GRACE_S
+
+
+def is_stale(
+    holder: Optional[dict[str, Any]],
+    *,
+    stale_after: float,
+    path: Optional[Path] = None,
+) -> bool:
     """True when this lock body may be broken.
 
-    A body that is missing or unparseable is stale by definition — an empty or
-    truncated lockfile is the signature of a process killed mid-write, and
-    honouring it forever would wedge the book.
+    A body that is missing or unparseable is stale — an empty or truncated
+    lockfile is the signature of a process killed mid-write, and honouring it
+    forever would wedge the book. The exception is one just written: pass
+    ``path`` and a body younger than ``_EMPTY_BODY_GRACE_S`` is left alone, so a
+    racing acquirer cannot break a lock the owner is still in the act of taking.
     """
     if not holder:
-        return True
+        return not _body_written_within_grace(path)
 
     age = _age_seconds(holder)
     if age is not None and age > stale_after:
@@ -250,10 +289,11 @@ def holder_of(
     succeed right now?", which is what the dashboard needs before it offers a
     destructive button. Read-only: it never breaks anything.
     """
-    holder = read_holder(lock_path(project_dir))
+    path = lock_path(project_dir)
+    holder = read_holder(path)
     if holder is None:
         return None
-    if is_stale(holder, stale_after=stale_after):
+    if is_stale(holder, stale_after=stale_after, path=path):
         return None
     return holder
 
@@ -276,13 +316,16 @@ def held_by_this_process(holder: Optional[dict[str, Any]]) -> bool:
 def _write_lock(path: Path, body: dict[str, Any]) -> bool:
     """Atomically create ``path`` with ``body``. False when it already exists."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Serialise before the create, so the file goes from absent to complete in
+    # one `os.write` rather than existing empty for the length of a json.dump.
+    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(body, fh, ensure_ascii=False)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
     except Exception:
         # A body we could not finish writing is worse than no lock: it would
         # read as "held by nobody" forever. Take it back down.
@@ -300,12 +343,31 @@ def _release(path: Path, token: str) -> None:
     ceiling), unlinking would free *their* lock — so check first. Best-effort:
     a release failure must never mask the body's own exception.
     """
-    try:
-        holder = read_holder(path)
-        if holder is not None and holder.get("_token") == token:
+    for attempt in range(_RELEASE_ATTEMPTS):
+        try:
+            holder = read_holder(path)
+            if holder is None or holder.get("_token") != token:
+                return
             path.unlink(missing_ok=True)
-    except OSError:
-        _log.warning("could not release lock %s", path, exc_info=True)
+            return
+        except OSError:
+            if attempt + 1 >= _RELEASE_ATTEMPTS:
+                _log.warning("could not release lock %s", path, exc_info=True)
+                return
+            time.sleep(_RELEASE_BACKOFF_S * (attempt + 1))
+
+
+def _wait_to_retry(deadline: float) -> bool:
+    """Sleep one poll interval. False when ``deadline`` has already passed.
+
+    The single throttle for every retry path in ``_acquire``, so no branch can
+    loop unbounded or un-slept.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    time.sleep(min(_POLL_INTERVAL_S, remaining))
+    return True
 
 
 def _acquire(
@@ -334,8 +396,13 @@ def _acquire(
 
         holder = read_holder(path)
         if holder is None:
-            continue                      # released between the two calls; retry
-        if is_stale(holder, stale_after=stale_after):
+            # Released between the two calls. Retry — but through the same
+            # bounded wait as every other path, or a file that keeps failing to
+            # unlink (a Windows sharing violation) spins a core forever.
+            if not _wait_to_retry(deadline):
+                raise LockBusy(path, {})
+            continue
+        if is_stale(holder, stale_after=stale_after, path=path):
             _log.warning(
                 "breaking stale lock %s held by pid=%s kind=%s since %s",
                 path, holder.get("pid"), holder.get("kind"), holder.get("started_at"),
@@ -346,12 +413,13 @@ def _acquire(
                 path.unlink()
             if _write_lock(path, body):
                 return token
+            # Lost the race to break it, or the unlink failed. Either way, wait.
+            if not _wait_to_retry(deadline):
+                raise LockBusy(path, holder)
             continue
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if not _wait_to_retry(deadline):
             raise LockBusy(path, holder)
-        time.sleep(min(_POLL_INTERVAL_S, remaining))
 
 
 @contextlib.contextmanager

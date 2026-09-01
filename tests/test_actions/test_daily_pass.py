@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import importlib
 import json
+import pathlib
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from src.actions.registry import Action, ActionState, ApplyResult, RunResult
+from src.actions.scope import book_profile as real_book_profile
 from src.harness import locks
 from tests.test_actions.conftest import make_book
 
@@ -87,8 +90,8 @@ def install(monkeypatch, fake):
     monkeypatch.setattr(daily_pass.registry, "get_action", lambda name: fake.as_action())
 
 
-def run(argv):
-    return daily_pass._execute(daily_pass._parse_args(argv))
+def run(argv, run_id="nightly_20260101_000000"):
+    return daily_pass._execute(daily_pass._parse_args(argv), run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +282,10 @@ def test_a_refused_cli_costs_only_its_own_books(driver, monkeypatch):
     install(monkeypatch, fake)
     monkeypatch.setattr(
         daily_pass, "_preflight",
-        lambda pairs: {"claude": "Invalid API key · Please run /login"},
+        lambda pairs: {
+            pair: "Invalid API key · Please run /login"
+            for pair in pairs if pair[0] == "claude"
+        },
     )
 
     payload = run([])
@@ -290,6 +296,38 @@ def test_a_refused_cli_costs_only_its_own_books(driver, monkeypatch):
     assert "/login" in refused["detail"]
 
 
+def test_one_books_refused_model_leaves_the_rest_of_its_family_alone(driver, monkeypatch):
+    """Cursor's third gate validates the model id, so a refusal can be one book's.
+
+    Keyed by CLI, one book pinning a model that gate rejects took every other
+    book on that family out of the night, with the wrong reason attached.
+    """
+    for name in ("bad-model", "good-model"):
+        book = make_book(driver, name)
+        (book / ".harness" / "config.json").write_text(
+            json.dumps({"headless_cli": "cursor"}), encoding="utf-8"
+        )
+    fake = FakeAction()
+    install(monkeypatch, fake)
+
+    def _profile_model(project_dir, **kwargs):
+        prof = real_book_profile(project_dir, **kwargs)
+        model = "not-a-model" if Path(project_dir).name == "bad-model" else "ok-model"
+        return replace(prof, worker_model=model)
+
+    monkeypatch.setattr(daily_pass.ascope, "book_profile", _profile_model)
+    monkeypatch.setattr(
+        daily_pass, "_preflight",
+        lambda pairs: {p: "unrecognised model" for p in pairs if p[1] == "not-a-model"},
+    )
+
+    payload = run([])
+
+    assert fake.ran == ["good-model"]
+    refused = [s for s in payload["skipped_books"] if s["project_id"] == "bad-model"][0]
+    assert refused["detail"] == "unrecognised model"
+
+
 def test_a_refused_cli_prepares_nothing(driver, monkeypatch):
     """Re-running after `claude` + /login must be a clean start, not a resume."""
     book = make_book(driver, "on-claude")
@@ -298,7 +336,10 @@ def test_a_refused_cli_prepares_nothing(driver, monkeypatch):
     )
     fake = FakeAction()
     install(monkeypatch, fake)
-    monkeypatch.setattr(daily_pass, "_preflight", lambda pairs: {"claude": "logged out"})
+    monkeypatch.setattr(
+        daily_pass, "_preflight",
+        lambda pairs: {pair: "logged out" for pair in pairs if pair[0] == "claude"},
+    )
 
     run([])
 
@@ -326,6 +367,50 @@ def test_a_real_run_writes_a_digest_and_a_log_row(driver, monkeypatch):
     row = json.loads(daily_pass.NIGHTLY_LOG.read_text(encoding="utf-8").splitlines()[-1])
     assert row["run_id"] == payload["run_id"]
     assert row["totals"]["applied"] == 1
+
+
+def test_two_runs_in_one_day_each_keep_their_digest(driver, monkeypatch):
+    """The digest is the whole notification surface, so it is named per run.
+
+    Dated `annotations_<YYYYmmdd>.md`, a hand-run after fixing a logged-out CLI
+    silently replaced the 06:30 pass's record of the other fifteen books.
+    """
+    make_book(driver, "a")
+    install(monkeypatch, FakeAction())
+
+    run([], run_id="nightly_20260101_063000")
+    run([], run_id="nightly_20260101_181500")
+
+    digests = sorted(pathlib.Path(daily_pass.DIGEST_DIR).glob("annotations_*.md"))
+    assert len(digests) == 2
+
+
+def test_a_dry_run_survives_one_book_raising(driver, monkeypatch):
+    """`--dry-run` is what you reach for when a book is already broken.
+
+    The dry-run branch sat above the try that the module's docstring promises
+    ("one book's exception ends that book, not the night"), so one corrupt
+    results.json aborted the whole plan and took the other books with it.
+    """
+    make_book(driver, "broken")
+    make_book(driver, "fine")
+    fake = FakeAction()
+    real_run = fake.run
+
+    def _run(project_dir, budget):
+        if Path(project_dir).name == "broken":
+            raise RuntimeError("corrupt results.json")
+        return real_run(project_dir, budget)
+
+    fake.run = _run
+    install(monkeypatch, fake)
+
+    payload = run(["--dry-run"])
+
+    assert fake.ran == ["fine"]
+    broken = [b for b in payload["books"] if b["project_id"] == "broken"][0]
+    assert broken["status"] == "error"
+    assert "corrupt results.json" in broken["error"]
 
 
 def test_held_resolutions_are_counted_for_the_inbox(driver, monkeypatch):

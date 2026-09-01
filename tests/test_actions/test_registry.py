@@ -87,6 +87,25 @@ def test_a_lower_floor_lets_medium_through():
     assert Policy(confidence_floor="medium").accepts(_item(confidence="medium")) is True
 
 
+@pytest.mark.parametrize("floor", ["very high", "hgih", "", "HIGH!", None])
+def test_an_unrecognised_floor_falls_back_to_the_strictest(floor):
+    """The floor has to fail closed; an item label may fail open.
+
+    ``confidence_rank`` returns 0 for anything it does not know, which is the
+    safe direction for an item — it clears fewer floors. On the floor side the
+    same 0 admits *everything*, so one typo in ``app_config.json`` would have
+    the nightly pass auto-writing low-confidence prose into every book.
+    """
+    policy = Policy(confidence_floor=floor)
+    assert policy.confidence_floor == "high"
+    assert policy.accepts(_item(confidence="low")) is False
+    assert policy.accepts(_item(confidence="high")) is True
+
+
+def test_a_recognised_floor_is_kept_verbatim():
+    assert Policy(confidence_floor="  Medium  ").confidence_floor == "medium"
+
+
 def test_rejects_a_type_outside_the_list():
     assert Policy().accepts(_item(type="footnote")) is False
 

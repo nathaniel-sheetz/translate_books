@@ -161,6 +161,7 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
 
     project_dir = Path(project_dir)
     errors: list[str] = []
+    warnings: list[str] = []
 
     prof = book_profile(
         project_dir,
@@ -168,7 +169,7 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
         override=budget.cli,
         default_cli=budget.default_cli,
     )
-    errors.extend(prof.warnings)
+    warnings.extend(prof.warnings)
 
     # Before `prepare`, because `prepare` writes: it renders a prompt file per
     # annotation and rewrites manifest.json. A dry run has to be able to answer
@@ -182,6 +183,7 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
         )
         return RunResult(
             action=ACTION_NAME, status="ok", targets=planned, errors=errors,
+            warnings=warnings,
             detail={
                 "dry_run": True,
                 "cli": prof.cli,
@@ -203,12 +205,14 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
         return RunResult(
             action=ACTION_NAME, status="error",
             errors=[*errors, str(prep.get("error") or "prepare failed")],
+            warnings=warnings,
         )
 
     entries = prep.get("manifest") or []
     if not entries:
         return RunResult(
             action=ACTION_NAME, status="ok", targets=0, errors=errors,
+            warnings=warnings,
             detail={"cli": prof.cli, "cli_source": prof.cli_source},
         )
 
@@ -222,6 +226,7 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
     if not capped:
         return RunResult(
             action=ACTION_NAME, status="partial", targets=0, errors=errors,
+            warnings=warnings,
             detail={"left_over": left_over, "reason": "max_targets exhausted"},
         )
 
@@ -247,6 +252,7 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
             wrote=len(out.get("wrote") or []),
             failed=len(out.get("failed") or []),
             errors=[*errors, str(landed.get("error") or "commit failed")],
+            warnings=warnings,
         )
 
     counts = landed.get("counts") or {}
@@ -264,6 +270,7 @@ def run(project_dir: Path, budget: Budget, *, runner=None) -> RunResult:
         failed=len(out.get("failed") or []) + int(counts.get("failed") or 0),
         committed=committed,
         errors=errors[:20],
+        warnings=warnings[:20],
         report_path=landed.get("report_path"),
         detail={
             "cli": prof.cli,
@@ -336,7 +343,7 @@ def auto_apply(project_dir: Path, policy: Policy) -> ApplyResult:
             held=held,
             errors=[],
             detail={
-                "dry_run": True,
+                "dry_run": policy.dry_run,
                 "would_apply": selected,
                 "would_retire": retirable,
                 "manual": manual,

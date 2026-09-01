@@ -137,6 +137,31 @@ def test_none_overrides_are_ignored():
     assert settings["concurrency"] == 2
 
 
+@pytest.mark.parametrize("key", ["exclude_groups", "auto_apply_types"])
+def test_a_string_where_a_list_belongs_is_refused(monkeypatch, key):
+    """Both keys are iterated, so a bare string fails silently — twice over.
+
+    ``exclude_groups`` as ``".backburner"`` becomes a set of its own characters:
+    the group it names stops being excluded and the pass reviews backup
+    snapshots. ``auto_apply_types`` as a string stops matching any type at all.
+    One widens the blast radius, one disables the feature; neither says a word.
+    """
+    monkeypatch.setattr(
+        "src.actions.scope.load_app_config",
+        lambda: {"automation": {key: ".backburner"}},
+    )
+    settings = ascope.automation_config()
+    assert settings[key] == ascope.AUTOMATION_DEFAULTS[key]
+
+
+def test_a_real_list_still_overrides(monkeypatch):
+    monkeypatch.setattr(
+        "src.actions.scope.load_app_config",
+        lambda: {"automation": {"exclude_groups": [".attic"]}},
+    )
+    assert ascope.automation_config()["exclude_groups"] == [".attic"]
+
+
 # ---------------------------------------------------------------------------
 # resolve_book_cli — the ladder
 # ---------------------------------------------------------------------------

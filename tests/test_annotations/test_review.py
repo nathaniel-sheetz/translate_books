@@ -184,6 +184,43 @@ def test_prepare_clears_stale_drafts_unless_keep_drafts(project):
     assert draft.read_text(encoding="utf-8") == "in flight"
 
 
+def test_keep_drafts_drops_a_draft_whose_note_has_changed(project):
+    """`keep_drafts` protects work in flight, not a verdict about older text.
+
+    The entry is re-rendered with the note's *current* content while `fanout`
+    skips any key whose draft is non-empty, so a draft kept across an edit would
+    pair new text with an old verdict — and `apply`'s drift check, comparing the
+    live note against that new text, would wave it through.
+    """
+    from pathlib import Path
+
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    draft = Path(prep["manifest"][0]["draft_path"])
+    draft.write_text("verdict about «poyo»", encoding="utf-8")
+
+    # The reader rewrites the note the draft was rendered against.
+    write_annotations(project, [_ann(es_idx=1, content="marco", sub_id="u1")])
+    again = review.prepare(project, keep_drafts=True)
+
+    assert not draft.exists()
+    assert again["manifest"][0]["content"] == "marco"
+
+
+def test_keep_drafts_drops_a_draft_it_cannot_prove_fresh(project):
+    """No manifest means nothing says what the draft was rendered against."""
+    from pathlib import Path
+
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    draft = Path(prep["manifest"][0]["draft_path"])
+    draft.write_text("verdict", encoding="utf-8")
+    (project / ".harness" / "annotations" / "manifest.json").unlink()
+
+    review.prepare(project, keep_drafts=True)
+    assert not draft.exists()
+
+
 def test_prepare_carries_skips_into_the_manifest(project):
     write_annotations(project, [_ann(es_idx=999, content="stranded", sub_id="u1")])
     prep = review.prepare(project)
@@ -547,6 +584,27 @@ def test_retiring_stamps_the_sidecar_without_touching_the_text(project):
     assert sidecar["state"] == "already_resolved"
     assert sidecar["written_content"] == content
     assert sidecar["original_content"] == content
+
+
+def test_a_write_keeps_the_es_text_re_anchor_snapshot(project):
+    """es_text is how a note survives a realign that drops its es_idx.
+
+    The successor record is built from a fixed key set mirroring
+    `POST /api/annotation` — which writes es_text too. Losing it here would
+    strand the note the next time the alignment moves, and the nightly pass
+    retires every finished note in every book.
+    """
+    content = "poyo — ya decidido"
+    write_annotations(project, [
+        _ann(es_idx=1, content=content, sub_id="u1", es_text="Se sentó en el poyo."),
+    ])
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+
+    review.apply(project, select=[prep["manifest"][0]["key"]])
+
+    assert store.load_active(project)[0]["es_text"] == "Se sentó en el poyo."
 
 
 def test_retired_notes_are_skipped_on_the_next_run(project):

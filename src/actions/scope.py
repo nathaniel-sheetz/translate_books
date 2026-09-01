@@ -28,12 +28,15 @@ editing sixteen ``config.json`` files.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from src.app_config import load_app_config
 from src.harness import state as hstate
+
+_log = logging.getLogger(__name__)
 
 # The ``automation`` block's defaults. Anything the operator does not set in
 # ``app_config.json`` comes from here, so a fresh clone behaves the same as this
@@ -114,19 +117,49 @@ class ScopeResult:
         return len(self.projects)
 
 
+# List-valued automation keys. A string here is the plausible hand-edit and the
+# damaging one: both of these are iterated, so `".backburner"` becomes a set of
+# its own characters — silently un-excluding the group it names, and excluding
+# any single-character grouping folder — while `auto_apply_types` as a string
+# stops matching any type at all. Opposite failures, both silent.
+_AUTOMATION_LIST_KEYS = ("exclude_groups", "auto_apply_types")
+
+
+def _coerce_automation(values: dict[str, Any], source: str) -> dict[str, Any]:
+    """Drop values whose type would fail silently, warning about each."""
+    clean = {}
+    for key, value in values.items():
+        if key in _AUTOMATION_LIST_KEYS and not isinstance(value, (list, tuple)):
+            _log.warning(
+                "%s: automation.%s must be a list, got %s — using the default",
+                source, key, type(value).__name__,
+            )
+            continue
+        clean[key] = value
+    return clean
+
+
 def automation_config(overrides: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """:data:`AUTOMATION_DEFAULTS` merged under ``app_config.json``'s ``automation``.
 
     ``overrides`` (a driver's command-line flags) wins over both. Keys with a
     ``None`` value are ignored rather than blanking the default, so a caller can
     pass its whole argparse namespace without special-casing every unset flag.
+
+    List-typed keys are type-checked on the way in — see
+    :data:`_AUTOMATION_LIST_KEYS` for why a string there is worse than a missing
+    key rather than merely wrong.
     """
     merged = dict(AUTOMATION_DEFAULTS)
     block = load_app_config().get("automation")
     if isinstance(block, dict):
-        merged.update({k: v for k, v in block.items() if v is not None})
+        merged.update(_coerce_automation(
+            {k: v for k, v in block.items() if v is not None}, "app_config.json"
+        ))
     if overrides:
-        merged.update({k: v for k, v in overrides.items() if v is not None})
+        merged.update(_coerce_automation(
+            {k: v for k, v in overrides.items() if v is not None}, "override"
+        ))
     return merged
 
 

@@ -167,8 +167,15 @@ clone with no block behaves identically. Driver flags override both:
 `--default-cli`, `--concurrency`, `--max-targets`, `--deadline-minutes`.
 
 Size `deadline_minutes` against the per-job ceilings in `headless._CLI_JOB_TIMEOUT_S`
-— claude 1800 s, cursor 900 s — not against the 9.7 s median. One wedged job is
-what the deadline is for.
+— claude 1800 s, cursor 900 s — not against the 9.7 s median.
+
+**It is checked between books, not inside one.** A book already under way runs to
+completion, so the real worst case is `deadline_minutes` plus one book's full
+fan-out. That is why the scheduled task's `ExecutionTimeLimit` is PT3H against a
+120-minute deadline rather than matched to it: the driver has to be able to
+finish its last book and still write the digest before the scheduler intervenes.
+Bounding a single wedged *job* is the per-job CLI timeout's work, not this
+setting's.
 
 ---
 

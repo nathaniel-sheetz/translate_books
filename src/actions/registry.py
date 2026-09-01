@@ -19,9 +19,12 @@ web response can all relay the same object without re-deriving it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+_log = logging.getLogger(__name__)
 
 # Confidence ladder the review verdicts use (``review.parse_verdict`` coerces
 # anything else to ``medium``). Ordered weakest-first so a floor is a >= test.
@@ -31,13 +34,34 @@ CONFIDENCE_ORDER = ("low", "medium", "high")
 def confidence_rank(value: str | None) -> int:
     """Position of a confidence label in :data:`CONFIDENCE_ORDER`.
 
-    An unrecognised label ranks as ``low`` — the safe direction, since the rank
-    is only ever compared against a floor that decides whether to write.
+    An unrecognised *item* label ranks as ``low`` — the safe direction, since a
+    weaker item clears fewer floors. That reasoning is exactly inverted for the
+    floor itself, which is why :func:`resolve_confidence_floor` guards it rather
+    than letting it fall through here: a floor that ranked 0 would admit
+    everything.
     """
     try:
         return CONFIDENCE_ORDER.index(str(value or "").strip().lower())
     except ValueError:
         return 0
+
+
+def resolve_confidence_floor(value: str | None) -> str:
+    """Validate a configured floor, falling back to the strictest label.
+
+    ``confidence_floor`` is the gate that keeps a reviewer's unsure prose out of
+    a book unwatched, so it has to fail closed. A typo in ``app_config.json``
+    ("hgih", "very high", a stray space) would otherwise rank 0 and let every
+    low-confidence result through on every book, unattended and unreported.
+    """
+    label = str(value or "").strip().lower()
+    if label in CONFIDENCE_ORDER:
+        return label
+    _log.warning(
+        "unrecognised confidence_floor %r; falling back to %r",
+        value, CONFIDENCE_ORDER[-1],
+    )
+    return CONFIDENCE_ORDER[-1]
 
 
 @dataclass(frozen=True)
@@ -87,7 +111,9 @@ class Budget:
 
     ``deadline`` is a :func:`time.monotonic` stamp rather than a duration so a
     driver can hand the *same* deadline to every book of the night and each one
-    can tell how much of it is left.
+    can tell how much of it is left. No action honours it *within* a book yet —
+    ``scripts/daily_pass.py`` enforces it between them — so it bounds the number
+    of books a night starts, not the length of any one of them.
 
     The two CLI fields are not interchangeable. ``cli`` **forces** a family past
     a book's own pin and exists for debugging only — the scheduled path leaves it
@@ -111,6 +137,12 @@ class RunResult:
     ``status`` is ``"ok"`` (everything landed), ``"partial"`` (something failed
     or was left over — the usual outcome of a budget ceiling) or ``"error"``
     (nothing useful happened; ``errors`` says why).
+
+    ``warnings`` is separate from ``errors`` on purpose. Provenance notes — "this
+    book's previous waves ran on cursor" — are worth printing and colour nothing;
+    folding them into ``errors`` would force ``status`` to ``"partial"`` and file
+    them in the digest under "error", every night, for the un-pinned majority of
+    books this pass exists to serve.
     """
 
     action: str
@@ -120,6 +152,7 @@ class RunResult:
     failed: int = 0
     committed: int = 0
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     report_path: Optional[str] = None
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -132,6 +165,7 @@ class RunResult:
             "failed": self.failed,
             "committed": self.committed,
             "errors": list(self.errors),
+            **({"warnings": list(self.warnings)} if self.warnings else {}),
             "report_path": self.report_path,
             **({"detail": dict(self.detail)} if self.detail else {}),
         }
@@ -151,6 +185,12 @@ class Policy:
     types: tuple[str, ...] = ("word_choice", "inconsistency", "flag")
     confidence_floor: str = "high"
     dry_run: bool = False
+
+    def __post_init__(self) -> None:
+        # frozen dataclass: assign through object.__setattr__.
+        object.__setattr__(
+            self, "confidence_floor", resolve_confidence_floor(self.confidence_floor)
+        )
 
     def accepts(self, item: dict[str, Any]) -> bool:
         """True when one ``review.apply`` plan entry clears both gates.

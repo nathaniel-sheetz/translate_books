@@ -170,6 +170,23 @@ def test_manual_entries_carry_their_reason(client, books):
     assert data["books"][0]["manual"][0]["reason"] == "multi_anchor"
 
 
+def test_a_manual_row_for_a_deleted_note_leaves_the_inbox(client, books):
+    """`results.json` keeps a key for the life of the book; the reader does not.
+
+    Only `applicable` was reconciled against the live records, so a manual row
+    for a note since deleted sat in the "needing a hand" count for ever, linking
+    to a chapter position that no longer holds it.
+    """
+    book = make_book(books)
+    plant_results(book, writable=False)
+    (book / "annotations.jsonl").write_text("", encoding="utf-8")
+
+    data = client.get("/api/review-inbox").get_json()
+
+    assert data["totals"]["manual"] == 0
+    assert data["books"] == []
+
+
 def test_orphans_are_listed_so_they_can_be_re_anchored(client, books):
     """No review run will ever reach them; only a human moving the anchor will."""
     book = make_book(books)
@@ -368,6 +385,30 @@ def test_apply_is_refused_while_a_wave_holds_the_lock(client, books):
     assert response.get_json()["lock"]["kind"] == "annotations"
     # Nothing was written while it was refused.
     assert len((book / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines()) == 1
+
+
+def test_a_409_names_no_pid_host_or_path(client, books):
+    """The app binds 0.0.0.0 with no auth, so a 409 is readable on the LAN.
+
+    `kind` and `started_at` are what a caller needs to decide whether to wait;
+    the pid, the hostname, the absolute lockfile path and the internal `_token`
+    are host detail and belong in the log.
+    """
+    import socket
+
+    book = make_book(books)
+    plant_results(book)
+
+    with locks.project_lock(book, kind="annotations", run_id="nightly"):
+        response = _apply(client, book.name, ["chapter_01__0__u1"])
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert set(payload["lock"]) == {"kind", "started_at"}
+    body = json.dumps(payload)
+    assert socket.gethostname() not in body
+    assert str(book) not in body
+    assert "_token" not in body
 
 
 def test_apply_releases_the_lock_afterwards(client, books):

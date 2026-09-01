@@ -14,11 +14,18 @@ import os
 import socket
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from src.harness import locks
+
+
+def _age(path, seconds):
+    """Backdate ``path``'s mtime, so the empty-body grace window has passed."""
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
 
 
 @pytest.fixture
@@ -168,14 +175,89 @@ def test_another_hosts_pid_is_never_probed(book):
 
 
 @pytest.mark.parametrize("content", ["", "not json", "[]"])
-def test_an_unreadable_body_is_stale(book, content):
+def test_an_unreadable_body_is_stale_once_it_is_past_the_grace(book, content):
     """A truncated lockfile is a killed process, not a permanent claim."""
     path = locks.lock_path(book)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    _age(path, locks._EMPTY_BODY_GRACE_S + 1)
     with locks.project_lock(book, kind="nightly", run_id="fresh"):
         body = json.loads(path.read_text(encoding="utf-8"))
     assert body["run_id"] == "fresh"
+
+
+@pytest.mark.parametrize("content", ["", "not json", "[]"])
+def test_an_unreadable_body_just_written_is_not_broken(book, content):
+    """The window between a holder's O_EXCL create and its write is not a stale lock.
+
+    Without this, two processes acquiring the same book milliseconds apart both
+    end up owning it: the second reads the first's still-empty body, calls it
+    abandoned, and breaks it.
+    """
+    path = locks.lock_path(book)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(locks.LockBusy):
+        with locks.project_lock(book, kind="nightly", run_id="racer"):
+            pass
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_a_release_retries_an_unlink_that_loses_a_race(book, monkeypatch):
+    """On Windows a delete fails while any reader has the body open.
+
+    `read_holder` runs on every dashboard render and every `pending_work scan`,
+    so a release colliding with one is ordinary. Giving up on the first failure
+    leaks a lock whose pid is still alive — no staleness check retires it, and
+    the book is 409ing for three hours.
+    """
+    real_unlink = Path.unlink
+    calls = {"n": 0}
+
+    def _flaky(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OSError(32, "The process cannot access the file")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _flaky)
+    with locks.project_lock(book, kind="annotations", run_id="r1") as path:
+        pass
+
+    assert calls["n"] == 3
+    assert not path.exists()
+
+
+def test_a_release_that_cannot_win_gives_up_quietly(book, monkeypatch):
+    """A release failure must never mask the body's own exception."""
+    def _always_fails(self, *args, **kwargs):
+        raise OSError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(Path, "unlink", _always_fails)
+    with locks.project_lock(book, kind="annotations", run_id="r1"):
+        pass  # exits without raising
+
+
+@pytest.mark.parametrize("tz", [timezone.utc, timezone(timedelta(hours=-4))])
+def test_a_tz_aware_started_at_is_aged_not_raised(tz):
+    """Subtracting an aware datetime from a naive `now` is a TypeError.
+
+    Nothing catches it, so it escapes `_acquire`, `holder_of` and the
+    dashboard's conflict check — one hand-edited lock file 500s every route for
+    that book until somebody deletes it. Age is compared in the body's own
+    frame, so an offset does not make a fresh lock look ancient either.
+    """
+    def _holder(when):
+        return {
+            "pid": os.getpid(), "host": socket.gethostname(),
+            "started_at": when.isoformat(),
+        }
+
+    fresh = _holder(datetime.now(tz))
+    old = _holder(datetime.now(tz) - timedelta(hours=4))
+
+    assert locks.is_stale(fresh, stale_after=locks.DEFAULT_STALE_AFTER_S) is False
+    assert locks.is_stale(old, stale_after=locks.DEFAULT_STALE_AFTER_S) is True
 
 
 def test_holder_of_ignores_a_stale_lock(book):

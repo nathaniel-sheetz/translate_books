@@ -76,26 +76,25 @@ _LOCK_WAIT_S = 60.0
 # ---------------------------------------------------------------------------
 
 
-def _preflight(pairs: set[tuple[str, str]]) -> dict[str, str]:
-    """Probe each ``(cli, model)`` the night needs. Returns ``{cli: error}``.
+def _preflight(pairs: set[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """Probe each ``(cli, model)`` the night needs. Returns ``{(cli, model): error}``.
 
-    Keyed by CLI in the result because that is the granularity of the decision —
-    a logged-out CLI takes every book pinned to it out of the night — but probed
-    per ``(cli, model)`` because Cursor's third gate validates the model id, and
-    a book with its own pinned model can fail where the family's default passes.
+    Keyed by the pair, not by the CLI, because Cursor's third gate validates the
+    model id: one book pinning a model that gate rejects must take out that book,
+    not every other book on the same family. A failure that really is family-wide
+    — a missing binary, a logged-out CLI — fails every pair for that CLI anyway,
+    so those books all drop out as before, each carrying the real reason.
     """
     from src.harness.headless import preflight_error
 
-    errors: dict[str, str] = {}
+    errors: dict[tuple[str, str], str] = {}
     for cli, model in sorted(pairs):
-        if cli in errors:
-            continue
         try:
             problem = preflight_error(cli, model=model)
         except Exception as exc:  # noqa: BLE001 - a probe crash is a refusal
             problem = f"{type(exc).__name__}: {exc}"
         if problem:
-            errors[cli] = problem
+            errors[(cli, model)] = problem
     return errors
 
 
@@ -196,11 +195,21 @@ def _run_book(
         # No lock: a dry run writes nothing, so taking a book's lock would only
         # make `--dry-run` fail against a book the dashboard is working on — the
         # one moment you most want to be able to ask what the plan is.
-        result = action.run(entry.project_dir, budget)
-        row["run"] = result.to_payload()
-        if policy is not None and action.auto_apply is not None:
-            applied = action.auto_apply(entry.project_dir, policy)
-            row["apply"] = applied.to_payload()
+        #
+        # Inside the same handler as the real path all the same: `--dry-run` is
+        # what you reach for when a book is already broken, so it is the last
+        # mode that should die on one corrupt results.json and take the other
+        # fifteen books' plans with it.
+        try:
+            result = action.run(entry.project_dir, budget)
+            row["run"] = result.to_payload()
+            if policy is not None and action.auto_apply is not None:
+                applied = action.auto_apply(entry.project_dir, policy)
+                row["apply"] = applied.to_payload()
+        except Exception as exc:  # noqa: BLE001 - one book must not end the night
+            row["status"] = "error"
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            row["traceback"] = traceback.format_exc(limit=6)
         return row
 
     try:
@@ -272,10 +281,16 @@ def _policy_line(payload: dict) -> str:
 
 
 def _write_digest(payload: dict) -> Path:
-    """One markdown file per night, linking each book's own dated report."""
+    """One markdown file per run, linking each book's own dated report.
+
+    Named for the run, not the day: a hand-run after fixing a logged-out CLI
+    would otherwise overwrite the 06:30 pass's digest, and that digest is the
+    only record the other fifteen books produce.
+    """
     DIGEST_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d")
-    path = DIGEST_DIR / f"annotations_{stamp}.md"
+    run_id = str(payload.get("run_id") or "")
+    stamp = run_id[len("nightly_"):] if run_id.startswith("nightly_") else run_id
+    path = DIGEST_DIR / f"annotations_{stamp or datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
 
     totals = payload["totals"]
     lines = [
@@ -318,6 +333,8 @@ def _write_digest(payload: dict) -> Path:
             lines.append(f"- report: [{report}]({report})")
         for err in (run.get("errors") or [])[:5]:
             lines.append(f"- error: {err}")
+        for warn in (run.get("warnings") or [])[:5]:
+            lines.append(f"- note: {warn}")
         lines.append("")
 
     if payload["skipped_books"]:
@@ -400,7 +417,7 @@ def _parse_args(argv: list[str] | None):
     return parser.parse_args(argv)
 
 
-def _execute(args) -> dict:
+def _execute(args, run_id: str) -> dict:
     settings = ascope.automation_config({
         "default_cli": args.default_cli,
         "concurrency": args.concurrency,
@@ -408,7 +425,6 @@ def _execute(args) -> dict:
         "deadline_minutes": args.deadline_minutes,
     })
     action = registry.get_action(args.action)
-    run_id = f"nightly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     policy = None if args.no_apply else Policy(
         types=tuple(settings["auto_apply_types"]),
@@ -418,23 +434,30 @@ def _execute(args) -> dict:
 
     candidates, skipped, pairs = _plan(settings, args)
 
-    preflight_errors: dict[str, str] = {}
+    preflight_errors: dict[tuple[str, str], str] = {}
     if not args.dry_run and candidates:
         preflight_errors = _preflight(pairs)
         if preflight_errors:
             kept = []
             for candidate in candidates:
-                cli = candidate["profile"].cli
-                if cli in preflight_errors:
+                prof = candidate["profile"]
+                pair = (prof.cli, prof.worker_model)
+                if pair in preflight_errors:
                     skipped.append({
                         "project_id": candidate["entry"].project_id,
-                        "reason": f"preflight:{cli}",
-                        "detail": preflight_errors[cli],
+                        "reason": f"preflight:{prof.cli}",
+                        "detail": preflight_errors[pair],
                         "pending": candidate["state"].pending,
                     })
                 else:
                     kept.append(candidate)
             candidates = kept
+
+    # `<cli>:<model>`, because a tuple cannot be a JSON key and every consumer
+    # below here — the digest, logs/nightly.jsonl, `--json` — serialises.
+    preflight_report = {
+        f"{cli}:{model}": error for (cli, model), error in preflight_errors.items()
+    }
 
     deadline = time.monotonic() + max(1, int(settings["deadline_minutes"])) * 60
     remaining_targets = int(settings["max_targets_per_run"])
@@ -444,7 +467,7 @@ def _execute(args) -> dict:
     log_run_event(
         run_id=run_id, project=None, event="nightly_start", action=args.action,
         books=len(candidates), dry_run=args.dry_run,
-        default_cli=settings["default_cli"], preflight_errors=preflight_errors,
+        default_cli=settings["default_cli"], preflight_errors=preflight_report,
     )
 
     for index, candidate in enumerate(candidates):
@@ -491,7 +514,7 @@ def _execute(args) -> dict:
         "dry_run": args.dry_run,
         "settings": settings,
         "policy": policy.to_payload() if policy else None,
-        "preflight_errors": preflight_errors,
+        "preflight_errors": preflight_report,
         "totals": totals,
         "books": books,
         "skipped_books": skipped,
@@ -499,7 +522,13 @@ def _execute(args) -> dict:
     }
 
     if not args.dry_run:
-        payload["digest"] = _rel(str(_write_digest(payload)))
+        # Best-effort, like _append_nightly_log beside it: every book has already
+        # been reviewed and written by this point, and losing the run's record
+        # over a failed report write would be the expensive way to report it.
+        try:
+            payload["digest"] = _rel(str(_write_digest(payload)))
+        except OSError as exc:
+            print(f"could not write the nightly digest: {exc}", file=sys.stderr)
         _append_nightly_log(payload)
 
     log_run_event(
@@ -513,8 +542,8 @@ def _print_human(payload: dict) -> None:
     totals = payload["totals"]
     mode = "DRY RUN — nothing written" if payload["dry_run"] else payload["run_id"]
     print(f"Nightly {payload['action']} pass · {mode}")
-    for cli, error in (payload["preflight_errors"] or {}).items():
-        print(f"  PREFLIGHT {cli}: {error}")
+    for pair, error in (payload["preflight_errors"] or {}).items():
+        print(f"  PREFLIGHT {pair}: {error}")
     for row in payload["books"]:
         run = row.get("run") or {}
         apply_ = row.get("apply") or {}
@@ -541,14 +570,14 @@ def _print_human(payload: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    run_id_hint = f"nightly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"nightly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     if args.dry_run:
-        payload = _execute(args)
+        payload = _execute(args, run_id)
     else:
         try:
-            with locks.repo_lock(kind="nightly", run_id=run_id_hint):
-                payload = _execute(args)
+            with locks.repo_lock(kind="nightly", run_id=run_id):
+                payload = _execute(args, run_id)
         except locks.LockBusy as busy:
             print(f"Another pass is already running: {busy}", file=sys.stderr)
             return 2

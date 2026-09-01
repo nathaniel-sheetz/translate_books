@@ -6458,6 +6458,21 @@ def project_review_run_coded(project_id):
     return jsonify({"ok": True, "job_id": job_id, "total": total})
 
 
+def _public_lock(holder: Optional[dict]) -> dict:
+    """The part of a lock body that may leave this process.
+
+    The app binds 0.0.0.0 with no auth, so a 409 is readable by anything on the
+    LAN. ``kind`` and ``started_at`` are what a caller needs to decide whether to
+    wait; the pid, the hostname, the absolute lockfile path and the internal
+    ``_token`` are host detail and stay in the log.
+    """
+    holder = holder or {}
+    return {
+        "kind": holder.get("kind") or "background",
+        "started_at": holder.get("started_at"),
+    }
+
+
 def _lock_conflict(project_dir: Path):
     """A 409 response when a CLI or nightly wave holds this book's lock.
 
@@ -6478,14 +6493,18 @@ def _lock_conflict(project_dir: Path):
     if locks.held_by_this_process(holder):
         return None
     kind = holder.get("kind") or "background"
+    app.logger.info(
+        "lock conflict on %s: held by pid=%s on %s (kind=%s, since=%s)",
+        project_dir, holder.get("pid"), holder.get("host"), kind,
+        holder.get("started_at"),
+    )
     return jsonify({
         "error": (
-            f"A {kind} run started outside the dashboard (pid {holder.get('pid')} "
-            f"on {holder.get('host')}) is working on this project. "
-            "Wait for it to finish, or stop it, and try again."
+            f"A {kind} run started outside the dashboard is working on this "
+            "project. Wait for it to finish, or stop it, and try again."
         ),
         "job_id": holder.get("run_id"),
-        "lock": holder,
+        "lock": _public_lock(holder),
     }), 409
 
 
@@ -7931,7 +7950,18 @@ def download_epub(project_id):
 # A row therefore leaves this page one of three ways: applied, rejected, or
 # edited in the reader. All three are the same underlying fact - the note now
 # carries a review stamp, or no longer matches the plan - which is why
-# `_inbox_state` is the single place that decides what is still outstanding.
+# `_inbox_state` decides what is still outstanding for every row carrying a
+# proposal. `manual` and `orphaned` rows carry none to compare against, so they
+# go through `_inbox_key_is_open`, which asks the weaker half of the same
+# question: is there still a live, unstamped record behind this key at all?
+# Both must be consulted. `results.json` keeps a key for the life of the book,
+# so a `manual` row for a note the reader has since deleted would otherwise sit
+# in the "needing a hand" count for ever, linking to nothing.
+#
+# `orphaned` rows are deliberately *not* filtered. An orphan is a note whose
+# anchor no longer resolves against the alignment, not one whose record is gone,
+# and this page is the only place it is ever shown - dropping one on a key
+# lookup would hide the exact notes that most need a human.
 
 from src.annotations.targets import already_reviewed  # noqa: E402
 
@@ -7993,6 +8023,20 @@ def _inbox_state(item: dict, records: dict[str, dict]) -> str:
     if current != (item.get("old") or ""):
         return "stale"
     return "open"
+
+
+def _inbox_key_is_open(key: Optional[str], records: dict[str, dict]) -> bool:
+    """True when ``key`` still names a live record with no review stamp.
+
+    For rows with no proposed text to diff — ``manual`` and ``orphaned``. A
+    deleted note and a retired one are both finished; neither is work.
+    """
+    if not key:
+        return False
+    record = records.get(key)
+    if record is None:
+        return False
+    return not already_reviewed(record)
 
 
 def _inbox_flags(item: dict) -> list[str]:
@@ -8087,6 +8131,7 @@ def _build_inbox(only_project: Optional[str] = None) -> dict:
                 "recommendation": _inbox_truncate(item.get("recommendation") or ""),
             }
             for item in (plan.get("manual") or [])
+            if _inbox_key_is_open(item.get("key"), records)
         ]
         orphaned = [
             {
@@ -8191,7 +8236,14 @@ def review_inbox_apply():
         with locks.project_lock(project_dir, kind="review-inbox"):
             result = annreview.apply(project_dir, select=keys)
     except locks.LockBusy as busy:
-        return jsonify({"error": str(busy), "lock": busy.holder}), 409
+        app.logger.info("lock busy: %s", busy)
+        return jsonify({
+            "error": (
+                f"A {busy.kind} run is working on this project. "
+                "Wait for it to finish, or stop it, and try again."
+            ),
+            "lock": _public_lock(busy.holder),
+        }), 409
 
     if result.get("status") != "ok":
         return jsonify({"error": result.get("error") or "apply failed"}), 400
@@ -8252,7 +8304,14 @@ def review_inbox_reject():
         with locks.project_lock(project_dir, kind="review-inbox"):
             result = annreview.apply(project_dir, reject=[key])
     except locks.LockBusy as busy:
-        return jsonify({"error": str(busy), "lock": busy.holder}), 409
+        app.logger.info("lock busy: %s", busy)
+        return jsonify({
+            "error": (
+                f"A {busy.kind} run is working on this project. "
+                "Wait for it to finish, or stop it, and try again."
+            ),
+            "lock": _public_lock(busy.holder),
+        }), 409
 
     if result.get("status") != "ok":
         return jsonify({"error": result.get("error") or "reject failed"}), 400
@@ -8284,7 +8343,14 @@ def review_inbox_unreject():
         with locks.project_lock(project_dir, kind="review-inbox"):
             result = annreview.unreject(project_dir, key)
     except locks.LockBusy as busy:
-        return jsonify({"error": str(busy), "lock": busy.holder}), 409
+        app.logger.info("lock busy: %s", busy)
+        return jsonify({
+            "error": (
+                f"A {busy.kind} run is working on this project. "
+                "Wait for it to finish, or stop it, and try again."
+            ),
+            "lock": _public_lock(busy.holder),
+        }), 409
 
     if result.get("status") != "ok":
         return jsonify({"error": result.get("error") or "undo failed"}), 400

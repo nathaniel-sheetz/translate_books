@@ -90,6 +90,27 @@ def _manifest_path(project_dir: Path) -> Path:
     return annotations_dir(project_dir) / "manifest.json"
 
 
+def _prepared_contents(project_dir: Path) -> dict[str, str]:
+    """``{key: content}`` from the manifest already on disk, best-effort.
+
+    What each surviving draft was rendered against. An absent or unreadable
+    manifest yields ``{}``, which makes every draft unprovable and so re-rendered
+    — the safe direction.
+    """
+    path = _manifest_path(project_dir)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    out: dict[str, str] = {}
+    for entry in doc.get("entries") or []:
+        if isinstance(entry, dict) and entry.get("key") is not None:
+            out[entry["key"]] = entry.get("content")
+    return out
+
+
 def _results_path(project_dir: Path) -> Path:
     return annotations_dir(project_dir) / "results.json"
 
@@ -207,6 +228,14 @@ def prepare(
     Re-preparing clears the drafts for the entries it re-renders so ``commit``
     never reads an orphan; pass ``keep_drafts`` to protect work still in flight.
 
+    ``keep_drafts`` protects a draft only while the note still reads as it did
+    when that draft was rendered. The entry carries the note's *current*
+    ``content``, but ``fanout`` skips any key whose draft is non-empty and
+    ``commit`` merges ``{**target_meta, **verdict}`` — so a draft kept across an
+    edit would pair the new text with the old verdict, and ``apply``'s drift
+    check, comparing the live note against that new text, would pass it. The
+    previous manifest is what says which is which.
+
     ``worker_model`` unset defaults per the book's ``headless_cli`` — see
     :func:`~src.harness.headless.default_worker_model`.
     """
@@ -228,6 +257,8 @@ def prepare(
     adir = annotations_dir(project_dir)
     adir.mkdir(parents=True, exist_ok=True)
 
+    prior_content = _prepared_contents(project_dir) if keep_drafts else {}
+
     entries: list[dict[str, Any]] = []
     estimated_cost = 0.0
     by_type: dict[str, int] = {}
@@ -245,7 +276,11 @@ def prepare(
         prefix, suffix = annprompts.build_prompt_parts(target, context)
         prompt = prefix + suffix
         prompt_path.write_text(prompt, encoding="utf-8")
-        if not keep_drafts:
+        # A draft survives only if the last manifest rendered it against exactly
+        # this text. Unknown counts as changed: a draft we cannot prove is fresh
+        # costs one re-run, and keeping it can write a verdict about a sentence
+        # the reader has since rewritten.
+        if not keep_drafts or prior_content.get(target.key) != target.content:
             draft_path.unlink(missing_ok=True)
 
         estimated_cost += estimate_call_cost(
@@ -1172,6 +1207,12 @@ def _successor_record(
     ``POST /api/annotation``: anything the reader does not round-trip must not
     survive a write, or a stale field would outlive the edit that dropped it.
 
+    ``es_text`` is in that key set because the reader writes it too — it is the
+    snapshot that re-anchors a note when realign drops its ``es_idx``, and it is
+    not something an edit invalidates. Dropping it mattered little while only
+    ``applied`` came through here; the nightly pass now retires every finished
+    note in every book, so a lost snapshot is the common case, not the rare one.
+
     ``sidecar=None`` omits the ``ai_review`` key entirely, which is how
     :func:`unreject` un-stamps a record — the same shape an edit in the reader
     produces, and the reason ``already_reviewed`` goes false again.
@@ -1189,6 +1230,8 @@ def _successor_record(
         new_record["sub_id"] = sub
     if record.get("origin"):
         new_record["origin"] = record["origin"]
+    if record.get("es_text"):
+        new_record["es_text"] = record["es_text"]
     if sidecar is not None:
         new_record[store.AI_REVIEW_KEY] = sidecar
     return new_record
