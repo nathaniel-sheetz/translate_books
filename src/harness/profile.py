@@ -76,7 +76,12 @@ EFFORT_NONE = "none"                  # nothing carries it; say so out loud
 # post-fallback, and the operator consented to that CLI when the estimate quoted
 # its baseline. Leaving it guessable let `prepare --cli cursor` be honoured and
 # then silently overturned by a bare `fanout` one command later.
-_DECIDED_CLI_SOURCES = frozenset({"cli", "config", "manifest"})
+# `automation.default_cli` belongs here for the same reason a flag or a pin does:
+# an operator wrote it in `app_config.json` to decide the un-pinned books. Leaving
+# it out made it a "guess", so the nightly pass emitted a provenance warning for
+# every un-pinned book on every run, and the missing-binary switch would have
+# silently flipped the family the operator had just chosen.
+_DECIDED_CLI_SOURCES = frozenset({"cli", "config", "manifest", "automation.default_cli"})
 
 
 def _is_guessed_cli(cli_source: str) -> bool:

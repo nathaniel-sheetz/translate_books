@@ -184,6 +184,43 @@ def test_prepare_clears_stale_drafts_unless_keep_drafts(project):
     assert draft.read_text(encoding="utf-8") == "in flight"
 
 
+def test_keep_drafts_drops_a_draft_whose_note_has_changed(project):
+    """`keep_drafts` protects work in flight, not a verdict about older text.
+
+    The entry is re-rendered with the note's *current* content while `fanout`
+    skips any key whose draft is non-empty, so a draft kept across an edit would
+    pair new text with an old verdict — and `apply`'s drift check, comparing the
+    live note against that new text, would wave it through.
+    """
+    from pathlib import Path
+
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    draft = Path(prep["manifest"][0]["draft_path"])
+    draft.write_text("verdict about «poyo»", encoding="utf-8")
+
+    # The reader rewrites the note the draft was rendered against.
+    write_annotations(project, [_ann(es_idx=1, content="marco", sub_id="u1")])
+    again = review.prepare(project, keep_drafts=True)
+
+    assert not draft.exists()
+    assert again["manifest"][0]["content"] == "marco"
+
+
+def test_keep_drafts_drops_a_draft_it_cannot_prove_fresh(project):
+    """No manifest means nothing says what the draft was rendered against."""
+    from pathlib import Path
+
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    draft = Path(prep["manifest"][0]["draft_path"])
+    draft.write_text("verdict", encoding="utf-8")
+    (project / ".harness" / "annotations" / "manifest.json").unlink()
+
+    review.prepare(project, keep_drafts=True)
+    assert not draft.exists()
+
+
 def test_prepare_carries_skips_into_the_manifest(project):
     write_annotations(project, [_ann(es_idx=999, content="stranded", sub_id="u1")])
     prep = review.prepare(project)
@@ -509,6 +546,322 @@ def test_apply_refuses_a_note_edited_since_the_review(project):
     out = review.apply(project, select=[key])
     assert out["applied"] == []
     assert [s["key"] for s in out["stale"]] == [key]
+
+
+def test_already_resolved_is_planned_as_resolved_not_manual(project):
+    """A finished note is not "needs a hand" — it is its own bucket."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido: se queda", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project)
+    assert [item["key"] for item in out["resolved"]] == [key]
+    assert out["manual"] == []
+    assert out["applicable"] == []
+
+
+def test_retiring_stamps_the_sidecar_without_touching_the_text(project):
+    content = "poyo — ya decidido: se queda"
+    write_annotations(project, [_ann(es_idx=1, content=content, sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project, select=[key])
+    assert out["retired"] == [key]
+    assert out["applied"] == []
+
+    record = store.load_active(project)[0]
+    # The reader's words are untouched; only the sidecar is new.
+    assert record["content"] == content
+    sidecar = record[store.AI_REVIEW_KEY]
+    assert sidecar["mode"] == "noop"
+    assert sidecar["state"] == "already_resolved"
+    assert sidecar["written_content"] == content
+    assert sidecar["original_content"] == content
+
+
+def test_a_write_keeps_the_es_text_re_anchor_snapshot(project):
+    """es_text is how a note survives a realign that drops its es_idx.
+
+    The successor record is built from a fixed key set mirroring
+    `POST /api/annotation` — which writes es_text too. Losing it here would
+    strand the note the next time the alignment moves, and the nightly pass
+    retires every finished note in every book.
+    """
+    content = "poyo — ya decidido"
+    write_annotations(project, [
+        _ann(es_idx=1, content=content, sub_id="u1", es_text="Se sentó en el poyo."),
+    ])
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+
+    review.apply(project, select=[prep["manifest"][0]["key"]])
+
+    assert store.load_active(project)[0]["es_text"] == "Se sentó en el poyo."
+
+
+def test_retired_notes_are_skipped_on_the_next_run(project):
+    """The whole point: a finished note stops being re-detected forever."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido: se queda", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    review.apply(project, select=[prep["manifest"][0]["key"]])
+
+    again = review.prepare(project)
+    assert again["manifest"] == []
+    assert [s["reason"] for s in again["skipped"]] == ["already_reviewed"]
+
+
+def test_re_retiring_the_same_note_is_a_no_op(project):
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+    review.apply(project, select=[key])
+
+    lines = len((project / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines())
+    out = review.apply(project, select=[key])
+    assert out["already_applied"] == [key]
+    assert out["retired"] == []
+    assert len(
+        (project / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ) == lines
+
+
+def test_retiring_refuses_a_note_edited_since_the_review(project):
+    """An edit may have turned a finished note back into a question."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    store.append_record(
+        project,
+        _ann(es_idx=1, content="poyo — ¿o poyete?", sub_id="u1",
+             timestamp="2026-03-01T00:00:00"),
+    )
+    out = review.apply(project, select=[key])
+    assert out["retired"] == []
+    assert [s["key"] for s in out["stale"]] == [key]
+
+
+# --- reject ----------------------------------------------------------------
+#
+# Declining a proposal is the retire write with a different `state`: the note's
+# own text, byte-for-byte, plus the stamp that stops it being re-detected. What
+# these guard is that the stamp is the *only* thing that changes, and that it
+# actually holds against the two callers that write.
+
+def test_rejecting_stamps_the_sidecar_without_touching_the_text(project):
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project, reject=[key])
+    record = store.load_active(project)[0]
+    sidecar = record[store.AI_REVIEW_KEY]
+
+    assert out["rejected"] == [key]
+    assert out["applied"] == []
+    assert record["content"] == "poyo"          # the note itself is untouched
+    assert sidecar["mode"] == "noop"
+    assert sidecar["state"] == "rejected"
+    assert sidecar["written_content"] == "poyo"
+    assert "marco" in sidecar["rejected_content"]   # what was declined, kept
+
+
+def test_rejected_notes_are_skipped_on_the_next_run(project):
+    """The whole point: a declined suggestion never comes back."""
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    review.apply(project, reject=[prep["manifest"][0]["key"]])
+
+    again = review.prepare(project)
+    assert again["manifest"] == []
+    assert [s["reason"] for s in again["skipped"]] == ["already_reviewed"]
+
+
+def test_re_rejecting_the_same_note_is_a_no_op(project):
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+    review.apply(project, reject=[key])
+
+    lines = len((project / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines())
+    out = review.apply(project, reject=[key])
+    assert out["already_applied"] == [key]
+    assert out["rejected"] == []
+    assert len(
+        (project / "annotations.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ) == lines
+
+
+def test_rejecting_refuses_a_note_edited_since_the_review(project):
+    """The edit may have made the proposal you are declining moot."""
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    store.append_record(
+        project,
+        _ann(es_idx=1, content="poyete", sub_id="u1", timestamp="2026-03-01T00:00:00"),
+    )
+    out = review.apply(project, reject=[key])
+    assert out["rejected"] == []
+    assert [s["key"] for s in out["stale"]] == [key]
+
+
+def test_selecting_a_rejected_note_does_not_write_over_the_rejection(project):
+    """The guard that makes a rejection durable.
+
+    A rejection leaves the content unchanged, so the drift checks that protect
+    the apply path would both pass and the proposal would land after all. This
+    is not hypothetical: `auto_apply` runs even when the night's `run` errored,
+    off whatever `results.json` is on disk.
+    """
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+    review.apply(project, reject=[key])
+
+    out = review.apply(project, select=[key])
+    assert out["applied"] == []
+    assert out["already_applied"] == [key]
+    assert store.load_active(project)[0]["content"] == "poyo"
+
+
+def test_a_key_named_on_both_sides_is_rejected_once(project):
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project, select=[key], reject=[key])
+    assert out["rejected"] == [key]
+    assert out["applied"] == []
+    assert out["already_applied"] == []
+    assert store.load_active(project)[0]["content"] == "poyo"
+
+
+def test_reject_alone_is_not_a_dry_run(project):
+    """`--reject` without `--select` still writes; only *neither* plans."""
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+
+    out = review.apply(project, reject=[prep["manifest"][0]["key"]])
+    assert out["dry_run"] is False
+    assert out["counts"]["rejected"] == 1
+
+
+def test_reject_honours_dry_run(project):
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    before = (project / "annotations.jsonl").read_text(encoding="utf-8")
+
+    out = review.apply(project, reject=[prep["manifest"][0]["key"]], dry_run=True)
+    assert out["dry_run"] is True
+    assert out["rejected"] == []
+    assert (project / "annotations.jsonl").read_text(encoding="utf-8") == before
+
+
+def test_rejecting_a_resolved_note_is_not_a_proposal(project):
+    """Only a proposal can be declined; a finished note is retired instead."""
+    write_annotations(
+        project, [_ann(es_idx=1, content="poyo — ya decidido", sub_id="u1")]
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+
+    out = review.apply(project, reject=[key])
+    assert out["rejected"] == []
+    assert out["unknown_ids"] == [key]
+
+
+# --- unreject --------------------------------------------------------------
+
+def test_unreject_reopens_the_note(project):
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+    review.apply(project, reject=[key])
+
+    out = review.unreject(project, key)
+    record = store.load_active(project)[0]
+
+    assert out["status"] == "ok"
+    assert record["content"] == "poyo"
+    assert store.AI_REVIEW_KEY not in record       # the stamp is gone
+    assert len(review.prepare(project)["manifest"]) == 1
+
+
+def test_unreject_refuses_an_applied_note(project):
+    """Undo lifts rejections only — never a write that actually landed."""
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+    key = prep["manifest"][0]["key"]
+    review.apply(project, select=[key])
+
+    out = review.unreject(project, key)
+    assert out["status"] == "error"
+    assert store.load_active(project)[0][store.AI_REVIEW_KEY]["mode"] == "append"
+
+
+def test_unreject_refuses_an_unknown_key(project):
+    write_annotations(project, [_ann(es_idx=1, content="poyo", sub_id="u1")])
+    out = review.unreject(project, "chapter_99__1__nope")
+    assert out["status"] == "error"
+
+
+def test_multi_anchor_footnote_stays_manual_even_when_resolved(project):
+    """Its text may be fine; publishing only its first bracket still is not."""
+    write_annotations(
+        project,
+        [_ann(es_idx=2, type="footnote", content="[Sancerre]; [Esaú,]", sub_id="u1")],
+    )
+    prep = review.prepare(project)
+    _draft_all(prep, state="already_resolved", note_text="")
+    review.commit(project)
+
+    out = review.apply(project)
+    assert out["resolved"] == []
+    assert [item["reason"] for item in out["manual"]] == ["multi_anchor"]
 
 
 def test_apply_reports_an_unknown_key(project):

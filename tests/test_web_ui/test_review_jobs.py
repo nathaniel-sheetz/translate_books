@@ -13,12 +13,31 @@ import itertools
 import json
 import re
 import threading
+from datetime import datetime
 
 import pytest
 
+from src.harness import locks
 from web_ui import jobs
 from web_ui.app import app
 from web_ui.evaluations import REVIEW_JUDGE_TYPES
+
+
+def _plant_foreign_lock(project_dir):
+    """A lock body from another live process, so the same-process guard misses it.
+
+    ``_lock_conflict`` deliberately ignores a lock this very process holds —
+    ``jobs.JobConflict`` answers that better — so a realistic test has to look
+    like the CLI or the nightly task, which is what the check exists for.
+    """
+    path = locks.lock_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "pid": 4242, "host": "some-other-machine", "kind": "annotations",
+        "run_id": "nightly_20260830_063000",
+        "started_at": datetime.now().isoformat(),
+    }), encoding="utf-8")
+    return path
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +252,44 @@ def test_concurrent_review_job_is_a_409(client, project, monkeypatch):
     assert second.get_json()["job_id"] == first.get_json()["job_id"]
     gate.set()
     drain(client, first.get_json()["job_id"])
+
+
+def test_an_outside_wave_holding_the_lock_is_a_409(client, project):
+    """`jobs` cannot see a wave started from the CLI or the nightly pass.
+
+    Without the lock check this route would run a destructive `prepare` on top of
+    it, unlinking the drafts that wave is still writing.
+    """
+    _plant_foreign_lock(project)
+    try:
+        rv = client.post("/api/project/jobproj/review/run-coded", json={})
+    finally:
+        locks.lock_path(project).unlink()
+
+    assert rv.status_code == 409
+    assert rv.get_json()["lock"]["kind"] == "annotations"
+    assert "nightly" in rv.get_json()["error"] or "annotations" in rv.get_json()["error"]
+
+
+def test_a_job_body_holds_the_lock_while_it_runs(client, project, monkeypatch):
+    """The check alone would be theatre: the nightly pass has to see us too."""
+    seen: list = []
+    gate = threading.Event()
+    import web_ui.app as app_module
+
+    def observe(*args, **kwargs):
+        seen.append(locks.read_holder(locks.lock_path(project)))
+        return gate.wait(timeout=5)
+
+    monkeypatch.setattr(app_module, "evaluate_and_persist_chunk", observe)
+
+    started = client.post("/api/project/jobproj/review/run-coded", json={})
+    gate.set()
+    drain(client, started.get_json()["job_id"])
+
+    assert seen and seen[0] is not None
+    assert seen[0]["kind"] == "review-coded"
+    assert locks.holder_of(project) is None      # released when the job ended
 
 
 # ── run-judges ───────────────────────────────────────────────────────────────

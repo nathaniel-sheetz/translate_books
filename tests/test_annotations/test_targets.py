@@ -64,6 +64,34 @@ def test_already_reviewed_is_skipped_when_content_still_matches(project):
     assert [s.reason for s in skipped] == [SKIP_ALREADY_REVIEWED]
 
 
+def test_a_rejected_note_is_skipped_though_its_text_never_changed(project):
+    """The gate is the stamp, not the text — which is what lets a reject work.
+
+    A rejection writes the note's own content back, so ``written_content`` equals
+    the live content and the note is retired without a single character moving.
+    """
+    write_annotations(
+        project,
+        [
+            _ann(
+                es_idx=1,
+                content="poyo",
+                sub_id="u1",
+                ai_review={
+                    "mode": "noop",
+                    "state": "rejected",
+                    "original_content": "poyo",
+                    "written_content": "poyo",
+                    "rejected_content": "poyo\n— IA: usar «marco».",
+                },
+            )
+        ],
+    )
+    targets, skipped = build_targets(project)
+    assert targets == []
+    assert [s.reason for s in skipped] == [SKIP_ALREADY_REVIEWED]
+
+
 def test_editing_a_reviewed_note_reopens_it(project):
     """A reader edit drops the sidecar, so the annotation becomes eligible again.
 

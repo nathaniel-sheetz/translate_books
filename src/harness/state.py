@@ -215,14 +215,61 @@ def emit_harness_result(data: dict) -> None:
     print(f"{HARNESS_RESULT_PREFIX} {json.dumps(data, ensure_ascii=False)}", flush=True)
 
 
+# How deep the walkers descend through grouping folders before giving up. A
+# cycle cannot form (symlinks are skipped), so this is a guard against a
+# pathological tree, not against recursion.
+PROJECT_WALK_MAX_DEPTH = 20
+
+
+def projects_root() -> Path:
+    """The repo's ``projects/`` directory."""
+    return REPO_ROOT / "projects"
+
+
+def is_project_dir(p: Path) -> bool:
+    """A project dir has ``chunks/`` or ``source.txt``.
+
+    The canonical predicate. ``web_ui.app`` re-exports it as ``_is_project_dir``
+    and :mod:`src.actions.scope` filters on top of it, so "what counts as a book"
+    is decided in exactly one place.
+    """
+    return p.is_dir() and ((p / "chunks").exists() or (p / "source.txt").exists())
+
+
+def iter_project_dirs(root: Path | None = None, _depth: int = 0):
+    """Yield project dirs under ``root``, descending through grouping subfolders
+    but never into a project itself. Order is stable (sorted).
+
+    Symlinks are skipped so a cycle cannot hang the walk, and the depth cap is a
+    second belt. A missing root yields nothing rather than raising — callers
+    treat "no projects" and "no projects dir" the same way.
+    """
+    root = root if root is not None else projects_root()
+    if not root.exists() or _depth > PROJECT_WALK_MAX_DEPTH:
+        return
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_symlink():      # skip symlinks to avoid infinite recursion on cycles
+            continue
+        if not entry.is_dir():
+            continue
+        if is_project_dir(entry):
+            yield entry
+        else:                       # grouping/container folder -> recurse
+            yield from iter_project_dirs(entry, _depth + 1)
+
+
 def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
     """Yield project dirs whose leaf name equals project_id, sorted alphabetically.
 
     Uses an explicit walk so it never follows symlinks, never expands glob
-    metacharacters, and never descends into a project directory — consistent
-    with _iter_project_dirs in web_ui/app.py.
+    metacharacters, and never descends into a project directory — the same shape
+    :func:`iter_project_dirs` walks, filtered by leaf name.
     """
-    if _depth > 20:
+    if _depth > PROJECT_WALK_MAX_DEPTH:
         return
     try:
         entries = sorted(root.iterdir())
@@ -231,7 +278,7 @@ def _iter_nested_match(root: Path, project_id: str, _depth: int = 0):
     for entry in entries:
         if entry.is_symlink() or not entry.is_dir():
             continue
-        is_proj = (entry / "chunks").exists() or (entry / "source.txt").exists()
+        is_proj = is_project_dir(entry)
         if entry.name == project_id and is_proj:
             yield entry
         elif not is_proj:

@@ -84,6 +84,10 @@ prompts/history/
 # Harness run log (per-user record of how each run went)
 logs/
 
+# Nightly-pass digests: one markdown file per run, linking each book's own
+# dated report. Machine-local output, same class as logs/.
+reports/nightly/
+
 # Backlog
 backlog/
 

@@ -63,6 +63,11 @@
                     {% endfor %}
                 </div>
             </div>
+            {#- The work chip on each card is the notification channel for one
+                book; this is the same channel for all of them at once. The repo
+                has no email/webhook/toast, so a link in the header is the whole
+                surface the nightly pass gets. -#}
+            <a class="btn-new-project" href="/review-inbox">{{ t.inbox_link }}</a>
             <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project_btn }}</button>
         </div>
     </div>

@@ -17,6 +17,24 @@
     "count_by": "words"
   },
   "judge_suites": {
-    "default": ["dialogue"]
+    "default": [
+      "dialogue"
+    ]
+  },
+  "automation": {
+    "exclude_groups": [
+      ".backburner",
+      ".published"
+    ],
+    "default_cli": "claude",
+    "auto_apply_types": [
+      "word_choice",
+      "inconsistency",
+      "flag"
+    ],
+    "confidence_floor": "high",
+    "max_targets_per_run": 400,
+    "deadline_minutes": 120,
+    "concurrency": 5
   }
 }

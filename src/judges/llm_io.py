@@ -83,6 +83,9 @@ def extract_json(text: str) -> str:
     Handles pure JSON, fenced code blocks, and JSON surrounded by commentary.
     Uses a real decoder (``raw_decode``) so nested braces are handled — the
     regex approach in ``src/judge.py`` only worked for flat objects.
+
+    Each candidate is decoded at its *first* opener only, never at a later one:
+    see the comment in the loop for why falling through matters.
     """
     stripped = text.strip()
 
@@ -95,15 +98,20 @@ def extract_json(text: str) -> str:
 
     decoder = json.JSONDecoder()
     for candidate in candidates:
-        for opener in ("{", "["):
-            idx = candidate.find(opener)
-            if idx == -1:
-                continue
-            try:
-                _, end = decoder.raw_decode(candidate[idx:])
-            except json.JSONDecodeError:
-                continue
-            return candidate[idx: idx + end]
+        # Decode at the FIRST opener only. Trying '[' after '{' has already
+        # failed reaches *inside* the broken object: a draft whose
+        # "recommendation" string carries an unescaped quote then yields its
+        # nested "evidence" array, and parse_judge_json reports "got list"
+        # instead of the real syntax error and its line and column.
+        positions = [i for i in (candidate.find("{"), candidate.find("[")) if i != -1]
+        if not positions:
+            continue
+        idx = min(positions)
+        try:
+            _, end = decoder.raw_decode(candidate[idx:])
+        except json.JSONDecodeError:
+            continue
+        return candidate[idx: idx + end]
 
     return stripped
 

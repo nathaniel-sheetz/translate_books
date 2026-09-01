@@ -21,6 +21,14 @@ is exact rather than a judgement call: a record written by ``apply`` carries an
 comparison against the live ``content``. It self-heals, too — editing the note in
 the reader goes through ``POST /api/annotation``, which rebuilds the record from a
 fixed key set and so drops ``ai_review``, correctly re-opening the annotation.
+
+That gate closes over notes the reviewer *changed*. It also has to close over the
+ones it deliberately left alone: a reader-written footnote that already carries a
+finished gloss is returned ``already_resolved``, and with nothing written there
+was nothing to compare against, so every such note was re-detected, re-prompted
+and re-reported on every run, for good. ``apply`` therefore stamps those too —
+an ``ai_review`` sidecar whose ``written_content`` is the *unchanged* content
+(``mode: "noop"``). The note is untouched; the annotation is retired.
 """
 
 from __future__ import annotations
@@ -153,13 +161,22 @@ def _match_glossary(terms: list[dict], needles: Iterable[str]) -> list[dict]:
     return out
 
 
-def _already_reviewed(record: dict) -> bool:
-    """True when this record still holds exactly the text a prior run wrote."""
+def already_reviewed(record: dict) -> bool:
+    """True when this record still holds exactly the text a prior run wrote.
+
+    Public because ``review.apply`` needs the identical test before it stamps a
+    record: one gate, one implementation, so "reviewed" can never mean one thing
+    to the detector and another to the writer.
+    """
     sidecar = record.get(store.AI_REVIEW_KEY)
     if not isinstance(sidecar, dict):
         return False
     written = sidecar.get("written_content")
     return isinstance(written, str) and written == (record.get("content") or "")
+
+
+# Retained for the module's own readers; `already_reviewed` is the exported name.
+_already_reviewed = already_reviewed
 
 
 def build_targets(
