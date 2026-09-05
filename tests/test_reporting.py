@@ -358,7 +358,7 @@ def test_generate_json_report_handles_none_scores():
 
     data = json.loads(report)
     assert data["detailed_results"][0]["score"] is None
-    assert data["summary"]["average_score"] is None
+    assert "average_score" not in data["summary"]
 
 
 def test_generate_json_report_serializes_datetimes(sample_eval_result):

@@ -2003,40 +2003,37 @@
         var container = document.getElementById('eval-card-container-' + chunkId);
         if (!container) return;
 
+        // A chunk edited since its evaluators ran still shows its real counts
+        // and its real findings. The edit invalidates the *summary* — a verdict
+        // of "clean" is a claim about prose the evaluator never saw — but each
+        // finding quotes text that can be checked, and the reader re-anchors
+        // them against current prose. So: note it, do not hide behind it.
         var isStale = !!evaluation.stale;
         var agg = evaluation.aggregated || {};
         var bySeverity = agg.issues_by_severity || {};
-        var errors = isStale ? 0 : (bySeverity.error || 0);
-        var warnings = isStale ? 0 : (bySeverity.warning || 0);
-        var info = isStale ? 0 : (bySeverity.info || 0);
-        var score = isStale ? null : agg.average_score;
+        var errors = bySeverity.error || 0;
+        var warnings = bySeverity.warning || 0;
+        var info = bySeverity.info || 0;
         var issues = evaluation.normalized_issues || evaluation.issues || [];
         var feedbackMap = buildFeedbackMap(evaluation.feedback);
 
         var html = '<article class="eval-card">';
         if (isStale) {
             html += '<div class="eval-stale-banner" role="status">';
-            html += 'Evaluation stale — translation changed';
+            html += 'Judged against an earlier revision of this text';
             if (evaluation.stale_reason) {
                 html += ': ' + escapeHtml(evaluation.stale_reason);
             }
-            html += '. Re-run evaluators or the judge before trusting these findings.';
+            html += '. Findings below still quote the current text; re-run to refresh the pass/fail summary.';
             html += '</div>';
         }
         html += '<header class="eval-card-header">';
         html += '<div class="eval-summary-chips">';
-        if (isStale) {
-            html += '<span class="eval-chip warnings">stale</span>';
-        } else {
-            if (errors > 0) html += '<span class="eval-chip errors">✗ ' + errors + '</span>';
-            if (warnings > 0) html += '<span class="eval-chip warnings">⚠ ' + warnings + '</span>';
-            if (info > 0) html += '<span class="eval-chip info">ℹ ' + info + '</span>';
-            if (errors === 0 && warnings === 0 && info === 0) {
-                html += '<span class="eval-chip pass">✓ all passed</span>';
-            }
-        }
-        if (score !== null && score !== undefined) {
-            html += '<span class="eval-chip score">score ' + score.toFixed(2) + '</span>';
+        if (errors > 0) html += '<span class="eval-chip errors">✗ ' + errors + '</span>';
+        if (warnings > 0) html += '<span class="eval-chip warnings">⚠ ' + warnings + '</span>';
+        if (info > 0) html += '<span class="eval-chip info">ℹ ' + info + '</span>';
+        if (errors === 0 && warnings === 0 && info === 0) {
+            html += '<span class="eval-chip pass">' + (isStale ? '✓ no findings' : '✓ all passed') + '</span>';
         }
         html += '</div>';
         html += '<div class="eval-card-actions">';
@@ -2046,10 +2043,10 @@
         html += '</header>';
 
         html += '<div class="eval-card-body">';
-        if (isStale) {
-            html += '<div class="eval-empty">Findings hidden — translation changed since last evaluation. Rerun evaluators or the judge.</div>';
-        } else if (issues.length === 0) {
-            html += '<div class="eval-empty">All evaluators passed.</div>';
+        if (issues.length === 0) {
+            html += '<div class="eval-empty">' +
+                (isStale ? 'No findings — but this pass ran against an earlier revision.'
+                         : 'All evaluators passed.') + '</div>';
         } else {
             html += renderEvalSections(chunkId, issues, feedbackMap);
         }
@@ -2197,11 +2194,7 @@
     function renderLlmJudgeSection(judge) {
         var html = '<section class="eval-section" data-eval-name="llm_judge">';
         html += '<header class="eval-section-header">';
-        html += '<h5>LLM judge';
-        if (judge.score !== null && judge.score !== undefined) {
-            html += ' <span class="eval-section-counts">score ' + Number(judge.score).toFixed(2) + '</span>';
-        }
-        html += '</h5>';
+        html += '<h5>LLM judge</h5>';
         html += '</header>';
         html += '<div class="eval-section-body">';
         if (judge.error) {
@@ -2346,13 +2339,12 @@
             var sum = evalChapterCache[cid];
             var existing = tr.querySelector('.eval-badge-container');
             if (existing) existing.remove();
-            if (!sum || (sum.errors === 0 && sum.warnings === 0 && !sum.stale)) return;
+            if (!sum || (sum.errors === 0 && sum.warnings === 0)) return;
             var nameCell = tr.children[1];
             if (!nameCell) return;
             var span = document.createElement('span');
             span.className = 'eval-badge-container';
             var h = '';
-            if (sum.stale > 0) h += '<span class="eval-badge warnings">stale</span>';
             if (sum.errors > 0) h += '<span class="eval-badge errors">✗ ' + sum.errors + '</span>';
             if (sum.warnings > 0) h += '<span class="eval-badge warnings">⚠ ' + sum.warnings + '</span>';
             span.innerHTML = h;

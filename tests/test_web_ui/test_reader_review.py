@@ -78,6 +78,9 @@ def _save_blacklist_finding(proj_dir):
     save_chunk_evaluation(
         proj_dir, "chapter_01_chunk_000",
         results=[], aggregated={}, normalized_issues=[issue],
+        # A real coded run always names the evaluators it ran, which is what
+        # gives them a freshness ledger entry to be judged stale or fresh by.
+        enabled_evals=["blacklist"],
     )
 
 
@@ -135,13 +138,22 @@ def test_review_omits_dismissed_findings(client, review_project):
     assert body["type_counts"] == {}
 
 
-def test_review_skips_stale_chunk(client, review_project):
+def test_stale_chunk_still_shows_a_finding_that_quotes_live_prose(
+    client, review_project,
+):
+    """The marker notes the summary is old; it does not hide the findings.
+
+    "negro" is still in the sentence the offset points at, so the finding is
+    still true and stays anchored. Only ``stale_evaluators`` records that the
+    verdict was formed against earlier text.
+    """
     _save_blacklist_finding(review_project)
     mark_evaluation_stale(review_project, "chapter_01_chunk_000", "text edited")
 
     body = client.get("/api/project/revproj/review/chapter_01").get_json()
-    assert body["by_es_idx"] == {}
-    assert body["stale_chunks"] == 1
+    assert [f["match"] for f in body["by_es_idx"]["0"]] == ["negro"]
+    assert body["unanchored"] == []
+    assert body["stale_evaluators"] == {"blacklist": 1}
 
 
 def test_review_ignores_non_highlightable_types(client, review_project):
@@ -285,9 +297,9 @@ def test_judge_finding_on_edited_prose_reads_obsolete(client, review_project):
     )
 
     body = client.get("/api/project/revproj/review/chapter_01").get_json()
-    assert body["stale_chunks"] == 0
     assert len(body["unanchored"]) == 1
     assert body["unanchored"][0]["reason"] == "obsolete"
+    assert body["stale_evaluators"] == {"address": 1}
 
 
 def test_finding_in_a_whitespace_gap_anchors_to_the_next_sentence(client, make_project):
@@ -330,15 +342,24 @@ def test_dismissed_unanchored_finding_leaves_the_bin(client, review_project):
     assert body["type_counts"] == {}
 
 
-def test_stale_chunks_stay_out_of_the_bin(client, review_project):
-    # A stale chunk is already surfaced by the stale_chunks toast; re-listing
-    # its findings in the bin would double-report them.
+def test_stale_chunk_bins_a_finding_that_no_longer_quotes_the_prose(
+    client, review_project,
+):
+    """The bin is where a superseded finding goes — not oblivion.
+
+    An elided excerpt cannot be found verbatim, and the marker means the
+    25-character fallback is not trusted to place it, so it lands in the
+    end-of-chapter bin labelled ``obsolete`` instead of tinting a sentence it
+    may no longer describe.
+    """
     _save_judge_finding(review_project, "El gato ... negro.")
     mark_evaluation_stale(review_project, "chapter_01_chunk_000", "text edited")
 
     body = client.get("/api/project/revproj/review/chapter_01").get_json()
-    assert body["unanchored"] == []
-    assert body["stale_chunks"] == 1
+    assert body["by_es_idx"] == {}
+    assert len(body["unanchored"]) == 1
+    assert body["unanchored"][0]["reason"] == "obsolete"
+    assert body["stale_evaluators"] == {"address": 1}
 
 
 def test_string_char_start_does_not_500(client, review_project):

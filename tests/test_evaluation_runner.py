@@ -457,7 +457,7 @@ class TestAggregateResults:
         assert summary["failed_evaluators"] == 0
         assert summary["overall_passed"] is True  # Vacuously true
         assert summary["total_issues"] == 0
-        assert summary["average_score"] is None
+        assert "average_score" not in summary
         assert summary["evaluator_results"] == []
 
     def test_aggregate_all_passing(self, basic_chunk):
@@ -539,22 +539,23 @@ class TestAggregateResults:
         assert summary["issues_by_evaluator"] == {"dialogue": 6}
         assert summary["issues_by_evaluator"]["dialogue"] == summary["total_issues"]
 
-    def test_aggregate_average_score(self, basic_chunk):
-        """Should calculate average score correctly."""
+    def test_aggregate_reports_no_mean_score(self, basic_chunk):
+        """There is deliberately no aggregate score.
+
+        The evaluators score on incompatible scales — ``dictionary`` reports a
+        clean-word density, ``completeness`` a flat per-issue deduction — so a
+        mean over them ranked chunks wrongly (a 13-issue chunk outscoring a
+        4-issue one) while adding nothing the severity counts do not say.
+        Per-evaluator scores stay; the mean does not come back.
+        """
         results = run_evaluators(basic_chunk, ["length", "paragraph"], {})
         summary = aggregate_results(results)
 
-        assert summary["average_score"] is not None
-        assert 0.0 <= summary["average_score"] <= 1.0
-
-    def test_aggregate_average_score_with_nulls(self, basic_chunk):
-        """Should handle null scores gracefully."""
-        # Some evaluators might return None for score
-        results = run_evaluators(basic_chunk, ["length"], {})
-        summary = aggregate_results(results)
-
-        # Should still calculate average from non-null scores
-        assert isinstance(summary["average_score"], (float, int, type(None)))
+        assert "average_score" not in summary
+        assert [r["name"] for r in summary["evaluator_results"]] == [
+            "length", "paragraph",
+        ]
+        assert all("score" in r for r in summary["evaluator_results"])
 
     def test_aggregate_evaluator_results_structure(self, basic_chunk):
         """Evaluator results should have correct structure."""
@@ -608,7 +609,6 @@ class TestAggregateResults:
             "total_issues",
             "issues_by_severity",
             "issues_by_evaluator",
-            "average_score",
             "evaluator_results"
         ]
 
@@ -719,7 +719,6 @@ class TestIntegrationWithFixtures:
         # Verify full pipeline works
         assert summary["total_evaluators"] == 4
         assert all(isinstance(r, EvalResult) for r in results)
-        assert "average_score" in summary
         assert "evaluator_results" in summary
         assert len(summary["evaluator_results"]) == 4
 
