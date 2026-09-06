@@ -277,7 +277,9 @@ the same loop the coded evaluators use — useful for tuning a judge's prompt.
 `apply` stale-stamps every chunk whose text it rewrote: `stale`, `stale_since`
 and `stale_reason` at the **top level** of `evaluations/<chunk>.json`, not inside
 `judges.<judge_name>` — a fixed finding must not keep asserting a failure, and
-`merge_judge_result` clears the stamp on the next run.
+either writer clears the stamp once no evaluator it still describes predates
+`stale_since` — `merge_judge_result` on the next judge run, or
+`evaluate_and_persist_chunk` on the next coded rerun.
 
 ### Freshness ledger (`eval_runs`)
 

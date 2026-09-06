@@ -367,14 +367,16 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
         - issues_by_evaluator: Total issue count per evaluator NAME, summed across
           every result carrying that name (an LLM-judge run has one result per
           target, all named for the judge)
-        - average_score: Average of non-null scores (0.0-1.0)
-        - evaluator_results: List of per-evaluator summaries
+        - evaluator_results: List of per-evaluator summaries (each keeps its
+          own ``score``; there is deliberately no aggregate mean — the
+          evaluators score on incompatible scales, so averaging a word-density
+          ratio against a per-issue deduction ranked chunks wrongly)
 
     Example:
         >>> results = run_evaluators(chunk, ["length", "paragraph"], {})
         >>> summary = aggregate_results(results)
         >>> print(f"Overall: {summary['overall_passed']}")
-        >>> print(f"Score: {summary['average_score']:.2f}")
+        >>> print(f"Issues: {summary['total_issues']}")
     """
     if not results:
         # Empty results list
@@ -386,7 +388,6 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
             "total_issues": 0,
             "issues_by_severity": {"error": 0, "warning": 0, "info": 0},
             "issues_by_evaluator": {},
-            "average_score": None,
             "evaluator_results": []
         }
 
@@ -410,10 +411,6 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
     issues_by_evaluator: dict[str, int] = {}
     for r in results:
         issues_by_evaluator[r.eval_name] = issues_by_evaluator.get(r.eval_name, 0) + len(r.issues)
-
-    # Calculate average score (only for non-null scores)
-    scores = [r.score for r in results if r.score is not None]
-    average_score = sum(scores) / len(scores) if scores else None
 
     # Create per-evaluator summaries
     evaluator_results = [
@@ -442,7 +439,6 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
             "info": total_info
         },
         "issues_by_evaluator": issues_by_evaluator,
-        "average_score": round(average_score, 2) if average_score is not None else None,
         "evaluator_results": evaluator_results
     }
 

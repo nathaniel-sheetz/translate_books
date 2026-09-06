@@ -163,10 +163,10 @@
             fetches.push(
                 fetch(`/api/project/${projectId}/review/${chapter}`)
                     .then(r => {
-                        if (!r.ok) return { _reviewFailed: true, by_es_idx: {}, stale_chunks: 0 };
+                        if (!r.ok) return { _reviewFailed: true, by_es_idx: {} };
                         return r.json();
                     })
-                    .catch(() => ({ _reviewFailed: true, by_es_idx: {}, stale_chunks: 0 }))
+                    .catch(() => ({ _reviewFailed: true, by_es_idx: {} }))
             );
         }
         return Promise.all(fetches)
@@ -191,11 +191,11 @@
                     showToast(i.review_load_failed || 'Could not load review findings.');
                     buildReviewMap(null);
                 } else {
+                    // No staleness toast: a finding is shown only when it still
+                    // quotes live prose, and one that no longer does is reported
+                    // per item in the end-of-chapter bin ("The prose this quotes
+                    // has since changed") rather than as a banner on load.
                     buildReviewMap(reviewData);
-                    if (reviewData && reviewData.stale_chunks > 0) {
-                        const tmpl = i.review_stale_chunks || 'Some judge results are hidden: {n} chunk(s) edited since the judges ran. Re-judge to see them.';
-                        showToast(tmpl.replace('{n}', String(reviewData.stale_chunks)), 6000);
-                    }
                 }
 
                 renderSentences(data.alignments);

@@ -322,6 +322,25 @@ def _entry_predates(entry: Optional[dict[str, Any]], since: Optional[str]) -> bo
         return True
 
 
+def _flag_still_covers(
+    runs: dict[str, Any], names: Iterable[str], since: Optional[str],
+) -> bool:
+    """Does the chunk-level ``stale`` marker still describe any evaluator?
+
+    The marker means "the text moved under the verdicts recorded before
+    ``stale_since``". An evaluator whose ledger entry is dated at or after that
+    stamp has re-run against the newer prose and carries its own evidence, so
+    the marker stops describing it (the same scoping :func:`_flag_covers`
+    applies when reading). Once it describes nobody it must be dropped —
+    otherwise it outlives its own scope and no amount of re-running clears it.
+
+    Both writers share this predicate: :func:`merge_judge_result` asks it of the
+    ledger it just stamped, and :func:`evaluate_and_persist_chunk` asks it of
+    the evaluators its own run is *not* refreshing.
+    """
+    return any(_entry_predates(runs.get(name), since) for name in names)
+
+
 def _stamp_eval_runs(
     previous: Optional[dict[str, Any]],
     names: Iterable[str],
@@ -687,8 +706,7 @@ def merge_judge_result(
     coded = payload.get("enabled_evals")
     coded = [n for n in coded if isinstance(n, str)] if isinstance(coded, list) else []
     others = (set(judges) | set(coded)) - {judge_name}
-    since = payload.get("stale_since")
-    if not any(_entry_predates(runs.get(name), since) for name in others):
+    if not _flag_still_covers(runs, others, payload.get("stale_since")):
         for key in ("stale", "stale_since", "stale_reason"):
             payload.pop(key, None)
 
@@ -706,8 +724,10 @@ def mark_evaluation_stale(
     in ``evaluations/<chunk>.json`` no longer describe the current translation.
     We stamp ``stale``/``stale_since``/``stale_reason`` rather than delete the
     file so a green (or failing) badge never silently outlives the edit that
-    invalidated it. Re-running the judge (:func:`merge_judge_result`) clears the
-    marker.
+    invalidated it. Either writer clears the marker once no evaluator it
+    describes still predates ``stale_since`` — re-running the judge
+    (:func:`merge_judge_result`) or re-running the coded evaluators
+    (:func:`evaluate_and_persist_chunk`); both ask :func:`_flag_still_covers`.
 
     Returns the written path, or ``None`` if no evaluation exists yet (nothing
     to invalidate).
@@ -845,13 +865,13 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
 
     The shape matches what the chapter-table badge renderer expects:
 
-    ``{chunk_id: {"errors": int, "warnings": int, "info": int, "total": int,
-    "stale": int (optional, 1 when findings are invalidated)}}``.
+    ``{chunk_id: {"errors": int, "warnings": int, "info": int, "total": int}}``.
 
     Missing or malformed files are skipped with a debug log — the summary is
-    best-effort. Stale evaluations (text edited after the run) contribute
-    ``stale: 1`` and zero severity counts so chapter badges do not show
-    outdated judge/coded findings as current.
+    best-effort. A chunk edited since its evaluators ran still reports its real
+    counts: the findings are re-anchored against current prose at read time
+    (``/api/project/<id>/review/<chapter>``), and the ones that no longer quote
+    live text are binned there rather than suppressed wholesale here.
     """
     out: dict[str, dict[str, int]] = {}
     eval_dir = _eval_results_dir(project_dir)
@@ -869,15 +889,6 @@ def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
             continue
 
         chunk_id = data.get("chunk_id") or path.stem
-        if data.get("stale"):
-            out[chunk_id] = {
-                "errors": 0,
-                "warnings": 0,
-                "info": 0,
-                "total": 0,
-                "stale": 1,
-            }
-            continue
 
         aggregated = data.get("aggregated") or {}
         severity = aggregated.get("issues_by_severity") or {}
@@ -929,10 +940,11 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
 
     Same shape of walk as :func:`load_project_summary`, but bucketed by
     category rather than severity, and gated exactly the way the reader's
-    Review Mode gates them (``web_ui/app.py:project_chapter_review``): stale
-    chunks are skipped, dismissed findings (``_feedback.jsonl``) are subtracted,
-    coded findings must be target-side with a ``char_start``, and only the
-    :data:`REVIEW_TYPES` categories are counted.
+    Review Mode gates them (``web_ui/app.py:project_chapter_review``): a chunk
+    edited since its evaluators ran is counted like any other, dismissed
+    findings (``_feedback.jsonl``) are subtracted, coded findings must be
+    target-side with a ``char_start``, and only the :data:`REVIEW_TYPES`
+    categories are counted.
 
     A finding the reader cannot anchor to a sentence — a judge excerpt that
     has drifted from the prose, a ``char_start`` no row covers — is not
@@ -971,7 +983,7 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
         except (json.JSONDecodeError, OSError) as e:
             logger.debug("Skipping unreadable evaluation %s: %s", path, e)
             continue
-        if not isinstance(data, dict) or data.get("stale"):
+        if not isinstance(data, dict):
             continue
 
         chunk_id = data.get("chunk_id") or path.stem
@@ -1038,8 +1050,9 @@ def count_ignored_hits(
     """How many findings each ignore entry covers, split live vs. dismissed.
 
     Keyed by :meth:`IgnoredTerm.identity`. "Live" means the same thing it means
-    to the review badges: a target-anchored coded finding in a non-stale chunk
-    that carries no feedback label. Only a ``live == 0 and dismissed == 0`` row
+    to the review badges: a target-anchored coded finding that carries no
+    feedback label, in any chunk — one edited since its evaluators ran counts
+    like the rest. Only a ``live == 0 and dismissed == 0`` row
     is the signal that the list has outlived the text it was written against;
     a zero beside a non-zero ``dismissed`` means you dismissed those findings by
     hand before the term was ignored, and the dismissal simply got there first.
@@ -1072,7 +1085,7 @@ def count_ignored_hits(
         except (json.JSONDecodeError, OSError) as e:
             logger.debug("Skipping unreadable evaluation %s: %s", path, e)
             continue
-        if not isinstance(data, dict) or data.get("stale"):
+        if not isinstance(data, dict):
             continue
 
         chunk_id = data.get("chunk_id") or path.stem
@@ -1531,6 +1544,21 @@ def evaluate_and_persist_chunk(
             aggregated = aggregate_results(persisted_results)
 
     persisted_evals = [r.eval_name for r in persisted_results]
+
+    # Everything in ``actually_ran`` is being stamped against the current text
+    # a few lines below, so carrying the marker forward is only honest while
+    # some *other* evaluator still predates it. Without this the marker
+    # outlived every verdict it described: this path re-stamped it
+    # unconditionally, so a coded rerun landing after a re-judge silently
+    # resurrected it and no re-run could ever clear the flag.
+    if stale_mark:
+        prior_runs = (previous or {}).get("eval_runs")
+        prior_runs = prior_runs if isinstance(prior_runs, dict) else {}
+        lagging = (
+            set(existing_judges or {}) | set(persisted_evals)
+        ) - set(actually_ran)
+        if not _flag_still_covers(prior_runs, lagging, stale_mark.get("stale_since")):
+            stale_mark = None
 
     save_chunk_evaluation(
         project_dir,

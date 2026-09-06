@@ -1188,7 +1188,6 @@
 .eval-chip.errors { background: #fdecea; color: #c0392b; }
 .eval-chip.warnings { background: #fff8e1; color: #d4a017; }
 .eval-chip.info { background: #e8f0fe; color: #1a73e8; }
-.eval-chip.score { background: #e8f5e9; color: #2d8a4e; }
 .eval-chip.pass { background: #e8f5e9; color: #2d8a4e; }
 
 .eval-card-actions {

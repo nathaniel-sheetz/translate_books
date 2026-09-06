@@ -411,18 +411,22 @@ class TestReaderView:
         assert rv.status_code == 200
         assert b"reader-app" in rv.data
 
-    def test_reader_ships_stale_chunk_toast_i18n(self, client, project_with_alignment):
-        html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
-        assert "review_stale_chunks" in html
-        assert "Some judge results are hidden:" in html
-        assert "{n}" in html
+    def test_reader_ships_no_stale_chunk_toast(self, client, project_with_alignment):
+        """The load-time staleness toast is gone, in both languages.
 
-    def test_reader_ships_stale_chunk_toast_i18n_es(self, client, project_with_alignment):
+        It fired on a chunk-level flag that was wrong on most of the book, and
+        it announced a hiding that no longer happens: a finding is shown when
+        it still quotes live prose, and reported in the end-of-chapter bin when
+        it does not.
+        """
+        html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
+        assert "review_stale_chunks" not in html
+        assert "Some judge results are hidden:" not in html
+
         client.set_cookie("reader_lang", "es")
         html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
-        assert "review_stale_chunks" in html
-        assert "Algunos resultados de los jueces" in html
-        assert "{n}" in html
+        assert "review_stale_chunks" not in html
+        assert "Algunos resultados de los jueces" not in html
 
     def test_chapter_not_found(self, client, project_with_alignment):
         rv = client.get("/read/test-project/chapter_99")

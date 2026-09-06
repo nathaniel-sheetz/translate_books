@@ -405,7 +405,7 @@ class TestCountIgnoredHits:
             live=0, dismissed=1
         )
 
-    def test_stale_chunks_are_counted_in_neither_slot(self, tmp_path):
+    def test_stale_chunks_are_counted_like_any_other(self, tmp_path):
         ev = tmp_path / "evaluations"
         ev.mkdir(parents=True)
         (ev / "chapter_01_chunk_000.json").write_text(
@@ -419,7 +419,10 @@ class TestCountIgnoredHits:
             encoding="utf-8",
         )
         ig = IgnoredTerms(terms=[IgnoredTerm(term="Deum", eval_name="dictionary")])
-        assert count_ignored_hits(tmp_path, ig)[("dictionary", "deum", None)] == IgnoreHits()
+        # The ignore list is about the term, not about how fresh the run was.
+        assert count_ignored_hits(tmp_path, ig)[("dictionary", "deum", None)] == IgnoreHits(
+            live=1, dismissed=0
+        )
 
     def test_empty_list_is_a_no_op(self, tmp_path):
         assert count_ignored_hits(tmp_path, IgnoredTerms()) == {}

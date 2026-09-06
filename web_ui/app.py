@@ -5740,7 +5740,8 @@ def _locate_match(text_in_chunk: str, match_text: str) -> tuple[Optional[int], O
 
 
 def _anchor_judge_excerpt(
-    excerpt: Optional[str], translated_text: str, rows_sorted: list[dict]
+    excerpt: Optional[str], translated_text: str, rows_sorted: list[dict],
+    *, exact_only: bool = False,
 ) -> Optional[int]:
     """Anchor a judge issue (raw excerpt, no offsets) to an ``es_idx``.
 
@@ -5749,6 +5750,11 @@ def _anchor_judge_excerpt(
     then map that char offset to the alignment row that contains it. Returns
     ``None`` when the excerpt can't be located — the caller bins it as
     unanchored rather than force-attaching it to a nearby sentence.
+
+    ``exact_only`` drops the 25-character fallback below. Pass it when the
+    judge's verdict predates the current prose: a truncated probe is exactly
+    how a finding about deleted text lands on the surviving sentence next to
+    it, and a misplaced highlight is worse than an entry in the overflow bin.
     """
     if not excerpt or not isinstance(excerpt, str) or not translated_text:
         return None
@@ -5762,6 +5768,8 @@ def _anchor_judge_excerpt(
         return None
     idx = translated_text.find(probe)
     if idx == -1:
+        if exact_only:
+            return None
         short = probe[:25]
         idx = translated_text.find(short) if len(short) >= 8 else -1
         if idx == -1:
@@ -5793,14 +5801,21 @@ def project_chapter_review(project_id, chapter):
     the persisted per-chunk evaluations — no new persistence format. Findings
     that already have feedback are treated as dismissed and omitted, as are
     those naming a term on the book's ignore list
-    (``projects/<id>/ignored_terms.json``); chunks marked ``stale`` (edited
-    after the run) are skipped and only counted.
+    (``projects/<id>/ignored_terms.json``).
+
+    A chunk edited since its evaluators ran is *not* skipped. Every finding is
+    re-anchored against the prose as it stands now, so one that still quotes
+    live text is still true and is shown; one that no longer matches falls into
+    ``unanchored`` as ``obsolete``. ``stale_evaluators`` reports, per evaluator,
+    how many chunks hold a verdict formed against earlier text — a note about
+    the *summary*, not a reason to hide the findings.
 
     Response::
 
         { ok, by_es_idx: { "<es_idx>": [finding, ...] },
           unanchored: [finding, ...],
-          type_counts: { blacklist: N, ... }, stale_chunks: N }
+          type_counts: { blacklist: N, ... },
+          stale_evaluators: { dialogue: N, ... } }
 
     Each anchored finding: ``{eval_name, issue_index, chunk_id, severity,
     message, suggestion, excerpt, match, match_start, match_end, term,
@@ -5862,7 +5877,7 @@ def project_chapter_review(project_id, chapter):
     by_es_idx: dict[str, list[dict]] = defaultdict(list)
     unanchored: list[dict] = []
     type_counts: dict[str, int] = defaultdict(int)
-    stale_chunks = 0
+    stale_evaluators: dict[str, int] = defaultdict(int)
 
     from src.utils.text_utils import normalize_newlines
 
@@ -5872,9 +5887,6 @@ def project_chapter_review(project_id, chapter):
     for chunk_id, crows in rows_by_chunk.items():
         payload = load_chunk_evaluation(project_dir, chunk_id)
         if not payload:
-            continue
-        if payload.get("stale"):
-            stale_chunks += 1
             continue
 
         feedback = feedback_by_chunk.get(chunk_id, [])
@@ -5901,6 +5913,9 @@ def project_chapter_review(project_id, chapter):
             current_chunk_sha(project_dir, chunk_id),
             chunk_mtime=chunk_mtime,
         )
+        for _eval_name, _detail in freshness.items():
+            if _detail.get("state") == "stale":
+                stale_evaluators[_eval_name] += 1
 
         # Coded evaluators → target-side normalized_issues with a char span.
         for ni in payload.get("normalized_issues") or []:
@@ -5925,6 +5940,16 @@ def project_chapter_review(project_id, chapter):
                 + (loc.get("snippet_after") or "")
             )
             row = _row_containing_offset(crows_sorted, char_start, raw_text)
+            # A verdict formed against earlier prose cannot vouch for a stored
+            # char offset — the text moved under it, so the offset now indexes
+            # a different sentence. Keep the finding in place only while the
+            # snippet it quotes is still verbatim in the row the offset lands
+            # in; otherwise bin it rather than tint an innocent sentence. The
+            # bin is lossless: message, suggestion and excerpt all survive.
+            if row is not None and (
+                (freshness.get(eval_name) or {}).get("state") == "stale"
+            ) and (not match_text or match_text not in row["text_in_chunk"]):
+                row = None
             if row is None:
                 unanchored.append({
                     "eval_name": eval_name,
@@ -5972,7 +5997,12 @@ def project_chapter_review(project_id, chapter):
                     ):
                         continue
                     excerpt = issue.get("location")
-                    es_idx = _anchor_judge_excerpt(excerpt, translated_text, crows_sorted)
+                    es_idx = _anchor_judge_excerpt(
+                        excerpt, translated_text, crows_sorted,
+                        exact_only=(
+                            (freshness.get(judge_name) or {}).get("state") == "stale"
+                        ),
+                    )
                     if es_idx is None:
                         unanchored.append({
                             "eval_name": judge_name,
@@ -6005,7 +6035,7 @@ def project_chapter_review(project_id, chapter):
         "by_es_idx": dict(by_es_idx),
         "unanchored": unanchored,
         "type_counts": dict(type_counts),
-        "stale_chunks": stale_chunks,
+        "stale_evaluators": dict(stale_evaluators),
     })
 
 
@@ -7523,11 +7553,10 @@ def project_evaluations_summary(project_id):
         chapter_id = _chapter_id_from_chunk_id(chunk_id)
         if not chapter_id:
             continue
-        bucket = by_chapter.setdefault(chapter_id, {"errors": 0, "warnings": 0, "info": 0, "stale": 0})
+        bucket = by_chapter.setdefault(chapter_id, {"errors": 0, "warnings": 0, "info": 0})
         bucket["errors"] += counts.get("errors", 0) or 0
         bucket["warnings"] += counts.get("warnings", 0) or 0
         bucket["info"] += counts.get("info", 0) or 0
-        bucket["stale"] += counts.get("stale", 0) or 0
 
     return jsonify({"ok": True, "summary": summary, "by_chapter": by_chapter})
 

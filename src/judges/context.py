@@ -89,9 +89,10 @@ def load_coded_findings(project_dir: Path) -> dict[str, list[str]]:
     "Live" means what the reader would currently show: dismissed findings and
     findings naming an ignored term are excluded, because the human has already
     said those are not defects and re-suppressing them via this list would be
-    telling the judge not to report something nobody objects to. Stale
-    evaluations are skipped for the same reason the reader skips them — they
-    describe prose that has since changed.
+    telling the judge not to report something nobody objects to. A chunk edited
+    since its evaluators ran is *not* skipped: the coded finding it holds is
+    still worth de-duplicating against, and dropping it here reintroduced the
+    double-reporting this function exists to prevent.
 
     Without this the dictionary and grammar evaluators (3.2 and 2.8 findings per
     chunk) and the editorial judge report the same defect independently, the
@@ -122,7 +123,7 @@ def load_coded_findings(project_dir: Path) -> dict[str, list[str]]:
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Skipping unreadable evaluation %s: %s", path, exc)
             continue
-        if not isinstance(payload, dict) or payload.get("stale"):
+        if not isinstance(payload, dict):
             continue
 
         by_key, by_index = build_dismissed(feedback_by_chunk.get(chunk_id, []))

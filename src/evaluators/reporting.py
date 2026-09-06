@@ -179,7 +179,6 @@ def generate_text_report(
     console.print(f"  Evaluators Run: {aggregated['total_evaluators']}")
     console.print(f"  Passed: [green]{aggregated['passed_evaluators']}[/green]")
     console.print(f"  Failed: [red]{aggregated['failed_evaluators']}[/red]")
-    console.print(f"  Average Score: {aggregated['average_score']:.2f}" if aggregated['average_score'] is not None else "  Average Score: —")
     console.print()
 
     console.print("[bold]Issue Counts:[/bold]")
@@ -292,7 +291,6 @@ def generate_json_report(
             "total_evaluators": aggregated["total_evaluators"],
             "passed_evaluators": aggregated["passed_evaluators"],
             "failed_evaluators": aggregated["failed_evaluators"],
-            "average_score": aggregated["average_score"],
             "total_issues": aggregated["total_issues"],
             "issues_by_severity": aggregated["issues_by_severity"],
             "issues_by_evaluator": aggregated["issues_by_evaluator"]
@@ -613,9 +611,6 @@ def generate_html_report(
     html_parts.append(f'            <div class="stat-card"><div class="stat-label">Evaluators Run</div><div class="stat-value">{aggregated["total_evaluators"]}</div></div>\n')
     html_parts.append(f'            <div class="stat-card"><div class="stat-label">Passed</div><div class="stat-value">{aggregated["passed_evaluators"]}</div></div>\n')
     html_parts.append(f'            <div class="stat-card"><div class="stat-label">Failed</div><div class="stat-value">{aggregated["failed_evaluators"]}</div></div>\n')
-
-    avg_score = f'{aggregated["average_score"]:.2f}' if aggregated["average_score"] is not None else "—"
-    html_parts.append(f'            <div class="stat-card"><div class="stat-label">Average Score</div><div class="stat-value">{avg_score}</div></div>\n')
     html_parts.append(f'            <div class="stat-card"><div class="stat-label">Total Issues</div><div class="stat-value">{aggregated["total_issues"]}</div></div>\n')
     html_parts.append(f'            <div class="stat-card error"><div class="stat-label">Errors</div><div class="stat-value">{aggregated["issues_by_severity"]["error"]}</div></div>\n')
     html_parts.append(f'            <div class="stat-card warning"><div class="stat-label">Warnings</div><div class="stat-value">{aggregated["issues_by_severity"]["warning"]}</div></div>\n')

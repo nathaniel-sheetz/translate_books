@@ -256,7 +256,12 @@ def test_load_project_summary_ignores_feedback_file(tmp_path):
     assert list(summary.keys()) == ["ch01_chunk_001"]
 
 
-def test_load_project_summary_stale_suppresses_judge_counts(tmp_path):
+def test_load_project_summary_keeps_judge_counts_when_marked_stale(tmp_path):
+    """The badge reports what the chunk holds, marker or not.
+
+    Zeroing the counts made a chapter with real findings look clean, which is
+    the more dangerous of the two possible errors.
+    """
     from web_ui.evaluations import mark_evaluation_stale, merge_judge_result
 
     merge_judge_result(
@@ -272,11 +277,10 @@ def test_load_project_summary_stale_suppresses_judge_counts(tmp_path):
 
     summary = load_project_summary(tmp_path)
     assert summary["ch01_chunk_001"] == {
-        "errors": 0,
+        "errors": 1,
         "warnings": 0,
         "info": 0,
-        "total": 0,
-        "stale": 1,
+        "total": 1,
     }
 
 
@@ -313,6 +317,58 @@ def test_evaluate_and_persist_preserves_stale_when_judges_kept(tmp_path):
     payload = load_chunk_evaluation(tmp_path, chunk.id)
     assert payload["stale"] is True
     assert payload["stale_reason"] == "edited by apply"
+    assert "dialogue" in payload["judges"]
+
+
+def test_coded_rerun_drops_a_marker_no_evaluator_still_needs(tmp_path):
+    """The marker must not outlive every verdict it describes.
+
+    Reproduces the deadlock that left fabre2 chapters 50-53 permanently
+    flagged. ``merge_judge_result`` will not clear the marker while a coded
+    evaluator still predates it, and the coded rerun used to re-stamp the
+    marker unconditionally — so whichever ran last won, and running the judges
+    could never clear the flag. Once *every* evaluator has re-run against the
+    current text the marker describes nobody and must go.
+    """
+    from src.models import Chunk, ChunkMetadata, ChunkStatus
+    from web_ui.evaluations import (
+        evaluate_and_persist_chunk,
+        mark_evaluation_stale,
+        merge_judge_result,
+    )
+
+    chunk = Chunk(
+        id="ch01_chunk_001",
+        chapter_id="ch01",
+        position=0,
+        source_text="Hello",
+        translated_text="Hola",
+        metadata=ChunkMetadata(
+            char_start=0, char_end=5, overlap_start=0, overlap_end=0,
+            paragraph_count=1, word_count=1,
+        ),
+        status=ChunkStatus.TRANSLATED,
+    )
+    judge = {"eval_name": "dialogue", "issues": [{"severity": "error", "message": "m"}]}
+
+    evaluate_and_persist_chunk(tmp_path, chunk, glossary=None, blacklist=None)
+    merge_judge_result(tmp_path, chunk.id, "dialogue", judge)
+    mark_evaluation_stale(tmp_path, chunk.id, "edited by apply")
+
+    # Re-judging alone cannot clear it: the coded evaluators still hold
+    # verdicts formed before the edit, and the marker still describes them.
+    merge_judge_result(tmp_path, chunk.id, "dialogue", judge)
+    assert load_chunk_evaluation(tmp_path, chunk.id)["stale"] is True
+
+    # Now the coded evaluators catch up. Nothing is left for the marker to
+    # describe, so it goes — in the file and in the returned summary alike.
+    result = evaluate_and_persist_chunk(tmp_path, chunk, glossary=None, blacklist=None)
+
+    payload = load_chunk_evaluation(tmp_path, chunk.id)
+    assert "stale" not in payload
+    assert "stale_since" not in payload
+    assert "stale_reason" not in payload
+    assert "stale" not in result
     assert "dialogue" in payload["judges"]
 
 
@@ -419,7 +475,7 @@ def test_chunk_id_without_a_chapter_still_reaches_the_project_total(tmp_path):
     assert load_project_type_counts(tmp_path)["blacklist"] == 1
 
 
-def test_chapter_type_counts_skip_stale_and_dismissed(tmp_path):
+def test_chapter_type_counts_skip_dismissed_but_keep_stale(tmp_path):
     save_chunk_evaluation(tmp_path, "chapter_01_chunk_000", results=[], aggregated={},
                           normalized_issues=[_target_issue("blacklist", issue_index=0),
                                              _target_issue("grammar", issue_index=1)])
@@ -431,7 +487,9 @@ def test_chapter_type_counts_skip_stale_and_dismissed(tmp_path):
     by_chapter = load_chapter_type_counts(tmp_path)
     assert by_chapter["chapter_01"]["blacklist"] == 0
     assert by_chapter["chapter_01"]["grammar"] == 1
-    assert "chapter_02" not in by_chapter
+    # Dismissal is a decision about the finding; the stale marker is only a
+    # note about the run that produced it, and must not silence a chapter.
+    assert by_chapter["chapter_02"]["blacklist"] == 1
 
 
 def test_chapter_type_counts_ignore_source_side_findings(tmp_path):
