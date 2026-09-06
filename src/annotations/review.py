@@ -1162,6 +1162,32 @@ _APPLY_SCHEMA = {
 }
 
 
+def results_all(project_dir: Path) -> list[dict[str, Any]]:
+    """Every reviewed result on disk, whole, in the order ``commit`` wrote them.
+
+    The read-only twin of :func:`apply`. ``apply(dry_run=True)`` is a *planner*:
+    it keeps only what a write needs (``old``/``new``/``mode``/``confidence``)
+    and drops ``state_reason``, ``evidence`` and ``note_text`` — the richest
+    prose the reviewer produced, and exactly what a screen built for reading
+    the model's opinion has to show. Rather than widen the plan dict, which
+    every caller of ``apply`` would then carry, this hands back the rows
+    untouched and lets the caller pick.
+
+    Returns ``[]`` when there is no results file yet or it cannot be read, the
+    same degradation as :func:`results_skipped` — 7 of the books here have
+    never been reviewed, and that is not an error.
+    """
+    results_path = _results_path(Path(project_dir))
+    try:
+        doc = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = doc.get("results") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
 def results_skipped(
     project_dir: Path, *, reason: Optional[str] = None
 ) -> list[dict[str, Any]]:

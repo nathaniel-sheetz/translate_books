@@ -1,0 +1,334 @@
+/* Recommendations — one book's LLM opinions, to read rather than to act on.
+   Rides on reader.css's tokens (loaded first) so light/dark, type and spacing
+   match the reader rather than becoming a third visual language. No :root here
+   on purpose: a second token table is how two pages drift apart. */
+
+.rec-page {
+    /* Wider than the inbox's 820px. A card shows three consecutive sentences of
+       prose plus its English source, and prose wrapped to six words a line is
+       what turns a reading page into a scanning page. */
+    max-width: 900px;
+}
+
+.rec-subtitle {
+    color: var(--text-muted3);
+    margin-bottom: 6px;
+}
+
+.rec-summary {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-bottom: 14px;
+}
+
+/* --- Filter ------------------------------------------------------------- */
+
+/* Sticky, because the filter is useless the moment it scrolls away on a page
+   whose whole point is a long scroll. */
+.rec-filter {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    padding: 10px 0;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.rec-filter-label {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.rec-filter-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    color: var(--text-muted4);
+    cursor: pointer;
+}
+
+.rec-filter-count {
+    color: var(--text-muted6);
+    font-size: 12px;
+}
+
+/* --- Chapters ----------------------------------------------------------- */
+
+.rec-chapter {
+    margin-bottom: 28px;
+    /* Reserves a screenful before the fill lands, so the scrollbar does not
+       lurch as sections resolve behind you. Only a floor: a filled chapter
+       grows past it. */
+    min-height: 120px;
+}
+
+.rec-chapter-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    padding-bottom: 6px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.rec-chapter-header h2 {
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--text-heading);
+    margin: 0;
+}
+
+.rec-chapter-header a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.rec-chapter-header a:hover { text-decoration: underline; }
+
+.rec-chapter-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.rec-chapter-status {
+    color: var(--text-muted6);
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* --- Cards -------------------------------------------------------------- */
+
+.rec-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    padding: 12px 14px;
+    margin-bottom: 12px;
+}
+
+/* The one item on the page whose verdict may no longer describe the text.
+   Marked at the edge rather than hidden: this screen reports what the models
+   said, and "said about text that has since changed" is part of the report. */
+.rec-card-stale {
+    border-left: 3px solid var(--badge-warn-color);
+}
+
+.rec-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 8px;
+}
+
+.rec-chip {
+    font-size: 11px;
+    line-height: 1.6;
+    padding: 1px 7px;
+    border-radius: 10px;
+    color: var(--text-muted3);
+    background: var(--bg-filter);
+    white-space: nowrap;
+}
+
+/* Severity is the only chip that earns colour: it is the one field that says
+   how much of your attention an item deserves before you read it. */
+.rec-chip-sev-error {
+    background: var(--banner-warn-bg);
+    color: var(--status-missing);
+}
+
+.rec-chip-sev-warning {
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-color);
+}
+
+.rec-chip-stale {
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-color);
+}
+
+.rec-chip-cat {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+}
+
+/* Pushed to the right edge: it is the only thing on the card that leaves the
+   page, so it belongs where an action belongs rather than among the labels. */
+.rec-open {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-link);
+    text-decoration: none;
+}
+
+.rec-open:hover { color: var(--text-link-hover); text-decoration: underline; }
+
+/* --- The sentence and its neighbours ------------------------------------ */
+
+.rec-context {
+    /* Borrowed from the reader's own reading column: this is prose to read, not
+       a field to scan, so it gets prose leading and a serif face. */
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 15px;
+    line-height: 1.65;
+    border-left: 2px solid var(--border);
+    padding-left: 12px;
+    margin-bottom: 10px;
+}
+
+/* Dimmed, because they are here to place the sentence, not to be read as
+   equals to it. */
+.rec-ctx-before,
+.rec-ctx-after {
+    color: var(--text-muted2);
+    margin: 0;
+}
+
+.rec-ctx-current {
+    color: var(--text);
+    margin: 2px 0;
+}
+
+.rec-ctx-current mark {
+    background: var(--ann-word-choice-badge);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+/* Findings from a judge never carry an in-sentence span (they report an
+   excerpt, not offsets), so the whole sentence is tinted instead — the same
+   fallback the reader paints. */
+.rec-ctx-current.rec-ctx-tinted {
+    background: var(--ann-flag);
+    border-radius: 3px;
+    padding: 0 3px;
+}
+
+.rec-en {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    margin: 6px 0 0;
+}
+
+.rec-en-label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10px;
+    color: var(--text-muted6);
+    margin-right: 5px;
+}
+
+/* An item whose sentence could not be found at all: excerpt and explanation
+   only, and a line saying why. Never forced onto a nearby sentence. */
+.rec-orphan {
+    border-left: 2px dashed var(--border-light);
+    padding-left: 12px;
+    margin-bottom: 10px;
+    color: var(--text-muted3);
+    font-size: 13px;
+}
+
+.rec-orphan-why {
+    color: var(--text-muted6);
+    font-size: 12px;
+    margin: 4px 0 0;
+}
+
+/* --- What the model said ------------------------------------------------ */
+
+.rec-suggestion {
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--accent-bg);
+    border-radius: 4px;
+    padding: 6px 9px;
+    margin-bottom: 8px;
+    /* A suggestion is often multi-line text meant to replace prose verbatim;
+       collapsing its newlines would misrepresent what would be written. */
+    white-space: pre-wrap;
+}
+
+.rec-label {
+    display: block;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+
+/* Untruncated, deliberately. The inbox's 600-character cap is what made the
+   model's reasoning unreadable, and reading it is this page's entire job. */
+.rec-explanation {
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--text-muted4);
+    margin: 0;
+    white-space: pre-wrap;
+}
+
+.rec-detail {
+    margin: 8px 0 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-divider);
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.rec-detail-label {
+    color: var(--text-muted6);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.rec-detail-text {
+    color: var(--text-muted3);
+    margin: 0 0 6px;
+    white-space: pre-wrap;
+}
+
+.rec-detail-text:last-child { margin-bottom: 0; }
+
+/* --- Filtering ---------------------------------------------------------- */
+
+/* One rule per kind rather than an attribute selector, so the filter is a
+   plain class toggle on the container and nothing re-fetches. The chapter
+   header chips hide with their cards, so a chapter filtered down to nothing
+   does not keep advertising counts you asked not to see. */
+.rec-hide-blacklist .rec-kind-blacklist,
+.rec-hide-grammar .rec-kind-grammar,
+.rec-hide-dictionary .rec-kind-dictionary,
+.rec-hide-completeness .rec-kind-completeness,
+.rec-hide-dialogue .rec-kind-dialogue,
+.rec-hide-address .rec-kind-address,
+.rec-hide-editorial .rec-kind-editorial,
+.rec-hide-word_choice .rec-kind-word_choice,
+.rec-hide-inconsistency .rec-kind-inconsistency,
+.rec-hide-footnote .rec-kind-footnote,
+.rec-hide-flag .rec-kind-flag {
+    display: none;
+}
+
+@media (max-width: 600px) {
+    .rec-context { font-size: 14px; }
+
+    /* The filter is four lines of chips on a phone; sticky would eat half the
+       viewport on the page you are trying to read. */
+    .rec-filter { position: static; }
+}

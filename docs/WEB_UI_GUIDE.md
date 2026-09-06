@@ -29,6 +29,7 @@ service, use `python scripts/serve.py` (see [`CLI_REFERENCE.md`](CLI_REFERENCE.m
 | `/read/<id>/<chapter>` | Bilingual reader view |
 | `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
 | `/review-inbox` | Cross-book annotation resolutions awaiting a decision |
+| `/recommendations/<id>` | One book's judge findings and reviewed notes, to read |
 | `/reports/<project_id>/<filename>` | Serves generated edit-review HTML reports (same-origin for tag API) |
 
 ---
@@ -625,6 +626,53 @@ The dashboard's job-starting routes (`review/run-coded`, `review/run-judges`,
 when a CLI or scheduled wave already holds it. Before this, a wave started outside
 Flask had no job record, so `jobs.JobConflict` never fired and a click here would
 run a `prepare` that unlinked the drafts that wave was still writing.
+
+---
+
+## Recommendations
+
+Served at `/recommendations/<project_id>`, linked from the Review stage's toolbar
+on the dashboard and from the book's own chapter list. One book, one dense
+scroll: every judge finding, coded finding and reviewed annotation, in reading
+order, each shown against the sentence it concerns plus the sentence either side.
+
+**It is read-only.** No apply, reject, dismiss or ignore — the reader and the
+review inbox keep that job, along with the locks and staleness checks that
+writing safely needs. This page exists because there was nowhere to simply *read*
+what the models said about a book: Review Mode shows one sentence at a time as a
+tint you tap, and the inbox truncates a recommendation to 600 characters and
+shows none of the reviewer's reasoning.
+
+- **One card shape for both sources.** A judge or coded finding contributes its
+  `message`, `suggestion` and `excerpt`; an annotation resolution contributes its
+  `recommendation` plus the prose the inbox drops — `state_reason`, every
+  `evidence[]` line, and the `note_text` it would append. Nothing is truncated.
+- **Context comes from adjacent alignment *rows*, never `es_idx ± 1`.** An N:1
+  group consumes the indices of the sentences it swallowed, so the index is
+  sparse in most of this corpus and index arithmetic would find a hole.
+- **The highlight follows what the source can support.** A coded finding has a
+  char span, so the offending words are marked; an annotation is marked at its
+  first anchor word; a judge reports only an excerpt, so the whole sentence is
+  tinted, exactly as the reader paints it.
+- **An item with no sentence still appears**, in a per-chapter tail, labelled
+  `obsolete` (the prose it quotes has changed) or `unplaceable` (the excerpt was
+  never verbatim) — the same overflow bin the reader gives them, never forced
+  onto a nearby sentence.
+- **A note edited since its review is shown and flagged**, not hidden. The
+  recommendation no longer describes the text, and that is a fact about the
+  report worth reading.
+- **Filtering is presentational.** The chips toggle a class on the container;
+  nothing re-fetches, so a chapter cannot change under you as you read it.
+- **Counts come from `load_chapter_type_counts`**, the same walk the chapter list
+  and dashboard use, so this page's numbers agree with theirs. A chapter counted
+  but unfillable — evaluation results in a chunk with no usable alignment rows —
+  says so rather than showing an empty heading.
+
+The shell is server-rendered counts only; each chapter's items arrive from
+`GET /api/project/<id>/recommendations/<chapter>` as the section nears the
+viewport. Whole-book rendering is seconds on a long book (80 chapters ≈ 4 s) and
+one chapter is ~50 ms. `GET /api/project/<id>/recommendations` returns the lot in
+one payload for scripts and tests; the page never calls it.
 
 ---
 

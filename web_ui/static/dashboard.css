@@ -243,6 +243,16 @@
     background: #eee;
 }
 
+/* The Review toolbar's "Read recommendations" is a link, not a button — it
+   navigates rather than starting a job. Without this it sits beside two real
+   buttons wearing the browser's default underline and blue-link colour, which
+   reads as a different kind of control than it is. */
+a.btn-primary, a.btn-secondary {
+    display: inline-block;
+    text-decoration: none;
+    color: #333;
+}
+
 .btn-save {
     background: #2d8a4e;
     color: #fff;

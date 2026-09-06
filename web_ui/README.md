@@ -29,6 +29,8 @@ web_ui/
 │   ├── dashboard.html          # Pipeline wizard (8-stage stepper)
 │   ├── reader.html             # Bilingual reader + project/chapter lists
 │   ├── chunk_edit.html         # Full-textarea chunk editor
+│   ├── review_inbox.html       # Cross-book annotation resolutions
+│   ├── recommendations.html    # Read-only screen for what the models said
 │   └── edit_review_report.html.j2  # Edit-review HTML report (Jinja2)
 └── static/
     ├── dashboard.js/.css       # Dashboard stage logic, batch SSE, prompts
@@ -38,6 +40,8 @@ web_ui/
     ├── reader_chapters.js      # Chapter list
     ├── concordance.js/.css     # "Find in book" search surface
     ├── chunk_edit.js/.css      # Chunk editor save flow + caret positioning
+    ├── review_inbox.js/.css    # Review inbox apply/reject flow
+    ├── recommendations.js/.css # Lazy chapter fill + kind filter
     ├── setup.js/.css           # Style guide + glossary wizard
     ├── edit_review_report.css  # Styles for the edit-review report
     └── manifest.webmanifest    # PWA manifest
@@ -53,18 +57,22 @@ web_ui/
 | `/read/<id>` | reader.html | Chapter list |
 | `/read/<id>/<ch>` | reader.html | Bilingual reader |
 | `/read/<id>/<ch>/chunk/<chunk_id>/edit` | chunk_edit.html | Full-chunk text editor |
+| `/review-inbox` | review_inbox.html | Outstanding annotation resolutions, every book |
+| `/recommendations/<id>` | recommendations.html | One book's findings and notes, read-only |
 
 ## API surface
 
-`app.py` defines 91 routes — 82 under `/api/`, plus the 9 page routes in the table
-above. By prefix:
+`app.py` defines 103 routes — 92 under `/api/`, plus 11 page routes (the table
+above lists the eight you navigate to; the rest serve images, reports and
+`/healthz`). By prefix:
 
 | Prefix | Count | Covers |
 |---|---|---|
-| `/api/project/<id>/...` | 45 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs |
+| `/api/project/<id>/...` | 51 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs, and the recommendations feed |
 | `/api/setup/<id>/...` | 13 | Style guide and glossary wizards |
 | `/api/alignment`, `/api/annotation(s)`, `/api/reviewed`, `/api/correction`, `/api/apply-corrections` | 9 | Reader data and review state |
-| `/api/llm-config`, `/api/llm/models`, `/api/split-patterns`, `/api/edit-tags`, `/api/set-*` | 8 | Config and UI preferences |
+| `/api/llm-config`, `/api/llm/models`, `/api/split-patterns`, `/api/edit-tags`, `/api/set-*` | 9 | Config and UI preferences |
+| `/api/review-inbox/...` | 4 | The cross-book annotation funnel |
 | `/api/sentence/...`, `/api/chunk/...`, `/api/remove-text`, `/api/removal-context` | 5 | Per-sentence and per-chunk editing |
 | `/api/search/<project_id>` | 1 | Concordance ("Find in book") |
 | `/api/projects/create` | 1 | Project creation |

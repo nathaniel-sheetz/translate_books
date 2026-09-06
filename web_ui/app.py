@@ -5790,17 +5790,14 @@ def _unanchored_reason(freshness: dict, eval_name: str) -> str:
     return "obsolete" if state == "stale" else "unplaceable"
 
 
-@app.route(
-    "/api/project/<project_id>/review/<chapter>",
-    methods=["GET"],
-)
-def project_chapter_review(project_id, chapter):
+def _build_chapter_review(project_dir: Path, chapter: str) -> dict:
     """Return evaluator findings for a chapter, anchored to reader sentences.
 
-    Powers the reader's opt-in Review Mode. Reuses the alignment builder and
-    the persisted per-chunk evaluations — no new persistence format. Findings
-    that already have feedback are treated as dismissed and omitted, as are
-    those naming a term on the book's ignore list
+    Powers the reader's opt-in Review Mode and, through
+    :func:`_recommendation_items`, the read-only recommendations screen. Reuses
+    the alignment builder and the persisted per-chunk evaluations — no new
+    persistence format. Findings that already have feedback are treated as
+    dismissed and omitted, as are those naming a term on the book's ignore list
     (``projects/<id>/ignored_terms.json``).
 
     A chunk edited since its evaluators ran is *not* skipped. Every finding is
@@ -5810,19 +5807,27 @@ def project_chapter_review(project_id, chapter):
     how many chunks hold a verdict formed against earlier text — a note about
     the *summary*, not a reason to hide the findings.
 
-    Response::
+    Returns::
 
-        { ok, by_es_idx: { "<es_idx>": [finding, ...] },
+        { ok: True, by_es_idx: { "<es_idx>": [finding, ...] },
           unanchored: [finding, ...],
           type_counts: { blacklist: N, ... },
           stale_evaluators: { dialogue: N, ... } }
+
+    or, when the chapter has no alignment or its file will not parse,
+    ``{"ok": False, "error": str, "status": 404|500}``. Two routes call this,
+    so the failure is data for the caller to shape rather than a response.
 
     Each anchored finding: ``{eval_name, issue_index, chunk_id, severity,
     message, suggestion, excerpt, match, match_start, match_end, term,
     rule_id}`` where ``match_start is None`` ⇒ paint a whole-sentence tint.
     ``term``/``rule_id`` are the finding's stable identity, present only on
     coded findings that have one; the reader uses them to offer "ignore this
-    for the whole book".
+    for the whole book". They are deliberately *not* carried on judge findings,
+    which the ignore list never gates — offering a button that changes nothing
+    is worse than not offering it. ``category`` is the issue's own defect class
+    (the editorial judge's ``NATURALNESS``, ``STYLE_GUIDE``, ...) and is carried
+    everywhere, because it is a label to read rather than an action to take.
 
     A finding that cannot be placed on a sentence at all — a coded ``char_start``
     no row covers, or a judge excerpt that is not in the prose — goes to
@@ -5833,22 +5838,19 @@ def project_chapter_review(project_id, chapter):
     """
     from collections import defaultdict
 
-    if not _safe_id(project_id) or not _safe_id(chapter):
-        return jsonify({"error": "Bad request"}), 400
-
-    project_dir = _resolve_project_dir(project_id)
-    if not project_dir.exists():
-        return jsonify({"error": "Project not found"}), 404
-
     align_path = project_dir / "alignments" / f"{chapter}.json"
     if not align_path.exists():
-        return jsonify({"error": f"Alignment not found: {project_id}/{chapter}"}), 404
+        return {
+            "ok": False,
+            "error": f"Alignment not found: {project_dir.name}/{chapter}",
+            "status": 404,
+        }
 
     try:
         with open(align_path, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"error": str(e)}), 500
+        return {"ok": False, "error": str(e), "status": 500}
 
     # Enrich rows with chunk_id + char offsets + text_in_chunk (same builder
     # /api/alignment uses). No paragraph/image enrichment needed here.
@@ -5962,6 +5964,7 @@ def project_chapter_review(project_id, chapter):
                     "reason": _unanchored_reason(freshness, eval_name),
                     "term": issue_term(eval_name, ni),
                     "rule_id": ni.get("rule_id"),
+                    "category": ni.get("category"),
                 })
                 type_counts[eval_name] += 1
                 continue
@@ -5979,6 +5982,7 @@ def project_chapter_review(project_id, chapter):
                 "match_end": match_end,
                 "term": issue_term(eval_name, ni),
                 "rule_id": ni.get("rule_id"),
+                "category": ni.get("category"),
             })
             type_counts[eval_name] += 1
 
@@ -6013,6 +6017,7 @@ def project_chapter_review(project_id, chapter):
                             "suggestion": issue.get("suggestion"),
                             "excerpt": excerpt or "",
                             "reason": _unanchored_reason(freshness, judge_name),
+                            "category": issue.get("category"),
                         })
                         type_counts[judge_name] += 1
                         continue
@@ -6027,16 +6032,40 @@ def project_chapter_review(project_id, chapter):
                         "match": "",
                         "match_start": None,
                         "match_end": None,
+                        "category": issue.get("category"),
                     })
                     type_counts[judge_name] += 1
 
-    return jsonify({
+    return {
         "ok": True,
         "by_es_idx": dict(by_es_idx),
         "unanchored": unanchored,
         "type_counts": dict(type_counts),
         "stale_evaluators": dict(stale_evaluators),
-    })
+    }
+
+
+@app.route(
+    "/api/project/<project_id>/review/<chapter>",
+    methods=["GET"],
+)
+def project_chapter_review(project_id, chapter):
+    """Return one chapter's findings as JSON, for the reader's Review Mode.
+
+    Guards, then :func:`_build_chapter_review` — whose payload this returns
+    unchanged, and whose ``ok: False`` carries the status to send.
+    """
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    result = _build_chapter_review(project_dir, chapter)
+    if not result.get("ok"):
+        return jsonify({"error": result["error"]}), result["status"]
+    return jsonify(result)
 
 
 # ── Review tab: the per-book ignore list ─────────────────────────────────────
@@ -8460,6 +8489,462 @@ def serve_edit_report(project_id, filename):
     if not reports_dir.exists():
         return jsonify({"error": "No reports for this project"}), 404
     return send_from_directory(str(reports_dir), filename)
+
+
+# ============================================================================
+# Recommendations - a read-only screen for what the models said
+# ============================================================================
+#
+# Every LLM opinion this pipeline produces is otherwise trapped behind a surface
+# built for *acting* on it, one item at a time: judge findings are readable only
+# inside the reader's Review Mode, a tint you tap, one sentence at a time; an
+# annotation resolution is readable only in the inbox, which truncates the
+# recommendation to 600 characters and shows none of the richest prose the model
+# wrote (`state_reason`, `evidence`, `note_text`). There was no way to simply
+# *read* what the models said about a book, in order, with enough surrounding
+# text to judge whether they were right.
+#
+# This section is that: one book, one dense scroll, judge findings and annotation
+# resolutions unified into one card shape, each shown against the sentence it
+# concerns plus the sentence either side.
+#
+# It is read-only on purpose. No apply, reject, dismiss or ignore - the inbox and
+# the reader keep that job, and they hold the locks and the staleness checks that
+# writing safely needs. The item shape still carries `chunk_id`, `issue_index`
+# and `key`, so an action could be added later without reshaping the data.
+#
+# Nothing here re-derives an opinion. Findings come from `_build_chapter_review`,
+# the same builder the reader's Review Mode uses, so this screen and the reader
+# agree on what is live, what is dismissed and where each finding lands; the
+# per-chapter counts come from `load_chapter_type_counts`, which the chapter list
+# and the dashboard already use, so the shell's numbers agree with theirs.
+
+_RECOMMENDATION_ANNOTATION_KINDS: tuple[str, ...] = (
+    "word_choice", "inconsistency", "footnote", "flag",
+)
+# Filter order on the page: deterministic checks, then judges, then the reader's
+# own notes - cheapest opinion to most considered, which is also roughly the
+# order of how much prose each one comes with.
+_RECOMMENDATION_KINDS: tuple[str, ...] = tuple(REVIEW_TYPES) + _RECOMMENDATION_ANNOTATION_KINDS
+
+# Two items on the same sentence render findings first, then the reader's note:
+# the note is usually a question *about* the sentence, and reads better after
+# the machine's verdict on it than before.
+_RECOMMENDATION_SOURCE_ORDER = {"coded": 0, "judge": 1, "annotation": 2}
+
+# Sorts after every real ``es_idx``. A chapter's sentence count is bounded by
+# its file, so any number past the largest one a book could hold will do.
+_RECOMMENDATION_LAST = 1 << 30
+
+
+def _context_rows(rows_in_order: list[dict], es_idx) -> dict:
+    """The sentence at ``es_idx`` and its neighbours, found *by position*.
+
+    Never ``es_idx +/- 1``. An N:1 alignment group consumes the indices of the
+    sentences it swallowed (``_group_nto1``, :mod:`src.sentence_aligner`), so
+    the index is sparse in 408 of this corpus's 502 alignment files: reading a
+    neighbour off ``es_idx - 1`` would land on a hole - no row at all - for most
+    of the books here, and would silently show no context on exactly the
+    sentences that were hardest to align.
+
+    Returns ``{"before": row|None, "current": row|None, "after": row|None}``,
+    each row ``{es, en, es_idx}``. ``current`` is ``None`` when the index no
+    longer names a row, which is how an annotation whose sentence was deleted
+    since the review still renders - with its own snapshot and no context,
+    rather than attached to whichever row inherited the number.
+    """
+    empty = {"before": None, "current": None, "after": None}
+    if es_idx is None:
+        return empty
+    position = None
+    for i, row in enumerate(rows_in_order):
+        if row.get("es_idx") == es_idx:
+            position = i
+            break
+    if position is None:
+        return empty
+
+    def at(i):
+        if i < 0 or i >= len(rows_in_order):
+            return None
+        row = rows_in_order[i]
+        return {
+            "es": row.get("es") or "",
+            "en": row.get("en") or "",
+            "es_idx": row.get("es_idx"),
+        }
+
+    return {
+        "before": at(position - 1),
+        "current": at(position),
+        "after": at(position + 1),
+    }
+
+
+def _recommendation_context_rows(project_dir: Path, chapter: str) -> list[dict]:
+    """A chapter's alignment rows in document order, ready for neighbour lookup.
+
+    Read raw: no ``_attach_text_in_chunk`` enrichment, because context needs
+    only ``es``/``en``/``es_idx`` and the chunk-offset walk is the expensive
+    half of the reader's builder. ``[IMAGE:...]`` placeholders are dropped - the
+    same rows :func:`_build_chapter_review` refuses to anchor to - so a picture
+    between two sentences does not become one of them as "context".
+
+    The file's own order is already document order in every alignment here, but
+    it is sorted anyway: this is what makes "the row before" mean the sentence
+    before.
+    """
+    align_path = project_dir / "alignments" / f"{chapter}.json"
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    rows = [
+        row for row in (data.get("alignments") or [])
+        if isinstance(row, dict)
+        and isinstance(row.get("es_idx"), int)
+        and not _IMAGE_PLACEHOLDER_RE.fullmatch((row.get("es") or "").strip())
+    ]
+    rows.sort(key=lambda r: r["es_idx"])
+    return rows
+
+
+def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
+                  *, unanchored_reason: Optional[str] = None) -> dict:
+    """One judge or coded finding as a recommendation card.
+
+    ``stale`` is always ``False`` here, and that is not an omission.
+    :func:`_build_chapter_review` has already made the staleness judgement for
+    findings: one whose quoted text is still verbatim in the sentence it lands
+    on is still true and is shown, and one whose text has moved on is binned as
+    ``obsolete`` - which arrives here as ``unanchored_reason``. There is no
+    third state left for a flag to carry. ``stale`` means something specific
+    and different for annotations; see :func:`_annotation_item`.
+    """
+    eval_name = finding.get("eval_name")
+    return {
+        "source": "judge" if eval_name in _REVIEW_JUDGE_TYPES else "coded",
+        "kind": eval_name,
+        "severity": finding.get("severity"),
+        "chapter_id": chapter,
+        "es_idx": es_idx,
+        "excerpt": finding.get("excerpt") or "",
+        "suggestion": finding.get("suggestion") or None,
+        "explanation": finding.get("message") or "",
+        "detail": [],
+        "rule_id": finding.get("rule_id"),
+        "category": finding.get("category"),
+        "term": finding.get("term"),
+        "confidence": None,
+        "context": context,
+        "match_start": finding.get("match_start"),
+        "match_end": finding.get("match_end"),
+        "unanchored_reason": unanchored_reason,
+        "stale": False,
+        "chunk_id": finding.get("chunk_id"),
+        "issue_index": finding.get("issue_index"),
+        "key": None,
+    }
+
+
+def _annotation_detail(row: dict) -> list[dict]:
+    """The prose the inbox throws away, as labelled blocks.
+
+    ``review.apply``'s plan keeps only what a *write* needs, so the reviewer's
+    reasoning - why it decided the note was in this state, what it checked, and
+    the note it would append - never reaches a screen. On a page whose whole job
+    is reading the model's opinion, that reasoning is the opinion.
+    """
+    detail: list[dict] = []
+    if row.get("state_reason"):
+        detail.append({"label": "state_reason", "text": str(row["state_reason"])})
+    if row.get("note_text"):
+        detail.append({"label": "note_text", "text": str(row["note_text"])})
+    for line in row.get("evidence") or []:
+        if isinstance(line, str) and line.strip():
+            detail.append({"label": "evidence", "text": line})
+    if row.get("manual_reason"):
+        detail.append({"label": "manual_reason", "text": str(row["manual_reason"])})
+    return detail
+
+
+def _annotation_item(row: dict, context: dict, *, stale: bool) -> dict:
+    """One reviewed annotation as a recommendation card.
+
+    ``excerpt`` is the note the reader wrote, ``suggestion`` the text the review
+    would write in its place (only when the review judged it writable), and
+    ``explanation`` the recommendation itself - untruncated, unlike the inbox's
+    600-character preview.
+
+    The highlight span comes from the note's first anchor word located in the
+    live sentence, so the card points at the word the note is about. It is
+    dropped when the anchor is no longer in the sentence, which is what
+    ``_locate_match`` already does for a coded finding: no highlight beats a
+    highlight on the wrong words.
+    """
+    current = (context.get("current") or {}).get("es") or ""
+    anchors = [a for a in (row.get("anchors") or []) if isinstance(a, str) and a.strip()]
+    match_start, match_end = (None, None)
+    if anchors and current:
+        match_start, match_end = _locate_match(current, anchors[0])
+    return {
+        "source": "annotation",
+        "kind": row.get("type") or "flag",
+        "severity": None,
+        "chapter_id": row.get("chapter_id"),
+        "es_idx": row.get("es_idx"),
+        "excerpt": row.get("content") or "",
+        "suggestion": (row.get("new_content") or None) if row.get("writable") else None,
+        "explanation": row.get("recommendation") or "",
+        "detail": _annotation_detail(row),
+        "rule_id": None,
+        "category": row.get("state"),
+        "term": anchors[0] if anchors else None,
+        "confidence": row.get("confidence"),
+        "context": context,
+        "match_start": match_start,
+        "match_end": match_end,
+        "unanchored_reason": None,
+        "stale": stale,
+        "chunk_id": None,
+        "issue_index": None,
+        "key": row.get("key"),
+    }
+
+
+def _recommendation_annotations(project_dir: Path) -> dict[str, list[dict]]:
+    """Every reviewed annotation for a book, bucketed by chapter.
+
+    One ``results.json`` read plus one ``annotations.jsonl`` read for the whole
+    book, done once and shared by every chapter - the alternative, per chapter,
+    would re-read both files eighty times on ``fabre2``.
+
+    Each row is paired with the staleness :func:`_inbox_state` computes: whether
+    the note has been edited in the reader since the review, which makes the
+    recommendation describe text that is no longer there. A read-only screen
+    should *show* that rather than hide the item, so the row is kept and
+    flagged. Rows whose key names no live record at all are dropped: the note
+    was deleted, and there is nothing left for the recommendation to be about.
+    """
+    from src.annotations import review as annreview
+
+    rows = annreview.results_all(project_dir)
+    if not rows:
+        return {}
+    records = _inbox_live_records(project_dir)
+
+    by_chapter: dict[str, list[dict]] = {}
+    for row in rows:
+        chapter_id = row.get("chapter_id")
+        if not chapter_id:
+            continue
+        state = _inbox_state(
+            {"key": row.get("key"), "old": row.get("content") or "",
+             "new": row.get("new_content")},
+            records,
+        )
+        if state == "gone":
+            continue
+        by_chapter.setdefault(chapter_id, []).append(
+            {"row": row, "stale": state == "stale"}
+        )
+    return by_chapter
+
+
+def _recommendation_items(
+    project_dir: Path, chapter: str, *,
+    annotations: Optional[dict[str, list[dict]]] = None,
+) -> dict:
+    """One chapter's findings and annotation resolutions, as one ordered list.
+
+    Anchored items come first in document order, findings before notes on the
+    same sentence; unanchored findings follow as a tail, each carrying the
+    ``unanchored_reason`` that says why it has no sentence (``obsolete`` - the
+    prose moved on; ``unplaceable`` - the excerpt was never verbatim). They are
+    kept rather than dropped for the same reason the reader keeps them in its
+    overflow bin: an opinion you cannot place is still an opinion, and these are
+    the ones most likely to be worth a human's attention.
+
+    Returns ``{"ok": True, "chapter_id", "items", "type_counts",
+    "stale_evaluators"}``, or :func:`_build_chapter_review`'s ``ok: False`` with
+    its status, unchanged.
+
+    ``annotations`` is :func:`_recommendation_annotations`' whole-book map,
+    passed in so a whole-book render reads ``results.json`` once instead of once
+    per chapter. Omitted, it is computed for this chapter alone.
+    """
+    review = _build_chapter_review(project_dir, chapter)
+    if not review.get("ok"):
+        return review
+
+    rows_in_order = _recommendation_context_rows(project_dir, chapter)
+    if annotations is None:
+        annotations = _recommendation_annotations(project_dir)
+
+    items: list[dict] = []
+    for key, findings in review["by_es_idx"].items():
+        try:
+            es_idx = int(key)
+        except (TypeError, ValueError):
+            continue
+        context = _context_rows(rows_in_order, es_idx)
+        for finding in findings:
+            items.append(_finding_item(finding, chapter, es_idx, context))
+
+    for entry in annotations.get(chapter) or []:
+        row = entry["row"]
+        items.append(_annotation_item(
+            row,
+            _context_rows(rows_in_order, row.get("es_idx")),
+            stale=entry["stale"],
+        ))
+
+    # Unanchored findings have no sentence, so they sort nowhere; the sort key
+    # parks them past every real index and the tail below appends them after it,
+    # which is the same end-of-chapter bin the reader gives them.
+    items.sort(key=lambda it: (
+        it["es_idx"] if it["es_idx"] is not None else _RECOMMENDATION_LAST,
+        _RECOMMENDATION_SOURCE_ORDER.get(it["source"], 9),
+    ))
+
+    empty_context = {"before": None, "current": None, "after": None}
+    for finding in review["unanchored"]:
+        items.append(_finding_item(
+            finding, chapter, None, empty_context,
+            unanchored_reason=finding.get("reason") or "unplaceable",
+        ))
+
+    return {
+        "ok": True,
+        "chapter_id": chapter,
+        "items": items,
+        "type_counts": review["type_counts"],
+        "stale_evaluators": review["stale_evaluators"],
+    }
+
+
+def _recommendation_shell(project_id: str, project_dir: Path) -> dict:
+    """The chapter index the page paints before any item has been fetched.
+
+    Counts only. Filling every chapter eagerly costs 4.2 s on the worst book
+    here (``fabre2``, 80 chapters, 350 findings), which is a blank page for four
+    seconds; one chapter costs ~50 ms, which is invisible behind a scroll. So
+    the shell is the cheap half: :func:`load_chapter_type_counts` walks
+    ``evaluations/*.json`` without touching alignments or chunks, and the
+    annotation counts come from the one ``results.json`` read the whole page
+    shares.
+
+    Chapters with nothing to read are left out entirely - this is a page you
+    scroll, and eighty empty headings is not a page you scroll.
+    """
+    counts_by_chapter = load_chapter_type_counts(project_dir)
+    annotations = _recommendation_annotations(project_dir)
+    manifest = _load_chapter_manifest_for_project(project_id)
+    chapter_prefix = _reader_strings().get("chapter_prefix", "Chapter")
+
+    align_dir = project_dir / "alignments"
+    chapter_ids = sorted(p.stem for p in align_dir.glob("*.json")) if align_dir.exists() else []
+    # A chapter can hold reviewed annotations with no alignment left to anchor
+    # them to (a re-split drops the file); it still has recommendations to read,
+    # so union the two sources rather than trusting either alone.
+    for chapter_id in annotations:
+        if chapter_id not in chapter_ids:
+            chapter_ids.append(chapter_id)
+    chapter_ids.sort()
+
+    chapters = []
+    totals: dict[str, int] = {kind: 0 for kind in _RECOMMENDATION_KINDS}
+    for chapter_id in chapter_ids:
+        kinds = dict(counts_by_chapter.get(chapter_id) or {})
+        for entry in annotations.get(chapter_id) or []:
+            kind = entry["row"].get("type") or "flag"
+            kinds[kind] = kinds.get(kind, 0) + 1
+        kinds = {kind: n for kind, n in kinds.items() if n}
+        if not kinds:
+            continue
+        for kind, n in kinds.items():
+            totals[kind] = totals.get(kind, 0) + n
+        chapters.append({
+            "id": chapter_id,
+            "label": _chapter_display_label(chapter_id, manifest, chapter_prefix),
+            "counts": kinds,
+            "total": sum(kinds.values()),
+        })
+
+    return {
+        "chapters": chapters,
+        "totals": {kind: n for kind, n in totals.items() if n},
+        "total": sum(totals.values()),
+        "kinds": list(_RECOMMENDATION_KINDS),
+    }
+
+
+@app.route("/recommendations/<project_id>")
+def recommendations_page(project_id):
+    """One book's recommendations, to read rather than to act on."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return "Project not found", 404
+
+    return render_template(
+        "recommendations.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        project_id=project_id,
+        project_title=_project_title(project_id),
+        shell=_recommendation_shell(project_id, project_dir),
+    )
+
+
+@app.route("/api/project/<project_id>/recommendations/<chapter>", methods=["GET"])
+def project_chapter_recommendations(project_id, chapter):
+    """One chapter's unified items. Drives the page's lazy fill."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    result = _recommendation_items(project_dir, chapter)
+    if not result.get("ok"):
+        return jsonify({"error": result["error"]}), result["status"]
+    return jsonify(result)
+
+
+@app.route("/api/project/<project_id>/recommendations", methods=["GET"])
+def project_recommendations(project_id):
+    """The whole book in one payload.
+
+    Seconds, not milliseconds, on a long book - the page never calls this, which
+    is why the per-chapter route exists. It is here for tests and for anyone who
+    wants the lot in one place.
+
+    A chapter whose alignment is missing or unreadable is reported with its
+    ``error`` instead of its items rather than failing the whole book: one
+    broken file should not cost you the other seventy-nine.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    shell = _recommendation_shell(project_id, project_dir)
+    annotations = _recommendation_annotations(project_dir)
+    chapters = []
+    for entry in shell["chapters"]:
+        result = _recommendation_items(
+            project_dir, entry["id"], annotations=annotations
+        )
+        if not result.get("ok"):
+            chapters.append({"chapter_id": entry["id"], "error": result["error"]})
+            continue
+        chapters.append(result)
+
+    return jsonify({"ok": True, "shell": shell, "chapters": chapters})
 
 
 def _is_tailnet_addr(addr: str) -> bool:

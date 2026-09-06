@@ -316,6 +316,20 @@
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
         <h1 style="margin:0;">{% if lang == 'es' and project_spanish_title %}{{ project_spanish_title }}{% else %}{{ project_title or project_id }}{% endif %}</h1>
+        {#- Sits with the dashboard cog rather than in the Review-mode group:
+            Review mode paints findings onto the prose you are reading, and this
+            is the opposite reading — every model opinion about the book at once,
+            with none of it actionable. -#}
+        <a href="/recommendations/{{ project_id }}" class="topbar-icon-btn"
+           title="{{ t.rec_link }}" aria-label="{{ t.rec_link }}">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                <path d="M9 7h7"/>
+                <path d="M9 11h5"/>
+            </svg>
+        </a>
         <a href="/project/{{ project_id }}" class="topbar-icon-btn" title="{{ t.dashboard_btn }}" aria-label="{{ t.dashboard_btn }}">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
