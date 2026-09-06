@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.54.1.0] - 2026-09-05
+
+### Changed
+- **A chunk edited since its evaluators ran no longer hides its findings.** The chunk-level `stale` marker gated four surfaces at once: the reader's Review Mode skipped the chunk outright, the chapter badge reported zeroes, `load_chapter_type_counts` and `count_ignored_hits` dropped it from their walks, and the dashboard card replaced the findings list with "Findings hidden". That is the wrong half to suppress. An edit ages the *summary* — a verdict of "clean" is a claim about prose the evaluator never saw — but each individual finding quotes text that can be checked against the page as it stands. Every finding is now re-anchored at read time and shown when it still quotes live prose.
+- **A finding that no longer matches is binned, not tinted.** Two guards in `project_chapter_review` replace the blanket skip. A coded finding keeps its stored `char_start` only while the snippet it quotes is still verbatim in the row that offset lands in; a judge excerpt is anchored with `_anchor_judge_excerpt(..., exact_only=True)`, which drops the 25-character fallback, because a truncated probe is exactly how a finding about deleted text re-homes onto its surviving neighbour. Either way the finding lands in the end-of-chapter overflow bin labelled `obsolete`, keeping its message, suggestion and excerpt — lossless, where the old gate was silent.
+- **A coded rerun can now retire the marker too.** `merge_judge_result` refused to clear it while any coded evaluator still predated `stale_since`, and `evaluate_and_persist_chunk` re-stamped it unconditionally — so whichever ran last won and no sequence of re-runs could ever clear the flag (fabre2 chapters 50-53 sat permanently marked). Both writers now ask the same predicate, `_flag_still_covers`: once no evaluator the marker describes still predates its stamp, it goes.
+- **`GET /api/project/<id>/review/<chapter>` returns `stale_evaluators` in place of `stale_chunks`.** A per-evaluator count of chunks holding a verdict formed against earlier text, replacing the single integer — a note about the summary, not a reason to hide anything. The reader's load-time "results are hidden" toast and both `review_stale_chunks` strings are gone with it; per-finding `reason` labels in the overflow bin say the same thing more precisely. Note the key is not yet rendered anywhere (TODOS.md, "Stale gate retirement").
+- **`/api/project/<id>/evaluations/summary` drops the always-zero `stale` bucket** from `by_chapter`, and the dashboard's `stale` chapter badge with it.
+- **The dashboard eval card notes the edit instead of hiding behind it.** Real severity chips and the real findings list, under a banner reading "Judged against an earlier revision of this text"; a clean chunk reads "no findings" rather than "all passed", since the pass never saw the current prose.
+
+### Removed
+- **`average_score`** from `aggregate_results`, the text/JSON/HTML reports, and the dashboard summary chip. The evaluators score on incompatible scales — averaging a word-density ratio against a per-issue deduction ranked chunks wrongly. Each evaluator keeps its own `score`, including the LLM judge's, which is still rendered per run.
+
 ## [0.54.0.0] - 2026-08-31
 
 ### Added

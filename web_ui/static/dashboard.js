@@ -2194,7 +2194,14 @@
     function renderLlmJudgeSection(judge) {
         var html = '<section class="eval-section" data-eval-name="llm_judge">';
         html += '<header class="eval-section-header">';
-        html += '<h5>LLM judge</h5>';
+        // This judge's own score on its own scale, which stays. Only the
+        // cross-evaluator mean went away: averaging a word-density ratio
+        // against a per-issue deduction ranked chunks wrongly.
+        html += '<h5>LLM judge';
+        if (judge.score !== null && judge.score !== undefined) {
+            html += ' <span class="eval-section-counts">score ' + Number(judge.score).toFixed(2) + '</span>';
+        }
+        html += '</h5>';
         html += '</header>';
         html += '<div class="eval-section-body">';
         if (judge.error) {

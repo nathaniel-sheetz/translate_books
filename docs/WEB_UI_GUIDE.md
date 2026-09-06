@@ -282,7 +282,7 @@ Every chunk save (manual, auto-translate, or edits from the chunk editor) trigge
 
 **Card layout:**
 
-- **Summary row** — severity chips (`✗ errors`, `⚠ warnings`, `ℹ info`), an `average_score` chip, a **Rerun evaluators** button, and a **Run LLM judge** button.
+- **Summary row** — severity chips (`✗ errors`, `⚠ warnings`, `ℹ info`), a **Rerun evaluators** button, and a **Run LLM judge** button. There is no aggregate score chip: the evaluators score on incompatible scales, so a mean of them ranked chunks wrongly.
 - **Grouped issue list** — one collapsible section per evaluator. Each issue row shows:
   - Severity icon + evaluator tag + `issue.message`
   - Context line with the offending span highlighted via `<mark>` (`…{snippet_before}<mark>{match}</mark>{snippet_after}…`). Falls back to the containing paragraph when the evaluator didn't report a precise location, or `(no location — evaluator gap)` when neither is available.

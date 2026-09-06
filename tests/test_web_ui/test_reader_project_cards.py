@@ -262,6 +262,24 @@ def test_flag_counts_include_stale_chunks(card_project):
     assert _card(card_project)["flag_counts"]["blacklist"] == 1
 
 
+def test_summary_by_chapter_no_longer_carries_a_stale_bucket(client, card_project):
+    """The rollup reports severities only.
+
+    ``load_project_summary`` stopped emitting a ``stale`` key when the marker
+    stopped suppressing counts, and the badge renderer that read it went with
+    it. A permanently-zero bucket in the response would be the last piece of
+    the retired gate still pretending to mean something.
+    """
+    # The rollup reads severities out of ``aggregated``, which a judge merge
+    # fills in; the coded helper above persists normalized issues only.
+    _dialogue_finding(card_project)
+    mark_evaluation_stale(card_project, "chapter_01_chunk_000", "text edited")
+
+    body = client.get("/api/project/cardproj/evaluations/summary").get_json()
+    assert body["ok"] is True
+    assert body["by_chapter"]["chapter_01"] == {"errors": 0, "warnings": 1, "info": 0}
+
+
 def test_flag_counts_skip_dismissed_findings(card_project):
     _blacklist_finding(card_project)
     append_feedback(card_project, "chapter_01_chunk_000", "blacklist", 0, "resolved")

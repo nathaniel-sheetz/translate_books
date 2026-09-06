@@ -724,8 +724,10 @@ def mark_evaluation_stale(
     in ``evaluations/<chunk>.json`` no longer describe the current translation.
     We stamp ``stale``/``stale_since``/``stale_reason`` rather than delete the
     file so a green (or failing) badge never silently outlives the edit that
-    invalidated it. Re-running the judge (:func:`merge_judge_result`) clears the
-    marker.
+    invalidated it. Either writer clears the marker once no evaluator it
+    describes still predates ``stale_since`` — re-running the judge
+    (:func:`merge_judge_result`) or re-running the coded evaluators
+    (:func:`evaluate_and_persist_chunk`); both ask :func:`_flag_still_covers`.
 
     Returns the written path, or ``None`` if no evaluation exists yet (nothing
     to invalidate).
@@ -938,10 +940,11 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
 
     Same shape of walk as :func:`load_project_summary`, but bucketed by
     category rather than severity, and gated exactly the way the reader's
-    Review Mode gates them (``web_ui/app.py:project_chapter_review``): stale
-    chunks are skipped, dismissed findings (``_feedback.jsonl``) are subtracted,
-    coded findings must be target-side with a ``char_start``, and only the
-    :data:`REVIEW_TYPES` categories are counted.
+    Review Mode gates them (``web_ui/app.py:project_chapter_review``): a chunk
+    edited since its evaluators ran is counted like any other, dismissed
+    findings (``_feedback.jsonl``) are subtracted, coded findings must be
+    target-side with a ``char_start``, and only the :data:`REVIEW_TYPES`
+    categories are counted.
 
     A finding the reader cannot anchor to a sentence — a judge excerpt that
     has drifted from the prose, a ``char_start`` no row covers — is not
@@ -1047,8 +1050,9 @@ def count_ignored_hits(
     """How many findings each ignore entry covers, split live vs. dismissed.
 
     Keyed by :meth:`IgnoredTerm.identity`. "Live" means the same thing it means
-    to the review badges: a target-anchored coded finding in a non-stale chunk
-    that carries no feedback label. Only a ``live == 0 and dismissed == 0`` row
+    to the review badges: a target-anchored coded finding that carries no
+    feedback label, in any chunk — one edited since its evaluators ran counts
+    like the rest. Only a ``live == 0 and dismissed == 0`` row
     is the signal that the list has outlived the text it was written against;
     a zero beside a non-zero ``dismissed`` means you dismissed those findings by
     hand before the term was ignored, and the dismissal simply got there first.

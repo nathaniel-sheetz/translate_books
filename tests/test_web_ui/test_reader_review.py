@@ -228,7 +228,17 @@ def make_project(tmp_path, monkeypatch):
     return build
 
 
-def _save_coded_finding(proj_dir, *, char_start, char_end, match, eval_name="blacklist"):
+def _save_coded_finding(
+    proj_dir, *, char_start, char_end, match, eval_name="blacklist",
+    enabled_evals=None,
+):
+    """Persist one target-side coded finding.
+
+    ``enabled_evals`` gives the evaluator a freshness ledger entry. Leave it
+    ``None`` for a finding whose staleness is not what the test is about;
+    without it the evaluator has no evidence it ever ran, so
+    :func:`evaluator_freshness_detail` never reports on it.
+    """
     issue = NormalizedIssue(
         eval_name=eval_name,
         eval_version="1.0.0",
@@ -244,6 +254,7 @@ def _save_coded_finding(proj_dir, *, char_start, char_end, match, eval_name="bla
     save_chunk_evaluation(
         proj_dir, "chapter_01_chunk_000",
         results=[], aggregated={}, normalized_issues=[issue],
+        enabled_evals=enabled_evals,
     )
 
 
@@ -360,6 +371,86 @@ def test_stale_chunk_bins_a_finding_that_no_longer_quotes_the_prose(
     assert len(body["unanchored"]) == 1
     assert body["unanchored"][0]["reason"] == "obsolete"
     assert body["stale_evaluators"] == {"address": 1}
+
+
+def test_stale_chunk_bins_a_coded_finding_whose_word_is_gone(
+    client, review_project,
+):
+    """The offset survives an edit; the sentence under it does not.
+
+    The stored span still lands inside row 0, but row 0 now reads "blanco".
+    Tinting it would point the reader at a word the evaluator never flagged,
+    so the finding goes to the bin instead. Without the marker the same
+    finding stays anchored (see the test above) — the marker is the only
+    thing that makes the offset untrustworthy.
+    """
+    _save_blacklist_finding(review_project)
+    edited = "El gato blanco. El perro grande."
+    (review_project / "chunks" / "chapter_01_chunk_000.json").write_text(
+        json.dumps({"id": "chapter_01_chunk_000", "translated_text": edited},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    alignment_path = review_project / "alignments" / "chapter_01.json"
+    alignment = json.loads(alignment_path.read_text(encoding="utf-8"))
+    alignment["alignments"][0]["es"] = "El gato blanco."
+    alignment_path.write_text(json.dumps(alignment, ensure_ascii=False), encoding="utf-8")
+    mark_evaluation_stale(review_project, "chapter_01_chunk_000", "text edited")
+
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["by_es_idx"] == {}
+    assert len(body["unanchored"]) == 1
+    f = body["unanchored"][0]
+    assert f["eval_name"] == "blacklist"
+    assert f["reason"] == "obsolete"
+    # Lossless: the bin keeps everything the sentence tint would have shown.
+    assert f["message"] == "'negro': flagged term"
+    assert f["suggestion"] == "reconsider"
+    assert f["excerpt"] == "negro"
+    assert body["stale_evaluators"] == {"blacklist": 1}
+
+
+def test_stale_chunk_anchors_a_judge_excerpt_that_is_still_verbatim(
+    client, review_project,
+):
+    """``exact_only`` drops the truncated fallback, not the exact match.
+
+    A judge verdict formed against earlier prose is still placeable when the
+    sentence it quotes survived the edit word for word. Only the 25-character
+    probe is withheld, because that is what silently re-homes a finding about
+    deleted text onto its surviving neighbour.
+    """
+    _save_judge_finding(review_project, "El gato negro.")
+    mark_evaluation_stale(review_project, "chapter_01_chunk_000", "text edited")
+
+    body = client.get("/api/project/revproj/review/chapter_01").get_json()
+    assert body["unanchored"] == []
+    assert list(body["by_es_idx"]) == ["0"]
+    assert body["by_es_idx"]["0"][0]["eval_name"] == "address"
+    assert body["stale_evaluators"] == {"address": 1}
+
+
+def test_stale_chunk_bins_a_coded_finding_with_no_match_text(client, make_project):
+    """An empty ``match`` gives the guard nothing to re-verify.
+
+    Same input as the whitespace-gap test above, which bridges char 14 to the
+    next sentence — but once the run is marked, there is no quoted snippet to
+    confirm the bridge still lands where it did, so the finding is binned
+    rather than bridged onto a sentence it may never have described.
+    """
+    proj = make_project(
+        "stalegapproj", "El gato negro.\n\nEl perro grande.",
+        [(0, "El gato negro."), (1, "El perro grande.")],
+    )
+    _save_coded_finding(
+        proj, char_start=14, char_end=16, match="", enabled_evals=["blacklist"],
+    )
+    mark_evaluation_stale(proj, "chapter_01_chunk_000", "text edited")
+
+    body = client.get("/api/project/stalegapproj/review/chapter_01").get_json()
+    assert body["by_es_idx"] == {}
+    assert len(body["unanchored"]) == 1
+    assert body["unanchored"][0]["reason"] == "obsolete"
 
 
 def test_string_char_start_does_not_500(client, review_project):
