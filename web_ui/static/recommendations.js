@@ -221,10 +221,29 @@
 
     var filter = document.getElementById('rec-filter');
     if (filter) {
+        /* The container's hide classes are derived state and the checkboxes are
+           the source, so read them rather than assume they start ticked. A
+           browser restores form-control state on a history navigation: follow a
+           card into the reader and come Back, and the boxes you unticked are
+           still unticked while the classes the change handler set are gone with
+           the old document. That left every kind you had filtered out on screen
+           under a box that said it was hidden, and only a tick-untick fixed it.
+           pageshow covers the restore that lands after this script has run, and
+           the bfcache case where no script runs at all. */
+        var syncFilter = function () {
+            var boxes = filter.querySelectorAll('.rec-kind-cb');
+            Array.prototype.forEach.call(boxes, function (cb) {
+                list.classList.toggle('rec-hide-' + cb.value, !cb.checked);
+            });
+        };
+
         filter.addEventListener('change', function (event) {
             var cb = event.target;
             if (!cb.classList.contains('rec-kind-cb')) return;
             list.classList.toggle('rec-hide-' + cb.value, !cb.checked);
         });
+
+        syncFilter();
+        window.addEventListener('pageshow', syncFilter);
     }
 })();
