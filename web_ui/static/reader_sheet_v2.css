@@ -305,6 +305,22 @@
   padding-top: 3px;
   min-width: 0;
   overflow-wrap: anywhere;
+  /* Contains the floated actions, so a one-line note still reserves their
+     44px instead of letting them hang out of the card. */
+  display: flow-root;
+}
+/* Floated rather than a flex sibling of .rv2-card-txt: at 375px the head has
+   ~325px to spend and two 44px buttons in the row would take them off every
+   line of the note. Floated, they shorten only the line boxes level with the
+   44px group -- the type label and about two lines of text -- and everything
+   below runs the card's full width, which is wider than the note gets today.
+   The negative margins moved here off the pencil, which used to carry them
+   alone, so the pair still hugs the card's padding edge. */
+.rv2-card-actions {
+  float: right;
+  display: flex;
+  align-items: flex-start;
+  margin: -10px -8px 0 8px;
 }
 .rv2-card-type {
   display: block;
@@ -316,11 +332,12 @@
   margin-bottom: 2px;
 }
 .rv2-card-edit {
-  flex: none;
   color: var(--rv2-muted2);
   min-width: 44px;
   min-height: 44px;
-  margin: -10px -8px;
+  /* The offset that used to live here is .rv2-card-actions' now, and applying
+     it twice sat the pencil 10px above the heart beside it. */
+  margin: 0;
   border: none;
   background: none;
   cursor: pointer;
@@ -331,6 +348,34 @@
 }
 .rv2-card-edit:hover { background: var(--rv2-filter-hover); color: var(--rv2-text); }
 .rv2-card-edit svg { width: 15px; height: 15px; }
+/* Idle it is just another icon button in the sheet's muted colour: an
+   unfavorited heart is a control you have to be able to find, not one you have
+   to already know is there. Only the lit state takes the danger red, which is
+   the only red this sheet owns; `fill` is switched here so the one path in the
+   glyph carries both states. */
+.rv2-fav {
+  flex: none;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--rv2-muted2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+.rv2-fav svg { width: 16px; height: 16px; }
+.rv2-fav:hover { background: var(--rv2-filter-hover); color: var(--rv2-danger); }
+.rv2-fav[aria-pressed="true"] { color: var(--rv2-danger); }
+.rv2-fav[aria-pressed="true"] svg { fill: currentColor; }
+.rv2-fav:disabled { opacity: 0.5; cursor: default; }
+/* Pushed to the trailing edge, away from the four verdicts it sits beside and
+   ahead of the full-width ignore row. */
+.rv2-issue-actions > .rv2-fav { margin-left: auto; }
+
 .rv2-card.open .rv2-card-head { display: none; }
 .rv2-card-body { display: none; padding: 9px; }
 .rv2-card.open .rv2-card-body { display: block; }

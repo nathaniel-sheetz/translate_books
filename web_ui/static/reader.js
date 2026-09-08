@@ -1284,15 +1284,20 @@
         // one" (the server assigns a fresh sub_id and returns it).
         if (subId) payload.sub_id = subId;
 
-        function applySaved(savedSubId) {
+        function applySaved(savedSubId, favId) {
             const sid = savedSubId || subId || null;
             const list = annotationsMap[idx] || (annotationsMap[idx] = []);
             const pos = sid ? list.findIndex(a => (a.sub_id || null) === sid) : -1;
             // Merge onto the existing record so server-side fields the client
-            // never sends (notably `anchored`) survive an edit.
+            // never sends (notably `anchored` and `fav_id`) survive an edit.
             const rec = Object.assign(
                 { anchored: true }, pos >= 0 ? list[pos] : null,
                 { es_idx: idx, type: type, content: text, sub_id: sid });
+            // A newly created note has no fav_id until the server names it, so
+            // it arrives with the save rather than on the next chapter load --
+            // otherwise a note you just wrote is the one you cannot heart.
+            // Queued offline there is no response, and no heart until reload.
+            if (favId) rec.fav_id = favId;
             if (pos >= 0) list[pos] = rec; else list.push(rec);
             repaintHighlight(idx);
             updateStats();
@@ -1315,7 +1320,7 @@
             body: JSON.stringify(payload),
         })
             .then(r => r.json())
-            .then(result => { if (result.saved) applySaved(result.sub_id); })
+            .then(result => { if (result.saved) applySaved(result.sub_id, result.fav_id); })
             .catch(() => {
                 // Offline: mint a client sub_id so the optimistic record stays
                 // addressable for later edit/delete.
@@ -2688,6 +2693,42 @@
             canIgnore(finding) { return canIgnoreFinding(finding); },
             ignoreLabel(finding) { return ignoreLabel(finding); },
             ignoreTitle() { return i.review_ignore_title || ''; },
+            // Mark an item to come back to, or unmark it. `favId` is composed
+            // server-side and carried on the row, so the sheet never derives an
+            // identity of its own -- this is the same id /recommendations uses.
+            // `snapshot` is the card's own text, kept so the mark stays legible
+            // once the note is deleted or a judge rewords the finding; the
+            // chapter is stamped here because only this file knows it.
+            // `onReject` puts the heart back when the server refuses.
+            setFavorite(favId, on, snapshot, onReject) {
+                const url = `/api/project/${projectId}/recommendations/favorite`;
+                const payload = { id: favId, favorite: !!on };
+                if (on && snapshot) {
+                    payload.snapshot = Object.assign({ chapter_id: chapter }, snapshot);
+                }
+                fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                })
+                    .then(r => {
+                        // A refusal is not something to retry: the id or the
+                        // flag was wrong and the queue would drop it silently
+                        // later anyway. Put the heart back rather than let it
+                        // claim a mark the server never took.
+                        if (!r.ok) {
+                            if (onReject) onReject();
+                            showToast((i.v2 || {}).fav_failed || 'Could not save');
+                        }
+                    })
+                    .catch(() => {
+                        // Offline: keep the heart lit and let the queue land it,
+                        // the way every other write in this file does.
+                        try {
+                            enqueue(url, 'POST', payload);
+                        } catch (e) { /* localStorage full — queue unavailable */ }
+                    });
+            },
             // Chunk-level actions open the shared modals via the hidden classic
             // controls, so the whole retranslate / remove / boundary flow is reused.
             retranslate() { if (retransBtn) retransBtn.click(); },

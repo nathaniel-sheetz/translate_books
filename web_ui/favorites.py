@@ -117,8 +117,68 @@ def chapter_of(fav_id: str) -> Optional[str]:
     return rest.split("__", 1)[0] or None
 
 
-def append_favorite(project_dir: Path, fav_id: str, favorite: bool) -> Path:
+# What a snapshot may carry, per kind. The reader sends the card's own text
+# along with the heart so a favorite stays readable after the item it names is
+# gone: a note you delete, or a finding an LLM judge rewords on its next run -
+# `issue_key` hashes `message`, so a reword is a different id and the standing
+# mark no longer matches anything live.
+#
+# `/recommendations` already recovers most of this unaided, because a reviewed
+# note keeps its text in `results.json`. That covers only annotations which have
+# been through annotation-review, and 22 of this corpus's 253 live notes have
+# not; the snapshot is for those and for the reworded findings.
+_SNAPSHOT_FIELDS = {
+    "annotation": ("chapter_id", "type", "text", "es_text"),
+    "finding": ("chapter_id", "eval_name", "category", "severity",
+                "message", "suggestion", "excerpt"),
+}
+
+# Room for a judge's message plus the sentence it quotes, and a ceiling so one
+# runaway field cannot bloat a file that every render of the page reads whole.
+_SNAPSHOT_MAX_CHARS = 2000
+
+
+def sanitize_snapshot(snapshot: object) -> Optional[dict]:
+    """The storable part of a caller-supplied snapshot, or ``None``.
+
+    Whitelisted per ``kind``, coerced to ``str`` and truncated. Anything the
+    scheme does not recognise - a bad shape, an unknown kind, a stray field - is
+    dropped rather than raised on, because the mark is the point and the text is
+    a convenience: a heart must not fail over the prose it was carrying.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    kind = snapshot.get("kind")
+    fields = _SNAPSHOT_FIELDS.get(kind) if isinstance(kind, str) else None
+    if not fields:
+        return None
+
+    out = {"kind": kind}
+    for name in fields:
+        value = snapshot.get(name)
+        # bool is an int subclass and would stringify to "True"; a dict or list
+        # is a caller sending something this field was never meant to hold.
+        if value is None or isinstance(value, (bool, dict, list)):
+            continue
+        text = str(value).strip()
+        if text:
+            out[name] = text[:_SNAPSHOT_MAX_CHARS]
+    return out if len(out) > 1 else None
+
+
+def append_favorite(
+    project_dir: Path,
+    fav_id: str,
+    favorite: bool,
+    snapshot: object = None,
+) -> Path:
     """Append one favorite/unfavorite record.
+
+    ``snapshot`` is the item's text as it read when the heart was tapped, passed
+    through :func:`sanitize_snapshot` here rather than by the caller so every
+    writer gets the same whitelist. It is kept only on a favoriting record: an
+    unfavorite means you are done with the item, and re-storing the text there
+    would leave the file arguing with itself about which record is standing.
 
     Raises:
         ValueError: If ``fav_id`` is not a well-formed id.
@@ -131,6 +191,10 @@ def append_favorite(project_dir: Path, fav_id: str, favorite: bool) -> Path:
         "id": fav_id,
         "favorite": bool(favorite),
     }
+    if favorite:
+        kept = sanitize_snapshot(snapshot)
+        if kept:
+            record["snapshot"] = kept
     path = _favorites_file(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
