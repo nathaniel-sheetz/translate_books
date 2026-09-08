@@ -101,6 +101,79 @@ STRINGS = {
             "flag": "Other",
         },
 
+        # Recommendations (/recommendations/<id>) - the read-only screen.
+        # Every key here needs a Spanish twin below: `get_strings` falls back a
+        # whole table at a time, not a key at a time, so a key present only in
+        # `en` renders as an empty string under ?lang=es rather than in English.
+        "rec_title": "What the models said",
+        "rec_link": "Recommendations",
+        "rec_subtitle": "Judge findings and reviewed notes, in reading order. "
+                        "Nothing here changes the book - act on them in the "
+                        "reader or the review inbox.",
+        "rec_summary": "{total} recommendation(s) across {chapters} chapter(s).",
+        "rec_empty": "Nothing to read yet. Run the judges, or review this book's notes.",
+        "rec_filter_label": "Show",
+        "rec_loading": "Loading\u2026",
+        "rec_load_failed": "Could not load this chapter.",
+        "rec_chapter_empty": "Nothing left in this chapter.",
+        "rec_suggestion": "Suggested",
+        "rec_original": "In the book",
+        "rec_source_line": "English",
+        # An item whose sentence could not be found. `obsolete` and
+        # `unplaceable` are the two reasons `_unanchored_reason` gives.
+        "rec_unanchored": "no sentence to show",
+        "rec_unanchored_obsolete": "the text this quotes has changed",
+        "rec_unanchored_unplaceable": "this quote is not verbatim in the prose",
+        "rec_stale": "the note changed since this was written",
+        # What became of an item. `open`/`stale` are outstanding; the rest is
+        # history - what you did about it, or what the model got wrong.
+        "rec_status_label": "Status",
+        "rec_statuses": {
+            "open": "Open",
+            "stale": "Note edited since",
+            "fixed": "Fixed",
+            "applied": "Applied",
+            "settled": "Settled",
+            "deleted": "Note deleted",
+            "not_a_problem": "Not a problem",
+            "bad_message": "Badly worded",
+            "missing_context_gap": "Missing context",
+        },
+        # A favorite is not a verdict: every status above says you are done with
+        # an item, and this says the opposite - come back to this one.
+        "rec_favorites_only": "Favorites only",
+        "rec_fav_add": "Add to favorites",
+        "rec_fav_remove": "Remove from favorites",
+        "rec_fav_failed": "Could not save",
+        "rec_history_chip": "{n} dealt with",
+        "rec_summary_history": "{history} more already dealt with.",
+        # An item whose prose has moved on since the model wrote about it: the
+        # card shows the text as it stood then, because whatever sentence lives
+        # at that position now is not the one this was about.
+        "rec_original_then": "As it read then",
+        "rec_text_changed": "the book has changed since this was written",
+        "rec_detail_labels": {
+            "state_reason": "Why",
+            "note_text": "Note it would add",
+            "evidence": "Checked",
+            "manual_reason": "Needs a hand",
+        },
+        # Card kinds: the seven evaluator categories plus the four annotation
+        # types, in one map because the page renders them as one list of chips.
+        "rec_kinds": {
+            "blacklist": "Blacklist",
+            "grammar": "Grammar",
+            "dictionary": "Dictionary",
+            "completeness": "Completeness",
+            "dialogue": "Dialogue",
+            "address": "Address (usted/t\u00fa)",
+            "editorial": "Editorial",
+            "word_choice": "Word choice",
+            "inconsistency": "Inconsistency",
+            "footnote": "Footnote",
+            "flag": "Other",
+        },
+
         # Review mode (chapter-list controls; type labels shared with the reader)
         "review_mode_label": "Review mode",
         "review_options_label": "Review error types",
@@ -388,6 +461,66 @@ STRINGS = {
         "inbox_epub_stale": "Cambi\u00f3 una nota al pie: hay que reconstruir el libro para que aparezca.",
         "inbox_rebuild": "Reconstruir EPUB",
         "inbox_types": {
+            "word_choice": "Elecci\u00f3n de palabra",
+            "inconsistency": "Inconsistencia",
+            "footnote": "Nota al pie",
+            "flag": "Otro",
+        },
+
+        # Recomendaciones (/recommendations/<id>)
+        "rec_title": "Lo que dijeron los modelos",
+        "rec_link": "Recomendaciones",
+        "rec_subtitle": "Hallazgos de los jueces y notas revisadas, en orden de "
+                        "lectura. Aqu\u00ed no se cambia nada: act\u00fae en el lector "
+                        "o en la bandeja de revisi\u00f3n.",
+        "rec_summary": "{total} recomendaci\u00f3n(es) en {chapters} cap\u00edtulo(s).",
+        "rec_empty": "Todav\u00eda no hay nada que leer. Ejecute los jueces o revise "
+                     "las notas de este libro.",
+        "rec_filter_label": "Mostrar",
+        "rec_loading": "Cargando\u2026",
+        "rec_load_failed": "No se pudo cargar este cap\u00edtulo.",
+        "rec_chapter_empty": "No queda nada en este cap\u00edtulo.",
+        "rec_suggestion": "Sugerencia",
+        "rec_original": "En el libro",
+        "rec_source_line": "Ingl\u00e9s",
+        "rec_unanchored": "sin oraci\u00f3n que mostrar",
+        "rec_unanchored_obsolete": "el texto que cita ha cambiado",
+        "rec_unanchored_unplaceable": "esta cita no aparece literal en el texto",
+        "rec_stale": "la nota cambi\u00f3 despu\u00e9s de escribirse esto",
+        "rec_status_label": "Estado",
+        "rec_statuses": {
+            "open": "Pendiente",
+            "stale": "La nota cambi\u00f3 despu\u00e9s",
+            "fixed": "Corregido",
+            "applied": "Aplicado",
+            "settled": "Resuelto",
+            "deleted": "Nota eliminada",
+            "not_a_problem": "No era un problema",
+            "bad_message": "Mal redactado",
+            "missing_context_gap": "Faltaba contexto",
+        },
+        "rec_favorites_only": "Solo favoritos",
+        "rec_fav_add": "A\u00f1adir a favoritos",
+        "rec_fav_remove": "Quitar de favoritos",
+        "rec_fav_failed": "No se pudo guardar",
+        "rec_history_chip": "{n} ya resuelto(s)",
+        "rec_summary_history": "{history} m\u00e1s ya resuelto(s).",
+        "rec_original_then": "Como se le\u00eda entonces",
+        "rec_text_changed": "el libro ha cambiado desde que se escribi\u00f3 esto",
+        "rec_detail_labels": {
+            "state_reason": "Por qu\u00e9",
+            "note_text": "Nota que a\u00f1adir\u00eda",
+            "evidence": "Comprobado",
+            "manual_reason": "Requiere intervenci\u00f3n",
+        },
+        "rec_kinds": {
+            "blacklist": "Lista negra",
+            "grammar": "Gram\u00e1tica",
+            "dictionary": "Diccionario",
+            "completeness": "Completitud",
+            "dialogue": "Di\u00e1logo",
+            "address": "Tratamiento (usted/t\u00fa)",
+            "editorial": "Edici\u00f3n",
             "word_choice": "Elecci\u00f3n de palabra",
             "inconsistency": "Inconsistencia",
             "footnote": "Nota al pie",

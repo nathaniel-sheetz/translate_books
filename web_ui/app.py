@@ -69,6 +69,7 @@ from src.utils.verse import is_verse_block
 from web_ui import jobs
 from web_ui.evaluations import (
     CODED_EVAL_NAMES,
+    FEEDBACK_STATUSES,
     JUDGE_STATUS_GROUPS,
     REVIEW_CODED_TYPES,
     REVIEW_JUDGE_TYPES,
@@ -84,7 +85,7 @@ from web_ui.evaluations import (
     empty_type_counts,
     evaluate_and_persist_chunk,
     evaluator_freshness_detail,
-    is_dismissed,
+    feedback_mark,
     is_ignored,
     issue_key,
     issue_term,
@@ -99,6 +100,7 @@ from web_ui.evaluations import (
     rollup_group_state,
     run_coded_evaluators,
 )
+from web_ui import favorites as favorites_store
 from web_ui.project_cards import PROJECT_STATUSES, build_project_card
 
 app = Flask(__name__)
@@ -5790,18 +5792,25 @@ def _unanchored_reason(freshness: dict, eval_name: str) -> str:
     return "obsolete" if state == "stale" else "unplaceable"
 
 
-@app.route(
-    "/api/project/<project_id>/review/<chapter>",
-    methods=["GET"],
-)
-def project_chapter_review(project_id, chapter):
+def _build_chapter_review(
+    project_dir: Path, chapter: str, *, include_dismissed: bool = False
+) -> dict:
     """Return evaluator findings for a chapter, anchored to reader sentences.
 
-    Powers the reader's opt-in Review Mode. Reuses the alignment builder and
-    the persisted per-chunk evaluations — no new persistence format. Findings
-    that already have feedback are treated as dismissed and omitted, as are
-    those naming a term on the book's ignore list
+    Powers the reader's opt-in Review Mode and, through
+    :func:`_recommendation_items`, the read-only recommendations screen. Reuses
+    the alignment builder and the persisted per-chunk evaluations — no new
+    persistence format. Findings that already have feedback are treated as
+    dismissed and omitted, as are those naming a term on the book's ignore list
     (``projects/<id>/ignored_terms.json``).
+
+    ``include_dismissed`` keeps the marked ones, each carrying the standing
+    feedback record as ``feedback``. It is off by default because Review Mode is
+    a working surface — a finding you have already ruled on must not come back
+    as a tint — and on only for the recommendations screen, which is a record of
+    what was decided rather than a list of what is left. The ignore list gates
+    both ways round: an entry there is a standing instruction about a term, not
+    a decision made once about one finding.
 
     A chunk edited since its evaluators ran is *not* skipped. Every finding is
     re-anchored against the prose as it stands now, so one that still quotes
@@ -5810,19 +5819,34 @@ def project_chapter_review(project_id, chapter):
     how many chunks hold a verdict formed against earlier text — a note about
     the *summary*, not a reason to hide the findings.
 
-    Response::
+    Returns::
 
-        { ok, by_es_idx: { "<es_idx>": [finding, ...] },
+        { ok: True, by_es_idx: { "<es_idx>": [finding, ...] },
           unanchored: [finding, ...],
           type_counts: { blacklist: N, ... },
           stale_evaluators: { dialogue: N, ... } }
 
-    Each anchored finding: ``{eval_name, issue_index, chunk_id, severity,
-    message, suggestion, excerpt, match, match_start, match_end, term,
-    rule_id}`` where ``match_start is None`` ⇒ paint a whole-sentence tint.
+    or, when the chapter has no alignment or its file will not parse,
+    ``{"ok": False, "error": str, "status": 404|500}``. Two routes call this,
+    so the failure is data for the caller to shape rather than a response.
+
+    Each anchored finding: ``{eval_name, issue_index, issue_key, chunk_id,
+    severity, message, suggestion, excerpt, match, match_start, match_end, term,
+    rule_id, feedback}`` where ``match_start is None`` ⇒ paint a whole-sentence
+    tint and ``feedback`` is the standing mark (always ``None`` unless
+    ``include_dismissed``).
+    ``issue_key`` is the finding's content hash (:func:`evaluations.issue_key`) —
+    the identity that survives an evaluator re-run, where ``issue_index`` is a
+    position that does not. It is derived here rather than by each caller so that
+    every surface reading this builder — Review Mode and the recommendations
+    screen both — names a finding the same way.
     ``term``/``rule_id`` are the finding's stable identity, present only on
     coded findings that have one; the reader uses them to offer "ignore this
-    for the whole book".
+    for the whole book". They are deliberately *not* carried on judge findings,
+    which the ignore list never gates — offering a button that changes nothing
+    is worse than not offering it. ``category`` is the issue's own defect class
+    (the editorial judge's ``NATURALNESS``, ``STYLE_GUIDE``, ...) and is carried
+    everywhere, because it is a label to read rather than an action to take.
 
     A finding that cannot be placed on a sentence at all — a coded ``char_start``
     no row covers, or a judge excerpt that is not in the prose — goes to
@@ -5833,22 +5857,19 @@ def project_chapter_review(project_id, chapter):
     """
     from collections import defaultdict
 
-    if not _safe_id(project_id) or not _safe_id(chapter):
-        return jsonify({"error": "Bad request"}), 400
-
-    project_dir = _resolve_project_dir(project_id)
-    if not project_dir.exists():
-        return jsonify({"error": "Project not found"}), 404
-
     align_path = project_dir / "alignments" / f"{chapter}.json"
     if not align_path.exists():
-        return jsonify({"error": f"Alignment not found: {project_id}/{chapter}"}), 404
+        return {
+            "ok": False,
+            "error": f"Alignment not found: {project_dir.name}/{chapter}",
+            "status": 404,
+        }
 
     try:
         with open(align_path, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"error": str(e)}), 500
+        return {"ok": False, "error": str(e), "status": 500}
 
     # Enrich rows with chunk_id + char offsets + text_in_chunk (same builder
     # /api/alignment uses). No paragraph/image enrichment needed here.
@@ -5929,7 +5950,8 @@ def project_chapter_review(project_id, chapter):
             if not isinstance(char_start, int):
                 continue
             issue_index = ni.get("issue_index")
-            if is_dismissed(fb_by_key, fb_by_index, eval_name, issue_index, ni):
+            mark = feedback_mark(fb_by_key, fb_by_index, eval_name, issue_index, ni)
+            if mark is not None and not include_dismissed:
                 continue
             if is_ignored(ignored_terms, eval_name, ni):
                 continue
@@ -5954,6 +5976,7 @@ def project_chapter_review(project_id, chapter):
                 unanchored.append({
                     "eval_name": eval_name,
                     "issue_index": issue_index,
+                    "issue_key": issue_key(eval_name, ni),
                     "chunk_id": chunk_id,
                     "severity": ni.get("severity"),
                     "message": ni.get("message"),
@@ -5962,6 +5985,8 @@ def project_chapter_review(project_id, chapter):
                     "reason": _unanchored_reason(freshness, eval_name),
                     "term": issue_term(eval_name, ni),
                     "rule_id": ni.get("rule_id"),
+                    "category": ni.get("category"),
+                    "feedback": mark,
                 })
                 type_counts[eval_name] += 1
                 continue
@@ -5969,6 +5994,7 @@ def project_chapter_review(project_id, chapter):
             by_es_idx[str(row["es_idx"])].append({
                 "eval_name": eval_name,
                 "issue_index": issue_index,
+                "issue_key": issue_key(eval_name, ni),
                 "chunk_id": chunk_id,
                 "severity": ni.get("severity"),
                 "message": ni.get("message"),
@@ -5979,6 +6005,8 @@ def project_chapter_review(project_id, chapter):
                 "match_end": match_end,
                 "term": issue_term(eval_name, ni),
                 "rule_id": ni.get("rule_id"),
+                "category": ni.get("category"),
+                "feedback": mark,
             })
             type_counts[eval_name] += 1
 
@@ -5992,9 +6020,10 @@ def project_chapter_review(project_id, chapter):
                 for issue_index, issue in enumerate(jres.get("issues") or []):
                     if not isinstance(issue, dict):
                         continue
-                    if is_dismissed(
+                    mark = feedback_mark(
                         fb_by_key, fb_by_index, judge_name, issue_index, issue
-                    ):
+                    )
+                    if mark is not None and not include_dismissed:
                         continue
                     excerpt = issue.get("location")
                     es_idx = _anchor_judge_excerpt(
@@ -6007,18 +6036,22 @@ def project_chapter_review(project_id, chapter):
                         unanchored.append({
                             "eval_name": judge_name,
                             "issue_index": issue_index,
+                            "issue_key": issue_key(judge_name, issue),
                             "chunk_id": chunk_id,
                             "severity": issue.get("severity"),
                             "message": issue.get("message"),
                             "suggestion": issue.get("suggestion"),
                             "excerpt": excerpt or "",
                             "reason": _unanchored_reason(freshness, judge_name),
+                            "category": issue.get("category"),
+                            "feedback": mark,
                         })
                         type_counts[judge_name] += 1
                         continue
                     by_es_idx[str(es_idx)].append({
                         "eval_name": judge_name,
                         "issue_index": issue_index,
+                        "issue_key": issue_key(judge_name, issue),
                         "chunk_id": chunk_id,
                         "severity": issue.get("severity"),
                         "message": issue.get("message"),
@@ -6027,16 +6060,41 @@ def project_chapter_review(project_id, chapter):
                         "match": "",
                         "match_start": None,
                         "match_end": None,
+                        "category": issue.get("category"),
+                        "feedback": mark,
                     })
                     type_counts[judge_name] += 1
 
-    return jsonify({
+    return {
         "ok": True,
         "by_es_idx": dict(by_es_idx),
         "unanchored": unanchored,
         "type_counts": dict(type_counts),
         "stale_evaluators": dict(stale_evaluators),
-    })
+    }
+
+
+@app.route(
+    "/api/project/<project_id>/review/<chapter>",
+    methods=["GET"],
+)
+def project_chapter_review(project_id, chapter):
+    """Return one chapter's findings as JSON, for the reader's Review Mode.
+
+    Guards, then :func:`_build_chapter_review` — whose payload this returns
+    unchanged, and whose ``ok: False`` carries the status to send.
+    """
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    result = _build_chapter_review(project_dir, chapter)
+    if not result.get("ok"):
+        return jsonify({"error": result["error"]}), result["status"]
+    return jsonify(result)
 
 
 # ── Review tab: the per-book ignore list ─────────────────────────────────────
@@ -8460,6 +8518,738 @@ def serve_edit_report(project_id, filename):
     if not reports_dir.exists():
         return jsonify({"error": "No reports for this project"}), 404
     return send_from_directory(str(reports_dir), filename)
+
+
+# ============================================================================
+# Recommendations - a read-only screen for what the models said
+# ============================================================================
+#
+# Every LLM opinion this pipeline produces is otherwise trapped behind a surface
+# built for *acting* on it, one item at a time: judge findings are readable only
+# inside the reader's Review Mode, a tint you tap, one sentence at a time; an
+# annotation resolution is readable only in the inbox, which truncates the
+# recommendation to 600 characters and shows none of the richest prose the model
+# wrote (`state_reason`, `evidence`, `note_text`). There was no way to simply
+# *read* what the models said about a book, in order, with enough surrounding
+# text to judge whether they were right.
+#
+# This section is that: one book, one dense scroll, judge findings and annotation
+# resolutions unified into one card shape, each shown against the sentence it
+# concerns plus the sentence either side.
+#
+# Nothing here acts on the book. No apply, reject, dismiss or ignore - the inbox
+# and the reader keep that job, and they hold the locks and the staleness checks
+# that writing safely needs. The item shape still carries `chunk_id`,
+# `issue_index` and `key`, so an action could be added later without reshaping
+# the data.
+#
+# The one thing it writes is a favorite: a mark that says come back to this,
+# stored per item in `favorites.jsonl`. Every other mark in this app is a verdict
+# - `fixed`, `not_a_problem` - and means you are finished with an item; this one
+# means you are not. It touches no prose, so it needs none of that machinery.
+#
+# Nothing here re-derives an opinion. Findings come from `_build_chapter_review`,
+# the same builder the reader's Review Mode uses, so this screen and the reader
+# agree on what is live, what is dismissed and where each finding lands; the
+# per-chapter counts come from `load_chapter_type_counts`, which the chapter list
+# and the dashboard already use, so the shell's numbers agree with theirs.
+
+_RECOMMENDATION_ANNOTATION_KINDS: tuple[str, ...] = (
+    "word_choice", "inconsistency", "footnote", "flag",
+)
+# Filter order on the page: deterministic checks, then judges, then the reader's
+# own notes - cheapest opinion to most considered, which is also roughly the
+# order of how much prose each one comes with.
+_RECOMMENDATION_KINDS: tuple[str, ...] = tuple(REVIEW_TYPES) + _RECOMMENDATION_ANNOTATION_KINDS
+
+# Two items on the same sentence render findings first, then the reader's note:
+# the note is usually a question *about* the sentence, and reads better after
+# the machine's verdict on it than before.
+def _recommendation_kind(raw: Optional[str]) -> str:
+    """A note's ``type`` folded onto a kind the filter row can offer.
+
+    The checkboxes come from ``_RECOMMENDATION_KINDS`` and the CSS holds one
+    ``.rec-hide-<kind>`` rule per entry, so a type from outside that tuple would
+    render a card no checkbox governs. ``flag`` is where an untyped note already
+    lands, so an unrecognised one lands with it rather than inventing a chip.
+    """
+    kind = raw or "flag"
+    return kind if kind in _RECOMMENDATION_KINDS else "flag"
+
+
+_RECOMMENDATION_SOURCE_ORDER = {"coded": 0, "judge": 1, "annotation": 2}
+
+# Sorts after every real ``es_idx``. A chapter's sentence count is bounded by
+# its file, so any number past the largest one a book could hold will do.
+_RECOMMENDATION_LAST = 1 << 30
+
+# What became of an item, in filter order: what is left, then what you did about
+# it, then what the model got wrong. `open` and `stale` are outstanding work;
+# the rest is history.
+_RECOMMENDATION_STATUSES: tuple[str, ...] = (
+    "open", "stale",
+    "fixed", "applied", "settled", "deleted",
+    "not_a_problem", "bad_message", "missing_context_gap",
+)
+_RECOMMENDATION_OPEN_STATUSES = frozenset({"open", "stale"})
+# Unticked on arrival. These say the finding was *wrong* - the judge misread the
+# prose, or worded itself badly - which is signal for tuning an evaluator and
+# noise for reading a book. They are 831 of the corpus's 1,132 marks, enough to
+# bury the 285 findings that record a real change to the text. The boxes are
+# there, with their counts, for when the question is how well the judges did.
+_RECOMMENDATION_STATUSES_OFF = frozenset({"not_a_problem", "bad_message"})
+
+
+def _coerce_es_idx(value) -> Optional[int]:
+    """``es_idx`` as an ``int``, or ``None`` when it is not one.
+
+    Findings reach the page through an ``int(key)`` guard, but a reviewed
+    annotation's index comes straight off ``results.json``, which no schema
+    polices - a hand-edited row or one written by an older reviewer can hold
+    ``"4"``. That sorts against the ints beside it with a ``TypeError``, so a
+    single bad row took out every card in its chapter rather than only itself.
+    Not a number at all is treated as no index: the card still renders, with its
+    stored sentence and no context, in the tail the sort parks it in.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _context_rows(rows_in_order: list[dict], es_idx) -> dict:
+    """The sentence at ``es_idx`` and its neighbours, found *by position*.
+
+    Never ``es_idx +/- 1``. An N:1 alignment group consumes the indices of the
+    sentences it swallowed (``_group_nto1``, :mod:`src.sentence_aligner`), so
+    the index is sparse in 408 of this corpus's 502 alignment files: reading a
+    neighbour off ``es_idx - 1`` would land on a hole - no row at all - for most
+    of the books here, and would silently show no context on exactly the
+    sentences that were hardest to align.
+
+    Returns ``{"before": row|None, "current": row|None, "after": row|None}``,
+    each row ``{es, en, es_idx}``. ``current`` is ``None`` when the index no
+    longer names a row, which is how an annotation whose sentence was deleted
+    since the review still renders - with its own snapshot and no context,
+    rather than attached to whichever row inherited the number.
+    """
+    empty = {"before": None, "current": None, "after": None}
+    if es_idx is None:
+        return empty
+    position = None
+    for i, row in enumerate(rows_in_order):
+        if row.get("es_idx") == es_idx:
+            position = i
+            break
+    if position is None:
+        return empty
+
+    def at(i):
+        if i < 0 or i >= len(rows_in_order):
+            return None
+        row = rows_in_order[i]
+        return {
+            "es": row.get("es") or "",
+            "en": row.get("en") or "",
+            "es_idx": row.get("es_idx"),
+        }
+
+    return {
+        "before": at(position - 1),
+        "current": at(position),
+        "after": at(position + 1),
+    }
+
+
+def _recommendation_context_rows(project_dir: Path, chapter: str) -> list[dict]:
+    """A chapter's alignment rows in document order, ready for neighbour lookup.
+
+    Read raw: no ``_attach_text_in_chunk`` enrichment, because context needs
+    only ``es``/``en``/``es_idx`` and the chunk-offset walk is the expensive
+    half of the reader's builder. ``[IMAGE:...]`` placeholders are dropped - the
+    same rows :func:`_build_chapter_review` refuses to anchor to - so a picture
+    between two sentences does not become one of them as "context".
+
+    The file's own order is already document order in every alignment here, but
+    it is sorted anyway: this is what makes "the row before" mean the sentence
+    before.
+    """
+    align_path = project_dir / "alignments" / f"{chapter}.json"
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    rows = [
+        row for row in (data.get("alignments") or [])
+        if isinstance(row, dict)
+        and isinstance(row.get("es_idx"), int)
+        and not _IMAGE_PLACEHOLDER_RE.fullmatch((row.get("es") or "").strip())
+    ]
+    rows.sort(key=lambda r: r["es_idx"])
+    return rows
+
+
+def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
+                  *, unanchored_reason: Optional[str] = None,
+                  favorites: frozenset = frozenset()) -> dict:
+    """One judge or coded finding as a recommendation card.
+
+    ``stale`` is always ``False`` here, and that is not an omission.
+    :func:`_build_chapter_review` has already made the staleness judgement for
+    findings: one whose quoted text is still verbatim in the sentence it lands
+    on is still true and is shown, and one whose text has moved on is binned as
+    ``obsolete`` - which arrives here as ``unanchored_reason``. There is no
+    third state left for a flag to carry. ``stale`` means something specific
+    and different for annotations; see :func:`_annotation_item`.
+
+    ``status`` is what became of the finding, read off the feedback mark
+    :func:`_build_chapter_review` attached: ``fixed`` when you edited the prose,
+    ``not_a_problem`` / ``bad_message`` / ``missing_context_gap`` when the
+    finding itself was wrong, ``open`` when nothing has been decided.
+
+    ``fav_id`` is the handle the heart posts back, and is ``None`` for a finding
+    with no ``chunk_id`` or no ``issue_key`` - an item nothing can address, which
+    the page renders without a heart rather than with one that cannot be saved.
+
+    ``original_text`` is the prose the finding quoted, and is set only when
+    there is no live sentence to show. That pairing is not a coincidence: the
+    two cases that lose their sentence are exactly the two where the prose moved
+    on, so the excerpt *is* the text as it read when the model wrote about it -
+    the one honest thing left to render.
+    """
+    eval_name = finding.get("eval_name")
+    mark = finding.get("feedback") or {}
+    fav_id = favorites_store.finding_id(
+        finding.get("chunk_id"), finding.get("issue_key")
+    )
+    return {
+        "source": "judge" if eval_name in _REVIEW_JUDGE_TYPES else "coded",
+        "kind": eval_name,
+        "severity": finding.get("severity"),
+        "chapter_id": chapter,
+        "es_idx": es_idx,
+        "excerpt": finding.get("excerpt") or "",
+        "suggestion": finding.get("suggestion") or None,
+        "explanation": finding.get("message") or "",
+        "detail": [],
+        "rule_id": finding.get("rule_id"),
+        "category": finding.get("category"),
+        "term": finding.get("term"),
+        "confidence": None,
+        "context": context,
+        "match_start": finding.get("match_start"),
+        "match_end": finding.get("match_end"),
+        "unanchored_reason": unanchored_reason,
+        "stale": False,
+        "status": FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open"),
+        "status_at": mark.get("ts"),
+        # `obsolete` only. That reason means the excerpt *was* the prose and the
+        # prose moved on, so the quote is a snapshot of the text as it read.
+        # `unplaceable` means the quote was never verbatim in the book at all -
+        # presenting it as former prose would invent a history that never
+        # happened, so it keeps the plain excerpt rendering.
+        "original_text": (
+            (finding.get("excerpt") or "") if unanchored_reason == "obsolete" else ""
+        ),
+        "chunk_id": finding.get("chunk_id"),
+        "issue_index": finding.get("issue_index"),
+        "key": None,
+        "fav_id": fav_id,
+        "favorite": fav_id is not None and fav_id in favorites,
+    }
+
+
+def _annotation_detail(row: dict) -> list[dict]:
+    """The prose the inbox throws away, as labelled blocks.
+
+    ``review.apply``'s plan keeps only what a *write* needs, so the reviewer's
+    reasoning - why it decided the note was in this state, what it checked, and
+    the note it would append - never reaches a screen. On a page whose whole job
+    is reading the model's opinion, that reasoning is the opinion.
+    """
+    detail: list[dict] = []
+    if row.get("state_reason"):
+        detail.append({"label": "state_reason", "text": str(row["state_reason"])})
+    if row.get("note_text"):
+        detail.append({"label": "note_text", "text": str(row["note_text"])})
+    for line in row.get("evidence") or []:
+        if isinstance(line, str) and line.strip():
+            detail.append({"label": "evidence", "text": line})
+    if row.get("manual_reason"):
+        detail.append({"label": "manual_reason", "text": str(row["manual_reason"])})
+    return detail
+
+
+def _annotation_item(row: dict, context: dict, *, stale: bool,
+                     status: str = "open", status_at: Optional[str] = None,
+                     favorites: frozenset = frozenset()) -> dict:
+    """One reviewed annotation as a recommendation card.
+
+    ``excerpt`` is the note the reader wrote, ``suggestion`` the text the review
+    would write in its place (only when the review judged it writable), and
+    ``explanation`` the recommendation itself - untruncated, unlike the inbox's
+    600-character preview.
+
+    ``fav_id`` is the note's own key, namespaced - annotations have carried a
+    stable identity all along, so unlike a finding there is nothing to derive.
+
+    The highlight span comes from the note's first anchor word located in the
+    live sentence, so the card points at the word the note is about. It is
+    dropped when the anchor is no longer in the sentence, which is what
+    ``_locate_match`` already does for a coded finding: no highlight beats a
+    highlight on the wrong words.
+
+    **The context is verified before it is shown.** ``es_idx`` is a position,
+    and a realign renumbers positions, so the sentence sitting at the index
+    today is not necessarily the sentence the review read. The review stored the
+    one it read as ``es_sentence``; unless the live row still matches it
+    verbatim, the live context is dropped and that stored sentence is returned
+    as ``original_text`` instead. Without this the card renders a
+    recommendation against prose it was never about - which is exactly what the
+    unanchored bin exists to prevent for findings, and what 25 of this corpus's
+    160 reviewed annotations were doing here.
+    """
+    stored = (row.get("es_sentence") or "").strip()
+    live = ((context.get("current") or {}).get("es") or "").strip()
+    text_changed = bool(stored) and stored != live
+    if text_changed or not live:
+        context = {"before": None, "current": None, "after": None}
+
+    current = (context.get("current") or {}).get("es") or ""
+    anchors = [a for a in (row.get("anchors") or []) if isinstance(a, str) and a.strip()]
+    match_start, match_end = (None, None)
+    if anchors and current:
+        match_start, match_end = _locate_match(current, anchors[0])
+    fav_id = favorites_store.annotation_id(row.get("key"))
+    return {
+        "source": "annotation",
+        "kind": _recommendation_kind(row.get("type")),
+        "severity": None,
+        "chapter_id": row.get("chapter_id"),
+        "es_idx": _coerce_es_idx(row.get("es_idx")),
+        "excerpt": row.get("content") or "",
+        "suggestion": (row.get("new_content") or None) if row.get("writable") else None,
+        "explanation": row.get("recommendation") or "",
+        "detail": _annotation_detail(row),
+        "rule_id": None,
+        "category": row.get("state"),
+        "term": anchors[0] if anchors else None,
+        "confidence": row.get("confidence"),
+        "context": context,
+        "match_start": match_start,
+        "match_end": match_end,
+        "unanchored_reason": None,
+        "stale": stale,
+        "status": status,
+        "status_at": status_at,
+        # Only when there is no live sentence: a card that can show the prose as
+        # it stands says more than a snapshot of prose that has not moved.
+        "original_text": stored if (context.get("current") is None) else "",
+        "chunk_id": None,
+        "issue_index": None,
+        "key": row.get("key"),
+        "fav_id": fav_id,
+        "favorite": fav_id is not None and fav_id in favorites,
+    }
+
+
+def _annotation_removed_at(project_dir: Path) -> dict[str, str]:
+    """``{annotation key: when it was deleted}`` for the notes that are gone.
+
+    ``annotations.jsonl`` is append-only, so a deleted note leaves a tombstone
+    (``removed: true``) carrying the timestamp of the deletion - which is the
+    only date this screen can put on "you dealt with this and threw the note
+    away". Keyed the way :func:`store.load_active` keys, so the last record at a
+    key wins: a note deleted, re-added and deleted again is dated by its latest
+    deletion, and one that was deleted and re-added is absent from here.
+
+    A second pass over the same file that :func:`_inbox_live_records` walks,
+    rather than a widening of it: the inbox shares that function and must keep
+    seeing live records only. The file is a few hundred lines a book.
+    """
+    from src.annotations import store
+
+    last: dict[str, dict] = {}
+    for record in store.iter_records(project_dir):
+        last[store.target_key(record)] = record
+    return {
+        key: record.get("timestamp") or ""
+        for key, record in last.items()
+        if record.get("removed")
+    }
+
+
+def _annotation_settled_at(record: Optional[dict]) -> Optional[str]:
+    """When a review last wrote to this note, from its ``ai_review`` stamp.
+
+    A best-effort date, not the fact the status rests on: :func:`_inbox_state`
+    calls a note ``applied`` by comparing its content against the proposed text,
+    and never consults this sidecar. So an "Applied" card legitimately carries
+    no date when nothing wrote the stamp - the state is still right.
+    """
+    from src.annotations import store
+
+    sidecar = (record or {}).get(store.AI_REVIEW_KEY)
+    return sidecar.get("at") if isinstance(sidecar, dict) else None
+
+
+def _recommendation_annotations(project_dir: Path) -> dict[str, list[dict]]:
+    """Every reviewed annotation for a book, bucketed by chapter.
+
+    One ``results.json`` read plus two passes over ``annotations.jsonl`` - the
+    live records and, in :func:`_annotation_removed_at`, the tombstones. Built
+    for the whole book at once so the caller can share it across chapters.
+
+    Each row is paired with the verdict :func:`_inbox_state` computes, which on
+    this screen is the card's status rather than a reason to hide it. That
+    includes ``gone`` - the note was deleted - which the inbox is right to drop
+    and this screen is wrong to: deleting the note is what *finishing* with a
+    recommendation looks like, so dropping those threw away the reviews you
+    acted on and kept the ones you ignored. 56 of ``fabre2``'s 79 reviewed
+    annotations were invisible here for that reason.
+
+    Nothing is lost by keeping them, because ``results.json`` holds the whole
+    row - the note's text, the model's reasoning, and ``es_sentence``, the
+    sentence as it stood when the review ran. A deleted note still has all of
+    that to show; see :func:`_annotation_item`.
+    """
+    from src.annotations import review as annreview
+
+    rows = annreview.results_all(project_dir)
+    if not rows:
+        return {}
+    records = _inbox_live_records(project_dir)
+    removed_at = _annotation_removed_at(project_dir)
+
+    by_chapter: dict[str, list[dict]] = {}
+    for row in rows:
+        chapter_id = row.get("chapter_id")
+        if not chapter_id:
+            continue
+        key = row.get("key")
+        state = _inbox_state(
+            {"key": key, "old": row.get("content") or "",
+             "new": row.get("new_content")},
+            records,
+        )
+        by_chapter.setdefault(chapter_id, []).append({
+            "row": row,
+            "stale": state == "stale",
+            "status": "deleted" if state == "gone" else state,
+            "status_at": (
+                removed_at.get(key) if state == "gone"
+                else _annotation_settled_at(records.get(key))
+            ),
+        })
+    return by_chapter
+
+
+def _recommendation_items(
+    project_dir: Path, chapter: str, *,
+    annotations: Optional[dict[str, list[dict]]] = None,
+    favorites: Optional[frozenset] = None,
+) -> dict:
+    """One chapter's findings and annotation resolutions, as one ordered list.
+
+    Anchored items come first in document order, findings before notes on the
+    same sentence; unanchored findings follow as a tail, each carrying the
+    ``unanchored_reason`` that says why it has no sentence (``obsolete`` - the
+    prose moved on; ``unplaceable`` - the excerpt was never verbatim). They are
+    kept rather than dropped for the same reason the reader keeps them in its
+    overflow bin: an opinion you cannot place is still an opinion, and these are
+    the ones most likely to be worth a human's attention.
+
+    Returns ``{"ok": True, "chapter_id", "items", "type_counts",
+    "stale_evaluators"}``, or :func:`_build_chapter_review`'s ``ok: False`` with
+    its status, unchanged.
+
+    ``annotations`` is :func:`_recommendation_annotations`' whole-book map,
+    passed in so a whole-book render reads ``results.json`` once instead of once
+    per chapter. Omitted, it is computed for this chapter alone. ``favorites`` is
+    passed the same way and for the same reason.
+
+    Dismissed findings are included, which the reader's Review Mode never does.
+    This screen is the record of what the models said and what became of it, so
+    a finding you fixed or called a false positive belongs on it - carrying its
+    ``status`` - rather than vanishing from the book's history the moment it was
+    marked.
+    """
+    review = _build_chapter_review(project_dir, chapter, include_dismissed=True)
+    if not review.get("ok"):
+        return review
+
+    rows_in_order = _recommendation_context_rows(project_dir, chapter)
+    if annotations is None:
+        annotations = _recommendation_annotations(project_dir)
+    if favorites is None:
+        favorites = frozenset(favorites_store.load_favorites(project_dir))
+
+    items: list[dict] = []
+    for key, findings in review["by_es_idx"].items():
+        try:
+            es_idx = int(key)
+        except (TypeError, ValueError):
+            continue
+        context = _context_rows(rows_in_order, es_idx)
+        for finding in findings:
+            items.append(_finding_item(
+                finding, chapter, es_idx, context, favorites=favorites
+            ))
+
+    for entry in annotations.get(chapter) or []:
+        row = entry["row"]
+        items.append(_annotation_item(
+            row,
+            _context_rows(rows_in_order, _coerce_es_idx(row.get("es_idx"))),
+            stale=entry["stale"],
+            status=entry["status"],
+            status_at=entry["status_at"],
+            favorites=favorites,
+        ))
+
+    # Unanchored findings have no sentence, so they sort nowhere: they are
+    # appended below, after this sort, into the same end-of-chapter bin the
+    # reader gives them. `_RECOMMENDATION_LAST` is not for them - it parks an
+    # annotation whose row carries no `es_idx` at the end of the sorted run.
+    items.sort(key=lambda it: (
+        it["es_idx"] if it["es_idx"] is not None else _RECOMMENDATION_LAST,
+        _RECOMMENDATION_SOURCE_ORDER.get(it["source"], 9),
+    ))
+
+    empty_context = {"before": None, "current": None, "after": None}
+    for finding in review["unanchored"]:
+        items.append(_finding_item(
+            finding, chapter, None, empty_context,
+            unanchored_reason=finding.get("reason") or "unplaceable",
+            favorites=favorites,
+        ))
+
+    return {
+        "ok": True,
+        "chapter_id": chapter,
+        "items": items,
+        "type_counts": review["type_counts"],
+        "stale_evaluators": review["stale_evaluators"],
+    }
+
+
+def _recommendation_shell(project_id: str, project_dir: Path) -> dict:
+    """The chapter index the page paints before any item has been fetched.
+
+    Counts only. Filling every chapter eagerly costs 4.2 s on the worst book
+    here (``fabre2``, 80 chapters, 350 findings), which is a blank page for four
+    seconds; one chapter costs ~50 ms, which is invisible behind a scroll. So
+    the shell is the cheap half: :func:`load_chapter_type_counts` walks
+    ``evaluations/*.json`` without touching alignments or chunks, and the
+    annotation counts come from the one ``results.json`` read the whole page
+    shares.
+
+    Chapters with nothing to read are left out entirely - this is a page you
+    scroll, and eighty empty headings is not a page you scroll.
+
+    Three numbers per chapter. The favorite count is the one the page cannot
+    work without: chapters fill lazily, so "favorites only" would show a run of
+    empty headings for every chapter you had not scrolled to. Knowing which
+    chapters hold favorites lets the page fetch exactly those and hide the rest.
+
+    Two of the three are counts of items, not one. The kind chips keep counting *outstanding*
+    items, because that is what they mean everywhere else in this app - the
+    chapter list and the Review tab read the same walk - and a chip that jumped
+    from 3 to 40 because the book has a long history would stop answering "is
+    there work here". History gets its own muted count beside them. A chapter is
+    listed if it holds either.
+    """
+    counts_by_chapter = load_chapter_type_counts(project_dir, statuses=True)
+    annotations = _recommendation_annotations(project_dir)
+    favorites_by_chapter = favorites_store.favorites_by_chapter(project_dir)
+    manifest = _load_chapter_manifest_for_project(project_id)
+    chapter_prefix = _reader_strings().get("chapter_prefix", "Chapter")
+
+    align_dir = project_dir / "alignments"
+    chapter_ids = sorted(p.stem for p in align_dir.glob("*.json")) if align_dir.exists() else []
+    # A chapter can hold reviewed annotations with no alignment left to anchor
+    # them to (a re-split drops the file); it still has recommendations to read,
+    # so union the two sources rather than trusting either alone.
+    for chapter_id in annotations:
+        if chapter_id not in chapter_ids:
+            chapter_ids.append(chapter_id)
+    chapter_ids.sort()
+
+    chapters = []
+    totals: dict[str, int] = {kind: 0 for kind in _RECOMMENDATION_KINDS}
+    status_totals: dict[str, int] = {}
+    open_total = 0
+    history_total = 0
+    for chapter_id in chapter_ids:
+        split = counts_by_chapter.get(chapter_id) or {}
+        kinds = {k: n for k, n in (split.get("open") or {}).items() if n}
+        history = sum((split.get("history") or {}).values())
+        # The kind filter has to know about a kind that exists only in this
+        # chapter's history, or unticking it would leave those cards on screen.
+        seen_kinds = dict(kinds)
+        for kind, n in (split.get("history") or {}).items():
+            if n:
+                seen_kinds[kind] = seen_kinds.get(kind, 0) + n
+        # `by_status` covers the marked findings only; an unmarked one is `open`
+        # and is counted here, so every status box carries a real total.
+        if kinds:
+            status_totals["open"] = status_totals.get("open", 0) + sum(kinds.values())
+        for status, n in (split.get("by_status") or {}).items():
+            status_totals[status] = status_totals.get(status, 0) + n
+
+        for entry in annotations.get(chapter_id) or []:
+            kind = entry["row"].get("type") or "flag"
+            if kind not in _RECOMMENDATION_KINDS:
+                kind = "flag"
+            status = entry["status"]
+            status_totals[status] = status_totals.get(status, 0) + 1
+            seen_kinds[kind] = seen_kinds.get(kind, 0) + 1
+            if status in _RECOMMENDATION_OPEN_STATUSES:
+                kinds[kind] = kinds.get(kind, 0) + 1
+            else:
+                history += 1
+
+        if not seen_kinds:
+            continue
+        for kind, n in seen_kinds.items():
+            totals[kind] = totals.get(kind, 0) + n
+        open_total += sum(kinds.values())
+        history_total += history
+        chapters.append({
+            "id": chapter_id,
+            "label": _chapter_display_label(chapter_id, manifest, chapter_prefix),
+            "counts": kinds,
+            "history": history,
+            "favorites": favorites_by_chapter.get(chapter_id, 0),
+        })
+
+    return {
+        "chapters": chapters,
+        "totals": {kind: n for kind, n in totals.items() if n},
+        "total": open_total,
+        "history_total": history_total,
+        "kinds": list(_RECOMMENDATION_KINDS),
+        "statuses": [s for s in _RECOMMENDATION_STATUSES if status_totals.get(s)],
+        "status_totals": status_totals,
+        "statuses_off": sorted(_RECOMMENDATION_STATUSES_OFF),
+    }
+
+
+@app.route("/recommendations/<project_id>")
+def recommendations_page(project_id):
+    """One book's recommendations, to read rather than to act on."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return "Project not found", 404
+
+    return render_template(
+        "recommendations.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        project_id=project_id,
+        project_title=_project_title(project_id),
+        shell=_recommendation_shell(project_id, project_dir),
+    )
+
+
+@app.route("/api/project/<project_id>/recommendations/<chapter>", methods=["GET"])
+def project_chapter_recommendations(project_id, chapter):
+    """One chapter's unified items. Drives the page's lazy fill."""
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    result = _recommendation_items(project_dir, chapter)
+    if not result.get("ok"):
+        return jsonify({"error": result["error"]}), result["status"]
+    return jsonify(result)
+
+
+@app.route("/api/project/<project_id>/recommendations", methods=["GET"])
+def project_recommendations(project_id):
+    """The whole book in one payload.
+
+    Seconds, not milliseconds, on a long book - the page never calls this, which
+    is why the per-chapter route exists. It is here for tests and for anyone who
+    wants the lot in one place.
+
+    A chapter whose alignment is missing or unreadable is reported with its
+    ``error`` instead of its items rather than failing the whole book: one
+    broken file should not cost you the other seventy-nine.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    shell = _recommendation_shell(project_id, project_dir)
+    annotations = _recommendation_annotations(project_dir)
+    favorites = frozenset(favorites_store.load_favorites(project_dir))
+    chapters = []
+    for entry in shell["chapters"]:
+        result = _recommendation_items(
+            project_dir, entry["id"], annotations=annotations, favorites=favorites
+        )
+        if not result.get("ok"):
+            chapters.append({"chapter_id": entry["id"], "error": result["error"]})
+            continue
+        chapters.append(result)
+
+    return jsonify({"ok": True, "shell": shell, "chapters": chapters})
+
+
+@app.route("/api/project/<project_id>/recommendations/favorite", methods=["POST"])
+def project_recommendation_favorite(project_id):
+    """Mark one recommendation to come back to, or unmark it.
+
+    The only write on this screen, and deliberately not a verdict: it changes
+    nothing about the book, the finding or the note - only whether you wanted to
+    see this one again. That is why it needs none of the locking and staleness
+    machinery the inbox and the reader carry to apply an edit.
+
+    The browser sends the id rather than the server re-deriving it from
+    ``(chunk_id, eval_name, issue_index)`` the way
+    :func:`project_chunk_evaluation_feedback` does. That route resolves
+    server-side because its three calling surfaces predate the content key and
+    still send a position; here every surface reads ``issue_key`` straight off
+    :func:`_build_chapter_review`, so there is no position to translate and no
+    positional fallback to keep working. The id is validated before it is
+    written, not trusted.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.json or {}
+    fav_id = data.get("id")
+    favorite = data.get("favorite")
+
+    if not favorites_store.is_valid_id(fav_id):
+        return jsonify({"error": "Malformed favorite id"}), 400
+    # Explicit, because this is a toggle and a missing field must not read as
+    # "unfavorite": the caller says which way it went.
+    if not isinstance(favorite, bool):
+        return jsonify({"error": "favorite must be true or false"}), 400
+
+    try:
+        favorites_store.append_favorite(project_dir, fav_id, favorite)
+    except Exception as e:
+        app.logger.exception("Failed to record favorite %s", fav_id)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True, "favorite": favorite})
 
 
 def _is_tailnet_addr(addr: str) -> bool:

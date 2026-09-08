@@ -42,6 +42,19 @@ _ALLOWED_FEEDBACK_TYPES = frozenset(
     {"false_positive", "bad_message", "missing_context_gap", "resolved"}
 )
 
+# What a mark means to a reader, as opposed to what it means to evaluator
+# tuning. `resolved` is the only one that says the *book* changed, and reading
+# "fixed" off a card is the point of showing marked findings at all; the other
+# three say the finding was wrong in one of three ways. The recommendations
+# screen renders these as its status chips (`web_ui/app.py:_finding_item`); an
+# unmarked finding is `open` and appears in no map.
+FEEDBACK_STATUSES: dict[str, str] = {
+    "resolved": "fixed",
+    "false_positive": "not_a_problem",
+    "bad_message": "bad_message",
+    "missing_context_gap": "missing_context_gap",
+}
+
 # Feedback records used to be keyed only by ``(eval_name, issue_index)`` — a
 # POSITION in the evaluator's issue list, recomputed by ``enumerate`` at read
 # time. Re-running an evaluator rewrites that list wholesale, so a mark silently
@@ -91,29 +104,37 @@ def issue_key(eval_name: str, issue: dict[str, Any]) -> str:
 
 def build_dismissed(
     feedback_records: Iterable[dict[str, Any]],
-) -> tuple[set[tuple[str, str]], set[tuple[str, Any]]]:
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[tuple[str, Any], dict[str, Any]]]:
     """Split feedback into content-keyed and legacy position-keyed lookups.
 
     Returns ``(by_key, by_index)``. Records written before ``issue_key`` existed
     have no key and can only be matched positionally, so they land in the second
-    set; everything written since matches on content. Pass both to
-    :func:`is_dismissed`.
+    map; everything written since matches on content. Pass both to
+    :func:`is_dismissed` — which asks only whether a finding is in there — or to
+    :func:`feedback_mark`, which hands back the record itself.
+
+    Mappings rather than sets because the recommendations screen shows *what*
+    was decided and when, not merely that something was. ``in`` means the same
+    thing on both, so every membership caller is unaffected.
+
+    The file is append-only and a finding can be marked more than once, so the
+    last record for a key wins: that is the label standing now.
     """
-    by_key: set[tuple[str, str]] = set()
-    by_index: set[tuple[str, Any]] = set()
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    by_index: dict[tuple[str, Any], dict[str, Any]] = {}
     for fb in feedback_records:
         eval_name = fb.get("eval_name")
         key = fb.get("issue_key")
         if key:
-            by_key.add((eval_name, key))
+            by_key[(eval_name, key)] = fb
         else:
-            by_index.add((eval_name, fb.get("issue_index")))
+            by_index[(eval_name, fb.get("issue_index"))] = fb
     return by_key, by_index
 
 
 def is_dismissed(
-    by_key: set[tuple[str, str]],
-    by_index: set[tuple[str, Any]],
+    by_key: dict[tuple[str, str], dict[str, Any]],
+    by_index: dict[tuple[str, Any], dict[str, Any]],
     eval_name: str,
     issue_index: Any,
     issue: Optional[dict[str, Any]] = None,
@@ -121,11 +142,33 @@ def is_dismissed(
     """True if this finding carries any feedback label.
 
     All four feedback types count as dismissal — the distinction between them is
-    tuning signal, not display state.
+    tuning signal, not display state. A surface that wants the distinction (the
+    recommendations screen labels a finding you *fixed* differently from one you
+    called a false positive) asks :func:`feedback_mark` instead.
     """
     if issue is not None and (eval_name, issue_key(eval_name, issue)) in by_key:
         return True
     return (eval_name, issue_index) in by_index
+
+
+def feedback_mark(
+    by_key: dict[tuple[str, str], dict[str, Any]],
+    by_index: dict[tuple[str, Any], dict[str, Any]],
+    eval_name: str,
+    issue_index: Any,
+    issue: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """The feedback record standing against this finding, or ``None``.
+
+    :func:`is_dismissed`'s answer with the record attached, and deliberately the
+    same precedence: a content key beats a legacy positional one, because the
+    position stopped meaning anything the moment the evaluator re-ran.
+    """
+    if issue is not None:
+        record = by_key.get((eval_name, issue_key(eval_name, issue)))
+        if record is not None:
+            return record
+    return by_index.get((eval_name, issue_index))
 
 
 # ``Issue.term`` is newer than the persisted corpus: every evaluation written
@@ -935,7 +978,9 @@ def chapter_id_from_chunk_id(chunk_id: str) -> str:
     return chunk_id[:idx] if idx > 0 else chunk_id
 
 
-def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
+def load_chapter_type_counts(
+    project_dir: Path, *, statuses: bool = False
+) -> dict[str, dict]:
     """Walk ``evaluations/*.json`` and count live findings per chapter, per category.
 
     Same shape of walk as :func:`load_project_summary`, but bucketed by
@@ -963,11 +1008,45 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
         :data:`REVIEW_TYPES` key, zero-filled. Chapters with no live findings
         are absent — callers wanting a row for every chapter should fall back
         to :func:`empty_type_counts`.
+
+        With ``statuses=True``, ``{chapter_id: {"open": {category: count},
+        "history": {category: count}, "by_status": {status: count}}}`` instead:
+        the same walk, but the marked findings it normally subtracts are
+        counted into ``history`` and broken down by :data:`FEEDBACK_STATUSES`
+        rather than thrown away. Only the recommendations screen asks for this.
+        The default shape is what the chapter list and the Review tab read, and
+        there "count" means outstanding work — a meaning worth keeping.
+
+        Findings held down by the ignore list are absent from both shapes. An
+        ignore entry is a standing instruction rather than a record of a
+        decision made once, and the Review tab already has a screen for
+        auditing it.
     """
-    by_chapter: dict[str, dict[str, int]] = {}
+    by_chapter: dict[str, dict] = {}
     eval_dir = _eval_results_dir(project_dir)
     if not eval_dir.exists():
         return by_chapter
+
+    def _bucket(chapter_id: str) -> dict:
+        if statuses:
+            return by_chapter.setdefault(chapter_id, {
+                "open": empty_type_counts(),
+                "history": empty_type_counts(),
+                "by_status": {},
+            })
+        return by_chapter.setdefault(chapter_id, empty_type_counts())
+
+    def _count(bucket: dict, eval_name: str, mark: Optional[dict[str, Any]]) -> None:
+        """One finding into its bucket, split by whether it carries a mark."""
+        if not statuses:
+            bucket[eval_name] += 1
+            return
+        if mark is None:
+            bucket["open"][eval_name] += 1
+            return
+        bucket["history"][eval_name] += 1
+        status = FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open")
+        bucket["by_status"][status] = bucket["by_status"].get(status, 0) + 1
 
     coded_types = frozenset(REVIEW_CODED_TYPES)
     judge_types = frozenset(REVIEW_JUDGE_TYPES)
@@ -988,7 +1067,7 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
 
         chunk_id = data.get("chunk_id") or path.stem
         fb_by_key, fb_by_index = build_dismissed(feedback_by_chunk.get(chunk_id, []))
-        counts = by_chapter.setdefault(chapter_id_from_chunk_id(chunk_id), empty_type_counts())
+        counts = _bucket(chapter_id_from_chunk_id(chunk_id))
 
         for ni in data.get("normalized_issues") or []:
             if not isinstance(ni, dict):
@@ -999,13 +1078,14 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
             loc = ni.get("location") or {}
             if loc.get("side") != "target" or loc.get("char_start") is None:
                 continue
-            if is_dismissed(
+            mark = feedback_mark(
                 fb_by_key, fb_by_index, eval_name, ni.get("issue_index"), ni
-            ):
+            )
+            if mark is not None and not statuses:
                 continue
             if is_ignored(ignored, eval_name, ni):
                 continue
-            counts[eval_name] += 1
+            _count(counts, eval_name, mark)
 
         judges = data.get("judges")
         if not isinstance(judges, dict):
@@ -1016,11 +1096,12 @@ def load_chapter_type_counts(project_dir: Path) -> dict[str, dict[str, int]]:
             for issue_index, issue in enumerate(jres.get("issues") or []):
                 if not isinstance(issue, dict):
                     continue
-                if is_dismissed(
+                mark = feedback_mark(
                     fb_by_key, fb_by_index, judge_name, issue_index, issue
-                ):
+                )
+                if mark is not None and not statuses:
                     continue
-                counts[judge_name] += 1
+                _count(counts, judge_name, mark)
 
     return by_chapter
 
@@ -1602,6 +1683,8 @@ __all__ = [
     "issue_key",
     "build_dismissed",
     "is_dismissed",
+    "feedback_mark",
+    "FEEDBACK_STATUSES",
     "is_ignored",
     "issue_term",
     "count_ignored_hits",

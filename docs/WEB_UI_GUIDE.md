@@ -29,6 +29,7 @@ service, use `python scripts/serve.py` (see [`CLI_REFERENCE.md`](CLI_REFERENCE.m
 | `/read/<id>/<chapter>` | Bilingual reader view |
 | `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
 | `/review-inbox` | Cross-book annotation resolutions awaiting a decision |
+| `/recommendations/<id>` | One book's judge findings and reviewed notes, to read |
 | `/reports/<project_id>/<filename>` | Serves generated edit-review HTML reports (same-origin for tag API) |
 
 ---
@@ -625,6 +626,117 @@ The dashboard's job-starting routes (`review/run-coded`, `review/run-judges`,
 when a CLI or scheduled wave already holds it. Before this, a wave started outside
 Flask had no job record, so `jobs.JobConflict` never fired and a click here would
 run a `prepare` that unlinked the drafts that wave was still writing.
+
+---
+
+## Recommendations
+
+Served at `/recommendations/<project_id>`, linked from the Review stage's toolbar
+on the dashboard and from the book's own chapter list. One book, one dense
+scroll: every judge finding, coded finding and reviewed annotation, in reading
+order, each shown against the sentence it concerns plus the sentence either side.
+
+**Nothing here acts on the book.** No apply, reject, dismiss or ignore — the
+reader and the review inbox keep that job, along with the locks and staleness
+checks that writing safely needs. This page exists because there was nowhere to
+simply *read* what the models said about a book: Review Mode shows one sentence
+at a time as a tint you tap, and the inbox truncates a recommendation to 600
+characters and shows none of the reviewer's reasoning. The one thing it writes is
+a favorite, below — a mark about you rather than about the prose.
+
+- **One card shape for both sources.** A judge or coded finding contributes its
+  `message`, `suggestion` and `excerpt`; an annotation resolution contributes its
+  `recommendation` plus the prose the inbox drops — `state_reason`, every
+  `evidence[]` line, and the `note_text` it would append. Nothing is truncated.
+- **Context comes from adjacent alignment *rows*, never `es_idx ± 1`.** An N:1
+  group consumes the indices of the sentences it swallowed, so the index is
+  sparse in most of this corpus and index arithmetic would find a hole.
+- **The highlight follows what the source can support.** A coded finding has a
+  char span, so the offending words are marked; an annotation is marked at its
+  first anchor word; a judge reports only an excerpt, so the whole sentence is
+  tinted, exactly as the reader paints it.
+- **An item with no sentence still appears**, in a per-chapter tail, labelled
+  `obsolete` (the prose it quotes has changed) or `unplaceable` (the excerpt was
+  never verbatim) — the same overflow bin the reader gives them, never forced
+  onto a nearby sentence.
+- **A note edited since its review is shown and flagged**, not hidden. The
+  recommendation no longer describes the text, and that is a fact about the
+  report worth reading.
+- **Nothing that was dealt with disappears.** Every item carries a `status`
+  saying what became of it: `open`, `stale`, `fixed` / `not_a_problem` /
+  `bad_message` / `missing_context_gap` for a finding you marked in the reader,
+  and `applied` / `settled` / `deleted` for a reviewed note. History is the
+  point of the page — Review Mode hides a finding the moment you rule on it, and
+  deleting a note used to take its recommendation with it, which lost the
+  reviews you *acted on* and kept the ones you ignored.
+- **Two presentational filter axes.** Kind, and status. Each checkbox toggles a
+  class on the container (`rec-hide-<kind>`, `rec-hide-status-<s>`); nothing
+  re-fetches, so a chapter cannot change under you as you read it. The two
+  statuses that say the judge was *wrong* — `not_a_problem` and `bad_message` —
+  start unticked: they are tuning signal for an evaluator, and 831 of the
+  corpus's 1,132 marks, enough to bury everything else.
+- **A heart on each card, and a third filter: Favorites only.** Every status
+  above says you are finished with an item; a favorite says the opposite — come
+  back to this one. It ANDs with the other two, so "favorites, dialogue only,
+  still open" is three ticks. Unlike the others it is *show-only*
+  (`rec-only-favorites` keeps what you ticked rather than hiding what you did
+  not), and unlike the others it fetches: chapters fill lazily, so ticking it
+  pulls exactly the chapters the shell says hold a favorite and hides the rest.
+- **An item whose prose has moved on shows the text as it stood then.** A
+  finding's stored excerpt, or the `es_sentence` the annotation review recorded,
+  under an "as it read then" label, with no live neighbours and a chapter-level
+  link — never the sentence sitting at that position now, which after a realign
+  may be a stranger. This also verifies live context before showing it: an
+  annotation card renders the live sentence only while it still matches what the
+  review read.
+- **Counts come from `load_chapter_type_counts`**, the same walk the chapter list
+  and dashboard use, so this page's numbers agree with theirs. The chapter chips
+  count *outstanding* items, as they do everywhere else; history gets a separate
+  muted count beside them (`load_chapter_type_counts(..., statuses=True)`, which
+  only this page asks for). A chapter counted but unfillable — evaluation
+  results in a chunk with no usable alignment rows — says so rather than showing
+  an empty heading.
+- **The ignore list still gates both.** An entry in `ignored_terms.json` is a
+  standing instruction about a term rather than a decision made once about one
+  finding, and the Review tab already has a screen for auditing it.
+
+The shell is server-rendered counts only; each chapter's items arrive from
+`GET /api/project/<id>/recommendations/<chapter>` as the section nears the
+viewport. Whole-book rendering is seconds on a long book (80 chapters ≈ 4 s) and
+one chapter is ~50 ms. `GET /api/project/<id>/recommendations` returns the lot in
+one payload for scripts and tests; the page never calls it.
+
+### Favorites
+
+`POST /api/project/<id>/recommendations/favorite` with `{"id": ..., "favorite":
+true|false}`. Records append to **`projects/<id>/favorites.jsonl`** — the project
+root, beside `annotations.jsonl` and `corrections.jsonl`, not the `evaluations/`
+directory holding `_feedback.jsonl`. A favorite can be on a reader *annotation*,
+whose data lives at the root, and the reader-sidecar family is where the reader
+itself will write one. The file is append-only and the last record for an id
+wins, so unfavoriting appends `favorite: false` rather than rewriting, and
+nothing needs a lock.
+
+Ids are composed by `web_ui/favorites.py` and validated on the way back in:
+
+| target | id |
+|---|---|
+| finding | `finding:<chunk_id>:<issue_key>` |
+| annotation | `annotation:<key>` |
+
+`issue_key` is the content hash from `web_ui/evaluations.py`, **not**
+`issue_index` — an index is a position in the evaluator's issue list, rewritten
+on every run, and a favorite keyed on it would silently re-aim at whatever
+finding later took the slot. `_build_chapter_review` now carries `issue_key` on
+every finding for that reason, which also means Review Mode already has the
+handle it would need to offer the same heart. Both id shapes carry their own
+chapter, so the shell counts favorites per chapter without opening anything else.
+
+The one inherited limitation: `issue_key` hashes the finding's `message`. Coded
+evaluators reproduce it verbatim on a re-run; LLM judges reword it. So a
+favorited *judge* finding loses its heart when that judge re-runs, unless the
+judge supplied its own `finding_key`. Feedback marks have always had exactly this
+limitation.
 
 ---
 

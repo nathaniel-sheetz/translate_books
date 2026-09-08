@@ -574,6 +574,12 @@
                 <button class="btn-primary" id="btn-align-all" style="display:none">Align All Unaligned</button>
                 <button class="btn-secondary" id="btn-rerun-coded">Rerun deterministic</button>
                 <button class="btn-secondary" id="btn-run-judges">Run LLM judges&hellip;</button>
+                <!-- The counts in the table below link into the reader, one
+                     chapter at a time, to act on a finding. This links to the
+                     other thing you want after a judge run: reading everything
+                     the models said about the book, in order, without acting on
+                     any of it. -->
+                <a class="btn-secondary" href="/recommendations/{{ project_id }}">Read recommendations</a>
                 <span class="review-scope-hint" id="review-scope-hint">whole book</span>
             </div>
 

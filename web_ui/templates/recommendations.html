@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t.rec_title }} — {{ project_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='recommendations.css') }}?v=3">
+</head>
+<body>
+<script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
+
+{#- The shell is counts only. Chapter bodies arrive from
+    /api/project/<id>/recommendations/<chapter> as each section nears the
+    viewport: rendering all of `fabre2` eagerly is 4.2 s of blank page, and one
+    chapter is ~50 ms. Every string the JS writes is stamped into data-* here
+    rather than built in the script, so the page stays translatable server-side
+    like every other page in this app. -#}
+<div class="nav-page rec-page">
+    <div class="nav-header">
+        <h1>{{ t.rec_title }}</h1>
+        <div class="nav-header-actions">
+            <a class="btn-new-project" href="/read/{{ project_id }}">{{ project_title }}</a>
+        </div>
+    </div>
+
+    <p class="rec-subtitle">{{ t.rec_subtitle }}</p>
+
+    {% if not shell.chapters %}
+    <p class="empty-state">{{ t.rec_empty }}</p>
+    {% else %}
+    <p class="rec-summary">
+        {{ t.rec_summary
+           | replace('{total}', shell.total | string)
+           | replace('{chapters}', shell.chapters | length | string) }}
+        {%- if shell.history_total %}
+        <span class="rec-summary-history">{{ t.rec_summary_history
+            | replace('{history}', shell.history_total | string) }}</span>
+        {%- endif %}
+    </p>
+
+    {#- Filtering is presentational: every kind is already in the DOM once its
+        chapter has filled, so unticking one adds a class to the container and
+        CSS hides it. No re-fetch, and no chapter that was read scrolling away
+        and coming back different. -#}
+    <div class="rec-filters">
+    <div class="rec-filter" id="rec-filter">
+        <span class="rec-filter-label">{{ t.rec_filter_label }}</span>
+        {% for kind in shell.kinds %}
+        {% if shell.totals.get(kind) %}
+        <label class="rec-filter-check rec-filter-{{ kind }}">
+            {#- No `data-prefix`: a kind's hide class is unprefixed, and the JS
+                reads a missing one as the empty string. -#}
+            <input type="checkbox" class="rec-hide-cb" value="{{ kind }}" checked>
+            <span>{{ t.rec_kinds.get(kind, kind) }}</span>
+            <span class="rec-filter-count">{{ shell.totals[kind] }}</span>
+        </label>
+        {% endif %}
+        {% endfor %}
+        {#- A third axis, and the only one that is show-only: the other two
+            remove what you untick, this one keeps just what you ticked. It
+            carries `rec-fav-cb` rather than `rec-hide-cb` so the delegated
+            handler above skips it, and no count - the number of things you
+            meant to come back to is not a number you need on screen. -#}
+        <label class="rec-filter-check rec-filter-fav">
+            <input type="checkbox" class="rec-fav-cb">
+            <span>{{ t.rec_favorites_only }}</span>
+        </label>
+    </div>
+
+    {#- The second axis. `not_a_problem` and `bad_message` arrive unticked
+        (`shell.statuses_off`): they say the judge was wrong rather than that
+        the book changed, and there are enough of them to bury everything else.
+        Both filters drive the same mechanism - a class on the container - so
+        they compose without either knowing about the other. -#}
+    {% if shell.statuses %}
+    <div class="rec-filter rec-filter-status" id="rec-status-filter">
+        <span class="rec-filter-label">{{ t.rec_status_label }}</span>
+        {% for status in shell.statuses %}
+        <label class="rec-filter-check rec-filter-status-{{ status }}">
+            <input type="checkbox" class="rec-hide-cb" data-prefix="status-"
+                   value="{{ status }}"
+                   {% if status not in shell.statuses_off %}checked{% endif %}>
+            <span>{{ t.rec_statuses.get(status, status) }}</span>
+            <span class="rec-filter-count">{{ shell.status_totals[status] }}</span>
+        </label>
+        {% endfor %}
+    </div>
+    {% endif %}
+    </div>
+
+    <div class="rec-list" id="rec-list"
+         data-project="{{ project_id }}"
+         data-failed="{{ t.rec_load_failed }}"
+         data-chapter-empty="{{ t.rec_chapter_empty }}"
+         data-suggestion="{{ t.rec_suggestion }}"
+         data-original="{{ t.rec_original }}"
+         data-source-line="{{ t.rec_source_line }}"
+         data-unanchored="{{ t.rec_unanchored }}"
+         data-unanchored-obsolete="{{ t.rec_unanchored_obsolete }}"
+         data-unanchored-unplaceable="{{ t.rec_unanchored_unplaceable }}"
+         data-stale="{{ t.rec_stale }}"
+         data-original-then="{{ t.rec_original_then }}"
+         data-text-changed="{{ t.rec_text_changed }}"
+         data-fav-add="{{ t.rec_fav_add }}"
+         data-fav-remove="{{ t.rec_fav_remove }}"
+         data-fav-failed="{{ t.rec_fav_failed }}"
+         {#- Single-quoted, because `tojson` escapes `'` but not `"`: the label
+             maps are JSON objects and would end the attribute early inside
+             double quotes. -#}
+         data-kinds='{{ t.rec_kinds | tojson }}'
+         data-detail-labels='{{ t.rec_detail_labels | tojson }}'
+         data-statuses='{{ t.rec_statuses | tojson }}'>
+        {% for chapter in shell.chapters %}
+        <section class="rec-chapter" data-chapter="{{ chapter.id }}"
+                 data-favorites="{{ chapter.favorites }}">
+            <div class="rec-chapter-header">
+                <h2><a href="/read/{{ project_id }}/{{ chapter.id }}">{{ chapter.label }}</a></h2>
+                <div class="rec-chapter-counts">
+                    {% for kind in shell.kinds %}
+                    {% if chapter.counts.get(kind) %}
+                    <span class="rec-chip rec-chip-kind rec-kind-{{ kind }}">
+                        {{ t.rec_kinds.get(kind, kind) }} {{ chapter.counts[kind] }}
+                    </span>
+                    {% endif %}
+                    {% endfor %}
+                    {% if chapter.history %}
+                    <span class="rec-chip rec-chip-history">{{ t.rec_history_chip
+                        | replace('{n}', chapter.history | string) }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {#- Filled by recommendations.js. The placeholder carries the height
+                of roughly one card so the scrollbar does not lurch as sections
+                resolve behind you. -#}
+            <div class="rec-items" role="list"></div>
+            <p class="rec-chapter-status">{{ t.rec_loading }}</p>
+        </section>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<script src="{{ url_for('static', filename='recommendations.js') }}?v=3"></script>
+</body>
+</html>
