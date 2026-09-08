@@ -250,6 +250,12 @@
 a.btn-primary, a.btn-secondary {
     display: inline-block;
     text-decoration: none;
+}
+
+/* Only the secondary link takes the body colour. `.btn-primary` sets white on
+   a dark navy fill, and a blanket `color: #333` here would beat it on
+   specificity and render the next `<a class="btn-primary">` unreadable. */
+a.btn-secondary {
     color: #333;
 }
 

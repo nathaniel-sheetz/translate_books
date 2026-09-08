@@ -25,18 +25,24 @@
 
 /* Sticky, because the filter is useless the moment it scrolls away on a page
    whose whole point is a long scroll. */
-.rec-filter {
+/* Both filter rows stick as one block. Sticking them separately would park
+   two `top: 0` elements on top of each other; the wrapper also means the rule
+   under them stays a single line however many rows there are. */
+.rec-filters {
     position: sticky;
     top: 0;
     z-index: 2;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.rec-filter {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 4px 10px;
     padding: 10px 0;
-    margin-bottom: 8px;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
 }
 
 .rec-filter-label {
@@ -123,6 +129,18 @@
     border-left: 3px solid var(--badge-warn-color);
 }
 
+/* Something already dealt with. Dimmed rather than hidden or badged loudly:
+   it is on the page to be read back, not to be worked on, and live items must
+   still win the eye when the two sit side by side. Restored to full contrast on
+   hover, because a card you have chosen to look at is a card you are reading. */
+.rec-card-history {
+    opacity: 0.72;
+}
+
+.rec-card-history:hover {
+    opacity: 1;
+}
+
 .rec-meta {
     display: flex;
     flex-wrap: wrap;
@@ -156,6 +174,32 @@
 .rec-chip-stale {
     background: var(--badge-warn-bg);
     color: var(--badge-warn-color);
+}
+
+/* Deliberately quiet, and deliberately not colour-coded per status: nine
+   statuses in nine colours is a legend to memorise, not information. The word
+   says what happened; the date says when. */
+.rec-chip-status {
+    background: var(--bg-filter);
+    color: var(--text-muted6);
+}
+
+/* The one status that says the *book* changed rather than that the model was
+   wrong - the only one worth a second glance. */
+.rec-chip-status-fixed,
+.rec-chip-status-applied {
+    background: var(--accent-bg);
+    color: var(--text-muted3);
+}
+
+.rec-chip-history {
+    background: transparent;
+    color: var(--text-muted6);
+    font-style: italic;
+}
+
+.rec-summary-history {
+    color: var(--text-muted6);
 }
 
 .rec-chip-cat {
@@ -234,6 +278,32 @@
 
 /* An item whose sentence could not be found at all: excerpt and explanation
    only, and a line saying why. Never forced onto a nearby sentence. */
+/* Text as it stood when the model wrote about it. The left rule and the label
+   exist to stop it reading as live prose: everything else on this page that
+   looks like a sentence *is* the book as it stands, and this is the one thing
+   that is not. */
+.rec-original-then {
+    border-left: 2px solid var(--border);
+    padding-left: 10px;
+    margin-bottom: 8px;
+}
+
+.rec-original-label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10px;
+    color: var(--text-muted6);
+    margin: 0 0 3px;
+}
+
+.rec-original-text {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-muted3);
+    margin: 0 0 4px;
+    white-space: pre-wrap;
+}
+
 .rec-orphan {
     border-left: 2px dashed var(--border-light);
     padding-left: 12px;
@@ -325,10 +395,78 @@
     display: none;
 }
 
+/* The second axis, same mechanism. Only cards carry a status class - the
+   chapter header chips count kinds, not statuses, so they are untouched here
+   and a chapter filtered down to nothing by status still shows what it holds. */
+.rec-hide-status-open .rec-status-open,
+.rec-hide-status-stale .rec-status-stale,
+.rec-hide-status-fixed .rec-status-fixed,
+.rec-hide-status-applied .rec-status-applied,
+.rec-hide-status-settled .rec-status-settled,
+.rec-hide-status-deleted .rec-status-deleted,
+.rec-hide-status-not_a_problem .rec-status-not_a_problem,
+.rec-hide-status-bad_message .rec-status-bad_message,
+.rec-hide-status-missing_context_gap .rec-status-missing_context_gap {
+    display: none;
+}
+
+/* The third axis, and the only show-only one: the two above remove what you
+   untick, this keeps only what you ticked. A separate class rather than an
+   extension of the hide rules, so all three compose - they are independent
+   selectors on the same container and a card must satisfy every one.
+
+   Chapters with no favorites go entirely, header and all. The count comes from
+   the shell and the script keeps it true as you toggle, so this hides exactly
+   the chapters the script also declines to fetch. */
+.rec-only-favorites .rec-card:not(.rec-card-fav) {
+    display: none;
+}
+
+.rec-only-favorites .rec-chapter[data-favorites="0"] {
+    display: none;
+}
+
+/* Set apart from the kind checkboxes it shares a row with: it filters on a
+   different question, and a rule says so more quietly than a second row would. */
+.rec-filter-fav {
+    margin-left: 8px;
+    padding-left: 12px;
+    border-left: 1px solid var(--border);
+}
+
+/* Chrome *and* the idle colour from .topbar-icon-btn in reader.css, which this
+   page loads first: an unfavorited heart is just another idle icon button, and
+   sharing the token keeps it as findable as the rest of them. The reader's own
+   --ann-remove (#ccc) was the tempting choice and is wrong here - it sits at
+   about 1.6:1 on a white card, which is a control you have to already know is
+   there. Only the two lit states are the reader's red, and this file loads
+   after reader.css so they win the tie on order. */
+.rec-fav:hover {
+    color: var(--ann-remove-hover);
+}
+
+.rec-fav[aria-pressed="true"] {
+    color: var(--ann-remove-active);
+}
+
+.rec-fav[aria-pressed="true"] svg {
+    fill: currentColor;
+}
+
+.rec-fav:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* Second row of the same block: no top padding, or the two read as unrelated. */
+.rec-filter-status {
+    padding-top: 0;
+}
+
 @media (max-width: 600px) {
     .rec-context { font-size: 14px; }
 
-    /* The filter is four lines of chips on a phone; sticky would eat half the
-       viewport on the page you are trying to read. */
-    .rec-filter { position: static; }
+    /* The filters are several lines of chips on a phone; sticky would eat half
+       the viewport on the page you are trying to read. */
+    .rec-filters { position: static; }
 }

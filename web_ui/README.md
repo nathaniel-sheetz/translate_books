@@ -58,20 +58,20 @@ web_ui/
 | `/read/<id>/<ch>` | reader.html | Bilingual reader |
 | `/read/<id>/<ch>/chunk/<chunk_id>/edit` | chunk_edit.html | Full-chunk text editor |
 | `/review-inbox` | review_inbox.html | Outstanding annotation resolutions, every book |
-| `/recommendations/<id>` | recommendations.html | One book's findings and notes, read-only |
+| `/recommendations/<id>` | recommendations.html | One book's findings and notes, to read and to flag for later |
 
 ## API surface
 
-`app.py` defines 103 routes — 92 under `/api/`, plus 11 page routes (the table
+`app.py` defines 104 routes — 93 under `/api/`, plus 11 page routes (the table
 above lists the eight you navigate to; the rest serve images, reports and
 `/healthz`). By prefix:
 
 | Prefix | Count | Covers |
 |---|---|---|
-| `/api/project/<id>/...` | 51 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs, and the recommendations feed |
+| `/api/project/<id>/...` | 52 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs, and the recommendations feed and its favorites |
 | `/api/setup/<id>/...` | 13 | Style guide and glossary wizards |
 | `/api/alignment`, `/api/annotation(s)`, `/api/reviewed`, `/api/correction`, `/api/apply-corrections` | 9 | Reader data and review state |
-| `/api/llm-config`, `/api/llm/models`, `/api/split-patterns`, `/api/edit-tags`, `/api/set-*` | 9 | Config and UI preferences |
+| `/api/llm-config`, `/api/llm/models`, `/api/split-patterns`, `/api/edit-tags`, `/api/set-*` | 8 | Config and UI preferences |
 | `/api/review-inbox/...` | 4 | The cross-book annotation funnel |
 | `/api/sentence/...`, `/api/chunk/...`, `/api/remove-text`, `/api/removal-context` | 5 | Per-sentence and per-chunk editing |
 | `/api/search/<project_id>` | 1 | Concordance ("Find in book") |
