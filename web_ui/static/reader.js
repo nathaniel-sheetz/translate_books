@@ -2660,6 +2660,25 @@
             });
     });
 
+    // A favorite is optimistic on the button, and the records have to move with
+    // it. The sheet rebuilds its cards from `annotationsMap` / `reviewMap` on
+    // every open, reading `favorite` off the row, so a mark stamped only on the
+    // DOM comes back unlit the next time that sentence is opened -- and the tap
+    // after that re-sends `favorite: true` instead of turning the mark off,
+    // which is what a favorites.jsonl with two identical `true` records is.
+    // Both maps are walked rather than the open sentence's rows alone: one
+    // finding can sit under several es_idx and those rows share a fav_id, the
+    // same reason the sheet's `setFavAll` moves them together.
+    function stampFavorite(favId, on) {
+        for (const map of [annotationsMap, reviewMap]) {
+            for (const idx of Object.keys(map)) {
+                for (const rec of (map[idx] || [])) {
+                    if (rec.fav_id === favId) rec.favorite = on;
+                }
+            }
+        }
+    }
+
     // ── ReaderCore: the seam the v2 skin drives ────────────────────────────────
     // Only the v2 layout needs this; it reuses this module's data + endpoints so
     // there is a single source of truth for persistence, modals, and re-render.
@@ -2699,13 +2718,15 @@
             // `snapshot` is the card's own text, kept so the mark stays legible
             // once the note is deleted or a judge rewords the finding; the
             // chapter is stamped here because only this file knows it.
-            // `onReject` puts the heart back when the server refuses.
+            // `onReject` puts the heart back when the server refuses; the row
+            // it was read from is put back with it, by `stampFavorite`.
             setFavorite(favId, on, snapshot, onReject) {
                 const url = `/api/project/${projectId}/recommendations/favorite`;
                 const payload = { id: favId, favorite: !!on };
                 if (on && snapshot) {
                     payload.snapshot = Object.assign({ chapter_id: chapter }, snapshot);
                 }
+                stampFavorite(favId, !!on);
                 fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2717,6 +2738,7 @@
                         // later anyway. Put the heart back rather than let it
                         // claim a mark the server never took.
                         if (!r.ok) {
+                            stampFavorite(favId, !on);
                             if (onReject) onReject();
                             showToast((i.v2 || {}).fav_failed || 'Could not save');
                         }
