@@ -2088,7 +2088,14 @@ def get_annotations(project_id, chapter):
     note whose sentence has since been renumbered or removed — the sentence
     list can't surface it, so the end-of-chapter overflow bin does, and that is
     also the only path by which such a note can be copied or deleted again.
+
+    ``fav_id`` and ``favorite`` come along so the sheet can render a heart
+    without composing an id of its own. It is :func:`store.target_key`, the same
+    identity :func:`_annotation_item` hands ``/recommendations``, so a note
+    hearted here is the note that screen shows hearted.
     """
+    from src.annotations import store
+
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Invalid ID"}), 400
     project_dir = _resolve_project_dir(project_id)
@@ -2097,11 +2104,17 @@ def get_annotations(project_id, chapter):
 
     live = _live_es_indices(project_dir, chapter)
     annotations = _load_annotations(project_dir, chapter)
-    flat = [
-        _ann_for_wire(ann, anchored=(live is None or _as_es_idx(ann.get("es_idx")) in live))
-        for lst in annotations.values()
-        for ann in lst
-    ]
+    favorites = favorites_store.load_favorites(project_dir)
+    flat = []
+    for lst in annotations.values():
+        for ann in lst:
+            row = _ann_for_wire(
+                ann, anchored=(live is None or _as_es_idx(ann.get("es_idx")) in live)
+            )
+            fav_id = favorites_store.annotation_id(store.target_key(ann))
+            row["fav_id"] = fav_id
+            row["favorite"] = fav_id is not None and fav_id in favorites
+            flat.append(row)
     return jsonify({"annotations": flat})
 
 
@@ -2166,7 +2179,16 @@ def save_annotation():
         with open(annotations_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        return jsonify({"saved": True, "sub_id": wire_sub})
+        # The heart's id comes back with the new note so the sheet can offer one
+        # immediately, rather than composing an identity of its own or waiting
+        # for a reload. Same key as `get_annotations` and `_annotation_item`.
+        from src.annotations import store
+
+        return jsonify({
+            "saved": True,
+            "sub_id": wire_sub,
+            "fav_id": favorites_store.annotation_id(store.target_key(record)),
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -6081,8 +6103,15 @@ def _build_chapter_review(
 def project_chapter_review(project_id, chapter):
     """Return one chapter's findings as JSON, for the reader's Review Mode.
 
-    Guards, then :func:`_build_chapter_review` — whose payload this returns
-    unchanged, and whose ``ok: False`` carries the status to send.
+    Guards, then :func:`_build_chapter_review`, whose ``ok: False`` carries the
+    status to send.
+
+    ``fav_id`` and ``favorite`` are stamped on here rather than inside the
+    builder, which ``/recommendations`` also calls and which
+    :func:`_finding_item` already decorates on that path. Adding them there
+    would have every caller pay for a favorites read whether it renders a heart
+    or not, and would move the reader's state into a function whose job is the
+    findings themselves.
     """
     if not _safe_id(project_id) or not _safe_id(chapter):
         return jsonify({"error": "Bad request"}), 400
@@ -6094,6 +6123,16 @@ def project_chapter_review(project_id, chapter):
     result = _build_chapter_review(project_dir, chapter)
     if not result.get("ok"):
         return jsonify({"error": result["error"]}), result["status"]
+
+    favorites = favorites_store.load_favorites(project_dir)
+    findings = [f for group in result["by_es_idx"].values() for f in group]
+    findings.extend(result["unanchored"])
+    for finding in findings:
+        fav_id = favorites_store.finding_id(
+            finding.get("chunk_id"), finding.get("issue_key")
+        )
+        finding["fav_id"] = fav_id
+        finding["favorite"] = fav_id is not None and fav_id in favorites
     return jsonify(result)
 
 
@@ -9225,6 +9264,13 @@ def project_recommendation_favorite(project_id):
     :func:`_build_chapter_review`, so there is no position to translate and no
     positional fallback to keep working. The id is validated before it is
     written, not trusted.
+
+    An optional ``snapshot`` carries the item's text as it read when the heart
+    was tapped, so a mark stays legible after the thing it names is gone - a
+    note deleted, or a judge finding reworded into a different ``issue_key`` on
+    the next run. It is whitelisted and truncated on the way in, and never read
+    back by this screen, which still renders live items; see
+    :func:`favorites.sanitize_snapshot`.
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
@@ -9233,6 +9279,11 @@ def project_recommendation_favorite(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     data = request.json or {}
+    # A JSON body can be truthy and still not be an object -- a bare string or
+    # a list -- and `.get` on those is an unhandled 500 rather than the 400
+    # this endpoint answers every other malformed request with.
+    if not isinstance(data, dict):
+        return jsonify({"error": "Bad request"}), 400
     fav_id = data.get("id")
     favorite = data.get("favorite")
 
@@ -9243,8 +9294,14 @@ def project_recommendation_favorite(project_id):
     if not isinstance(favorite, bool):
         return jsonify({"error": "favorite must be true or false"}), 400
 
+    # Unvalidated here on purpose: `append_favorite` runs it through
+    # `sanitize_snapshot`, which drops what it does not recognise instead of
+    # failing. The mark is the point and the text is a convenience, so a heart
+    # must still land when the snapshot beside it is malformed.
     try:
-        favorites_store.append_favorite(project_dir, fav_id, favorite)
+        favorites_store.append_favorite(
+            project_dir, fav_id, favorite, snapshot=data.get("snapshot")
+        )
     except Exception as e:
         app.logger.exception("Failed to record favorite %s", fav_id)
         return jsonify({"error": str(e)}), 500

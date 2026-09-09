@@ -709,15 +709,19 @@ one payload for scripts and tests; the page never calls it.
 ### Favorites
 
 `POST /api/project/<id>/recommendations/favorite` with `{"id": ..., "favorite":
-true|false}`. Records append to **`projects/<id>/favorites.jsonl`** — the project
-root, beside `annotations.jsonl` and `corrections.jsonl`, not the `evaluations/`
-directory holding `_feedback.jsonl`. A favorite can be on a reader *annotation*,
-whose data lives at the root, and the reader-sidecar family is where the reader
-itself will write one. The file is append-only and the last record for an id
-wins, so unfavoriting appends `favorite: false` rather than rewriting, and
-nothing needs a lock.
+true|false, "snapshot": {...}}`. Records append to
+**`projects/<id>/favorites.jsonl`** — the project root, beside
+`annotations.jsonl` and `corrections.jsonl`, not the `evaluations/` directory
+holding `_feedback.jsonl`. A favorite can be on a reader *annotation*, whose data
+lives at the root, and the reader-sidecar family is where the reader writes its
+own. The file is append-only and the last record for an id wins, so unfavoriting
+appends `favorite: false` rather than rewriting, and nothing needs a lock.
 
-Ids are composed by `web_ui/favorites.py` and validated on the way back in:
+Ids are composed by `web_ui/favorites.py`, validated as they are composed — both
+`annotation_id` and `finding_id` return `None` rather than an id `is_valid_id`
+would reject, which is how an item that cannot be addressed reaches the browser
+without a heart instead of with one that 400s — and validated again on the way
+back in:
 
 | target | id |
 |---|---|
@@ -727,16 +731,57 @@ Ids are composed by `web_ui/favorites.py` and validated on the way back in:
 `issue_key` is the content hash from `web_ui/evaluations.py`, **not**
 `issue_index` — an index is a position in the evaluator's issue list, rewritten
 on every run, and a favorite keyed on it would silently re-aim at whatever
-finding later took the slot. `_build_chapter_review` now carries `issue_key` on
-every finding for that reason, which also means Review Mode already has the
-handle it would need to offer the same heart. Both id shapes carry their own
-chapter, so the shell counts favorites per chapter without opening anything else.
+finding later took the slot. `_build_chapter_review` carries `issue_key` on every
+finding for that reason, which is what lets Review Mode offer the same heart off
+the same identity. Both id shapes carry their own chapter, so the shell counts
+favorites per chapter without opening anything else.
 
 The one inherited limitation: `issue_key` hashes the finding's `message`. Coded
 evaluators reproduce it verbatim on a re-run; LLM judges reword it. So a
 favorited *judge* finding loses its heart when that judge re-runs, unless the
 judge supplied its own `finding_key`. Feedback marks have always had exactly this
 limitation.
+
+### The heart in the reader
+
+The same mark, written from the reader's bottom sheet (v2 skin) so an item can be
+flagged as you deal with it rather than by finding it again on another screen.
+The Annotate tab carries one per note card and the Issues tab one per finding.
+
+Neither surface composes an id. `GET /api/annotations/<id>/<chapter>` and
+`GET /api/project/<id>/review/<chapter>` each stamp `fav_id` and `favorite` onto
+every row, and `POST /api/annotation` returns the new note's `fav_id` with its
+`sub_id` — so a note written seconds ago can be hearted without a reload. A row
+with `fav_id: null` has no stable identity to save against and gets no heart
+rather than one that cannot persist. One finding fanned out over several rows
+shares a `fav_id`, and the sheet moves that whole set together, the way
+`submitFeedback` already drops them together.
+
+A heart is not a verdict. `Apply` and the three feedback labels beside it each
+record a decision and drop the finding; the heart decides nothing, leaves the row
+where it is, and sits at the trailing edge of that row so it does not read as a
+fifth way to dismiss something.
+
+**The snapshot.** The reader points at things it is in the middle of getting rid
+of, so the item's own text travels with the mark: `{kind, chapter_id, ...}` —
+`type`/`text`/`es_text` for a note, `eval_name`/`category`/`severity`/`message`/
+`suggestion`/`excerpt` for a finding. `favorites.sanitize_snapshot` whitelists it
+per kind, coerces to `str`, and caps both the field (2000 characters) and the
+whole record (4000, spent down in whitelist order so the short identifying
+fields land first and the prose divides what is left). The record cap is the one
+that bounds the file: seven capped fields would otherwise compose a 14,000-
+character record, and `favorites.jsonl` is append-only, never compacted, and
+read whole by all three of these surfaces. Anything the scheme does not
+recognise is dropped rather than refused, because the mark is the point and a
+heart must not fail over the prose it was carrying.
+
+It is captured once, when the heart is tapped — editing a note you have already
+hearted leaves the stored text as it read then. It is written and not yet read
+back: this screen still renders live items, and it already recovers most of this
+unaided, because a reviewed note keeps its text in `results.json` and is shown
+with `status: deleted` after you delete it. What that misses is a note
+annotation-review has never seen (22 of the corpus's 253 live notes) and a
+finding a judge has since reworded.
 
 ---
 

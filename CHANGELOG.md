@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.56.0.0] - 2026-09-08
+
+### Added
+- **The favorites heart, in the reader's bottom sheet.** The mark existed only on `/recommendations`, which meant flagging something to come back to required finding it again on another screen after you had already met it in the reader. It is now on every note card in the Annotate tab and every finding in the Issues tab, writing the same `favorites.jsonl` the other screen reads. Neither surface composes an id: `GET /api/annotations/<id>/<chapter>` and `GET /api/project/<id>/review/<chapter>` stamp `fav_id` and `favorite` onto every row, and `POST /api/annotation` returns the new note's `fav_id` alongside its `sub_id`, so a note written seconds ago can be hearted without a reload. A second identity scheme would have disagreed with the first the moment a realign moved an `es_idx`.
+- **A heart is not a verdict, and the layout says so.** `Apply` and the three feedback labels beside it each record a decision and drop the finding; the heart decides nothing and leaves the row where it is, so it sits at the trailing edge of that row rather than reading as a fifth way to dismiss something. One finding fanned out over several rows shares a `fav_id`, and the whole set moves together — the way `submitFeedback` already drops them together.
+- **An optional `snapshot` on the favorite endpoint, so a mark stays legible after the thing it names is gone.** The reader points at things it is in the middle of getting rid of: a note you then delete, or a judge finding reworded on the next run into a different `issue_key`. The card's own text now travels with the mark. `favorites.sanitize_snapshot` whitelists it per kind, coerces to `str`, and caps both the field (2000 chars) and the whole record (4000, spent in whitelist order so the short identifying fields land first and the prose divides what is left). Anything the scheme does not recognise is dropped rather than refused: the mark is the point, and a heart must not fail over the prose it was carrying.
+
+### Fixed
+- **A single unparseable line in `favorites.jsonl` could take down reading the book.** `load_favorites` guarded `json.loads` but then called `.get` on the result, so a line parsing to `null`, a list or a scalar raised `AttributeError` past both `except` clauses — and this release put that file on the path of every chapter's annotation fetch and every chapter's review fetch, not just the recommendations screen. The annotations fetch would have 500'd the sheet empty; the review fetch is worse, because `reader.js` swallows it into an empty findings map and Review Mode goes blank with nothing said. The module docstring had promised the opposite all along.
+- **`annotation_id` could compose an id the write endpoint rejects,** drawing a heart that 400s on every tap with nothing the reader could do about it. `es_idx` is never validated on the annotation write path and `target_key` promises a safe charset without enforcing one, so the composer is where it has to be caught. It now returns `None` for anything `is_valid_id` would refuse — the contract `finding_id` already kept — which is how an item that cannot be addressed reaches the browser without a heart instead of with a dead one. Fixed in the composer, so `/recommendations` and the review inbox inherit it and the two surfaces still name an item identically.
+- A JSON body that is truthy but not an object (`"a string"`, `[1, 2]`) 500'd the favorite endpoint instead of answering the 400 every other malformed request there gets.
+- `stampFavorite` had no guard for a falsy `fav_id`, which would have stamped every row that carries none — exactly what a note created while offline looks like until a reload names it.
+- A stale cached `reader.js` left the heart lit with nothing sent, because the `core().setFavorite` check had no `else` to put it back.
+- Every annotation card head had grown ~10px, heart or no heart: the actions group took over the pencil's negative margins but dropped the bottom one, and the float's margin box is what the card reserves.
+
 ## [0.55.0.0] - 2026-09-08
 
 ### Added

@@ -378,6 +378,13 @@ STRINGS = {
                 "aria_save_note": "Save note",
                 "aria_delete_note": "Delete note",
                 "aria_remove_anchor": "Remove tapped word",
+                # Same wording as the recommendations screen's heart
+                # (rec_fav_add/rec_fav_remove): it is the same mark on
+                # the same item, and a second name for it would read as
+                # a second feature.
+                "aria_fav_add": "Add to favorites",
+                "aria_fav_remove": "Remove from favorites",
+                "fav_failed": "Could not save",
             },
         },
     },
@@ -723,6 +730,9 @@ STRINGS = {
                 "aria_save_note": "Guardar nota",
                 "aria_delete_note": "Eliminar nota",
                 "aria_remove_anchor": "Quitar la palabra",
+                "aria_fav_add": "Añadir a favoritos",
+                "aria_fav_remove": "Quitar de favoritos",
+                "fav_failed": "No se pudo guardar",
             },
         },
     },

@@ -73,6 +73,10 @@
     const PENCIL = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13.5 3.5l3 3L7 16l-4 1 1-4z"/></svg>';
     const TRASH = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg>';
     const DISK = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4.5 3.5h8L16 7v9.5H4.5z"/><path d="M7 3.5v3.5h5V3.5"/><rect x="7" y="10.5" width="6" height="4.5"/></svg>';
+    // One path with `fill` switched in CSS, so the outline and filled states
+    // cannot drift apart -- the same trick recommendations.js uses for the
+    // heart on the other surface this mark appears on.
+    const HEART = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M10 17.08 3.17 10.25a4.08 4.08 0 0 1 5.75-5.75l1.08 1.08 1.08-1.08a4.08 4.08 0 0 1 5.75 5.75Z"/></svg>';
 
     const DOT = { address: 'addr', grammar: 'gram', dictionary: 'gloss', consistency: 'cons', register: 'reg' };
     const SEVCLASS = { error: 'error', info: 'info' };
@@ -191,6 +195,66 @@
         refreshSrcToggle();
     });
 
+    // ── Favorites ──────────────────────────────────────────────────────────────
+    //
+    // A favorite is not a verdict: unlike Apply and the three feedback labels it
+    // decides nothing about the item and never drops it from the list. It only
+    // records that you want this one again -- as a study list for revising the
+    // prompts, the style guide and the glossary.
+    //
+    // The id is composed server-side and carried on the row, so this file never
+    // derives an identity: a note hearted here is the note /recommendations
+    // shows hearted. No fav_id means the item has nothing stable to save
+    // against, and it gets no heart rather than one that cannot persist.
+
+    // aria-pressed is the state and the label is what a screen reader hears;
+    // both move together here so they cannot disagree.
+    function setFav(btn, on) {
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        btn.setAttribute('aria-label', on
+            ? T('aria_fav_remove', 'Remove from favorites')
+            : T('aria_fav_add', 'Add to favorites'));
+    }
+    // One finding can be fanned out over several rows -- a dictionary hit on a
+    // term used six times is six locations and one issue -- and those rows share
+    // a fav_id, exactly as submitFeedback already treats them as one thing. So
+    // the whole set moves together; otherwise one lit heart would sit beside two
+    // unlit ones naming the same mark. Walked in JS rather than built into an
+    // attribute selector so the id never has to be escaped into one.
+    function setFavAll(favId, on) {
+        sheet.querySelectorAll('.rv2-fav').forEach(function (b) {
+            if (b.dataset.favId === favId) setFav(b, on);
+        });
+    }
+    // `snapshot` is a function so the text is read at click time rather than at
+    // render time. It travels with the mark so a favorite stays legible after
+    // the item is gone -- the note deleted, or the finding reworded by the next
+    // judge run into a different issue_key.
+    function favButton(favId, favorite, snapshot) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'rv2-fav';
+        b.dataset.favId = favId;
+        b.innerHTML = HEART;
+        setFav(b, !!favorite);
+        b.addEventListener('click', function (e) {
+            e.stopPropagation();
+            const on = b.getAttribute('aria-pressed') !== 'true';
+            // Optimistic: waiting on a round trip to colour an icon reads as a
+            // broken page. ReaderCore puts it back if the server refuses.
+            setFavAll(favId, on);
+            if (core().setFavorite) {
+                core().setFavorite(favId, on, on ? snapshot() : null,
+                    function () { setFavAll(favId, !on); });
+            } else {
+                // A stale cached reader.js has no setFavorite. Put the heart
+                // back rather than leave it claiming a mark nothing sent.
+                setFavAll(favId, !on);
+            }
+        });
+        return b;
+    }
+
     // ── Annotate (multiple annotations per sentence) ───────────────────────────
     function renderAnnotate() {
         els.cardList.innerHTML = '';
@@ -230,13 +294,35 @@
         d.className = 'rv2-card';
         d.dataset.type = type;
         if (ann.sub_id) d.dataset.subId = ann.sub_id;
+        // The actions float right *inside* the note text rather than sitting
+        // beside it as a flex sibling: a second 44px button in the row would
+        // have narrowed every line of every note, where the float narrows only
+        // the two lines level with it and lets the rest run the full width.
+        // It must come first in source order for the text to wrap around it.
         d.innerHTML =
             '<div class="rv2-card-head">'
             + '<span class="rv2-badge ' + type + '">' + typeGlyph(type) + '</span>'
-            + '<span class="rv2-card-txt"><span class="rv2-card-type">' + esc(ANN_NAMES[type] || type) + '</span>' + esc(ann.content || '') + '</span>'
+            + '<span class="rv2-card-txt">'
+            + '<span class="rv2-card-actions">'
             + '<button class="rv2-card-edit" type="button" aria-label="' + esc(T('aria_edit_note', 'Edit note')) + '">' + PENCIL + '</button>'
+            + '</span>'
+            + '<span class="rv2-card-type">' + esc(ANN_NAMES[type] || type) + '</span>' + esc(ann.content || '')
+            + '</span>'
             + '</div>'
             + '<div class="rv2-card-body">' + composerHtml(type, ann.content || '', true) + '</div>';
+        if (ann.fav_id) {
+            // Left of the pencil, which keeps its habitual place at the edge.
+            d.querySelector('.rv2-card-actions').insertBefore(
+                favButton(ann.fav_id, ann.favorite, function () {
+                    return {
+                        kind: 'annotation',
+                        type: type,
+                        text: ann.content || '',
+                        es_text: (cur && cur.es) || '',
+                    };
+                }),
+                d.querySelector('.rv2-card-edit'));
+        }
         paintTps(d);
         selectType(d, type);
         d.querySelector('.rv2-card-edit').addEventListener('click', function () {
@@ -430,6 +516,23 @@
             });
             acts.appendChild(b);
         });
+        // The heart sits apart from the four above and before the ignore row.
+        // Every one of those records a verdict and drops the finding; this one
+        // decides nothing and leaves it on the list, so it must not read as a
+        // fifth way to dismiss something. CSS pushes it to the right edge.
+        if (f.fav_id) {
+            acts.appendChild(favButton(f.fav_id, f.favorite, function () {
+                return {
+                    kind: 'finding',
+                    eval_name: f.eval_name,
+                    category: f.category,
+                    severity: f.severity,
+                    message: f.message,
+                    suggestion: f.suggestion,
+                    excerpt: f.excerpt,
+                };
+            }));
+        }
         // Book-wide ignore, on its own row and last. The four buttons above
         // label ONE finding; this one silences a term everywhere in the book
         // and can only be undone from the dashboard's Review stage, so it does
