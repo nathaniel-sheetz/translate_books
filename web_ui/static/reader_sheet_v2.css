@@ -315,12 +315,15 @@
    44px group -- the type label and about two lines of text -- and everything
    below runs the card's full width, which is wider than the note gets today.
    The negative margins moved here off the pencil, which used to carry them
-   alone, so the pair still hugs the card's padding edge. */
+   alone, so the pair still hugs the card's padding edge. Top and bottom are
+   both kept: the float's margin box is what .rv2-card-txt reserves, so
+   dropping the bottom one would grow every card head by 10px -- including the
+   cards with no heart on them. */
 .rv2-card-actions {
   float: right;
   display: flex;
   align-items: flex-start;
-  margin: -10px -8px 0 8px;
+  margin: -10px -8px -10px 8px;
 }
 .rv2-card-type {
   display: block;

@@ -82,10 +82,18 @@ def annotation_id(key: Optional[str]) -> Optional[str]:
     ``key`` is :func:`src.annotations.store.target_key`'s
     ``<chapter_id>__<es_idx>__<sub_id>``, which is already the identity the
     inbox and the review sidecar key on.
+
+    ``None`` when the composed id is not one :func:`is_valid_id` would accept,
+    the same contract :func:`finding_id` keeps: an item that cannot be
+    addressed reaches the browser without a heart, rather than with one that
+    400s on every tap. ``target_key`` promises a safe charset but does not
+    enforce it -- ``es_idx`` is never validated on the write path -- and the id
+    pattern also caps length, which a long ``chapter_id`` can exceed.
     """
     if not key:
         return None
-    return f"annotation:{key}"
+    fav_id = f"annotation:{key}"
+    return fav_id if is_valid_id(fav_id) else None
 
 
 def is_valid_id(fav_id: object) -> bool:
@@ -133,9 +141,14 @@ _SNAPSHOT_FIELDS = {
                 "message", "suggestion", "excerpt"),
 }
 
-# Room for a judge's message plus the sentence it quotes, and a ceiling so one
-# runaway field cannot bloat a file that every render of the page reads whole.
+# Room for a judge's message plus the sentence it quotes. The per-field cap
+# stops one runaway value; the record cap is what actually bounds the file,
+# because seven capped fields still compose a 14,000-character record. This
+# file is read whole -- by the recommendations screen and, since the reader
+# grew a heart, by every chapter's annotation and review fetch too -- and it is
+# append-only with no compaction, so every toggle adds another record.
 _SNAPSHOT_MAX_CHARS = 2000
+_SNAPSHOT_MAX_RECORD_CHARS = 4000
 
 
 def sanitize_snapshot(snapshot: object) -> Optional[dict]:
@@ -154,15 +167,20 @@ def sanitize_snapshot(snapshot: object) -> Optional[dict]:
         return None
 
     out = {"kind": kind}
+    # Spent down in whitelist order, so the cheap identifying fields land first
+    # and the long prose divides what is left. A field with no budget is
+    # dropped rather than stored empty.
+    budget = _SNAPSHOT_MAX_RECORD_CHARS
     for name in fields:
         value = snapshot.get(name)
         # bool is an int subclass and would stringify to "True"; a dict or list
         # is a caller sending something this field was never meant to hold.
         if value is None or isinstance(value, (bool, dict, list)):
             continue
-        text = str(value).strip()
+        text = str(value).strip()[:min(_SNAPSHOT_MAX_CHARS, budget)]
         if text:
-            out[name] = text[:_SNAPSHOT_MAX_CHARS]
+            out[name] = text
+            budget -= len(text)
     return out if len(out) > 1 else None
 
 
@@ -228,6 +246,14 @@ def load_favorites(project_dir: Path) -> set[str]:
                     record = json.loads(line)
                 except json.JSONDecodeError as e:
                     logger.debug("Skipping malformed favorite line in %s: %s", path, e)
+                    continue
+                # A line can parse and still not be a record: `null`, a list, a
+                # bare string. `.get` on those raises past both excepts here,
+                # and this file is now read by the reader's annotation and
+                # review fetches as well as the recommendations screen -- one
+                # hand-edited line would 500 all three.
+                if not isinstance(record, dict):
+                    logger.debug("Skipping non-object favorite line in %s", path)
                     continue
                 fav_id = record.get("id")
                 if isinstance(fav_id, str) and fav_id:

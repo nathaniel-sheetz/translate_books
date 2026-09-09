@@ -2670,6 +2670,10 @@
     // finding can sit under several es_idx and those rows share a fav_id, the
     // same reason the sheet's `setFavAll` moves them together.
     function stampFavorite(favId, on) {
+        // A row with no fav_id has nothing to match -- a note created offline
+        // has none until a reload names it -- and `undefined === undefined`
+        // would otherwise stamp every one of them.
+        if (!favId) return;
         for (const map of [annotationsMap, reviewMap]) {
             for (const idx of Object.keys(map)) {
                 for (const rec of (map[idx] || [])) {

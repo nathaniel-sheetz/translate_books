@@ -285,8 +285,13 @@ def favorite_records(proj_dir):
     path = proj_dir / "favorites.jsonl"
     if not path.exists():
         return []
+    # split("\n"), not splitlines(): the file is newline-delimited,
+    # and snapshots are written with ensure_ascii=False, so a U+2028 or
+    # U+2029 in the prose would have splitlines() break one record into
+    # two unparseable ones.
     return [json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            for line in path.read_text(encoding="utf-8").split("\n")
+            if line.strip()]
 
 
 def fav_ids(client, **kwargs):
@@ -1282,3 +1287,148 @@ def test_a_finding_snapshot_keeps_the_judges_own_words(client, book):
     (record,) = favorite_records(book)
     assert record["snapshot"]["message"].startswith("The first defect.")
     assert record["snapshot"]["eval_name"] == "dialogue"
+
+
+# --- What the heart must not take the reader down with it -------------------
+#
+# Reading `favorites.jsonl` used to be one screen's business. The reader's heart
+# put it on the path of every chapter's annotation fetch and every chapter's
+# review fetch, so anything that can make this file or this endpoint raise now
+# breaks reading the book, not just reading the recommendations.
+
+_NL = chr(10)
+
+
+@pytest.mark.parametrize("junk", ["null", "[1, 2]", '"a string"', "5", "true"])
+def test_a_line_that_is_not_a_record_is_skipped_like_a_malformed_one(book, junk):
+    """`json.loads` succeeds on all of these and none of them has `.get`.
+
+    The module docstring promises malformed lines are swallowed, and that has to
+    hold for a line that parses as much as for one that does not - otherwise the
+    guarantee covers only the typo you are least likely to make by hand.
+    """
+    from web_ui import favorites as favorites_store
+
+    good = "annotation:chapter_01__4__u1"
+    (book / "favorites.jsonl").write_text(
+        junk + _NL + json.dumps({"id": good, "favorite": True}) + _NL,
+        encoding="utf-8",
+    )
+
+    assert favorites_store.load_favorites(book) == {good}
+    assert favorites_store.favorites_by_chapter(book) == {"chapter_01": 1}
+
+
+def test_a_corrupt_favorites_file_does_not_cost_the_reader_the_chapter(client, book):
+    """The failure the guard above exists to prevent, at the two endpoints that
+    began reading this file when the reader grew a heart.
+
+    A 500 from the annotations fetch empties the sheet; a 500 from the review
+    fetch is worse, because `reader.js` swallows it into an empty findings map
+    and Review Mode goes blank with nothing said.
+    """
+    plant_annotation(book)
+    plant_judge(book)
+    (book / "favorites.jsonl").write_text("null" + _NL, encoding="utf-8")
+
+    assert client.get("/api/annotations/recbook/chapter_01").status_code == 200
+    assert client.get("/api/project/recbook/review/chapter_01").status_code == 200
+    assert reader_notes(client) and reader_findings(client)
+
+
+@pytest.mark.parametrize("key, why", [
+    ("chapter_01__4 or 1__u1", "es_idx is never validated on the write path"),
+    ("chapter_01__4__u1" + "x" * 120, "past the id pattern's length cap"),
+    ("chapter_01__4__u1" + chr(10) + "5", "a newline would forge a second record"),
+])
+def test_a_key_the_scheme_cannot_carry_gets_no_id_at_all(key, why):
+    """`annotation_id` keeps `finding_id`'s contract: no addressable id, no id.
+
+    `target_key`'s docstring promises a safe charset but nothing enforces it, so
+    the composer is where this has to be caught. A heart drawn on an id the
+    write endpoint rejects is worse than no heart - it 400s on every tap and
+    there is nothing the reader can do about it.
+    """
+    from web_ui import favorites as favorites_store
+
+    assert favorites_store.annotation_id(key) is None, why
+
+
+def test_an_unaddressable_note_reaches_the_reader_without_a_heart(client, book):
+    """And the row still renders: the note is the point, the heart is not."""
+    with open(book / "annotations.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "project_id": "recbook", "chapter_id": "chapter_01",
+            "es_idx": "4 or 1", "sub_id": "u1", "type": "word_choice",
+            "content": "[ladro]", "timestamp": "2026-01-01T00:00:00",
+        }, ensure_ascii=False) + _NL)
+
+    (note,) = reader_notes(client)
+    assert note["content"] == "[ladro]"
+    assert note["fav_id"] is None
+    assert note["favorite"] is False
+
+
+def test_a_finding_with_no_chunk_id_gets_no_heart_either():
+    """The half of `finding_id`'s contract the annotation side now matches."""
+    from web_ui import favorites as favorites_store
+
+    assert favorites_store.finding_id(None, "a1b2") is None
+    assert favorites_store.finding_id("chapter_01_chunk_000", None) is None
+
+
+def test_an_unanchored_finding_is_stamped_like_an_anchored_one(client, book):
+    """A judge issue whose excerpt is nowhere in the chunk lands in
+    `unanchored`, a separate list on the payload and therefore a separate chance
+    to forget it. The reader draws hearts on that list too."""
+    plant_judge(book, location="Una oracion que no esta en el capitulo.")
+
+    unanchored = client.get(
+        "/api/project/recbook/review/chapter_01").get_json()["unanchored"]
+    assert unanchored, "expected the excerpt to fail to anchor"
+    for finding in unanchored:
+        assert finding["fav_id"] is not None
+        assert finding["favorite"] is False
+
+    assert favorite(client, unanchored[0]["fav_id"]).status_code == 200
+    assert all(f["favorite"] for f in client.get(
+        "/api/project/recbook/review/chapter_01").get_json()["unanchored"])
+
+
+@pytest.mark.parametrize("body", ["a bare string", [1, 2], 12])
+def test_a_body_that_is_not_an_object_is_a_400_and_not_a_crash(client, book, body):
+    """`request.json or {}` is truthy for all of these and `.get` raises on
+    each, which the endpoint's one try block does not cover. Every other
+    malformed request here answers 400, so this one has to as well."""
+    rv = client.post("/api/project/recbook/recommendations/favorite", json=body)
+    assert rv.status_code == 400
+
+
+def test_the_whole_snapshot_is_bounded_and_not_only_each_field(client, book):
+    """Seven fields capped at 2000 still compose a 14,000-character record, in
+    an append-only file that is never compacted and is now read whole on three
+    paths. The record cap is the one that actually bounds the file."""
+    from web_ui import favorites as favorites_store
+
+    fav_id = "finding:chapter_01_chunk_000:a1b2"
+    assert favorite(client, fav_id, snapshot={
+        "kind": "finding",
+        "chapter_id": "chapter_01",
+        "eval_name": "dialogue",
+        "category": "STYLE_GUIDE",
+        "severity": "error",
+        "message": "m" * 5000,
+        "suggestion": "s" * 5000,
+        "excerpt": "e" * 5000,
+    }).status_code == 200
+
+    (record,) = favorite_records(book)
+    snapshot = record["snapshot"]
+    prose = sum(len(v) for k, v in snapshot.items() if k != "kind")
+    assert prose <= favorites_store._SNAPSHOT_MAX_RECORD_CHARS
+    # Spent in whitelist order, so what identifies the finding survives whole
+    # and the prose divides what is left rather than being crowded out by it.
+    assert snapshot["chapter_id"] == "chapter_01"
+    assert snapshot["eval_name"] == "dialogue"
+    assert snapshot["severity"] == "error"
+    assert 0 < len(snapshot["message"]) <= favorites_store._SNAPSHOT_MAX_CHARS

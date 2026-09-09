@@ -219,8 +219,8 @@
     // term used six times is six locations and one issue -- and those rows share
     // a fav_id, exactly as submitFeedback already treats them as one thing. So
     // the whole set moves together; otherwise one lit heart would sit beside two
-    // unlit ones naming the same mark. Matched in JS rather than by an attribute
-    // selector because a fav_id carries the `:` that separates its namespace.
+    // unlit ones naming the same mark. Walked in JS rather than built into an
+    // attribute selector so the id never has to be escaped into one.
     function setFavAll(favId, on) {
         sheet.querySelectorAll('.rv2-fav').forEach(function (b) {
             if (b.dataset.favId === favId) setFav(b, on);
@@ -246,6 +246,10 @@
             if (core().setFavorite) {
                 core().setFavorite(favId, on, on ? snapshot() : null,
                     function () { setFavAll(favId, !on); });
+            } else {
+                // A stale cached reader.js has no setFavorite. Put the heart
+                // back rather than leave it claiming a mark nothing sent.
+                setFavAll(favId, !on);
             }
         });
         return b;

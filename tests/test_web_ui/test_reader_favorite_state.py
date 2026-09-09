@@ -88,6 +88,8 @@ class TestTheSheetStillReadsTheRow:
 
 def stamp_favorite(maps, fav_id, on):
     """Mirror of reader.js ``stampFavorite`` — keep in lockstep with it."""
+    if not fav_id:
+        return
     for m in maps:
         for idx in list(m):
             for rec in m.get(idx) or []:
@@ -98,8 +100,11 @@ def stamp_favorite(maps, fav_id, on):
 class TestStampSemantics:
     @pytest.fixture
     def maps(self):
+        # The third row has no `fav_id` at all, which is what a note created
+        # while offline looks like until a reload names it (see `applySaved`).
         anns = {"4": [{"fav_id": "annotation:c__4__u1", "favorite": False},
-                      {"fav_id": "annotation:c__4__u2", "favorite": False}]}
+                      {"fav_id": "annotation:c__4__u2", "favorite": False},
+                      {"favorite": False}]}
         # One dictionary hit on a term used twice: two locations, two rows in
         # two sentences, one issue_key — so one fav_id.
         findings = {"4": [{"fav_id": "finding:c_chunk_000:ab12", "favorite": False}],
@@ -108,7 +113,7 @@ class TestStampSemantics:
 
     def test_the_hearted_note_is_the_only_note_that_moves(self, maps):
         stamp_favorite(maps, "annotation:c__4__u1", True)
-        assert [a["favorite"] for a in maps[0]["4"]] == [True, False]
+        assert [a["favorite"] for a in maps[0]["4"]] == [True, False, False]
 
     def test_every_row_of_one_finding_moves_together(self, maps):
         """Including the rows under another es_idx, which `setFavAll` cannot see:
@@ -122,11 +127,19 @@ class TestStampSemantics:
         stamp_favorite(maps, "finding:c_chunk_000:ab12", False)
         assert not any(f["favorite"] for group in maps[1].values() for f in group)
 
-    def test_an_id_nothing_carries_changes_nothing(self, maps):
-        """A finding with no chunk_id gets `fav_id: None` and no heart; nothing
-        should match it, least of all every other unhearted row."""
-        stamp_favorite(maps, None, True)
+    @pytest.mark.parametrize("missing", [None, "", 0])
+    def test_an_id_nothing_carries_changes_nothing(self, maps, missing):
+        """A finding with no chunk_id gets `fav_id: None` and no heart. Without
+        a guard this is the dangerous call, not a harmless one: the rows that
+        carry no `fav_id` are exactly the ones a falsy id would match, and
+        `undefined === undefined` in JS is as true as `None == None` here.
+        """
+        stamp_favorite(maps, missing, True)
         assert not any(r["favorite"] for m in maps for g in m.values() for r in g)
+
+    def test_the_guard_is_in_the_real_source_too(self):
+        """The mirror above is only evidence if the JS has the same guard."""
+        assert "if (!favId) return;" in _fn_body(READER_JS, "stampFavorite")
 
 
 def _fn_body(source, name):

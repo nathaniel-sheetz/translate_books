@@ -717,7 +717,11 @@ lives at the root, and the reader-sidecar family is where the reader writes its
 own. The file is append-only and the last record for an id wins, so unfavoriting
 appends `favorite: false` rather than rewriting, and nothing needs a lock.
 
-Ids are composed by `web_ui/favorites.py` and validated on the way back in:
+Ids are composed by `web_ui/favorites.py`, validated as they are composed — both
+`annotation_id` and `finding_id` return `None` rather than an id `is_valid_id`
+would reject, which is how an item that cannot be addressed reaches the browser
+without a heart instead of with one that 400s — and validated again on the way
+back in:
 
 | target | id |
 |---|---|
@@ -762,9 +766,14 @@ fifth way to dismiss something.
 of, so the item's own text travels with the mark: `{kind, chapter_id, ...}` —
 `type`/`text`/`es_text` for a note, `eval_name`/`category`/`severity`/`message`/
 `suggestion`/`excerpt` for a finding. `favorites.sanitize_snapshot` whitelists it
-per kind, coerces to `str` and caps each field at 2000 characters; anything it
-does not recognise is dropped rather than refused, because the mark is the point
-and a heart must not fail over the prose it was carrying.
+per kind, coerces to `str`, and caps both the field (2000 characters) and the
+whole record (4000, spent down in whitelist order so the short identifying
+fields land first and the prose divides what is left). The record cap is the one
+that bounds the file: seven capped fields would otherwise compose a 14,000-
+character record, and `favorites.jsonl` is append-only, never compacted, and
+read whole by all three of these surfaces. Anything the scheme does not
+recognise is dropped rather than refused, because the mark is the point and a
+heart must not fail over the prose it was carrying.
 
 It is captured once, when the heart is tapped — editing a note you have already
 hearted leaves the stored text as it read then. It is written and not yet read

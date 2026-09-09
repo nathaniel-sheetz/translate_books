@@ -9268,8 +9268,9 @@ def project_recommendation_favorite(project_id):
     An optional ``snapshot`` carries the item's text as it read when the heart
     was tapped, so a mark stays legible after the thing it names is gone - a
     note deleted, or a judge finding reworded into a different ``issue_key`` on
-    the next run. It is stored as sent and never read back by this screen, which
-    still renders live items; see :func:`favorites.sanitize_snapshot`.
+    the next run. It is whitelisted and truncated on the way in, and never read
+    back by this screen, which still renders live items; see
+    :func:`favorites.sanitize_snapshot`.
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
@@ -9278,6 +9279,11 @@ def project_recommendation_favorite(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     data = request.json or {}
+    # A JSON body can be truthy and still not be an object -- a bare string or
+    # a list -- and `.get` on those is an unhandled 500 rather than the 400
+    # this endpoint answers every other malformed request with.
+    if not isinstance(data, dict):
+        return jsonify({"error": "Bad request"}), 400
     fav_id = data.get("id")
     favorite = data.get("favorite")
 
