@@ -2315,6 +2315,11 @@ def apply_corrections(project_id):
             realign_chapter,
             recombine_chapter,
         )
+        from src.corrections_apply import (
+            drain_corrections,
+            safe_chunk_id,
+            stamp_status,
+        )
         from src.utils.file_io import load_chunk, save_chunk
 
         raw_corrections = load_corrections(project_dir)
@@ -2333,25 +2338,44 @@ def apply_corrections(project_id):
         affected_chapters = set()
         total_applied = 0
         log = []
+        unapplied: list[dict] = []
 
         # 1. Patch chunks
         for chunk_id, chunk_corrections in sorted(by_chunk.items()):
+            if not safe_chunk_id(chunk_id):
+                log.append(f"{chunk_id}: skipped (unsafe chunk id)")
+                unapplied.extend(chunk_corrections)
+                continue
+
             chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
             if not chunk_path.exists():
                 log.append(f"{chunk_id}: skipped (not found)")
+                unapplied.extend(chunk_corrections)
                 continue
 
             chunk = load_chunk(chunk_path)
-            updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_corrections)
-
-            chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
-            affected_chapters.add(chapter_id)
+            updated_chunk, applied, applied_indices = apply_to_chunk(chunk, chunk_corrections)
 
             if applied > 0:
+                # Only a chunk that actually moved needs its chapter
+                # recombined and realigned. "0 applied, N still stuck" is a
+                # steady state now, and realign loads the alignment model.
+                affected_chapters.add(chunk_id.rsplit("_chunk_", 1)[0])
                 save_chunk(updated_chunk, chunk_path)
+
+            done = set(applied_indices)
+            unapplied.extend(
+                corr for i, corr in enumerate(chunk_corrections) if i not in done
+            )
 
             total_applied += applied
             log.append(f"{chunk_id}: {applied}/{len(chunk_corrections)}")
+
+        # group_by_chunk drops rows with a falsy chunk_id -- save_correction
+        # writes chunk_id "" whenever the alignment lookup misses. They never
+        # reach the loop above, so without this they would be drained as if
+        # they had applied.
+        unapplied.extend(c for c in corrections if c.get("chunk_id") not in by_chunk)
 
         # 2. Recombine affected chapters
         for chapter_id in sorted(affected_chapters):
@@ -2362,19 +2386,37 @@ def apply_corrections(project_id):
             realign_chapter(project_dir, chapter_id)
 
         # 4. Archive corrections — write the full pre-dedupe list so
-        # corrections_applied.jsonl keeps a complete record of every Save.
+        # corrections_applied.jsonl keeps a complete record of every Save, each
+        # row stamped with whether it actually landed. A row dropped by
+        # dedupe_corrections inherits the status of the twin that survived it.
         archive_path = project_dir / "corrections_applied.jsonl"
         applied_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         with open(archive_path, "a", encoding="utf-8") as f:
-            for corr in raw_corrections:
-                f.write(json.dumps({**corr, "applied_at": applied_at}, ensure_ascii=False) + "\n")
+            for corr in stamp_status(raw_corrections, corrections, unapplied):
+                f.write(json.dumps(
+                    {**corr, "applied_at": applied_at},
+                    ensure_ascii=False,
+                ) + "\n")
 
-        if total_applied == len(corrections):
-            corrections_path.unlink()
+        # 5. Drain per-record, not all-or-nothing. Corrections that landed leave
+        # the queue even when a sibling could not be matched; otherwise one
+        # unresolvable row keeps the reader's pending banner up forever and
+        # every later Apply re-archives the whole queue.
+        still_pending = drain_corrections(project_dir, unapplied)
 
         return jsonify({
             "applied": total_applied,
             "total": len(corrections),
+            "pending": still_pending,
+            "unapplied": [
+                {
+                    "chapter_id": c.get("chapter_id"),
+                    "chunk_id": c.get("chunk_id"),
+                    "es_idx": c.get("es_idx"),
+                    "original_es": c.get("original_es"),
+                }
+                for c in unapplied
+            ],
             "chapters": sorted(affected_chapters),
             "log": log,
         })
@@ -4931,6 +4973,7 @@ def _apply_pending_corrections_for_chapter(
 
     from collections import defaultdict
     from scripts.apply_corrections import apply_to_chunk
+    from src.corrections_apply import correction_key
 
     rows: list[dict] = []
     for line in corrections_path.read_text(encoding="utf-8").splitlines():
@@ -4956,15 +4999,6 @@ def _apply_pending_corrections_for_chapter(
     by_chunk: dict[str, list[dict]] = defaultdict(list)
     for record in target_rows:
         by_chunk[record["chunk_id"]].append(record)
-
-    def _correction_record_key(record: dict) -> tuple:
-        return (
-            record.get("chunk_id"),
-            record.get("original_es"),
-            record.get("corrected_es"),
-            record.get("chunk_offset_start"),
-            record.get("chunk_offset_end"),
-        )
 
     chunks_dir = project_dir / "chunks"
     applied_total = 0
@@ -4994,7 +5028,7 @@ def _apply_pending_corrections_for_chapter(
             save_chunk(updated_chunk, chunk_path)
             applied_total += applied
             for idx in applied_indices:
-                applied_record_keys.add(_correction_record_key(chunk_rows[idx]))
+                applied_record_keys.add(correction_key(chunk_rows[idx]))
 
     archive_path = project_dir / "corrections_applied.jsonl"
     applied_at = datetime.now().isoformat()
@@ -5004,7 +5038,7 @@ def _apply_pending_corrections_for_chapter(
             archived["applied_at"] = applied_at
             archived["status"] = (
                 "applied"
-                if _correction_record_key(record) in applied_record_keys
+                if correction_key(record) in applied_record_keys
                 else "skipped"
             )
             f.write(json.dumps(archived, ensure_ascii=False) + "\n")
