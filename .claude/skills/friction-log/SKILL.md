@@ -15,6 +15,7 @@ allowed-tools:
   - Write
   - Glob
   - Grep
+  - AskUserQuestion
 ---
 
 # friction-log
@@ -71,8 +72,11 @@ The file is always:
   `2026-08-26-photogen-nycteris-editorial-first-run`,
   `2026-07-19-the-little-duke-dropped-chunk-tail-paragraph`.
 - Use today's date, not the date of the run's first command.
-- **Never overwrite.** If the path exists, lengthen the descriptor to something
-  distinguishing (`-second-run`, `-apply`, `-ch12-16`) rather than clobbering.
+- **Never overwrite.** Check first — `ls <resolved-dir>/<skill-name>/` in the gather step
+  already shows you the directory; a shell redirect (`cat > path`) clobbers silently and
+  these logs are gitignored, so a clobbered one is gone. If the path exists, lengthen the
+  descriptor to something distinguishing (`-second-run`, `-apply`, `-ch12-16`) rather
+  than clobbering.
 
 The default directory is gitignored, so writing a log is a local action — it is never
 part of a commit and should not be offered as one.
@@ -113,7 +117,10 @@ They give you:
 - which were closed — strike those through and mark `**done, in <version>.**`,
 - the baseline numbers this run should be compared against.
 
-Link prior logs relatively, e.g. `[2026-08-11 photogen effort-consent](2026-08-11-photogen-nycteris-cursor-effort-consent.md)`.
+Link prior logs relatively — they are siblings in the same per-skill directory, so the
+target is a bare filename: `[<date> <short name>](<log-filename.md>)`. For instance, link
+text `2026-08-11 photogen effort-consent` pointing at
+`2026-08-11-photogen-nycteris-cursor-effort-consent.md`.
 
 ### 3. Write it
 
