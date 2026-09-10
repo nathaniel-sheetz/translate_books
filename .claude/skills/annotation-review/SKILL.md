@@ -305,3 +305,12 @@ python scripts/harness.py epub --project fabre2
 - Judges are the *pre*-review pass over the same book; see
   `.claude/skills/judge-review/SKILL.md`. The two do not share persistence:
   annotation results never touch `evaluations/*.json` or the dashboard badges.
+
+## Friction logs
+
+Runs of this skill are logged in `.claude/skill-friction-logs/annotation-review/`. When the user asks
+for a friction log — or a run wasted significant tokens or operator time and they would
+plausibly want one — invoke the **`friction-log`** skill rather than hand-rolling the
+file; it owns the location, naming, and section skeleton. Those prior logs are also the
+best standing record of this skill's known rough edges: read the latest one or two when
+a run hits something that feels familiar.

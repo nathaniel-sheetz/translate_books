@@ -178,3 +178,12 @@ Prefer `suggested_reference` from `status` when present; fall back to this table
   (`stage_translate` skips chunks that already have a translation).
 - Verse/poetry *rendering* is not unified behind a registry — see
   `references/EXTENDING.md` (known rough edge).
+
+## Friction logs
+
+Runs of this skill are logged in `.claude/skill-friction-logs/translate-harness/`. When the user asks
+for a friction log — or a run wasted significant tokens or operator time and they would
+plausibly want one — invoke the **`friction-log`** skill rather than hand-rolling the
+file; it owns the location, naming, and section skeleton. Those prior logs are also the
+best standing record of this skill's known rough edges: read the latest one or two when
+a run hits something that feels familiar.

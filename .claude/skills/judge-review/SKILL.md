@@ -862,3 +862,12 @@ later: `append_feedback(project_dir, chunk_id, "dialogue", issue_index,
 - Never hand-restore chunks from `.chunk_edits/` to recover an interrupted apply — re-running the
   same `--select` (or `--realign-only`) is the supported path and does it without discarding the
   edits that did land. Those snapshots are still the last resort if the text itself is wrong.
+
+## Friction logs
+
+Runs of this skill are logged in `.claude/skill-friction-logs/judge-review/`. When the user asks
+for a friction log — or a run wasted significant tokens or operator time and they would
+plausibly want one — invoke the **`friction-log`** skill rather than hand-rolling the
+file; it owns the location, naming, and section skeleton. Those prior logs are also the
+best standing record of this skill's known rough edges: read the latest one or two when
+a run hits something that feels familiar.
