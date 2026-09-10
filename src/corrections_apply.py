@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
@@ -42,8 +43,15 @@ def load_corrections(project_dir: Path) -> list[dict]:
 
     corrections = []
     for line in corrections_path.read_text(encoding="utf-8").strip().split("\n"):
-        if line.strip():
+        if not line.strip():
+            continue
+        try:
             corrections.append(json.loads(line))
+        except json.JSONDecodeError:
+            # A half-written line (crash or disk-full mid-drain) must not
+            # lock the queue out of the UI forever. The two sibling readers
+            # in web_ui.app already skip undecodable rows; match them.
+            logger.warning("Skipping undecodable correction row: %r", line[:80])
     return corrections
 
 
@@ -55,6 +63,15 @@ def group_by_chunk(corrections: list[dict]) -> dict[str, list[dict]]:
         if chunk_id:
             by_chunk[chunk_id].append(c)
     return dict(by_chunk)
+
+
+def dedupe_key(record: dict) -> tuple:
+    """The identity :func:`dedupe_corrections` collapses on.
+
+    Also what :func:`stamp_status` uses to hand a dropped row the status of
+    the twin that survived it, so the two can never drift apart.
+    """
+    return (record.get("chunk_id", ""), record.get("es_idx"), record.get("corrected_es"))
 
 
 def dedupe_corrections(corrections: list[dict]) -> list[dict]:
@@ -72,7 +89,7 @@ def dedupe_corrections(corrections: list[dict]) -> list[dict]:
     """
     by_key: dict[tuple, dict] = {}
     for corr in corrections:
-        key = (corr.get("chunk_id", ""), corr.get("es_idx"), corr.get("corrected_es"))
+        key = dedupe_key(corr)
         existing = by_key.get(key)
         if existing is None:
             by_key[key] = corr
@@ -83,6 +100,36 @@ def dedupe_corrections(corrections: list[dict]) -> list[dict]:
 
 
 _WS_RUN_RE = re.compile(r"\s+")
+
+#  A paragraph break: a newline, optional same-line whitespace, another
+#  newline. The aligner never merges sentences across one, so a tier-4 span
+#  that swallows one is matching across a paragraph boundary and would fuse
+#  two paragraphs into one on apply.
+_BLANK_LINE_RE = re.compile(r"\n[^\S\n]*\n")
+
+
+def restore_whitespace(matched: str, corrected: str) -> str:
+    """Re-insert ``matched``'s own whitespace runs into ``corrected``.
+
+    A tier-4 span covers the chunk's real whitespace -- a dialogue-dash line
+    break, say -- while ``corrected_es`` comes back from the reader
+    space-joined, because that is how the alignment row is shown. Writing it
+    verbatim would quietly reflow the book: the line break becomes a space.
+
+    When the two agree on how many whitespace runs they have, each run is
+    positional and the chunk's version wins. When they disagree the user
+    deliberately re-shaped the sentence (splitting it, or turning a dash into
+    quotes), so ``corrected`` is returned untouched.
+    """
+    src_runs = _WS_RUN_RE.findall(matched)
+    parts = _WS_RUN_RE.split(corrected)
+    if not src_runs or len(src_runs) != len(parts) - 1:
+        return corrected
+    out = [parts[0]]
+    for run, part in zip(src_runs, parts[1:]):
+        out.append(run)
+        out.append(part)
+    return "".join(out)
 
 
 def _whitespace_flexible_find(text: str, original: str, from_pos: int = 0):
@@ -97,20 +144,32 @@ def _whitespace_flexible_find(text: str, original: str, from_pos: int = 0):
     partial drain in :func:`drain_corrections` — pinned the whole queue forever.
 
     Only whitespace runs flex; every non-space character still has to match
-    exactly, so this cannot silently land on a different sentence.
+    exactly, so this cannot silently land on a different sentence. A
+    candidate that spans a blank line is rejected outright (the aligner never
+    merges across a paragraph break), and the whitespace the match does cover
+    -- a dialogue line break, a non-breaking space -- is restored by
+    :func:`restore_whitespace` when the correction is written back.
 
     Returns ``(start, end)`` of the first match at or after ``from_pos``, or
-    ``None``.
+    ``None`` -- including when ``original`` is empty, carries leading or
+    trailing whitespace, or is a single token with no whitespace run to flex.
     """
     if not original or original != original.strip():
         return None
-    parts = [p for p in _WS_RUN_RE.split(original) if p]
+    parts = _WS_RUN_RE.split(original)
     if len(parts) < 2:
         return None
     pattern = re.compile(r"\s+".join(re.escape(p) for p in parts))
-    match = pattern.search(text, max(0, from_pos))
+
+    def _first_within_paragraph(start_at: int):
+        for m in pattern.finditer(text, max(0, start_at)):
+            if not _BLANK_LINE_RE.search(m.group(0)):
+                return m
+        return None
+
+    match = _first_within_paragraph(from_pos)
     if match is None and from_pos > 0:
-        match = pattern.search(text)
+        match = _first_within_paragraph(0)
     if match is None:
         return None
     return match.start(), match.end()
@@ -229,6 +288,12 @@ def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False)
             continue
 
         start, end = span
+        matched = text[start:end]
+        if matched != original:
+            # Tiers 1-3 slice back to ``original`` exactly, so a difference
+            # here means the whitespace-tolerant tier matched and the chunk
+            # holds whitespace the space-joined ``corrected`` does not.
+            corrected = restore_whitespace(matched, corrected)
         text = text[:start] + corrected + text[end:]
         applied += 1
         applied_indices.append(orig_idx)
@@ -340,6 +405,44 @@ def correction_key(record: dict) -> tuple:
     )
 
 
+def safe_chunk_id(value) -> bool:
+    """Return True only for chunk ids that are safe as a filesystem name.
+
+    ``chunk_id`` arrives from ``corrections.jsonl`` and is joined onto
+    ``chunks/`` to build a path, so it is validated the same way
+    ``web_ui.app._safe_id`` validates every other id: periods are allowed
+    inside the name, but an all-dots id is not.
+    """
+    if not isinstance(value, str) or not value or set(value) == {"."}:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.\-]+", value))
+
+
+def stamp_status(
+    raw_corrections: list[dict], deduped: list[dict], unapplied: list[dict],
+) -> list[dict]:
+    """Tag every raw queue row with ``status`` of ``applied`` or ``skipped``.
+
+    Status is tracked by object identity over ``deduped``, not by a value
+    key: :func:`correction_key` omits ``es_idx`` while
+    :func:`dedupe_corrections` keys on it, so two surviving rows in one chunk
+    can share a value key and a failure on one would mislabel the other.
+
+    A row that dedupe dropped never had a chance to apply on its own, so it
+    inherits the status of the twin that survived it -- which is only
+    ``applied`` if that twin actually landed.
+    """
+    unapplied_ids = {id(corr) for corr in unapplied}
+    status_by_key = {
+        dedupe_key(corr): "skipped" if id(corr) in unapplied_ids else "applied"
+        for corr in deduped
+    }
+    return [
+        {**corr, "status": status_by_key.get(dedupe_key(corr), "skipped")}
+        for corr in raw_corrections
+    ]
+
+
 def drain_corrections(project_dir: Path, unapplied: list[dict]) -> int:
     """Rewrite ``corrections.jsonl`` with only the corrections still pending.
 
@@ -360,7 +463,14 @@ def drain_corrections(project_dir: Path, unapplied: list[dict]) -> int:
     if not unapplied:
         corrections_path.unlink(missing_ok=True)
         return 0
-    with open(corrections_path, "w", encoding="utf-8") as f:
+    # Write-then-rename: this is the user's own queue of unshipped edits, and
+    # every Apply now rewrites it. A crash partway through a plain "w" would
+    # leave a truncated row that no reader could parse.
+    tmp_path = corrections_path.with_name(corrections_path.name + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         for corr in unapplied:
             f.write(json.dumps(corr, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, corrections_path)
     return len(unapplied)

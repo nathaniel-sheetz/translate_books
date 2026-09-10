@@ -38,6 +38,8 @@ from src.corrections_apply import (  # noqa: E402  (re-exported for importers)
     realign_chapter,
     rebuild_epub,
     recombine_chapter,
+    safe_chunk_id,
+    stamp_status,
 )
 from src.utils.file_io import load_chunk, save_chunk  # noqa: E402
 
@@ -53,6 +55,8 @@ __all__ = [
     "realign_chapter",
     "rebuild_epub",
     "recombine_chapter",
+    "safe_chunk_id",
+    "stamp_status",
 ]
 
 
@@ -95,6 +99,11 @@ def main():
 
     print(f"\nApplying to {len(by_chunk)} chunk(s):")
     for chunk_id, chunk_corrections in sorted(by_chunk.items()):
+        if not safe_chunk_id(chunk_id):
+            print(f"  {chunk_id}: SKIPPED (unsafe chunk id)")
+            unapplied.extend(chunk_corrections)
+            continue
+
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
         if not chunk_path.exists():
             print(f"  {chunk_id}: SKIPPED (chunk file not found)")
@@ -106,11 +115,11 @@ def main():
             chunk, chunk_corrections, dry_run=args.dry_run,
         )
 
-        chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
-        affected_chapters.add(chapter_id)
-
-        if applied > 0 and not args.dry_run:
-            save_chunk(updated_chunk, chunk_path)
+        if applied > 0:
+            # Only chapters that actually moved get recombined + realigned.
+            affected_chapters.add(chunk_id.rsplit("_chunk_", 1)[0])
+            if not args.dry_run:
+                save_chunk(updated_chunk, chunk_path)
 
         done = set(applied_indices)
         unapplied.extend(
@@ -119,6 +128,11 @@ def main():
 
         print(f"  {chunk_id}: {applied}/{len(chunk_corrections)} corrections applied")
         total_applied += applied
+
+    # Rows with a falsy chunk_id never reach the loop (group_by_chunk drops
+    # them), so they have to be carried into unapplied by hand or the drain
+    # deletes them as if they had applied.
+    unapplied.extend(c for c in corrections if c.get("chunk_id") not in by_chunk)
 
     if args.dry_run:
         print(f"\nDry run complete. {total_applied} correction(s) would be applied to {len(affected_chapters)} chapter(s).")
@@ -152,16 +166,8 @@ def main():
     # 6. Archive applied corrections — write the full pre-dedupe list so
     # corrections_applied.jsonl keeps a complete audit trail of every Save,
     # each row stamped with whether it actually landed.
-    unapplied_keys = {correction_key(c) for c in unapplied}
     archive_path = archive_applied_records(
-        project_dir,
-        [
-            {
-                **corr,
-                "status": "skipped" if correction_key(corr) in unapplied_keys else "applied",
-            }
-            for corr in raw_corrections
-        ],
+        project_dir, stamp_status(raw_corrections, corrections, unapplied),
     )
 
     # 7. Drain per-record. A correction that cannot be matched no longer holds
