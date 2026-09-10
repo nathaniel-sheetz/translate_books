@@ -359,10 +359,19 @@
                     btn.disabled = false;
                     btn.textContent = '{{ t.apply_corrections }}';
                 } else {
-                    banner.className = 'chapter-banner banner-success';
-                    banner.innerHTML = data.applied + ' {{ t.apply_done }} ' +
+                    var msg = data.applied + ' {{ t.apply_done }} ' +
                         data.chapters.length + ' {{ t.apply_chapters }}';
-                    setTimeout(function() { location.reload(); }, 1500);
+                    if (data.pending) {
+                        // Partial apply: the rest stay queued, so don't paint
+                        // this green or the banner looks like it lied when it
+                        // comes back after the reload.
+                        banner.className = 'chapter-banner banner-warn';
+                        msg += ' — ' + data.pending + ' {{ t.apply_unmatched }}';
+                    } else {
+                        banner.className = 'chapter-banner banner-success';
+                    }
+                    banner.innerHTML = msg;
+                    setTimeout(function() { location.reload(); }, data.pending ? 4000 : 1500);
                 }
             })
             .catch(function(err) {

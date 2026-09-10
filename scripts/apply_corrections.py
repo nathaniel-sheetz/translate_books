@@ -30,7 +30,9 @@ from src.corrections_apply import (  # noqa: E402  (re-exported for importers)
     _resolve_correction_span,
     apply_to_chunk,
     archive_applied_records,
+    correction_key,
     dedupe_corrections,
+    drain_corrections,
     group_by_chunk,
     load_corrections,
     realign_chapter,
@@ -43,7 +45,9 @@ __all__ = [
     "_resolve_correction_span",
     "apply_to_chunk",
     "archive_applied_records",
+    "correction_key",
     "dedupe_corrections",
+    "drain_corrections",
     "group_by_chunk",
     "load_corrections",
     "realign_chapter",
@@ -87,22 +91,31 @@ def main():
     by_chunk = group_by_chunk(corrections)
     affected_chapters = set()
     total_applied = 0
+    unapplied: list[dict] = []
 
     print(f"\nApplying to {len(by_chunk)} chunk(s):")
     for chunk_id, chunk_corrections in sorted(by_chunk.items()):
         chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
         if not chunk_path.exists():
             print(f"  {chunk_id}: SKIPPED (chunk file not found)")
+            unapplied.extend(chunk_corrections)
             continue
 
         chunk = load_chunk(chunk_path)
-        updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_corrections, dry_run=args.dry_run)
+        updated_chunk, applied, applied_indices = apply_to_chunk(
+            chunk, chunk_corrections, dry_run=args.dry_run,
+        )
 
         chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
         affected_chapters.add(chapter_id)
 
         if applied > 0 and not args.dry_run:
             save_chunk(updated_chunk, chunk_path)
+
+        done = set(applied_indices)
+        unapplied.extend(
+            corr for i, corr in enumerate(chunk_corrections) if i not in done
+        )
 
         print(f"  {chunk_id}: {applied}/{len(chunk_corrections)} corrections applied")
         total_applied += applied
@@ -137,16 +150,31 @@ def main():
         rebuild_epub(project_dir)
 
     # 6. Archive applied corrections — write the full pre-dedupe list so
-    # corrections_applied.jsonl keeps a complete audit trail of every Save.
-    corrections_path = project_dir / "corrections.jsonl"
-    archive_path = archive_applied_records(project_dir, raw_corrections)
+    # corrections_applied.jsonl keeps a complete audit trail of every Save,
+    # each row stamped with whether it actually landed.
+    unapplied_keys = {correction_key(c) for c in unapplied}
+    archive_path = archive_applied_records(
+        project_dir,
+        [
+            {
+                **corr,
+                "status": "skipped" if correction_key(corr) in unapplied_keys else "applied",
+            }
+            for corr in raw_corrections
+        ],
+    )
 
-    if total_applied == len(corrections):
-        corrections_path.unlink()
+    # 7. Drain per-record. A correction that cannot be matched no longer holds
+    # its successfully applied siblings in the queue.
+    still_pending = drain_corrections(project_dir, unapplied)
+
+    if not still_pending:
         print(f"\nDone. Corrections archived to {archive_path.name}, corrections.jsonl cleared.")
     else:
-        print(f"\nWARNING: {len(corrections) - total_applied} correction(s) failed to apply.")
-        print(f"corrections.jsonl NOT deleted. Review and fix failed corrections manually.")
+        print(f"\nWARNING: {still_pending} correction(s) failed to apply and stay queued:")
+        for corr in unapplied:
+            print(f"  {corr.get('chunk_id')} es_idx={corr.get('es_idx')}: {corr.get('original_es', '')[:70]!r}")
+        print(f"{total_applied} applied correction(s) were drained from corrections.jsonl.")
 
 
 if __name__ == "__main__":

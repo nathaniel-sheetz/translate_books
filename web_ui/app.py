@@ -2315,6 +2315,7 @@ def apply_corrections(project_id):
             realign_chapter,
             recombine_chapter,
         )
+        from src.corrections_apply import correction_key, drain_corrections
         from src.utils.file_io import load_chunk, save_chunk
 
         raw_corrections = load_corrections(project_dir)
@@ -2333,22 +2334,29 @@ def apply_corrections(project_id):
         affected_chapters = set()
         total_applied = 0
         log = []
+        unapplied: list[dict] = []
 
         # 1. Patch chunks
         for chunk_id, chunk_corrections in sorted(by_chunk.items()):
             chunk_path = project_dir / "chunks" / f"{chunk_id}.json"
             if not chunk_path.exists():
                 log.append(f"{chunk_id}: skipped (not found)")
+                unapplied.extend(chunk_corrections)
                 continue
 
             chunk = load_chunk(chunk_path)
-            updated_chunk, applied, _ = apply_to_chunk(chunk, chunk_corrections)
+            updated_chunk, applied, applied_indices = apply_to_chunk(chunk, chunk_corrections)
 
             chapter_id = chunk_id.rsplit("_chunk_", 1)[0]
             affected_chapters.add(chapter_id)
 
             if applied > 0:
                 save_chunk(updated_chunk, chunk_path)
+
+            done = set(applied_indices)
+            unapplied.extend(
+                corr for i, corr in enumerate(chunk_corrections) if i not in done
+            )
 
             total_applied += applied
             log.append(f"{chunk_id}: {applied}/{len(chunk_corrections)}")
@@ -2362,19 +2370,40 @@ def apply_corrections(project_id):
             realign_chapter(project_dir, chapter_id)
 
         # 4. Archive corrections — write the full pre-dedupe list so
-        # corrections_applied.jsonl keeps a complete record of every Save.
+        # corrections_applied.jsonl keeps a complete record of every Save, each
+        # row stamped with whether it actually landed. Rows dropped by
+        # dedupe_corrections are archived as "applied": the surviving twin
+        # carried the same edit.
+        unapplied_keys = {correction_key(c) for c in unapplied}
         archive_path = project_dir / "corrections_applied.jsonl"
         applied_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         with open(archive_path, "a", encoding="utf-8") as f:
             for corr in raw_corrections:
-                f.write(json.dumps({**corr, "applied_at": applied_at}, ensure_ascii=False) + "\n")
+                status = "skipped" if correction_key(corr) in unapplied_keys else "applied"
+                f.write(json.dumps(
+                    {**corr, "applied_at": applied_at, "status": status},
+                    ensure_ascii=False,
+                ) + "\n")
 
-        if total_applied == len(corrections):
-            corrections_path.unlink()
+        # 5. Drain per-record, not all-or-nothing. Corrections that landed leave
+        # the queue even when a sibling could not be matched; otherwise one
+        # unresolvable row keeps the reader's pending banner up forever and
+        # every later Apply re-archives the whole queue.
+        still_pending = drain_corrections(project_dir, unapplied)
 
         return jsonify({
             "applied": total_applied,
             "total": len(corrections),
+            "pending": still_pending,
+            "unapplied": [
+                {
+                    "chapter_id": c.get("chapter_id"),
+                    "chunk_id": c.get("chunk_id"),
+                    "es_idx": c.get("es_idx"),
+                    "original_es": c.get("original_es"),
+                }
+                for c in unapplied
+            ],
             "chapters": sorted(affected_chapters),
             "log": log,
         })

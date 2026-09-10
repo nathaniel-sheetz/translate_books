@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -81,12 +82,47 @@ def dedupe_corrections(corrections: list[dict]) -> list[dict]:
     return list(by_key.values())
 
 
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+def _whitespace_flexible_find(text: str, original: str, from_pos: int = 0):
+    """Find ``original`` in ``text`` treating every whitespace run as ``\\s+``.
+
+    The reader saves ``original_es`` from the alignment row's ``es`` field, which
+    the aligner builds as ``" ".join(sentences)`` for N:1 merged rows. When the
+    chunk separates those sentences with a newline (a dialogue-dash line inside
+    one paragraph, the common case), the space-joined ``original_es`` is not a
+    literal substring of ``chunk.translated_text`` and every exact ``find()``
+    tier below misses. Such a correction can never apply, which — before the
+    partial drain in :func:`drain_corrections` — pinned the whole queue forever.
+
+    Only whitespace runs flex; every non-space character still has to match
+    exactly, so this cannot silently land on a different sentence.
+
+    Returns ``(start, end)`` of the first match at or after ``from_pos``, or
+    ``None``.
+    """
+    if not original or original != original.strip():
+        return None
+    parts = [p for p in _WS_RUN_RE.split(original) if p]
+    if len(parts) < 2:
+        return None
+    pattern = re.compile(r"\s+".join(re.escape(p) for p in parts))
+    match = pattern.search(text, max(0, from_pos))
+    if match is None and from_pos > 0:
+        match = pattern.search(text)
+    if match is None:
+        return None
+    return match.start(), match.end()
+
+
 def _resolve_correction_span(
     text: str, original: str, hint_start, hint_end,
 ) -> tuple[int, int] | None:
     """Resolve which span of ``text`` a correction targets.
 
-    Mirrors the three-tier logic in ``web_ui.app.sentence_replace``:
+    Mirrors the three-tier logic in ``web_ui.app.sentence_replace``, plus a
+    fourth whitespace-tolerant tier (see :func:`_whitespace_flexible_find`):
 
       1. Hint slices exactly back to ``original`` — exact span. This is the
          common path when the alignment row's ``chunk_offset_start`` /
@@ -99,6 +135,9 @@ def _resolve_correction_span(
          duplicate when ``original`` has a "twin" earlier in the chunk;
          this matches pre-offset-aware behavior for old queued corrections
          that lack offsets.
+      4. Still nothing — whitespace-tolerant search, where each whitespace run
+         in ``original`` matches any whitespace run in ``text``. Catches the
+         space-joined merged alignment row vs. newline-separated chunk case.
 
     Returns ``(start, end)`` or ``None`` if ``original`` is absent.
     """
@@ -124,9 +163,13 @@ def _resolve_correction_span(
             return idx, idx + len(original)
 
     idx = text.find(original)
-    if idx == -1:
-        return None
-    return idx, idx + len(original)
+    if idx != -1:
+        return idx, idx + len(original)
+
+    #  4. No literal match anywhere — retry with whitespace runs treated as
+    #     equivalent, so a merged alignment row whose sentences are newline-
+    #     separated in the chunk still resolves.
+    return _whitespace_flexible_find(text, original, hint_start if has_hint else 0)
 
 
 def apply_to_chunk(chunk: Chunk, corrections: list[dict], dry_run: bool = False) -> tuple[Chunk, int, list[int]]:
@@ -279,3 +322,45 @@ def archive_applied_records(
         for corr in records:
             f.write(json.dumps({**corr, "applied_at": applied_at}, ensure_ascii=False) + "\n")
     return archive_path
+
+
+def correction_key(record: dict) -> tuple:
+    """Identity of a correction for applied/unapplied bookkeeping.
+
+    Matches ``web_ui.app._correction_record_key``: the offsets are part of the
+    key because two Saves on the same sentence with different spans are
+    genuinely different edits.
+    """
+    return (
+        record.get("chunk_id"),
+        record.get("original_es"),
+        record.get("corrected_es"),
+        record.get("chunk_offset_start"),
+        record.get("chunk_offset_end"),
+    )
+
+
+def drain_corrections(project_dir: Path, unapplied: list[dict]) -> int:
+    """Rewrite ``corrections.jsonl`` with only the corrections still pending.
+
+    The queue used to be all-or-nothing: ``corrections.jsonl`` was deleted only
+    when *every* correction applied, so a single unresolvable row (e.g. one
+    whose ``original_es`` no longer exists in the chunk) kept the whole file —
+    and the reader's "pending corrections" banner — alive forever. Every later
+    Apply then re-applied the same already-satisfied rows through the idempotent
+    path and re-archived the full queue, so the banner never cleared and
+    ``corrections_applied.jsonl`` grew a duplicate copy per click.
+
+    Draining per-record makes progress monotonic: whatever applied leaves the
+    queue, whatever genuinely failed stays visible.
+
+    Returns the number of records left pending.
+    """
+    corrections_path = project_dir / CORRECTIONS_FILENAME
+    if not unapplied:
+        corrections_path.unlink(missing_ok=True)
+        return 0
+    with open(corrections_path, "w", encoding="utf-8") as f:
+        for corr in unapplied:
+            f.write(json.dumps(corr, ensure_ascii=False) + "\n")
+    return len(unapplied)

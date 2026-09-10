@@ -579,3 +579,169 @@ class TestDuplicateAndIdempotent:
 
         # File stays — banner must not clear on a partial apply.
         assert (proj_dir / "corrections.jsonl").exists()
+
+
+# -------- Merged alignment rows: space-joined es vs newline in chunk --------
+
+
+class TestMergedRowWhitespace:
+    """The reader saves ``original_es`` from the alignment row's ``es``, which
+    the aligner builds as ``" ".join(sentences)`` for N:1 merged rows. A chunk
+    that separates those sentences with a newline (dialogue-dash lines) then
+    has no literal match, so the correction could never apply.
+    """
+
+    BODY = (
+        "Un niño dijo:\n"
+        "—Si yo encontrara un cuchillo, me lo quedaría."
+    )
+    ROW_ES = (
+        "Un niño dijo: "
+        "—Si yo encontrara un cuchillo, me lo quedaría."
+    )
+
+    def test_span_resolves_across_newline(self):
+        text = "Antes. " + self.BODY + " Después."
+        start = text.find("Un ni")
+        span = _resolve_correction_span(text, self.ROW_ES, None, None)
+        assert span == (start, start + len(self.BODY))
+
+    def test_stale_offsets_still_resolve_across_newline(self):
+        text = "Antes. " + self.BODY + " Después."
+        start = text.find("Un ni")
+        # Same length as ROW_ES (\n and space are both one char), so the
+        # tier-1 exact-slice check runs and fails on the newline.
+        span = _resolve_correction_span(
+            text, self.ROW_ES, start, start + len(self.ROW_ES),
+        )
+        assert span == (start, start + len(self.BODY))
+
+    def test_apply_to_chunk_lands_on_merged_row(self):
+        text = "Antes. " + self.BODY + " Después."
+        chunk = _make_chunk("c0", "ch", text, text)
+        corrected = (
+            "Un niño dijo: «Si yo encontrara un cuchillo, "
+            "me lo quedaría.»"
+        )
+        updated, applied, _ = apply_to_chunk(chunk, [{
+            "chunk_id": "c0",
+            "original_es": self.ROW_ES,
+            "corrected_es": corrected,
+        }])
+        assert applied == 1
+        assert updated.translated_text == "Antes. " + corrected + " Después."
+
+    def test_whitespace_flex_does_not_match_different_words(self):
+        text = "Un niño dijo:\nOtra cosa completamente distinta."
+        span = _resolve_correction_span(text, self.ROW_ES, None, None)
+        assert span is None
+
+
+# -------- Partial drain: applied rows leave the queue --------
+
+
+class TestPartialDrain:
+    def test_applied_rows_drain_when_a_sibling_fails(
+        self, client, project_with_duplicate_for_correction,
+    ):
+        """One unresolvable correction used to pin the whole queue: the route
+        only unlinked corrections.jsonl when every row applied, so the reader's
+        banner came back with the already-applied rows still in it, forever.
+        """
+        proj_dir, body, body_start, body_end = project_with_duplicate_for_correction
+
+        good = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 1,
+            "original_es": body,
+            "corrected_es": "«" + body + "»",
+            "chunk_offset_start": body_start,
+            "chunk_offset_end": body_end,
+        }
+        orphan = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 5,
+            "original_es": "Esta frase no está en el chunk.",
+            "corrected_es": "Ni esta tampoco.",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            json.dumps(good, ensure_ascii=False) + "\n"
+            + json.dumps(orphan, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        rv = client.post("/api/apply-corrections/test-project")
+        assert rv.status_code == 200, rv.get_json()
+        data = rv.get_json()
+        assert data["applied"] == 1
+        assert data["pending"] == 1
+        assert data["unapplied"][0]["es_idx"] == 5
+
+        # Only the unresolvable row is still queued.
+        remaining = [
+            json.loads(ln) for ln in
+            (proj_dir / "corrections.jsonl").read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        assert len(remaining) == 1
+        assert remaining[0]["es_idx"] == 5
+
+        # The archive records both, distinguishable by status.
+        archived = [
+            json.loads(ln) for ln in
+            (proj_dir / "corrections_applied.jsonl").read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        assert {r["es_idx"]: r["status"] for r in archived} == {1: "applied", 5: "skipped"}
+
+    def test_reapply_does_not_regrow_the_archive(
+        self, client, project_with_duplicate_for_correction,
+    ):
+        """Because the queue never drained, every Apply click re-archived the
+        full queue — corrections_applied.jsonl grew by N rows per click.
+        """
+        proj_dir, body, body_start, body_end = project_with_duplicate_for_correction
+
+        good = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 1,
+            "original_es": body,
+            "corrected_es": "«" + body + "»",
+            "chunk_offset_start": body_start,
+            "chunk_offset_end": body_end,
+        }
+        orphan = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "es_idx": 5,
+            "original_es": "Esta frase no está en el chunk.",
+            "corrected_es": "Ni esta tampoco.",
+        }
+        (proj_dir / "corrections.jsonl").write_text(
+            json.dumps(good, ensure_ascii=False) + "\n"
+            + json.dumps(orphan, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        client.post("/api/apply-corrections/test-project")
+        after_first = len([
+            ln for ln in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if ln.strip()
+        ])
+
+        rv = client.post("/api/apply-corrections/test-project")
+        assert rv.get_json()["applied"] == 0
+
+        after_second = len([
+            ln for ln in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if ln.strip()
+        ])
+        # Only the still-queued orphan is re-archived, not the applied row.
+        assert after_second == after_first + 1
