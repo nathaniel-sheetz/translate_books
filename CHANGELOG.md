@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.57.0.0] - 2026-09-10
+
+### Added
+- **`friction-log` — the skill that writes the post-run friction log, instead of each session re-deriving the format.** Thirty-seven of these logs already exist under `.claude/skill-friction-logs/`, and they are the reason the translation skills improve: each one opens against the prior two or three for the same skill, marks which findings recurred and which closed in a named version, and carries a measured cost on every ranked item. That continuity is the part that dies first when a log is written from recollection at the end of a long session — so the skill makes the gathering step mandatory (repo state, `.harness/last_output.json`, `logs/harness_runs.jsonl`, the fanout payloads already in the conversation) and owns the naming, the per-skill directory, and the section skeleton.
+- **`references/template.md` — the canonical section skeleton, distilled from the logs already on disk** rather than invented. Ten sections, three of which (prior-item status, the usage table, the numbers for the next run) are dropped outright when the session had no wave instead of left as empty headings. It names three richest exemplars to read at full size, fixes the severity vocabulary (`HIGH`/`MEDIUM`/`LOW` plus a cost class), and states the bar explicitly: significant waste of tokens or operator time, ranked by impact rather than chronology, with self-inflicted agent errors stated plainly and not buried at position 5.
+- **Routing, so the skill is reachable the way the other three are.** A bullet in `CLAUDE.md` and a short `## Friction logs` section at the foot of `translate-harness`, `judge-review` and `annotation-review` pointing at their own log directory — which doubles as the pointer a run should follow when it hits something that feels familiar, since those logs are the standing record of each skill's known rough edges.
+- **`tests/test_skill_definitions.py` — structural guards over `.claude/skills/`.** Every skill directory must carry an `invoke <name>` bullet in `CLAUDE.md` (the recurring mistake is adding a skill and forgetting to route it, which leaves it invisible), its frontmatter must parse with `name:` matching the directory, and every `references/x.md` it tells the agent to Read must exist — resolved inside the skill's own directory, or from the repo root when fully qualified, as `judge-review` does when it points at `translate-harness`'s address-map reference. A `references/*.md` glob is deliberately not resolved. The suite asserts the tree is non-empty first, so the parametrized checks cannot pass vacuously.
+
+### Fixed
+- **`friction-log` was told to ask a question it had no tool to ask.** Its frontmatter omitted `AskUserQuestion` while the body instructs it to ask when which skill owns the log is genuinely ambiguous; all three sibling skills declare it.
+- **"Never overwrite" named no check.** The rule stated the remedy — lengthen the descriptor — without saying to look first, in a repo whose sessions run Bash-first, where `cat > path` clobbers silently and the target directory is gitignored, so a clobbered log is simply gone.
+
 ## [0.56.0.0] - 2026-09-08
 
 ### Added
