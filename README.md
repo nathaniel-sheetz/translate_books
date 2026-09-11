@@ -83,7 +83,9 @@ Open any aligned chapter at `/read/<project_id>/<chapter>`:
 - **Remove stray text** — a caption or OCR artifact — from both sides at once, with
   overlap regions propagated and the chapter re-aligned.
 - **Annotate** (word choice, inconsistency, footnote, flag) and resolve the notes later
-  with `/annotation-review`.
+  with `/annotation-review`. To *add* an editorial footnote rather than resolve one the
+  reader left — including scanning chapters for spots that deserve one — use
+  `/footnote-pass`.
 
 ---
 
@@ -238,6 +240,7 @@ pytest --cov=src tests/         # with coverage
 | [`docs/ADDRESS_JUDGE.md`](docs/ADDRESS_JUDGE.md) | The address map and the usted/tú judge |
 | [`docs/EDITORIAL_JUDGE.md`](docs/EDITORIAL_JUDGE.md) | The editorial defect judge and its adjudication pass |
 | [`docs/ANNOTATION_REVIEW.md`](docs/ANNOTATION_REVIEW.md) | Resolving reader annotations and drafting footnote glosses |
+| [`docs/FOOTNOTE_PASS.md`](docs/FOOTNOTE_PASS.md) | Authoring *new* editorial footnotes: scan, research, validated write |
 | [`docs/NIGHTLY_PASS.md`](docs/NIGHTLY_PASS.md) | The scheduled cross-book pass, its locks, and the `/review-inbox` funnel |
 | [`docs/EDIT_REVIEW.md`](docs/EDIT_REVIEW.md) | Comparing translations against LLM baselines, tagging hunks |
 | [`docs/LLM_JUDGE_EVALUATOR.md`](docs/LLM_JUDGE_EVALUATOR.md) | LLM-judge evaluator + model comparison harness |
