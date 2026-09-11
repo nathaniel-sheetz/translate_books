@@ -61,18 +61,6 @@ class ExistingNote:
         """True when the note publishes nothing — only an anchor, or empty."""
         return not self.display_text
 
-    def as_dict(self) -> dict:
-        return {
-            "key": self.key,
-            "chapter_id": self.chapter_id,
-            "es_idx": self.es_idx,
-            "sub_id": self.sub_id,
-            "anchor": self.anchor,
-            "display_text": self.display_text,
-            "es_sentence": self.es_sentence,
-            "origin": self.origin,
-        }
-
 
 @dataclass
 class StyleCorpus:

@@ -69,10 +69,10 @@ from src.footnote_pass import write as fp_write  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Commands that write nothing and so get no sidecar (their whole contract is that
-# they touch nothing on disk).
-_NO_SIDECAR_COMMANDS: frozenset[str] = frozenset()
-
+# ``.harness/footnotes/`` for the project this invocation names, resolved once in
+# main(). None when --project doesn't resolve (the command is about to fail on it
+# anyway). Unlike ``run_judges.py`` there is no read-only command to exempt: all
+# six write an artifact, and all six get the sidecar.
 _OUTPUT_DIR: Path | None = None
 
 
@@ -99,8 +99,6 @@ def _set_output_dir(args: argparse.Namespace) -> None:
     """Point the ``last_output.json`` sidecar at this invocation's project."""
     global _OUTPUT_DIR
     _OUTPUT_DIR = None
-    if getattr(args, "command", None) in _NO_SIDECAR_COMMANDS:
-        return
     project = getattr(args, "project", None)
     if not project:
         return
