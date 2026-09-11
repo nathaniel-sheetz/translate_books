@@ -120,6 +120,12 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     "annotations": "medium",
     "translate": "high",
     "footnotes": "high",
+    # footnote-pass's chapter scan. Detection against a fixed taxonomy, which is
+    # the same shape of job as a judge wave and is named medium for that reason
+    # rather than from its own sweep — an unmeasured band stated explicitly beats
+    # inheriting whatever the installed CLI defaults to (high, per
+    # project_headless_effort_default_high). Re-measure and move the row.
+    "footnote_scan": "medium",
 }
 
 

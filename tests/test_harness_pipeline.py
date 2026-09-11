@@ -2055,19 +2055,13 @@ def test_status_echoes_backend_and_suggested_reference(tmp_path: Path):
     assert pre["stage"] == "pre-chunk"
     assert pre["suggested_reference"] == "references/chunk.md"
     # Effort block: auto everywhere → medium for review, high for book prose.
+    # Both maps are derived from the registry rather than spelled out, so adding a
+    # wave type is a one-line change in state.py instead of a test failure; the
+    # medium/high split the comment names is spot-checked below.
     he = pre["headless_effort"]
-    assert he["config"] == {
-        "judges": "auto",
-        "annotations": "auto",
-        "translate": "auto",
-        "footnotes": "auto",
-    }
-    assert he["resolved"] == {
-        "judges": "medium",
-        "annotations": "medium",
-        "translate": "high",
-        "footnotes": "high",
-    }
+    assert he["config"] == {cmd: "auto" for cmd in state.COMMAND_EFFORT_DEFAULTS}
+    assert he["resolved"] == dict(state.COMMAND_EFFORT_DEFAULTS)
+    assert (he["resolved"]["judges"], he["resolved"]["translate"]) == ("medium", "high")
     assert he["extra_flags"] == []
 
     # One type pinned shows up in both maps, and only for that type.

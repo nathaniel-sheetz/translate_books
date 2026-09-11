@@ -285,6 +285,25 @@ Full reference: [`ANNOTATION_REVIEW.md`](ANNOTATION_REVIEW.md).
 
 *Skill equivalent:* `/annotation-review`
 
+### `footnote_pass.py` — author new editorial footnotes
+
+```bash
+python scripts/footnote_pass.py style  --project my-book
+python scripts/footnote_pass.py add    --project my-book \
+    --chapter chapter_04 --es-idx 40 --anchor "ubres," --note "Hoy sabemos que…" --dry-run
+python scripts/footnote_pass.py verify --project my-book
+```
+
+Sub-verbs: `style`, `scan-prepare`, `scan-fanout`, `scan-commit`, `add`, `verify`. The
+**create** counterpart to `review_annotations.py`, which can only review notes a reader
+already left. `add` is the writer and validates against every way `src/endnotes.py`
+drops a footnote silently — an `es_idx` with no alignment row, a sentence not findable
+in the chapter body, or a note that is empty once its `[anchor]` is stripped. `verify`
+applies the same audit to notes already on disk; run it after any `harness.py align`.
+Full reference: [`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md).
+
+*Skill equivalent:* `/footnote-pass`
+
 ### `pending_work.py` — what unattended work is available
 
 ```bash
