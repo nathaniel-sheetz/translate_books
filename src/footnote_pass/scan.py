@@ -12,7 +12,8 @@ end to end.
 category, claim, why}`` — a pointer, never a gloss. No style guide and no glossary
 go into the scan prompt: those govern how a gloss is *worded*, they load at the
 drafting step instead, and a scanner given them starts writing notes, which is the
-wrong output and wastes the wave. One consequence worth stating: the
+wrong output and wastes the wave. The English source is withheld for a second,
+separate reason — see :func:`render_body`. One consequence worth stating: the
 annotation-review cache split (``docs/ANNOTATION_REVIEW.md``) notes that the
 glossary is what carried *that* preamble over Sonnet's 1024-token cache minimum,
 and this one has no glossary to lean on — measured on ``fabre2`` it lands at ~1.1k
@@ -63,9 +64,59 @@ REQUIRED_FIELDS = ("chapter_id", "candidates")
 # Candidate fields the commit validator requires before it will show one.
 CANDIDATE_FIELDS = ("es_idx", "quoted_span", "category", "claim", "why")
 
+# What `--source-text` accepts. "es" is the default; see `render_body`.
+SOURCE_TEXT_CHOICES = ("es", "both")
+DEFAULT_SOURCE_TEXT = "es"
+
+# The ``{{source_rule}}`` paragraph, one per mode. Two strings rather than two
+# template files: a second template is a second thing to keep in step, and
+# everything else about the two prompts is identical.
+#
+# Wrapped to the template's own column, because they are pasted into it.
+_SOURCE_RULE = {
+    "es": (
+        "You are reading the Spanish ALONE. The English original is not in front of\n"
+        "you, and you must not guess at it. State the `claim` as *this sentence* makes\n"
+        "it — your candidate reaches the researcher with the English source attached\n"
+        "beside it, and what the author actually asserted is settled there, before a\n"
+        "word of the gloss is written.\n"
+        "\n"
+        "So do not propose a sentence because you suspect the translation of it. A\n"
+        "rendering that reads oddly is the judges' business, not the back matter's, and\n"
+        "from here you cannot tell a translator's slip from an author's claim. Propose\n"
+        "the claim; let the researcher check the source."
+    ),
+    "both": (
+        "Judge the claim against the **EN** line as well as the ES. Most candidates are\n"
+        "of the form \"the author asserts X\", and what the author asserted is in the\n"
+        "source."
+    ),
+}
+
 
 def _manifest_path(project_dir: Path) -> Path:
-    return footnotes_dir(project_dir) / "manifest.json"
+    """This wave's manifest.
+
+    Named ``scan.manifest.json``, not ``manifest.json``, because
+    ``harness.py footnotes`` — the *translation* wave for imported Gutenberg notes
+    — writes ``.harness/footnotes/manifest.json`` from
+    ``src/harness/flow.py:_footnote_manifest_path``. Two waves, one directory, one
+    filename: whichever prepared last silently owned it. The ``.scan.`` infix is
+    the convention every other file this wave writes already uses
+    (``<chapter_id>.scan.prompt.txt``).
+    """
+    return footnotes_dir(project_dir) / "scan.manifest.json"
+
+
+def _usage_log_path(project_dir: Path) -> Path:
+    """Per-job rows for this wave, split from the translation wave's log.
+
+    Same collision as :func:`_manifest_path`, and here it is not just ownership:
+    ``profile.baseline_tokens`` reads this file to price the consent gate, and a
+    median taken across two wave types with very different prompt sizes describes
+    neither. Registered in ``profile.USAGE_LOG_RELPATH`` under ``footnote_scan``.
+    """
+    return footnotes_dir(project_dir) / "scan.usage.jsonl"
 
 
 def _candidates_path(project_dir: Path) -> Path:
@@ -85,13 +136,35 @@ def chapter_ids(project_dir: Path) -> list[str]:
 
 
 def render_body(
-    chapter_id: str, rows: list[dict], already: set[tuple[str, Optional[int]]]
+    chapter_id: str,
+    rows: list[dict],
+    already: set[tuple[str, Optional[int]]],
+    *,
+    include_source: bool = False,
 ) -> str:
-    """The per-chapter body: numbered ``es_idx | ES | EN`` rows.
+    """The per-chapter body: numbered ``es_idx | ES`` rows, ``| EN`` on request.
 
-    **The EN side is load-bearing.** Most candidates are of the form "the author
-    asserts X", and X is judged against the source, not against the translation —
-    a scanner with only the Spanish is guessing at what the author actually said.
+    **The scan reads the Spanish alone.** This is the shape
+    :mod:`src.judges.editorial_judge` already uses and states the reason for: a
+    reader who can see the original stops evaluating the Spanish as Spanish and
+    starts diffing it against the source. A footnote is for someone holding the
+    translation and nothing else, so the pass that decides whether a sentence
+    needs one should be reading what that reader reads.
+
+    The English is not discarded, only moved. ``scan_commit`` attaches
+    ``en_sentence`` to every usable candidate from the alignment and
+    ``report.render_candidate_report`` prints it, so the source rejoins the
+    candidate at the review gate — where a human and the researching agent are
+    already looking, and can act on it. Same division of labour as
+    :mod:`src.judges.editorial_verify`, and attached to *every* candidate rather
+    than to the ones a scanner nominates for the reason that module gives: the
+    2026-08-27 judge-review friction log caught a wave where nothing asked for
+    the source, so pass two adjudicated blind and confirmed everything.
+
+    ``include_source=True`` (``scan-prepare --source-text both``) restores the EN
+    line. It is worth a deliberate choice rather than a default: measured across
+    the 40 prepared ``fabre2`` bodies the EN lines are 48% of the body, so
+    carrying them very nearly doubles the wave's input.
 
     Sentences that already carry a footnote are marked inline, which is cheaper and
     more reliable than a separate exclusion list the model has to cross-reference.
@@ -109,7 +182,8 @@ def render_body(
         marker = "  [ALREADY NOTED]" if es_idx in noted else ""
         lines.append(f"[{es_idx}]{marker}")
         lines.append(f"  ES: {(row.get('es') or '').strip()}")
-        lines.append(f"  EN: {(row.get('en') or '').strip()}")
+        if include_source:
+            lines.append(f"  EN: {(row.get('en') or '').strip()}")
     lines += [
         "",
         "Return the JSON object for this chapter. An empty `candidates` list is a "
@@ -119,12 +193,28 @@ def render_body(
 
 
 def build_prompt_parts(
-    profile: str, chapter_id: str, rows: list[dict], already: set[tuple[str, Optional[int]]]
+    profile: str,
+    chapter_id: str,
+    rows: list[dict],
+    already: set[tuple[str, Optional[int]]],
+    *,
+    include_source: bool = False,
 ) -> tuple[str, str]:
-    """``(preamble, body)`` for one chapter. The preamble is identical per wave."""
-    rendered = render(load_template(TEMPLATE), {"profile": profile})
+    """``(preamble, body)`` for one chapter. The preamble is identical per wave.
+
+    ``source_rule`` sits above the cache-split marker, so each mode gets its own
+    per-wave cached preamble — and a body that carries the EN can never be served
+    under the preamble that says the English is not in front of you.
+    """
+    rendered = render(
+        load_template(TEMPLATE),
+        {
+            "profile": profile,
+            "source_rule": _SOURCE_RULE["both" if include_source else "es"],
+        },
+    )
     prefix, marker, suffix = rendered.partition(_CACHE_PREFIX_SPLIT_MARKER)
-    body = render_body(chapter_id, rows, already)
+    body = render_body(chapter_id, rows, already, include_source=include_source)
     if not marker:
         # No split marker: the whole template is the body, exactly how judges and
         # annotation prompts degrade.
@@ -140,13 +230,22 @@ _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
     "manifest": "one entry per chapter: {chapter_id, sentences, already_noted, "
     "prompt_path, draft_path, preamble_path, body_path}",
-    "manifest_path": "path to manifest.json (scan-fanout and scan-commit read this)",
+    "manifest_path": "path to scan.manifest.json (scan-fanout and scan-commit read this)",
     "profile_path": "the approved Gate 1 profile this wave was rendered against",
     "chapters": "chapter ids in scope",
+    "source_text": "'es' (default — the scanner reads the Spanish alone) or 'both'. "
+    "prompt_version hashes the template, which is shared by the two modes, so this "
+    "is the only field that says which prompt a candidate set came from",
     "worker_model": "model tier to pin each footnote-scan-worker to",
     "batch_size": "workers per wave / default headless concurrency",
+    "effective": "what the wave will run as, with provenance per field: "
+    "{cli, cli_source, worker_model, worker_model_source, effort, effort_source, "
+    "effort_channel, baseline_tokens, baseline_source, host, warnings}. Quote this "
+    "at the usage gate — the four fields cli/worker_model/effort/effort_channel are "
+    "only interpretable together",
     "usage_summary": "{chapters, workers, sentences, already_noted, worker_model, "
-    "batch_size, headless_effort, headless_effort_source}",
+    "batch_size, cli, headless_baseline_tokens, headless_baseline_source, "
+    "headless_effort, headless_effort_source, headless_effort_channel}",
     "instructions": "what to do with the manifest (scan-fanout, or spawn workers)",
 }
 
@@ -159,6 +258,7 @@ def scan_prepare(
     worker_model: Optional[str] = None,
     batch_size: Optional[int] = None,
     keep_drafts: bool = False,
+    source_text: str = DEFAULT_SOURCE_TEXT,
 ) -> dict[str, Any]:
     """Render one scan prompt per chapter plus a manifest (no spend).
 
@@ -166,13 +266,28 @@ def scan_prepare(
     rather than by prose. It points at the taxonomy the user approved, which the
     agent wrote with ``Write`` after the gate. Without it there is nothing to scan
     *for*, and a wave would run on the model's own idea of what deserves a note.
+
+    ``source_text`` picks which languages the scanner reads; see
+    :func:`render_body`. It is recorded on the manifest and in the payload because
+    ``prompt_version`` cannot distinguish the two modes — they share a template.
     """
-    from src.harness import state as hstate
-    from src.harness.headless import default_worker_model
-    from src.harness.profile import resolve_cli
+    import sys
+
+    from src.harness.profile import resolve_profile
 
     project_dir = Path(project_dir)
     profile_file = Path(profile_file)
+    source_text = str(source_text or DEFAULT_SOURCE_TEXT).strip().lower()
+    if source_text not in SOURCE_TEXT_CHOICES:
+        return {
+            "status": "error",
+            "error": (
+                f"unknown source_text {source_text!r}; expected one of "
+                f"{list(SOURCE_TEXT_CHOICES)}"
+            ),
+            "_schema": _PREPARE_SCHEMA,
+        }
+    include_source = source_text == "both"
     if not profile_file.exists():
         return {
             "status": "error",
@@ -213,9 +328,18 @@ def scan_prepare(
     else:
         wanted = available
 
-    worker_model = worker_model or default_worker_model(
-        resolve_cli(hstate.load_config(project_dir))[0]
+    # One resolver, not three. `resolve_cli` + `default_worker_model` +
+    # `resolve_headless_argv` each answered a slightly different question, which
+    # is how a payload came to print `headless_effort: medium` beside a
+    # `grok-4.6[effort=high,fast=false]` worker — the consent gate then had two
+    # true-looking numbers to choose between and picked the inert one.
+    prof = resolve_profile(
+        project_dir,
+        command=COMMAND,
+        worker_model=worker_model,
+        usage_log=_usage_log_path(project_dir),
     )
+    worker_model = prof.worker_model
     batch_size = _DEFAULT_BATCH_SIZE if batch_size is None else max(1, int(batch_size))
 
     fdir = footnotes_dir(project_dir)
@@ -229,7 +353,9 @@ def scan_prepare(
 
     for chapter_id in wanted:
         rows = load_alignment_rows(project_dir, chapter_id)
-        prefix, body = build_prompt_parts(profile, chapter_id, rows, already)
+        prefix, body = build_prompt_parts(
+            profile, chapter_id, rows, already, include_source=include_source
+        )
         total_sentences += len(rows)
 
         prompt_path = fdir / f"{chapter_id}.scan.prompt.txt"
@@ -270,10 +396,6 @@ def scan_prepare(
 
         entries.append(entry)
 
-    _effort_argv, effort, effort_source = hstate.resolve_headless_argv(
-        hstate.load_config(project_dir), command=COMMAND
-    )
-
     manifest_doc = {
         "chapters": wanted,
         "profile_path": str(profile_file),
@@ -281,12 +403,28 @@ def scan_prepare(
         "batch_size": batch_size,
         "prepared_at": datetime.now().isoformat(),
         "prompt_version": prompt_version(TEMPLATE),
+        # Beside `prompt_version`, not folded into it: the hash covers the
+        # template, and both modes render from the same one.
+        "source_text": source_text,
+        # The resolved profile, so `fanout` reproduces the consented wave without
+        # the operator re-passing --cli, and a wrong pin is visible on disk rather
+        # than only in a payload that scrolled away.
+        "cli": prof.cli,
+        "effort": prof.effort,
+        "effort_channel": prof.effort_channel,
+        "host": prof.host,
         "entries": entries,
     }
     manifest_path = _manifest_path(project_dir)
     manifest_path.write_text(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+    # Also on stderr: this is the last moment before the manifest is spawned
+    # against, and a mis-resolved CLI is worth seeing even by a caller who only
+    # skims the JSON.
+    for warning in prof.warnings:
+        print(f"[scan-prepare] warning: {warning}", file=sys.stderr)
 
     return {
         "status": "ok",
@@ -296,6 +434,8 @@ def scan_prepare(
         "chapters": wanted,
         "worker_model": worker_model,
         "batch_size": batch_size,
+        "source_text": source_text,
+        "effective": prof.to_payload(),
         "usage_summary": {
             "chapters": len(entries),
             "workers": len(entries),
@@ -303,8 +443,15 @@ def scan_prepare(
             "already_noted": sum(len(e["already_noted"]) for e in entries),
             "worker_model": worker_model,
             "batch_size": batch_size,
-            "headless_effort": effort,
-            "headless_effort_source": effort_source,
+            "source_text": source_text,
+            "cli": prof.cli,
+            "headless_baseline_tokens": prof.baseline_tokens,
+            "headless_baseline_source": prof.baseline_source,
+            # Off the same profile as `effective`, so these two can no longer
+            # tell the operator different stories about the same wave.
+            "headless_effort": prof.effort,
+            "headless_effort_source": prof.effort_source,
+            "headless_effort_channel": prof.effort_channel,
         },
         "instructions": (
             "Run `scan-fanout` for a headless wave, or spawn one "
@@ -323,10 +470,14 @@ _FANOUT_SCHEMA = {
     "worker_model": "model tier used for the headless CLI",
     "concurrency": "max parallel headless CLI processes",
     "cli": "headless CLI used (claude|cursor)",
+    "source_text": "which languages the prepared bodies carry ('es'|'both'), echoed "
+    "from the manifest — fanout re-renders nothing, it ships what prepare wrote",
+    "effective": "what the wave ran as, with provenance per field — the same "
+    "block scan-prepare printed, re-resolved from the manifest",
     "warning": "optional non-fatal notice (e.g. Cursor paired with a Claude model alias)",
     "counts": "{wrote, failed, skipped, todo}",
     "usage": "what the wave consumed; per-job detail goes to "
-    ".harness/footnotes/usage.jsonl, never into this payload",
+    ".harness/footnotes/scan.usage.jsonl, never into this payload",
     "instructions": "next step (scan-commit, or re-fanout failed/missing)",
 }
 
@@ -364,20 +515,14 @@ def scan_fanout(
 
     ``runner`` is a test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
     """
+    import sys
+
     from src.harness import state as hstate
-    from src.harness.headless import (
-        default_worker_model,
-        run_headless_wave,
-        warn_cursor_claude_model,
-    )
-    from src.harness.profile import resolve_cli
+    from src.harness.headless import run_headless_wave
+    from src.harness.profile import resolve_profile
 
     project_dir = Path(project_dir)
     cfg = hstate.load_config(project_dir)
-    cli_name, _source = resolve_cli(cfg, override=cli)
-    extra_flags, resolved_effort, _effort_source = hstate.resolve_headless_argv(
-        cfg, command=COMMAND, effort_override=effort, cli=cli_name
-    )
     requested_cache = hstate.resolve_prompt_cache(cfg, cache_override=cache)
 
     manifest_path = _manifest_path(project_dir)
@@ -396,8 +541,48 @@ def scan_fanout(
         if missing:
             return _fanout_error(f"chapters not in manifest: {sorted(missing)}")
 
-    worker_model = doc.get("worker_model") or default_worker_model(cli_name)
-    model_warning = warn_cursor_claude_model(cli_name, worker_model)
+    # Reproduce the consented wave. The manifest is an explicit choice, not a
+    # guess, so its values are labelled `manifest` rather than `cli` — "a flag
+    # said so" and "the manifest we were consented to said so" must not print
+    # identically.
+    #
+    # A manifest that recorded `effort: null` means "emit no flag", which the
+    # resolver spells "default"; inheriting it as None would fall back through
+    # the config ladder and run at a level nobody approved. Only inherit while
+    # the CLI has not flipped, though — a level resolved for Claude is a
+    # Claude-table number, and carrying it onto Cursor would write an
+    # `[effort=…]` bracket onto a model that never had one.
+    inherited_effort, inherited_effort_source = effort, "cli"
+    if not effort and "effort" in doc and (cli or doc.get("cli")) == doc.get("cli"):
+        inherited_effort = doc["effort"] or "default"
+        inherited_effort_source = "manifest"
+
+    prof = resolve_profile(
+        project_dir,
+        command=COMMAND,
+        cli=cli or doc.get("cli"),
+        cli_source="cli" if cli else "manifest",
+        worker_model=doc.get("worker_model"),
+        worker_model_source="manifest",
+        effort=inherited_effort,
+        effort_source=inherited_effort_source,
+        cfg=cfg,
+        usage_log=_usage_log_path(project_dir),
+    )
+    cli_name = prof.cli
+    worker_model = prof.worker_model
+    resolved_effort = prof.effort
+    # Only the argv channel takes a `--effort` flag. On Cursor the level rides in
+    # the model's own `[effort=…]` bracket, and feeding it to the argv composer
+    # would put the flag on a CLI that has none.
+    extra_flags = hstate.compose_headless_argv(
+        cfg, resolved_effort if prof.effort_channel == "argv" else None
+    )
+    for warning in prof.warnings:
+        print(f"[scan-fanout] warning: {warning}", file=sys.stderr)
+    # One joined string, plus the list: callers and tests substring-match
+    # `warning` for a specific notice, which a bare list would break.
+    model_warning = "; ".join(prof.warnings) or None
 
     if concurrency is None:
         try:
@@ -489,10 +674,18 @@ def scan_fanout(
         "worker_model": worker_model,
         "cli": cli_name,
         "concurrency": concurrency,
+        # Echoed, never re-derived: the bodies on disk are what they are, and a
+        # payload that guessed the mode could contradict the file it is shipping.
+        "source_text": doc.get("source_text") or DEFAULT_SOURCE_TEXT,
+        # Every exit from here — launcher error, empty wave, completed wave — has
+        # to say what it ran (or would have run) as. A payload that omits it is
+        # how an operator ends up reading a Claude effort beside a Cursor wave.
+        "effective": prof.to_payload(),
         "_schema": _FANOUT_SCHEMA,
     }
     if model_warning:
         base["warning"] = model_warning
+        base["warnings"] = list(prof.warnings)
 
     if not ready:
         return {
@@ -525,7 +718,7 @@ def scan_fanout(
         cli=cli_name,
         cli_bin=cli_bin,
         runner=runner,
-        usage_log=footnotes_dir(project_dir) / "usage.jsonl",
+        usage_log=_usage_log_path(project_dir),
         extra_flags=extra_flags,
         effort=resolved_effort,
         cache=requested_cache,
@@ -622,7 +815,14 @@ def scan_commit(
     anchor — so it is reported as ``unusable`` and never offered as a choice. The
     alternative is spending research on a hallucinated span and discovering it at
     ``add`` time.
+
+    It is also where the English rejoins the work. Every usable candidate is
+    stamped with ``en_sentence`` from the alignment — unconditionally, whatever
+    the scanner was shown — which is what makes the default Spanish-only scan
+    safe: the claim is checked against the source at Gate 2, by a reader who can
+    act on the difference. See :func:`render_body`.
     """
+    from src.footnote_pass import ledger as fp_ledger
     from src.footnote_pass.report import write_candidate_report
 
     project_dir = Path(project_dir)
@@ -749,7 +949,22 @@ def scan_commit(
                     {**row, "reason": UNUSABLE_ALREADY, "detail": "this sentence already has a footnote"}
                 )
                 continue
-            usable.append({**row, "es_sentence": es_text, "en_sentence": en_map.get(es_idx, "")})
+            # The stable id for this candidate, so a decision row can join back
+            # to it exactly. `(chapter_id, es_idx)` alone is neither unique nor
+            # stable — see `ledger.candidate_key`.
+            usable.append(
+                {
+                    **row,
+                    "candidate_key": fp_ledger.candidate_key(
+                        chapter_id, es_idx, row["quoted_span"]
+                    ),
+                    "es_sentence": es_text,
+                    # Attached whatever the scanner read. Under the default
+                    # Spanish-only scan this is the *only* place the source
+                    # reaches the decision, so it is not conditional on anything.
+                    "en_sentence": en_map.get(es_idx, ""),
+                }
+            )
 
     by_chapter: dict[str, int] = {}
     by_category: dict[str, int] = {}
@@ -764,6 +979,7 @@ def scan_commit(
         "chapters": doc.get("chapters"),
         "worker_model": doc.get("worker_model"),
         "prompt_version": doc.get("prompt_version"),
+        "source_text": doc.get("source_text") or DEFAULT_SOURCE_TEXT,
         "candidates": usable,
         "unusable": unusable,
         "failed": failed,
@@ -774,6 +990,22 @@ def scan_commit(
         json.dumps(doc_out, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     report_path = write_candidate_report(project_dir, doc_out) if report else None
+
+    # One `proposed` ledger row per usable candidate, so the ledger can answer
+    # "what was proposed, and what became of it" on its own after the next
+    # commit has replaced `candidates.json`. Not governed by `--no-report`: that
+    # flag is about markdown, not about the record.
+    try:
+        stamp = fp_ledger.run_id()
+        fp_ledger.append_decisions(
+            project_dir,
+            [
+                fp_ledger.proposed_row(project_dir, row, doc_out, stamp=stamp)
+                for row in usable
+            ],
+        )
+    except OSError as exc:
+        logger.warning("footnote scan-commit: could not append to the ledger: %s", exc)
 
     return {
         "status": "ok",

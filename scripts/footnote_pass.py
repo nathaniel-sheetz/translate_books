@@ -175,10 +175,12 @@ def _parse_chapters(spec: Optional[str]) -> Optional[list[str]]:
 
 
 def _load_json_file(path_arg: str) -> list[dict[str, Any]]:
-    """Read ``--json-file`` into a list of note dicts.
+    """Read ``--json-file`` into a list of decision rows.
 
-    Accepts a bare list, or the ``{"notes": [...]}`` / ``{"approved": [...]}``
-    wrappers an agent is likely to write.
+    Accepts a bare list, or the ``{"notes": [...]}`` / ``{"approved": [...]}`` /
+    ``{"decisions": [...]}`` wrappers an agent is likely to write. A row with no
+    ``verdict`` is a keep, so every file written against the old
+    ``approved.json`` shape still works — see ``ledger.split_decisions``.
     """
     path = Path(path_arg)
     if not path.exists():
@@ -189,18 +191,21 @@ def _load_json_file(path_arg: str) -> list[dict[str, Any]]:
         _die(f"unreadable --json-file {path}: {exc}")
         raise AssertionError("unreachable")  # pragma: no cover
     if isinstance(doc, dict):
-        for key in ("notes", "approved", "candidates"):
+        for key in ("notes", "approved", "candidates", "decisions"):
             if isinstance(doc.get(key), list):
                 doc = doc[key]
                 break
     if not isinstance(doc, list):
         _die(
-            f"--json-file {path} must hold a list of notes (or a "
-            '{"notes": [...]} wrapper)'
+            f"--json-file {path} must hold a list of decisions (or a "
+            '{"decisions": [...]} wrapper)'
         )
     rows = [row for row in doc if isinstance(row, dict)]
     if not rows:
-        _die(f"--json-file {path} holds no note objects")
+        _die(
+            f"--json-file {path} holds no decision objects — each row needs at "
+            'least chapter_id and es_idx, plus note (a keep) or verdict/reason'
+        )
     return rows
 
 
@@ -224,6 +229,7 @@ def _cmd_scan_prepare(args: argparse.Namespace) -> int:
         worker_model=args.worker_model,
         batch_size=args.batch_size,
         keep_drafts=args.keep_drafts,
+        source_text=args.source_text,
     )
     _emit(out)
     return 0 if out.get("status") == "ok" else 1
@@ -284,7 +290,15 @@ def _cmd_add(args: argparse.Namespace) -> int:
                 "note": args.note,
             }
         ]
-    out = fp_write.add(project_dir, notes, dry_run=args.dry_run)
+    out = fp_write.add(
+        project_dir,
+        notes,
+        dry_run=args.dry_run,
+        report=not args.no_report,
+        # Only a decisions document can be *incomplete*; one note composed from
+        # flags has no candidate set to be measured against.
+        decided=bool(args.json_file),
+    )
     _emit(out, _ADD_SCHEMA)
     return 0 if out.get("status") == "ok" else 1
 
@@ -305,8 +319,18 @@ _ADD_SCHEMA = {
     "refused": "notes NOT written, each with the problems that blocked it",
     "warnings": "notes written despite a degraded anchor (anchor_not_found, "
     "ambiguous_anchor) — the note publishes, the marker may sit in the wrong place",
-    "counts": "{requested, added, planned, refused, warnings}",
+    "counts": "{requested, added, planned, refused, warnings, dropped, invalid, "
+    "undecided}",
+    "dropped": "rows marked verdict=drop — recorded with their reason, never validated",
+    "undecided": "candidates in candidates.json this run neither kept nor dropped. "
+    "A warning, not a refusal: record them as drops before the next `scan-commit` "
+    "replaces that file",
     "annotations_path": "the append-only file written to",
+    "ledger_path": ".harness/footnotes/decisions.jsonl — null on --dry-run, because "
+    "a proposal is not a decision",
+    "report_path": "the dated decision report. On --dry-run this IS the Gate 3 "
+    "review page: Read it and print the glosses, never summarise them into "
+    "AskUserQuestion labels",
     "instructions": "what to fix and what to run next",
 }
 
@@ -374,6 +398,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not clear existing drafts (use when recovering with work in flight)",
     )
+    p_prepare.add_argument(
+        "--source-text",
+        choices=list(fp_scan.SOURCE_TEXT_CHOICES),
+        default=fp_scan.DEFAULT_SOURCE_TEXT,
+        help="which languages the scanner reads. 'es' (default) shows it the "
+        "Spanish alone, the way the book's reader sees it; the English is attached "
+        "to every candidate at scan-commit and read at Gate 2 instead. 'both' puts "
+        "the EN line back in the prompt and roughly doubles the wave's input",
+    )
 
     p_fanout = sub.add_parser(
         "scan-fanout", help="run a headless claude/cursor wave (no API spend)"
@@ -428,13 +461,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument(
         "--json-file",
         default=None,
-        help="a list of {chapter_id, es_idx, anchor, note} — lands a whole approved "
-        "batch in one call, with a per-note result",
+        help="a list of {chapter_id, es_idx, anchor, note, verdict?, reason?, "
+        "stage?, sources?} — lands a whole approved batch in one call, with a "
+        "per-note result. verdict defaults to keep, so an old approved.json works",
     )
     p_add.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and print the resolved anchor + injection preview; write nothing",
+        help="validate and print the resolved anchor + injection preview; write "
+        "nothing to the book or the ledger. Still renders the decision report — "
+        "that file IS the Gate 3 review page",
+    )
+    p_add.add_argument(
+        "--no-report",
+        action="store_true",
+        help="skip the dated decision report; the ledger is still appended",
     )
 
     p_verify = sub.add_parser(

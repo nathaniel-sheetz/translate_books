@@ -74,11 +74,11 @@ python scripts/footnote_pass.py scan-fanout --project fabre2 \
 # 4. Parse drafts, validate every candidate, write candidates.json + the report.
 python scripts/footnote_pass.py scan-commit --project fabre2 [--no-report]
 
-# 5. The writer. One note inline, or a whole approved batch from a file.
+# 5. The writer. One note inline, or a whole decided batch from a file.
 python scripts/footnote_pass.py add --project fabre2 \
     --chapter chapter_04 --es-idx 40 --anchor "ubres," --note "Hoy sabemos que…" [--dry-run]
 python scripts/footnote_pass.py add --project fabre2 \
-    --json-file projects/fabre2/.harness/footnotes/approved.json
+    --json-file projects/fabre2/.harness/footnotes/decisions.json [--dry-run] [--no-report]
 
 # 6. Audit every active footnote against the whole validation table.
 python scripts/footnote_pass.py verify --project fabre2 [--chapters 1-20]
@@ -107,6 +107,32 @@ name instead, and `verify` applies the same table to notes already on disk:
 reports that one. Re-running the identical command is a `duplicate` refusal, not a
 second endnote.
 
+### `add` also writes the record of what you decided
+
+Every `add` appends one row per decision to
+`.harness/footnotes/decisions.jsonl` and renders a dated report under
+`reports/`. That is the only durable account of the editorial pass: `candidates.json`
+is **replaced wholesale** by the next `scan-commit`, and `annotations.jsonl` holds the
+notes that landed but nothing about the ones that did not.
+
+- **`--json-file` takes a decisions document**, a superset of the old
+  `approved.json`: `[{chapter_id, es_idx, anchor, note, verdict?, reason?, stage?,
+  sources?, candidate_key?}, …]`. **A row with no `verdict` is a keep**, so an old
+  approved file still works unchanged.
+- `verdict: "drop"` rows are recorded with their `reason` and `stage`
+  (`gate2` | `research` | `gate3`) and never reach the validator. That is how a
+  candidate you cut, or one you killed while researching, stops vanishing.
+- `candidate_key` comes off the candidate report. Copy it and the ledger joins back to
+  the exact claim; without it the join falls back to the sentence and reports itself as
+  a weaker match — two candidates on one sentence resolve to "unknown" rather than a
+  guess.
+- `--dry-run` renders the report and writes **nothing** — not the book, not the ledger.
+  A proposal is not a decision.
+- `--no-report` skips the markdown only; the ledger is still appended.
+- `counts.undecided` names candidates in chapters you touched that appear in neither a
+  keep nor a drop. It is a **warning, not a refusal** — but record them before the next
+  `scan-commit` erases `candidates.json`.
+
 **Run `verify` after any `harness.py align`.** `es_idx` is a position in the
 alignment, not an identity — re-aligning a chapter moves every note in it.
 
@@ -127,9 +153,16 @@ child env and refuses to start unless `claude auth status` confirms a subscripti
 A top-level `error` with empty `wrote`/`failed` means the wave never started — relay
 it verbatim; nothing was written, so re-running after `claude` + `/login` is safe.
 
-The scan wave runs at **medium** effort by default (`footnote_scan` in
-`src/harness/state.py:COMMAND_EFFORT_DEFAULTS`), so it does not inherit the CLI's
-high band. Override per book with
+**Effort: read it off `effective`, never off the table.** `footnote_scan` sits at
+medium in `src/harness/state.py:COMMAND_EFFORT_DEFAULTS`, and on **Claude** that is
+what an unpinned wave runs at — the flag is emitted, so it does not inherit the CLI's
+high band. On **Cursor there is no flag**: the level rides in the model's own
+`[effort=…]` bracket, and `resolve_profile` deliberately honours whatever you chose in
+Cursor's model picker rather than overwriting it with a table default you never saw. A
+Cursor wave therefore often runs at **high**, and saying "medium by default" about it
+is how the 2026-09-11 `fabre2` run sold a 23-minute high wave as a medium one.
+
+`scan-prepare` answers this once, in `effective`. Quote that. Override per book with
 `harness.py config-set --key headless_effort_footnote_scan`, or per run with
 `--effort`.
 
@@ -176,8 +209,15 @@ python scripts/footnote_pass.py scan-prepare --project fabre2 --chapters 1-20 \
 ```
 
 `--profile-file` is required, which is how G1 is enforced in code rather than by this
-paragraph. Relay `usage_summary` (chapters, sentences, worker_model, batch_size,
-headless_effort).
+paragraph. Relay the scope from `usage_summary` (chapters, sentences, batch_size) and
+what it will run as from `effective` — see the gate below.
+
+**The scanner reads the Spanish alone** (`--source-text es`, the default). The English
+is attached to every candidate at `scan-commit` and read at G2 instead — same split as
+the editorial judge's two passes. `--source-text both` puts the EN line back in the
+prompt and roughly doubles the wave's input; use it deliberately, and say which mode ran
+at the gate, because `usage_summary.source_text` is the only field that distinguishes
+the two candidate sets afterwards.
 
 **Re-`scan-prepare` is destructive** — it clears the drafts for the chapters it
 re-renders. Prepare the whole range once; pass `--keep-drafts` if you must re-prepare
@@ -188,6 +228,30 @@ with good drafts present.
 No dollars, but a wave consumes real session/rate usage. Get approval in a **separate
 turn** and ask which backend via `AskUserQuestion` unless already chosen.
 
+**Build the consent block from `effective`, and quote it verbatim.** `scan-prepare`
+resolved the whole wave once and reported it with the provenance of every field:
+
+- `cli` + `cli_source` — which launcher, and whether that came from a flag, the book's
+  `headless_cli` pin, or host detection
+- `worker_model` — **as prepare printed it**, bracket included
+- `effort` **and** `effort_channel` — `argv` means a `--effort` flag carries it,
+  `model_bracket` means the Cursor model string does, `none` means nothing does
+
+Those four are only interpretable together, which is why they are relayed as a block
+and not cherry-picked. Two rules, both learned the expensive way:
+
+- **Do not quote `usage_summary.headless_effort` on a Cursor wave** — use
+  `effective.effort`. (They are derived from the same profile now, so they agree; but
+  `effective` is the field that carries its own provenance.)
+- **Do not describe headless as "Claude"** when prepare already named a Cursor model.
+  "Headless" is a backend, not a vendor. On 2026-09-11 the gate offered
+  "headless — medium effort, Claude subscription" against a wave that ran Cursor /
+  `grok-4.6` at high for 23 minutes; the consent was for something that never ran.
+
+An honest line reads: *"Cursor, `grok-4.6[effort=high,fast=false]`, effort **high**
+(from your Cursor model picker; the command default is medium) — 20 chapters, ~23 min.
+Run it?"*
+
 #### 4a. Headless fan-out (default)
 
 ```bash
@@ -196,6 +260,13 @@ python scripts/footnote_pass.py scan-fanout --project fabre2
 
 On 529, re-run with a lower `--concurrency`. Cursor needs a Cursor model id
 (`grok-4.6`, `auto`); `--worker-model sonnet` with `--cli cursor` returns a warning.
+
+On **Cursor + Windows**, a job failing with
+`EPERM: operation not permitted, rename '…\.cursor\cli-config.json…'` is concurrent
+`cursor-agent` processes racing that one file, not a rate limit. Re-run just the failed
+ids at `--concurrency 1`:
+`scan-fanout --target-ids chapter_34 --concurrency 1`. Never re-`scan-prepare` to
+recover — that is destructive.
 
 #### 4b. Task workers
 
@@ -212,7 +283,9 @@ wave. On 529, step down `batch_size → 3 → 1`.
 python scripts/footnote_pass.py scan-commit --project fabre2
 ```
 
-`Read` `report_path` and relay it — the per-candidate text is there, not on stdout.
+`Read` `report_path` and relay it **in full** — the per-candidate text is there, not on
+stdout, and G2 below is a decision the user cannot make from counts. Each candidate
+carries a `candidate_key`; keep it, it is what joins a decision back to its claim.
 Re-run `scan-fanout --target-ids <ids>` for anything in `failed`/`missing`, cap at ~3
 attempts per chapter, then surface it.
 
@@ -220,13 +293,31 @@ Raise the `unusable` count explicitly, and `span_not_in_sentence` in particular:
 means a worker paraphrased instead of quoting, and if it is most of the list the
 profile or the model tier is wrong, not the book.
 
+**The report's `EN:` line is your job, not the scanner's.** Under the default scan the
+worker never saw the source, so a candidate's `claim` is what the *Spanish* asserts. The
+English is attached here from the alignment so the check happens once, at G2, in front
+of someone who can act on it: if the source does not support the claim, that is a cut
+with the reason "the English does not say this" — not a note, and not research to spend.
+
 An empty candidate list is a valid answer. Relay it as one.
 
 ### 6. STOP — G2: the shortlist gate
 
-Cut the list **before** research is spent on it. Present the candidates grouped by
-category with the claim and the sentence, and get an explicit pick. Research is the
-expensive step and it is all in your own context.
+Cut the list **before** research is spent on it. Research is the expensive step and it
+is all in your own context.
+
+**Print the candidates in the chat, then ask.** Grouped by chapter: `es_idx`,
+category, the claim, and the ES sentence. `report_path` is the source — relay it, do
+not compress it into options.
+
+`AskUserQuestion` is allowed **only as an id-picker once the content is already on
+screen.** It must never be the place the content lives: the widget truncates, and an
+option label cannot hold a sentence plus a claim. A picker whose labels *are* the
+evidence is asking the user to cut a list they have not read.
+
+Record the cut. Every candidate the user drops becomes a `verdict: "drop"` row with
+`stage: "gate2"` and their reason, in the decisions file you write at §8. Undecided
+candidates are lost when the next `scan-commit` replaces `candidates.json`.
 
 ### 7. Research and draft, inline
 
@@ -235,7 +326,11 @@ Per surviving candidate:
 1. `WebSearch` the specific claim; `WebFetch` a source to confirm it.
 2. **Kill anything that turns out pedantic, trivial, or already explained by the
    sentence.** A candidate that survives detection and dies here is the system
-   working, not a waste.
+   working, not a waste. But **a kill is reported at G3 with its reason, never
+   silently** — it goes into the decisions file as `stage: "research"`. A borderline
+   call goes on the list *flagged as borderline* rather than decided for the user: on
+   2026-09-11 the ch. 29 cobras note was killed as pedantic, and the operator restored
+   it as a sidenote the moment they saw it.
 3. **Only now load the drafting inputs**: the book's `style.json` and
    `glossary.json`, and the gloss-voice rules in `prompts/annotation_footnote.txt` —
    1–2 sentences, ~30 words, concrete, self-contained, no hedging, register matched
@@ -251,26 +346,57 @@ sentences for the book's reader, not a citation.
 
 ### 8. STOP — G3: the notes gate
 
-Present each drafted note with its finding, its sources, and the exact `--anchor`.
-Approve **individually** — `AskUserQuestion` in groups of ≤4; one call does not hold
-more. Anything going into a published book gets looked at by a human first.
+**The standing rule: anything going into a published book is read by a human in full
+before it is written. Never ask for approval of text that is not on screen.**
 
-Write the approved set to `.harness/footnotes/approved.json` as
-`[{chapter_id, es_idx, anchor, note}, ...]`.
+1. Write `.harness/footnotes/decisions.json` — every keep *and* every drop, with the
+   reasons from §6 and §7:
+
+   ```json
+   [
+     {"chapter_id": "chapter_22", "es_idx": 61, "anchor": "todos nuestros viñedos.",
+      "note": "Tío Paul no exageraba: …", "sources": ["https://…"],
+      "candidate_key": "chapter_22__61__7f3ab19c"},
+     {"chapter_id": "chapter_30", "es_idx": 12, "verdict": "drop", "stage": "research",
+      "reason": "the first-aid note later in the chapter already covers it"}
+   ]
+   ```
+
+2. `add --json-file … --dry-run`. It writes nothing and renders
+   `reports/footnote_decisions_<stamp>_proposal.md` — the review page, with each
+   gloss verbatim and the marker shown where it will actually fall
+   (`…ubres,‹N› sino del ano…`).
+
+3. **Print the notes in the chat**, from that file: the ES sentence, the marker
+   preview, the exact `--anchor`, the gloss **verbatim**, the finding, the sources.
+   Then the drops with their reasons, so a kill can be reversed.
+
+4. Ask for approval or edits **in the conversation**. An id-picker afterwards is
+   optional; `AskUserQuestion` whose labels *are* the notes is not. One call cannot
+   hold an 80-word Spanish sentence plus a two-sentence gloss — on 2026-09-11 the
+   operator cancelled exactly that dialogue with *"I need to see the full notes."*
+
+5. Apply their wording edits to `decisions.json` and re-run the dry run if the text
+   changed.
 
 ### 9. Write, verify, publish
 
 ```bash
-python scripts/footnote_pass.py add --project fabre2 --json-file <approved.json> --dry-run
-python scripts/footnote_pass.py add --project fabre2 --json-file <approved.json>
+python scripts/footnote_pass.py add --project fabre2 --json-file <decisions.json> --dry-run
+python scripts/footnote_pass.py add --project fabre2 --json-file <decisions.json>
 python scripts/footnote_pass.py verify --project fabre2
 python scripts/harness.py epub --project fabre2
 ```
 
-`--dry-run` first, always: it prints the resolved anchor and an injection preview
-(`…ubres,‹N› sino del ano…`) and writes nothing. Then report the endnote count delta —
-`Endnotes section appended (N notes)` must increase by exactly the number added.
-That log line is the only end-to-end proof the notes landed.
+`--dry-run` first, always — G3 already ran it, so this is the re-run after any wording
+edit. Then report the endnote count delta: `Endnotes section appended (N notes)` must
+increase by exactly the number added. That log line is the only end-to-end proof the
+notes landed.
+
+The live `add` returns `ledger_path` and `report_path`. Relay both — that report is
+the account of the pass that survives the next scan — and raise `counts.undecided` if
+it is nonzero: it is the last chance to record a candidate before `scan-commit`
+replaces `candidates.json`.
 
 ## Notes
 
@@ -288,7 +414,14 @@ That log line is the only end-to-end proof the notes landed.
   the text). Several `[brackets]` in one note are not.
 - `annotations.jsonl` is append-only. Nothing here ever rewrites a line, so every run
   is recoverable from the log, and a note the user later edits in the reader supersedes
-  rather than replaces.
+  rather than replaces. `decisions.jsonl` follows the same rule: a second decision on
+  one candidate appends and supersedes, so the refusal-then-fix sequence stays readable.
+- **`.harness/footnotes/` holds two waves.** `harness.py footnotes` (the Gutenberg
+  translation wave) owns `manifest.json` and `usage.jsonl` there; this one owns
+  `scan.manifest.json` and `scan.usage.jsonl`. Do not read the unprefixed pair
+  expecting a scan.
+- "Durable" means *survives the next `scan-commit`*, not *survives a re-clone* —
+  `projects/` is gitignored.
 - Reviewing notes a reader left is `.claude/skills/annotation-review/SKILL.md`.
   Engineering reference: `docs/FOOTNOTE_PASS.md`.
 

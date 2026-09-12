@@ -8,6 +8,7 @@ stdout is reconfigured to UTF-8 so a raya survives the console codepage.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -175,6 +176,9 @@ def test_add_exits_nonzero_on_a_partial_batch(project, tmp_path, capsys):
         "planned": 0,
         "refused": 1,
         "warnings": 0,
+        "dropped": 0,
+        "invalid": 0,
+        "undecided": 0,
     }
 
 
@@ -247,6 +251,49 @@ def test_scan_prepare_takes_a_chapter_range(project, profile_file, capsys):
     assert out["chapters"] == ["chapter_02"]
 
 
+def test_scan_prepare_defaults_to_the_spanish_only_scan(project, profile_file, capsys):
+    code, out = _run(
+        capsys,
+        ["scan-prepare", "--project", str(project), "--profile-file", str(profile_file)],
+    )
+    assert code == 0
+    assert out["source_text"] == "es"
+
+
+def test_scan_prepare_passes_source_text_through(project, profile_file, capsys):
+    code, out = _run(
+        capsys,
+        [
+            "scan-prepare",
+            "--project",
+            str(project),
+            "--profile-file",
+            str(profile_file),
+            "--source-text",
+            "both",
+        ],
+    )
+    assert code == 0
+    assert out["source_text"] == "both"
+
+
+def test_scan_prepare_rejects_an_unknown_source_text(project, profile_file):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "scan-prepare",
+                "--project",
+                str(project),
+                "--profile-file",
+                str(profile_file),
+                "--source-text",
+                "english",
+            ]
+        )
+    # argparse `choices`, so this never reaches scan_prepare's own guard.
+    assert exc.value.code == 2
+
+
 # --- parser surface -------------------------------------------------------
 
 def test_every_subcommand_is_dispatchable():
@@ -259,3 +306,70 @@ def test_no_subcommand_is_an_argparse_error():
     with pytest.raises(SystemExit) as exc:
         cli.main([])
     assert exc.value.code == 2
+
+
+# --- the decisions document ------------------------------------------------
+
+
+def test_add_json_file_accepts_a_decisions_wrapper(project, tmp_path, capsys):
+    path = tmp_path / "decisions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "decisions": [
+                    {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+                     "note": "Del ano.", "verdict": "keep"},
+                    {"chapter_id": "chapter_01", "es_idx": 2, "verdict": "drop",
+                     "stage": "gate2", "reason": "the sentence already says it"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    code, out = _run(capsys, ["add", "--project", str(project), "--json-file", str(path)])
+    assert code == 0
+    assert out["counts"]["added"] == 1
+    assert out["counts"]["dropped"] == 1
+    assert out["ledger_path"].endswith("decisions.jsonl")
+    assert Path(out["report_path"]).exists()
+
+
+def test_add_dry_run_writes_the_review_page_and_no_ledger(project, tmp_path, capsys):
+    """The Gate 3 contract: the gloss and the marker are in a file, in full."""
+    path = tmp_path / "decisions.json"
+    gloss = "La gota sale del ano, no de los cuernitos."
+    path.write_text(
+        json.dumps([{"chapter_id": "chapter_01", "es_idx": 1,
+                     "anchor": "cuernitos", "note": gloss}]),
+        encoding="utf-8",
+    )
+    code, out = _run(
+        capsys,
+        ["add", "--project", str(project), "--json-file", str(path), "--dry-run"],
+    )
+    assert code == 0
+    assert out["ledger_path"] is None
+    text = Path(out["report_path"]).read_text(encoding="utf-8")
+    assert gloss in text and "‹N›" in text
+    assert not (project / "annotations.jsonl").exists()
+    assert not (project / ".harness" / "footnotes" / "decisions.jsonl").exists()
+
+
+def test_add_no_report_skips_the_markdown_but_still_appends_the_ledger(
+    project, tmp_path, capsys
+):
+    """--no-report is about markdown, not about the record."""
+    path = tmp_path / "decisions.json"
+    path.write_text(
+        json.dumps([{"chapter_id": "chapter_01", "es_idx": 1,
+                     "anchor": "cuernitos", "note": "Del ano."}]),
+        encoding="utf-8",
+    )
+    code, out = _run(
+        capsys,
+        ["add", "--project", str(project), "--json-file", str(path), "--no-report"],
+    )
+    assert code == 0
+    assert out["report_path"] is None
+    assert not list((project / "reports").glob("footnote_decisions_*.md"))
+    assert out["ledger_path"] and Path(out["ledger_path"]).exists()

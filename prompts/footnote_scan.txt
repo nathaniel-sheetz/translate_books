@@ -1,12 +1,16 @@
 # footnote-pass — chapter scan (DETECTION ONLY)
-# Version: 1.0
+# Version: 1.1
 # Finds sentences in one chapter that deserve an editorial footnote, per an
 # approved profile. It does NOT write glosses — a sibling of
 # prompts/annotation_footnote.txt, not a variant of it: that one drafts published
 # prose, this one only points.
-# Preamble variables: profile.
-# Body: the chapter's alignment rows as numbered es_idx | ES | EN pairs, rendered
-# by src/footnote_pass/scan.py:render_body.
+# Preamble variables: profile, source_rule.
+# Body: the chapter's alignment rows as numbered es_idx | ES rows — Spanish only
+# by default, es_idx | ES | EN under `scan-prepare --source-text both`. Rendered
+# by src/footnote_pass/scan.py:render_body, which supplies the matching
+# source_rule. The English is withheld by default on purpose, the same way
+# src/judges/editorial_judge.py withholds it from the editorial judge's first
+# pass; it rejoins the candidate at review time.
 
 You are scanning one chapter of a translated book for places that deserve an
 **editorial footnote** — a short note in the book's back matter that tells the
@@ -67,8 +71,7 @@ One JSON object per spot, with exactly these fields:
   honeydew comes from the cornicles." Not "this might be wrong".
 - `why` — one line in English on why a note here helps *this book's reader*.
 
-Judge the claim against the **EN** line as well as the ES. Most candidates are of
-the form "the author asserts X", and what the author asserted is in the source.
+{{source_rule}}
 
 ## Output
 

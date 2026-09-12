@@ -39,6 +39,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Optional
 
 from src.annotations import store
@@ -156,14 +157,17 @@ def validate_proposal(
     note: str,
     es_map: Optional[dict[int, str]] = None,
     body: Optional[str] = None,
-    existing: Optional[set[tuple[str, Optional[int], str]]] = None,
+    existing: Optional[Mapping[tuple[str, Optional[int], str], Optional[str]]] = None,
 ) -> Proposal:
     """Validate one proposed footnote against every silent-failure mode.
 
     ``es_map`` / ``body`` are caches so a batch does not re-read one chapter's
-    alignment and text per note. ``existing`` is ``{(chapter_id, es_idx, content)}``
-    of live notes, used for the idempotency check — re-running ``add`` with
-    identical arguments must be a no-op, not a second endnote.
+    alignment and text per note. ``existing`` maps
+    ``(chapter_id, es_idx, content)`` of every live note to its ``sub_id``, and
+    drives the idempotency check — re-running ``add`` with identical arguments
+    must be a no-op, not a second endnote. Only membership is tested here, so a
+    bare set still works; the ``sub_id`` is what lets ``add`` report *which*
+    existing note a duplicate collided with.
     """
     project_dir = Path(project_dir)
     problems: list[Problem] = []
@@ -300,10 +304,16 @@ def validate_proposal(
     )
 
 
-def _live_contents(project_dir: Path) -> set[tuple[str, Optional[int], str]]:
-    """``{(chapter_id, es_idx, content)}`` for every active footnote."""
+def _live_contents(project_dir: Path) -> dict[tuple[str, Optional[int], str], Optional[str]]:
+    """``{(chapter_id, es_idx, content): sub_id}`` for every active footnote.
+
+    A dict rather than a set so a ``duplicate`` refusal can name the note it
+    collided with. A duplicate is not work destroyed — the gloss *is* on the book,
+    under an earlier ``sub_id`` — and a ledger row that says "refused" without
+    saying that reads as a loss.
+    """
     return {
-        (r.get("chapter_id") or "", r.get("es_idx"), r.get("content") or "")
+        (r.get("chapter_id") or "", r.get("es_idx"), r.get("content") or ""): r.get("sub_id")
         for r in store.load_active(project_dir, types=(FOOTNOTE_TYPE,))
     }
 
@@ -334,20 +344,37 @@ def add(
     notes: list[dict[str, Any]],
     *,
     dry_run: bool = False,
+    report: bool = True,
+    decided: bool = False,
 ) -> dict[str, Any]:
-    """Validate and append footnote records.
+    """Validate and append footnote records, and record the decisions.
 
-    ``notes`` is ``[{chapter_id, es_idx, anchor?, note}, ...]`` — one entry from
+    ``notes`` is the decisions document: ``[{chapter_id, es_idx, anchor?, note,
+    verdict?, reason?, stage?, sources?}, ...]`` — one entry from
     ``--chapter/--es-idx/--anchor/--note``, or the whole approved batch from
-    ``--json-file``. Every entry is validated independently and reported
-    independently: a batch with one bad anchor lands the rest rather than
-    refusing as a unit, which is what makes re-running it after a fix cheap.
+    ``--json-file``. **A row with no ``verdict`` is a keep**, which is exactly the
+    shape ``approved.json`` has always had, so every existing batch file keeps
+    working. Rows marked ``drop`` are recorded and never reach the validator.
+
+    Every keep is validated independently and reported independently: a batch
+    with one bad anchor lands the rest rather than refusing as a unit, which is
+    what makes re-running it after a fix cheap.
 
     Writes go through ``store.append_record`` — never a hand-rolled
     ``open(..., "a")``; that module is the single writer, and keeping the file
     append-only is what makes every run recoverable.
+
+    ``decided`` says the caller passed a decisions document rather than composing
+    one note from flags. Only then is it meaningful to report candidates that
+    were neither kept nor dropped — an inline ``add`` has no decision set to be
+    complete against.
     """
+    from src.footnote_pass import ledger as fp_ledger
+    from src.footnote_pass.report import write_decision_report
+
     project_dir = Path(project_dir)
+    stamp = fp_ledger.run_id()
+    keeps, drops, invalid = fp_ledger.split_decisions(notes)
     existing = _live_contents(project_dir)
     es_maps: dict[str, dict[int, str]] = {}
     bodies: dict[str, Optional[str]] = {}
@@ -357,7 +384,7 @@ def add(
     planned: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
-    for raw in notes:
+    for raw in keeps:
         chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
         if chapter_id not in es_maps:
             es_maps[chapter_id] = load_alignment_es_map(project_dir, chapter_id)
@@ -379,6 +406,7 @@ def add(
             "es_idx": proposal.es_idx,
             "anchor": proposal.anchor,
             "content": proposal.content,
+            "es_text": proposal.es_text,
             "problems": [p.as_dict() for p in proposal.problems],
             "injection_preview": proposal.injection_preview,
         }
@@ -386,6 +414,13 @@ def add(
             row["suggested_anchor"] = proposal.suggested_anchor
 
         if proposal.blocked:
+            # A duplicate is the one refusal that is not a loss: the gloss is on
+            # the book already. Name the note it collided with, so the ledger and
+            # the report can say so rather than reporting destroyed work.
+            if any(p.code == DUPLICATE for p in proposal.problems):
+                row["existing_sub_id"] = existing.get(
+                    (proposal.chapter_id, proposal.es_idx, proposal.content)
+                )
             refused.append(row)
             continue
         if proposal.problems:
@@ -408,10 +443,12 @@ def add(
         store.append_record(project_dir, record)
         # Keep the in-run dedupe honest: two identical entries in one --json-file
         # must not both land.
-        existing.add((proposal.chapter_id, proposal.es_idx, proposal.content))
+        existing[(proposal.chapter_id, proposal.es_idx, proposal.content)] = record[
+            "sub_id"
+        ]
         added.append({**row, "sub_id": record["sub_id"]})
 
-    return {
+    payload = {
         "status": "ok" if not refused else "partial",
         "dry_run": dry_run,
         "added": added,
@@ -419,11 +456,14 @@ def add(
         "refused": refused,
         "warnings": warnings,
         "counts": {
-            "requested": len(notes),
+            "requested": len(keeps),
             "added": len(added),
             "planned": len(planned),
             "refused": len(refused),
             "warnings": len(warnings),
+            "dropped": len(drops),
+            "invalid": len(invalid),
+            "undecided": 0,
         },
         "annotations_path": str(store.annotations_path(project_dir)),
         "instructions": (
@@ -438,6 +478,62 @@ def add(
             "--project <id>` — an added note only reaches the book on the next build."
         ),
     }
+
+    # ── the decision record ─────────────────────────────────────────────────
+    # After the loop, because no `sub_id` exists until the records are appended,
+    # and once per invocation, because a per-note append leaves a partial ledger
+    # behind a mid-batch crash. `annotations.jsonl` stays the recovery source of
+    # truth; this is a join document, not a write log.
+    #
+    # Best-effort, and reported rather than raised: a footnote that landed must
+    # never come back as a failure because a markdown file could not be written.
+    try:
+        doc = fp_ledger.build_run_doc(
+            project_dir,
+            stamp=stamp,
+            dry_run=dry_run,
+            result=payload,
+            keeps=keeps,
+            drops=drops,
+            invalid=invalid,
+            candidates=fp_ledger.load_candidates(project_dir),
+            decided=decided,
+        )
+        payload["counts"]["undecided"] = doc["counts"]["undecided"]
+        payload["undecided"] = doc["undecided"]
+        payload["dropped"] = [
+            r for r in doc["rows"] if r["verdict"] == fp_ledger.VERDICT_DROP
+        ]
+        payload["invalid"] = [
+            r for r in doc["rows"] if r["verdict"] == fp_ledger.VERDICT_INVALID
+        ]
+        # A dry run is a proposal, not a decision. Appending it would make "what
+        # we considered" indistinguishable from "what was chosen", which is the
+        # confusion this ledger exists to end — and the pre-edit gloss is not
+        # lost, because the dated *proposal* report holds it verbatim.
+        payload["ledger_path"] = (
+            None if dry_run else str(fp_ledger.append_decisions(project_dir, doc["rows"]))
+        )
+        payload["report_path"] = (
+            str(write_decision_report(project_dir, doc)) if report else None
+        )
+    except OSError as exc:
+        payload["ledger_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        payload.setdefault("ledger_path", None)
+        payload.setdefault("report_path", None)
+
+    if invalid:
+        # A malformed instruction is a real error and should exit nonzero. An
+        # *omission* is not — see the undecided note below.
+        payload["status"] = "partial"
+    if payload["counts"]["undecided"]:
+        payload["instructions"] = (
+            f"{payload['counts']['undecided']} candidate(s) from candidates.json "
+            "appear in neither a keep nor a drop. Record them with "
+            '`"verdict": "drop"` and a reason, or they are lost when the next '
+            "`scan-commit` replaces that file. " + payload["instructions"]
+        )
+    return payload
 
 
 def verify(

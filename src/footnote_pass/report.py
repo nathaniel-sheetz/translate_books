@@ -10,6 +10,12 @@ published is drafted later, in the conversation, and never appears here.
 The report carries what the shortlist gate (G2) needs to cut on — the category, the
 claim, the sentence, and the English source beside it — and the ``unusable`` section,
 which is the honest accounting of what the wave proposed that could not be anchored.
+
+The English is the part to understand. By default the scanner never saw it
+(``scan.render_body``); ``scan_commit`` attaches it from the alignment afterwards.
+So this page is not a transcript of what the worker read — it is the first place
+the claim and the source appear together, which is why the header says which mode
+the scan ran in and the preamble says what to do about it.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ def render_candidate_report(doc: dict[str, Any]) -> str:
     candidates: list[dict] = doc.get("candidates") or []
     unusable: list[dict] = doc.get("unusable") or []
     chapters = doc.get("chapters") or []
+    spanish_only = (doc.get("source_text") or "es") != "both"
 
     by_category: dict[str, int] = {}
     by_chapter: dict[str, list[dict]] = {}
@@ -60,6 +67,8 @@ def render_candidate_report(doc: dict[str, Any]) -> str:
         f"- **Chapters scanned:** {len(chapters)}"
         + (f" ({chapters[0]} … {chapters[-1]})" if chapters else ""),
         f"- **Worker model:** {doc.get('worker_model')}",
+        f"- **Scan read:** "
+        + ("the Spanish alone" if spanish_only else "the Spanish and the English"),
         f"- **Usable candidates:** {len(candidates)}",
         f"- **Unusable (refused before you saw them):** {len(unusable)}",
         "",
@@ -68,6 +77,14 @@ def render_candidate_report(doc: dict[str, Any]) -> str:
         "then research what survives.",
         "",
     ]
+    if spanish_only:
+        lines += [
+            "The scanner read the Spanish alone, so it could not check what the author",
+            "actually asserted. The **EN** line under each candidate is attached here",
+            "from the alignment — that check belongs to you, before the research is",
+            "spent. A claim the source does not support is a cut, not a note.",
+            "",
+        ]
 
     if by_category:
         lines += ["## By category", "", "| Category | Candidates |", "|---|---|"]
@@ -89,6 +106,10 @@ def render_candidate_report(doc: dict[str, Any]) -> str:
                 f"#### es_idx {row.get('es_idx')} — {row.get('category')}",
                 "",
                 f"- **Span:** `{row.get('quoted_span')}`",
+                # Copy this into the decisions file: it is what makes the ledger
+                # join back to this exact candidate rather than guess from the
+                # sentence, which two candidates can share.
+                f"- **Candidate key:** `{row.get('candidate_key')}`",
                 f"- **Claim to check:** {row.get('claim')}",
                 f"- **Why:** {row.get('why')}",
                 f"- **ES:** {row.get('es_sentence')}",
@@ -127,4 +148,231 @@ def render_candidate_report(doc: dict[str, Any]) -> str:
             lines.append(f"- `{chapter_id}` — no draft on disk; re-run the wave")
         lines.append("")
 
+    return "\n".join(lines)
+
+
+# ── the decision report ─────────────────────────────────────────────────────
+# The candidate report above is the Gate 2 page: pointers, before research. This
+# one is the Gate 3 page and the record of what landed — the published gloss,
+# verbatim, with the marker shown where it will actually fall.
+#
+# The 2026-09-11 fabre2 run is why it exists. Gate 3 was run through
+# `AskUserQuestion` option labels, which cannot hold an 80-word Spanish sentence
+# plus a two-sentence gloss, so the operator was asked to approve copy they had
+# not seen and cancelled the dialogue. A markdown file can hold it; a picker
+# cannot.
+
+_OUTCOME_LABELS = {
+    "added": "written",
+    "planned": "planned (nothing written)",
+    "refused": "REFUSED — not on disk",
+    "duplicate": "already on the book",
+    "dropped": "dropped",
+    "omitted": "not decided",
+    "invalid": "malformed decision row",
+}
+
+_PROBLEM_LABELS = {
+    "no_aligned_sentence": "no alignment row carries that es_idx",
+    "sentence_not_in_body": "the aligned sentence is not in chapters/<id>.txt",
+    "empty_gloss": "nothing left once the [bracket] is stripped — publishes silently",
+    "multi_anchor": "more than one bracket; the extras publish verbatim",
+    "no_chapter_body": "no chapters/<id>.txt",
+    "duplicate": "an active note on this sentence already holds this text",
+    "anchor_not_found": "the marker falls to the end of the sentence",
+    "ambiguous_anchor": "the anchor recurs; the marker takes the first hit",
+    "sentence_drifted": "es_idx now names a different sentence",
+}
+
+
+def _fence(text: str) -> str:
+    """Quote a gloss as a fenced block so brackets and rayas survive markdown.
+
+    Same helper and same reason as ``src/annotations/report.py:_fence``: the whole
+    point of this page is that the text is verbatim. Copied rather than imported —
+    ``footnote_pass`` depends on ``src.annotations`` for data (``store``), not for
+    presentation.
+    """
+    body = text or ""
+    fence = "```"
+    while fence in body:
+        fence += "`"
+    return f"{fence}\n{body}\n{fence}"
+
+
+def _decision_report_filename(stamp: str, *, dry_run: bool) -> str:
+    """``footnote_decisions_<stamp>[_proposal].md``.
+
+    Two names, so a proposal can never be mistaken for a record of what landed by
+    someone scrolling ``reports/``. Shared ``footnote_`` prefix so both sort beside
+    ``footnote_candidates_<stamp>.md``.
+    """
+    suffix = "_proposal" if dry_run else ""
+    return f"footnote_decisions_{stamp}{suffix}.md"
+
+
+def write_decision_report(project_dir: Path, doc: dict[str, Any]) -> Path:
+    """Write the run's decision report and return its path."""
+    project_dir = Path(project_dir)
+    reports_dir = project_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / _decision_report_filename(
+        doc.get("run_id") or "", dry_run=bool(doc.get("dry_run"))
+    )
+    path.write_text(render_decision_report(doc), encoding="utf-8")
+    return path
+
+
+def _problem_lines(row: dict[str, Any]) -> list[str]:
+    lines = []
+    for problem in row.get("problems") or []:
+        code = problem.get("code") or "?"
+        label = _PROBLEM_LABELS.get(code, code)
+        kind = "warning" if problem.get("warning") else "refused"
+        lines.append(f"- **{code}** ({kind}) — {label}")
+        detail = (problem.get("detail") or "").strip()
+        if detail:
+            lines.append(f"  - {detail}")
+    if row.get("suggested_anchor"):
+        lines.append(f"- **Try this anchor instead:** `{row['suggested_anchor']}`")
+    return lines
+
+
+def render_decision_report(doc: dict[str, Any]) -> str:
+    """One renderer for both states, branching on ``dry_run``.
+
+    Deliberately one function: the page the operator approved and the page that
+    records what landed must not drift apart in layout, for the same reason
+    ``_preview`` is computed through ``endnotes._injection_point`` itself.
+    """
+    dry_run = bool(doc.get("dry_run"))
+    rows = doc.get("rows") or []
+    counts = doc.get("counts") or {}
+    keeps = [r for r in rows if r.get("verdict") == "keep"]
+    drops = [r for r in rows if r.get("verdict") == "drop"]
+    invalid = [r for r in rows if r.get("verdict") == "invalid"]
+    undecided = [r for r in rows if r.get("verdict") == "undecided"]
+
+    title = "Footnote decisions — proposed" if dry_run else "Footnote decisions"
+    lines = [
+        f"# {title}",
+        "",
+        f"- **Project:** {doc.get('project')}",
+        f"- **Run:** `{doc.get('run_id')}` · {doc.get('written_at')}",
+        f"- **Kept:** {len(keeps)} · **Dropped:** {counts.get('dropped', 0)} · "
+        f"**Not decided:** {counts.get('undecided', 0)}",
+    ]
+    if doc.get("worker_model"):
+        lines.append(
+            f"- **Candidates proposed by:** {doc.get('worker_model')} "
+            f"(committed {doc.get('candidates_committed_at')})"
+        )
+    lines.append("")
+    if dry_run:
+        lines += [
+            "> **`--dry-run`. Nothing is on disk.** This is the review page: every",
+            "> gloss below is printed in full, with the marker shown where it will",
+            "> actually fall. Read the text itself before approving it — that is the",
+            "> whole reason this file exists rather than a picker.",
+            "",
+        ]
+
+    lines += ["## Notes", ""]
+    if not keeps:
+        lines += ["_No notes in this run._", ""]
+    for row in keeps:
+        outcome = _OUTCOME_LABELS.get(row.get("outcome"), row.get("outcome") or "?")
+        heading = f"### {row.get('chapter_id')} · es_idx {row.get('es_idx')} — {outcome}"
+        if row.get("sub_id"):
+            heading += f" (`{row['sub_id']}`)"
+        lines += [heading, ""]
+        candidate = row.get("candidate") or {}
+        if candidate.get("category"):
+            lines.append(f"- **Category:** {candidate['category']}")
+        if candidate.get("claim"):
+            lines.append(f"- **Claim checked:** {candidate['claim']}")
+        if row.get("anchor"):
+            lines.append(f"- **Anchor:** `{row['anchor']}`")
+        if row.get("join") and row.get("join") != "none":
+            lines.append(
+                f"- **Candidate:** `{row.get('candidate_key')}` ({row['join']} match)"
+            )
+        for source in row.get("sources") or []:
+            lines.append(f"- **Source:** {source}")
+        if row.get("existing_sub_id"):
+            lines.append(f"- **Already on the book as:** `{row['existing_sub_id']}`")
+        lines.append("")
+        if row.get("es_text"):
+            lines += ["**Sentence:**", "", _fence(row["es_text"]), ""]
+        preview = row.get("injection_preview") or ""
+        if preview:
+            lines += ["**Marker lands here:**", "", _fence(preview), ""]
+        lines += ["**Note:**", "", _fence(row.get("content") or ""), ""]
+        problems = _problem_lines(row)
+        if problems:
+            lines += problems + [""]
+
+    lines += ["## Dropped", ""]
+    if not drops:
+        lines += ["_Nothing was dropped in this run._", ""]
+    else:
+        lines += [
+            "Decided against, and recorded so the next run does not re-propose them",
+            "blind.",
+            "",
+            "| Chapter | es_idx | Stage | Reason |",
+            "|---|---|---|---|",
+        ]
+        for row in drops:
+            reason = (row.get("reason") or "—").replace("|", "\\|")
+            lines.append(
+                f"| {row.get('chapter_id')} | {row.get('es_idx')} | "
+                f"{row.get('stage')} | {reason} |"
+            )
+        lines.append("")
+
+    if undecided:
+        lines += [
+            "## Not decided",
+            "",
+            "Candidates from `candidates.json` in chapters this run touched that appear",
+            "in neither a keep nor a drop. **`scan-commit` replaces that file**, so",
+            "anything left here is lost on the next scan — record it as a drop with a",
+            "reason.",
+            "",
+            "| Chapter | es_idx | Claim |",
+            "|---|---|---|",
+        ]
+        for row in undecided:
+            candidate = row.get("candidate") or {}
+            claim = (candidate.get("claim") or "—").replace("|", "\\|")
+            lines.append(f"| {row.get('chapter_id')} | {row.get('es_idx')} | {claim} |")
+        lines.append("")
+
+    if invalid:
+        lines += ["## Malformed decision rows", ""]
+        for row in invalid:
+            lines.append(
+                f"- `{row.get('chapter_id')}` es_idx {row.get('es_idx')} — "
+                f"{row.get('problem')}"
+            )
+        lines.append("")
+
+    if dry_run:
+        lines += [
+            "---",
+            "",
+            "Nothing was written. Re-run `add` without `--dry-run` to land these.",
+            "",
+        ]
+    else:
+        lines += [
+            "---",
+            "",
+            f"Appended to `{doc.get('annotations_path')}`. Run `verify`, then",
+            "`python scripts/harness.py epub --project <id>` — the log line",
+            "`Endnotes section appended (N notes)` must rise by exactly the number",
+            "written above. That line is the only end-to-end proof.",
+            "",
+        ]
     return "\n".join(lines)

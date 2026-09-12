@@ -24,7 +24,7 @@ python scripts/footnote_pass.py style --project fabre2 [--chapters 1-20]
 # Render one scan prompt per chapter (no spend). --profile-file is required.
 python scripts/footnote_pass.py scan-prepare --project fabre2 [--chapters 1-20] \
     --profile-file projects/fabre2/.harness/footnotes/profile.md \
-    [--worker-model sonnet] [--batch-size 5] [--keep-drafts]
+    [--worker-model sonnet] [--batch-size 5] [--keep-drafts] [--source-text es|both]
 
 # Then EITHER a headless wave …
 python scripts/footnote_pass.py scan-fanout --project fabre2 \
@@ -35,10 +35,10 @@ python scripts/footnote_pass.py scan-fanout --project fabre2 \
 # Parse drafts, validate candidates, write candidates.json + the dated report.
 python scripts/footnote_pass.py scan-commit --project fabre2 [--no-report]
 
-# The writer.
+# The writer. --json-file takes the decisions document (keeps AND drops).
 python scripts/footnote_pass.py add --project fabre2 \
     --chapter chapter_04 --es-idx 40 --anchor "ubres," --note "Hoy sabemos que…" [--dry-run]
-python scripts/footnote_pass.py add --project fabre2 --json-file <approved.json> [--dry-run]
+python scripts/footnote_pass.py add --project fabre2 --json-file <decisions.json> [--dry-run] [--no-report]
 
 # Audit every active footnote against the whole table.
 python scripts/footnote_pass.py verify --project fabre2 [--chapters 1-20]
@@ -154,13 +154,43 @@ That is a cost detail, not a correctness one, and the body dominates the job eit
 matter, measure it from `usage.jsonl`'s `cache_read` column and fix it in the template,
 not by padding the profile.
 
-### The body carries both languages
+### The scan reads the Spanish alone
 
-`scan.render_body` emits numbered `es_idx | ES | EN` rows. The English side is
-load-bearing: most candidates are of the form "the author asserts X", and X is judged
-against the source, not the translation. Sentences that already carry a footnote are
-marked `[ALREADY NOTED]` inline, which is cheaper than a cross-referenced exclusion list
-— and `scan-commit` rejects a re-proposal anyway.
+`scan.render_body` emits numbered `es_idx | ES` rows. No English, by default.
+
+This is the shape `src/judges/editorial_judge.py` already uses, for the reason
+`docs/EDITORIAL_JUDGE.md` ("Why pass one is blind to the English") gives: *a reader who
+can see the original stops evaluating the Spanish as Spanish and starts diffing it
+against the source.* It applies here with one extra argument of its own — a footnote is
+written for someone holding the translation and nothing else, so the pass deciding
+whether a sentence needs one should be reading what that reader reads.
+
+**The English is moved, not dropped.** `scan_commit` stamps `en_sentence` onto every
+usable candidate from the alignment, unconditionally, and `report.py` prints it under
+each one. So the source rejoins the claim at Gate 2 — in front of a human and an agent
+who can act on the difference, rather than a detector that can only avoid proposing.
+That is the `editorial_verify` division of labour, and it is deliberately *not* gated on
+a per-candidate `source_check` field the way that module's is: the
+`.claude/skill-friction-logs/judge-review/2026-08-27-five-little-peppers-editorial-ch12-16-claude-switch.md`
+run recorded `source_requested: 0` on a set where four of five findings turned on the
+English, and pass two confirmed everything. Attaching it to all of them costs nothing
+here, because it is already on the row.
+
+`scan-prepare --source-text both` restores the EN line and the old instruction with it
+(one `{{source_rule}}` variable above the cache split selects the paragraph, so a
+bilingual body can never be served under a preamble that says the English is not in
+front of you). Make it a real choice: measured across the 40 prepared `fabre2` bodies
+the EN lines are **48.1%** of the body against the ES lines' 48.8% — EN/ES = 0.98, so
+carrying the source very nearly doubles the wave's input.
+
+`prompt_version` hashes the template, which both modes share, so it cannot tell them
+apart. `source_text` is recorded on the manifest, in `scan-prepare`'s payload and
+`usage_summary`, echoed by `scan-fanout`, and carried into `candidates.json` — that
+field is the only thing that says which prompt a candidate set came from.
+
+Sentences that already carry a footnote are marked `[ALREADY NOTED]` inline, which is
+cheaper than a cross-referenced exclusion list — and `scan-commit` rejects a
+re-proposal anyway.
 
 ### Candidates are validated before anyone sees them
 
@@ -173,13 +203,30 @@ mostly that indicates the wrong model tier rather than a problem in the book.
 ## Effort
 
 The scan registers as its own wave type, `footnote_scan`, in
-`src/harness/state.py:COMMAND_EFFORT_DEFAULTS` at **medium** — so an unpinned wave does
-not inherit the Claude CLI's high band. That also gives `headless_effort_footnote_scan`
-through `harness.py config-set` for free, and `--effort` overrides per run.
+`src/harness/state.py:COMMAND_EFFORT_DEFAULTS` at **medium**, and
+`headless_effort_footnote_scan` comes with it through `harness.py config-set`.
+`--effort` overrides per run.
 
 The band is a measurement, not a preference. Medium here is named by analogy with the
 judge waves (detection against a fixed rubric, where medium measured out at no quality
 loss) rather than from its own sweep. Re-measure and move the row, with a comment.
+
+**The table binds on Claude. On Cursor it usually does not**, and saying otherwise is
+what the 2026-09-11 `fabre2` friction log is about. Claude takes the level as a
+`--effort` flag, so withholding the CLI's high band is a thing this table can do. Cursor
+has no flag: the level rides in the model's own `[effort=…]` bracket, and
+`profile.resolve_profile` (`src/harness/profile.py:318-323`) deliberately honours
+whatever the operator already selected in Cursor's model picker rather than rewriting
+argv they never asked to change. A Cursor scan therefore commonly runs at **high**.
+
+That is a reporting problem, not a correctness one, and it is solved by reporting:
+`scan-prepare` and `scan-fanout` both resolve through `resolve_profile` and emit one
+`effective` block — `cli`, `worker_model`, `effort`, `effort_channel`, each with its
+provenance — and `usage_summary.headless_effort` is derived from the same profile, so
+the two cannot tell different stories. Quote `effective` at the consent gate. Before
+this, `usage_summary` said `medium`/`default:footnote_scan` beside a
+`grok-4.6[effort=high,fast=false]` worker, and an agent relaying "the summary" could
+truthfully sell a 23-minute high wave as a medium one.
 
 ## Layout
 
@@ -189,7 +236,8 @@ src/footnote_pass/
   corpus.py        the style corpus: gloss vs placeholder, alignment/body readers
   scan.py          scan_prepare / scan_fanout / scan_commit, the candidate validator
   write.py         add / verify, the validation table, sub_id minting
-  report.py        the dated candidate report
+  ledger.py        the decision ledger: the candidate <-> note join
+  report.py        the dated candidate and decision reports
 scripts/footnote_pass.py
 prompts/footnote_scan.txt
 .claude/skills/footnote-pass/SKILL.md
@@ -198,17 +246,83 @@ prompts/footnote_scan.txt
 projects/<slug>/.harness/footnotes/
   style_corpus.md              every existing footnote, split gloss/placeholder
   profile.md                   the approved taxonomy (by convention; any path works)
-  manifest.json                what scan-prepare staged
+  scan.manifest.json           what scan-prepare staged
   preamble.scan.txt            shared, cacheable
-  <chapter_id>.scan.body.txt   one chapter's bilingual rows
+  <chapter_id>.scan.body.txt   one chapter's sentence rows (ES; +EN under --source-text both)
   <chapter_id>.scan.prompt.txt preamble + body (Task workers)
   <chapter_id>.scan.draft.json worker output
-  candidates.json              the validated shortlist
-  approved.json                what the user approved (by convention; add --json-file)
-  usage.jsonl                  per-job headless usage
+  candidates.json              the validated shortlist (REPLACED each scan-commit)
+  decisions.json               keeps and drops (by convention; add --json-file)
+  decisions.jsonl              the append-only decision ledger
+  scan.usage.jsonl             per-job headless usage
   last_output.json             the OUTPUT_JSON sidecar
 projects/<slug>/reports/footnote_candidates_<YYYYmmdd_HHMMSS>.md
+projects/<slug>/reports/footnote_decisions_<YYYYmmdd_HHMMSS>[_proposal].md
 ```
+
+## The decision ledger
+
+`candidates.json` records what a wave proposed and `annotations.jsonl` records what
+reached the book. Everything in between — which candidates the human cut at Gate 2,
+which the agent killed while researching, what a gloss said before it was rewritten,
+and which claim any landed note came from — used to exist only in a chat transcript.
+And `scan-commit` **replaces `candidates.json` wholesale**, so the proposals went with
+it.
+
+`src/footnote_pass/ledger.py` closes that. Every `add` appends one row per decision to
+`.harness/footnotes/decisions.jsonl` and renders
+`reports/footnote_decisions_<stamp>.md`.
+
+**Append-only, not replace-in-place.** `src/annotations/review.py`'s `results.json` is
+rewritten because it is a *plan* that `apply` still has to execute, so a second commit
+must merge rather than clobber owed work. Nothing reads this as a plan, so merge logic
+would be liability without a payer. It inherits `store.append_record`'s superseding
+rule instead: a later row at the same key wins and the earlier stays as history — which
+is what makes a refusal, a fix, and the landing readable as one sequence.
+
+**Snapshots, not references.** Each row embeds the candidate's category, claim and span
+and the model that proposed it. A row that merely pointed at `candidates.json` would be
+worthless the moment the next commit rewrote it, which is the exact failure this
+module exists to prevent.
+
+**The join is `candidate_key`, not `(chapter_id, es_idx)`.** That pair is not unique —
+`scan_commit` never dedupes on it and `write.py` deliberately allows several notes on
+one sentence — and not stable, since `es_idx` is a position, which is the whole reason
+`sentence_drifted` exists. `candidate_key` is
+`<chapter_id>__<es_idx>__<sha1(quoted_span)[:8]>`, stamped onto every usable row at
+commit time and printed in the candidate report. Resolution is two-tier and reports its
+own quality in `join`: `exact` (the decision row carried the key), `sentence` (matched
+the pair, and exactly one candidate had it), `none`. **An ambiguous sentence degrades to
+`none` rather than guessing** — a ledger that claims a claim it cannot prove belongs to
+a note is worse than one that says it does not know. The join to `annotations.jsonl` is
+`sub_id`.
+
+**`--dry-run` renders the report and appends nothing.** A proposal is not a decision,
+and a ledger that cannot tell "what we considered" from "what was chosen" is the
+confusion it exists to end. The pre-edit gloss is not lost: the dated *proposal* report
+holds it verbatim, and no later run deletes it. That proposal render is also the Gate 3
+review page — it carries the gloss in full and the injection preview showing where the
+marker falls, because the `AskUserQuestion` widget cannot hold an 80-word Spanish
+sentence plus a two-sentence gloss, and asking through it is asking a human to approve
+copy they have not seen.
+
+`counts.undecided` names usable candidates, in chapters this run touched, that appear
+in neither a keep nor a drop. It is a **warning that does not change `status`**: an
+omission is not a malformed instruction, and a routine `add` that exits nonzero makes
+the "then run `verify`" flow read as a failure. An unknown `verdict` *is* an error and
+does flip `status` to `partial` — guessing which way the operator meant it is how
+unapproved copy lands in a published book.
+
+### Two waves, one directory
+
+`.harness/footnotes/` is shared with `harness.py footnotes`, the *translation* wave for
+imported Gutenberg notes (`src/harness/flow.py:_footnote_work_dir`). Both used to write
+`manifest.json` there and append to the same `usage.jsonl`: whichever prepared last
+silently owned the manifest, and `profile.baseline_tokens` read a median across two
+wave types with very different prompt sizes, which described neither. This wave now
+owns `scan.manifest.json` and `scan.usage.jsonl`, registered under `footnote_scan` in
+`profile.USAGE_LOG_RELPATH`. Stale unprefixed files from before the split are simply
+orphaned; nothing migrates.
 
 Reports are in **English**, unlike the annotation-review reports: a candidate is a
 detection note addressed to the editor, not prose for the book's reader. The gloss that
