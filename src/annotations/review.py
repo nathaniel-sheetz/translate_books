@@ -1239,6 +1239,9 @@ def _successor_record(
     ``applied`` came through here; the nightly pass now retires every finished
     note in every book, so a lost snapshot is the common case, not the rare one.
 
+    ``verified_by`` is in it for the same reason: the reader stamps who confirmed
+    the note, and a review write does not change that.
+
     ``sidecar=None`` omits the ``ai_review`` key entirely, which is how
     :func:`unreject` un-stamps a record — the same shape an edit in the reader
     produces, and the reason ``already_reviewed`` goes false again.

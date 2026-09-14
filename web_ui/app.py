@@ -5292,7 +5292,8 @@ def _reanchor_annotations_after_realign(
 
         ts = datetime.now().isoformat()
         # Re-anchor every annotation on this sentence, preserving each one's
-        # identity (sub_id) and any imported-footnote provenance.
+        # identity (sub_id), any imported-footnote provenance, and its
+        # verified_by stamp.
         for record in records:
             remove_row = {
                 "project_id": record.get("project_id"),

@@ -12,7 +12,9 @@ the reader's bottom-sheet Save, drained into the ledger by Apply or realign.
 Per book:
 
 - **reader** — every reader row in the ledger.
-- **skip** — reader rows stamped ``status: "skipped"``: the edit never landed.
+- **skip** — reader rows stamped ``status: "skipped"``: that Apply attempt did
+  not land. A failing row is re-archived on every Apply, so this counts
+  attempts, and the same edit can still land later.
 - **dup** — landed rows repeating an earlier ``(chunk_id, original_es,
   corrected_es)``. Saving twice before Apply writes two rows for one edit.
 - **unique** — reader edits that landed, counted once. This is the audit set
@@ -24,12 +26,14 @@ Per book:
 - **retrans** — rows in ``retranslations.jsonl``. A retranslate-modal edit
   lands in the chunk without ever reaching the ledger, so these are reader
   edits the audit set does not contain. The chunk editor logs nothing at all.
-- **native** — unique edits stamped ``verified_by: "native"``. A reader row
-  without the field predates it and counts as ``self``.
+- **native** — unique edits with ``verified_by: "native"`` on any of their
+  rows. A reader row without the field predates it and counts as ``self``.
 
 ``--export`` writes one JSONL row per unique edit, carrying the triple the panel
 judges (``en``, ``es_before``, ``es_after``) and an ``audit_id`` hashed from the
-edit itself, so verdicts still join back after a re-export.
+edit itself, so verdicts still join back after a re-export. Its ``status`` is
+``"applied"`` when any copy was stamped so, and ``null`` for an edit only older
+rows carry: those predate the stamp and may never have landed.
 
 ``--freeze DIR`` writes the exam snapshot for the books named by ``--project``.
 Per book, ``edits.jsonl`` holds the export rows, each marked with whether its
@@ -37,7 +41,9 @@ Per book, ``edits.jsonl`` holds the export rows, each marked with whether its
 chunk's source, the LLM translation its ``last_llm_log`` recorded, and the text
 at freeze time. ``manifest.json`` holds counts and file hashes. The replay reads
 the snapshot, never the live book, so the books can keep being improved. The
-directory must be new; ``exam/`` is gitignored for it.
+directory must be new or empty, and is written whole or not at all; ``exam/`` is
+gitignored for it. ``--export`` and ``--freeze`` refuse a slug that names two
+books, since audit ids and snapshot directories are keyed by slug.
 
 Usage:
     python scripts/ledger_census.py
@@ -53,7 +59,9 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -173,8 +181,16 @@ def census_project(projects_root: Path, project_dir: Path) -> tuple[dict[str, An
     reader = [row for row in ledger if not row.get("source")]
     landed = [row for row in reader if row.get("status") != "skipped"]
     unique: dict[tuple[str, str, str], dict] = {}
+    native_keys, applied_keys = set(), set()
     for row in landed:
-        unique.setdefault(edit_key(row), row)
+        key = edit_key(row)
+        unique.setdefault(key, row)
+        # A later copy can carry what the first lacks: a native speaker re-saving
+        # the same edit, or an Apply stamp on an edit an older Apply left unstamped.
+        if row.get("verified_by") == "native":
+            native_keys.add(key)
+        if row.get("status") == "applied":
+            applied_keys.add(key)
     retranslations, _ = _read_jsonl(project_dir / RETRANSLATIONS_FILENAME)
     aligned = aligned_row_count(project_dir)
 
@@ -189,7 +205,7 @@ def census_project(projects_root: Path, project_dir: Path) -> tuple[dict[str, An
         "aligned_rows": aligned,
         "per_1k": _per_1k(len(unique), aligned),
         "retranslations": len(retranslations),
-        "native": sum(1 for row in unique.values() if row.get("verified_by") == "native"),
+        "native": len(native_keys),
         "malformed_lines": malformed,
     }
     export = [
@@ -204,9 +220,10 @@ def census_project(projects_root: Path, project_dir: Path) -> tuple[dict[str, An
             "es_after": row.get("corrected_es") or "",
             "timestamp": row.get("timestamp"),
             "applied_at": row.get("applied_at"),
-            "verified_by": row.get("verified_by") or "self",
+            "status": "applied" if key in applied_keys else row.get("status"),
+            "verified_by": "native" if key in native_keys else (row.get("verified_by") or "self"),
         }
-        for row in unique.values()
+        for key, row in unique.items()
     ]
     return stats, export
 
@@ -264,25 +281,31 @@ def original_translation(chunk: dict) -> tuple[Optional[str], dict[str, Any]]:
     info: dict[str, Any] = {
         "llm_log": rel, "log_project_slug": None, "model": None, "translated_at": None,
     }
-    if not rel:
+    if not rel or not isinstance(rel, str):
         return None, info
     try:
         doc = json.loads((_REPO_ROOT / rel).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None, info
-    meta = doc.get("metadata") or {}
+    if not isinstance(doc, dict):
+        return None, info
+    meta = doc.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
     info["log_project_slug"] = meta.get("project_slug")
     info["model"] = meta.get("model")
     info["translated_at"] = meta.get("timestamp")
     source_head = _norm(chunk.get("source_text"))[:_SOURCE_CHECK_CHARS]
+    prompt, response = doc.get("prompt"), doc.get("response")
     same_chunk = (
         meta.get("chunk_id") in (None, chunk.get("id"))
         and bool(source_head)
-        and source_head in _norm(doc.get("prompt"))
+        and isinstance(prompt, str)
+        and source_head in _norm(prompt)
     )
-    if doc.get("response") is None or not same_chunk:
+    if not isinstance(response, str) or not same_chunk:
         return None, info
-    return doc["response"], info
+    return response, info
 
 
 def freeze_book(projects_root: Path, project_dir: Path, out_dir: Path) -> dict[str, Any]:
@@ -292,7 +315,13 @@ def freeze_book(projects_root: Path, project_dir: Path, out_dir: Path) -> dict[s
 
     chunks, originals = [], {}
     for path in sorted((project_dir / "chunks").glob("*.json")):
-        chunk = json.loads(path.read_text(encoding="utf-8"))
+        # An exam missing a chunk is not the book, so a bad chunk fails the freeze.
+        try:
+            chunk = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{path}: {exc}") from exc
+        if not isinstance(chunk, dict):
+            raise ValueError(f"{path}: not a JSON object")
         chunk_id = chunk.get("id") or path.stem
         original, info = original_translation(chunk)
         if original is not None:
@@ -330,6 +359,52 @@ def freeze_book(projects_root: Path, project_dir: Path, out_dir: Path) -> dict[s
     }
 
 
+def write_freeze(projects_root: Path, projects: list[Path], out_dir: Path) -> list[dict[str, Any]]:
+    """Write the whole exam snapshot into ``out_dir``, or nothing at all.
+
+    Every book and the manifest go into a staging directory beside ``out_dir``,
+    renamed into place only once all of it is written. A failure partway removes
+    the staging directory, so no half-snapshot is left for the next run to refuse.
+    ``out_dir`` must not exist or be empty; the caller checks.
+    """
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.", dir=out_dir.parent))
+    try:
+        summaries = [freeze_book(projects_root, p, staging) for p in projects]
+        version_file = _REPO_ROOT / "VERSION"
+        manifest = {
+            "frozen_at": datetime.now().isoformat(timespec="seconds"),
+            "code_version": (
+                version_file.read_text(encoding="utf-8").strip() if version_file.exists() else None
+            ),
+            "purpose": (
+                "Phase 0 exam: replay judges against these books' original translations. "
+                "Never tune a judge on these books."
+            ),
+            "books": summaries,
+        }
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+        if out_dir.exists():
+            out_dir.rmdir()  # empty; a rename cannot replace a directory on Windows
+        staging.rename(out_dir)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return summaries
+
+
+def shared_slugs(projects_root: Path, projects: list[Path]) -> dict[str, list[str]]:
+    """Slugs naming more than one book, with the paths of each."""
+    by_slug: dict[str, list[str]] = {}
+    for project_dir in projects:
+        by_slug.setdefault(project_dir.name, []).append(
+            project_dir.relative_to(projects_root).as_posix()
+        )
+    return {slug: paths for slug, paths in by_slug.items() if len(paths) > 1}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -347,7 +422,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--freeze", type=Path,
-        help="Write the exam snapshot of the --project books into this new directory.",
+        help="Write the exam snapshot of the --project books into this new (or empty) directory.",
     )
     args = parser.parse_args(argv)
 
@@ -370,6 +445,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not projects:
         print(f"No {CORRECTIONS_APPLIED_FILENAME} under {args.projects_root}", file=sys.stderr)
         return 1
+    # audit_id hashes the slug and a snapshot has one directory per slug, so two
+    # books sharing one would collide in the export and the freeze.
+    if args.export or args.freeze:
+        shared = shared_slugs(args.projects_root, projects)
+        for slug, paths in sorted(shared.items()):
+            print(f"Slug {slug!r} names more than one book: {', '.join(paths)}", file=sys.stderr)
+        if shared:
+            return 1
 
     stats, export = [], []
     for project_dir in projects:
@@ -398,22 +481,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         print(f"\nWrote {len(export)} audit rows to {args.export}")
     if args.freeze:
-        summaries = [freeze_book(args.projects_root, p, args.freeze) for p in projects]
-        version_file = _REPO_ROOT / "VERSION"
-        manifest = {
-            "frozen_at": datetime.now().isoformat(timespec="seconds"),
-            "code_version": (
-                version_file.read_text(encoding="utf-8").strip() if version_file.exists() else None
-            ),
-            "purpose": (
-                "Phase 0 exam: replay judges against these books' original translations. "
-                "Never tune a judge on these books."
-            ),
-            "books": summaries,
-        }
-        (args.freeze / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-        )
+        try:
+            summaries = write_freeze(args.projects_root, projects, args.freeze)
+        except (OSError, ValueError) as exc:
+            print(f"Freeze failed; nothing was written to {args.freeze}: {exc}", file=sys.stderr)
+            return 1
         print(f"\nFroze {len(summaries)} book(s) into {args.freeze}")
         for s in summaries:
             print(

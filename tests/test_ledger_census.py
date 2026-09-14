@@ -262,3 +262,69 @@ def test_freeze_never_writes_into_an_existing_snapshot(root, tmp_path):
 def test_freeze_needs_a_project(root, tmp_path):
     with pytest.raises(SystemExit):
         _freeze(root, tmp_path / "exam")
+
+
+def test_a_failed_freeze_leaves_nothing_behind(root, tmp_path):
+    # other-book sorts first and freezes cleanly; book then fails on a bad chunk.
+    _with_chunks(root, tmp_path)
+    (root / "book" / "chunks" / "ch01_chunk_002.json").write_text("{not json", encoding="utf-8")
+    out = tmp_path / "exam" / "2026-09-14"
+    assert _freeze(root, out, "book", "other-book") == 1
+    assert not out.exists()
+    assert list(out.parent.iterdir()) == []
+
+
+def test_freeze_fills_an_existing_empty_directory(root, tmp_path):
+    out = tmp_path / "exam"
+    out.mkdir()
+    assert _freeze(root, out, "book") == 0
+    assert (out / "manifest.json").exists()
+    # The staging directory was renamed into place, not left beside it.
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".exam.")] == []
+
+
+def test_a_slug_shared_by_two_books_blocks_export_and_freeze(root, tmp_path):
+    _write_jsonl(root / ".drafts" / "other-book" / "corrections_applied.jsonl", [_reader()])
+    export = tmp_path / "audit.jsonl"
+    out = tmp_path / "exam"
+    assert census.main(["--projects-root", str(root), "--export", str(export)]) == 1
+    assert not export.exists()
+    assert _freeze(root, out, "other-book") == 1
+    assert not out.exists()
+    # The census alone keys rows by path, so it still runs.
+    assert census.main(["--projects-root", str(root)]) == 0
+
+
+@pytest.mark.parametrize("doc", [
+    ["not", "an", "object"],
+    {"metadata": "nope", "prompt": 42, "response": "El gato."},
+    {"metadata": {"chunk_id": "ch01_chunk_000"}, "prompt": "The cat. The cow.", "response": ["El gato."]},
+])
+def test_a_malformed_log_is_no_original(root, tmp_path, doc):
+    _with_chunks(root, tmp_path)
+    (tmp_path / "history" / "t1.json").write_text(json.dumps(doc), encoding="utf-8")
+    out = tmp_path / "exam"
+    assert _freeze(root, out, "book") == 0
+    assert _read(out / "book" / "chunks.jsonl")[0]["original_translation"] is None
+
+
+def test_a_native_resave_of_an_edit_counts_as_native(root):
+    ledger = root / ".published" / "other-book" / "corrections_applied.jsonl"
+    _write_jsonl(ledger, [
+        _reader(before="Uno.", after="Una."),
+        _reader(before="Uno.", after="Una.", verified_by="native"),
+    ])
+    stats, rows = census.census_project(root, ledger.parent)
+    assert (stats["unique_edits"], stats["duplicates"], stats["native"]) == (1, 1, 1)
+    assert rows[0]["verified_by"] == "native"
+
+
+def test_export_status_prefers_an_applied_copy_and_keeps_unstamped_null(root):
+    ledger = root / ".published" / "other-book" / "corrections_applied.jsonl"
+    legacy = _reader(before="Uno.", after="Una.")
+    del legacy["status"]
+    older = _reader(before="Dos.", after="Doce.")
+    del older["status"]
+    _write_jsonl(ledger, [legacy, older, _reader(before="Dos.", after="Doce.")])
+    _, rows = census.census_project(root, ledger.parent)
+    assert {r["es_before"]: r["status"] for r in rows} == {"Uno.": None, "Dos.": "applied"}

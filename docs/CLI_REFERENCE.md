@@ -284,10 +284,11 @@ sentences, the `retranslations.jsonl` rows the ledger never sees, and how many
 edits are native-confirmed, for every book outside `.backburner`. Read-only. `--export` writes one
 `(en, es_before, es_after)` row per unique landed edit with a stable `audit_id`:
 the input to the Phase 0 reader-edit audit. `--freeze DIR` writes the exam
-snapshot for the `--project` books into a new directory: their edit rows, each
+snapshot for the `--project` books into a new or empty directory: their edit rows, each
 chunk's source and original LLM translation, and a manifest with file hashes.
-Replays read the snapshot, so the live books can keep changing. `exam/` is
-gitignored for it.
+The snapshot is written whole or not at all. Replays read the snapshot, so the
+live books can keep changing. `--export` and `--freeze` refuse a slug that names
+two books. `exam/` is gitignored for it.
 
 ### `review_annotations.py` — resolve reader annotations
 
