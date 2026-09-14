@@ -1,0 +1,725 @@
+"""
+The write front door: ``add`` mints footnote records, ``verify`` audits them.
+
+This module exists because ``src/endnotes.py`` drops a footnote **silently**. A
+record can be perfectly well-formed JSON, sit in ``annotations.jsonl`` for ever,
+and publish nothing at all, in three ways:
+
+==========================  ==================================================
+``no_aligned_sentence``     no alignment row carries that ``es_idx``
+                            (``endnotes.py:161`` — logs a warning)
+``sentence_not_in_body``    the aligned sentence is not findable in
+                            ``chapters/<id>.txt`` (``endnotes.py:168`` — logs)
+``empty_gloss``             nothing left after the first ``[bracket]`` is
+                            stripped (``endnotes.py:180`` — **logs nothing**)
+==========================  ==================================================
+
+Plus three anchor problems that are not silent but are still wrong:
+
+==========================  ==================================================
+``anchor_not_found``        warning only; the marker falls to the sentence end
+``ambiguous_anchor``        the anchor occurs more than once, so the marker
+                            lands on the first occurrence, not the intended one
+``multi_anchor``            more than one bracket: ``endnotes`` consumes the
+                            first and publishes the rest verbatim into the book
+                            (``targets.py:292``) — refused
+==========================  ==================================================
+
+Every one of those is checked *before* the record is appended. ``verify`` runs the
+same checks over notes already on disk, which is the half that catches the
+pre-existing ones — and the reason to re-run it after any ``harness.py align``:
+``es_idx`` is a position in the alignment, not an identity.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import secrets
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from collections.abc import Mapping
+from typing import Any, Optional
+
+from src.annotations import store
+from src.endnotes import _injection_point, parse_endnote_content
+from src.footnote_import import _unique_anchor
+from src.footnote_pass import FOOTNOTE_TYPE, ORIGIN
+from src.footnote_pass.corpus import (
+    chapter_body_path,
+    load_alignment_es_map,
+    read_chapter_body,
+)
+
+logger = logging.getLogger(__name__)
+
+_BRACKET_RE = re.compile(r"\[([^\]]*)\]")
+
+# Failure codes. Named rather than free-text so the skill, the tests and the
+# report all say the same thing about the same defect.
+NO_ALIGNED_SENTENCE = "no_aligned_sentence"
+SENTENCE_NOT_IN_BODY = "sentence_not_in_body"
+EMPTY_GLOSS = "empty_gloss"
+ANCHOR_NOT_FOUND = "anchor_not_found"
+AMBIGUOUS_ANCHOR = "ambiguous_anchor"
+MULTI_ANCHOR = "multi_anchor"
+NO_CHAPTER_BODY = "no_chapter_body"
+DUPLICATE = "duplicate"
+SENTENCE_DRIFTED = "sentence_drifted"
+CANDIDATE_KEY_MISMATCH = "candidate_key_mismatch"
+
+# ``anchor_not_found``, ``ambiguous_anchor`` and ``sentence_drifted`` degrade
+# *placement*; the note still publishes, so they warn rather than refuse.
+# ``candidate_key_mismatch`` degrades the record, not the book. Everything else
+# means nothing reaches the book at all.
+WARNING_CODES = frozenset(
+    {ANCHOR_NOT_FOUND, AMBIGUOUS_ANCHOR, SENTENCE_DRIFTED, CANDIDATE_KEY_MISMATCH}
+)
+
+
+def mint_sub_id() -> str:
+    """A reader-convention ``sub_id``: ``u`` + 8 hex chars.
+
+    The same shape ``web_ui/app.py:save_annotation`` mints, and deliberately
+    clear of the ``gb<n>`` namespace ``footnote_import`` owns, so a Gutenberg
+    re-import can never collide with a note written here.
+    """
+    return "u" + secrets.token_hex(4)
+
+
+@dataclass
+class Problem:
+    """One validation failure or warning on a proposed or existing note."""
+
+    code: str
+    detail: str
+
+    @property
+    def is_warning(self) -> bool:
+        return self.code in WARNING_CODES
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "detail": self.detail, "warning": self.is_warning}
+
+
+@dataclass
+class Proposal:
+    """One footnote to write, after validation."""
+
+    chapter_id: str
+    es_idx: int
+    anchor: Optional[str]
+    note: str
+    content: str
+    es_text: str
+    problems: list[Problem]
+    injection_preview: str = ""
+    suggested_anchor: Optional[str] = None
+
+    @property
+    def blocked(self) -> bool:
+        return any(not p.is_warning for p in self.problems)
+
+
+def _strip_brackets(text: str) -> str:
+    """The text with every ``[...]`` token removed, whitespace collapsed."""
+    return re.sub(r"\s+", " ", _BRACKET_RE.sub(" ", text)).strip()
+
+
+def compose_content(anchor: Optional[str], note: str) -> str:
+    """The stored ``content`` for a note: ``[anchor] gloss``, or just the gloss.
+
+    The same composition ``review._planned_content`` uses for a footnote, kept
+    here so the create path and the review path cannot disagree about the wire
+    shape of a record.
+    """
+    note = (note or "").strip()
+    anchor = (anchor or "").strip()
+    return f"[{anchor}] {note}" if anchor else note
+
+
+def _note_fields(raw: Mapping[str, Any]) -> tuple[Optional[str], str]:
+    """``(anchor, note)`` for one keep row, accepting the composed shape too.
+
+    A decisions row normally carries the bare gloss in ``note``. Two paths hand
+    over the composed ``[anchor] gloss`` instead: a row copied back out of
+    ``decisions.jsonl`` (``content``, no ``note``), and the Gate 3 review page,
+    whose fenced **Note** block is the composed text an agent pastes into ``note``
+    beside ``anchor``. Composing either again reads ``[anchor] [anchor] gloss`` and
+    is refused as ``multi_anchor``. So a leading bracket naming the row's own
+    anchor is peeled off, from whichever field carries the text. One naming a
+    *different* anchor stays, and ``multi_anchor`` refuses it: which of the two
+    the operator meant is not ours to guess.
+    """
+    anchor = raw.get("anchor")
+    note = str(raw.get("note") or "")
+    text = (note if note.strip() else str(raw.get("content") or "")).lstrip()
+    match = _BRACKET_RE.match(text)
+    if match and anchor and match.group(1).strip() == str(anchor).strip():
+        return anchor, text[match.end():]
+    return anchor, text
+
+
+def _preview(body: str, sent_start: int, sent_end: int, anchor: Optional[str]) -> str:
+    """Show where the superscript marker would land, with ``‹N›`` standing in.
+
+    Computed through ``endnotes._injection_point`` itself rather than a private
+    re-implementation: a preview that agrees with a different algorithm than the
+    publisher is worse than no preview.
+    """
+    pos = _injection_point(body, sent_start, sent_end, anchor)
+    sentence = body[sent_start:sent_end]
+    marked = body[sent_start:pos] + "‹N›" + body[pos:sent_end]
+    return marked if sentence else ""
+
+
+def validate_proposal(
+    project_dir: Path,
+    *,
+    chapter_id: str,
+    es_idx: Any,
+    anchor: Optional[str],
+    note: str,
+    es_map: Optional[dict[int, str]] = None,
+    body: Optional[str] = None,
+    existing: Optional[Mapping[tuple[str, Optional[int], str], Optional[str]]] = None,
+) -> Proposal:
+    """Validate one proposed footnote against every silent-failure mode.
+
+    ``es_map`` / ``body`` are caches so a batch does not re-read one chapter's
+    alignment and text per note. ``existing`` maps
+    ``(chapter_id, es_idx, content)`` of every live note to its ``sub_id``, and
+    drives the idempotency check — re-running ``add`` with identical arguments
+    must be a no-op, not a second endnote. Only membership is tested here, so a
+    bare set still works; the ``sub_id`` is what lets ``add`` report *which*
+    existing note a duplicate collided with.
+    """
+    project_dir = Path(project_dir)
+    problems: list[Problem] = []
+    note = (note or "").strip()
+    anchor = (anchor or "").strip() or None
+
+    try:
+        es_idx_int = int(es_idx)
+    except (TypeError, ValueError):
+        return Proposal(
+            chapter_id=chapter_id,
+            es_idx=-1,
+            anchor=anchor,
+            note=note,
+            content=compose_content(anchor, note),
+            es_text="",
+            problems=[Problem(NO_ALIGNED_SENTENCE, f"es_idx is not an integer: {es_idx!r}")],
+        )
+
+    content = compose_content(anchor, note)
+
+    # empty_gloss first: it is the one endnotes.py does not log, so it is the one
+    # most worth naming loudly. Checked against the bracket-stripped text, which
+    # is exactly what ``parse_endnote_content`` publishes.
+    if not _strip_brackets(content):
+        problems.append(
+            Problem(
+                EMPTY_GLOSS,
+                "the note is empty once the [anchor] bracket is stripped, so it "
+                "would be skipped with no log line and publish nothing",
+            )
+        )
+
+    # More than one bracket publishes the extras literally into the book.
+    brackets = [m.group(1).strip() for m in _BRACKET_RE.finditer(content)]
+    if len(brackets) > 1:
+        problems.append(
+            Problem(
+                MULTI_ANCHOR,
+                f"{len(brackets)} bracketed tokens ({brackets!r}); endnotes consumes "
+                "the first and publishes the rest verbatim — write one note per anchor",
+            )
+        )
+    elif brackets and not anchor:
+        # No `anchor` given, but the text carries one bracket — and that is the
+        # anchor endnotes will read. Without this, a bracket passed inside `note`
+        # or `content` skipped every placement check and previewed the marker
+        # somewhere the publisher does not put it.
+        anchor = parse_endnote_content(content)[0]
+
+    if es_map is None:
+        es_map = load_alignment_es_map(project_dir, chapter_id)
+    es_text = es_map.get(es_idx_int, "")
+    if not es_text:
+        problems.append(
+            Problem(
+                NO_ALIGNED_SENTENCE,
+                f"no alignment row for {chapter_id} es_idx={es_idx_int} in "
+                f"alignments/{chapter_id}.json",
+            )
+        )
+
+    if body is None:
+        body = read_chapter_body(project_dir, chapter_id)
+    preview = ""
+    suggested: Optional[str] = None
+    if body is None:
+        problems.append(
+            Problem(
+                NO_CHAPTER_BODY,
+                f"no chapter body at {chapter_body_path(project_dir, chapter_id)}",
+            )
+        )
+    elif es_text:
+        sent_start = body.find(es_text)
+        if sent_start == -1:
+            problems.append(
+                Problem(
+                    SENTENCE_NOT_IN_BODY,
+                    "the aligned sentence is not findable verbatim in "
+                    f"chapters/{chapter_id}.txt — the note would be skipped",
+                )
+            )
+        else:
+            sent_end = sent_start + len(es_text)
+            if anchor:
+                occurrences = es_text.count(anchor)
+                if occurrences == 0:
+                    problems.append(
+                        Problem(
+                            ANCHOR_NOT_FOUND,
+                            f"anchor {anchor!r} does not occur in the sentence; the "
+                            "marker will fall to the end of the sentence",
+                        )
+                    )
+                elif occurrences > 1:
+                    # Grown backward from the END OF THE FIRST occurrence, because
+                    # that is where ``_injection_point`` actually puts the marker.
+                    # The suggestion therefore pins the current behaviour
+                    # explicitly; it cannot guess that a later occurrence was
+                    # meant. Same helper footnote_import uses, so a grown anchor
+                    # behaves identically to an imported one.
+                    first_end = sent_start + es_text.find(anchor) + len(anchor)
+                    grown = _unique_anchor(body, sent_start, sent_end, first_end)
+                    suggested = grown if grown and grown != anchor else None
+                    problems.append(
+                        Problem(
+                            AMBIGUOUS_ANCHOR,
+                            f"anchor {anchor!r} occurs {occurrences}x in the sentence; "
+                            "the marker lands on the first one"
+                            + (
+                                f". --anchor {suggested!r} pins that spot; for a later "
+                                "occurrence, extend the anchor by hand"
+                                if suggested
+                                else ""
+                            ),
+                        )
+                    )
+            preview = _preview(body, sent_start, sent_end, anchor)
+
+    if existing is not None and (chapter_id, es_idx_int, content) in existing:
+        problems.append(
+            Problem(
+                DUPLICATE,
+                "an active footnote on this sentence already holds exactly this "
+                "text — adding it again would publish two identical endnotes",
+            )
+        )
+
+    return Proposal(
+        chapter_id=chapter_id,
+        es_idx=es_idx_int,
+        anchor=anchor,
+        note=note,
+        content=content,
+        es_text=es_text,
+        problems=problems,
+        injection_preview=preview,
+        suggested_anchor=suggested,
+    )
+
+
+def _live_contents(project_dir: Path) -> dict[tuple[str, Optional[int], str], Optional[str]]:
+    """``{(chapter_id, es_idx, content): sub_id}`` for every active footnote.
+
+    A dict rather than a set so a ``duplicate`` refusal can name the note it
+    collided with. A duplicate is not work destroyed — the gloss *is* on the book,
+    under an earlier ``sub_id`` — and a ledger row that says "refused" without
+    saying that reads as a loss.
+    """
+    return {
+        (r.get("chapter_id") or "", r.get("es_idx"), r.get("content") or ""): r.get("sub_id")
+        for r in store.load_active(project_dir, types=(FOOTNOTE_TYPE,))
+    }
+
+
+def build_record(project_dir: Path, proposal: Proposal) -> dict:
+    """The ``annotations.jsonl`` record for a validated proposal.
+
+    Mirrors the wire shape ``web_ui/app.py:save_annotation`` writes — the reader
+    has to be able to open, edit and delete this note like any other — plus
+    ``origin`` for provenance. ``origin`` is inert downstream: only
+    ``"gutenberg"`` is special-cased (``src/annotations/targets.py``).
+    """
+    return {
+        "project_id": Path(project_dir).name,
+        "chapter_id": proposal.chapter_id,
+        "es_idx": proposal.es_idx,
+        "sub_id": mint_sub_id(),
+        "type": FOOTNOTE_TYPE,
+        "content": proposal.content,
+        "es_text": proposal.es_text,
+        "origin": ORIGIN,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+def add(
+    project_dir: Path,
+    notes: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+    report: bool = True,
+    decided: bool = False,
+) -> dict[str, Any]:
+    """Validate and append footnote records, and record the decisions.
+
+    ``notes`` is the decisions document: ``[{chapter_id, es_idx, anchor?, note,
+    verdict?, reason?, stage?, sources?}, ...]`` — one entry from
+    ``--chapter/--es-idx/--anchor/--note``, or the whole approved batch from
+    ``--json-file``. **A row with no ``verdict`` is a keep**, which is exactly the
+    shape ``approved.json`` has always had, so every existing batch file keeps
+    working. Rows marked ``drop`` are recorded and never reach the validator.
+
+    Every keep is validated independently and reported independently: a batch
+    with one bad anchor lands the rest rather than refusing as a unit, which is
+    what makes re-running it after a fix cheap.
+
+    Writes go through ``store.append_record`` — never a hand-rolled
+    ``open(..., "a")``; that module is the single writer, and keeping the file
+    append-only is what makes every run recoverable.
+
+    ``decided`` says the caller passed a decisions document rather than composing
+    one note from flags. Only then is it meaningful to report candidates that
+    were neither kept nor dropped — an inline ``add`` has no decision set to be
+    complete against.
+    """
+    from src.footnote_pass import ledger as fp_ledger
+    from src.footnote_pass.report import write_decision_report
+
+    project_dir = Path(project_dir)
+    stamp = fp_ledger.run_id()
+    keeps, drops, invalid = fp_ledger.split_decisions(notes)
+    existing = _live_contents(project_dir)
+    es_maps: dict[str, dict[int, str]] = {}
+    bodies: dict[str, Optional[str]] = {}
+
+    added: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    planned: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    for keep_index, raw in enumerate(keeps):
+        chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
+        if chapter_id not in es_maps:
+            es_maps[chapter_id] = load_alignment_es_map(project_dir, chapter_id)
+            bodies[chapter_id] = read_chapter_body(project_dir, chapter_id)
+
+        anchor, note = _note_fields(raw)
+        proposal = validate_proposal(
+            project_dir,
+            chapter_id=chapter_id,
+            es_idx=raw.get("es_idx"),
+            anchor=anchor,
+            note=note,
+            es_map=es_maps[chapter_id],
+            body=bodies[chapter_id],
+            existing=existing,
+        )
+        raw_key = raw.get("candidate_key")
+        if (
+            isinstance(raw_key, str)
+            and raw_key
+            and not fp_ledger.key_names_sentence(
+                raw_key, proposal.chapter_id, proposal.es_idx
+            )
+        ):
+            # One half of the row is a copy slip. If it is the key, the ledger
+            # would credit this note to another candidate's claim; if it is the
+            # es_idx, the note is about to land on the wrong sentence. Only the
+            # operator knows which, so it is said here, on the Gate 3 page.
+            proposal.problems.append(
+                Problem(
+                    CANDIDATE_KEY_MISMATCH,
+                    f"candidate_key {raw_key!r} names a different sentence than "
+                    f"{proposal.chapter_id} es_idx={proposal.es_idx}; fix whichever "
+                    "half is the slip — the ledger joins this note to neither",
+                )
+            )
+
+        row = {
+            "chapter_id": proposal.chapter_id,
+            "es_idx": proposal.es_idx,
+            "anchor": proposal.anchor,
+            "content": proposal.content,
+            "es_text": proposal.es_text,
+            "problems": [p.as_dict() for p in proposal.problems],
+            "injection_preview": proposal.injection_preview,
+            fp_ledger.KEEP_INDEX: keep_index,
+        }
+        if proposal.suggested_anchor:
+            row["suggested_anchor"] = proposal.suggested_anchor
+
+        if proposal.blocked:
+            # A duplicate is the one refusal that is not a loss: the gloss is on
+            # the book already. Name the note it collided with, so the ledger and
+            # the report can say so rather than reporting destroyed work.
+            if any(p.code == DUPLICATE for p in proposal.problems):
+                row["existing_sub_id"] = existing.get(
+                    (proposal.chapter_id, proposal.es_idx, proposal.content)
+                )
+            refused.append(row)
+            continue
+        if proposal.problems:
+            # A pointer, not a second copy: the full row is already in `added` or
+            # `planned`, and echoing it twice is the stdout bloat every other CLI
+            # in this repo has had to walk back.
+            warnings.append(
+                {
+                    "chapter_id": proposal.chapter_id,
+                    "es_idx": proposal.es_idx,
+                    "codes": [p.code for p in proposal.problems],
+                }
+            )
+
+        if dry_run:
+            # Planned rows join the in-run dedupe exactly as landed ones do, or the
+            # review page approves two identical notes the live run refuses one of.
+            existing[(proposal.chapter_id, proposal.es_idx, proposal.content)] = None
+            planned.append(row)
+            continue
+
+        record = build_record(project_dir, proposal)
+        store.append_record(project_dir, record)
+        # Keep the in-run dedupe honest: two identical entries in one --json-file
+        # must not both land.
+        existing[(proposal.chapter_id, proposal.es_idx, proposal.content)] = record[
+            "sub_id"
+        ]
+        added.append({**row, "sub_id": record["sub_id"]})
+
+    payload = {
+        "status": "ok" if not refused else "partial",
+        "dry_run": dry_run,
+        "added": added,
+        "planned": planned,
+        "refused": refused,
+        "warnings": warnings,
+        "counts": {
+            "requested": len(keeps),
+            "added": len(added),
+            "planned": len(planned),
+            "refused": len(refused),
+            "warnings": len(warnings),
+            "dropped": len(drops),
+            "invalid": len(invalid),
+            "undecided": 0,
+        },
+        "annotations_path": str(store.annotations_path(project_dir)),
+        "instructions": (
+            "Fix each refused entry and re-run; a refused note is not on disk. "
+            if refused
+            else ""
+        )
+        + (
+            "Nothing was written (--dry-run). Re-run without it to land these."
+            if dry_run
+            else "Run `verify` next, then `python scripts/harness.py epub "
+            "--project <id>` — an added note only reaches the book on the next build."
+        ),
+    }
+
+    # ── the decision record ─────────────────────────────────────────────────
+    # After the loop, because no `sub_id` exists until the records are appended,
+    # and once per invocation, because a per-note append leaves a partial ledger
+    # behind a mid-batch crash. `annotations.jsonl` stays the recovery source of
+    # truth; this is a join document, not a write log.
+    #
+    # Best-effort, and reported rather than raised: a footnote that landed must
+    # never come back as a failure because a markdown file could not be written.
+    try:
+        doc = fp_ledger.build_run_doc(
+            project_dir,
+            stamp=stamp,
+            dry_run=dry_run,
+            result=payload,
+            keeps=keeps,
+            drops=drops,
+            invalid=invalid,
+            candidates=fp_ledger.load_candidates(project_dir),
+            decided=decided,
+        )
+        payload["counts"]["undecided"] = doc["counts"]["undecided"]
+        payload["undecided"] = doc["undecided"]
+        payload["dropped"] = [
+            r for r in doc["rows"] if r["verdict"] == fp_ledger.VERDICT_DROP
+        ]
+        payload["invalid"] = [
+            r for r in doc["rows"] if r["verdict"] == fp_ledger.VERDICT_INVALID
+        ]
+    except OSError as exc:
+        payload["ledger_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        payload.setdefault("ledger_path", None)
+        payload.setdefault("report_path", None)
+    else:
+        # A dry run is a proposal, not a decision. Appending it would make "what
+        # we considered" indistinguishable from "what was chosen", which is the
+        # confusion this ledger exists to end — and the pre-edit gloss is not
+        # lost, because the dated *proposal* report holds it verbatim.
+        if dry_run:
+            payload["ledger_path"] = None
+        else:
+            try:
+                payload["ledger_path"] = str(
+                    fp_ledger.append_decisions(project_dir, doc["rows"])
+                )
+            except OSError as exc:
+                payload["ledger_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                payload["ledger_path"] = None
+        try:
+            payload["report_path"] = (
+                str(write_decision_report(project_dir, doc)) if report else None
+            )
+        except OSError as exc:
+            payload["report_error"] = f"{type(exc).__name__}: {exc}"[:500]
+            payload["report_path"] = None
+
+    # The ledger's join key, not a field for the caller: it counts positions in
+    # `keeps`, so beside interleaved drops it would misname a --json-file entry.
+    for bucket in ("added", "planned", "refused"):
+        for row in payload[bucket]:
+            row.pop(fp_ledger.KEEP_INDEX, None)
+
+    if invalid:
+        # A malformed instruction is a real error and should exit nonzero. An
+        # *omission* is not — see the undecided note below.
+        payload["status"] = "partial"
+    if payload["counts"]["undecided"]:
+        payload["instructions"] = (
+            f"{payload['counts']['undecided']} candidate(s) from candidates.json "
+            "appear in neither a keep nor a drop. Record them with "
+            '`"verdict": "drop"` and a reason, or they are lost when the next '
+            "`scan-commit` replaces that file. A decision on a sentence with "
+            "several candidates needs its `candidate_key` to count. "
+            + payload["instructions"]
+        )
+    return payload
+
+
+def verify(
+    project_dir: Path, *, chapters: Optional[list[str]] = None
+) -> dict[str, Any]:
+    """Audit every active footnote in scope against the validation table.
+
+    This is the half that catches the notes already in the file rather than only
+    the ones just added, which is why the flow runs it after ``add`` *and* after
+    any ``harness.py align``: re-aligning a chapter moves every ``es_idx``, and a
+    note whose sentence moved fails ``no_aligned_sentence`` or
+    ``sentence_not_in_body`` from then on, publishing nothing and saying nothing.
+    """
+    project_dir = Path(project_dir)
+    wanted = set(chapters) if chapters else None
+
+    records = store.load_active(project_dir, types=(FOOTNOTE_TYPE,))
+    if wanted is not None:
+        records = [r for r in records if r.get("chapter_id") in wanted]
+
+    es_maps: dict[str, dict[int, str]] = {}
+    bodies: dict[str, Optional[str]] = {}
+
+    ok: list[str] = []
+    broken: list[dict[str, Any]] = []
+    warned: list[dict[str, Any]] = []
+    by_code: dict[str, int] = {}
+
+    for record in records:
+        chapter_id = record.get("chapter_id") or ""
+        if chapter_id not in es_maps:
+            es_maps[chapter_id] = load_alignment_es_map(project_dir, chapter_id)
+            bodies[chapter_id] = read_chapter_body(project_dir, chapter_id)
+
+        content = record.get("content") or ""
+        anchor, note = parse_endnote_content(content)
+        proposal = validate_proposal(
+            project_dir,
+            chapter_id=chapter_id,
+            es_idx=record.get("es_idx"),
+            anchor=anchor,
+            note=note,
+            es_map=es_maps[chapter_id],
+            body=bodies[chapter_id],
+        )
+
+        problems = list(proposal.problems)
+
+        # Drift: the record's own ``es_text`` snapshot says which sentence the note
+        # was written about, and the alignment says which sentence that ``es_idx``
+        # names *now*. When they disagree, a re-align or a retranslation moved the
+        # rows under the note: it still publishes, but against a sentence nobody
+        # chose. Only checkable here — a fresh proposal has no snapshot to compare.
+        snapshot = record.get("es_text")
+        if snapshot and proposal.es_text and snapshot != proposal.es_text:
+            problems.append(
+                Problem(
+                    SENTENCE_DRIFTED,
+                    f"es_idx={record.get('es_idx')} now names a different sentence "
+                    f"than this note was written against ({snapshot!r}); re-anchor it",
+                )
+            )
+
+        key = store.target_key(record)
+        row = {
+            "key": key,
+            "chapter_id": chapter_id,
+            "es_idx": record.get("es_idx"),
+            "origin": record.get("origin"),
+            "content": content,
+            "problems": [p.as_dict() for p in problems],
+        }
+        for problem in problems:
+            by_code[problem.code] = by_code.get(problem.code, 0) + 1
+        if any(not p.is_warning for p in problems):
+            broken.append(row)
+        elif problems:
+            warned.append(row)
+        else:
+            ok.append(key)
+
+    return {
+        "status": "ok" if not broken else "broken",
+        "counts": {
+            "audited": len(records),
+            "ok": len(ok),
+            "broken": len(broken),
+            "warned": len(warned),
+        },
+        "by_code": by_code,
+        "broken": broken,
+        "warned": warned,
+        "chapters": sorted(chapters) if chapters else None,
+        "instructions": (
+            (
+                "Each broken note publishes NOTHING today. Relay them: an "
+                f"{EMPTY_GLOSS} is a note never written up; the other codes mean "
+                "the sentence moved (usually a re-align or a retranslation) and "
+                "the note needs re-anchoring in the reader or by a fresh `add`. "
+                if broken
+                else "Every active footnote resolves to a sentence and publishes "
+                "text. Safe to build the EPUB. "
+            )
+            + (
+                f"{len(warned)} note(s) publish but are misplaced — a "
+                f"{SENTENCE_DRIFTED} means the note is now attached to a sentence "
+                "nobody chose, which is worth raising even though it is not fatal."
+                if warned
+                else ""
+            )
+        ).strip(),
+    }

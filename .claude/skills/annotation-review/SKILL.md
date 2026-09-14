@@ -43,6 +43,11 @@ The reader's four annotation types, from `projects/<slug>/annotations.jsonl`:
 
 It is **note-only**. It never edits translated prose — that is `judge-review apply`.
 
+**It also cannot create a note.** `apply` replaces the text of an annotation a human
+already left; there is nothing for it to attach a new one to. If the ask is "add a
+footnote here" or "scan these chapters for places that need a note", that is
+**`footnote-pass`** — stop and invoke it instead.
+
 ## The CLI (read first)
 
 `python scripts/review_annotations.py <prepare|fanout|commit|run|apply>` is

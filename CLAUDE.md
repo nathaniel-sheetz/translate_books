@@ -26,4 +26,5 @@ Key routing rules:
 - Translate a book conversationally, draft style guide/glossary in-chat → invoke translate-harness
 - Run LLM judges, check dialogue compliance, evaluate translation quality → invoke judge-review
 - Review reader annotations, resolve word-choice notes, draft footnote glosses → invoke annotation-review
+- Add editorial footnotes to a book, scan chapters for footnote candidates → invoke footnote-pass
 - Write a friction log, log what wasted time/tokens in this run → invoke friction-log

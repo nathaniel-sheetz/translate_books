@@ -145,6 +145,19 @@ def test_footnote_template_names_short_glosses_as_resolved():
     assert "Pequeño sin nombre" in template
 
 
+def test_footnote_voice_rules_live_in_the_cacheable_preamble():
+    """The friend-of-the-author voice and its examples are the same for every
+    footnote target, so they sit above the split rather than in each body."""
+    prefix, body = annprompts.build_prompt_parts(_target(ann_type="footnote"), _context())
+    for marker in (
+        "Two kinds of note, one voice",
+        "Never write against the author",
+        "Eso es cierto de alguien haciendo ejercicio fuerte",
+    ):
+        assert marker in prefix
+        assert marker not in body
+
+
 def test_unknown_type_falls_back_to_the_flag_template():
     assert annprompts.template_for("something_new") == annprompts.TEMPLATES["flag"]
 

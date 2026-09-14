@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from scripts.harness import _build_parser
-from src.harness import flow
+from src.harness import flow, state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC_PATH = REPO_ROOT / "docs" / "TRANSLATE_HARNESS.md"
@@ -119,14 +119,14 @@ def test_translate_commit_takes_no_scoping_flag():
 
 def test_documented_config_set_keys_match_the_registry():
     """The doc enumerates every ``config-set --key`` inline; adding one must update it."""
-    # The sentence lists the keys as inline code, with the four effort keys
-    # given as a `headless_effort_*` stem plus a parenthesised suffix list.
+    # The sentence lists the keys as inline code, with the effort keys given as a
+    # `headless_effort_*` stem plus a parenthesised suffix list.
     para = DOC.split("`config-set --key` accepts exactly:", 1)
     assert len(para) == 2, "the config-set enumeration moved; update this test's anchor"
     sentence = para[1].split("\n\n", 1)[0]
 
     named = set(re.findall(r"`([a-z_]+)`", sentence))
-    suffixes = {"translate", "judges", "annotations", "footnotes"}
+    suffixes = set(state.COMMAND_EFFORT_DEFAULTS)
     documented = (named - suffixes - {"headless_effort_"}) | {
         f"headless_effort_{s}" for s in suffixes if s in named
     }

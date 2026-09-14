@@ -59,6 +59,12 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
     "annotations": (".harness", "annotations", "usage.jsonl"),
     "translate": (".harness", "translate", "usage.jsonl"),
     "footnotes": (".harness", "footnotes", "usage.jsonl"),
+    # footnote-pass's chapter scan shares a directory with the `footnotes`
+    # translation wave above but not a log: a baseline averaged over two wave
+    # types describes neither, and these two differ by an order of magnitude in
+    # prompt size. See `src/footnote_pass/scan.py:_manifest_path` for the same
+    # split applied to the manifest.
+    "footnote_scan": (".harness", "footnotes", "scan.usage.jsonl"),
 }
 
 # How the resolved effort actually reaches the model.

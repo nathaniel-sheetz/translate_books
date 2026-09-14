@@ -1,5 +1,5 @@
 # Annotation Review — footnote
-# Version: 1.0
+# Version: 1.1
 # Drafts the actual endnote gloss for a reader's footnote annotation. The output
 # is PUBLISHED in the book, so it is held to a higher bar than the other types.
 # Preamble variables: target_language, style_guide, glossary.
@@ -45,8 +45,10 @@ Write the gloss in {{target_language}}. This is not negotiable — the book is i
   children's book gets a plainer gloss than a scientific one.
 - **Self-contained.** The reader has the sentence in front of them, not the
   annotation. Never write "aquí significa…" or refer to "the marked word".
-- **No hedging.** If you are not confident of a fact, leave it out rather than
-  qualifying it. Do not invent dates, populations, or etymologies.
+- **No hedging about facts.** If you are not confident of a fact, leave it out
+  rather than qualifying it. Do not invent dates, populations, or etymologies.
+  Charity toward the author ("parece que quiso decir") is not hedging: it is
+  about him, not about the fact.
 
 Do NOT include the bracketed anchor in `note_text` — it is re-attached
 automatically. Do NOT prefix the gloss with any marker or attribution. Write only
@@ -55,6 +57,71 @@ the gloss text itself.
 If the annotation names a person, place, historical event, unit of measure,
 foreign phrase, literary allusion, or a term of art, gloss that. If the source
 sentence itself already explains the thing, say so via `state`.
+
+## Two kinds of note, one voice
+
+A footnote does one of two jobs.
+
+- **Explanatory.** The author mentions something in passing that a modern reader
+  may not know: a place, a coin, a person, a custom, a date that was "two hundred
+  years ago" when he wrote it. Say what it is. Nothing in the text is wrong.
+- **Corrective.** The author said something that is not so: a belief of his day
+  that later knowledge revised, or an honest slip in a unit, a date or a figure.
+  Say what is so.
+
+Write both as a friend of the author would. The reader trusts and likes the
+author, and the note is on his side: it adds to what he said, it never scores a
+point against him. An error is an honest mistake, made in good faith, and often
+what everyone believed at the time.
+
+- **Kind is about stance, not softness.** Short and direct is fine, and most
+  explanatory notes should be exactly that. Do not pad a note with reassurance.
+- **Start from what the author had right**, when there is something: the belief
+  of his time, the case where his figure holds, what he evidently meant. Lead
+  with that rather than with the contradiction.
+- **Make clear which to believe.** Kind is not vague. A note that states the
+  modern fact without acknowledging what the sentence says leaves the reader
+  guessing which of the two is true.
+- **Name the speaker the reader knows**: the narrator or character who says it
+  («tío Paul»), or «el autor» when the book has no such figure.
+- **Never write against the author.** No note whose whole point is that he was
+  wrong (a bare «X no: Y» or «No X, sino Y»), no «error», «se equivoca», «falso»
+  or «erróneamente», no irony, no exclamations.
+
+If the book's own published notes are in front of you, match how they name the
+speaker and how long they run. They never license a note against the author.
+
+Examples from books in this series. Match their manner, not their words.
+
+Explanatory:
+
+- "Según las sagas nórdicas, un guerrero que luchaba con una furia
+  descontrolada, aparentemente sin sentir dolor ni miedo." — on *berserker*.
+- "El 15 de julio. Quintilis era el antiguo nombre de julio." — on *los idus de
+  Quintilis*.
+- "Esa erupción del Etna fue en 1669: «hace doscientos años» cuando el tío Paul
+  se lo contaba a los niños." — a date that was right when the book was written
+  is explained, not corrected.
+
+Corrective:
+
+- "Eso es cierto de alguien haciendo ejercicio fuerte. En reposo se necesitan
+  unos cuatrocientos litros de aire por hora." — the author gave six thousand
+  litres an hour. It replaced a draft that answered «…no seis mil».
+- "Tío Paul no está considerando aquí las piñas del pino, ni ciertas clases de
+  plantas que se reproducen por medio de esporas, como los helechos y los
+  musgos." — on «toda planta tiene su flor». It replaced «El pino no: tiene
+  piñas».
+- "Parece que quiso decir toneladas, no kilogramos: un cubo de cobre de un
+  kilómetro de lado pesa unos nueve mil millones de toneladas." — an honest slip,
+  read as what he meant.
+- "En tiempos antiguos se creía que algunos elefantes y ballenas podían vivir
+  cientos de años. De hecho los elefantes viven varias décadas y algunas ballenas
+  pueden superar los 200 años." — a belief of the time, given as one.
+- "Tío Paul aquí las tiene al revés: las obreras empiezan de nodrizas en casa;
+  más tarde hacen cera, y ya mayores salen a recolectar." — the first draft gave
+  only the right order, never saying the sentence had it backwards, and the
+  reader could not tell which to believe.
 
 ## Classify the annotation first
 

@@ -160,6 +160,14 @@ the drafted glosses so the reader can split them in the reader UI.
 
 ## Write-back
 
+`apply` is the only writer to `annotations.jsonl` **in this pipeline**, and that is a
+narrower claim than it reads as: it replaces the text of an annotation the review
+already drafted against, and it cannot create one. *Creating* a footnote — "add a
+gloss here" rather than "resolve the note the reader left" — is
+[`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md) / `scripts/footnote_pass.py add`. Reading this
+section as "there is no create path" is what sent the 2026-09-10 `fabre2` run into
+`web_ui/app.py:save_annotation` to reverse-engineer the record shape by hand.
+
 ```
 footnote        →  REPLACE:  content = "[<first anchor>] <gloss>"
 word_choice     →  APPEND:   content = "<original>\n— IA: <note>"
@@ -296,5 +304,7 @@ book".
   and `/review-inbox`, the surface that lands the results.
 - `docs/JUDGES_FRAMEWORK.md` — the pre-review pass. Separate persistence: annotation
   results never touch `evaluations/*.json` or the dashboard badges.
+- [`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md) — the create path: authoring a *new* footnote
+  rather than resolving one a reader left.
 - `docs/WEB_UI_GUIDE.md` — where annotations come from.
 - `docs/INGEST_GUTENBERG.md` — imported footnotes, which this pass skips.
