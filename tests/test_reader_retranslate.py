@@ -415,6 +415,8 @@ class TestReplaceEndpoint:
         # Offsets recorded for forensic debugging of bad replacements.
         assert record["chunk_offset_start"] == 0
         assert record["chunk_offset_end"] == len("El gato se sentó.")
+        # No claim from the client: the edit is the reader's own.
+        assert record["verified_by"] == "self"
 
 
 # -------- /api/sentence/replace: chunk-offset resolution --------

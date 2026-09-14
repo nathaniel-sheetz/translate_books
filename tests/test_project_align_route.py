@@ -510,6 +510,7 @@ class TestRealignAppliesPendingCorrections:
             "chunk_offset_start": 0,
             "chunk_offset_end": len(original_es),
             "timestamp": "2026-05-20T12:00:00",
+            "verified_by": "native",
         }
         (project / "corrections.jsonl").write_text(
             json.dumps(correction, ensure_ascii=False) + "\n",
@@ -570,6 +571,8 @@ class TestRealignAppliesPendingCorrections:
         assert archived_rows[0]["corrected_es"] == corrected_es
         assert "applied_at" in archived_rows[0]
         assert archived_rows[0]["status"] == "applied"
+        # The realign drain rebuilds the archived row; provenance must survive it.
+        assert archived_rows[0]["verified_by"] == "native"
         # Untouched chunk text in other positions should be preserved.
         assert "El perro ladró" in updated.translated_text
 

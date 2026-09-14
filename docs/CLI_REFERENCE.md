@@ -270,6 +270,20 @@ anchoring. Costs nothing: it scores what is already persisted rather than
 re-running the judge. `--write-examples` turns the marked corpus into the
 few-shot bank the judge reads back on its next run.
 
+### `ledger_census.py` — reader-edit census and audit export
+
+```bash
+python scripts/ledger_census.py
+python scripts/ledger_census.py --project my-book --export audit_input.jsonl
+```
+
+Per book, from `corrections_applied.jsonl`: reader edits (with repeats and
+skipped rows split out), automated rows, unique reader edits per 1,000 aligned
+sentences, the `retranslations.jsonl` rows the ledger never sees, and how many
+edits are native-confirmed. Read-only. `--export` writes one
+`(en, es_before, es_after)` row per unique landed edit with a stable `audit_id`:
+the input to the Phase 0 reader-edit audit.
+
 ### `review_annotations.py` — resolve reader annotations
 
 ```bash

@@ -1256,6 +1256,8 @@ def _successor_record(
         new_record["sub_id"] = sub
     if record.get("origin"):
         new_record["origin"] = record["origin"]
+    if record.get("verified_by"):
+        new_record["verified_by"] = record["verified_by"]
     if record.get("es_text"):
         new_record["es_text"] = record["es_text"]
     if sidecar is not None:
