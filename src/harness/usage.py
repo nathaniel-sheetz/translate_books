@@ -49,8 +49,13 @@ _CHARS_PER_TOKEN = 4
 # cursor — from the 2026-08-10 probe (cursor-agent 2026.08.04-aaa8809): a no-op
 # job billed ~18.2k input, and a 4.5k-token prompt billed 21.8k total, putting
 # the fixed per-process prefix at ~17.2k. There is no client-side lever on it:
-# `cursor-agent` has no `--system-prompt-file` and no cache-TTL knob, and
-# `cacheWriteTokens` came back 0 on every probe.
+# `cursor-agent` has no `--system-prompt-file` and no cache-TTL knob.
+#
+# The prefix depends on the *model*, not only the CLI. The 2026-09-14 panel probe
+# (cursor-agent 2026.09.10) measured Grok 4.6 ~17.9k, Gemini 3.8 Flash ~16.3k,
+# GPT-5.6 Terra ~16.3k and Claude Sonnet 5 ~30.6k. So this constant fits the
+# non-Claude models and quotes a Claude-on-Cursor wave ~13k low per job, until
+# that model's rows are most of the Cursor rows among the last 40 logged jobs.
 #
 # Only load-bearing on a cold machine: three logged jobs *of that CLI* and
 # baseline_tokens() switches to the measured median.
@@ -146,6 +151,11 @@ def usage_from_envelope(obj: Any, *, model: str | None = None) -> dict[str, Any]
     20,105 + 1,664 = 21,769 = run 1's total), so ``input + cache_creation +
     cache_read`` is billed input on both families and ``overhead_ratio`` needs no
     per-CLI arithmetic.
+
+    Some Cursor models put the prefix in a different field. GPT-5.6 Terra
+    reported ~16.7k ``cacheWriteTokens`` against ``inputTokens`` of 3 on
+    2026-09-14, and the same sum still counts it. Cursor envelopes carry no cost,
+    so ``cost_usd`` is absent and a Cursor wave's ``cost_equiv_usd`` is 0.
     """
     if not isinstance(obj, Mapping):
         return None

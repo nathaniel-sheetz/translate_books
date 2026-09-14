@@ -132,6 +132,29 @@ Its `inputTokens` excludes cache reads, exactly as Claude's does, so the shared
 estimated** — one `usage.jsonl` holds every family's rows, and an unfiltered
 median over a 4.4× gap describes neither.
 
+**On Cursor the prefix also depends on the model.** Measured by the 2026-09-14
+panel probe (cursor-agent 2026.09.10, the same audit prompt on every model,
+medium effort):
+
+| `--model` | fixed prefix per job | how Cursor reports it |
+|---|---|---|
+| `grok-4.6[effort=medium,fast=false]` | ~17.9k | `inputTokens`, plus opportunistic `cacheReadTokens` (0–8.8k) |
+| `gemini-3.8-flash-medium` | ~16.3k | all `inputTokens`; no cache reads on any job |
+| `gpt-5.6-terra-medium` | ~16.3k | all `cacheWriteTokens` (`inputTokens` ≈ 3) on every job; no reads |
+| `claude-sonnet-5-medium` | ~30.6k | `cacheWriteTokens` on the first job, then ~30.3k `cacheReadTokens` per job |
+
+`baseline_tokens()` is per CLI, not per model. The 17.2k default fits the
+non-Claude models and quotes a Claude-on-Cursor wave ~13k low per job, until
+that model's rows are most of the Cursor rows among the last 40 logged jobs. Billed input is
+still `input + cache_creation + cache_read` on every model.
+
+**Cursor envelopes carry no cost,** so `cost_equiv_usd` is 0 on a Cursor wave.
+To price one, multiply the token counts by the rates on
+[cursor.com/docs/models](https://cursor.com/docs/models), billing
+`cacheWriteTokens` at the input rate (Cursor lists no write price). At those
+rates the whole probe (24 processes across four models) came to $0.84, and the
+operator saw about 2% of the Pro allotment used.
+
 `headless_extra_flags` remains Claude-only: it is Claude argv and is dropped on a
 Cursor wave. **`headless_effort_<type>` no longer is** — see the two-channel note
 below.
@@ -139,20 +162,28 @@ below.
 #### There is no Cursor prompt cache to configure
 
 Stated as a measured fact so it stops reading as an open item. `cursor-agent`
-has no `--system-prompt-file`, no cache-TTL env knob, and reported
-`cacheWriteTokens: 0` on every probe — the client cannot write, pin, or price an
-entry. Server-side prefix caching does fire opportunistically (`cacheReadTokens`
-of 0 / 256 / 1664 / 7680 across identical-prefix calls), which is why Cursor
-waves keep `warm_first` and now log `cache_read` beside `warm`: the question is
-answerable from two waves of `usage.jsonl` rather than by argument. Relocating
+has no `--system-prompt-file` and no cache-TTL env knob, so the client cannot
+write, pin, or price an entry. What the server does varies by model (table
+above). On Grok 4.5 `cacheWriteTokens` was 0 on every probe while reads fired
+opportunistically (`cacheReadTokens` of 0 / 256 / 1664 / 7680 across
+identical-prefix calls). GPT-5.6 Terra reports its whole prefix as writes and
+never reads. Claude models write once and read back. That is why Cursor waves
+keep `warm_first` and log `cache_read` beside `warm`. Relocating
 the preamble into a `.cursor/rules` always-apply file via `--workspace` was
 probed on 2026-08-11 (3 runs per arm, same model and body) and moved cache reads
 not at all — median 5,312 in both arms — so `_fold_system_prompt` stays as it is.
 
-The only client-side levers on the ~17.2k fixed prefix are **fewer processes** or
+The only client-side levers on the fixed prefix are **fewer processes** or
 **a smaller prompt**. That is a description of the CLI, not a recommendation to
 group: grouping trades per-target reasoning depth for fewer prefixes, and with
 `usage` reported per wave that trade is now the operator's to make per wave.
+The 2026-09-14 probe put numbers on both sides. Twenty audit rows in one process
+cost about a tenth as much per row as one row per process on Grok, Gemini and
+Terra; on Claude via Cursor, whose prefix comes back from cache, the cost was
+about the same. Batching also moved verdicts: of 5 rows judged both ways, 3
+changed on Gemini 3.8 Flash, 2 on Grok 4.6, 1 on Sonnet 5 and none on Terra.
+Part of that is noise: the same model through the other CLI disagreed with
+itself on 4 of 20 rows.
 
 Cursor waves record `cache: null` on every row, since no mode was requested.
 
