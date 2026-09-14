@@ -31,10 +31,20 @@ Per book:
 judges (``en``, ``es_before``, ``es_after``) and an ``audit_id`` hashed from the
 edit itself, so verdicts still join back after a re-export.
 
+``--freeze DIR`` writes the exam snapshot for the books named by ``--project``.
+Per book, ``edits.jsonl`` holds the export rows, each marked with whether its
+``es_before`` appears in the original translation. ``chunks.jsonl`` holds each
+chunk's source, the LLM translation its ``last_llm_log`` recorded, and the text
+at freeze time. ``manifest.json`` holds counts and file hashes. The replay reads
+the snapshot, never the live book, so the books can keep being improved. The
+directory must be new; ``exam/`` is gitignored for it.
+
 Usage:
     python scripts/ledger_census.py
     python scripts/ledger_census.py --project bambi-a-life-in-the-woods
     python scripts/ledger_census.py --json census.json --export audit_input.jsonl
+    python scripts/ledger_census.py --project the-little-duke --project bambi-a-life-in-the-woods \\
+        --freeze exam/2026-09-14
 """
 
 from __future__ import annotations
@@ -42,7 +52,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -225,6 +237,99 @@ def format_table(stats: list[dict], totals: dict) -> str:
     return "\n".join(out)
 
 
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+#: Leading characters of a chunk's source its log prompt must carry to count as
+#: that chunk's original.
+_SOURCE_CHECK_CHARS = 200
+
+
+def original_translation(chunk: dict) -> tuple[Optional[str], dict[str, Any]]:
+    """A chunk's translation as the LLM returned it, from its ``last_llm_log``.
+
+    Edits leave the pointer alone, so this is the text before any reader or judge
+    change. The log must be for this chunk: the same ``chunk_id``, and a prompt
+    carrying the chunk's source. ``project_slug`` is recorded but not required
+    to match, because a chapter translated in a copy of the book and carried over
+    is still the text the reader read. Anything else gives ``None`` rather than
+    a wrong baseline.
+    """
+    rel = chunk.get("last_llm_log")
+    info: dict[str, Any] = {
+        "llm_log": rel, "log_project_slug": None, "model": None, "translated_at": None,
+    }
+    if not rel:
+        return None, info
+    try:
+        doc = json.loads((_REPO_ROOT / rel).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, info
+    meta = doc.get("metadata") or {}
+    info["log_project_slug"] = meta.get("project_slug")
+    info["model"] = meta.get("model")
+    info["translated_at"] = meta.get("timestamp")
+    source_head = _norm(chunk.get("source_text"))[:_SOURCE_CHECK_CHARS]
+    same_chunk = (
+        meta.get("chunk_id") in (None, chunk.get("id"))
+        and bool(source_head)
+        and source_head in _norm(doc.get("prompt"))
+    )
+    if doc.get("response") is None or not same_chunk:
+        return None, info
+    return doc["response"], info
+
+
+def freeze_book(projects_root: Path, project_dir: Path, out_dir: Path) -> dict[str, Any]:
+    """Write one book's exam snapshot under ``out_dir/<slug>/`` and summarize it."""
+    project_id = project_dir.name
+    _, edits = census_project(projects_root, project_dir)
+
+    chunks, originals = [], {}
+    for path in sorted((project_dir / "chunks").glob("*.json")):
+        chunk = json.loads(path.read_text(encoding="utf-8"))
+        chunk_id = chunk.get("id") or path.stem
+        original, info = original_translation(chunk)
+        if original is not None:
+            originals[chunk_id] = _norm(original)
+        chunks.append({
+            "chunk_id": chunk_id,
+            "chapter_id": chunk.get("chapter_id"),
+            "position": chunk.get("position"),
+            "source_text": chunk.get("source_text") or "",
+            "original_translation": original,
+            "translation_at_freeze": chunk.get("translated_text") or "",
+            **info,
+        })
+    # An edit to a sentence that had already changed since translation (an
+    # earlier edit, a judge fix, a re-split) cannot be replayed on the original.
+    for edit in edits:
+        before = _norm(edit["es_before"])
+        edit["before_in_original"] = bool(before) and before in originals.get(edit["chunk_id"], "")
+
+    book_dir = out_dir / project_id
+    book_dir.mkdir(parents=True)
+    written = {"edits.jsonl": edits, "chunks.jsonl": chunks}
+    for name, rows in written.items():
+        with open(book_dir / name, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return {
+        "project_id": project_id,
+        "path": project_dir.relative_to(projects_root).as_posix(),
+        "edits": len(edits),
+        "edits_before_in_original": sum(1 for e in edits if e["before_in_original"]),
+        "chunks": len(chunks),
+        "chunks_missing_original": sum(1 for c in chunks if c["original_translation"] is None),
+        "sha256": {name: _sha256(book_dir / name) for name in written},
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -232,22 +337,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Directory holding the books (default: projects/).",
     )
     parser.add_argument(
-        "--project",
-        help="Only this book, by slug (found under hidden group directories too).",
+        "--project", action="append",
+        help="Only this book, by slug (found under hidden group directories too). Repeatable.",
     )
     parser.add_argument("--json", dest="json_out", type=Path, help="Write the report as JSON.")
     parser.add_argument(
         "--export", type=Path,
         help="Write the audit input: one JSONL row per unique landed reader edit.",
     )
+    parser.add_argument(
+        "--freeze", type=Path,
+        help="Write the exam snapshot of the --project books into this new directory.",
+    )
     args = parser.parse_args(argv)
+
+    if args.freeze and not args.project:
+        parser.error("--freeze needs at least one --project")
+    if args.freeze and args.freeze.exists() and (
+        not args.freeze.is_dir() or any(args.freeze.iterdir())
+    ):
+        print(f"{args.freeze} is not an empty directory; a freeze always writes a new one", file=sys.stderr)
+        return 1
 
     projects = discover_projects(args.projects_root)
     if args.project:
-        projects = [p for p in projects if p.name == args.project]
+        wanted = set(args.project)
+        projects = [p for p in projects if p.name in wanted]
+        missing = sorted(wanted - {p.name for p in projects})
+        if missing:
+            print(f"No {CORRECTIONS_APPLIED_FILENAME} for: {', '.join(missing)}", file=sys.stderr)
+            return 1
     if not projects:
-        scope = f" for {args.project}" if args.project else ""
-        print(f"No {CORRECTIONS_APPLIED_FILENAME} under {args.projects_root}{scope}", file=sys.stderr)
+        print(f"No {CORRECTIONS_APPLIED_FILENAME} under {args.projects_root}", file=sys.stderr)
         return 1
 
     stats, export = [], []
@@ -276,6 +397,30 @@ def main(argv: Optional[list[str]] = None) -> int:
             for row in export:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         print(f"\nWrote {len(export)} audit rows to {args.export}")
+    if args.freeze:
+        summaries = [freeze_book(args.projects_root, p, args.freeze) for p in projects]
+        version_file = _REPO_ROOT / "VERSION"
+        manifest = {
+            "frozen_at": datetime.now().isoformat(timespec="seconds"),
+            "code_version": (
+                version_file.read_text(encoding="utf-8").strip() if version_file.exists() else None
+            ),
+            "purpose": (
+                "Phase 0 exam: replay judges against these books' original translations. "
+                "Never tune a judge on these books."
+            ),
+            "books": summaries,
+        }
+        (args.freeze / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+        print(f"\nFroze {len(summaries)} book(s) into {args.freeze}")
+        for s in summaries:
+            print(
+                f"  {s['project_id']}: {s['edits']} edits "
+                f"({s['edits_before_in_original']} found in the original), "
+                f"{s['chunks']} chunks ({s['chunks_missing_original']} without an original)"
+            )
     return 0
 
 

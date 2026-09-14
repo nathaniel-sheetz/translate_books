@@ -275,6 +275,7 @@ few-shot bank the judge reads back on its next run.
 ```bash
 python scripts/ledger_census.py
 python scripts/ledger_census.py --project my-book --export audit_input.jsonl
+python scripts/ledger_census.py --project book-a --project book-b --freeze exam/2026-09-14
 ```
 
 Per book, from `corrections_applied.jsonl`: reader edits (with repeats and
@@ -282,7 +283,11 @@ skipped rows split out), automated rows, unique reader edits per 1,000 aligned
 sentences, the `retranslations.jsonl` rows the ledger never sees, and how many
 edits are native-confirmed, for every book outside `.backburner`. Read-only. `--export` writes one
 `(en, es_before, es_after)` row per unique landed edit with a stable `audit_id`:
-the input to the Phase 0 reader-edit audit.
+the input to the Phase 0 reader-edit audit. `--freeze DIR` writes the exam
+snapshot for the `--project` books into a new directory: their edit rows, each
+chunk's source and original LLM translation, and a manifest with file hashes.
+Replays read the snapshot, so the live books can keep changing. `exam/` is
+gitignored for it.
 
 ### `review_annotations.py` — resolve reader annotations
 
