@@ -1149,8 +1149,11 @@ def run_headless_wave(
     prompt-cache TTL; ``auto`` resolves from job shapes and prior wall times.
     **Cursor has no controllable cache** — not "no cache": its server-side prefix
     caching fires opportunistically (``cacheReadTokens`` of 0 / 256 / 1664 / 7680
-    across identical-prefix probe calls) while ``cacheWriteTokens`` stayed 0, so
-    the client cannot write, pin, or price an entry. Cursor waves therefore record
+    across identical-prefix probe calls on Grok 4.5), and what it reports varies
+    by model: GPT-5.6 Terra bills its whole prefix as ``cacheWriteTokens`` on
+    every job and never reads, while Claude Sonnet 5 writes once and reads back
+    (2026-09-14 probe). Either way the client cannot write, pin, or price an
+    entry. Cursor waves therefore record
     ``cache=None`` and keep ``warm_first``: with ``cache_read`` now logged beside
     ``warm``, two waves of ``usage.jsonl`` settle empirically whether serializing
     job 1 raises cache reads. When the resolved Claude mode is ``off``, warm-up is

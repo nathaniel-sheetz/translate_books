@@ -503,9 +503,12 @@ to write the two Q2 option descriptions, not to open a fifth question:
   cross-invocation prompt caching either way.
 - **Cursor path.** None of that Sonnet cache advice applies — it is Claude-only. What
   binds instead is a **fixed ~17.2k tokens per process** (vs ~3.9k on Claude), measured
-  2026-08-10 and confirmed on a real wave at a **0.78 overhead ratio**. There is no
-  client-side lever on it: `cursor-agent` has no `--system-prompt-file`, no cache-TTL env
-  knob, and `cacheWriteTokens` is always 0. Moving the preamble into a `.cursor/rules`
+  2026-08-10 and confirmed on a real wave at a **0.78 overhead ratio**. It varies by model:
+  ~16–18k on Grok 4.6, Gemini 3.8 Flash and GPT-5.6 Terra, ~30.6k on Claude Sonnet 5
+  (2026-09-14; per-model table in `docs/LLM_PROVIDERS.md`). There is no client-side lever
+  on it: `cursor-agent` has no `--system-prompt-file` and no cache-TTL env knob, and
+  whether the server writes or reads cache depends on the model, not on the wave. Moving
+  the preamble into a `.cursor/rules`
   always-apply file was probed (2026-08-11, 3 runs per arm) and changed cache reads not at
   all. The only levers are **fewer processes** or **a smaller prompt** — that is a fact
   about the CLI, not a recommendation to group. Grouping (`--targets-per-worker`) trades

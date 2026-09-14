@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.59.0.1] - 2026-09-14
+
+### Changed
+- **The Cursor provider docs carry the 2026-09-14 panel probe's numbers.** The fixed per-process prefix depends on the model, not only the CLI: ~17.9k on Grok 4.6, ~16.3k on Gemini 3.8 Flash and GPT-5.6 Terra, ~30.6k on Claude Sonnet 5. So the 17.2k Cursor default in `baseline_tokens()` quotes a Claude-on-Cursor wave ~13k low per job until that model's rows dominate the log. The per-model table is in `docs/LLM_PROVIDERS.md`; the judge-review and translate-harness skill references point to it.
+- **"`cacheWriteTokens` is always 0" was only true of Grok.** GPT-5.6 Terra reports its whole prefix as cache writes on every job and never reads; Sonnet 5 writes once and reads back. Billed input is still `input + cache_creation + cache_read` on every model, and the `headless.py` and `usage.py` comments now say so.
+- **How to price a Cursor wave.** Cursor envelopes carry no cost, so `cost_equiv_usd` is 0; multiply the token counts by the rates on cursor.com, billing cache writes at the input rate. The docs also record what batching did in the probe: 20 audit rows in one process cost about a tenth as much per row as one row per process on the non-Claude models, and moved some verdicts. Docs and comments only; no behavior change.
+
 ## [0.59.0.0] - 2026-09-14
 
 ### Added

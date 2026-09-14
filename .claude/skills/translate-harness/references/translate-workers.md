@@ -238,10 +238,12 @@ misconfiguration (warning only), and an id the CLI outright rejects fails the wa
 spawns anything.
 
 Cursor waves report `usage` like Claude ones, but the shape differs sharply: **~17.2k fixed
-tokens per process** against Claude's ~3.9k, and no prompt cache to configure (no
-`--system-prompt-file`, no TTL knob, `cacheWriteTokens` always 0 — a `.cursor/rules`
-workspace-rule placement was probed and changed nothing). Fewer processes or a smaller prompt
-are the only levers; the `overhead_ratio` on each wave is what that decision should rest on.
+tokens per process** against Claude's ~3.9k (~30.6k when the Cursor model is Claude Sonnet 5;
+per-model table in `docs/LLM_PROVIDERS.md`), and no prompt cache to configure (no
+`--system-prompt-file`, no TTL knob, and whether the server writes or reads cache depends on
+the model — a `.cursor/rules` workspace-rule placement was probed and changed nothing). Fewer
+processes or a smaller prompt are the only levers; the `overhead_ratio` on each wave is what
+that decision should rest on.
 
 **Subscription enforcement (both profiles).** The child env is scrubbed of every metered
 credential — the whole `ANTHROPIC_*` namespace, the `CLAUDE_CODE_USE_*` third-party switches,
