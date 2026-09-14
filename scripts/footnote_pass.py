@@ -85,12 +85,14 @@ def _die(message: str) -> None:
 
 def _resolve_project(arg: str) -> Path:
     """Accept a project id or a path; exit with JSON on failure."""
+    # Resolved, because `scan-prepare` writes these paths into the manifest and a
+    # later command run from another cwd must read the same files.
     candidate = Path(arg)
     if candidate.is_dir():
-        return candidate
+        return candidate.resolve()
     resolved = _REPO_ROOT / "projects" / arg
     if resolved.is_dir():
-        return resolved
+        return resolved.resolve()
     _die(f"project not found: {arg!r} (looked for a directory and projects/{arg})")
     raise AssertionError("unreachable")  # pragma: no cover
 
@@ -190,8 +192,14 @@ def _load_json_file(path_arg: str) -> list[dict[str, Any]]:
     except (json.JSONDecodeError, OSError) as exc:
         _die(f"unreadable --json-file {path}: {exc}")
         raise AssertionError("unreachable")  # pragma: no cover
+    if isinstance(doc, dict) and isinstance(doc.get("candidates"), list):
+        _die(
+            f"--json-file {path} looks like scan output (candidates.json): those rows "
+            "are pointers, not decisions. Write a decisions document — note for a "
+            "keep, verdict/reason for a drop, candidate_key copied from the report"
+        )
     if isinstance(doc, dict):
-        for key in ("notes", "approved", "candidates", "decisions"):
+        for key in ("notes", "approved", "decisions"):
             if isinstance(doc.get(key), list):
                 doc = doc[key]
                 break
@@ -251,7 +259,11 @@ def _cmd_scan_fanout(args: argparse.Namespace) -> int:
         cache=args.prompt_cache,
     )
     _emit(out)
-    return 1 if out.get("error") else 0
+    # Every job failing is a failed wave, not an empty one — exiting 0 walks the
+    # flow straight on to `scan-commit` over drafts that were never written.
+    counts = out.get("counts") or {}
+    all_failed = bool(counts.get("failed")) and not counts.get("wrote")
+    return 1 if out.get("error") or all_failed else 0
 
 
 def _cmd_scan_commit(args: argparse.Namespace) -> int:
@@ -263,7 +275,7 @@ def _cmd_scan_commit(args: argparse.Namespace) -> int:
 def _cmd_add(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     if args.json_file:
-        if args.chapter or args.es_idx is not None or args.note:
+        if args.chapter or args.es_idx is not None or args.anchor or args.note:
             _die("--json-file is exclusive with --chapter/--es-idx/--anchor/--note")
         notes = _load_json_file(args.json_file)
     else:
@@ -385,7 +397,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--chapters", help="chapters to scan (1-20, 3,7,12, chapter_04); default all"
     )
     p_prepare.add_argument(
-        "--worker-model", default=None, help="model tier per worker (default: sonnet)"
+        "--worker-model",
+        default=None,
+        help="model pin per worker; omit and the resolved profile supplies it",
     )
     p_prepare.add_argument(
         "--batch-size",
@@ -462,8 +476,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--json-file",
         default=None,
         help="a list of {chapter_id, es_idx, anchor, note, verdict?, reason?, "
-        "stage?, sources?} — lands a whole approved batch in one call, with a "
-        "per-note result. verdict defaults to keep, so an old approved.json works",
+        "stage?, sources?, candidate_key?} — lands a whole approved batch in one "
+        "call, with a per-note result. verdict defaults to keep, so an old "
+        "approved.json works. candidate_key is the join back to the scanned claim",
     )
     p_add.add_argument(
         "--dry-run",

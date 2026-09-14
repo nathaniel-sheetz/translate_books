@@ -210,6 +210,78 @@ def test_add_json_file_must_exist(project, tmp_path):
     assert "not found" in json.loads(str(exc.value))["error"]
 
 
+def test_add_json_file_refuses_scan_output(project, tmp_path):
+    """candidates.json is pointers; read as keeps it would sit in the ledger for ever."""
+    path = tmp_path / "candidates.json"
+    path.write_text(
+        json.dumps({"candidates": [{"chapter_id": "chapter_01", "es_idx": 1,
+                                    "quoted_span": "cuernitos"}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["add", "--project", str(project), "--json-file", str(path)])
+    assert "scan output" in json.loads(str(exc.value))["error"]
+    assert not (project / ".harness" / "footnotes" / "decisions.jsonl").exists()
+
+
+def test_a_relative_project_path_is_resolved(project, monkeypatch):
+    """scan-prepare writes these paths into the manifest; another cwd must read them."""
+    monkeypatch.chdir(project.parent)
+    resolved = cli._resolve_project(project.name)
+    assert resolved.is_absolute()
+    assert resolved == project.resolve()
+
+
+def test_scan_commit_exits_nonzero_when_it_keeps_the_previous_shortlist(
+    project, profile_file, capsys
+):
+    """Exiting 0 here would walk the flow on as if the last shortlist were new."""
+    from src.footnote_pass import scan as fp_scan
+    from src.footnote_pass.corpus import footnotes_dir
+
+    fp_scan.scan_prepare(project, profile_file=profile_file)
+    fdir = footnotes_dir(project)
+    (fdir / "chapter_01.scan.draft.json").write_text(
+        json.dumps({"chapter_id": "chapter_01", "candidates": [
+            {"es_idx": 1, "quoted_span": "cuernitos",
+             "category": "corrects the author's science",
+             "claim": "Aphids drip from their cornicles.",
+             "why": "They do not."},
+        ]}),
+        encoding="utf-8",
+    )
+    (fdir / "chapter_02.scan.draft.json").write_text(
+        json.dumps({"chapter_id": "chapter_02", "candidates": []}),
+        encoding="utf-8",
+    )
+    first, _ = _run(capsys, ["scan-commit", "--project", str(project)])
+    assert first == 0
+    before = (fdir / "candidates.json").read_text(encoding="utf-8")
+    for draft in fdir.glob("*.scan.draft.json"):
+        draft.unlink()
+
+    code, out = _run(capsys, ["scan-commit", "--project", str(project)])
+    assert code == 1
+    assert out["status"] == "error"
+    assert (fdir / "candidates.json").read_text(encoding="utf-8") == before
+
+
+def test_scan_fanout_exits_nonzero_when_every_job_failed(project, capsys, monkeypatch):
+    """Exiting 0 walks the flow on to `scan-commit` over drafts never written."""
+    monkeypatch.setattr(
+        cli.fp_scan,
+        "scan_fanout",
+        lambda *_a, **_k: {
+            "wrote": [],
+            "failed": [{"id": "chapter_01", "error": "boom"}],
+            "skipped": [],
+            "counts": {"wrote": 0, "failed": 1, "skipped": 0, "todo": 1},
+        },
+    )
+    code, _out = _run(capsys, ["scan-fanout", "--project", str(project)])
+    assert code == 1
+
+
 # --- scan-prepare ---------------------------------------------------------
 
 def test_scan_prepare_requires_a_profile_file(project):

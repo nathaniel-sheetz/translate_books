@@ -8,10 +8,11 @@ infer the book's own footnote style from the notes it already carries, scan
 chapters for more spots that deserve the same treatment, and append validated
 ``type: "footnote"`` records through ``src.annotations.store``.
 
-Four modules, each one stage of that:
+Five modules, each one stage of that:
 
 - :mod:`corpus` — read the existing footnotes as a style-inference corpus.
 - :mod:`scan`   — render scan prompts, fan them out, collect candidates.
+- :mod:`ledger` — the append-only log of proposals, keeps, and drops.
 - :mod:`write`  — ``add`` and ``verify``: the validated write, and the audit.
 - :mod:`report` — the dated markdown candidate report.
 

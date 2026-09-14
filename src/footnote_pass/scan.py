@@ -298,7 +298,14 @@ def scan_prepare(
             ),
             "_schema": _PREPARE_SCHEMA,
         }
-    profile = profile_file.read_text(encoding="utf-8").strip()
+    try:
+        profile = profile_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        return {
+            "status": "error",
+            "error": f"could not read profile file {profile_file}: {exc}",
+            "_schema": _PREPARE_SCHEMA,
+        }
     if not profile:
         return {
             "status": "error",
@@ -509,7 +516,8 @@ def scan_fanout(
     """Run one headless CLI wave over the prepared chapters.
 
     Each job passes the shared preamble as ``system_prompt_file`` and the
-    chapter's bilingual rows as ``input_text``. ``run_headless_wave`` owns the CLI
+    chapter's ``es_idx | ES`` rows as ``input_text`` (``| EN`` when
+    ``source_text`` is ``both``). ``run_headless_wave`` owns the CLI
     difference, the subscription preflight and the usage log — no launcher code
     lives here.
 
@@ -783,7 +791,8 @@ def parse_scan_draft(raw: str, *, chapter_id: str) -> list[dict[str, Any]]:
 
 
 _COMMIT_SCHEMA = {
-    "status": "'ok' | 'error'",
+    "status": "'ok' | 'partial' (some chapters in failed/missing; the rest landed) | "
+    "'error' (nothing parsed — candidates.json left as it was)",
     "counts": "{chapters, usable, unusable, failed, missing}",
     "by_chapter": "{chapter_id: usable candidate count}",
     "by_category": "{category: usable candidate count}",
@@ -803,6 +812,7 @@ UNUSABLE_NO_ROW = "no_aligned_sentence"
 UNUSABLE_SPAN = "span_not_in_sentence"
 UNUSABLE_FIELDS = "missing_fields"
 UNUSABLE_ALREADY = "already_noted"
+UNUSABLE_DUPLICATE = "duplicate_span"
 
 
 def scan_commit(
@@ -857,14 +867,32 @@ def scan_commit(
     unusable: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
     missing: list[str] = []
+    parsed = 0
+    seen_keys: set[str] = set()
 
     for entry in entries:
         if not isinstance(entry, dict) or not entry.get("chapter_id"):
             failed.append({"chapter_id": "?", "problem": "malformed manifest entry"})
             continue
         chapter_id = entry["chapter_id"]
-        draft_path = Path(entry.get("draft_path") or "")
-        if not draft_path or not draft_path.resolve().is_relative_to(fdir):
+        draft_raw = entry.get("draft_path")
+        if not draft_raw:
+            failed.append({"chapter_id": chapter_id, "problem": "missing draft_path"})
+            continue
+        draft_path = Path(draft_raw)
+        try:
+            escaped = not draft_path.resolve().is_relative_to(fdir)
+        except (OSError, RuntimeError, ValueError) as exc:
+            failed.append(
+                {
+                    "chapter_id": chapter_id,
+                    "problem": (
+                        f"unresolvable draft_path: {type(exc).__name__}: {exc}"[:500]
+                    ),
+                }
+            )
+            continue
+        if escaped:
             failed.append(
                 {
                     "chapter_id": chapter_id,
@@ -891,6 +919,7 @@ def scan_commit(
                 {"chapter_id": chapter_id, "problem": f"{type(exc).__name__}: {exc}"}
             )
             continue
+        parsed += 1
 
         rows = load_alignment_rows(project_dir, chapter_id)
         es_map = {r.get("es_idx"): (r.get("es") or "") for r in rows}
@@ -900,7 +929,7 @@ def scan_commit(
             row = {
                 "chapter_id": chapter_id,
                 "es_idx": candidate.get("es_idx"),
-                "quoted_span": str(candidate.get("quoted_span") or ""),
+                "quoted_span": str(candidate.get("quoted_span") or "").strip(),
                 "category": str(candidate.get("category") or ""),
                 "claim": str(candidate.get("claim") or ""),
                 "why": str(candidate.get("why") or ""),
@@ -952,12 +981,25 @@ def scan_commit(
             # The stable id for this candidate, so a decision row can join back
             # to it exactly. `(chapter_id, es_idx)` alone is neither unique nor
             # stable — see `ledger.candidate_key`.
+            key = fp_ledger.candidate_key(chapter_id, es_idx, row["quoted_span"])
+            if key and key in seen_keys:
+                # A second row under one key is unaddressable: no decision can
+                # name it apart from the first, so it would sit in `undecided`
+                # for good. Listed rather than dropped — its claim may differ.
+                unusable.append(
+                    {
+                        **row,
+                        "reason": UNUSABLE_DUPLICATE,
+                        "detail": "the wave already proposed this span on this sentence",
+                    }
+                )
+                continue
+            if key:
+                seen_keys.add(key)
             usable.append(
                 {
                     **row,
-                    "candidate_key": fp_ledger.candidate_key(
-                        chapter_id, es_idx, row["quoted_span"]
-                    ),
+                    "candidate_key": key,
                     "es_sentence": es_text,
                     # Attached whatever the scanner read. Under the default
                     # Spanish-only scan this is the *only* place the source
@@ -965,6 +1007,30 @@ def scan_commit(
                     "en_sentence": en_map.get(es_idx, ""),
                 }
             )
+
+    counts = {
+        "chapters": len(entries),
+        "usable": len(usable),
+        "unusable": len(unusable),
+        "failed": len(failed),
+        "missing": len(missing),
+    }
+    if not parsed and (failed or missing):
+        # Nothing parsed, so there is nothing to replace the last shortlist with.
+        # Writing anyway would empty the only file `add` joins against and report
+        # `ok` over a wave that never ran. An empty-but-parsed scan still lands.
+        return {
+            "status": "error",
+            "error": "no scan draft parsed — candidates.json left as it was",
+            "counts": counts,
+            "failed": failed,
+            "missing": missing,
+            "instructions": (
+                "Nothing was replaced. Re-run `scan-fanout` (with --target-ids for "
+                "these chapters), confirm drafts exist, then commit again."
+            ),
+            "_schema": _COMMIT_SCHEMA,
+        }
 
     by_chapter: dict[str, int] = {}
     by_category: dict[str, int] = {}
@@ -989,14 +1055,16 @@ def scan_commit(
     candidates_path.write_text(
         json.dumps(doc_out, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    report_path = write_candidate_report(project_dir, doc_out) if report else None
+    stamp = fp_ledger.run_id()
+    report_path = (
+        write_candidate_report(project_dir, doc_out, stamp=stamp) if report else None
+    )
 
     # One `proposed` ledger row per usable candidate, so the ledger can answer
     # "what was proposed, and what became of it" on its own after the next
     # commit has replaced `candidates.json`. Not governed by `--no-report`: that
     # flag is about markdown, not about the record.
     try:
-        stamp = fp_ledger.run_id()
         fp_ledger.append_decisions(
             project_dir,
             [
@@ -1008,14 +1076,8 @@ def scan_commit(
         logger.warning("footnote scan-commit: could not append to the ledger: %s", exc)
 
     return {
-        "status": "ok",
-        "counts": {
-            "chapters": len(entries),
-            "usable": len(usable),
-            "unusable": len(unusable),
-            "failed": len(failed),
-            "missing": len(missing),
-        },
+        "status": "partial" if failed or missing else "ok",
+        "counts": counts,
         "by_chapter": by_chapter,
         "by_category": by_category,
         "failed": failed,

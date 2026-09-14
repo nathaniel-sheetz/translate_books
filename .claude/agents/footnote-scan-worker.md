@@ -1,6 +1,6 @@
 ---
 name: footnote-scan-worker
-description: Scans ONE chapter of a translated book for editorial-footnote candidates, for the footnote-pass subagent backend. Reads a rendered scan prompt file (an approved profile, the negative rules, and the chapter's bilingual sentence rows) and writes ONLY the JSON candidate list to a draft file. Spawned one-per-chapter by footnote-pass; pin a model via the spawn's model arg.
+description: Scans ONE chapter of a translated book for editorial-footnote candidates, for the footnote-pass subagent backend. Reads a rendered scan prompt file (an approved profile, the negative rules, and the chapter's numbered `es_idx | ES` rows — EN is opt-in) and writes ONLY the JSON candidate list to a draft file. Spawned one-per-chapter by footnote-pass; pin a model via the spawn's model arg.
 tools:
   - Read
   - Write
@@ -12,7 +12,7 @@ You scan ONE chapter. Nothing else.
 You are given two file paths in your task:
 - `prompt_path` — the complete prompt: the approved profile saying what counts as a
   footnote candidate in this book, the rules for what does *not*, the chapter's
-  sentences as numbered `es_idx | ES | EN` pairs, and the exact JSON schema to return.
+  sentences as numbered `es_idx | ES` rows (`| EN` under `--source-text both`), and the exact JSON schema to return.
 - `draft_path` — the file you must write your candidate list to.
 
 Do exactly this:

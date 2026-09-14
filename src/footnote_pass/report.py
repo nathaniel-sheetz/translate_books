@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 _REASON_LABELS = {
     "no_aligned_sentence": "the es_idx has no alignment row",
@@ -30,15 +30,22 @@ _REASON_LABELS = {
     "(so it cannot become an anchor)",
     "missing_fields": "the candidate is missing a required field",
     "already_noted": "this sentence already carries a footnote",
+    "duplicate_span": "the wave already proposed this span on this sentence",
 }
 
 
-def write_candidate_report(project_dir: Path, doc: dict[str, Any]) -> Path:
-    """Write ``reports/footnote_candidates_<YYYYmmdd_HHMMSS>.md`` and return its path."""
+def write_candidate_report(
+    project_dir: Path, doc: dict[str, Any], *, stamp: Optional[str] = None
+) -> Path:
+    """Write ``reports/footnote_candidates_<YYYYmmdd_HHMMSS>.md`` and return its path.
+
+    ``stamp`` is the same ``run_id`` the ``proposed`` ledger rows carry, so a
+    commit that straddles a second still joins the markdown file to those rows.
+    """
     project_dir = Path(project_dir)
     reports_dir = project_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     path = reports_dir / f"footnote_candidates_{stamp}.md"
     path.write_text(render_candidate_report(doc), encoding="utf-8")
     return path
@@ -182,6 +189,8 @@ _PROBLEM_LABELS = {
     "anchor_not_found": "the marker falls to the end of the sentence",
     "ambiguous_anchor": "the anchor recurs; the marker takes the first hit",
     "sentence_drifted": "es_idx now names a different sentence",
+    "candidate_key_mismatch": "the candidate_key names another sentence; the ledger "
+    "joins this note to neither",
 }
 
 
@@ -253,13 +262,27 @@ def render_decision_report(doc: dict[str, Any]) -> str:
     invalid = [r for r in rows if r.get("verdict") == "invalid"]
     undecided = [r for r in rows if r.get("verdict") == "undecided"]
 
+    # `Kept` counts decisions, beside Dropped and Not decided. The breakdown is
+    # what stops a refused keep reading as a landed note in the header.
+    kept_parts = []
+    for outcome, word in (
+        ("added", "written"),
+        ("planned", "planned"),
+        ("duplicate", "duplicate"),
+        ("refused", "refused"),
+    ):
+        n = sum(1 for r in keeps if r.get("outcome") == outcome)
+        if n:
+            kept_parts.append(f"{n} {word}")
+    kept = f"{len(keeps)} ({' · '.join(kept_parts)})" if kept_parts else str(len(keeps))
+
     title = "Footnote decisions — proposed" if dry_run else "Footnote decisions"
     lines = [
         f"# {title}",
         "",
         f"- **Project:** {doc.get('project')}",
         f"- **Run:** `{doc.get('run_id')}` · {doc.get('written_at')}",
-        f"- **Kept:** {len(keeps)} · **Dropped:** {counts.get('dropped', 0)} · "
+        f"- **Kept:** {kept} · **Dropped:** {counts.get('dropped', 0)} · "
         f"**Not decided:** {counts.get('undecided', 0)}",
     ]
     if doc.get("worker_model"):
@@ -282,6 +305,10 @@ def render_decision_report(doc: dict[str, Any]) -> str:
         lines += ["_No notes in this run._", ""]
     for row in keeps:
         outcome = _OUTCOME_LABELS.get(row.get("outcome"), row.get("outcome") or "?")
+        if row.get("outcome") == "duplicate" and not row.get("existing_sub_id"):
+            # Only a dry run lands here: the collision is with an earlier row of
+            # this same file, which is not on the book yet.
+            outcome = "repeats an earlier note in this run"
         heading = f"### {row.get('chapter_id')} · es_idx {row.get('es_idx')} — {outcome}"
         if row.get("sub_id"):
             heading += f" (`{row['sub_id']}`)"
@@ -317,8 +344,8 @@ def render_decision_report(doc: dict[str, Any]) -> str:
         lines += ["_Nothing was dropped in this run._", ""]
     else:
         lines += [
-            "Decided against, and recorded so the next run does not re-propose them",
-            "blind.",
+            "Decided against, and recorded in the ledger. A later scan does not read",
+            "the ledger yet, so the same span can come back as a new candidate.",
             "",
             "| Chapter | es_idx | Stage | Reason |",
             "|---|---|---|---|",
@@ -338,7 +365,8 @@ def render_decision_report(doc: dict[str, Any]) -> str:
             "Candidates from `candidates.json` in chapters this run touched that appear",
             "in neither a keep nor a drop. **`scan-commit` replaces that file**, so",
             "anything left here is lost on the next scan — record it as a drop with a",
-            "reason.",
+            "reason. On a sentence with several candidates, a keep or drop only counts",
+            "for the one whose `candidate_key` it carries.",
             "",
             "| Chapter | es_idx | Claim |",
             "|---|---|---|",

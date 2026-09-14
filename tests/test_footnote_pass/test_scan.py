@@ -58,6 +58,16 @@ def test_prepare_refuses_an_empty_profile_file(project, tmp_path):
     assert "empty" in out["error"]
 
 
+def test_prepare_refuses_an_unreadable_profile_file(project, tmp_path):
+    """Missing/empty already return JSON; a Latin-1 file must not traceback instead."""
+    path = tmp_path / "latin1.md"
+    path.write_bytes("perfil: café".encode("latin-1"))
+    out = _prepare(project, path)
+    assert out["status"] == "error"
+    assert "could not read" in out["error"]
+    assert not _manifest_path(project).exists()
+
+
 def test_prepare_refuses_a_book_with_no_alignments(tmp_path, profile_file):
     bare = tmp_path / "bare"
     (bare / ".harness").mkdir(parents=True)
@@ -281,6 +291,7 @@ def test_commit_reports_a_missing_draft_rather_than_failing(project, profile_fil
     _prepare(project, profile_file)
     _draft(project, "chapter_01", [dict(_GOOD)])
     out = fp_scan.scan_commit(project)
+    assert out["status"] == "partial"
     assert out["missing"] == ["chapter_02"]
     assert out["counts"]["usable"] == 1
 
@@ -348,6 +359,35 @@ def test_an_empty_candidate_list_is_a_valid_answer(project, profile_file):
         "failed": 0,
         "missing": 0,
     }
+
+
+def test_a_commit_with_no_parsed_draft_keeps_the_previous_shortlist(project, profile_file):
+    """A wave that never ran must not empty the only file `add` joins against."""
+    _prepare(project, profile_file)
+    _draft(project, "chapter_01", [dict(_GOOD)])
+    _draft(project, "chapter_02", [])
+    assert fp_scan.scan_commit(project)["counts"]["usable"] == 1
+    candidates_path = footnotes_dir(project) / "candidates.json"
+    before = candidates_path.read_text(encoding="utf-8")
+
+    for draft in footnotes_dir(project).glob("*.scan.draft.json"):
+        draft.unlink()
+    out = fp_scan.scan_commit(project)
+    assert out["status"] == "error"
+    assert out["counts"]["missing"] == 2
+    assert candidates_path.read_text(encoding="utf-8") == before
+    proposed = [r for r in fp_ledger.read_decisions(project) if r["verdict"] == "proposed"]
+    assert len(proposed) == 1
+
+
+def test_commit_lists_a_repeated_span_as_unusable(project, profile_file):
+    """Two rows under one key: no decision could ever name the second apart."""
+    _prepare(project, profile_file)
+    _draft(project, "chapter_01", [dict(_GOOD), {**_GOOD, "category": "supplies period context"}])
+    _draft(project, "chapter_02", [])
+    out = fp_scan.scan_commit(project)
+    assert out["counts"]["usable"] == 1
+    assert out["unusable"][0]["reason"] == fp_scan.UNUSABLE_DUPLICATE
 
 
 # --- fanout (stubbed runner, nothing spawned) -----------------------------
@@ -557,3 +597,5 @@ def test_commit_stamps_a_candidate_key_on_every_usable_row(project, profile_file
     assert [r["candidate_key"] for r in rows] == [key]
     assert rows[0]["verdict"] == "proposed"
     assert rows[0]["candidate"]["claim"] == "Aphids drip from their cornicles."
+    stamp = Path(out["report_path"]).name.removeprefix("footnote_candidates_").removesuffix(".md")
+    assert rows[0]["run_id"] == stamp

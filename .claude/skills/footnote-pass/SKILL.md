@@ -118,14 +118,22 @@ notes that landed but nothing about the ones that did not.
 - **`--json-file` takes a decisions document**, a superset of the old
   `approved.json`: `[{chapter_id, es_idx, anchor, note, verdict?, reason?, stage?,
   sources?, candidate_key?}, …]`. **A row with no `verdict` is a keep**, so an old
-  approved file still works unchanged.
+  approved file still works unchanged. A refused row copied back out of
+  `decisions.jsonl` (`anchor` plus the composed `content`, no `note`) also works, and
+  so does the review page's composed `[anchor] gloss` pasted into `note`. Scan output
+  does not: `candidates.json` is refused, and a keep with no `note` field is `invalid`.
 - `verdict: "drop"` rows are recorded with their `reason` and `stage`
   (`gate2` | `research` | `gate3`) and never reach the validator. That is how a
-  candidate you cut, or one you killed while researching, stops vanishing.
+  candidate you cut, or one you killed while researching, is recorded. A drop is a
+  record, not a filter: the next scan does not read the ledger and can propose the
+  same span again.
 - `candidate_key` comes off the candidate report. Copy it and the ledger joins back to
   the exact claim; without it the join falls back to the sentence and reports itself as
-  a weaker match — two candidates on one sentence resolve to "unknown" rather than a
-  guess.
+  a weaker match — two candidates on one sentence resolve to `"none"` rather than a
+  guess, and `counts.undecided` keeps listing both. A key naming a different sentence
+  than the row's own `chapter_id`/`es_idx` warns `candidate_key_mismatch` and joins to
+  nothing — one half is a copy slip, and if it is the `es_idx` the note is on the wrong
+  sentence. Fix it before approving.
 - `--dry-run` renders the report and writes **nothing** — not the book, not the ledger.
   A proposal is not a decision.
 - `--no-report` skips the markdown only; the ledger is still appended.
@@ -186,10 +194,14 @@ probably does not know.
 Present the inferred taxonomy: one line per category, **each with the actual existing
 note that evidences it.** On `fabre2` that lands at roughly:
 
-- *corrects the author's science* — a 19th-century claim now known to be wrong
-- *corrects an unforced error* — something the author simply got wrong
+- *updates the author's science* — what his century believed, since revised
+- *clarifies an honest slip* — a figure, date or unit he evidently meant differently
 - *supplies period context a modern child lacks*
 - *modernizes an obsolete name* — a place, unit or term since renamed
+
+Name the corrective categories the way a friend of the author would. The category
+text is written into `profile.md`, stamped on every candidate, and read again as the
+frame you draft from at §7.
 
 Use `AskUserQuestion`, multiSelect, ≤4 options, **plus an explicit invitation to
 redirect or add categories.** The reason this gate exists is that you may have
@@ -287,7 +299,10 @@ python scripts/footnote_pass.py scan-commit --project fabre2
 stdout, and G2 below is a decision the user cannot make from counts. Each candidate
 carries a `candidate_key`; keep it, it is what joins a decision back to its claim.
 Re-run `scan-fanout --target-ids <ids>` for anything in `failed`/`missing`, cap at ~3
-attempts per chapter, then surface it.
+attempts per chapter, then surface it. `status: partial` means those chapters are
+missing but the rest landed. `status: error` with nothing parsed means **nothing was
+replaced** — the previous `candidates.json` is untouched, so re-fan; never re-prepare.
+`scan-fanout` exits 1 when every job failed: do not commit over that.
 
 Raise the `unusable` count explicitly, and `span_not_in_sentence` in particular: that
 means a worker paraphrased instead of quoting, and if it is most of the list the
@@ -332,10 +347,25 @@ Per surviving candidate:
    2026-09-11 the ch. 29 cobras note was killed as pedantic, and the operator restored
    it as a sidenote the moment they saw it.
 3. **Only now load the drafting inputs**: the book's `style.json` and
-   `glossary.json`, and the gloss-voice rules in `prompts/annotation_footnote.txt` —
-   1–2 sentences, ~30 words, concrete, self-contained, no hedging, register matched
-   to the book, no "aquí significa…".
-4. Write the gloss in the book's target language.
+   `glossary.json`, and two sections of `prompts/annotation_footnote.txt` — "What a
+   good gloss is" (1–2 sentences, ~30 words, concrete, self-contained, no hedging
+   about facts, register matched to the book, no "aquí significa…") and **"Two kinds
+   of note, one voice"**.
+4. **Decide what kind of note it is.** *Explanatory*: the author refers in passing to
+   something a modern reader may not know. *Corrective*: the author said something
+   that is not so. Either way the note is written as a friend of the author would
+   write it — an error is an honest mistake, never a point scored against him. Kind is
+   not vague: a corrective note still makes clear which version to believe.
+5. **Pick the voice sample.** Kindness toward the author is the floor on every book.
+   Above it, count the published glosses *of the same kind* in `style_corpus.md`:
+   with **three or more**, match their phrasing — how they name the author or
+   narrator, how long they run; with fewer, the examples in the prompt are the
+   sample. A corpus note that reads against the author does not license another. A
+   merely terse one is a fine model: bluntness is not unkindness, least of all in an
+   explanatory note. On the 2026-09-11 `fabre2` ch. 41–60 slice, four of five
+   published glosses were rewritten at G3 for voice (*«no seis mil»*, *«El pino no:
+   tiene piñas»*).
+6. Write the gloss in the book's target language.
 
 Sources go in your relay to the user and **never** into the gloss. The endnote is 1–2
 sentences for the book's reader, not a citation.
@@ -368,7 +398,8 @@ before it is written. Never ask for approval of text that is not on screen.**
    (`…ubres,‹N› sino del ano…`).
 
 3. **Print the notes in the chat**, from that file: the ES sentence, the marker
-   preview, the exact `--anchor`, the gloss **verbatim**, the finding, the sources.
+   preview, the exact `--anchor`, the note's kind (explanatory / corrective), the
+   gloss **verbatim**, the finding, the sources.
    Then the drops with their reasons, so a kill can be reversed.
 
 4. Ask for approval or edits **in the conversation**. An id-picker afterwards is

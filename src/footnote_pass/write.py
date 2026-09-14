@@ -67,11 +67,15 @@ MULTI_ANCHOR = "multi_anchor"
 NO_CHAPTER_BODY = "no_chapter_body"
 DUPLICATE = "duplicate"
 SENTENCE_DRIFTED = "sentence_drifted"
+CANDIDATE_KEY_MISMATCH = "candidate_key_mismatch"
 
 # ``anchor_not_found``, ``ambiguous_anchor`` and ``sentence_drifted`` degrade
 # *placement*; the note still publishes, so they warn rather than refuse.
-# Everything else means nothing reaches the book at all.
-WARNING_CODES = frozenset({ANCHOR_NOT_FOUND, AMBIGUOUS_ANCHOR, SENTENCE_DRIFTED})
+# ``candidate_key_mismatch`` degrades the record, not the book. Everything else
+# means nothing reaches the book at all.
+WARNING_CODES = frozenset(
+    {ANCHOR_NOT_FOUND, AMBIGUOUS_ANCHOR, SENTENCE_DRIFTED, CANDIDATE_KEY_MISMATCH}
+)
 
 
 def mint_sub_id() -> str:
@@ -133,6 +137,28 @@ def compose_content(anchor: Optional[str], note: str) -> str:
     note = (note or "").strip()
     anchor = (anchor or "").strip()
     return f"[{anchor}] {note}" if anchor else note
+
+
+def _note_fields(raw: Mapping[str, Any]) -> tuple[Optional[str], str]:
+    """``(anchor, note)`` for one keep row, accepting the composed shape too.
+
+    A decisions row normally carries the bare gloss in ``note``. Two paths hand
+    over the composed ``[anchor] gloss`` instead: a row copied back out of
+    ``decisions.jsonl`` (``content``, no ``note``), and the Gate 3 review page,
+    whose fenced **Note** block is the composed text an agent pastes into ``note``
+    beside ``anchor``. Composing either again reads ``[anchor] [anchor] gloss`` and
+    is refused as ``multi_anchor``. So a leading bracket naming the row's own
+    anchor is peeled off, from whichever field carries the text. One naming a
+    *different* anchor stays, and ``multi_anchor`` refuses it: which of the two
+    the operator meant is not ours to guess.
+    """
+    anchor = raw.get("anchor")
+    note = str(raw.get("note") or "")
+    text = (note if note.strip() else str(raw.get("content") or "")).lstrip()
+    match = _BRACKET_RE.match(text)
+    if match and anchor and match.group(1).strip() == str(anchor).strip():
+        return anchor, text[match.end():]
+    return anchor, text
 
 
 def _preview(body: str, sent_start: int, sent_end: int, anchor: Optional[str]) -> str:
@@ -211,6 +237,12 @@ def validate_proposal(
                 "the first and publishes the rest verbatim — write one note per anchor",
             )
         )
+    elif brackets and not anchor:
+        # No `anchor` given, but the text carries one bracket — and that is the
+        # anchor endnotes will read. Without this, a bracket passed inside `note`
+        # or `content` skipped every placement check and previewed the marker
+        # somewhere the publisher does not put it.
+        anchor = parse_endnote_content(content)[0]
 
     if es_map is None:
         es_map = load_alignment_es_map(project_dir, chapter_id)
@@ -384,22 +416,43 @@ def add(
     planned: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
-    for raw in keeps:
+    for keep_index, raw in enumerate(keeps):
         chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
         if chapter_id not in es_maps:
             es_maps[chapter_id] = load_alignment_es_map(project_dir, chapter_id)
             bodies[chapter_id] = read_chapter_body(project_dir, chapter_id)
 
+        anchor, note = _note_fields(raw)
         proposal = validate_proposal(
             project_dir,
             chapter_id=chapter_id,
             es_idx=raw.get("es_idx"),
-            anchor=raw.get("anchor"),
-            note=raw.get("note") or raw.get("content") or "",
+            anchor=anchor,
+            note=note,
             es_map=es_maps[chapter_id],
             body=bodies[chapter_id],
             existing=existing,
         )
+        raw_key = raw.get("candidate_key")
+        if (
+            isinstance(raw_key, str)
+            and raw_key
+            and not fp_ledger.key_names_sentence(
+                raw_key, proposal.chapter_id, proposal.es_idx
+            )
+        ):
+            # One half of the row is a copy slip. If it is the key, the ledger
+            # would credit this note to another candidate's claim; if it is the
+            # es_idx, the note is about to land on the wrong sentence. Only the
+            # operator knows which, so it is said here, on the Gate 3 page.
+            proposal.problems.append(
+                Problem(
+                    CANDIDATE_KEY_MISMATCH,
+                    f"candidate_key {raw_key!r} names a different sentence than "
+                    f"{proposal.chapter_id} es_idx={proposal.es_idx}; fix whichever "
+                    "half is the slip — the ledger joins this note to neither",
+                )
+            )
 
         row = {
             "chapter_id": proposal.chapter_id,
@@ -409,6 +462,7 @@ def add(
             "es_text": proposal.es_text,
             "problems": [p.as_dict() for p in proposal.problems],
             "injection_preview": proposal.injection_preview,
+            fp_ledger.KEEP_INDEX: keep_index,
         }
         if proposal.suggested_anchor:
             row["suggested_anchor"] = proposal.suggested_anchor
@@ -436,6 +490,9 @@ def add(
             )
 
         if dry_run:
+            # Planned rows join the in-run dedupe exactly as landed ones do, or the
+            # review page approves two identical notes the live run refuses one of.
+            existing[(proposal.chapter_id, proposal.es_idx, proposal.content)] = None
             planned.append(row)
             continue
 
@@ -507,20 +564,38 @@ def add(
         payload["invalid"] = [
             r for r in doc["rows"] if r["verdict"] == fp_ledger.VERDICT_INVALID
         ]
-        # A dry run is a proposal, not a decision. Appending it would make "what
-        # we considered" indistinguishable from "what was chosen", which is the
-        # confusion this ledger exists to end — and the pre-edit gloss is not
-        # lost, because the dated *proposal* report holds it verbatim.
-        payload["ledger_path"] = (
-            None if dry_run else str(fp_ledger.append_decisions(project_dir, doc["rows"]))
-        )
-        payload["report_path"] = (
-            str(write_decision_report(project_dir, doc)) if report else None
-        )
     except OSError as exc:
         payload["ledger_error"] = f"{type(exc).__name__}: {exc}"[:500]
         payload.setdefault("ledger_path", None)
         payload.setdefault("report_path", None)
+    else:
+        # A dry run is a proposal, not a decision. Appending it would make "what
+        # we considered" indistinguishable from "what was chosen", which is the
+        # confusion this ledger exists to end — and the pre-edit gloss is not
+        # lost, because the dated *proposal* report holds it verbatim.
+        if dry_run:
+            payload["ledger_path"] = None
+        else:
+            try:
+                payload["ledger_path"] = str(
+                    fp_ledger.append_decisions(project_dir, doc["rows"])
+                )
+            except OSError as exc:
+                payload["ledger_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                payload["ledger_path"] = None
+        try:
+            payload["report_path"] = (
+                str(write_decision_report(project_dir, doc)) if report else None
+            )
+        except OSError as exc:
+            payload["report_error"] = f"{type(exc).__name__}: {exc}"[:500]
+            payload["report_path"] = None
+
+    # The ledger's join key, not a field for the caller: it counts positions in
+    # `keeps`, so beside interleaved drops it would misname a --json-file entry.
+    for bucket in ("added", "planned", "refused"):
+        for row in payload[bucket]:
+            row.pop(fp_ledger.KEEP_INDEX, None)
 
     if invalid:
         # A malformed instruction is a real error and should exit nonzero. An
@@ -531,7 +606,9 @@ def add(
             f"{payload['counts']['undecided']} candidate(s) from candidates.json "
             "appear in neither a keep nor a drop. Record them with "
             '`"verdict": "drop"` and a reason, or they are lost when the next '
-            "`scan-commit` replaces that file. " + payload["instructions"]
+            "`scan-commit` replaces that file. A decision on a sentence with "
+            "several candidates needs its `candidate_key` to count. "
+            + payload["instructions"]
         )
     return payload
 

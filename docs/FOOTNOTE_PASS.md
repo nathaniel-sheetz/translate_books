@@ -139,6 +139,12 @@ guide, no glossary.** Those govern how a gloss is *worded*, and a scanner given 
 starts writing notes — the wrong output, and the wave is wasted. They load later, in the
 conversation, when the gloss is actually drafted.
 
+So does the default voice: the "Two kinds of note, one voice" section of
+`prompts/annotation_footnote.txt`. It holds every drafted gloss, explanatory or
+corrective, to a friend-of-the-author stance whatever the book's existing notes do, and
+its examples are the voice sample when the book has fewer than three published notes of
+that kind (`SKILL.md` §7).
+
 A candidate is `{chapter_id, es_idx, quoted_span, category, claim, why}`. Never a gloss.
 
 One consequence worth recording: `docs/ANNOTATION_REVIEW.md`'s cache-split section notes
@@ -294,7 +300,10 @@ commit time and printed in the candidate report. Resolution is two-tier and repo
 own quality in `join`: `exact` (the decision row carried the key), `sentence` (matched
 the pair, and exactly one candidate had it), `none`. **An ambiguous sentence degrades to
 `none` rather than guessing** — a ledger that claims a claim it cannot prove belongs to
-a note is worse than one that says it does not know. The join to `annotations.jsonl` is
+a note is worse than one that says it does not know. So does a key that names a
+different sentence than the row's own `chapter_id`/`es_idx`: one half is a copy slip,
+the key is kept aside as `claimed_candidate_key`, and `add` warns
+`candidate_key_mismatch`. The join to `annotations.jsonl` is
 `sub_id`.
 
 **`--dry-run` renders the report and appends nothing.** A proposal is not a decision,

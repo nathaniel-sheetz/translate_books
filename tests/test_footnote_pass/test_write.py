@@ -687,6 +687,191 @@ def test_an_exact_candidate_key_beats_an_ambiguous_sentence(project):
     assert row["candidate"]["claim"] == "The author says the drop comes from the cornicles."
 
 
+_GOTA = {**_APHID, "quoted_span": "una gota", "claim": "A different claim."}
+
+
+def test_deciding_one_candidate_leaves_its_sibling_on_the_sentence_undecided(project):
+    """Several notes per sentence are legal, so the sentence is not the decision.
+
+    Once the kept note lands, `scan_commit` refuses the whole sentence as already
+    noted — this warning is the last place the sibling shows up.
+    """
+    doc = _candidates(project, [_APHID, _GOTA])
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+          "note": "Del ano.", "candidate_key": doc["candidates"][0]["candidate_key"]}],
+        decided=True,
+    )
+    assert out["counts"]["undecided"] == 1
+    assert out["undecided"][0]["quoted_span"] == "una gota"
+
+
+def test_a_keyless_decision_on_a_shared_sentence_leaves_every_candidate_undecided(project):
+    """The join cannot say which one was decided, so neither is marked done."""
+    _candidates(project, [_APHID, _GOTA])
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "verdict": "drop", "reason": "obvious"}],
+        decided=True,
+    )
+    assert out["counts"]["undecided"] == 2
+
+
+def test_each_keep_joins_its_own_decision_when_one_gloss_contains_another(project):
+    """A text match gave the longer note the shorter one's key and sources."""
+    doc = _candidates(project, [_APHID, _GOTA])
+    key_a, key_b = (c["candidate_key"] for c in doc["candidates"])
+    fp_write.add(
+        project,
+        [
+            {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+             "note": "Del ano.", "candidate_key": key_a, "sources": ["https://a.example"]},
+            {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "una gota",
+             "note": "Del ano. Hoy se sabe.", "candidate_key": key_b,
+             "sources": ["https://b.example"]},
+        ],
+        decided=True,
+    )
+    rows = {r["anchor"]: r for r in fp_ledger.read_decisions(project)}
+    assert rows["cuernitos"]["candidate_key"] == key_a
+    assert rows["cuernitos"]["sources"] == ["https://a.example"]
+    assert rows["una gota"]["candidate_key"] == key_b
+    assert rows["una gota"]["sources"] == ["https://b.example"]
+    assert rows["una gota"]["candidate"]["claim"] == "A different claim."
+
+
+def test_a_note_with_a_trailing_newline_keeps_its_decision_fields(project):
+    doc = _candidates(project, [_APHID])
+    key = doc["candidates"][0]["candidate_key"]
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+          "note": "Del ano.\n", "candidate_key": key, "sources": ["https://a.example"],
+          "reason": "corrects the science"}],
+        decided=True,
+    )
+    row = fp_ledger.read_decisions(project)[0]
+    assert (row["candidate_key"], row["join"]) == (key, "exact")
+    assert row["sources"] == ["https://a.example"]
+    assert row["reason"] == "corrects the science"
+    # The join key is the ledger's, and never reaches stdout.
+    assert fp_ledger.KEEP_INDEX not in out["added"][0]
+
+
+def test_a_row_copied_back_out_of_the_ledger_lands_as_written(project):
+    """`anchor` plus composed `content`, no `note` — the refusal-recovery shape."""
+    row = {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+           "content": "[cuernitos] Del ano."}
+    out = fp_write.add(project, [row])
+    assert out["counts"]["added"] == 1
+    records = store.load_active(project, types=("footnote",))
+    assert [r["content"] for r in records] == ["[cuernitos] Del ano."]
+
+    # Feeding the landed row back again is the ordinary duplicate no-op.
+    again = fp_write.add(project, [row])
+    assert _codes(again["refused"]) == {fp_write.DUPLICATE}
+
+
+def test_a_content_bracket_naming_a_different_anchor_is_refused(project):
+    """Which of the two the operator meant is not ours to guess."""
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+          "content": "[una gota] Del ano."}],
+    )
+    assert fp_write.MULTI_ANCHOR in _codes(out["refused"])
+
+
+@pytest.mark.parametrize("field", ["note", "content"])
+def test_a_bracket_in_the_text_is_validated_as_the_anchor(project, field):
+    """With no `anchor` field endnotes reads the bracket, so validation must too."""
+    out = fp_write.add(
+        project, [{"chapter_id": "chapter_01", "es_idx": 1, field: "[Burdeos] Ciudad."}]
+    )
+    assert out["counts"]["added"] == 1
+    assert out["added"][0]["anchor"] == "Burdeos"
+    assert _codes(out["added"]) == {fp_write.ANCHOR_NOT_FOUND}
+
+
+def test_the_composed_note_from_the_review_page_can_be_pasted_back(project):
+    """Gate 3 prints `[anchor] gloss`; pasted into `note` beside `anchor`, it lands once."""
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+          "note": "[cuernitos] Del ano."}],
+    )
+    assert out["counts"]["added"] == 1
+    records = store.load_active(project, types=("footnote",))
+    assert [r["content"] for r in records] == ["[cuernitos] Del ano."]
+
+
+def test_a_non_string_candidate_key_does_not_crash_add(project):
+    """The CLI contract is one JSON object; a list key used to raise TypeError."""
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+          "note": "Del ano.", "candidate_key": ["chapter_01__1__deadbeef"]}],
+    )
+    assert out["status"] == "ok"
+    assert out["counts"]["added"] == 1
+    row = fp_ledger.read_decisions(project)[0]
+    assert row["join"] == "none"
+
+
+def test_a_candidate_key_naming_another_sentence_is_not_trusted(project):
+    """A copy slip must not credit the note to that claim, or hide that candidate."""
+    sancerre = {**_APHID, "es_idx": 2, "quoted_span": "Sancerre", "claim": "A place.",
+                "es_sentence": "Nos fuimos a Sancerre."}
+    doc = _candidates(project, [_APHID, sancerre])
+    other_key = doc["candidates"][1]["candidate_key"]
+    out = fp_write.add(
+        project,
+        [{"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos",
+          "note": "Del ano.", "candidate_key": other_key}],
+        decided=True,
+    )
+    assert out["counts"]["added"] == 1
+    assert out["warnings"][0]["codes"] == [fp_write.CANDIDATE_KEY_MISMATCH]
+    row = fp_ledger.read_decisions(project)[0]
+    assert (row["join"], row["candidate"], row["candidate_key"]) == ("none", None, None)
+    assert row["claimed_candidate_key"] == other_key
+    assert {u["quoted_span"] for u in out["undecided"]} == {"cuernitos", "Sancerre"}
+
+
+def test_a_dry_run_refuses_the_in_run_duplicate_the_live_run_would(project):
+    """The review page must not approve a note the live run then refuses."""
+    note = {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos", "note": "Del ano."}
+    dry = fp_write.add(project, [dict(note), dict(note)], dry_run=True)
+    live = fp_write.add(project, [dict(note), dict(note)])
+    assert (dry["counts"]["planned"], dry["counts"]["refused"], dry["status"]) == (1, 1, "partial")
+    assert (live["counts"]["added"], live["counts"]["refused"], live["status"]) == (1, 1, "partial")
+    page = Path(dry["report_path"]).read_text(encoding="utf-8")
+    assert "repeats an earlier note in this run" in page
+    assert "already on the book" not in page
+
+
+def test_scan_candidates_passed_as_decisions_are_invalid_not_keeps(project):
+    """Pointers recorded as keeps would sit in the append-only ledger for ever."""
+    doc = _candidates(project, [_APHID])
+    out = fp_write.add(project, doc["candidates"], decided=True)
+    assert out["status"] == "partial"
+    assert (out["counts"]["requested"], out["counts"]["invalid"]) == (0, 1)
+    assert [r["verdict"] for r in fp_ledger.read_decisions(project)] == ["invalid"]
+
+
+def test_the_report_header_splits_kept_by_outcome(project):
+    out = fp_write.add(
+        project,
+        [
+            {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "cuernitos", "note": "Del ano."},
+            {"chapter_id": "chapter_01", "es_idx": 99, "note": "Huérfana."},
+        ],
+    )
+    page = Path(out["report_path"]).read_text(encoding="utf-8")
+    assert "**Kept:** 2 (1 written · 1 refused)" in page
+
+
 def test_an_unwritable_report_does_not_lose_the_note(project, monkeypatch):
     """A footnote that landed must never be reported as a failure."""
     from src.footnote_pass import report as fp_report
@@ -700,5 +885,7 @@ def test_an_unwritable_report_does_not_lose_the_note(project, monkeypatch):
     )
     assert out["status"] == "ok"
     assert out["counts"]["added"] == 1
-    assert "read-only file system" in out["ledger_error"]
+    assert out.get("ledger_path")
+    assert "ledger_error" not in out
+    assert "read-only file system" in out["report_error"]
     assert len(store.load_active(project, types=("footnote",))) == 1

@@ -71,6 +71,10 @@ JOIN_EXACT = "exact"        # the row carried a candidate_key and it matched
 JOIN_SENTENCE = "sentence"  # matched (chapter_id, es_idx), and it was unambiguous
 JOIN_NONE = "none"          # no candidates, no match, or an ambiguous sentence
 
+# Stamped by ``write.add`` on each result row: the position, in ``keeps``, of the
+# decision row that produced it. The only exact join back — see ``_keep_for``.
+KEEP_INDEX = "_keep_index"
+
 SCHEMA = 1
 
 _KEY_SAFE = re.compile(r"^[A-Za-z0-9_\-]+$")
@@ -107,6 +111,16 @@ def candidate_key(chapter_id: str, es_idx: Any, quoted_span: str) -> Optional[st
     return key if _KEY_SAFE.match(key) else None
 
 
+def key_names_sentence(key: str, chapter_id: str, es_idx: Any) -> bool:
+    """Whether ``key`` is a :func:`candidate_key` for this sentence at all.
+
+    The key embeds its own ``chapter_id`` and ``es_idx``, so a decision row that
+    carries one can contradict itself — and the ``__`` delimiters keep
+    ``chapter_1`` from matching ``chapter_10``.
+    """
+    return key.startswith(f"{chapter_id}__{es_idx}__")
+
+
 def _as_int(value: Any) -> Optional[int]:
     try:
         return int(value)
@@ -137,7 +151,19 @@ def split_decisions(
             invalid.append({"row": repr(raw)[:200], "problem": "not a JSON object"})
             continue
         verdict = str(raw.get("verdict") or VERDICT_KEEP).strip().lower()
-        if verdict == VERDICT_KEEP:
+        if verdict == VERDICT_KEEP and "note" not in raw and "content" not in raw:
+            # Not a blank gloss (that has a field, and `empty_gloss` names it) but
+            # no text field at all: the shape of a scan candidate — span, claim,
+            # why — passed where a decisions document belongs. Kept, it would sit
+            # in the append-only ledger for ever as a choice nobody made.
+            invalid.append(
+                {
+                    **raw,
+                    "problem": "a keep with no note — scan candidates are pointers, "
+                    "not decisions",
+                }
+            )
+        elif verdict == VERDICT_KEEP:
             keeps.append(raw)
         elif verdict == VERDICT_DROP:
             drops.append(raw)
@@ -185,13 +211,40 @@ def _join_candidate(
     ambiguous sentence — two candidates on it, and no key to tell them apart —
     degrades to ``none``. A ledger that claims a claim and a category it cannot
     prove belong to this note is worse than one that says it does not know.
+
+    So does a key naming a different sentence than the row's own: one half of
+    the row is a copy slip, and trusting the key would both credit the note to
+    that other claim and mark that other candidate decided.
     """
-    if key and key in candidates["by_key"]:
-        return candidates["by_key"][key], JOIN_EXACT
+    if isinstance(key, str) and key:
+        if not key_names_sentence(key, chapter_id, es_idx):
+            return None, JOIN_NONE
+        if key in candidates["by_key"]:
+            return candidates["by_key"][key], JOIN_EXACT
     hits = candidates["by_sentence"].get((chapter_id, es_idx)) or []
     if len(hits) == 1:
         return hits[0], JOIN_SENTENCE
     return None, JOIN_NONE
+
+
+def _resolve(
+    candidates: dict[str, Any], raw: dict[str, Any]
+) -> tuple[str, Optional[int], Optional[str], Optional[dict], str]:
+    """``(chapter_id, es_idx, key, candidate, join)`` for one decision row.
+
+    One function, so the ledger rows and the undecided sweep cannot disagree about
+    which candidate a decision was about.
+    """
+    chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
+    es_idx = _as_int(raw.get("es_idx"))
+    raw_key = raw.get("candidate_key")
+    key = (
+        raw_key
+        if isinstance(raw_key, str) and raw_key
+        else candidate_key(chapter_id, es_idx, raw.get("quoted_span") or "")
+    )
+    cand, join = _join_candidate(candidates, chapter_id, es_idx, key)
+    return chapter_id, es_idx, key, cand, join
 
 
 def _candidate_snapshot(row: Optional[dict]) -> Optional[dict]:
@@ -256,15 +309,18 @@ def build_run_doc(
     rows: list[dict[str, Any]] = []
 
     def _base(raw: dict[str, Any], *, verdict: str, stage_default: str) -> dict:
-        chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
-        es_idx = _as_int(raw.get("es_idx"))
-        key = raw.get("candidate_key") or candidate_key(
-            chapter_id, es_idx, raw.get("quoted_span") or ""
-        )
-        cand, join = _join_candidate(candidates, chapter_id, es_idx, key)
+        chapter_id, es_idx, key, cand, join = _resolve(candidates, raw)
+        claimed = None
+        if key and not key_names_sentence(key, chapter_id, es_idx):
+            # Indexed under a key for another sentence, this decision would read
+            # later as a ruling on that other candidate. Kept aside, not dropped:
+            # it is what the operator wrote, and half of it is right.
+            claimed, key = key, None
         if cand is not None and not key:
             key = candidate_key(chapter_id, es_idx, cand.get("quoted_span") or "")
+        extra = {"claimed_candidate_key": claimed} if claimed else {}
         return {
+            **extra,
             "schema": SCHEMA,
             "run_id": stamp,
             "written_at": written_at,
@@ -284,14 +340,9 @@ def build_run_doc(
 
     # ── keeps, in the order `add` reported them ─────────────────────────────
     # `added` / `planned` / `refused` are disjoint and together cover every keep
-    # that reached the validator, so pairing them back up by position within each
-    # bucket is exact — `add` preserves input order inside a bucket.
-    by_sentence: dict[tuple[str, Optional[int], str], dict] = {}
-    for raw in keeps:
-        chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
-        note = str(raw.get("note") or raw.get("content") or "")
-        by_sentence[(chapter_id, _as_int(raw.get("es_idx")), note)] = raw
-
+    # that reached the validator. Each result row carries `KEEP_INDEX`, the
+    # position of the keep that produced it — the join back to that keep's
+    # `candidate_key`, `sources`, `stage` and `reason`.
     for bucket, outcome in (
         ("added", OUTCOME_ADDED),
         ("planned", OUTCOME_PLANNED),
@@ -308,7 +359,7 @@ def build_run_doc(
                 if outcome == OUTCOME_REFUSED and "duplicate" in codes
                 else outcome
             )
-            raw = _match_keep(by_sentence, out)
+            raw = _keep_for(keeps, out)
             row = _base(raw, verdict=VERDICT_KEEP, stage_default="gate3")
             row.update(
                 {
@@ -406,20 +457,19 @@ def build_run_doc(
     }
 
 
-def _match_keep(
-    by_sentence: dict[tuple[str, Optional[int], str], dict], out: dict
-) -> dict:
+def _keep_for(keeps: list[dict], out: dict) -> dict:
     """The decision row a result row came from, or a stand-in.
 
-    ``add`` composes ``content`` as ``[anchor] note``, so the note text is not
-    recoverable from the result alone; match on the bare note first and fall back
-    to the result itself, which carries everything the ledger strictly needs.
+    By ``KEEP_INDEX``, never by text. ``content`` is composed and stripped, and two
+    keeps on one sentence can carry glosses where one contains the other — a text
+    match handed the longer note the shorter one's ``candidate_key`` and sources,
+    and a note with a trailing newline matched nothing. A row without the stamp (a
+    caller other than ``add``) falls back to the result itself, which carries
+    everything the ledger strictly needs.
     """
-    chapter_id = out.get("chapter_id")
-    es_idx = out.get("es_idx")
-    for (ch, idx, note), raw in by_sentence.items():
-        if ch == chapter_id and idx == es_idx and note and note in (out.get("content") or ""):
-            return raw
+    index = out.get(KEEP_INDEX)
+    if isinstance(index, int) and 0 <= index < len(keeps):
+        return keeps[index]
     return dict(out)
 
 
@@ -438,39 +488,38 @@ def _annotation_key(out: dict) -> Optional[str]:
 def _undecided(
     candidates: dict[str, Any], keeps: list[dict], drops: list[dict]
 ) -> list[dict]:
-    """Usable candidates that appear in neither a keep nor a drop row.
+    """Usable candidates that no keep or drop row resolves to.
 
     Scoped to the chapters this run actually touched. ``candidates.json``
     routinely covers a whole range (21–40) while an ``add`` lands one note in
     ch. 4, and reporting the other nineteen chapters as unfinished business every
     time is how a warning becomes noise everyone learns to ignore.
+
+    Resolved through :func:`_resolve`, the join the ledger rows use, and never by
+    sentence alone: several candidates on one sentence are legal, and deciding one
+    says nothing about the others. A sibling wrongly marked decided here is gone
+    for good — once its neighbour lands, ``scan_commit`` refuses the whole
+    sentence as already noted. A keyless row on a sentence with several
+    candidates resolves to none of them, so all stay listed; that is the honest
+    answer, and ``candidate_key`` is the fix.
     """
     decided_rows = list(keeps) + list(drops)
     touched = {
         str(r.get("chapter_id") or r.get("chapter") or "") for r in decided_rows
     }
-    seen_keys = set()
-    seen_sentences = set()
+    # By identity: `load_candidates` indexes the same row objects it lists, so
+    # this needs no key — and a candidate without one is still covered.
+    resolved: set[int] = set()
     for raw in decided_rows:
-        chapter_id = str(raw.get("chapter_id") or raw.get("chapter") or "")
-        es_idx = _as_int(raw.get("es_idx"))
-        if raw.get("candidate_key"):
-            seen_keys.add(raw["candidate_key"])
-        seen_sentences.add((chapter_id, es_idx))
+        _chapter_id, _es_idx, _key, cand, _join = _resolve(candidates, raw)
+        if cand is not None:
+            resolved.add(id(cand))
 
-    out: list[dict] = []
-    for row in candidates["rows"]:
-        chapter_id = str(row.get("chapter_id") or "")
-        if chapter_id not in touched:
-            continue
-        es_idx = _as_int(row.get("es_idx"))
-        key = candidate_key(chapter_id, es_idx, row.get("quoted_span") or "")
-        if key and key in seen_keys:
-            continue
-        if (chapter_id, es_idx) in seen_sentences:
-            continue
-        out.append(row)
-    return out
+    return [
+        row
+        for row in candidates["rows"]
+        if str(row.get("chapter_id") or "") in touched and id(row) not in resolved
+    ]
 
 
 def proposed_row(
@@ -490,6 +539,12 @@ def proposed_row(
     project_dir = Path(project_dir)
     chapter_id = str(candidate.get("chapter_id") or "")
     es_idx = _as_int(candidate.get("es_idx"))
+    raw_key = candidate.get("candidate_key")
+    key = (
+        raw_key
+        if isinstance(raw_key, str) and raw_key
+        else candidate_key(chapter_id, es_idx, candidate.get("quoted_span") or "")
+    )
     return {
         "schema": SCHEMA,
         "run_id": stamp,
@@ -501,9 +556,8 @@ def proposed_row(
         "outcome": VERDICT_PROPOSED,
         "chapter_id": chapter_id,
         "es_idx": es_idx,
-        "candidate_key": candidate.get("candidate_key")
-        or candidate_key(chapter_id, es_idx, candidate.get("quoted_span") or ""),
-        "join": JOIN_EXACT,
+        "candidate_key": key,
+        "join": JOIN_EXACT if key else JOIN_NONE,
         "es_text": candidate.get("es_sentence"),
         "candidate": _candidate_snapshot(candidate),
         "proposed_by": {
@@ -551,13 +605,3 @@ def read_decisions(project_dir: Path | str) -> list[dict[str, Any]]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
-
-
-def latest_by_candidate(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Current state per candidate: the last row wins, earlier ones are history."""
-    out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        key = row.get("candidate_key")
-        if key:
-            out[key] = row
-    return out
