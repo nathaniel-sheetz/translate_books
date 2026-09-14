@@ -8,10 +8,12 @@ it is visible. So every audit item carries:
 - ``starts_paragraph``: whether the sentence opens its Spanish paragraph.
 - ``context_before_en`` / ``context_before_es``: the previous paragraph when it
   does, otherwise the earlier part of its own paragraph, cut by :func:`tail` so
-  the paragraph's opening words survive.
+  the paragraph's opening words survive. Image and caption lines are skipped:
+  they sit between two paragraphs of prose without being prose.
 - ``quote_continues``: read from the English, where it is unambiguous. True when
-  the paragraph opens with a quotation mark and the previous paragraph left its
-  quotation open, which means the same speaker is still talking.
+  the same speaker is still talking at this sentence: the English paragraph
+  opens with a quotation mark after one that left its quotation open, or the
+  Spanish starts a paragraph where the English runs on inside an open quotation.
 
 The sentence is found by its text, never by ``es_idx``: a realign can move the
 index onto a different sentence while the ledger row keeps the old one.
@@ -21,6 +23,8 @@ from __future__ import annotations
 
 import re
 from typing import Any, Iterable, Optional
+
+from src.utils.text_utils import is_caption_block
 
 #: Stripped from both ends of a sentence before it becomes a search key, so a
 #: raya or guillemet the edit added or removed does not stop the match.
@@ -36,6 +40,12 @@ MIN_KEY_CHARS = 12
 CONTEXT_CHARS = 400
 CONTEXT_HEAD_CHARS = 80
 
+#: Image paragraphs in a chunk start with this.
+IMAGE_PREFIX = "[IMAGE:"
+
+#: An unmarked English caption: at most this many words, and no punctuation.
+BARE_CAPTION_WORDS = 8
+
 #: Context for a row whose chunk could not be read.
 NO_CONTEXT: dict[str, Any] = {
     "starts_paragraph": False,
@@ -47,6 +57,7 @@ NO_CONTEXT: dict[str, Any] = {
 }
 
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+_PUNCTUATION = re.compile(r"[.,;:!?¡¿“”\"«»—]")
 
 
 def paragraphs(text: Optional[str]) -> list[str]:
@@ -66,22 +77,48 @@ def tail(text: str, limit: int = CONTEXT_CHARS, head: int = CONTEXT_HEAD_CHARS) 
     return text[:head].rstrip() + " … " + text[-(limit - head):].lstrip()
 
 
-def quote_left_open(paragraph: str) -> bool:
-    """Whether an English paragraph ends inside a quotation.
+def quote_left_open(text: str) -> bool:
+    """Whether English text ends inside a quotation.
 
     English leaves a quotation unclosed at a paragraph break when the same
     speaker carries on into the next paragraph. Curly quotes show it directly;
     straight quotes can only be counted, and an odd count leaves one open.
     """
-    return paragraph.count("“") > paragraph.count("”") or paragraph.count('"') % 2 == 1
+    return text.count("“") > text.count("”") or text.count('"') % 2 == 1
 
 
-def locate(text: Optional[str], candidates: Iterable[Optional[str]]) -> Optional[dict[str, Any]]:
+def is_layout(paragraph: str, *, bare_captions: bool = False) -> bool:
+    """Whether a paragraph is an image or a caption rather than prose.
+
+    Spanish captions carry the ``[CAPTION]`` marker, but many English sources
+    leave theirs unmarked ("Stratus"). ``bare_captions`` also counts a short
+    line with no punctuation. Pass it only where the Spanish showed a caption
+    or image at that spot, or a heading would count too.
+    """
+    text = paragraph.strip()
+    if text.startswith(IMAGE_PREFIX) or is_caption_block(text):
+        return True
+    return bare_captions and len(text.split()) <= BARE_CAPTION_WORDS and not _PUNCTUATION.search(text)
+
+
+def locate(
+    text: Optional[str],
+    candidates: Iterable[Optional[str]],
+    *,
+    bare_captions: bool = False,
+) -> Optional[dict[str, Any]]:
     """Find the first candidate sentence in ``text`` and describe what precedes it.
 
-    Returns ``{starts_paragraph, before, quote_continues}``, or ``None`` when no
-    candidate is found. ``quote_continues`` is ``None`` when the paragraph opens
-    ``text``, since the previous paragraph is in another chunk.
+    Returns ``None`` when no candidate is found, otherwise:
+
+    - ``starts_paragraph`` and ``before``, as the module docstring describes.
+    - ``quote_continues``: ``None`` when nothing but images and captions
+      precede the paragraph in ``text``, since the previous prose is in
+      another chunk.
+    - ``open_before``: whether a quotation is open where the sentence starts
+      inside its paragraph.
+    - ``skipped``: image and caption paragraphs passed over to reach the
+      previous paragraph.
     """
     paras = paragraphs(text)
     for candidate in candidates:
@@ -95,10 +132,13 @@ def locate(text: Optional[str], candidates: Iterable[Optional[str]]) -> Optional
             if j < 0:
                 continue
             starts = not para[:j].strip(MARKS)
-            prev = paras[i - 1] if i > 0 else ""
+            k = i - 1
+            while k >= 0 and is_layout(paras[k], bare_captions=bare_captions):
+                k -= 1
+            prev = paras[k] if k >= 0 else ""
             if not starts:
                 quote_continues: Optional[bool] = False
-            elif i == 0:
+            elif k < 0:
                 quote_continues = None
             else:
                 quote_continues = para.lstrip().startswith(("“", '"')) and quote_left_open(prev)
@@ -106,6 +146,8 @@ def locate(text: Optional[str], candidates: Iterable[Optional[str]]) -> Optional
                 "starts_paragraph": starts,
                 "before": tail(prev if starts else para[:j].rstrip()),
                 "quote_continues": quote_continues,
+                "open_before": quote_left_open(para[:j]),
+                "skipped": i - 1 - k,
             }
     return None
 
@@ -119,10 +161,19 @@ def edit_context(chunk: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     ``quote_continues`` from the English.
     """
     es = locate(chunk.get("translated_text"), [row.get("es_after"), row.get("es_before")])
-    en = locate(chunk.get("source_text"), [row.get("en")])
+    en = locate(
+        chunk.get("source_text"),
+        [row.get("en")],
+        bare_captions=bool(es and es["starts_paragraph"] and es["skipped"]),
+    )
+    quote_continues = en["quote_continues"] if en else None
+    if es and en and es["starts_paragraph"] and not en["starts_paragraph"]:
+        # The Spanish opened a paragraph where the English runs on. The same
+        # speaker is still talking exactly when the English quotation is open here.
+        quote_continues = en["open_before"]
     return {
         "starts_paragraph": bool(es and es["starts_paragraph"]),
-        "quote_continues": en["quote_continues"] if en else None,
+        "quote_continues": quote_continues,
         "context_before_en": en["before"] if en else "",
         "context_before_es": es["before"] if es else "",
         "en_found": en is not None,

@@ -149,3 +149,60 @@ def test_edit_context_reports_what_it_could_not_find():
     assert out["starts_paragraph"] is False
     assert out["quote_continues"] is None
     assert out["context_before_en"] == "" and out["context_before_es"] == ""
+
+
+def test_image_and_caption_paragraphs_are_not_the_paragraph_before():
+    text = (
+        "»Los estratos rojos anuncian lluvia.\n\n[IMAGE:images/i186.jpg]\n\n[CAPTION] Estratos\n\n"
+        "»Finalmente, damos el nombre de «nimbos» a una masa de nubes oscuras."
+    )
+    found = ctx.locate(text, ["»Finalmente, damos el nombre de «nimbos» a una masa de nubes oscuras."])
+    assert found["before"] == "»Los estratos rojos anuncian lluvia."
+    assert found["skipped"] == 2
+
+
+def test_an_unmarked_english_caption_is_skipped_only_where_the_spanish_had_one():
+    en = (
+        "“They are followed by rain or wind.\n\nStratus\n\n"
+        "“Finally, we give the name ‘nimbus’ to a mass of dark clouds."
+    )
+    es = (
+        "»Los estratos rojos anuncian lluvia.\n\n[CAPTION] Estratos\n\n"
+        "»Finalmente, damos el nombre de «nimbos» a una masa de nubes oscuras."
+    )
+    row = {
+        "en": "“Finally, we give the name ‘nimbus’ to a mass of dark clouds.",
+        "es_before": "—Finalmente, damos el nombre de «nimbos» a una masa de nubes oscuras.",
+        "es_after": "»Finalmente, damos el nombre de «nimbos» a una masa de nubes oscuras.",
+    }
+    out = ctx.edit_context({"source_text": en, "translated_text": es}, row)
+    assert out["quote_continues"] is True
+    assert out["context_before_en"] == "“They are followed by rain or wind."
+    # Without the Spanish caption as evidence, the short line is taken as prose.
+    assert ctx.locate(en, [row["en"]])["quote_continues"] is False
+
+
+def test_a_paragraph_the_spanish_split_off_inside_an_open_quotation_continues():
+    en = "“Jacques knocked it down,” continued Uncle Paul, “and crushed it. The worthy man took the entrails for poison."
+    es = "—Jacques la tumbó —continuó el tío Paul— y la aplastó.\n\n»El buen hombre tomó por veneno las entrañas."
+    row = {
+        "en": "The worthy man took the entrails for poison.",
+        "es_before": "El buen hombre tomó por veneno las entrañas.",
+        "es_after": "»El buen hombre tomó por veneno las entrañas.",
+    }
+    out = ctx.edit_context({"source_text": en, "translated_text": es}, row)
+    assert out["starts_paragraph"] is True
+    assert out["quote_continues"] is True
+
+
+def test_narration_the_spanish_split_off_does_not_continue():
+    en = "“Jacques knocked it down,” said Uncle Paul. The worthy man took the entrails for poison."
+    es = "—Jacques la tumbó —dijo el tío Paul.\n\nEl buen hombre tomó por veneno las entrañas."
+    row = {
+        "en": "The worthy man took the entrails for poison.",
+        "es_before": "—El buen hombre tomó por veneno las entrañas.",
+        "es_after": "El buen hombre tomó por veneno las entrañas.",
+    }
+    out = ctx.edit_context({"source_text": en, "translated_text": es}, row)
+    assert out["starts_paragraph"] is True
+    assert out["quote_continues"] is False

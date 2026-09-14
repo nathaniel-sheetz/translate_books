@@ -7,6 +7,11 @@ and a report. It is the prepare / fanout / commit flow of
 ``scripts/ledger_census.py --export``, and everything lands in one run
 directory (``audit/`` is gitignored for it).
 
+A reader often saves a sentence and then edits it again. Judged alone, the
+halfway state can look like a regression ("aprietan … haces" before "haces"
+became "hacen"), so each run of saves on one sentence is audited once, as its
+net change. See :func:`collapse_saves`.
+
 Nothing here writes into ``projects/``. A consensus is a candidate label, not a
 stamp: ``verified_by: "panel"`` waits until the pilot shows the panel holds.
 
@@ -68,8 +73,8 @@ DEFECT_CLASSES = (
 BUCKETS = ("silver", "taste", "regression_queue", "split")
 
 #: Twenty rows in one process cost about a tenth as much per row as one row per
-#: process on the non-Claude panel models (Phase 0 §5). The pilot checks what
-#: batching does to the verdicts.
+#: process on the non-Claude panel models (Phase 0 §5), and the pilot found
+#: batching moves verdicts no more than a rerun does.
 DEFAULT_ROWS_PER_JOB = 20
 DEFAULT_CONCURRENCY = 3
 
@@ -147,6 +152,60 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _text(row: dict[str, Any], field: str) -> str:
+    return (row.get(field) or "").strip()
+
+
+def collapse_saves(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group successive saves on one sentence into chains, each in save order.
+
+    A save continues an earlier one when it is in the same chunk, comes later,
+    and starts from exactly the text the earlier one left. Links only run
+    forward in save order, so a revert (A→B, then B→A) is one chain rather than
+    a loop. A save continues at most one chain.
+    """
+    ordered = sorted(rows, key=lambda row: (str(row.get("timestamp") or row.get("applied_at") or ""), row["audit_id"]))
+    position = {row["audit_id"]: n for n, row in enumerate(ordered)}
+    starting: dict[tuple, list[dict[str, Any]]] = {}
+    for row in ordered:
+        starting.setdefault((row.get("project_id"), row.get("chunk_id"), _text(row, "es_before")), []).append(row)
+
+    successor: dict[str, dict[str, Any]] = {}
+    continued: set[str] = set()
+    for row in ordered:
+        after = _text(row, "es_after")
+        if not after:
+            continue
+        for later in starting.get((row.get("project_id"), row.get("chunk_id"), after), ()):
+            if position[later["audit_id"]] > position[row["audit_id"]] and later["audit_id"] not in continued:
+                successor[row["audit_id"]] = later
+                continued.add(later["audit_id"])
+                break
+
+    chains = []
+    for row in ordered:
+        if row["audit_id"] in continued:
+            continue
+        chain = [row]
+        while chain[-1]["audit_id"] in successor:
+            chain.append(successor[chain[-1]["audit_id"]])
+        chains.append(chain)
+    return chains
+
+
+def net_edit(chain: list[dict[str, Any]]) -> dict[str, Any]:
+    """One chain as a single edit: the first save's before, the last save's after.
+
+    It keeps the last save's ``audit_id``, and ``chain`` lists every save's id
+    in order so a verdict joins back to all of them.
+    """
+    return {
+        **chain[-1],
+        "es_before": chain[0].get("es_before") or "",
+        "chain": [row["audit_id"] for row in chain],
+    }
+
+
 def book_dirs(projects_root: Path, slugs: Iterable[str]) -> tuple[dict[str, Path], dict[str, list[str]]]:
     """``({slug: book dir}, {shared slug: paths})`` for the books the rows name.
 
@@ -214,7 +273,10 @@ _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
     "run_dir": "the run directory that fanout and commit take",
     "models": "the panel this run was prepared for; fanout accepts only these",
-    "rows": "edits to audit (rows whose es_before equals es_after are dropped)",
+    "rows": "net edits to audit, one per chain of saves on a sentence",
+    "collapsed": "{chains, saves_merged, reverted}: chains of more than one save; saves "
+    "folded into a later one's net edit; chains that ended where they started, which are "
+    "dropped",
     "jobs": "headless processes per model: rows / rows_per_job, rounded up",
     "rows_per_job": "edits rendered into one prompt",
     "by_project": "rows per book",
@@ -239,10 +301,11 @@ def prepare(
 ) -> dict[str, Any]:
     """Render one prompt per batch of edits, plus a manifest, into a new run directory.
 
-    Rows are sorted by ``audit_id`` before ``limit`` applies, so the same input
-    and filters always select and batch the same rows. The run directory must be
-    new or empty: re-rendering over drafts would pair verdicts with other rows.
-    No spend.
+    Successive saves on a sentence become one net edit first. Excluding any save
+    excludes its net edit. Edits are sorted by ``audit_id`` before ``limit``
+    applies, so the same input and filters always select and batch the same
+    edits. The run directory must be new or empty: re-rendering over drafts
+    would pair verdicts with other rows. No spend.
     """
     input_path, run_dir = Path(input_path), Path(run_dir)
     models = list(dict.fromkeys(models))
@@ -268,16 +331,25 @@ def prepare(
     unique: dict[str, dict[str, Any]] = {}
     for row in rows:
         unique.setdefault(row["audit_id"], row)
+    changed = [row for row in unique.values() if _text(row, "es_before") != _text(row, "es_after")]
+    chains = collapse_saves(changed)
+    nets = [net_edit(chain) for chain in chains]
+    kept = [net for net in nets if _text(net, "es_before") != _text(net, "es_after")]
+    collapsed = {
+        "chains": sum(1 for chain in chains if len(chain) > 1),
+        "saves_merged": len(changed) - len(chains),
+        "reverted": len(nets) - len(kept),
+    }
+
     excluded = set(exclude_ids or ())
     wanted = set(projects) if projects else None
     selected = sorted(
         (
-            row for row in unique.values()
-            if (row.get("es_before") or "") != (row.get("es_after") or "")
-            and row["audit_id"] not in excluded
-            and (wanted is None or row.get("project_id") in wanted)
+            net for net in kept
+            if not excluded.intersection(net["chain"])
+            and (wanted is None or net.get("project_id") in wanted)
         ),
-        key=lambda row: row["audit_id"],
+        key=lambda net: net["audit_id"],
     )
     if limit is not None:
         selected = selected[:limit]
@@ -327,6 +399,7 @@ def prepare(
             "en": row.get("en") or "",
             "es_before": row.get("es_before") or "",
             "es_after": row.get("es_after") or "",
+            "chain": row["chain"],
             "verified_by": row.get("verified_by"),
             "status": row.get("status"),
             "starts_paragraph": context["starts_paragraph"],
@@ -359,10 +432,11 @@ def prepare(
         "prompt_version": prompt_version(TEMPLATE),
         "models": models,
         "rows_per_job": rows_per_job,
+        "collapsed": collapsed,
         "filters": {
             "projects": sorted(wanted) if wanted else None,
             "limit": limit,
-            "excluded": len(excluded & set(unique)),
+            "excluded": sum(1 for net in kept if excluded.intersection(net["chain"])),
         },
         "preamble_path": PREAMBLE_FILENAME,
         "jobs": jobs,
@@ -378,6 +452,7 @@ def prepare(
         "run_dir": str(run_dir),
         "models": models,
         "rows": len(items),
+        "collapsed": collapsed,
         "jobs": len(jobs),
         "rows_per_job": rows_per_job,
         "by_project": by_project,
@@ -771,6 +846,13 @@ def render_report(
         f"{manifest.get('rows_per_job')}, prompt `{str(manifest.get('prompt_version'))[:12]}`. "
         f"Committed {summary['committed_at']}.",
     ]
+    collapsed = manifest.get("collapsed") or {}
+    if collapsed.get("saves_merged") or collapsed.get("reverted"):
+        lines.append(
+            f"{collapsed.get('saves_merged', 0)} later saves were folded into "
+            f"{collapsed.get('chains', 0)} net edits, and {collapsed.get('reverted', 0)} "
+            "sequences that ended where they started were left out."
+        )
     if manifest.get("context_missing"):
         lines.append(
             f"{len(manifest['context_missing'])} edits had context missing in one language or "
@@ -814,9 +896,10 @@ def render_report(
     queue = [r for r in results if r["consensus"] == "regression_queue"]
     lines += ["", f"## Regression queue ({len(queue)})"]
     for r in queue:
+        saves = f" · {len(r['chain'])} saves" if len(r.get("chain") or []) > 1 else ""
         lines += [
             "",
-            f"### `{r['audit_id']}` · {r['project_id']} · {r['chunk_id']}",
+            f"### `{r['audit_id']}` · {r['project_id']} · {r['chunk_id']}{saves}",
             "",
             f"- **EN:** {_cell(r['en'])}",
             f"- **Before:** {_cell(r['es_before'])}",

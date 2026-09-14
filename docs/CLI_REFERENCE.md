@@ -303,8 +303,10 @@ batches (`--rows-per-job`, default 20) into a new or empty run directory for the
 panel: Grok 4.6, Gemini 3.8 Flash and GPT-5.6 Terra by default, and `--model`
 repeats to change it. Each edit carries the paragraph before it in both
 languages and a `quote_continues` flag read from the English, so a model can
-tell a continuing speaker's » from a stray closing mark. `--project`, `--limit`
-and `--exclude-ids-file` narrow the rows. `fanout` runs one headless Cursor
+tell a continuing speaker's » from a stray closing mark. Successive saves on one
+sentence are audited once, as their net change, and a sequence that ends where
+it started is left out. `--project`, `--limit` and `--exclude-ids-file` narrow
+the rows; excluding any save excludes its net edit. `fanout` runs one headless Cursor
 wave per model and skips jobs that already have a draft, so a re-run resumes.
 `commit` writes `results.jsonl` and `report.md`: verdicts per model, pairwise
 agreement, the consensus buckets (silver, taste, regression queue, split), M6

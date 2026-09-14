@@ -369,3 +369,79 @@ def test_cli_fanout_without_a_run_fails(tmp_path, capsys):
 
     assert cli.main(["fanout", "--run", str(tmp_path / "nope")]) == 1
     assert "prepare" in json.loads(capsys.readouterr().out)["error"]
+
+
+# --- successive saves ---------------------------------------------------------------
+
+def _save(audit_id, before, after, timestamp, chunk="ch01_chunk_000"):
+    return {**_row(audit_id, before, after, "When you squeeze a sponge."), "chunk_id": chunk, "timestamp": timestamp}
+
+
+def test_successive_saves_on_a_sentence_are_one_net_edit():
+    rows = [
+        _save("c2", "Cuando aprietan una esponja, haces que salga agua.",
+              "Cuando aprietan una esponja, hacen que salga agua.", "2026-07-02T10:00:00"),
+        _save("c1", "Cuando aprietas una esponja, haces que salga agua.",
+              "Cuando aprietan una esponja, haces que salga agua.", "2026-07-01T10:00:00"),
+        _save("x1", "Otra frase distinta del capítulo.", "Otra frase diferente del capítulo.", "2026-07-01T11:00:00"),
+    ]
+    chains = panel.collapse_saves(rows)
+    assert sorted([row["audit_id"] for row in chain] for chain in chains) == [["c1", "c2"], ["x1"]]
+    net = panel.net_edit(next(chain for chain in chains if len(chain) == 2))
+    assert net["audit_id"] == "c2"
+    assert net["es_before"] == "Cuando aprietas una esponja, haces que salga agua."
+    assert net["es_after"] == "Cuando aprietan una esponja, hacen que salga agua."
+    assert net["chain"] == ["c1", "c2"]
+
+
+def test_a_save_in_another_chunk_does_not_continue_the_chain():
+    rows = [
+        _save("c1", "Frase uno del capítulo aquí.", "Frase dos del capítulo aquí.", "2026-07-01"),
+        _save("c2", "Frase dos del capítulo aquí.", "Frase tres del capítulo aquí.", "2026-07-02", chunk="ch02_chunk_000"),
+    ]
+    assert len(panel.collapse_saves(rows)) == 2
+
+
+def test_a_revert_is_one_chain_not_a_loop():
+    rows = [
+        _save("r2", "Texto B de la frase editada.", "Texto A de la frase original.", "2026-07-02"),
+        _save("r1", "Texto A de la frase original.", "Texto B de la frase editada.", "2026-07-01"),
+    ]
+    assert [[row["audit_id"] for row in chain] for chain in panel.collapse_saves(rows)] == [["r1", "r2"]]
+
+
+def _chained_input(tmp_path):
+    before, after = ROWS[1]["es_before"], ROWS[1]["es_after"]
+    middle = "Todos escucharon en silencio durante mucho tiempo."
+    return _input(tmp_path / "input.jsonl", [
+        dict(ROWS[0], timestamp="2026-07-01T09:00:00"),
+        dict(ROWS[1], audit_id="b1", es_before=before, es_after=middle, timestamp="2026-07-01T10:00:00"),
+        dict(ROWS[1], audit_id="b2", es_before=middle, es_after=after, timestamp="2026-07-02T10:00:00"),
+        dict(ROWS[2], audit_id="r1", timestamp="2026-07-01T10:00:00"),
+        dict(ROWS[2], audit_id="r2", es_before=ROWS[2]["es_after"], es_after=ROWS[2]["es_before"],
+             timestamp="2026-07-02T10:00:00"),
+    ])
+
+
+def test_prepare_audits_the_net_edit_and_drops_a_revert(tmp_path):
+    root = tmp_path / "projects"
+    _book(root, "book")
+    out = panel.prepare(_chained_input(tmp_path), tmp_path / "run", models=MODELS, projects_root=root)
+    assert out["rows"] == 2
+    assert out["collapsed"] == {"chains": 2, "saves_merged": 2, "reverted": 1}
+    rows = _manifest(tmp_path / "run")["rows"]
+    assert list(rows) == ["a1", "b2"]
+    assert rows["b2"]["es_before"] == ROWS[1]["es_before"]
+    assert rows["b2"]["es_after"] == ROWS[1]["es_after"]
+    assert rows["b2"]["chain"] == ["b1", "b2"]
+    assert rows["a1"]["chain"] == ["a1"]
+
+
+def test_excluding_any_save_excludes_its_net_edit(tmp_path):
+    root = tmp_path / "projects"
+    _book(root, "book")
+    out = panel.prepare(
+        _chained_input(tmp_path), tmp_path / "run", models=MODELS, projects_root=root, exclude_ids=["b1"],
+    )
+    assert out["rows"] == 1
+    assert list(_manifest(tmp_path / "run")["rows"]) == ["a1"]
