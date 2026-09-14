@@ -280,7 +280,7 @@ python scripts/ledger_census.py --project my-book --export audit_input.jsonl
 Per book, from `corrections_applied.jsonl`: reader edits (with repeats and
 skipped rows split out), automated rows, unique reader edits per 1,000 aligned
 sentences, the `retranslations.jsonl` rows the ledger never sees, and how many
-edits are native-confirmed. Read-only. `--export` writes one
+edits are native-confirmed, for every book outside `.backburner`. Read-only. `--export` writes one
 `(en, es_before, es_after)` row per unique landed edit with a stable `audit_id`:
 the input to the Phase 0 reader-edit audit.
 

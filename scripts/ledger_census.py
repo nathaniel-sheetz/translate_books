@@ -54,6 +54,10 @@ from src.corrections_apply import CORRECTIONS_APPLIED_FILENAME  # noqa: E402
 
 RETRANSLATIONS_FILENAME = "retranslations.jsonl"
 
+#: Group directories left out of the census: parked books, and in one case a
+#: pre-redo copy that repeats a live book's edits.
+_EXCLUDED_GROUPS = frozenset({".backburner"})
+
 #: Hex digits kept from the sha1: ~48 bits, collision-free at corpus scale.
 _AUDIT_ID_CHARS = 12
 
@@ -81,14 +85,18 @@ def discover_projects(projects_root: Path) -> list[Path]:
 
     Anything deeper is a copy kept inside a book rather than a book of its own,
     and a ``.bak`` directory is a snapshot of another book; counting either would
-    count the same edits twice.
+    count the same edits twice. Parked groups are not part of the corpus at all.
     """
     found = []
     for path in projects_root.rglob(CORRECTIONS_APPLIED_FILENAME):
         project_dir = path.parent
         parts = project_dir.relative_to(projects_root).parts
         top_level = len(parts) == 1
-        grouped = len(parts) == 2 and parts[0].startswith(".")
+        grouped = (
+            len(parts) == 2
+            and parts[0].startswith(".")
+            and parts[0] not in _EXCLUDED_GROUPS
+        )
         if (top_level or grouped) and ".bak" not in project_dir.name:
             found.append(project_dir)
     return sorted(found)

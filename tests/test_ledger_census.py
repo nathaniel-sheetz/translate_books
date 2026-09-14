@@ -63,8 +63,9 @@ def root(tmp_path):
         root / ".published" / "other-book" / "corrections_applied.jsonl",
         [_reader(before="Uno.", after="Una.")],
     )
-    # Neither is a book of its own: a snapshot, and a copy nested inside a book.
-    _write_jsonl(root / ".backburner" / "book.bak-migration" / "corrections_applied.jsonl", [_reader()])
+    # None of these is counted: a parked book, a snapshot, a copy nested in a book.
+    _write_jsonl(root / ".backburner" / "parked-book" / "corrections_applied.jsonl", [_reader()])
+    _write_jsonl(root / ".published" / "book.bak-migration" / "corrections_applied.jsonl", [_reader()])
     _write_jsonl(book / ".harness" / "archive" / "corrections_applied.jsonl", [_reader()])
     return root
 
