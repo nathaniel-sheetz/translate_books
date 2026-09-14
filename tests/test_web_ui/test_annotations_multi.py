@@ -321,3 +321,33 @@ class TestAnchoring:
         assert rec["sub_id"] == "gb1"
         assert rec["es_text"] == "El perro."
         assert _get(client)[0]["anchored"] is True
+
+    def test_saved_annotation_stamps_verified_by(self, client, project):
+        _post(client, es_idx=0, type="flag", content="a")
+        _post(client, es_idx=1, type="flag", content="b", verified_by="native")
+        stored = _load_annotations(project, "chapter_01")
+        assert stored[0][0]["verified_by"] == "self"
+        assert stored[1][0]["verified_by"] == "native"
+
+    def test_realign_carries_verified_by(self, client, project):
+        from web_ui.app import _reanchor_annotations_after_realign
+
+        _post(client, es_idx=1, type="word_choice", content="dudo", verified_by="native")
+
+        align_path = project / "alignments" / "chapter_01.json"
+        data = json.loads(align_path.read_text(encoding="utf-8"))
+        data["alignments"] = [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato.", "en": "The cat.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+            {"es_idx": 1, "en_idx": 1, "es": "Un pajaro.", "en": "A bird.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+            {"es_idx": 2, "en_idx": 2, "es": "El perro.", "en": "The dog.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+        ]
+        align_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        _reanchor_annotations_after_realign(
+            project, "chapter_01", {0: "El gato.", 1: "El perro."}
+        )
+
+        assert _load_annotations(project, "chapter_01")[2][0]["verified_by"] == "native"

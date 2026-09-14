@@ -354,6 +354,18 @@ def _safe_id(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_.\-]+", value))
 
 
+#: Who confirmed a reader edit or note. A client may only claim "self" or
+#: "native"; "panel" is reserved for the ledger audit's own writer. A row with
+#: no field predates it and means "self" too.
+_CLIENT_VERIFIED_BY = frozenset({"self", "native"})
+
+
+def _verified_by(data: dict) -> str:
+    """The ``verified_by`` stamp for a reader-authored write; unknown → "self"."""
+    value = data.get("verified_by")
+    return value if isinstance(value, str) and value in _CLIENT_VERIFIED_BY else "self"
+
+
 def _get_ui_lang() -> str:
     """Read UI language from cookie, default to English."""
     return request.cookies.get("reader_lang", "en")
@@ -1876,6 +1888,7 @@ def save_correction():
             "corrected_es": corrected_es,
             "en_reference": en_reference or "",
             "timestamp": datetime.now().isoformat(),
+            "verified_by": _verified_by(data),
         }
 
         # Persist client-supplied chunk offsets so apply_to_chunk can target
@@ -2161,6 +2174,7 @@ def save_annotation():
             "type": ann_type,
             "content": content or "",
             "timestamp": datetime.now().isoformat(),
+            "verified_by": _verified_by(data),
         }
         if storage_sub is not None:
             record["sub_id"] = storage_sub
@@ -3172,6 +3186,7 @@ def sentence_replace():
                 "current_translation": current_translation,
                 "new_translation": new_translation,
                 "timestamp": datetime.now().isoformat(),
+                "verified_by": _verified_by(data),
             }, ensure_ascii=False) + "\n")
     except OSError:
         pass
@@ -5277,7 +5292,8 @@ def _reanchor_annotations_after_realign(
 
         ts = datetime.now().isoformat()
         # Re-anchor every annotation on this sentence, preserving each one's
-        # identity (sub_id) and any imported-footnote provenance.
+        # identity (sub_id), any imported-footnote provenance, and its
+        # verified_by stamp.
         for record in records:
             remove_row = {
                 "project_id": record.get("project_id"),
@@ -5297,7 +5313,7 @@ def _reanchor_annotations_after_realign(
             if record.get("sub_id") is not None:
                 remove_row["sub_id"] = record["sub_id"]
                 recreate_row["sub_id"] = record["sub_id"]
-            for extra in ("origin", "fn_number"):
+            for extra in ("origin", "fn_number", "verified_by"):
                 if record.get(extra) is not None:
                     recreate_row[extra] = record[extra]
             # Carry the sentence snapshot forward, refreshed to the row we just

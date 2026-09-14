@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.59.0.0] - 2026-09-14
+
+### Added
+- **`scripts/ledger_census.py`: how many reader edits there are, before Phase 0 audits them.** Per book, from `corrections_applied.jsonl`: reader rows, skipped Apply attempts, repeat saves, unique landed edits, automated (`judge:*`) rows, aligned sentences and unique edits per 1,000 of them, the `retranslations.jsonl` rows the ledger never sees, and native-confirmed edits. Books under `.backburner`, `.bak` snapshots and copies nested inside a book are left out. Read-only; it never calls a model.
+- **`--export` writes the audit input.** One `(en, es_before, es_after)` row per unique landed edit. Its `audit_id` is hashed from the edit rather than its position in the file, so verdicts still join back after a re-export. Each row also carries `verified_by` (`"native"` if any copy of the edit was) and `status` (`"applied"` if any copy was stamped so, `null` for an edit only older rows carry, which may never have landed).
+- **`--freeze DIR` writes the Phase 0 exam snapshot.** For the `--project` books: the edit rows, each marked with whether its `es_before` appears in the original translation; each chunk's source, its LLM translation recovered from `last_llm_log` (only when that log's prompt carries this chunk's source), and its text at freeze time; and a manifest with file hashes. It writes into a staging directory and renames it into place, so a malformed chunk fails the freeze without leaving a half-snapshot behind. A malformed log only costs that chunk its original. `--export` and `--freeze` refuse a slug that names two books, because ids and snapshot directories are keyed by slug. `exam/` is gitignored.
+- **Reader writes record who confirmed them.** `POST /api/correction`, `/api/annotation` and `/api/sentence/replace` stamp `verified_by` as `"self"` or `"native"`. A client cannot claim `"panel"`, which is reserved for the audit's own writer; anything else becomes `"self"`. The stamp survives Apply, realign re-anchoring and every annotation-review write. No reader control sends `"native"` yet (tracked in `TODOS.md`), so the census `native` column reads 0 today.
+
 ## [0.58.0.0] - 2026-09-13
 
 ### Added

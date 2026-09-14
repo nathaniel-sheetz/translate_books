@@ -45,6 +45,8 @@ ENV/
 
 # Project specific
 projects/
+# Exam snapshots from scripts/ledger_census.py --freeze (archived outside git)
+exam/
 backups/
 test_reports/
 *.log

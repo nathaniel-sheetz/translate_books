@@ -607,6 +607,21 @@ def test_a_write_keeps_the_es_text_re_anchor_snapshot(project):
     assert store.load_active(project)[0]["es_text"] == "Se sentó en el poyo."
 
 
+def test_a_write_keeps_the_verified_by_stamp(project):
+    """Provenance rides the same fixed key set as es_text: a note a native
+    speaker confirmed must not quietly become the reader's own on a write."""
+    write_annotations(project, [
+        _ann(es_idx=1, content="poyo", sub_id="u1", verified_by="native"),
+    ])
+    prep = review.prepare(project)
+    _draft_all(prep)
+    review.commit(project)
+
+    review.apply(project, select=[prep["manifest"][0]["key"]])
+
+    assert store.load_active(project)[0]["verified_by"] == "native"
+
+
 def test_retired_notes_are_skipped_on_the_next_run(project):
     """The whole point: a finished note stops being re-detected forever."""
     write_annotations(

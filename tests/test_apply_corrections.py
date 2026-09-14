@@ -535,6 +535,33 @@ class TestDuplicateAndIdempotent:
         ]
         assert len(archive_lines) == 2
 
+    def test_archived_row_keeps_verified_by(
+        self, client, project_with_duplicate_for_correction,
+    ):
+        """Apply copies the whole queued row into the ledger, so the provenance
+        stamped at Save reaches corrections_applied.jsonl untouched."""
+        proj_dir, body, body_start, body_end = project_with_duplicate_for_correction
+        client.post("/api/correction", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 1,
+            "original_es": body,
+            "corrected_es": f"«{body}»",
+            "en_reference": "There was a heavy sea running",
+            "chunk_offset_start": body_start,
+            "chunk_offset_end": body_end,
+            "verified_by": "native",
+        })
+
+        rv = client.post("/api/apply-corrections/test-project")
+        assert rv.status_code == 200, rv.get_json()
+
+        archived = [
+            json.loads(ln) for ln in (proj_dir / "corrections_applied.jsonl")
+            .read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+        assert [r["verified_by"] for r in archived] == ["native"]
+
     def test_dedupe_empty_input(self):
         assert dedupe_corrections([]) == []
 

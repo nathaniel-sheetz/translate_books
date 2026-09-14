@@ -568,6 +568,31 @@ class TestCorrectionAPI:
         assert record["corrected_es"] == "El perrito."
         assert record["es_idx"] == 1
 
+    @pytest.mark.parametrize("sent, stamped", [
+        (None, "self"),
+        ("native", "native"),
+        ("panel", "self"),  # reserved for the audit writer, never a client
+        (["native"], "self"),
+    ])
+    def test_correction_stamps_verified_by(
+        self, client, project_with_alignment, sent, stamped,
+    ):
+        body = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 1,
+            "original_es": "El perro.",
+            "corrected_es": "El perrito.",
+            "en_reference": "The dog.",
+        }
+        if sent is not None:
+            body["verified_by"] = sent
+        client.post("/api/correction", json=body)
+
+        corrections_path = project_with_alignment / "corrections.jsonl"
+        lines = corrections_path.read_text(encoding="utf-8").strip().split("\n")
+        assert json.loads(lines[-1])["verified_by"] == stamped
+
     def test_correction_missing_fields(self, client, project_with_alignment):
         rv = client.post("/api/correction", json={
             "project_id": "test-project",
