@@ -290,6 +290,28 @@ The snapshot is written whole or not at all. Replays read the snapshot, so the
 live books can keep changing. `--export` and `--freeze` refuse a slug that names
 two books. `exam/` is gitignored for it.
 
+### `panel_audit.py` — audit the reader's edits with a model panel
+
+```bash
+python scripts/panel_audit.py prepare --input audit/run/input.jsonl --run audit/run/rows20
+python scripts/panel_audit.py fanout  --run audit/run/rows20
+python scripts/panel_audit.py commit  --run audit/run/rows20
+```
+
+Reads the rows `ledger_census.py --export` writes. `prepare` renders them in
+batches (`--rows-per-job`, default 20) into a new or empty run directory for the
+panel: Grok 4.6, Gemini 3.8 Flash and GPT-5.6 Terra by default, and `--model`
+repeats to change it. Each edit carries the paragraph before it in both
+languages and a `quote_continues` flag read from the English, so a model can
+tell a continuing speaker's » from a stray closing mark. `--project`, `--limit`
+and `--exclude-ids-file` narrow the rows. `fanout` runs one headless Cursor
+wave per model and skips jobs that already have a draft, so a re-run resumes.
+`commit` writes `results.jsonl` and `report.md`: verdicts per model, pairwise
+agreement, the consensus buckets (silver, taste, regression queue, split), M6
+and token usage. It sets an unparseable draft aside as `<job>.rejected.json` so
+the next `fanout` re-runs that job. Nothing is written into `projects/`, and
+`audit/` is gitignored.
+
 ### `review_annotations.py` — resolve reader annotations
 
 ```bash

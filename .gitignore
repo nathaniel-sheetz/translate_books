@@ -47,6 +47,8 @@ ENV/
 projects/
 # Exam snapshots from scripts/ledger_census.py --freeze (archived outside git)
 exam/
+# Panel audit runs from scripts/panel_audit.py (prompts, drafts, verdicts)
+/audit/
 backups/
 test_reports/
 *.log
