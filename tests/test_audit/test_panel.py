@@ -496,3 +496,88 @@ def test_excluding_any_save_excludes_its_net_edit(tmp_path):
     )
     assert out["rows"] == 1
     assert list(_manifest(tmp_path / "run")["rows"]) == ["a1"]
+
+
+def test_the_report_counts_collapsed_saves_over_the_whole_input(tmp_path):
+    root = tmp_path / "projects"
+    _book(root, "book")
+    run_dir = tmp_path / "run"
+    panel.prepare(_chained_input(tmp_path), run_dir, models=MODELS, projects_root=root)
+    panel.commit(run_dir)
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    # Two multi-save chains, one of them a revert: one net edit survives.
+    assert (
+        "Across the whole input, before filters: 2 later saves were folded into 1 net edits, "
+        "and 1 sequences that ended where they started were left out."
+    ) in report
+
+
+# --- failure paths ------------------------------------------------------------------
+
+def test_a_render_failure_writes_nothing_so_the_run_can_be_retried(setup, monkeypatch):
+    def missing():
+        raise FileNotFoundError("prompts/dialogue.txt exists but is empty")
+
+    monkeypatch.setattr(panel, "_load_dialogue_block", missing)
+    out = _prepare(setup)
+    assert out["status"] == "error"
+    assert "could not render the prompts" in out["error"]
+    assert not setup[2].exists()
+
+    monkeypatch.undo()
+    assert _prepare(setup)["status"] == "ok"
+
+
+def _escape_first_job(run_dir: Path) -> None:
+    (run_dir.parent / "outside.txt").write_text("not a job body", encoding="utf-8")
+    manifest = _manifest(run_dir)
+    manifest["jobs"][0]["body_path"] = "../outside.txt"
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+
+def test_fanout_refuses_a_body_path_outside_the_run(setup):
+    _prepare(setup, rows_per_job=2)
+    run_dir = setup[2]
+    _escape_first_job(run_dir)
+    seen = []
+    out = panel.fanout(run_dir, model="model-a", runner=_answering_runner(seen), concurrency=1)
+    assert [f["id"] for f in out["failed"]] == ["job-001"]
+    assert "escapes the run directory" in out["failed"][0]["error"]
+    assert len(seen) == 1
+    assert "not a job body" not in seen[0]["input_text"]
+
+
+def test_a_launcher_refusal_keeps_the_jobs_that_failed_before_it(setup, monkeypatch):
+    import src.harness.headless as headless
+
+    _prepare(setup, rows_per_job=2)
+    run_dir = setup[2]
+    _escape_first_job(run_dir)
+    monkeypatch.setattr(headless, "run_headless_wave", lambda *args, **kwargs: {"error": "no cli"})
+    out = panel.fanout(run_dir, model="model-a", concurrency=1)
+    assert out["error"] == "no cli"
+    assert [f["id"] for f in out["failed"]] == ["job-001"]
+    assert out["counts"] == {"wrote": 0, "failed": 1, "skipped": 0, "todo": 2}
+
+
+@pytest.mark.parametrize("spelling", ["word_choice", "word choice", "Word-Choice", " word  choice "])
+def test_parse_draft_accepts_a_class_spelled_with_spaces_or_hyphens(spelling):
+    raw = json.dumps([{"id": "a1", "verdict": "improvement", "defect_class": spelling}])
+    assert panel.parse_draft(raw, ["a1"])[0]["defect_class"] == "word_choice"
+
+
+def test_parse_draft_still_rejects_a_near_miss_class():
+    raw = json.dumps([{"id": "a1", "verdict": "improvement", "defect_class": "word choices"}])
+    with pytest.raises(JudgeParseError, match="defect_class"):
+        panel.parse_draft(raw, ["a1"])
+
+
+@pytest.mark.parametrize("text, message", [
+    ("{not json", "unreadable manifest"),
+    ('{"models": [], "rows": {}}', "malformed manifest"),
+])
+def test_commit_refuses_a_broken_manifest(tmp_path, text, message):
+    (tmp_path / "manifest.json").write_text(text, encoding="utf-8")
+    out = panel.commit(tmp_path)
+    assert out["status"] == "error"
+    assert message in out["error"]

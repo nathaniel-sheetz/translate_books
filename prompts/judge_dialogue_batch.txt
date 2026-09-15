@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge — batched (multiple items per prompt)
-# Version: 1.4
+# Version: 1.5
 # Checks whether one or more Spanish translations follow the project's house
 # dialogue rules in a single call. Variables: dialogue_rules, items
 # Each <item> carries an id plus its own <source>/<translation>; return exactly

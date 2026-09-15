@@ -366,7 +366,7 @@ _PREPARE_SCHEMA = {
     "rows": "net edits to audit, one per chain of saves on a sentence",
     "collapsed": "{chains, saves_merged, reverted}: chains of more than one save; saves "
     "folded into a later one's net edit; chains that ended where they started, which are "
-    "dropped",
+    "dropped. Counted over the whole input, before --project, --limit and exclusions",
     "jobs": "headless processes per model: a job holds one book's rows, so each book's rows / "
     "rows_per_job, rounded up, summed over books",
     "rows_per_job": "edits rendered into one prompt",
@@ -512,17 +512,26 @@ def prepare(
         for i in range(0, len(book_items), rows_per_job)
     ]
     width = max(3, len(str(len(batches))))
-    (run_dir / "jobs").mkdir(parents=True, exist_ok=True)
+    # Render every job before writing anything: a failure part-way would leave a
+    # directory the empty-run check above then refuses to prepare again.
     preamble: Optional[str] = None
+    rendered: list[tuple[str, str, list[dict[str, Any]], str]] = []
+    try:
+        for n, (slug, batch) in enumerate(batches, 1):
+            job_id = f"job-{n:0{width}d}"
+            prefix, body = build_prompt_parts(batch, format_book_context(slug, standards[slug]))
+            if preamble is None:
+                preamble = prefix
+            elif prefix != preamble:
+                raise ValueError(f"{job_id}: the preamble differs between jobs")
+            rendered.append((job_id, slug, batch, body))
+    except (OSError, ValueError) as exc:
+        return _error(f"could not render the prompts: {exc}", _PREPARE_SCHEMA)
+
+    (run_dir / "jobs").mkdir(parents=True, exist_ok=True)
+    (run_dir / PREAMBLE_FILENAME).write_text(preamble or "", encoding="utf-8")
     jobs = []
-    for n, (slug, batch) in enumerate(batches, 1):
-        job_id = f"job-{n:0{width}d}"
-        prefix, body = build_prompt_parts(batch, format_book_context(slug, standards[slug]))
-        if preamble is None:
-            preamble = prefix
-            (run_dir / PREAMBLE_FILENAME).write_text(prefix, encoding="utf-8")
-        elif prefix != preamble:
-            raise RuntimeError(f"{job_id}: the preamble differs between jobs")
+    for job_id, slug, batch, body in rendered:
         body_rel = f"jobs/{job_id}.body.txt"
         (run_dir / body_rel).write_text(body, encoding="utf-8")
         for item in batch:
@@ -693,7 +702,17 @@ def fanout(
     )
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
         return {
-            **_fanout_error(wave["error"], skipped=skipped),
+            **_fanout_error(
+                wave["error"],
+                failed=pre_failed,
+                skipped=skipped,
+                counts={
+                    "wrote": 0,
+                    "failed": len(pre_failed),
+                    "skipped": len(skipped),
+                    "todo": len(ready) + len(pre_failed),
+                },
+            ),
             "model": model,
             "cli": cli,
             "concurrency": concurrency,
@@ -736,11 +755,13 @@ _COMMIT_SCHEMA = {
     "complete": "edits every panel model judged; consensus and M6 count only these",
     "buckets": "{silver, taste, regression_queue, split} over complete rows",
     "m6": "{unanimous_regression, any_regression, of, share, any_share}",
-    "by_model": "{model: {improvement, taste, regression, judged}}",
+    "by_model": "{model: {improvement, taste, regression, judged, failed, missing}}: failed and "
+    "missing count jobs",
     "agreement": "list of {models, same, of}: rows both models judged, and how many share a verdict",
     "failed": "list of {model, job, problem}. The draft was renamed to <job>.rejected.json, so "
     "re-running fanout re-runs the job",
     "missing": "list of {model, job} with no draft yet",
+    "usage": "{model: token rollup from usage/<model>.jsonl, or null}",
     "instructions": "next step",
 }
 
@@ -769,7 +790,8 @@ def parse_draft(raw: str, audit_ids: list[str]) -> list[dict[str, Any]]:
         verdict = str(obj.get("verdict") or "").strip().lower()
         if verdict not in VERDICTS:
             raise JudgeParseError(f"item {label}: verdict {obj.get('verdict')!r} is not one of {list(VERDICTS)}")
-        defect_class = str(obj.get("defect_class") or "").strip().lower()
+        # "word choice" and "word-choice" name the same class as "word_choice".
+        defect_class = re.sub(r"[\s-]+", "_", str(obj.get("defect_class") or "").strip().lower())
         if defect_class not in DEFECT_CLASSES:
             raise JudgeParseError(
                 f"item {label}: defect_class {obj.get('defect_class')!r} is not one of {list(DEFECT_CLASSES)}"
@@ -960,8 +982,8 @@ def render_report(
     collapsed = manifest.get("collapsed") or {}
     if collapsed.get("saves_merged") or collapsed.get("reverted"):
         lines.append(
-            f"{collapsed.get('saves_merged', 0)} later saves were folded into "
-            f"{collapsed.get('chains', 0)} net edits, and {collapsed.get('reverted', 0)} "
+            f"Across the whole input, before filters: {collapsed.get('saves_merged', 0)} later saves were folded into "
+            f"{collapsed.get('chains', 0) - collapsed.get('reverted', 0)} net edits, and {collapsed.get('reverted', 0)} "
             "sequences that ended where they started were left out."
         )
     if manifest.get("context_missing"):

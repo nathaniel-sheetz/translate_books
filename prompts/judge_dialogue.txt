@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge
-# Version: 1.5
+# Version: 1.6
 # Checks whether a Spanish translation follows the project's house dialogue
 # rules. Variables: dialogue_rules, source_text, translation_text
 

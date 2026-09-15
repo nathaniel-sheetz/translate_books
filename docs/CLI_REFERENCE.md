@@ -310,8 +310,15 @@ read from the English, so a model can tell a continuing speaker's » from a stra
 closing mark. The manifest's `books` records which parts each book had. Successive saves on one
 sentence are audited once, as their net change, and a sequence that ends where
 it started is left out. `--project`, `--limit` and `--exclude-ids-file` narrow
-the rows; excluding any save excludes its net edit. `fanout` runs one headless Cursor
-wave per model and skips jobs that already have a draft, so a re-run resumes.
+the rows; excluding any save excludes its net edit. `--projects-root` points at
+the directory holding the books (default `projects/`). A rendering failure
+returns an error before anything is written, so the same `--run` can be
+retried. `fanout` runs one headless wave per model and skips jobs that already
+have a draft, so a re-run resumes. `--model` runs one panel model instead of
+every one in turn, `--job-ids` (comma-separated) limits it to some jobs,
+`--concurrency` caps parallel CLI processes (default 3), and `--cli` picks
+`cursor` (the default) or `claude`, with `--cli-bin` when the binary is not on
+`PATH`.
 `commit` writes `results.jsonl` and `report.md`: verdicts per model, pairwise
 agreement, the consensus buckets (silver, taste, regression queue, split), M6
 and token usage. It sets an unparseable draft aside as `<job>.rejected.json` so
