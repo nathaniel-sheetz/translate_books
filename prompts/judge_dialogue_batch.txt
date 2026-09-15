@@ -61,7 +61,8 @@ For each violation choose the single most specific `rule` id from this list:
   (wrong capitalization, period before the inciso, comma/period misplaced
   relative to the closing raya).
 - "guillemets-for-thoughts": nested speech or internal thoughts not wrapped in
-  guillemets « » (or wrapped in English quotes).
+  guillemets « » (or wrapped in English quotes); also a quotation inside them
+  set in « » or English quotes instead of single angle quotes ‹ ›.
 - "other": a clear dialogue-rule violation that none of the above describes.
 
 Severity guidance: use "error" for unambiguous violations (English quotes in
