@@ -12,6 +12,12 @@ halfway state can look like a regression ("aprietan … haces" before "haces"
 became "hacen"), so each run of saves on one sentence is audited once, as its
 net change. See :func:`collapse_saves`.
 
+Each job holds one book's edits and opens with that book's own standard: its
+style guide, style rules and forms-of-address map, plus each edit's glossary
+hits. Without them the fabre2 pilot split on edits the book had already settled:
+its glossary gives "la madre Ambroisine", and its address map gives the children
+tú with Uncle Paul. See :func:`load_book`.
+
 Nothing here writes into ``projects/``. A consensus is a candidate label, not a
 stamp: ``verified_by: "panel"`` waits until the pilot shows the panel holds.
 
@@ -38,12 +44,19 @@ from typing import Any, Iterable, Optional
 from src.audit.context import NO_CONTEXT, edit_context
 from src.harness.usage import read_recent, rollup
 from src.judges.base import _CACHE_PREFIX_SPLIT_MARKER
+from src.judges.context import load_style_rules
 from src.judges.llm_io import (
     JudgeParseError,
     extract_json,
     load_template,
     prompt_version,
     render,
+)
+from src.utils.file_io import (
+    filter_glossary_for_chunk,
+    load_address_map,
+    load_glossary,
+    load_style_guide,
 )
 from src.utils.text_utils import _load_dialogue_block
 
@@ -77,6 +90,10 @@ BUCKETS = ("silver", "taste", "regression_queue", "split")
 #: batching moves verdicts no more than a rerun does.
 DEFAULT_ROWS_PER_JOB = 20
 DEFAULT_CONCURRENCY = 3
+
+#: Glossary entries shown per edit at most. A long sentence in a book with a
+#: large glossary can match many, and the list is a reference, not the task.
+MAX_GLOSSARY_HITS = 12
 
 MANIFEST_FILENAME = "manifest.json"
 PREAMBLE_FILENAME = "preamble.txt"
@@ -230,7 +247,72 @@ def _load_chunk(book_dir: Optional[Path], chunk_id: str) -> Optional[dict[str, A
     return data if isinstance(data, dict) else None
 
 
-def build_item(row: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+def load_book(book_dir: Optional[Path]) -> dict[str, Any]:
+    """The book's own standard: style guide, style rules, address map and glossary.
+
+    Loaded as the judges load them: the style guide's ``content``, the rule
+    sidecar through :func:`load_style_rules`, and the address map's prose
+    ``content``, falling back to its ``global_rules``. Every part is optional; a
+    missing or unreadable file comes back empty (``None`` for the glossary).
+    """
+    book: dict[str, Any] = {"style_guide": "", "style_rules": "", "address_map": "", "glossary": None}
+    if book_dir is None:
+        return book
+    try:
+        book["style_guide"] = (load_style_guide(book_dir / "style.json").content or "").strip()
+    except Exception:  # noqa: BLE001 - an unusable file is an absent one
+        pass
+    book["style_rules"] = load_style_rules(book_dir)
+    try:
+        amap = load_address_map(book_dir / "address_map.json")
+        book["address_map"] = (amap.content or "").strip() or (amap.global_rules or "").strip()
+    except Exception:  # noqa: BLE001 - same
+        pass
+    try:
+        book["glossary"] = load_glossary(book_dir / "glossary.json")
+    except Exception:  # noqa: BLE001 - same
+        pass
+    return book
+
+
+def book_summary(book: dict[str, Any]) -> dict[str, Any]:
+    """Which parts of its standard a book's jobs carry, for the manifest."""
+    return {
+        "style_guide": bool(book["style_guide"]),
+        "style_rules": bool(book["style_rules"]),
+        "address_map": bool(book["address_map"]),
+        "glossary_terms": len(book["glossary"].terms) if book["glossary"] else 0,
+    }
+
+
+def format_book_context(slug: str, book: dict[str, Any]) -> str:
+    """The block a book's jobs open with. An absent part is named, not left out."""
+    return "\n\n".join((
+        f"BOOK: {slug}",
+        "STYLE GUIDE\n" + (book["style_guide"] or "(none recorded for this book)"),
+        "STYLE RULES\n" + (book["style_rules"] or "(none recorded for this book)"),
+        "FORMS OF ADDRESS\n" + (book["address_map"] or "(no address map for this book)"),
+    ))
+
+
+def glossary_hits(glossary: Any, en: str) -> list[str]:
+    """The glossary entries whose English appears in ``en``, as ``english → spanish``.
+
+    Matched the way :func:`filter_glossary_for_chunk` matches a chunk's source,
+    variants included, and capped at :data:`MAX_GLOSSARY_HITS`.
+    """
+    if glossary is None or not en.strip():
+        return []
+    hits = []
+    for term in filter_glossary_for_chunk(glossary, en).terms[:MAX_GLOSSARY_HITS]:
+        line = f"{term.english} → {term.spanish}"
+        if term.alternatives:
+            line += f" (also: {', '.join(term.alternatives)})"
+        hits.append(line)
+    return hits
+
+
+def build_item(row: dict[str, Any], context: dict[str, Any], glossary: Iterable[str] = ()) -> dict[str, Any]:
     """One item as the panel reads it. The key order is the prompt's."""
     return {
         "id": row["audit_id"],
@@ -241,16 +323,24 @@ def build_item(row: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         "quote_continues": context["quote_continues"],
         "context_before_en": context["context_before_en"],
         "context_before_es": context["context_before_es"],
+        "context_after_en": context["context_after_en"],
+        "context_after_es": context["context_after_es"],
+        "glossary": list(glossary),
     }
 
 
-def build_prompt_parts(items: list[dict[str, Any]]) -> tuple[str, str]:
-    """``(preamble, body)`` for one job. The preamble is the same for every job."""
+def build_prompt_parts(items: list[dict[str, Any]], book_context: str = "") -> tuple[str, str]:
+    """``(preamble, body)`` for one job.
+
+    The preamble is the same for every job. The body opens with the book's
+    standard, since a job holds one book's edits.
+    """
     rendered = render(
         load_template(TEMPLATE),
         {
             "dialogue_rules": _load_dialogue_block(),
             "item_count": str(len(items)),
+            "book_context": book_context,
             # Last, so text inside an item is never itself scanned for a placeholder.
             "items": json.dumps(items, ensure_ascii=False, indent=1),
         },
@@ -277,9 +367,12 @@ _PREPARE_SCHEMA = {
     "collapsed": "{chains, saves_merged, reverted}: chains of more than one save; saves "
     "folded into a later one's net edit; chains that ended where they started, which are "
     "dropped",
-    "jobs": "headless processes per model: rows / rows_per_job, rounded up",
+    "jobs": "headless processes per model: a job holds one book's rows, so each book's rows / "
+    "rows_per_job, rounded up, summed over books",
     "rows_per_job": "edits rendered into one prompt",
     "by_project": "rows per book",
+    "books": "{slug: {style_guide, style_rules, address_map, glossary_terms}}: the parts of its "
+    "own standard each book's jobs open with. A part the book lacks is named as absent in the prompt",
     "context_missing": "{count, rows}: rows whose sentence was not found in its chunk in "
     "one language or both. They still render, with empty context for that language. "
     "rows lists at most the first 20; the manifest keeps them all",
@@ -304,7 +397,8 @@ def prepare(
     Successive saves on a sentence become one net edit first. Excluding any save
     excludes its net edit. Edits are sorted by ``audit_id`` before ``limit``
     applies, so the same input and filters always select and batch the same
-    edits. The run directory must be new or empty: re-rendering over drafts
+    edits. Each job holds one book's edits and opens with that book's standard
+    (:func:`load_book`). The run directory must be new or empty: re-rendering over drafts
     would pair verdicts with other rows. No spend.
     """
     input_path, run_dir = Path(input_path), Path(run_dir)
@@ -366,7 +460,8 @@ def prepare(
         )
 
     chunks: dict[tuple[str, str], Optional[dict[str, Any]]] = {}
-    items: list[dict[str, Any]] = []
+    standards: dict[str, dict[str, Any]] = {}
+    items_by_book: dict[str, list[dict[str, Any]]] = {}
     row_meta: dict[str, dict[str, Any]] = {}
     context_missing: list[dict[str, Any]] = []
     by_project: dict[str, int] = {}
@@ -389,7 +484,10 @@ def prepare(
                 "en_found": context["en_found"],
                 "es_found": context["es_found"],
             })
-        items.append(build_item(row, context))
+        if slug not in standards:
+            standards[slug] = load_book(books.get(slug))
+        hits = glossary_hits(standards[slug]["glossary"], row.get("en") or "")
+        items_by_book.setdefault(slug, []).append(build_item(row, context, hits))
         by_project[slug] = by_project.get(slug, 0) + 1
         row_meta[row["audit_id"]] = {
             "project_id": slug,
@@ -404,16 +502,22 @@ def prepare(
             "status": row.get("status"),
             "starts_paragraph": context["starts_paragraph"],
             "quote_continues": context["quote_continues"],
+            "glossary": hits,
         }
 
-    batches = [items[i:i + rows_per_job] for i in range(0, len(items), rows_per_job)]
+    # One book per job, so each job can open with that book's standard.
+    batches = [
+        (slug, book_items[i:i + rows_per_job])
+        for slug, book_items in sorted(items_by_book.items())
+        for i in range(0, len(book_items), rows_per_job)
+    ]
     width = max(3, len(str(len(batches))))
     (run_dir / "jobs").mkdir(parents=True, exist_ok=True)
     preamble: Optional[str] = None
     jobs = []
-    for n, batch in enumerate(batches, 1):
+    for n, (slug, batch) in enumerate(batches, 1):
         job_id = f"job-{n:0{width}d}"
-        prefix, body = build_prompt_parts(batch)
+        prefix, body = build_prompt_parts(batch, format_book_context(slug, standards[slug]))
         if preamble is None:
             preamble = prefix
             (run_dir / PREAMBLE_FILENAME).write_text(prefix, encoding="utf-8")
@@ -423,7 +527,12 @@ def prepare(
         (run_dir / body_rel).write_text(body, encoding="utf-8")
         for item in batch:
             row_meta[item["id"]]["job_id"] = job_id
-        jobs.append({"id": job_id, "audit_ids": [item["id"] for item in batch], "body_path": body_rel})
+        jobs.append({
+            "id": job_id,
+            "project_id": slug,
+            "audit_ids": [item["id"] for item in batch],
+            "body_path": body_rel,
+        })
 
     manifest = {
         "prepared_at": datetime.now().isoformat(timespec="seconds"),
@@ -438,6 +547,7 @@ def prepare(
             "limit": limit,
             "excluded": sum(1 for net in kept if excluded.intersection(net["chain"])),
         },
+        "books": {slug: book_summary(book) for slug, book in sorted(standards.items())},
         "preamble_path": PREAMBLE_FILENAME,
         "jobs": jobs,
         "rows": row_meta,
@@ -451,11 +561,12 @@ def prepare(
         "status": "ok",
         "run_dir": str(run_dir),
         "models": models,
-        "rows": len(items),
+        "rows": len(row_meta),
         "collapsed": collapsed,
         "jobs": len(jobs),
         "rows_per_job": rows_per_job,
         "by_project": by_project,
+        "books": {slug: book_summary(book) for slug, book in sorted(standards.items())},
         "context_missing": {"count": len(context_missing), "rows": context_missing[:_ECHOED_MISSING]},
         "preamble_chars": len(preamble or ""),
         "instructions": (

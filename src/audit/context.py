@@ -10,6 +10,9 @@ it is visible. So every audit item carries:
   does, otherwise the earlier part of its own paragraph, cut by :func:`tail` so
   the paragraph's opening words survive. Image and caption lines are skipped:
   they sit between two paragraphs of prose without being prose.
+- ``context_after_en`` / ``context_after_es``: the rest of the sentence's own
+  paragraph, cut by :func:`head`. A quote's speaker tag ("Maureen asked") sits
+  there; without it the panel guessed the speaker and misjudged an usted.
 - ``quote_continues``: read from the English, where it is unambiguous. True when
   the same speaker is still talking at this sentence: the English paragraph
   opens with a quotation mark after one that left its quotation open, or the
@@ -40,6 +43,10 @@ MIN_KEY_CHARS = 12
 CONTEXT_CHARS = 400
 CONTEXT_HEAD_CHARS = 80
 
+#: Text after the sentence is cut to its first ``CONTEXT_AFTER_CHARS``. The
+#: speaker tag that follows a quote comes first.
+CONTEXT_AFTER_CHARS = 200
+
 #: Image paragraphs in a chunk start with this.
 IMAGE_PREFIX = "[IMAGE:"
 
@@ -52,6 +59,8 @@ NO_CONTEXT: dict[str, Any] = {
     "quote_continues": None,
     "context_before_en": "",
     "context_before_es": "",
+    "context_after_en": "",
+    "context_after_es": "",
     "en_found": False,
     "es_found": False,
 }
@@ -75,6 +84,14 @@ def tail(text: str, limit: int = CONTEXT_CHARS, head: int = CONTEXT_HEAD_CHARS) 
     if len(text) <= limit:
         return text
     return text[:head].rstrip() + " … " + text[-(limit - head):].lstrip()
+
+
+def head(text: str, limit: int = CONTEXT_AFTER_CHARS) -> str:
+    """``text`` cut at a word break to about its first ``limit`` characters."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind(" ", 0, limit)
+    return text[:cut if cut > 0 else limit].rstrip() + " …"
 
 
 def quote_left_open(text: str) -> bool:
@@ -101,6 +118,25 @@ def is_layout(paragraph: str, *, bare_captions: bool = False) -> bool:
     return bare_captions and len(text.split()) <= BARE_CAPTION_WORDS and not _PUNCTUATION.search(text)
 
 
+#: Quote marks a sentence can open with, directly before its first word.
+_OPENING_QUOTES = "“\"'‘"
+
+
+def _rest_of_paragraph(para: str, j: int, line: str, sentence: str) -> str:
+    """What follows the sentence found at ``j``, past its own closing marks.
+
+    Empty when the sentence ends its paragraph, or when the paragraph does not
+    hold the sentence's whole first line (the key matched only its opening).
+    """
+    if not para.startswith(sentence, j):
+        return ""
+    rest = para[j + len(sentence):]
+    closing = line[len(line.rstrip(MARKS)):].strip()
+    if closing and rest.startswith(closing):
+        rest = rest[len(closing):]
+    return head(rest.strip())
+
+
 def locate(
     text: Optional[str],
     candidates: Iterable[Optional[str]],
@@ -112,11 +148,12 @@ def locate(
     Returns ``None`` when no candidate is found, otherwise:
 
     - ``starts_paragraph`` and ``before``, as the module docstring describes.
+    - ``after``: the rest of the sentence's paragraph (:func:`_rest_of_paragraph`).
     - ``quote_continues``: ``None`` when nothing but images and captions
       precede the paragraph in ``text``, since the previous prose is in
       another chunk.
     - ``open_before``: whether a quotation is open where the sentence starts
-      inside its paragraph.
+      inside its paragraph, not counting the sentence's own opening quote.
     - ``skipped``: image and caption paragraphs passed over to reach the
       previous paragraph.
     """
@@ -124,7 +161,9 @@ def locate(
     for candidate in candidates:
         # Only the first line: an edit that split a paragraph carries the break,
         # and no single paragraph of the chunk contains text across it.
-        key = (candidate or "").strip().split("\n", 1)[0].strip(MARKS)[:KEY_CHARS]
+        line = (candidate or "").strip().split("\n", 1)[0].strip()
+        sentence = line.strip(MARKS)
+        key = sentence[:KEY_CHARS]
         if not key or (len(key) < MIN_KEY_CHARS and sum(p.count(key) for p in paras) != 1):
             continue
         for i, para in enumerate(paras):
@@ -145,8 +184,11 @@ def locate(
             return {
                 "starts_paragraph": starts,
                 "before": tail(prev if starts else para[:j].rstrip()),
+                "after": _rest_of_paragraph(para, j, line, sentence),
                 "quote_continues": quote_continues,
-                "open_before": quote_left_open(para[:j]),
+                # The key starts past the sentence's own opening quote. Counted,
+                # that quote made every new turn read as an open quotation.
+                "open_before": quote_left_open(para[:j].rstrip(_OPENING_QUOTES)),
                 "skipped": i - 1 - k,
             }
     return None
@@ -176,6 +218,8 @@ def edit_context(chunk: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         "quote_continues": quote_continues,
         "context_before_en": en["before"] if en else "",
         "context_before_es": es["before"] if es else "",
+        "context_after_en": en["after"] if en else "",
+        "context_after_es": es["after"] if es else "",
         "en_found": en is not None,
         "es_found": es is not None,
     }

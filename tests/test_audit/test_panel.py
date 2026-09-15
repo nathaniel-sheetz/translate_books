@@ -123,11 +123,12 @@ def test_prepare_renders_items_in_the_prompt_shape(setup):
     _prepare(setup, rows_per_job=2)
     run_dir = setup[2]
     body = (run_dir / _manifest(run_dir)["jobs"][0]["body_path"]).read_text(encoding="utf-8")
-    assert body.startswith("Items (2):\n")
+    assert body.startswith("BOOK: book\n\nSTYLE GUIDE\n")
+    assert "\n\nItems (2):\n" in body
     items = _items(body)
     assert list(items[0]) == [
         "id", "en", "before", "after", "starts_paragraph", "quote_continues",
-        "context_before_en", "context_before_es",
+        "context_before_en", "context_before_es", "context_after_en", "context_after_es", "glossary",
     ]
     assert items[0]["starts_paragraph"] is True
     assert items[0]["context_before_es"].startswith("»Fue en el año 79.")
@@ -140,6 +141,56 @@ def test_the_preamble_carries_the_rules_and_no_items(setup):
     assert "quote_continues is read from the English source" in preamble
     assert "{{" not in preamble
     assert "Items (" not in preamble
+
+
+def _standard(book: Path, *, style: str, rules: list, address: str, terms: list) -> None:
+    (book / "style.json").write_text(json.dumps({"content": style}), encoding="utf-8")
+    (book / "style_rules.json").write_text(json.dumps({"rules": rules}), encoding="utf-8")
+    (book / "address_map.json").write_text(json.dumps({"content": address}, ensure_ascii=False), encoding="utf-8")
+    (book / "glossary.json").write_text(json.dumps({"terms": terms}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_each_job_holds_one_book_and_opens_with_its_standard(tmp_path):
+    root = tmp_path / "projects"
+    _standard(
+        _book(root, "uncle"),
+        style="Warm register for curious readers.",
+        rules=[{"id": "names-keep", "rule": "A name keeps one rendering."}],
+        address="The children address their uncle with tú.",
+        terms=[
+            {"english": "volcano", "spanish": "volcán", "alternatives": ["monte de fuego"]},
+            {"english": "glacier", "spanish": "glaciar"},
+        ],
+    )
+    _book(root, "bare")
+    rows = [
+        dict(ROWS[0], project_id="uncle"),
+        dict(ROWS[1], project_id="bare"),
+        dict(ROWS[1], audit_id="a3", project_id="uncle"),
+    ]
+    run_dir = tmp_path / "run"
+    out = panel.prepare(_input(tmp_path / "input.jsonl", rows), run_dir, models=MODELS, projects_root=root)
+    assert out["status"] == "ok"
+    manifest = _manifest(run_dir)
+    # Sorted by audit_id, a1 and a3 share a job while a2 of the other book gets its own.
+    assert [(job["project_id"], job["audit_ids"]) for job in manifest["jobs"]] == [
+        ("bare", ["a2"]), ("uncle", ["a1", "a3"]),
+    ]
+    assert out["books"] == manifest["books"] == {
+        "bare": {"style_guide": False, "style_rules": False, "address_map": False, "glossary_terms": 0},
+        "uncle": {"style_guide": True, "style_rules": True, "address_map": True, "glossary_terms": 2},
+    }
+    bare, uncle = ((run_dir / job["body_path"]).read_text(encoding="utf-8") for job in manifest["jobs"])
+    assert uncle.startswith("BOOK: uncle\n\nSTYLE GUIDE\nWarm register for curious readers.")
+    assert '- "names-keep": A name keeps one rendering.' in uncle
+    assert "FORMS OF ADDRESS\nThe children address their uncle with tú." in uncle
+    assert "Warm register" not in bare
+    assert "STYLE RULES\n(none recorded for this book)" in bare
+    assert "FORMS OF ADDRESS\n(no address map for this book)" in bare
+    items = {item["id"]: item for item in _items(uncle)}
+    assert items["a1"]["glossary"] == ["volcano → volcán (also: monte de fuego)"]
+    assert items["a3"]["glossary"] == []
+    assert manifest["rows"]["a1"]["glossary"] == ["volcano → volcán (also: monte de fuego)"]
 
 
 def test_prepare_reports_rows_without_context(setup):

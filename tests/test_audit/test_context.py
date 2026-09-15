@@ -120,6 +120,8 @@ def test_edit_context_uses_the_text_not_the_index():
         "quote_continues": True,
         "context_before_en": "“It was in the year 79. Vesuvius was then a peaceful mountain.",
         "context_before_es": "»Fue en el año 79. El Vesubio era entonces una montaña apacible.",
+        "context_after_en": "",
+        "context_after_es": "",
         "en_found": True,
         "es_found": True,
     }
@@ -206,3 +208,45 @@ def test_narration_the_spanish_split_off_does_not_continue():
     out = ctx.edit_context({"source_text": en, "translated_text": es}, row)
     assert out["starts_paragraph"] is True
     assert out["quote_continues"] is False
+
+
+def test_a_new_turn_the_spanish_split_off_does_not_continue():
+    # The sentence opens its own quotation inside the English paragraph. Counted,
+    # that opening quote made the flag read true on 41 new turns.
+    es = "La abuela sonrió.\n\n—¿Quieres miel en tus hotcakes?"
+    row = {"es_before": "—¿Quieres miel en los hotcakes?", "es_after": "—¿Quieres miel en tus hotcakes?"}
+    for en, sentence in (
+        ('Grandma beamed. "Clarence," she asked, "will you have honey?"',
+         '"Clarence," she asked, "will you have honey?"'),
+        ("His mother turned. “Can’t you stay by yourself? Shame on you!”",
+         "“Can’t you stay by yourself? Shame on you!”"),
+    ):
+        out = ctx.edit_context({"source_text": en, "translated_text": es}, dict(row, en=sentence))
+        assert out["starts_paragraph"] is True
+        assert out["quote_continues"] is False, en
+
+
+def test_the_speaker_tag_after_a_quote_is_context():
+    en = '"Makes a neat water trough, eh?" he chuckled.\n\n"You think she can manage without us?" Maureen asked.'
+    es = "—Hace las veces de un buen bebedero —dijo.\n\n—¿Cree que podrá arreglárselas sin nosotros? —preguntó Maureen."
+    row = {
+        "en": '"You think she can manage without us?"',
+        "es_before": "—¿Crees que podrá arreglárselas sin nosotros?",
+        "es_after": "—¿Cree que podrá arreglárselas sin nosotros?",
+    }
+    out = ctx.edit_context({"source_text": en, "translated_text": es}, row)
+    assert out["context_after_en"] == "Maureen asked."
+    assert out["context_after_es"] == "—preguntó Maureen."
+    assert out["context_before_es"] == "—Hace las veces de un buen bebedero —dijo."
+
+
+def test_a_sentence_ending_its_paragraph_has_nothing_after():
+    row = {"en": "Everyone listened.", "es_before": "Todos escuchaban.", "es_after": "Todos escuchaban."}
+    out = ctx.edit_context({"source_text": EN_CURLY, "translated_text": ES}, dict(row, en="Nobody said a word for a while."))
+    assert out["context_after_en"] == ""
+    assert ctx.locate(EN_CURLY, ["Everyone listened."])["after"] == "Nobody said a word for a while."
+
+
+def test_head_cuts_at_a_word_break():
+    assert ctx.head("short") == "short"
+    assert ctx.head("uno dos tres cuatro", limit=10) == "uno dos …"
