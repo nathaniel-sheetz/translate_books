@@ -970,6 +970,9 @@ def setupsave_glossary(project_id):
         existing_set = {t.english.lower() for t in existing.terms}
         new_terms = [t for t in terms if t.english.lower() not in existing_set]
         existing.terms.extend(new_terms)
+        # The loaded timestamp would otherwise be written straight back, leaving
+        # the reader's staleness check blind to the most common glossary edit.
+        existing.updated_at = datetime.now()
         save_glossary(existing, glossary_path)
         return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
     else:
@@ -1395,8 +1398,10 @@ def get_alignment(project_id, chapter):
 
 _REFERENCE_KINDS = ("style-guide", "glossary", "address-map")
 
-#: Which judge reads each document, so "changed after the judge ran" can name a
-#: run to compare against. Names come from :data:`REVIEW_TYPES`.
+#: Which evaluator reads each document, so "changed after it last ran" can name a
+#: run to compare against. Names come from :data:`REVIEW_TYPES`. ``dictionary`` is
+#: a coded evaluator (:data:`REVIEW_CODED_TYPES`), not an LLM judge like the other
+#: two; the user-facing ``ref_stale`` string still calls all three "judge".
 _REFERENCE_JUDGE = {
     "style-guide": "editorial",
     "glossary": "dictionary",
@@ -1404,18 +1409,24 @@ _REFERENCE_JUDGE = {
 }
 
 
-def _last_judge_run(project_dir: Path, chapter: str, judge: str) -> Optional[str]:
-    """Latest ISO time ``judge`` ran on any chunk of ``chapter``, or ``None``.
+def _earliest_judge_run(project_dir: Path, chapter: str, judge: str) -> Optional[str]:
+    """Earliest ISO time ``judge`` ran on any chunk of ``chapter``, or ``None``.
 
     Reads ``evaluations/`` directly: those files are named by chunk id and chunk
     ids carry the chapter id as a prefix, so this never opens a chunk. Prefers
     the per-evaluator ``eval_runs`` ledger and falls back to the scalar
     ``judges_at`` for projects evaluated before that ledger existed.
+
+    Earliest, not latest: a chapter's chunks are judged in separate runs, and a
+    document edited after the *first* of them already invalidates the findings
+    shown on that chunk's sentences. Taking the latest run would stay silent for
+    the whole chapter until the document outran even the most recently judged
+    chunk -- which is exactly the case this warning exists to catch.
     """
     eval_dir = project_dir / "evaluations"
     if not eval_dir.exists():
         return None
-    latest: Optional[str] = None
+    earliest: Optional[str] = None
     for path in eval_dir.glob(f"{chapter}_chunk_*.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1427,9 +1438,9 @@ def _last_judge_run(project_dir: Path, chapter: str, judge: str) -> Optional[str
         ran_at = entry.get("at") if isinstance(entry, dict) else None
         if not ran_at and judge in (payload.get("judges") or {}):
             ran_at = payload.get("judges_at")
-        if ran_at and (latest is None or str(ran_at) > latest):
-            latest = str(ran_at)
-    return latest
+        if ran_at and (earliest is None or str(ran_at) < earliest):
+            earliest = str(ran_at)
+    return earliest
 
 
 def _reference_staleness(
@@ -1445,7 +1456,7 @@ def _reference_staleness(
     if not chapter or not updated_at:
         return None
     judge = _REFERENCE_JUDGE[kind]
-    ran_at = _last_judge_run(project_dir, chapter, judge)
+    ran_at = _earliest_judge_run(project_dir, chapter, judge)
     if not ran_at:
         return None
     return {"judge": judge, "ran_at": ran_at, "stale": str(updated_at) > ran_at}
@@ -2839,7 +2850,10 @@ def _get_project_status(project_id: str) -> dict:
                 "updated_at": am.updated_at.isoformat() if am.updated_at else None,
             }
         except Exception:
-            pass
+            # Present but unreadable is not the same as absent. Falling through
+            # to the absent case makes the dashboard print the `address-map
+            # prepare` command, which overwrites the broken-but-present file.
+            status["address_map_unreadable"] = True
 
     # Chapters + chunks
     chapters_dir = project_dir / "chapters"

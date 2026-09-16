@@ -29,6 +29,7 @@ STATIC = Path(__file__).resolve().parents[2] / "web_ui" / "static"
 
 EARLY = "2026-01-01T00:00:00"
 JUDGE_RUN = "2026-02-01T00:00:00"
+MID = "2026-02-15T00:00:00"      # between the two runs in TestStaleness
 LATE = "2026-03-01T00:00:00"
 
 
@@ -125,9 +126,10 @@ def _write_address_map(proj: Path, updated: str = EARLY) -> None:
     }, ensure_ascii=False), encoding="utf-8")
 
 
-def _write_evaluation(proj: Path, judge: str, ran_at: str = JUDGE_RUN) -> None:
-    (proj / "evaluations" / "chapter_01_chunk_000.json").write_text(json.dumps({
-        "chunk_id": "chapter_01_chunk_000",
+def _write_evaluation(proj: Path, judge: str, ran_at: str = JUDGE_RUN,
+                      chunk: str = "chapter_01_chunk_000") -> None:
+    (proj / "evaluations" / f"{chunk}.json").write_text(json.dumps({
+        "chunk_id": chunk,
         "evaluated_at": ran_at,
         "judges_at": ran_at,
         "judges": {judge: {}},
@@ -302,6 +304,21 @@ class TestStaleness:
         _write_address_map(project, updated=LATE)
         assert _ref(client, "address-map", chapter=None).get_json()["stale"] is None
 
+    def test_the_earliest_run_decides_not_the_latest(self, client, project):
+        # A chapter's chunks are judged in separate runs. chunk_000 ran in
+        # February and chunk_005 in March, and the map was rewritten between
+        # them -- so every finding on chunk_000's sentences quotes the pre-edit
+        # map and this chapter IS stale. Comparing against the latest run
+        # instead answers False, and the banner never appears at all.
+        _write_evaluation(project, "address", ran_at=JUDGE_RUN,
+                          chunk="chapter_01_chunk_000")
+        _write_evaluation(project, "address", ran_at=LATE,
+                          chunk="chapter_01_chunk_005")
+        _write_address_map(project, updated=MID)
+        stale = _ref(client, "address-map").get_json()["stale"]
+        assert stale["stale"] is True
+        assert stale["ran_at"] == JUDGE_RUN
+
 
 class TestReaderMarkup:
     def test_menu_and_dialog_render_in_v2(self, client, project):
@@ -359,9 +376,18 @@ class TestSheetSource:
         assert "docReturnFocus" in js
 
     def test_address_map_links_to_the_style_guide_stage(self):
-        # The map's read-only block lives under the light style guide.
+        # The map's read-only block sits on the style-guide stage, below the
+        # light guide -- though no longer *inside* the committed-guide block.
         js = (STATIC / "reader_sheet_v2.js").read_text(encoding="utf-8")
         assert "'address-map': 'style-guide'" in js
+
+    def test_an_error_response_is_not_rendered_as_a_document(self):
+        # Without this check a 404/400 body reaches renderDoc, whose not-exists
+        # branch reads "This book has no style guide." for a document that is
+        # fine -- sending the reader off to regenerate it.
+        js = (STATIC / "reader_sheet_v2.js").read_text(encoding="utf-8")
+        fetch = js.split("/reference/' + kind + qs")[1].split(".catch(")[0]
+        assert "!r.ok" in fetch
 
 
 class TestHiddenIsHonoured:
@@ -450,3 +476,27 @@ class TestDashboardAddressMap:
         assert "function renderAddressMap(" in js
         body = js.split("function renderAddressMap(")[1].split("\n    }")[0]
         assert "innerHTML" not in body
+
+    def test_corrupt_map_reports_unreadable_not_absent(self, client, project):
+        # Reporting it as absent makes the dashboard print the `address-map
+        # prepare` command, and running that overwrites the broken-but-present
+        # file rather than repairing it.
+        (project / "address_map.json").write_text("{not json", encoding="utf-8")
+        s = client.get("/api/project/test-project/status").get_json()
+        assert s["address_map_unreadable"] is True
+        assert s["has_address_map"] is False
+
+    def test_unreadable_branch_withholds_the_prepare_command(self):
+        js = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+        body = js.split("function renderAddressMap(")[1].split("\n    }")[0]
+        branch = body.split("if (status.address_map_unreadable) {")[1].split("}")[0]
+        assert "address-map prepare" not in branch
+
+    def test_map_renders_without_a_committed_style_guide(self):
+        # The harness drafts the map BEFORE the style guide, so gating the call
+        # on the guide hid the map on exactly the books that have one already.
+        js = (STATIC / "dashboard.js").read_text(encoding="utf-8")
+        body = js.split("function populateStyleGuideStage(")[1].split("\n    }")[0]
+        guarded, _, unguarded = body.partition("} else {")
+        assert "renderAddressMap(status)" not in guarded
+        assert "renderAddressMap(status)" in unguarded

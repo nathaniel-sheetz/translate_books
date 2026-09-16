@@ -402,9 +402,11 @@ STRINGS = {
                 "ref_general_rules": "General rules",
                 "ref_in_style_guide": "Folded into the style guide",
                 "ref_edited": "edited {date}",
-                # Names the judge, because which judge read a stale document is
-                # the whole point of the warning.
-                "ref_stale": "Changed after the {judge} judge last ran on this chapter ({date}).",
+                # Names the evaluator, because which one read a stale document is
+                # the whole point of the warning. "the last {judge} run" rather
+                # than "the {judge} judge": dictionary is a coded evaluator, not
+                # an LLM judge, so the noun cannot be hard-coded here.
+                "ref_stale": "Changed after the last {judge} run on this chapter ({date}).",
                 "ref_missing": "This book has no {doc}.",
                 "ref_missing_hint": "Create it with:",
                 "ref_unreadable": "This file could not be read.",
@@ -773,7 +775,7 @@ STRINGS = {
                 "ref_general_rules": "Reglas generales",
                 "ref_in_style_guide": "Incorporado a la guía de estilo",
                 "ref_edited": "editado el {date}",
-                "ref_stale": "Cambió después de la última ejecución del juez {judge} en este capítulo ({date}).",
+                "ref_stale": "Cambió después de la última ejecución de {judge} en este capítulo ({date}).",
                 "ref_missing": "Este libro no tiene {doc}.",
                 "ref_missing_hint": "Créelo con:",
                 "ref_unreadable": "No se pudo leer el archivo.",

@@ -256,7 +256,12 @@
             ? '?chapter=' + encodeURIComponent(CHAPTER) + '&es_idx=' + encodeURIComponent(cur.esIdx)
             : '';
         fetch('/api/project/' + encodeURIComponent(PROJECT) + '/reference/' + kind + qs)
-            .then((r) => r.json())
+            .then((r) => {
+                // An error body is not a document: a 404/400 would otherwise fall
+                // through renderDoc and read as "this book has no style guide".
+                if (!r.ok) throw new Error('reference ' + r.status);
+                return r.json();
+            })
             .then((d) => renderDoc(kind, d))
             .catch(() => {
                 refEls.body.replaceChildren(
@@ -271,7 +276,7 @@
         }
         if (d && d.stale && d.stale.stale) {
             refEls.stale.textContent = fmt(
-                T('ref_stale', 'Changed after the {judge} judge last ran on this chapter ({date}).'),
+                T('ref_stale', 'Changed after the last {judge} run on this chapter ({date}).'),
                 { judge: d.stale.judge, date: shortDate(d.stale.ran_at) });
             refEls.stale.hidden = false;
         }
@@ -297,15 +302,19 @@
     /** A "Show all N" / "Show less" toggle over a lazily-built section. */
     function addToggle(body, count, build) {
         const holder = node('div');
-        const btn = node('button', 'rv2-doc-toggle',
-                         T('ref_show_all', 'Show all') + ' ' + count);
+        // The style guide has no count to show -- it toggles light -> full.
+        const showAll = function () {
+            const base = T('ref_show_all', 'Show all');
+            return count ? base + ' ' + count : base;
+        };
+        const btn = node('button', 'rv2-doc-toggle', showAll());
         btn.type = 'button';
         let shown = false;
         btn.addEventListener('click', function () {
             shown = !shown;
             btn.textContent = shown
                 ? T('ref_show_less', 'Show less')
-                : T('ref_show_all', 'Show all') + ' ' + count;
+                : showAll();
             holder.replaceChildren();
             if (shown) build(holder);
         });
@@ -425,6 +434,7 @@
         requestAnimationFrame(function () { refreshSrcToggle(); anchorSheet(); });
     }
     function hide() {
+        setMenu(false);   // else the popup survives the close and reopens with it
         overlay.hidden = true;
         sheet.hidden = true;
         sheet.classList.remove('editing', 'editfull', 'rv2-kb');

@@ -1298,11 +1298,14 @@
             document.getElementById('style-guide-wizard').style.display = 'none';
             document.getElementById('style-guide-preview').textContent = status.style_guide_content;
             document.getElementById('light-style-guide-input').value = status.light_style_guide_content || '';
-            renderAddressMap(status);
         } else {
             document.getElementById('style-guide-existing').style.display = 'none';
             document.getElementById('style-guide-wizard').style.display = '';
         }
+        // Unconditional, and outside the branch: the harness drafts the address
+        // map before the style guide, so a book can have a map while the wizard
+        // is still showing. Gating this on the guide hid the map entirely.
+        renderAddressMap(status);
     }
 
     // Read-only view of address_map.json. Built as nodes rather than an HTML
@@ -1321,6 +1324,13 @@
         }
 
         var map = status.address_map;
+        if (status.address_map_unreadable) {
+            // Present but corrupt. Deliberately does not print the prepare
+            // command: running it would overwrite the file, not repair it.
+            host.appendChild(el('p', 'section-hint',
+                'This book has an address_map.json, but it could not be read.'));
+            return;
+        }
         if (!status.has_address_map || !map) {
             var empty = el('p', 'section-hint', 'No address map for this book yet.');
             var cmd = el('code', null,
