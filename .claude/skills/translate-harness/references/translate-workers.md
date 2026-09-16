@@ -333,7 +333,8 @@ for the wave's entries; pass `--concurrency` when throttling):
 - **All-parallel:** spawn workers for **every** `chunk_id` in bounded batches of `batch_size`
   (the saved fan-out width; rate limits), `translate-commit` after each batch. No re-prepare (this mode
   has no cross-chunk Spanish context). This is also the mode to use whenever `spawn_mode_moot` is true.
-  Headless: one `translate-fanout` call already waves at `batch_size`; then commit.
+  Headless: one `translate-fanout` call already runs a rolling pool `batch_size` wide
+  (a free slot takes the next chunk as soon as it frees); then commit.
 
 **4B-d. Re-spawn the misses.** For any `failed` (the report names the problem per chunk) or `missing`
 (no draft written), re-spawn a worker for just those `chunk_id`s — Task spawn, or

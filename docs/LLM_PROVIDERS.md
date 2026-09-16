@@ -187,6 +187,32 @@ itself on 4 of 20 rows.
 
 Cursor waves record `cache: null` on every row, since no mode was requested.
 
+#### Each Cursor worker gets its own config directory
+
+`cursor-agent` saves `cli-config.json` and `statsig-cache.json` by writing a
+`<name>.<pid>.<uuid>.tmp` sibling and renaming it over the original. Every worker
+shared one directory, so concurrent renames collided — `EPERM: operation not
+permitted, rename '…\.cursor\cli-config.json…'` — on roughly 3% of jobs at widths
+2–5, each needing a hand re-run. Since 0.59.3.0 each concurrent worker runs with its
+own `CURSOR_CONFIG_DIR`, seeded with a copy of `cli-config.json` alone.
+
+Verified against the CLI bundle (2026.09.10-fd3934a), which resolves that variable as
+`CURSOR_CONFIG_DIR` → `XDG_CONFIG_HOME/cursor` → `~/.cursor`. Two things are
+deliberately **not** relocated:
+
+- **The login.** It lives in `%APPDATA%\Cursor\auth.json`, computed from the home root
+  and never from the config dir, so workers stay authenticated. Had auth lived under
+  the config dir, the preflight would pass on the real directory and then every worker
+  would run logged out.
+- **Chats and projects.** Those follow `CURSOR_DATA_DIR`, a different variable.
+
+`statsig-cache.json` is never copied into a slot — duplicating a live file the
+interactive Cursor may be mid-rename on would mean handling torn reads. Each slot
+refetches it once, ever, so the first wave after upgrading looks marginally slower.
+Slots are reused across waves, and if seeding fails the worker simply runs as it did
+before: an *unseeded* directory is not an option, because `cli-config.json` carries
+`permissions.allow`/`deny` and `privacyCache`.
+
 #### Effort has two channels — one per CLI
 
 `cursor-agent` has **no `--effort` flag**; it takes its knobs inside the model

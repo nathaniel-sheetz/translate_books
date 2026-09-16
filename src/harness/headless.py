@@ -6,7 +6,8 @@ Both fan-outs need the same Windows/cwd/absolutize/wave fixes:
 - Run from a neutral empty cwd so project ``CLAUDE.md`` / workspace context is not
   auto-loaded.
 - Absolutize ``--system-prompt-file`` (worker cwd is neutral, not the project).
-- Process jobs in waves of ``concurrency`` (one wave finishes before the next).
+- Run jobs in a rolling pool ``concurrency`` wide (a free slot takes the next job).
+- Give each Cursor worker its own ``CURSOR_CONFIG_DIR`` so they cannot race it.
 - Scrub every metered credential from the child env (``subscription_env``).
 - Refuse to start until the CLI confirms a subscription login
   (``subscription_auth_error``).
@@ -45,10 +46,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from src.harness.usage import (
     append_usage,
@@ -541,17 +544,171 @@ def cursor_model_error(
     )
 
 
-def neutral_claude_cwd() -> Path:
-    """Empty temp dir so headless CLIs do not auto-load a project CLAUDE.md."""
-    root = Path(
+def _temp_root() -> Path:
+    """The system temp directory, honoring the usual overrides."""
+    return Path(
         os.environ.get("TEMP")
         or os.environ.get("TMP")
         or os.environ.get("TMPDIR")
         or tempfile.gettempdir()
     )
-    cwd = root / "claude-headless-empty"
+
+
+def neutral_claude_cwd() -> Path:
+    """Empty temp dir so headless CLIs do not auto-load a project CLAUDE.md."""
+    cwd = _temp_root() / "claude-headless-empty"
     cwd.mkdir(parents=True, exist_ok=True)
     return cwd
+
+
+# ---------------------------------------------------------------------------
+# Per-worker Cursor config directories
+# ---------------------------------------------------------------------------
+#
+# ``cursor-agent`` saves ``cli-config.json`` and ``statsig-cache.json`` by
+# writing a ``<name>.<pid>.<uuid>.tmp`` sibling and renaming it over the
+# original. Every worker shared one directory, so concurrent renames collided --
+# ``EPERM: operation not permitted, rename '…\.cursor\cli-config.json…'`` -- on
+# about 3% of jobs at widths 2-5, each needing a hand re-run (2026-09-11 fabre2
+# lost 1/20 in the morning and 3/20 in the afternoon). Verified in the CLI
+# bundle (2026.09.10-fd3934a): both files resolve off ``CURSOR_CONFIG_DIR`` ->
+# ``XDG_CONFIG_HOME/cursor`` -> ``~/.cursor``, so giving each worker slot its own
+# directory removes the collision rather than working around it.
+#
+# Deliberately NOT relocated:
+#
+# - **The login.** It lives in ``%APPDATA%\Cursor\auth.json`` (``~/.cursor`` on
+#   macOS), computed from the home root and never from the config dir, so a
+#   worker with its own config dir stays authenticated. This is the fact the
+#   whole feature rests on: had auth lived here, the preflight would pass on the
+#   operator's real directory and then *every* worker would run logged out,
+#   burning the 15-minute Cursor ceiling each.
+# - **Chats and projects.** Those follow ``CURSOR_DATA_DIR``, a different
+#   variable, and stay where the operator expects them.
+#
+# Slots are reused across waves so the ~800 KB statsig cache is refetched once
+# per slot rather than once per wave. ``statsig-cache.json`` is never seeded:
+# copying a live file the operator's interactive Cursor may be mid-rename on
+# would mean handling torn reads, and one cold refetch per slot is cheaper than
+# that -- so the first wave after this change looks a little slower, once.
+
+_SLOT_ROOT_NAME = "cursor-headless-slots"
+_CURSOR_CONFIG_DIR_VAR = "CURSOR_CONFIG_DIR"
+
+_slot_lock = threading.Lock()
+_slot_free: list[int] = []
+_slot_high = 0
+# The slot the calling thread currently holds. A thread-local rather than an
+# argument because the runner seam is ``(cmd, *, input_text, cwd)`` and a job's
+# env must not become part of it -- every test stub implements that signature.
+_slot_current = threading.local()
+
+
+def _cursor_config_dir(env: Mapping[str, str]) -> Path:
+    """The config directory ``cursor-agent`` would use under ``env``.
+
+    Mirrors the CLI's own precedence (verified 2026.09.10-fd3934a):
+    ``CURSOR_CONFIG_DIR`` -> ``XDG_CONFIG_HOME/cursor`` -> ``~/.cursor``. Read
+    out of ``env`` rather than ``os.environ`` so an operator who deliberately
+    relocated their Cursor config is seeded *from* it instead of having it
+    silently ignored.
+
+    Note this is only the **seed source**. :data:`CURSOR_CLI_CONFIG` still spells
+    the plain ``~/.cursor`` path for :func:`cursor_default_model`, which four
+    test modules monkeypatch as a module constant.
+    """
+    explicit = (env.get(_CURSOR_CONFIG_DIR_VAR) or "").strip()
+    if explicit:
+        return Path(explicit)
+    xdg = (env.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg:
+        return Path(xdg) / "cursor"
+    return Path.home() / ".cursor"
+
+
+def _seed_slot_config(slot_dir: Path, source_dir: Path) -> bool:
+    """Copy ``cli-config.json`` into ``slot_dir``; True when the slot is usable.
+
+    That one file and nothing else -- never a recursive copy: ``~/.cursor``
+    carries ``extensions/`` and ``chats/``, which run to hundreds of megabytes.
+
+    Returns **False on any failure**, and the caller then leaves
+    ``CURSOR_CONFIG_DIR`` unset so the job runs exactly as it did before this
+    feature existed. Falling back to an *empty* directory would not be a cold
+    cache: ``cli-config.json`` carries ``permissions.allow`` / ``permissions.deny``
+    and ``privacyCache.{ghostMode,privacyMode}``, so an unseeded slot would
+    quietly change the worker's permissions and data-retention posture.
+
+    Re-seeded whenever the operator's own file is newer -- they changed their
+    model picker -- since one ``stat`` per job is free beside a subprocess.
+    """
+    source = source_dir / "cli-config.json"
+    dest = slot_dir / "cli-config.json"
+    try:
+        src_stat = source.stat()
+    except OSError:
+        return False
+    try:
+        # 0o700: cli-config.json carries authInfo.email and userId, and on POSIX
+        # the temp root is shared. This module already withholds that email from
+        # probe output; a world-readable copy would widen it straight back.
+        slot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            if dest.stat().st_mtime >= src_stat.st_mtime:
+                return True
+        except OSError:
+            pass  # not seeded yet
+        # Write a sibling and rename over the target -- the same shape the CLI
+        # itself uses, so two processes seeding one slot cannot tear the file.
+        staged = slot_dir / f"cli-config.json.{os.getpid()}.tmp"
+        shutil.copy2(source, staged)
+        os.replace(staged, dest)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def _cursor_slot(source_dir: Path) -> Iterator[None]:
+    """Hold one per-worker config slot for the duration of a spawn.
+
+    A free-list keyed on availability alone, rather than on the job index or a
+    counter: ``index % concurrency`` is wrong (job N can start while job 0 is
+    still running) and a monotonic counter would leak a directory per wave,
+    since every wave builds a fresh pool with fresh threads. The free-list
+    bounds the directories to the widest wave this process has run and keeps
+    their paths stable, which is what lets the statsig cache survive between
+    waves.
+    """
+    global _slot_high
+    with _slot_lock:
+        if _slot_free:
+            index = _slot_free.pop()
+        else:
+            index, _slot_high = _slot_high, _slot_high + 1
+    try:
+        slot_dir = _temp_root() / _SLOT_ROOT_NAME / f"slot-{index}"
+        _slot_current.dir = (
+            slot_dir if _seed_slot_config(slot_dir, source_dir) else None
+        )
+        yield
+    finally:
+        _slot_current.dir = None
+        with _slot_lock:
+            _slot_free.append(index)
+
+
+def _slot_env(cli: str, env: Mapping[str, str]) -> Mapping[str, str]:
+    """``env`` pointed at the calling thread's config slot, if it holds one.
+
+    Derived from the scrubbed wave env, never from ``os.environ``: rebuilding
+    the child environment here would reopen the metered-billing hole the scrub
+    exists to close.
+    """
+    slot = getattr(_slot_current, "dir", None)
+    if cli != "cursor" or slot is None:
+        return env
+    return {**env, _CURSOR_CONFIG_DIR_VAR: str(slot)}
 
 
 def default_claude_runner(
@@ -1076,30 +1233,6 @@ def _failure_detail(cli: str, stdout: str) -> str:
     return text
 
 
-def _wave_batches(
-    jobs: list[dict[str, Any]], concurrency: int, warm_first: bool
-) -> list[list[dict[str, Any]]]:
-    """Split ``jobs`` into batches, optionally running the first job alone.
-
-    Every job in a wave shares a prefix — the CLI's own system prompt plus, for
-    solo judge entries, the per-judge preamble passed via ``--system-prompt-file``
-    — and that prefix is cacheable. Cache *writes* bill at **2×** base input on
-    the CLI's default 1-hour TTL, or **1.25×** under ``FORCE_PROMPT_CACHING_5M``;
-    cache *reads* bill at **0.1×**. Launching ``concurrency`` jobs simultaneously
-    means the whole wave front starts before any of them has written a cache
-    entry, so all of them pay ``cache_creation`` and only the stragglers can
-    read it. The 2026-07-30 baseline probe put that prefix at ~5.8k tokens per
-    job, so on an eight-job wave the difference is most of the overhead, for the
-    price of one job's latency.
-    """
-    if warm_first and len(jobs) > 1 and concurrency > 1:
-        rest = jobs[1:]
-        return [jobs[:1]] + [
-            rest[i : i + concurrency] for i in range(0, len(rest), concurrency)
-        ]
-    return [jobs[i : i + concurrency] for i in range(0, len(jobs), concurrency)]
-
-
 def run_headless_wave(
     jobs: list[dict[str, Any]],
     *,
@@ -1124,6 +1257,14 @@ def run_headless_wave(
     reported any (see :mod:`src.harness.usage`). When the real runner is used and
     the binary is missing from PATH, or the CLI is not on a subscription login,
     returns a top-level ``error`` with empty lists (fail-fast; no per-job wave).
+
+    Jobs run in a **rolling pool** ``concurrency`` wide: a free slot takes the
+    next job the moment it frees, rather than the whole wave front waiting on
+    the slowest job of a fixed group (31% of worker time, measured across 230
+    rebuilt Cursor judge groups). ``wrote`` and ``failed`` are consequently in
+    completion order; no caller pins that, they match by id. On Cursor each
+    concurrent worker additionally gets its **own** ``CURSOR_CONFIG_DIR``, so
+    they can no longer race ``cli-config.json`` — see ``_cursor_slot``.
 
     ``claude_bin`` is a back-compat alias for ``cli_bin`` and is only valid when
     ``cli`` is ``claude`` (mismatch returns a top-level ``error``).
@@ -1198,16 +1339,32 @@ def run_headless_wave(
     # not read them, and the run() closure looks up wave_env by name at call
     # time, so the reassignment is visible to every worker.
     wave_env = subscription_env(cli_name)
+    # Only a real spawn needs a per-worker config dir. A stub runner must never
+    # touch the operator's Cursor directory or the temp root, so unit tests stay
+    # hermetic.
+    slot_source = (
+        _cursor_config_dir(wave_env)
+        if cli_name == "cursor" and runner is None
+        else None
+    )
     if runner is None:
         def run(cmd: list[str], *, input_text: str, cwd: Path) -> tuple[int, str, str]:
-            return default_claude_runner(
-                cmd,
-                input_text=input_text,
-                cwd=cwd,
-                timeout=job_timeout,
-                cli=cli_name,
-                env=wave_env,
-            )
+            # The slot is held only across the subprocess call -- precisely the
+            # window in which two workers could collide on the config file.
+            # ``wave_env`` is looked up by name at call time on purpose: it is
+            # reassigned below once the prompt-cache mode resolves, and freezing
+            # it here would drop FORCE_PROMPT_CACHING_5M from every job.
+            with (
+                _cursor_slot(slot_source) if slot_source is not None else nullcontext()
+            ):
+                return default_claude_runner(
+                    cmd,
+                    input_text=input_text,
+                    cwd=cwd,
+                    timeout=job_timeout,
+                    cli=cli_name,
+                    env=_slot_env(cli_name, wave_env),
+                )
     else:
         run = runner
 
@@ -1226,9 +1383,21 @@ def run_headless_wave(
     # Subscription preflight, after binary resolution (so it probes the same
     # absolute path the workers launch) and before any job runs. Skipped for an
     # empty fan-out so an idempotent re-run with nothing to do stays a no-op.
+    #
+    # ``subscription_auth_error`` documents that it must run with the same env
+    # the workers get. Per-worker config dirs would quietly make that false, so
+    # the probe takes a real seeded slot -- which also proves a seeded directory
+    # still authenticates *before* N jobs depend on it.
+    # Guarded on ``jobs`` for the same reason the probe below is: an empty
+    # fan-out must stay a pure no-op, right down to not creating a slot.
+    probe_env = wave_env
+    if jobs and slot_source is not None:
+        slot_zero = _temp_root() / _SLOT_ROOT_NAME / "slot-0"
+        if _seed_slot_config(slot_zero, slot_source):
+            probe_env = {**wave_env, _CURSOR_CONFIG_DIR_VAR: str(slot_zero)}
     if jobs and (prober is not None or runner is None):
         auth_error = subscription_auth_error(
-            cli_name, cli_bin, wave_env, cwd=cwd, prober=prober
+            cli_name, cli_bin, probe_env, cwd=cwd, prober=prober
         )
         if auth_error:
             return _error_result(f"subscription preflight failed: {auth_error}", cwd)
@@ -1348,36 +1517,77 @@ def run_headless_wave(
 
     records: list[dict[str, Any]] = []
     wave_started = time.monotonic()
-    batches = _wave_batches(jobs, concurrency, use_warm_first)
     done_count = 0
-    for batch_index, wave in enumerate(batches):
-        warm = use_warm_first and batch_index == 0 and len(batches) > 1
-        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-            futures = {pool.submit(_run_one, j, warm): j for j in wave}
-            for fut in as_completed(futures):
-                job_id, ok, detail, record = fut.result()
-                if ok:
-                    wrote.append(job_id)
-                else:
-                    failed.append({"id": job_id, "error": detail})
-                # Written from this thread as each job lands, so a wave killed
-                # part-way still leaves the telemetry for the jobs that finished.
-                records.append(record)
-                append_usage(usage_log, record)
-                done_count += 1
-                if on_job_done is not None:
-                    try:
-                        on_job_done({
-                            "id": job_id,
-                            "ok": ok,
-                            "error": None if ok else detail,
-                            "done": done_count,
-                            "total": len(jobs),
-                        })
-                    except Exception:  # noqa: BLE001 - a progress hook is not the wave
-                        logger.exception(
-                            "on_job_done callback failed for job %s", job_id
-                        )
+
+    def _warm_label(index: int) -> bool:
+        """Whether job ``index`` is the wave's cache warm-up, for its usage row.
+
+        Every job in a wave shares a prefix — the CLI's own system prompt plus,
+        for solo judge entries, the per-judge preamble passed via
+        ``--system-prompt-file`` — and that prefix is cacheable. Cache *writes*
+        bill at **2×** base input on the CLI's default 1-hour TTL, or **1.25×**
+        under ``FORCE_PROMPT_CACHING_5M``; cache *reads* bill at **0.1×**.
+        Starting the whole pool at once means every job pays ``cache_creation``
+        and only stragglers can read, so job 1 runs alone first. The 2026-07-30
+        baseline probe put that prefix at ~5.8k tokens per job, so on an
+        eight-job wave that is most of the overhead for one job's latency.
+
+        The gate below additionally requires ``concurrency > 1``; this label
+        deliberately does **not**. At ``concurrency == 1`` the old batching still
+        marked job 0 warm even though nothing was serialized for its benefit,
+        and ``usage.jsonl`` is an A/B corpus — a relabelled row is a corrupted
+        one. Verified equivalent to the old per-row label for (8,5,warm),
+        (8,5,cold), (1,5,warm), (3,1,warm) and (3,2,warm).
+        """
+        return use_warm_first and len(jobs) > 1 and index == 0
+
+    def _collect(outcome: tuple[str, bool, str, dict[str, Any]]) -> None:
+        nonlocal done_count
+        job_id, ok, detail, record = outcome
+        if ok:
+            wrote.append(job_id)
+        else:
+            failed.append({"id": job_id, "error": detail})
+        # Written from this thread as each job lands, so a wave killed part-way
+        # still leaves the telemetry for the jobs that finished.
+        records.append(record)
+        append_usage(usage_log, record)
+        done_count += 1
+        if on_job_done is not None:
+            try:
+                on_job_done({
+                    "id": job_id,
+                    "ok": ok,
+                    "error": None if ok else detail,
+                    "done": done_count,
+                    "total": len(jobs),
+                })
+            except Exception:  # noqa: BLE001 - a progress hook is not the wave
+                logger.exception("on_job_done callback failed for job %s", job_id)
+
+    # A rolling pool, not fixed groups: a free slot takes the next job the
+    # moment it frees. Groups made every job wait on the slowest in its group,
+    # which was 31% of worker time across 230 rebuilt Cursor judge groups.
+    # Guarded on ``jobs`` because ``max_workers=0`` is a ValueError, and an
+    # empty fan-out must stay the idempotent no-op callers rely on.
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(concurrency, len(jobs))) as pool:
+            start = 0
+            if use_warm_first and len(jobs) > 1 and concurrency > 1:
+                _collect(pool.submit(_run_one, jobs[0], _warm_label(0)).result())
+                start = 1
+            futures = [
+                pool.submit(_run_one, job, _warm_label(start + offset))
+                for offset, job in enumerate(jobs[start:])
+            ]
+            try:
+                for fut in as_completed(futures):
+                    _collect(fut.result())
+            except BaseException:
+                # The whole wave is queued up front now, so without this an
+                # interrupt would let the entire backlog run on spending tokens.
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
 
     out: dict[str, Any] = {
         "wrote": wrote,
