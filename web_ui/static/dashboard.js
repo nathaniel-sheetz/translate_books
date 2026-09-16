@@ -1298,9 +1298,88 @@
             document.getElementById('style-guide-wizard').style.display = 'none';
             document.getElementById('style-guide-preview').textContent = status.style_guide_content;
             document.getElementById('light-style-guide-input').value = status.light_style_guide_content || '';
+            renderAddressMap(status);
         } else {
             document.getElementById('style-guide-existing').style.display = 'none';
             document.getElementById('style-guide-wizard').style.display = '';
+        }
+    }
+
+    // Read-only view of address_map.json. Built as nodes rather than an HTML
+    // string: every value here is operator-authored free text (character names,
+    // relationship prose, per-rule notes).
+    function renderAddressMap(status) {
+        var host = document.getElementById('address-map-view');
+        if (!host) return;
+        host.replaceChildren();
+
+        function el(tag, cls, text) {
+            var n = document.createElement(tag);
+            if (cls) n.className = cls;
+            if (text != null) n.textContent = String(text);
+            return n;
+        }
+
+        var map = status.address_map;
+        if (!status.has_address_map || !map) {
+            var empty = el('p', 'section-hint', 'No address map for this book yet.');
+            var cmd = el('code', null,
+                'python scripts/harness.py address-map prepare --project ' + PROJECT);
+            cmd.style.cssText = 'display:block; margin-top:6px; padding:6px 8px; ' +
+                'background:#f3f0ec; border-radius:5px; font-size:11.5px; overflow-x:auto;';
+            host.appendChild(empty);
+            host.appendChild(cmd);
+            return;
+        }
+
+        var meta = el('p', 'section-hint',
+            (map.pairs || []).length + ' pairs' +
+            (map.updated_at ? ' · edited ' + String(map.updated_at).slice(0, 10) : ''));
+        host.appendChild(meta);
+
+        (map.pairs || []).forEach(function (p) {
+            var row = el('div');
+            row.style.cssText = 'padding:8px 0; border-bottom:1px solid #eceae6;';
+            var head = el('div', null, p.a + ' ↔ ' + p.b);
+            head.style.cssText = 'font-size:13.5px; font-weight:600;';
+            row.appendChild(head);
+            if (p.relationship) {
+                var rel = el('div', null, p.relationship);
+                rel.style.cssText = 'font-size:12px; color:#666; margin:2px 0 4px;';
+                row.appendChild(rel);
+            }
+            [['a_to_b', p.a], ['b_to_a', p.b]].forEach(function (pairing) {
+                ((p.directions || {})[pairing[0]] || []).forEach(function (r) {
+                    var line = el('div');
+                    line.style.cssText = 'font-size:12.5px; margin-top:2px;';
+                    var who = el('span', null, pairing[1] + ' → ');
+                    who.style.color = '#888';
+                    var form = el('strong', null, r.form || '');
+                    line.appendChild(who);
+                    line.appendChild(form);
+                    if (r.when) {
+                        var when = el('span', null, ' · ' + r.when);
+                        when.style.color = '#666';
+                        line.appendChild(when);
+                    }
+                    row.appendChild(line);
+                    if (r.notes) {
+                        var notes = el('div', null, r.notes);
+                        notes.style.cssText = 'font-size:11.5px; color:#888; margin-left:12px;';
+                        row.appendChild(notes);
+                    }
+                });
+            });
+            host.appendChild(row);
+        });
+
+        if (map.global_rules) {
+            var gh = el('h4', null, 'General rules');
+            gh.style.cssText = 'margin:12px 0 4px; font-size:13px;';
+            var gr = el('div', null, map.global_rules);
+            gr.style.cssText = 'font-size:12.5px; color:#444; white-space:pre-wrap;';
+            host.appendChild(gh);
+            host.appendChild(gr);
         }
     }
 

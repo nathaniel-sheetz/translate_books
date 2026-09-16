@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.59.2.0] - 2026-09-15
+
+### Added
+- **The three documents a line was translated under, readable from the sentence.** A vertical `⋮` in the reader sheet's header opens the style guide, the forms-of-address map or the glossary in a read-only dialog, each with a link to its dashboard editor. `GET /api/project/<id>/reference/<kind>` serves them; passing `chapter`/`es_idx` leads the payload with the part bearing on the tapped sentence, and a **Show all** toggle opens the whole document. Until now none of the three reached the reader at all — you could read a finding without being able to read the rule it came from.
+- **Relevance that is actually a filter.** The glossary narrows through `filter_glossary_for_chunk`, so plurals and possessives count. The address map narrows on the rule a pair actually states — *who addresses whom* — so both parties must stand in the text; a lone name counts only when it is not a hub appearing in half the book's pairs. Matching a single name looked reasonable and was useless in practice: a protagonist is half of nearly every pair, so plain "Bambi" selected 9 of that book's 11. `global_rules` ships regardless, because that is the address judge's own fallback when no pair matches and so applies precisely when nothing did. For the style guide the light guide is the summary view, since there is nothing sentence-specific to narrow prose to; books without one open on the full guide.
+- **A warning when a document outran the judge that reads it.** Each dialog stamps the document's last edit and says when it changed *after* that judge last ran on this chapter — the case where a finding on screen quotes a rule that has since been rewritten. This is a second freshness axis, not the existing one: `evaluator_freshness` asks whether a chunk's *text* changed since an evaluator ran, so the comparison here reads `eval_runs[<judge>].at` itself (falling back to the scalar `judges_at` for projects predating that ledger). Style guide → `editorial`, glossary → `dictionary`, address map → `address`. A chapter with no recorded run is never called stale: absence of a run is not evidence, and warning there would banner every unjudged chapter.
+- **The address map has a UI surface for the first time.** A read-only block on the dashboard's Style Guide stage, under the light style guide, renders every pair, its relationship and each direction's `tú`/`usted` rules with their conditions and notes. It sits there because the map's `style_guide_summary` is folded into that guide's FORMS OF ADDRESS section. The map is still authored through `harness.py address-map`; 10 of 21 books have none, and those show the command that creates one rather than an empty panel. `/api/project/<id>/status` grew `has_address_map` and `address_map`.
+
+### Changed
+- **Reference text reaches the page as nodes, never as markup.** These documents are operator-authored free text, there is no markdown renderer in the app, and this sheet has already shipped one injection of exactly this class (the `safeAnnType` allowlist). Both the sheet viewer and the dashboard renderer build DOM and set `textContent`; tests assert the absence of `innerHTML` in both. The viewer also carries the dialog treatment the sheet itself still lacks — `role="dialog"`, `aria-modal`, a focus trap, Escape, and focus restored to the control that opened it.
+- The `⋮` is a **vertical** ellipsis: the sheet's "Other" annotation type already uses a horizontal one, and two horizontal ellipses in one sheet read as the same control. The menu is v2-only, classic being reachable only by cookie or `?ui=classic`.
+
 ## [0.59.1.0] - 2026-09-15
 
 ### Added
