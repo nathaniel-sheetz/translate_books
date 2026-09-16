@@ -169,6 +169,8 @@ A shared **LLM provider/model selector** appears at the top of the style guide w
 - **Edit** — opens an inline textarea with the current style guide text for direct edits. Save or Cancel with the buttons below.
 - **Rebuild** — discards the current guide and re-runs the full Q&A wizard to regenerate it from scratch.
 
+**Forms of address (read-only).** Below the light style guide sits a read-only view of `address_map.json` — every pair, its relationship, and each direction's `tú`/`usted` rules with their conditions and notes, plus the map's `global_rules`. This is the only place in the web UI that shows the map at all; it is authored through `python scripts/harness.py address-map prepare|commit` and is not editable here. Books without a map show the command that creates one. It lives on this stage because the map's `style_guide_summary` is folded into the style guide's FORMS OF ADDRESS section.
+
 **Light style guide.** Below the guide sits an optional **Light Style Guide** textarea — at most two sentences (dialect plus high-level tone) that replace the full guide in the reader's single-sentence Retranslate prompt. Books set up through the translate harness arrive with it already filled in; anything typed here overrides that. Clearing it falls back to the full guide. See [Reader Retranslate](READER_RETRANSLATE.md). Editing the main guide never disturbs this field.
 
 **Skipping a question.** Every question (fixed, feature-detected/conditional, or LLM-generated) has a small **Skip** checkbox in the top-right of its block. Ticking it dims the question, disables the radios, and clears any selected answer. Skipped questions are excluded from the style-guide prompt, the no-LLM fallback, the prompt-copy preview, and the Glossary stage's "choose relevant questions" list (the matching row is greyed out and its checkbox disabled). Use this when a question is irrelevant to your book or when an LLM-generated question is off-base. Skip state is session-only — reloading the dashboard clears it.
@@ -810,6 +812,16 @@ Sentences are displayed as a vertical list of Spanish text. Tap any sentence to 
 
 Annotated sentences get a subtle colored background tint. Each annotation has an optional note field.
 
+**Reference documents (⋮).** The sheet's header carries a vertical `⋮` opening the three documents the line was translated under — **Style guide**, **Forms of address**, **Glossary** — each in a read-only dialog with a link to its dashboard editor. Each opens on the part bearing on the tapped sentence, with a **Show all** toggle for the whole document:
+
+- **Glossary** — the terms occurring in that sentence (matched on the English via `filter_glossary_for_chunk`, so plurals and possessives count).
+- **Forms of address** — the pairs the sentence names. A pair governs *who addresses whom*, so both parties must be present; a lone name counts only when it is not a hub appearing in half the book's pairs, without which a protagonist selects nearly every pair. `global_rules` always shows, since that is the address judge's own fallback when no pair matches.
+- **Style guide** — the light style guide is the summary view, since there is nothing sentence-specific to narrow prose to. Books with no light guide open on the full guide.
+
+Each dialog stamps when the document was last edited, and warns when it was **edited after the judge that reads it last ran on this chapter** — the case where a finding on screen quotes a rule that has since been rewritten. This is a different question from `evaluator_freshness`, which asks whether a chunk's *text* changed since an evaluator ran. Documents map to judges as style guide → `editorial`, glossary → `dictionary`, address map → `address`. A chapter with no recorded run is never called stale.
+
+The menu is v2-only (classic is reachable only via the `reader_ui_version` cookie or `?ui=classic`).
+
 When Review Mode is on, the sheet's Issues tab lists that sentence's findings with the four
 feedback labels (resolved / false positive / bad message / missing context), each of which
 marks **that one finding**. Spelling and grammar findings also get an **Ignore in this
@@ -865,6 +877,7 @@ The reader also shows a **Realign** button (topbar icon, right of chapter naviga
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/alignment/<id>/<chapter>` | GET | Alignment data with enrichments |
+| `/api/project/<id>/reference/<kind>` | GET | One reference document (`style-guide`, `glossary`, `address-map`) for the sheet's ⋮ menu. Optional `chapter`/`es_idx` lead the payload with the part relevant to that sentence and enable the staleness check |
 | `/api/correction` | POST | Save a sentence correction |
 | `/api/annotations/<id>/<chapter>` | GET | Get chapter annotations |
 | `/api/annotation` | POST | Save annotation |

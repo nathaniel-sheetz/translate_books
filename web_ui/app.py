@@ -42,7 +42,9 @@ from src.models import (
 )
 from src.glossary_bootstrap import glossary_terms_from_proposals, proposals_to_glossary
 from src.utils.file_io import (
+    filter_glossary_for_chunk,
     format_glossary_for_prompt,
+    load_address_map,
     load_chunk,
     load_glossary,
     load_prompt_template,
@@ -968,6 +970,9 @@ def setupsave_glossary(project_id):
         existing_set = {t.english.lower() for t in existing.terms}
         new_terms = [t for t in terms if t.english.lower() not in existing_set]
         existing.terms.extend(new_terms)
+        # The loaded timestamp would otherwise be written straight back, leaving
+        # the reader's staleness check blind to the most common glossary edit.
+        existing.updated_at = datetime.now()
         save_glossary(existing, glossary_path)
         return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
     else:
@@ -1373,6 +1378,290 @@ def get_alignment(project_id, chapter):
         return jsonify(data)
     except (json.JSONDecodeError, OSError) as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Reference documents in the reader
+#
+# The style guide, the glossary and the forms-of-address map are the three
+# per-book documents a translation is written and judged against, and none of
+# them used to reach the reader: you could read a finding without being able to
+# read the rule it came from. These serve all three to the bottom sheet,
+# leading with the part that bears on the tapped sentence.
+#
+# Two freshness questions live in this app and they are NOT the same one.
+# ``evaluator_freshness`` asks whether a chunk's TEXT changed since an evaluator
+# ran. This asks whether the DOCUMENT changed since the judge ran -- the case
+# where a finding on screen quotes a rule that has since been rewritten. Hence
+# the comparison below rather than a call into that helper.
+# ---------------------------------------------------------------------------
+
+_REFERENCE_KINDS = ("style-guide", "glossary", "address-map")
+
+#: Which evaluator reads each document, so "changed after it last ran" can name a
+#: run to compare against. Names come from :data:`REVIEW_TYPES`. ``dictionary`` is
+#: a coded evaluator (:data:`REVIEW_CODED_TYPES`), not an LLM judge like the other
+#: two; the user-facing ``ref_stale`` string still calls all three "judge".
+_REFERENCE_JUDGE = {
+    "style-guide": "editorial",
+    "glossary": "dictionary",
+    "address-map": "address",
+}
+
+
+def _earliest_judge_run(project_dir: Path, chapter: str, judge: str) -> Optional[str]:
+    """Earliest ISO time ``judge`` ran on any chunk of ``chapter``, or ``None``.
+
+    Reads ``evaluations/`` directly: those files are named by chunk id and chunk
+    ids carry the chapter id as a prefix, so this never opens a chunk. Prefers
+    the per-evaluator ``eval_runs`` ledger and falls back to the scalar
+    ``judges_at`` for projects evaluated before that ledger existed.
+
+    Earliest, not latest: a chapter's chunks are judged in separate runs, and a
+    document edited after the *first* of them already invalidates the findings
+    shown on that chunk's sentences. Taking the latest run would stay silent for
+    the whole chapter until the document outran even the most recently judged
+    chunk -- which is exactly the case this warning exists to catch.
+    """
+    eval_dir = project_dir / "evaluations"
+    if not eval_dir.exists():
+        return None
+    earliest: Optional[str] = None
+    for path in eval_dir.glob(f"{chapter}_chunk_*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        entry = (payload.get("eval_runs") or {}).get(judge)
+        ran_at = entry.get("at") if isinstance(entry, dict) else None
+        if not ran_at and judge in (payload.get("judges") or {}):
+            ran_at = payload.get("judges_at")
+        if ran_at and (earliest is None or str(ran_at) < earliest):
+            earliest = str(ran_at)
+    return earliest
+
+
+def _reference_staleness(
+    project_dir: Path, chapter: str, kind: str, updated_at: Optional[str]
+) -> Optional[dict]:
+    """Whether the document outran the judge that reads it.
+
+    ``None`` whenever the question cannot be answered -- no chapter in hand, no
+    edit time on the document, or no recorded run for that judge on this
+    chapter. Never having run a judge is not evidence that the document is
+    stale, and saying so would put a warning on every unjudged chapter.
+    """
+    if not chapter or not updated_at:
+        return None
+    judge = _REFERENCE_JUDGE[kind]
+    ran_at = _earliest_judge_run(project_dir, chapter, judge)
+    if not ran_at:
+        return None
+    return {"judge": judge, "ran_at": ran_at, "stale": str(updated_at) > ran_at}
+
+
+def _alignment_row_text(project_dir: Path, chapter: str, es_idx: int) -> tuple[str, str]:
+    """Return ``(english, spanish)`` for one aligned sentence.
+
+    Read here rather than taken from the client: the English decides which
+    glossary terms come back, so letting the caller supply it would let any
+    caller widen its own result.
+    """
+    align_path = project_dir / "alignments" / f"{chapter}.json"
+    if not align_path.exists():
+        return "", ""
+    try:
+        data = json.loads(align_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return "", ""
+    for row in data.get("alignments", []):
+        if row.get("es_idx") == es_idx:
+            return str(row.get("en") or ""), str(row.get("es") or "")
+    return "", ""
+
+
+def _glossary_term_row(term) -> dict:
+    """One glossary term, flattened for the sheet."""
+    term_type = getattr(term.type, "value", term.type)
+    return {
+        "english": term.english,
+        "spanish": term.spanish,
+        "type": str(term_type or ""),
+        "context": term.context or "",
+        "alternatives": list(term.alternatives or []),
+    }
+
+
+def _address_pair_row(pair) -> dict:
+    """One address pair, in the shape ``address_map_commit`` already returns."""
+    return {
+        "a": pair.a,
+        "b": pair.b,
+        "relationship": pair.relationship,
+        "directions": {
+            key: [rule.model_dump(exclude_none=True) for rule in rules]
+            for key, rules in pair.directions.items()
+        },
+    }
+
+
+def _reference_style_guide(project_dir: Path) -> dict:
+    """The style guide, with the light guide as its summary view.
+
+    The light guide is already the <=2-sentence condensation used for
+    retranslation, so it *is* the "relevant" view -- there is nothing
+    sentence-specific to narrow a prose guide to. Books set up through the
+    dashboard never get one (deliberate, see ``style_guide_wizard``), and those
+    simply open on the full guide with no toggle.
+    """
+    path = project_dir / "style.json"       # style.json, not style_guide.json
+    if not path.exists():
+        return {"exists": False}
+    try:
+        guide = load_style_guide(path)
+    except Exception:
+        return {"exists": False, "unreadable": True}
+    return {
+        "exists": True,
+        "updated_at": guide.updated_at.isoformat() if guide.updated_at else None,
+        "light": (guide.light_content or "").strip(),
+        "content": guide.content or "",
+    }
+
+
+def _reference_glossary(project_dir: Path, english: str) -> dict:
+    """The glossary, led by the terms that occur in this sentence."""
+    path = project_dir / "glossary.json"
+    if not path.exists():
+        return {"exists": False}
+    try:
+        glossary = load_glossary(path)
+    except Exception:
+        return {"exists": False, "unreadable": True}
+    relevant = (
+        filter_glossary_for_chunk(glossary, english).terms if english else []
+    )
+    return {
+        "exists": True,
+        "updated_at": glossary.updated_at.isoformat() if glossary.updated_at else None,
+        "relevant": [_glossary_term_row(t) for t in relevant],
+        "all": [_glossary_term_row(t) for t in glossary.terms],
+    }
+
+
+def _pair_relevance(pairs: list, haystack: str) -> list:
+    """The pairs a sentence is actually about.
+
+    A pair governs who addresses whom, so *both* parties standing in the text is
+    the real signal. Matching on a single name is close to useless in practice:
+    a protagonist is one half of nearly every pair, so plain "Bambi" selects 9
+    of that book's 11 pairs -- noise wearing a filter's clothes. A lone name
+    therefore counts only when it is not one of those hubs.
+
+    Whatever this returns, the caller still ships ``global_rules``: that is the
+    address judge's own fallback when no pair matches, so an empty result is
+    still an answer rather than a blank panel.
+    """
+    haystack = haystack.strip()
+    if not haystack or not pairs:
+        return []
+    hub_counts: dict[str, int] = {}
+    for pair in pairs:
+        for name in (pair.a, pair.b):
+            hub_counts[name.lower()] = hub_counts.get(name.lower(), 0) + 1
+    # "Hub" only means something once there are pairs to be central among.
+    hubs = {
+        name for name, n in hub_counts.items()
+        if len(pairs) > 2 and n * 2 >= len(pairs)
+    }
+    both, single = [], []
+    for pair in pairs:
+        a_in = pair.a.lower() in haystack
+        b_in = pair.b.lower() in haystack
+        if a_in and b_in:
+            both.append(pair)
+        elif a_in or b_in:
+            matched = pair.a.lower() if a_in else pair.b.lower()
+            if matched not in hubs:
+                single.append(pair)
+    return both + single
+
+
+def _reference_address_map(project_dir: Path, english: str, spanish: str) -> dict:
+    """The address map, led by the pairs this sentence names.
+
+    Pairs are matched against both languages: a map is drafted with the English
+    cast and only later renamed to the glossary's Spanish names, so either form
+    can be the one standing in the text.
+    """
+    path = project_dir / "address_map.json"
+    if not path.exists():
+        return {"exists": False}
+    try:
+        address_map = load_address_map(path)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
+        return {"exists": False, "unreadable": True}
+    relevant = _pair_relevance(address_map.pairs, f"{english} {spanish}".lower())
+    return {
+        "exists": True,
+        "updated_at": (
+            address_map.updated_at.isoformat() if address_map.updated_at else None
+        ),
+        "relevant": [_address_pair_row(p) for p in relevant],
+        "all": [_address_pair_row(p) for p in address_map.pairs],
+        "global_rules": address_map.global_rules or "",
+        "summary": address_map.style_guide_summary or "",
+        "content": address_map.content or "",
+    }
+
+
+@app.route("/api/project/<project_id>/reference/<kind>")
+def project_reference(project_id, kind):
+    """Serve one reference document to the reader's bottom sheet.
+
+    ``chapter`` and ``es_idx`` are optional; with them the payload leads with
+    the part bearing on that sentence, without them it is just the document.
+    """
+    if not _safe_id(project_id) or kind not in _REFERENCE_KINDS:
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    chapter = request.args.get("chapter", "")
+    if chapter and not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+    try:
+        es_idx = int(request.args.get("es_idx", "-1"))
+    except (TypeError, ValueError):
+        es_idx = -1
+
+    english, spanish = "", ""
+    if chapter and es_idx >= 0:
+        english, spanish = _alignment_row_text(project_dir, chapter, es_idx)
+
+    if kind == "style-guide":
+        payload = _reference_style_guide(project_dir)
+    elif kind == "glossary":
+        payload = _reference_glossary(project_dir, english)
+    else:
+        payload = _reference_address_map(project_dir, english, spanish)
+
+    payload["kind"] = kind
+    payload["stale"] = (
+        _reference_staleness(project_dir, chapter, kind, payload.get("updated_at"))
+        if payload.get("exists")
+        else None
+    )
+    # The address map has no editor anywhere yet, so an absent one is a dead end
+    # unless the popup says which command writes it.
+    if not payload.get("exists") and kind == "address-map":
+        payload["empty_command"] = (
+            f"python scripts/harness.py address-map prepare --project {project_id}"
+        )
+    return jsonify(payload)
 
 
 def _attach_text_in_chunk(alignment_data: dict, chunks_dir: Path, target_lang: str = "es") -> None:
@@ -2462,6 +2751,8 @@ def _get_project_status(project_id: str) -> dict:
         "style_guide_content": None,
         "light_style_guide_content": None,
         "glossary_count": 0,
+        "has_address_map": False,
+        "address_map": None,
         "alignment_count": 0,
     }
 
@@ -2542,6 +2833,27 @@ def _get_project_status(project_id: str) -> dict:
             status["glossary_count"] = len(g.terms)
         except Exception:
             pass
+
+    # Address map. Read-only on the dashboard: it is authored through
+    # `harness.py address-map`, and this is the first surface that shows it at
+    # all. Ships with the style guide because the map feeds that guide's FORMS
+    # OF ADDRESS section.
+    address_map_path = project_dir / "address_map.json"
+    if address_map_path.exists():
+        try:
+            am = load_address_map(address_map_path)
+            status["has_address_map"] = True
+            status["address_map"] = {
+                "pairs": [_address_pair_row(p) for p in am.pairs],
+                "global_rules": am.global_rules or "",
+                "summary": am.style_guide_summary or "",
+                "updated_at": am.updated_at.isoformat() if am.updated_at else None,
+            }
+        except Exception:
+            # Present but unreadable is not the same as absent. Falling through
+            # to the absent case makes the dashboard print the `address-map
+            # prepare` command, which overwrites the broken-but-present file.
+            status["address_map_unreadable"] = True
 
     # Chapters + chunks
     chapters_dir = project_dir / "chapters"

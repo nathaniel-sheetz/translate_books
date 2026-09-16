@@ -1715,6 +1715,9 @@ def main():
                     existing_terms = {t.english.lower() for t in existing.terms}
                     new_terms = [t for t in accepted if t.english.lower() not in existing_terms]
                     existing.terms.extend(new_terms)
+                    # Same reason as the web UI's merge save: the reader's
+                    # staleness check reads updated_at, so a merge must move it.
+                    existing.updated_at = datetime.now()
                     save_glossary(existing, out_path)
                     print(f"\nMerged {len(new_terms)} new terms into {out_path} ({len(existing.terms)} total)")
                 else:

@@ -299,6 +299,19 @@
                         <span class="status-msg" id="light-style-save-status"></span>
                     </div>
                 </div>
+
+            </div>
+
+            <!-- Forms of address. Read-only: the map is authored through
+                 `harness.py address-map`, and this is the first place in the web
+                 UI that shows it at all. It sits outside #style-guide-existing on
+                 purpose: the harness drafts the map before the style guide, so a
+                 book can have a map and no committed guide, and the map must
+                 still show. It feeds that guide's FORMS OF ADDRESS section. -->
+            <div class="address-map-section" style="margin-top:20px;">
+                <h3 style="margin:0 0 4px 0; font-size:14px;">Forms of Address <span style="font-weight:normal; color:#888; font-size:12px;">(read-only, written by the harness)</span></h3>
+                <p class="section-hint" style="margin:0 0 8px 0;">Who addresses whom as t&uacute; or usted. The address judge reads this; edit it with <code>python scripts/harness.py address-map prepare</code>.</p>
+                <div id="address-map-view"></div>
             </div>
 
             <div id="style-guide-wizard">

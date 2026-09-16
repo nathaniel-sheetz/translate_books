@@ -386,6 +386,32 @@ STRINGS = {
                 "aria_fav_add": "Add to favorites",
                 "aria_fav_remove": "Remove from favorites",
                 "fav_failed": "Could not save",
+
+                # Reference documents (⋮ menu): the style guide, glossary and
+                # address map a line was translated under, readable without
+                # leaving the sentence.
+                "aria_ref_menu": "Reference documents",
+                "ref_style_guide": "Style guide",
+                "ref_glossary": "Glossary",
+                "ref_address_map": "Forms of address",
+                "ref_edit_link": "Edit in dashboard",
+                "ref_relevant": "Relevant to this sentence",
+                "ref_none_relevant": "Nothing here matches this sentence.",
+                "ref_show_all": "Show all",
+                "ref_show_less": "Show less",
+                "ref_general_rules": "General rules",
+                "ref_in_style_guide": "Folded into the style guide",
+                "ref_edited": "edited {date}",
+                # Names the evaluator, because which one read a stale document is
+                # the whole point of the warning. "the last {judge} run" rather
+                # than "the {judge} judge": dictionary is a coded evaluator, not
+                # an LLM judge, so the noun cannot be hard-coded here.
+                "ref_stale": "Changed after the last {judge} run on this chapter ({date}).",
+                "ref_missing": "This book has no {doc}.",
+                "ref_missing_hint": "Create it with:",
+                "ref_unreadable": "This file could not be read.",
+                "ref_failed": "Could not load.",
+                "aria_ref_close": "Close",
             },
         },
     },
@@ -735,6 +761,26 @@ STRINGS = {
                 "aria_fav_add": "Añadir a favoritos",
                 "aria_fav_remove": "Quitar de favoritos",
                 "fav_failed": "No se pudo guardar",
+
+                # Documentos de referencia (menú ⋮).
+                "aria_ref_menu": "Documentos de referencia",
+                "ref_style_guide": "Guía de estilo",
+                "ref_glossary": "Glosario",
+                "ref_address_map": "Formas de tratamiento",
+                "ref_edit_link": "Editar en el panel",
+                "ref_relevant": "Relevante para esta frase",
+                "ref_none_relevant": "Nada de aquí corresponde a esta frase.",
+                "ref_show_all": "Ver todo",
+                "ref_show_less": "Ver menos",
+                "ref_general_rules": "Reglas generales",
+                "ref_in_style_guide": "Incorporado a la guía de estilo",
+                "ref_edited": "editado el {date}",
+                "ref_stale": "Cambió después de la última ejecución de {judge} en este capítulo ({date}).",
+                "ref_missing": "Este libro no tiene {doc}.",
+                "ref_missing_hint": "Créelo con:",
+                "ref_unreadable": "No se pudo leer el archivo.",
+                "ref_failed": "No se pudo cargar.",
+                "aria_ref_close": "Cerrar",
             },
         },
     },

@@ -108,6 +108,309 @@
         });
     }
 
+    // ── Reference documents (⋮ menu) ───────────────────────────────────────────
+    //
+    // The style guide, glossary and address map a line was translated under,
+    // readable without leaving the sentence. Read-only here; the header link is
+    // the way to the editors on the dashboard.
+    //
+    // Everything below builds nodes rather than HTML strings. There is no
+    // markdown renderer in this app, these documents are operator-authored
+    // free text, and this sheet has already shipped one innerHTML injection
+    // (see safeAnnType above) -- so document text only ever reaches the page
+    // through textContent.
+    const app = document.getElementById('reader-app');
+    const PROJECT = app ? app.dataset.project : '';
+    const CHAPTER = app ? app.dataset.chapter : '';
+
+    const REF_TITLE = {
+        'style-guide': T('ref_style_guide', 'Style guide'),
+        'glossary': T('ref_glossary', 'Glossary'),
+        'address-map': T('ref_address_map', 'Forms of address'),
+    };
+    // Both the style guide and the address map are edited on the style-guide
+    // stage -- the map's read-only block sits under the light guide there.
+    const REF_STAGE = {
+        'style-guide': 'style-guide',
+        'glossary': 'glossary',
+        'address-map': 'style-guide',
+    };
+
+    const refEls = {
+        menu: el('rv2-refmenu'),
+        btn: el('rv2-refmenu-btn'),
+        popup: el('rv2-refmenu-popup'),
+        overlay: el('rv2-doc-overlay'),
+        doc: el('rv2-doc'),
+        title: el('rv2-doc-title'),
+        meta: el('rv2-doc-meta'),
+        link: el('rv2-doc-link'),
+        close: el('rv2-doc-close'),
+        stale: el('rv2-doc-stale'),
+        body: el('rv2-doc-body'),
+    };
+
+    function node(tag, cls, text) {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text != null) n.textContent = String(text);
+        return n;
+    }
+    function fmt(template, vars) {
+        return String(template).replace(/{(\w+)}/g, (m, k) => (vars[k] != null ? vars[k] : m));
+    }
+    function shortDate(iso) {
+        if (!iso) return '';
+        const s = String(iso);
+        return s.length >= 10 ? s.slice(0, 10) : s;
+    }
+
+    // ── menu open/close (ported: reader_projects.js's bindPopup is not loaded
+    // on the reading view, which only pulls reader.js/concordance.js/this file)
+    let menuOpen = false;
+    function setMenu(open) {
+        if (!refEls.btn || !refEls.popup) return;
+        menuOpen = open;
+        refEls.popup.hidden = !open;
+        refEls.btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        refEls.btn.classList.toggle('popup-open', open);
+    }
+    if (refEls.btn) {
+        refEls.btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            setMenu(!menuOpen);
+        });
+        document.addEventListener('click', function (e) {
+            if (menuOpen && refEls.menu && !refEls.menu.contains(e.target)) setMenu(false);
+        });
+    }
+    if (refEls.popup) {
+        refEls.popup.querySelectorAll('.rv2-refmenu-item').forEach(function (item) {
+            item.addEventListener('click', function () {
+                setMenu(false);
+                openDoc(item.dataset.ref);
+            });
+        });
+    }
+
+    // ── document viewer (full dialog semantics: the sheet has none) ───────────
+    let docReturnFocus = null;
+
+    function showDoc() {
+        docReturnFocus = document.activeElement;
+        refEls.overlay.hidden = false;
+        refEls.doc.hidden = false;
+        document.body.style.overflow = 'hidden';
+        if (refEls.close) refEls.close.focus();
+    }
+    function closeDoc() {
+        if (refEls.doc.hidden) return;
+        refEls.overlay.hidden = true;
+        refEls.doc.hidden = true;
+        document.body.style.overflow = '';
+        // Don't strand keyboard/AT users at the top of the document.
+        if (docReturnFocus && docReturnFocus.focus) docReturnFocus.focus();
+        docReturnFocus = null;
+    }
+    function trapDocFocus(e) {
+        if (e.key !== 'Tab') return;
+        const focusable = refEls.doc.querySelectorAll(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const visible = Array.prototype.filter.call(
+            focusable, (n) => !n.hidden && n.offsetParent !== null);
+        if (!visible.length) return;
+        const first = visible[0];
+        const last = visible[visible.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault(); last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault(); first.focus();
+        }
+    }
+    if (refEls.doc) {
+        refEls.doc.addEventListener('keydown', trapDocFocus);
+        refEls.close.addEventListener('click', closeDoc);
+        refEls.overlay.addEventListener('click', closeDoc);
+        // Capture: the reader's global Escape closes the whole sheet, and the
+        // topmost surface should win instead.
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && !refEls.doc.hidden) {
+                e.preventDefault();
+                e.stopPropagation();
+                closeDoc();
+            }
+        }, true);
+    }
+
+    function openDoc(kind) {
+        if (!refEls.doc) return;
+        refEls.title.textContent = REF_TITLE[kind] || '';
+        refEls.meta.textContent = '';
+        refEls.stale.hidden = true;
+        refEls.stale.textContent = '';
+        refEls.body.replaceChildren();
+        refEls.link.href = '/project/' + encodeURIComponent(PROJECT) + '#' + REF_STAGE[kind];
+        showDoc();
+
+        const qs = cur && cur.esIdx != null
+            ? '?chapter=' + encodeURIComponent(CHAPTER) + '&es_idx=' + encodeURIComponent(cur.esIdx)
+            : '';
+        fetch('/api/project/' + encodeURIComponent(PROJECT) + '/reference/' + kind + qs)
+            .then((r) => {
+                // An error body is not a document: a 404/400 would otherwise fall
+                // through renderDoc and read as "this book has no style guide".
+                if (!r.ok) throw new Error('reference ' + r.status);
+                return r.json();
+            })
+            .then((d) => renderDoc(kind, d))
+            .catch(() => {
+                refEls.body.replaceChildren(
+                    node('p', 'rv2-doc-empty', T('ref_failed', 'Could not load.')));
+            });
+    }
+
+    function renderDoc(kind, d) {
+        if (d && d.updated_at) {
+            refEls.meta.textContent = fmt(T('ref_edited', 'edited {date}'),
+                                          { date: shortDate(d.updated_at) });
+        }
+        if (d && d.stale && d.stale.stale) {
+            refEls.stale.textContent = fmt(
+                T('ref_stale', 'Changed after the last {judge} run on this chapter ({date}).'),
+                { judge: d.stale.judge, date: shortDate(d.stale.ran_at) });
+            refEls.stale.hidden = false;
+        }
+        const body = refEls.body;
+        body.replaceChildren();
+
+        if (!d || !d.exists) {
+            body.appendChild(node('p', 'rv2-doc-empty', d && d.unreadable
+                ? T('ref_unreadable', 'This file could not be read.')
+                : fmt(T('ref_missing', 'This book has no {doc}.'),
+                      { doc: (REF_TITLE[kind] || '').toLowerCase() })));
+            if (d && d.empty_command) {
+                body.appendChild(node('p', 'rv2-doc-empty', T('ref_missing_hint', 'Create it with:')));
+                body.appendChild(node('code', 'rv2-doc-cmd', d.empty_command));
+            }
+            return;
+        }
+        if (kind === 'style-guide') renderStyleGuide(body, d);
+        else if (kind === 'glossary') renderGlossary(body, d);
+        else renderAddressMap(body, d);
+    }
+
+    /** A "Show all N" / "Show less" toggle over a lazily-built section. */
+    function addToggle(body, count, build) {
+        const holder = node('div');
+        // The style guide has no count to show -- it toggles light -> full.
+        const showAll = function () {
+            const base = T('ref_show_all', 'Show all');
+            return count ? base + ' ' + count : base;
+        };
+        const btn = node('button', 'rv2-doc-toggle', showAll());
+        btn.type = 'button';
+        let shown = false;
+        btn.addEventListener('click', function () {
+            shown = !shown;
+            btn.textContent = shown
+                ? T('ref_show_less', 'Show less')
+                : showAll();
+            holder.replaceChildren();
+            if (shown) build(holder);
+        });
+        body.appendChild(btn);
+        body.appendChild(holder);
+    }
+
+    function renderStyleGuide(body, d) {
+        // The light guide IS the summary view -- there is nothing
+        // sentence-specific to narrow prose to. Books without one (every book
+        // set up through the dashboard) just open on the full guide.
+        if (d.light) {
+            body.appendChild(node('p', 'rv2-doc-kicker', T('ref_relevant', 'Relevant to this sentence')));
+            body.appendChild(node('p', 'rv2-doc-prose', d.light));
+            addToggle(body, '', function (holder) {
+                holder.appendChild(node('p', 'rv2-doc-prose', d.content));
+            });
+        } else {
+            body.appendChild(node('p', 'rv2-doc-prose', d.content));
+        }
+    }
+
+    function termNode(t) {
+        const row = node('div', 'rv2-term');
+        const head = node('div', 'rv2-term-head');
+        head.appendChild(node('span', 'rv2-term-en', t.english));
+        head.appendChild(node('span', 'rv2-term-arrow', '→'));
+        head.appendChild(node('span', 'rv2-term-es', t.spanish));
+        if (t.type) head.appendChild(node('span', 'rv2-term-type', t.type));
+        row.appendChild(head);
+        if (t.context) row.appendChild(node('p', 'rv2-term-ctx', t.context));
+        if (t.alternatives && t.alternatives.length) {
+            row.appendChild(node('p', 'rv2-term-alts', t.alternatives.join(' · ')));
+        }
+        return row;
+    }
+
+    function renderGlossary(body, d) {
+        const rel = d.relevant || [];
+        const all = d.all || [];
+        body.appendChild(node('p', 'rv2-doc-kicker', T('ref_relevant', 'Relevant to this sentence')));
+        if (rel.length) rel.forEach((t) => body.appendChild(termNode(t)));
+        else body.appendChild(node('p', 'rv2-doc-empty', T('ref_none_relevant', 'Nothing here matches this sentence.')));
+        if (all.length) {
+            addToggle(body, all.length, function (holder) {
+                all.forEach((t) => holder.appendChild(termNode(t)));
+            });
+        }
+    }
+
+    function dirNode(who, rules) {
+        const frag = document.createDocumentFragment();
+        (rules || []).forEach(function (r) {
+            const line = node('div', 'rv2-dir');
+            line.appendChild(node('span', 'rv2-dir-who', who));
+            line.appendChild(node('span', 'rv2-form', r.form || ''));
+            if (r.when) line.appendChild(node('span', 'rv2-dir-when', r.when));
+            frag.appendChild(line);
+            if (r.notes) frag.appendChild(node('p', 'rv2-dir-notes', r.notes));
+        });
+        return frag;
+    }
+
+    function pairNode(p) {
+        const row = node('div', 'rv2-pair');
+        row.appendChild(node('div', 'rv2-pair-head', p.a + ' ↔ ' + p.b));
+        if (p.relationship) row.appendChild(node('p', 'rv2-pair-rel', p.relationship));
+        const dirs = p.directions || {};
+        row.appendChild(dirNode(p.a + ' →', dirs.a_to_b));
+        row.appendChild(dirNode(p.b + ' →', dirs.b_to_a));
+        return row;
+    }
+
+    function renderAddressMap(body, d) {
+        const rel = d.relevant || [];
+        const all = d.all || [];
+        body.appendChild(node('p', 'rv2-doc-kicker', T('ref_relevant', 'Relevant to this sentence')));
+        if (rel.length) rel.forEach((p) => body.appendChild(pairNode(p)));
+        else body.appendChild(node('p', 'rv2-doc-empty', T('ref_none_relevant', 'Nothing here matches this sentence.')));
+        // Always shown: these are what the address judge falls back to when no
+        // pair matches, so they apply precisely when `relevant` is empty.
+        if (d.global_rules) {
+            body.appendChild(node('p', 'rv2-doc-kicker', T('ref_general_rules', 'General rules')));
+            body.appendChild(node('p', 'rv2-doc-prose', d.global_rules));
+        }
+        if (all.length) {
+            addToggle(body, all.length, function (holder) {
+                all.forEach((p) => holder.appendChild(pairNode(p)));
+            });
+        }
+        if (d.summary) {
+            body.appendChild(node('p', 'rv2-doc-kicker', T('ref_in_style_guide', 'Folded into the style guide')));
+            body.appendChild(node('p', 'rv2-doc-prose', d.summary));
+        }
+    }
+
     // ── State ──────────────────────────────────────────────────────────────────
     let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors, tappedWord }
 
@@ -131,6 +434,7 @@
         requestAnimationFrame(function () { refreshSrcToggle(); anchorSheet(); });
     }
     function hide() {
+        setMenu(false);   // else the popup survives the close and reopens with it
         overlay.hidden = true;
         sheet.hidden = true;
         sheet.classList.remove('editing', 'editfull', 'rv2-kb');

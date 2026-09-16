@@ -19,7 +19,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=19">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=22">
     {% endif %}
 </head>
 <body>
@@ -592,6 +592,21 @@
           <div class="rv2-src-row">
             <span class="rv2-kicker" id="rv2-src-kicker">{{ t.js.v2.source_label }}</span>
             <span class="rv2-spacer"></span>
+            <!-- Reference documents. A VERTICAL ellipsis on purpose: the
+                 "Other" annotation type already uses a horizontal one, and two
+                 horizontal ellipses in one sheet read as the same control. -->
+            <div class="rv2-refmenu" id="rv2-refmenu">
+              <button class="rv2-refmenu-btn" id="rv2-refmenu-btn" type="button"
+                      aria-label="{{ t.js.v2.aria_ref_menu }}" aria-haspopup="true"
+                      aria-expanded="false" aria-controls="rv2-refmenu-popup">
+                <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="10" cy="4.5" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="10" cy="15.5" r="1.5"/></svg>
+              </button>
+              <div class="rv2-refmenu-popup" id="rv2-refmenu-popup" role="menu" hidden>
+                <button class="rv2-refmenu-item" type="button" role="menuitem" data-ref="style-guide">{{ t.js.v2.ref_style_guide }}</button>
+                <button class="rv2-refmenu-item" type="button" role="menuitem" data-ref="address-map">{{ t.js.v2.ref_address_map }}</button>
+                <button class="rv2-refmenu-item" type="button" role="menuitem" data-ref="glossary">{{ t.js.v2.ref_glossary }}</button>
+              </div>
+            </div>
             <button class="rv2-close" id="rv2-close" type="button" aria-label="{{ t.js.v2.aria_close }}">&times;</button>
           </div>
           <div class="rv2-src clamp" id="rv2-src">
@@ -648,6 +663,24 @@
       </div>
     </section>
     <div class="rv2-bubble" id="rv2-bubble"></div>
+
+    <!-- Reference document viewer. Read-only: the dashboard link in the header
+         is the way to change any of these. Carries the full dialog treatment
+         (focus trap, Escape, focus restore) the sheet itself still lacks. -->
+    <div class="rv2-doc-overlay" id="rv2-doc-overlay" hidden></div>
+    <section class="rv2-doc" id="rv2-doc" role="dialog" aria-modal="true"
+             aria-labelledby="rv2-doc-title" hidden>
+      <header class="rv2-doc-head">
+        <div class="rv2-doc-titles">
+          <h2 class="rv2-doc-title" id="rv2-doc-title"></h2>
+          <p class="rv2-doc-meta" id="rv2-doc-meta"></p>
+        </div>
+        <a class="rv2-doc-link" id="rv2-doc-link" href="#" target="_blank" rel="noopener">{{ t.js.v2.ref_edit_link }} &#8599;</a>
+        <button class="rv2-doc-close" id="rv2-doc-close" type="button" aria-label="{{ t.js.v2.aria_ref_close }}">&times;</button>
+      </header>
+      <div class="rv2-doc-stale" id="rv2-doc-stale" hidden></div>
+      <div class="rv2-doc-body" id="rv2-doc-body"></div>
+    </section>
     {% endif %}
 
     <!-- Remove-text modal -->
@@ -821,7 +854,7 @@ window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</
 <script src="{{ url_for('static', filename='reader.js') }}?v=33"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
-<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=11"></script>
+<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=12"></script>
 {% endif %}
 
 {% elif mode == "not_found" %}

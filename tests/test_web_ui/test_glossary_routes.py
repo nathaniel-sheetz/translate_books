@@ -242,6 +242,21 @@ class TestSaveGlossaryMergeMode:
         assert data["ok"] is True
         assert data["new"] == 1
 
+    def test_merge_moves_updated_at(self, client, project):
+        """Merge wrote the *loaded* timestamp straight back, so the reader's
+        staleness warning could never fire for the commonest glossary edit."""
+        _write_glossary(project, [_minimal_term("magic", "magia")])
+        before = json.loads(
+            (project / "glossary.json").read_text(encoding="utf-8"))["updated_at"]
+        rv = client.post(
+            "/api/setup/proj1/glossary",
+            json={"terms": [_minimal_term("dragon", "dragon")], "mode": "merge"},
+        )
+        assert rv.status_code == 200
+        after = json.loads(
+            (project / "glossary.json").read_text(encoding="utf-8"))["updated_at"]
+        assert after > before
+
 
 class TestSaveGlossaryReplaceMode:
     """mode="replace": entire glossary is replaced with submitted list."""
