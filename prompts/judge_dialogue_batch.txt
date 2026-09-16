@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge — batched (multiple items per prompt)
-# Version: 1.4
+# Version: 1.5
 # Checks whether one or more Spanish translations follow the project's house
 # dialogue rules in a single call. Variables: dialogue_rules, items
 # Each <item> carries an id plus its own <source>/<translation>; return exactly
@@ -61,7 +61,8 @@ For each violation choose the single most specific `rule` id from this list:
   (wrong capitalization, period before the inciso, comma/period misplaced
   relative to the closing raya).
 - "guillemets-for-thoughts": nested speech or internal thoughts not wrapped in
-  guillemets « » (or wrapped in English quotes).
+  guillemets « » (or wrapped in English quotes); also a quotation inside them
+  set in « » or English quotes instead of single angle quotes ‹ ›.
 - "other": a clear dialogue-rule violation that none of the above describes.
 
 Severity guidance: use "error" for unambiguous violations (English quotes in

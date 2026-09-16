@@ -4,6 +4,6 @@ House style: dialogue on its own line. Apply these rules whenever the source con
 - TURN OPENING AND CONTINUATION: each spoken turn begins on its own new paragraph, opening with a raya attached directly to the first word, with NO space after it (—Hola., never — Hola.). Use » (U+00BB) ONLY when one speech paragraph is followed DIRECTLY by another speech paragraph by the SAME speaker (»Entonces…, never » Entonces…). If narration sits between them, resume with —. Also use — for every new speaker.
 - Introductory or scene-setting narration goes in its OWN paragraph BEFORE the speech. Do not open a paragraph with narration and then attach the speech with a raya on the same line.
 - Narrator comments during a turn are incisos, framed by rayas, inline: —Ese hombre —añadió— me ha engañado.
-- NESTED SPEECH AND INTERNAL THOUGHTS: use guillemets « » (Paul pensó: «Hoy nacerá»), never English quotes.
+- NESTED SPEECH AND INTERNAL THOUGHTS: use guillemets « » (Paul pensó: «Hoy nacerá»), never English quotes. A quotation inside them takes single angle quotes ‹ ›: «Creo que ‹Windy› quedaría muy bien».
 
 (This is a brief public example. Maintain your full house style privately in prompts/dialogue.txt, which the pipeline loads in preference to this file.)

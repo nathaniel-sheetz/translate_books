@@ -290,6 +290,41 @@ The snapshot is written whole or not at all. Replays read the snapshot, so the
 live books can keep changing. `--export` and `--freeze` refuse a slug that names
 two books. `exam/` is gitignored for it.
 
+### `panel_audit.py` — audit the reader's edits with a model panel
+
+```bash
+python scripts/panel_audit.py prepare --input audit/run/input.jsonl --run audit/run/rows20
+python scripts/panel_audit.py fanout  --run audit/run/rows20
+python scripts/panel_audit.py commit  --run audit/run/rows20
+```
+
+Reads the rows `ledger_census.py --export` writes. `prepare` renders them in
+batches (`--rows-per-job`, default 20) into a new or empty run directory for the
+panel: Grok 4.6, Gemini 3.8 Flash and GPT-5.6 Terra by default, and `--model`
+repeats to change it. A batch holds one book's edits and opens with that book's
+own standard: its `style.json` guide, `style_rules.json` and `address_map.json`,
+each named as absent when the book lacks it. Each edit carries its glossary
+hits, the text around it in both languages (the paragraph before, and the rest
+of its own paragraph, where a speaker tag sits) and a `quote_continues` flag
+read from the English, so a model can tell a continuing speaker's » from a stray
+closing mark. The manifest's `books` records which parts each book had. Successive saves on one
+sentence are audited once, as their net change, and a sequence that ends where
+it started is left out. `--project`, `--limit` and `--exclude-ids-file` narrow
+the rows; excluding any save excludes its net edit. `--projects-root` points at
+the directory holding the books (default `projects/`). A rendering failure
+returns an error before anything is written, so the same `--run` can be
+retried. `fanout` runs one headless wave per model and skips jobs that already
+have a draft, so a re-run resumes. `--model` runs one panel model instead of
+every one in turn, `--job-ids` (comma-separated) limits it to some jobs,
+`--concurrency` caps parallel CLI processes (default 3), and `--cli` picks
+`cursor` (the default) or `claude`, with `--cli-bin` when the binary is not on
+`PATH`.
+`commit` writes `results.jsonl` and `report.md`: verdicts per model, pairwise
+agreement, the consensus buckets (silver, taste, regression queue, split), M6
+and token usage. It sets an unparseable draft aside as `<job>.rejected.json` so
+the next `fanout` re-runs that job. Nothing is written into `projects/`, and
+`audit/` is gitignored.
+
 ### `review_annotations.py` — resolve reader annotations
 
 ```bash

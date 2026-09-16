@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.59.1.0] - 2026-09-15
+
+### Added
+- **`scripts/panel_audit.py`: the Phase 0 audit of the reader's own edits.** `prepare` / `fanout` / `commit`, the shape `review_annotations.py` already uses, over the corpus instead of one book. It reads the rows `ledger_census.py --export` writes, and three model families (Grok 4.6, Gemini 3.8 Flash, GPT-5.6 Terra through Cursor) each call every edit an improvement, taste or a regression, name the defect class and offer what a native Mexican reader would write. `commit` writes `results.jsonl` and `report.md`: verdicts per model, pairwise agreement, the consensus buckets (silver, taste, regression queue, split) and M6, the share of judged rows the whole panel calls a regression. Nothing is written into `projects/`, a consensus is a candidate label rather than a stamp, and `audit/` is gitignored.
+- **A run of saves on one sentence is audited once, as its net change.** A reader often saves a sentence and then edits it again; judged alone the halfway state reads as a regression ("aprietan … haces" before "haces" became "hacen"). `collapse_saves` links a save to the one that starts from exactly the text it left, in the same chunk and later in save order, so a revert is one chain rather than a loop. A sequence that ends where it started is left out, and excluding any save excludes its whole net edit.
+- **Each job carries one book's own standard.** A batch holds a single book's edits and opens with its style guide, style rules and forms-of-address map — each named as absent when the book lacks it — plus every edit's glossary hits. Without them the fabre2 pilot split on edits the book had already settled: its glossary gives "la madre Ambroisine", and its address map gives the children tú with Uncle Paul.
+- **The text around each edit, in both languages.** `src/audit/context.py` gives every item the paragraph before and the rest of its own paragraph (where a speaker tag sits), skipping image and caption paragraphs, plus a `quote_continues` flag read from the English so a model can tell a continuing speaker's » from a stray closing mark.
+
+### Changed
+- **A quotation inside nested speech takes single angle quotes ‹ ›.** `prompts/dialogue.example.txt` states the rule («Creo que ‹Windy› quedaría muy bien»), and the `guillemets-for-thoughts` rule in both dialogue judges now catches « » or English quotes in that inner position. Both judge prompts carry the version bump that goes with a content change (1.5 → 1.6, and 1.4 → 1.5 for the batched one).
+
 ## [0.59.0.1] - 2026-09-14
 
 ### Changed
