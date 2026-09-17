@@ -1103,6 +1103,157 @@ def slot_source(tmp_path: Path, monkeypatch) -> Path:
     return source
 
 
+def test_slot_dir_mode_never_restricts_the_acl_on_windows(monkeypatch):
+    """A restrictive mode on Windows is a lockout, not a permission.
+
+    Python turns ``0o700`` into a protected descriptor granting only OWNER
+    RIGHTS, SYSTEM and Administrators -- no ACE for the user's own SID. A
+    scheduled task creates files owned by ``BUILTIN\\Administrators``, which an
+    interactive token holds deny-only, so the operator lost every right to the
+    nightly's ``cli-config.json`` including ``READ_CONTROL``. POSIX keeps
+    ``0o700``, where the mode means what it says.
+    """
+    monkeypatch.setattr(headless.os, "name", "nt")
+    assert headless._slot_dir_mode() == 0o777  # Path.mkdir's default: a no-op
+    monkeypatch.setattr(headless.os, "name", "posix")
+    assert headless._slot_dir_mode() == 0o700
+
+
+def test_seed_creates_the_slot_with_that_mode(
+    slot_source: Path, tmp_path: Path, monkeypatch
+):
+    """A mode nothing passes to ``mkdir`` is a comment, not a behavior.
+
+    Recorded for the slot itself only: ``parents=True`` makes ``Path.mkdir``
+    recurse into missing parents *without* forwarding the mode, so an unfiltered
+    spy sees those calls too and says nothing about the directory under test.
+    The mode is read positionally as well as by keyword, because the retry that
+    follows creating the parents passes it positionally.
+
+    Compared against a **literal**, never against ``_slot_dir_mode()``: asserting
+    the call site equals the function it calls is a tautology that holds however
+    both change, so re-hardcoding ``mode=0o700`` would still pass everywhere the
+    ACL test is skipped -- which is every POSIX CI runner.
+    """
+    slot = tmp_path / "slots" / "slot-0"
+    expected = 0o777 if os.name == "nt" else 0o700
+    seen: list[int] = []
+    real_mkdir = Path.mkdir
+
+    def spy(self: Path, *args, **kwargs):
+        if self == slot:
+            seen.append(kwargs.get("mode", args[0] if args else 0o777))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", spy)
+    assert headless._seed_slot_config(slot, slot_source)
+    assert seen and all(mode == expected for mode in seen)
+
+
+def _slot_dacl_or_skip(path: Path) -> str:
+    """``path``'s DACL, as SDDL with the leading ``D:`` stripped.
+
+    Splitting on ``D:`` is the load-bearing part, not tidiness.
+    ``Get-Acl().Sddl`` leads with the ``O:`` **owner** field, and a ``0o700``
+    directory is owned by the very user a per-user-ACE assertion would search
+    for -- so testing against the whole descriptor passes with the bug fully
+    present. Only the DACL distinguishes the two cases.
+
+    Skips rather than fails when the descriptor cannot be read at all: an
+    absent PowerShell or a blocking ExecutionPolicy says nothing about the code
+    under test.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop';"
+                "(Get-Acl -LiteralPath $env:SLOT_ACL_PROBE).Sddl",
+            ],
+            capture_output=True, text=True, timeout=120,
+            # Through the environment, not interpolated: a quote or a space in
+            # the temp path would otherwise break the PowerShell literal.
+            env={**os.environ, "SLOT_ACL_PROBE": str(path)},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:  # no PowerShell here
+        pytest.skip(f"cannot read an ACL in this environment: {exc}")
+    if probe.returncode != 0:  # ExecutionPolicy, or Get-Acl refused
+        pytest.skip(f"Get-Acl unavailable: {probe.stderr.strip()[:200]}")
+    sddl = probe.stdout.strip()
+    assert "D:" in sddl, f"no DACL in descriptor: {sddl!r}"
+    return sddl.split("D:", 1)[1]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ACL inheritance is Windows-only")
+def test_a_seeded_slot_does_not_block_acl_inheritance(
+    slot_source: Path, tmp_path: Path
+):
+    """The slot's DACL must not be *protected* -- that flag is the whole defect.
+
+    Asserted on ``D:P`` rather than on a per-user ACE, and on the DACL alone
+    rather than on the whole SDDL. Both traps are real, and both were measured
+    rather than reasoned about:
+
+    - ``Get-Acl().Sddl`` leads with the ``O:`` **owner** field, and a ``0o700``
+      directory is owned by the very user whose SID you would search for -- so
+      ``sid in sddl`` returns ``True`` with the bug fully present. A test
+      written that way passes either way and pins nothing.
+    - The inherited ACE is no better a witness here. ``tmp_path`` lives under
+      pytest's basetemp, which pytest itself creates ``0o700``, so a
+      correctly-inheriting slot inherits only ``OW`` (owner rights) and carries
+      no per-user ACE at all.
+
+    ``D:P`` is the one thing that actually differs: present under ``0o700``,
+    absent when inheritance is left alone.
+    """
+    slot = tmp_path / "slots" / "slot-0"
+    assert headless._seed_slot_config(slot, slot_source)
+    dacl = _slot_dacl_or_skip(slot)
+    assert not dacl.startswith("P"), f"slot DACL blocks inheritance: D:{dacl}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits; Windows has the ACL test")
+def test_a_seeded_slot_is_private_on_posix(slot_source: Path, tmp_path: Path):
+    """``0o700`` must reach the filesystem, not merely be returned.
+
+    The literal assertions above pin what :func:`_slot_dir_mode` *returns*; this
+    pins the directory it produces. It matters most on exactly the platform
+    where the Windows ACL test is skipped -- every POSIX CI runner --
+    because ``cli-config.json`` carries ``authInfo.email`` and ``userId`` and a
+    group- or world-readable slot would widen both.
+    """
+    slot = tmp_path / "slots" / "slot-0"
+    assert headless._seed_slot_config(slot, slot_source)
+    assert slot.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.skipif(os.name != "nt", reason="protected DACLs are Windows-only")
+def test_an_existing_protected_slot_is_not_repaired(
+    slot_source: Path, tmp_path: Path
+):
+    """A known limitation, pinned so it cannot change unnoticed.
+
+    ``mkdir(exist_ok=True)`` ignores the mode for a directory that already
+    exists, so dropping the restrictive mode fixes slots created *from now on*
+    and leaves every existing root exactly as it was. That is why upgrading
+    alone changes nothing on a machine that already has ``~/.cursor-slots``: it
+    must be cleared once, with elevation, because a scheduled task owns what is
+    inside it.
+
+    Asserted rather than merely documented because it cuts both ways. If this
+    test starts failing, seeding has begun repairing ACLs by itself -- which
+    would be welcome, but it would also make the manual cleanup step in
+    ``docs/LLM_PROVIDERS.md`` and the CHANGELOG wrong.
+    """
+    slot = tmp_path / "slots" / "slot-0"
+    slot.mkdir(parents=True, mode=0o700)  # a slot created before the fix
+    assert headless._seed_slot_config(slot, slot_source)
+    assert _slot_dacl_or_skip(slot).startswith("P"), (
+        "an existing slot's protected DACL was repaired; the documented "
+        "one-time cleanup is now stale"
+    )
+
+
 def test_concurrent_slots_are_distinct_and_seeded(tmp_path: Path, slot_source: Path):
     """Four genuinely overlapping workers must get four different directories."""
     seen: list[str] = []
