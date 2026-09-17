@@ -22,7 +22,8 @@ recognise from one sentence: proper nouns, words correctly left in another
 language, archaisms, dialect, source-text artifacts, and grammar rules misfiring
 on Spanish dialogue punctuation.
 
-This is Phase 2 of [`design/quality-automation-plan.md`](design/quality-automation-plan.md).
+This is Phase 2 of `docs/design/quality-automation-plan.md`, which is design
+scratch and deliberately not tracked in the repo.
 
 ## What it does and does not do
 
@@ -69,9 +70,21 @@ python scripts/harness.py config-set --project my-book \
 ## What reaches a prompt
 
 Each item carries the checker, the flagged term, the checker's message, the
-sentence, the LanguageTool `rule_id` for grammar findings, and any glossary
-entries whose Spanish appears in that sentence. A job opens with the book's
-style guide and style rules.
+sentences, the LanguageTool `rule_id` for grammar findings, and any glossary
+entries whose Spanish appears in them. A job opens with the book's style guide
+and style rules.
+
+**One item is one finding, not one occurrence.** A checker reports a repeated
+unknown word once — `'pudín': Unknown word ... (found 3 time(s))` — and the
+normalizer fans it into an entry per occurrence so the reader can highlight each
+span. Those entries share the four fields `issue_key` hashes, so they are a
+single identity to the sidecar, to `_feedback.jsonl` and to all three gates: one
+verdict is all any of them can store. They are collapsed back into one item
+carrying every occurrence's sentence, and the prompt tells the model its single
+verdict covers all of them — suppress only if the term is right in every
+sentence listed. Emitting them separately would put one id in a job twice, which
+`parse_draft` rejects, and would let a verdict formed on one sentence suppress
+occurrences that were never judged.
 
 The sentence comes from the alignment, through the same `attach_text_in_chunk` /
 `row_containing_offset` pair the reader's Review Mode uses. A finding whose
@@ -145,8 +158,8 @@ still loses nothing, and it moves only with a number from this script attached.
 
 **Keep the exam books out.** `wonder-book-of-horses`, `the-little-duke` and
 `bambi-a-life-in-the-woods` are the frozen holdout
-([`design/quality-automation-phase0-progress.md`](design/quality-automation-phase0-progress.md) §4,
-rule 3). Nothing in the code enforces that list; `--exam` excludes them for you.
+(`docs/design/quality-automation-phase0-progress.md` §4, rule 3 — design scratch,
+not tracked). Nothing in the code enforces that list; `--exam` excludes them for you.
 
 A `resolved` finding's word has been fixed out of the chunk, so it no longer
 reproduces against current text. The pre-edit translation is recovered through
@@ -158,7 +171,7 @@ verified is reported as unscoreable rather than guessed at.
 
 | path | what |
 |---|---|
-| `src/triage/findings.py` | collects findings, joins each to its sentence |
+| `src/triage/findings.py` | collects findings, joins each to its sentences |
 | `src/triage/pass_.py` | prepare / fanout / commit |
 | `scripts/run_triage.py` | the CLI |
 | `scripts/replay_triage.py` | calibration and the floor |

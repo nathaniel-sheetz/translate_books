@@ -201,7 +201,8 @@ _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
     "run_dir": "the .harness/triage directory fanout and commit read",
     "run_id": "stamped onto every verdict this run writes, so a bad wave can be found again",
-    "items": "findings to triage, each with the sentence it fired on",
+    "items": "findings to triage, each with every sentence it fired in; a word a "
+    "checker found more than once in a chunk is one finding, not one per occurrence",
     "jobs": "headless processes: items / items_per_job, rounded up",
     "items_per_job": "findings rendered into one prompt",
     "by_eval": "items per checker",
@@ -288,7 +289,10 @@ def prepare(
             job_id = f"job-{n:0{width}d}"
             views = [
                 tfindings.item_prompt_view(
-                    it, glossary_hits_for_sentence(book.get("glossary"), it.get("sentence") or "")
+                    it,
+                    glossary_hits_for_sentence(
+                        book.get("glossary"), "\n".join(it.get("sentences") or ())
+                    ),
                 )
                 for it in batch
             ]

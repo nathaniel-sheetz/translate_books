@@ -26,6 +26,13 @@ ES = (
     "—Audaz, te lo prometo —dijo el duque.\n"
 )
 
+#: One word, three paragraphs — what a checker reports as "(found 3 time(s))".
+REPEATED = (
+    "Fru Astrida cantaba de los Sigfridos antiguos.\n\n"
+    "El niño escuchaba a los Sigfridos en silencio.\n\n"
+    "—Los Sigfridos —dijo el duque, y se durmió.\n"
+)
+
 
 def _chunk(project: Path, chunk_id: str, text: str = ES) -> None:
     (project / "chunks").mkdir(parents=True, exist_ok=True)
@@ -83,6 +90,32 @@ def _ni(eval_name: str, term: str, text: str = ES, *, index: int = 0,
     }
 
 
+def _occurrences(term: str, text: str, *, eval_name: str = "dictionary",
+                 index: int = 0) -> list[dict]:
+    """The entries the normalizer fans one repeated-word finding into.
+
+    They share ``issue_index``, ``severity``, ``message`` and ``location.raw``
+    — the four fields ``issue_key`` hashes — and differ only in the offset,
+    which is exactly the shape the dictionary evaluator produces for a word it
+    found more than once in a chunk.
+    """
+    starts: list[int] = []
+    at = text.find(term)
+    while at >= 0:
+        starts.append(at)
+        at = text.find(term, at + 1)
+    raw = "Character positions: " + ", ".join(str(s) for s in starts)
+    out = []
+    for start in starts:
+        ni = _ni(eval_name, term, text, index=index,
+                 message=f"'{term}': Unknown word (found {len(starts)} time(s))")
+        ni["location"]["raw"] = raw
+        ni["location"]["char_start"] = start
+        ni["location"]["char_end"] = start + len(term)
+        out.append(ni)
+    return out
+
+
 @pytest.fixture
 def book(tmp_path: Path) -> Path:
     project = tmp_path / "bk"
@@ -98,8 +131,10 @@ def test_finding_carries_the_sentence_its_offset_lands_in(book: Path):
     item = items[0]
     assert item["term"] == "Sigfridos"
     # The sentence, not the paragraph before it and not the whole chunk.
-    assert "Sigfridos" in item["sentence"]
-    assert "El niño escuchaba" not in item["sentence"]
+    assert item["occurrences"] == 1
+    assert len(item["sentences"]) == 1
+    assert "Sigfridos" in item["sentences"][0]
+    assert "El niño escuchaba" not in item["sentences"][0]
 
 
 def test_a_second_paragraph_finding_gets_its_own_sentence(tmp_path: Path):
@@ -110,8 +145,8 @@ def test_a_second_paragraph_finding_gets_its_own_sentence(tmp_path: Path):
     _evaluation(project, "chapter_01_chunk_000", [_ni("dictionary", "escuchaba")])
     items, _ = tf.collect_book(project)
     assert len(items) == 1
-    assert "El niño escuchaba" in items[0]["sentence"]
-    assert "Fru Astrida" not in items[0]["sentence"]
+    assert "El niño escuchaba" in items[0]["sentences"][0]
+    assert "Fru Astrida" not in items[0]["sentences"][0]
 
 
 def test_item_id_is_unique_and_carries_its_join_back(book: Path):
@@ -223,7 +258,65 @@ def test_prompt_view_hides_bookkeeping_and_the_checkers_guess(book: Path):
     """The model sees the question, not the sidecar's keys or the checker's fix."""
     items, _ = tf.collect_book(book)
     view = tf.item_prompt_view(items[0], ["spring → manantial"])
-    assert set(view) == {"id", "eval_name", "term", "message", "sentence", "glossary"}
+    assert set(view) == {"id", "eval_name", "term", "message", "sentences", "glossary"}
     assert "issue_key" not in view and "chunk_id" not in view
     assert "suggestion" not in view
     assert view["glossary"] == ["spring → manantial"]
+    assert view["sentences"] == items[0]["sentences"]
+
+
+def test_a_repeated_word_is_one_item_carrying_every_sentence(tmp_path: Path):
+    """The checker reports it once and ``issue_key`` cannot tell the occurrences
+    apart, so the prompt must not ask about it three times.
+
+    Rendering one item per occurrence put the same id in a job more than once,
+    which ``pass_.parse_draft`` rejects, and let a verdict formed on one sentence
+    suppress occurrences the model never saw.
+    """
+    project = tmp_path / "bk"
+    _chunk(project, "chapter_01_chunk_000", REPEATED)
+    _alignment(project, "chapter_01", "chapter_01_chunk_000", REPEATED)
+    _evaluation(project, "chapter_01_chunk_000", _occurrences("Sigfridos", REPEATED))
+    items, _ = tf.collect_book(project)
+    assert len(items) == 1
+    item = items[0]
+    assert item["occurrences"] == 3
+    # Each occurrence's own sentence, not the first one repeated.
+    assert len(item["sentences"]) == len(set(item["sentences"])) == 3
+    assert all("Sigfridos" in sentence for sentence in item["sentences"])
+
+
+def test_every_collected_id_is_unique(tmp_path: Path):
+    """``pass_.parse_draft`` rejects a draft whose ids repeat, so a job that
+    rendered one id twice could never be committed at all."""
+    project = tmp_path / "bk"
+    _chunk(project, "chapter_01_chunk_000", REPEATED)
+    _alignment(project, "chapter_01", "chapter_01_chunk_000", REPEATED)
+    _evaluation(project, "chapter_01_chunk_000",
+                _occurrences("Sigfridos", REPEATED)
+                + [_ni("grammar", "duque", REPEATED, index=1)])
+    items, _ = tf.collect_book(project)
+    ids = [item["id"] for item in items]
+    assert len(ids) == len(set(ids)) == 2
+
+
+def test_a_dismissed_repeated_word_is_one_skip_not_three(tmp_path: Path):
+    """The tally counts findings, not offsets.
+
+    Counting each occurrence made ``skipped.dismissed`` read higher than the
+    number of marks a human had actually made, which is the number the report is
+    there to convey.
+    """
+    from web_ui.evaluations import issue_key
+    project = tmp_path / "bk"
+    _chunk(project, "chapter_01_chunk_000", REPEATED)
+    _alignment(project, "chapter_01", "chapter_01_chunk_000", REPEATED)
+    occurrences = _occurrences("Sigfridos", REPEATED)
+    _evaluation(project, "chapter_01_chunk_000", occurrences)
+    append_feedback(
+        project, "chapter_01_chunk_000", "dictionary", 0, "false_positive",
+        key=issue_key("dictionary", occurrences[0]),
+    )
+    items, skips = tf.collect_book(project)
+    assert items == []
+    assert skips["dismissed"] == 1

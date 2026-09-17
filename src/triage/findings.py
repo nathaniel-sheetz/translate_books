@@ -23,6 +23,15 @@ What is skipped, and why each is skipped rather than guessed at:
 - **Findings on stale chunks whose snippet has moved.** Same rule
   ``_build_chapter_review`` applies: a verdict formed against earlier prose
   cannot vouch for an offset the text has shifted under.
+
+One item is one *finding*, not one occurrence. A checker reports a repeated
+unknown word once — ``'pudín': Unknown word ... (found 3 time(s))`` — and the
+normalizer fans that into an entry per occurrence so the reader can highlight
+each span. Those entries share ``issue_index``, ``severity``, ``message`` and
+``location.raw``, which are the four fields :func:`issue_key` hashes, so they
+are a single identity to the sidecar, to the dismissal corpus, and to all three
+read-time gates. They are collapsed back here, carrying every occurrence's
+sentence, because one verdict is all any of them can ever store.
 """
 
 from __future__ import annotations
@@ -87,11 +96,15 @@ def collect_chapter(
     to write a verdict back:
 
     ``{id, chunk_id, eval_name, issue_index, issue_key, term, rule_id, message,
-    suggestion, match, sentence}``
+    suggestion, match, sentences, occurrences}``
 
     ``id`` is ``<chunk_id>:<eval_name>:<issue_index>:<issue_key>`` — unique
     within a run, and carrying its own join back to the sidecar so a draft that
     answers about the wrong item cannot be silently mis-filed.
+
+    ``sentences`` holds one entry per distinct sentence the finding fired in, in
+    document order, and ``occurrences`` how many offsets it covers. They differ
+    only for a word a checker found more than once in one chunk.
 
     ``skips``, when given, is incremented in place with why findings were passed
     over, so ``prepare`` can report the shape of what it did not send.
@@ -172,6 +185,15 @@ def collect_chapter(
             chunk_mtime=chunk_mtime,
         )
 
+        # Keyed by item id, so the occurrences of one repeated word land on one
+        # item instead of two or three that no key downstream can tell apart.
+        # Emitting them separately put the same id in a prompt more than once,
+        # which `pass_.parse_draft` rejects outright, and left a verdict formed
+        # on one sentence suppressing occurrences that were never judged.
+        by_id: dict[str, dict[str, Any]] = {}
+        ruled: set[str] = set()
+        unanchorable: dict[str, str] = {}
+
         for ni in payload.get("normalized_issues") or []:
             if not isinstance(ni, dict):
                 continue
@@ -186,17 +208,37 @@ def collect_chapter(
                 continue
 
             issue_index = ni.get("issue_index")
+            key = issue_key(eval_name, ni)
+            item_id = f"{chunk_id}:{eval_name}:{issue_index}:{key}"
+
+            existing = by_id.get(item_id)
+            if existing is not None:
+                existing["occurrences"] += 1
+                row = row_containing_offset(crows_sorted, char_start, raw_text)
+                if row is not None and row["text_in_chunk"] not in existing["sentences"]:
+                    existing["sentences"].append(row["text_in_chunk"])
+                continue
+            # Ruled on under an earlier occurrence. The answer cannot change with
+            # the offset, and counting it again would report three skips for one
+            # finding — which is what made `skipped.dismissed` exceed the number
+            # of findings a human has actually marked.
+            if item_id in ruled:
+                continue
+
             if feedback_mark(fb_by_key, fb_by_index, eval_name, issue_index, ni):
                 tally["dismissed"] += 1
+                ruled.add(item_id)
                 continue
             if is_ignored(ignored_terms, eval_name, ni):
                 tally["ignored"] += 1
+                ruled.add(item_id)
                 continue
             # Any standing verdict counts, `keep` included: re-asking a question
             # already answered spends tokens to learn nothing. A re-run that
             # *should* re-ask clears the sidecar first.
             if triage_mark(tr_by_key, eval_name, ni):
                 tally["already_triaged"] += 1
+                ruled.add(item_id)
                 continue
 
             match_text = loc.get("match") or ""
@@ -204,15 +246,14 @@ def collect_chapter(
             if row is not None and (
                 (freshness.get(eval_name) or {}).get("state") == "stale"
             ) and (not match_text or match_text not in row["text_in_chunk"]):
-                tally["stale_moved"] += 1
+                unanchorable[item_id] = "stale_moved"
                 continue
             if row is None:
-                tally["unanchored"] += 1
+                unanchorable[item_id] = "unanchored"
                 continue
 
-            key = issue_key(eval_name, ni)
-            items.append({
-                "id": f"{chunk_id}:{eval_name}:{issue_index}:{key}",
+            by_id[item_id] = {
+                "id": item_id,
                 "chunk_id": chunk_id,
                 "eval_name": eval_name,
                 "issue_index": issue_index,
@@ -222,8 +263,18 @@ def collect_chapter(
                 "message": ni.get("message") or "",
                 "suggestion": ni.get("suggestion"),
                 "match": match_text,
-                "sentence": row["text_in_chunk"],
-            })
+                "sentences": [row["text_in_chunk"]],
+                "occurrences": 1,
+            }
+
+        # Deliberately after the loop: a later occurrence of the same word may
+        # anchor where an earlier one could not, so the skip is only real for an
+        # id that never produced an item.
+        for item_id, reason in unanchorable.items():
+            if item_id not in by_id:
+                tally[reason] += 1
+
+        items.extend(by_id.values())
 
     return items
 
@@ -264,7 +315,7 @@ def item_prompt_view(item: dict[str, Any], glossary: Optional[list[str]] = None)
         "eval_name": item["eval_name"],
         "term": item.get("term") or "",
         "message": item.get("message") or "",
-        "sentence": item.get("sentence") or "",
+        "sentences": list(item.get("sentences") or ()),
     }
     if item.get("rule_id"):
         view["rule_id"] = item["rule_id"]
