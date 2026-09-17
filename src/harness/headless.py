@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -79,6 +80,12 @@ _CLI_JOB_TIMEOUT_S = {
     "claude": 30 * 60,
     "cursor": 15 * 60,
 }
+
+# After a timed-out worker's tree is killed, how long to wait for its pipes to
+# drain. Bounded on purpose: an *unbounded* drain is the bug this replaces.
+_DRAIN_TIMEOUT_S = 10
+# Ceiling on the tree-kill call itself, so cleanup cannot become the new hang.
+_TREE_KILL_TIMEOUT_S = 15
 
 # Claude Code worker aliases that look wrong when paired with headless_cli=cursor.
 _CLAUDE_WORKER_ALIASES = frozenset({"sonnet", "opus", "haiku", "fable"})
@@ -456,18 +463,25 @@ def with_cursor_effort(model: str | None, effort: str | None) -> str:
 
 
 def _cursor_known_models(
-    cli_bin: str, *, probe: AuthProber | None = None, timeout: float = 30.0
+    cli_bin: str,
+    *,
+    probe: AuthProber | None = None,
+    timeout: float = 30.0,
+    env: Mapping[str, str] | None = None,
 ) -> set[str]:
     """Ids from ``cursor-agent models``; empty set when it cannot be read.
 
     The list is **incomplete** — see :func:`cursor_model_error` — so an empty
     result and a missing id are treated the same way: not evidence of anything.
+
+    ``env`` defaults to the scrubbed shared environment; pass an isolated one
+    wherever a wave's per-worker config dirs are in play.
     """
     runner = probe if probe is not None else _default_auth_prober
     try:
         rc, stdout, _stderr = runner(
             [cli_bin, "models"],
-            env=subscription_env("cursor"),
+            env=env if env is not None else subscription_env("cursor"),
             cwd=neutral_claude_cwd(),
             timeout=timeout,
         )
@@ -492,6 +506,7 @@ def cursor_model_error(
     *,
     probe: AuthProber | None = None,
     timeout: float = 30.0,
+    env: Mapping[str, str] | None = None,
 ) -> str | None:
     """Return why ``cursor-agent`` would reject ``model``, or ``None`` to proceed.
 
@@ -512,11 +527,19 @@ def cursor_model_error(
 
     Fails **open** on every other outcome — an unavailable, slow, or restructured
     CLI must never be the thing that blocks a working wave.
+
+    ``env`` is the child environment for both probes. Pass an isolated one: the
+    second probe's argv is the same shape a worker job runs, so against the
+    operator's own ``~/.cursor`` it can rewrite ``selectedModel`` — the very
+    mutation per-worker config dirs exist to prevent. It defaults to the scrubbed
+    shared env, which is right for a bare read like
+    :func:`worker_model_suggestions`.
     """
+    probe_env = env if env is not None else subscription_env("cursor")
     base = _cursor_model_base(model)
     if not base:
         return None
-    known = _cursor_known_models(cli_bin, probe=probe, timeout=timeout)
+    known = _cursor_known_models(cli_bin, probe=probe, timeout=timeout, env=probe_env)
     # A listed base id proves the *id* is valid, but a bracket suffix can still
     # be rejected (``gpt-5.2[effort=bogus]``). Only skip the CLI probe when the
     # argv has no parameters to validate.
@@ -530,7 +553,7 @@ def cursor_model_error(
     ]
     try:
         _rc, stdout, stderr = runner(
-            argv, env=subscription_env("cursor"), cwd=neutral_claude_cwd(), timeout=timeout
+            argv, env=probe_env, cwd=neutral_claude_cwd(), timeout=timeout
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -592,16 +615,154 @@ def neutral_claude_cwd() -> Path:
 # would mean handling torn reads, and one cold refetch per slot is cheaper than
 # that -- so the first wave after this change looks a little slower, once.
 
-_SLOT_ROOT_NAME = "cursor-headless-slots"
+_SLOT_ROOT_NAME = ".cursor-slots"
 _CURSOR_CONFIG_DIR_VAR = "CURSOR_CONFIG_DIR"
+_SLOT_ROOT_VAR = "HEADLESS_SLOT_ROOT"
+
+# ``cursor-agent`` writes its chat state *inside* CURSOR_CONFIG_DIR, at
+# ``chats/<32-hex>/<uuid>/store.db`` (plus ``-wal``, ``-shm``) -- 118 characters
+# below the slot, measured. Windows caps a path at 260 unless the writing binary
+# opts in via a ``longPathAware`` manifest, and node/sqlite do not for these
+# writes, so ``LongPathsEnabled=1`` does not rescue it. Past that budget every
+# long job dies with rc=124 and a *Cursor endpoint* reconnect message that reads
+# exactly like a provider outage: 4 of 4 long jobs failed under a 261-character
+# root and 2 of 2 passed at 139 -- same target, same model, same effort. Short
+# jobs pass either way, which is what makes it so misleading; a 10.5 s probe
+# succeeded while every real job was failing. 120 leaves margin over the 118.
+_SLOT_PATH_BUDGET = 120
+_SLOT_CHILD_OVERHEAD = 118
+
+# How many indices a worker may walk past before it gives up on isolation.
+_SLOT_SEED_ATTEMPTS = 8
 
 _slot_lock = threading.Lock()
 _slot_free: list[int] = []
 _slot_high = 0
+# Indices whose directory could not be seeded. Never returned to the free list:
+# a scheduled task running under another identity leaves ``slot-0..N`` owned by
+# someone this user can neither read nor delete, and recycling such an index
+# would make every job retry it forever.
+_slot_poisoned: set[int] = set()
+# Per-wave isolation tally, so a wave that quietly lost isolation says so.
+_slot_stats = {"seeded": 0, "unseeded": 0}
+_slot_first_error: str | None = None
 # The slot the calling thread currently holds. A thread-local rather than an
 # argument because the runner seam is ``(cmd, *, input_text, cwd)`` and a job's
 # env must not become part of it -- every test stub implements that signature.
 _slot_current = threading.local()
+
+
+def _slot_root() -> Path:
+    """Where per-worker Cursor config slots live.
+
+    Under the user's home rather than ``_temp_root()``, which buys two distinct
+    properties the temp root could not (2026-09-16 field findings, issues 2-3):
+
+    - **Per-user by construction.** The slot root used to sit under the *shared*
+      temp root, so a scheduled task running under another identity created
+      ``slot-0..N`` first, with an ACL the interactive user could neither read
+      nor delete. Every interactive wave that day then allocated slot-0, failed
+      to seed it, and silently ran unisolated.
+    - **Short.** See :data:`_SLOT_PATH_BUDGET`. ``%TEMP%`` is already deep on
+      Windows and an agent session can point it deeper still -- the root that
+      broke this was 261 characters.
+
+    ``HEADLESS_SLOT_ROOT`` overrides it, and is validated like any other root.
+    The override is resolved to an absolute path before use: a relative value
+    would otherwise pass the character budget as a handful of characters and
+    then expand against cwd into the deep path the budget exists to refuse.
+
+    The trade is that slots are no longer swept by the OS. They hold one small
+    JSON each and the free list bounds their count to the widest wave this
+    process has run, so the cost is fixed and small -- and stable paths are
+    exactly what let each slot's statsig cache survive between waves.
+    """
+    override = (os.environ.get(_SLOT_ROOT_VAR) or "").strip()
+    root = Path(override) if override else Path.home() / _SLOT_ROOT_NAME
+    return root.expanduser().resolve()
+
+
+def _slot_path_error(root: Path) -> str | None:
+    """Why this slot root would kill every long Cursor job, or ``None``.
+
+    Checked before anything spawns rather than discovered from the failures: the
+    symptom names Cursor's own endpoint, so it reads as a provider outage and
+    costs hours to tell apart from one.
+    """
+    length = len(str(root))
+    if length <= _SLOT_PATH_BUDGET:
+        return None
+    return (
+        f"slot root is {length} characters, over the {_SLOT_PATH_BUDGET}-character "
+        f"budget ({root}). cursor-agent writes chats/<id>/<uuid>/store.db-wal about "
+        f"{_SLOT_CHILD_OVERHEAD} characters below it, which would cross the "
+        f"260-character Windows path limit and kill every long job with rc=124 and a "
+        f"Cursor reconnect message that looks like a provider outage. Set "
+        f"{_SLOT_ROOT_VAR} to a shorter path."
+    )
+
+
+def _reset_slot_stats() -> None:
+    """Clear the per-wave isolation tally. Called once, just before the pool."""
+    global _slot_first_error
+    with _slot_lock:
+        _slot_stats["seeded"] = 0
+        _slot_stats["unseeded"] = 0
+        _slot_first_error = None
+
+
+def _note_slot_error(path: Path, exc: OSError) -> None:
+    """Record why a slot could not be seeded, and warn once per wave.
+
+    Failing open is right; failing open *quietly* is what turned a one-line
+    problem into a two-hour investigation, because a wave with isolation working
+    and one with it disabled were byte-identical from the outside.
+
+    ``path`` is whichever file actually failed -- the destination slot, or the
+    operator's source ``cli-config.json``. Naming the slot for a missing *source*
+    sent the reader looking at a directory that was never the problem.
+    """
+    global _slot_first_error
+    detail = f"{path}: [{exc.errno}] {exc.strerror or exc}"
+    with _slot_lock:
+        first = _slot_first_error is None
+        if first:
+            _slot_first_error = detail
+    if first:
+        logger.warning("cursor slot could not be seeded (%s); failing open", detail)
+
+
+def _count_slot(seeded: bool) -> None:
+    with _slot_lock:
+        _slot_stats["seeded" if seeded else "unseeded"] += 1
+
+
+def _slot_tally() -> str | None:
+    """``"n/N"`` isolated workers for the usage rollup, or ``None`` if no slots."""
+    with _slot_lock:
+        seeded, unseeded = _slot_stats["seeded"], _slot_stats["unseeded"]
+    total = seeded + unseeded
+    return f"{seeded}/{total}" if total else None
+
+
+def _take_slot() -> int:
+    global _slot_high
+    with _slot_lock:
+        if _slot_free:
+            return _slot_free.pop()
+        index, _slot_high = _slot_high, _slot_high + 1
+        return index
+
+
+def _retire_slot(index: int) -> None:
+    """Retire a poisoned index rather than freeing it (see ``_slot_poisoned``)."""
+    with _slot_lock:
+        _slot_poisoned.add(index)
+
+
+def _release_slot(index: int) -> None:
+    with _slot_lock:
+        _slot_free.append(index)
 
 
 def _cursor_config_dir(env: Mapping[str, str]) -> Path:
@@ -646,12 +807,15 @@ def _seed_slot_config(slot_dir: Path, source_dir: Path) -> bool:
     dest = slot_dir / "cli-config.json"
     try:
         src_stat = source.stat()
-    except OSError:
+    except OSError as exc:
+        _note_slot_error(source, exc)
         return False
+    staged = slot_dir / f"cli-config.json.{os.getpid()}.tmp"
     try:
-        # 0o700: cli-config.json carries authInfo.email and userId, and on POSIX
-        # the temp root is shared. This module already withholds that email from
-        # probe output; a world-readable copy would widen it straight back.
+        # 0o700: cli-config.json carries authInfo.email and userId. Under the
+        # home root that is belt-and-braces rather than load-bearing, but this
+        # module already withholds that email from probe output and a
+        # world-readable copy would widen it straight back.
         slot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             if dest.stat().st_mtime >= src_stat.st_mtime:
@@ -660,12 +824,17 @@ def _seed_slot_config(slot_dir: Path, source_dir: Path) -> bool:
             pass  # not seeded yet
         # Write a sibling and rename over the target -- the same shape the CLI
         # itself uses, so two processes seeding one slot cannot tear the file.
-        staged = slot_dir / f"cli-config.json.{os.getpid()}.tmp"
         shutil.copy2(source, staged)
         os.replace(staged, dest)
         return True
-    except OSError:
+    except OSError as exc:
+        _note_slot_error(slot_dir, exc)
         return False
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @contextmanager
@@ -679,23 +848,42 @@ def _cursor_slot(source_dir: Path) -> Iterator[None]:
     bounds the directories to the widest wave this process has run and keeps
     their paths stable, which is what lets the statsig cache survive between
     waves.
+
+    On a seed failure the loop **advances** to the next index rather than
+    yielding an unisolated slot, and retires the bad one. Scoping the root per
+    user (:func:`_slot_root`) fixes the collision that actually reproduced here;
+    advancing self-heals whatever it does not catch -- a stale elevated run, a
+    changed ACL -- at a cost of one leaked directory per poisoned index, paid
+    once per process rather than once per job.
+
+    A missing **source**, though, is not a poisoned slot, and advancing cannot
+    help: the file is absent at the same path on every attempt, so the loop would
+    burn :data:`_SLOT_SEED_ATTEMPTS` indices per spawn and blame a destination
+    that was never at fault. Checked once, up front, and failed open.
     """
-    global _slot_high
-    with _slot_lock:
-        if _slot_free:
-            index = _slot_free.pop()
-        else:
-            index, _slot_high = _slot_high, _slot_high + 1
+    index: int | None = None
+    slot_dir: Path | None = None
+    source = source_dir / "cli-config.json"
     try:
-        slot_dir = _temp_root() / _SLOT_ROOT_NAME / f"slot-{index}"
-        _slot_current.dir = (
-            slot_dir if _seed_slot_config(slot_dir, source_dir) else None
-        )
+        source.stat()
+    except OSError as exc:
+        _note_slot_error(source, exc)
+    else:
+        for _ in range(_SLOT_SEED_ATTEMPTS):
+            candidate = _take_slot()
+            candidate_dir = _slot_root() / f"slot-{candidate}"
+            if _seed_slot_config(candidate_dir, source_dir):
+                index, slot_dir = candidate, candidate_dir
+                break
+            _retire_slot(candidate)
+    try:
+        _slot_current.dir = slot_dir
+        _count_slot(slot_dir is not None)
         yield
     finally:
         _slot_current.dir = None
-        with _slot_lock:
-            _slot_free.append(index)
+        if index is not None:
+            _release_slot(index)
 
 
 def _slot_env(cli: str, env: Mapping[str, str]) -> Mapping[str, str]:
@@ -711,6 +899,128 @@ def _slot_env(cli: str, env: Mapping[str, str]) -> Mapping[str, str]:
     return {**env, _CURSOR_CONFIG_DIR_VAR: str(slot)}
 
 
+def _close_streams(proc: subprocess.Popen) -> None:
+    """Drop the pipes without waiting on whoever still holds the other end."""
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill the worker *and its children*, not just the wrapper.
+
+    ``cursor-agent`` resolves to ``cursor-agent.CMD``, which spawns ``node``.
+    Killing only the wrapper leaves node alive holding the inherited stdout and
+    stderr handles -- both halves of the 2026-09-16 findings: the drain then
+    blocks for two to three times the job budget, and the worker sits orphaned in
+    its reconnect loop with nothing left to collect its output. By then its
+    parent chain reads ``powershell.exe:<pid> <- (gone)``, so a later sweep keyed
+    on a live parent does not find it. It has to die with the wave.
+    """
+    try:
+        if os.name == "nt":
+            # ``/T`` walks the tree from this pid, which is still intact here:
+            # the orphaning only happens once the parent is gone.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=_TREE_KILL_TIMEOUT_S,
+            )
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()  # last resort, and the direct child only
+    except OSError:
+        pass
+
+
+# Every live child this process has spawned -- workers and preflight probes alike.
+#
+# ``KeyboardInterrupt`` is delivered to the **main** thread only, so the
+# ``except BaseException`` guarding a spawn can never see the operator's Ctrl-C:
+# the ``Popen`` it guards lives in a pool thread. Without a registry the
+# interrupting thread holds no handle on the processes it needs to kill, and
+# ``ThreadPoolExecutor.__exit__`` then waits out every in-flight job -- up to
+# ``concurrency`` x the 900 s Cursor ceiling, spent on a wave nobody is left to
+# collect.
+_live_procs: set[subprocess.Popen] = set()
+_live_procs_lock = threading.Lock()
+
+
+@contextmanager
+def _tracked(proc: subprocess.Popen) -> Iterator[subprocess.Popen]:
+    """Register ``proc`` as killable by :func:`_kill_live_processes`."""
+    with _live_procs_lock:
+        _live_procs.add(proc)
+    try:
+        yield proc
+    finally:
+        with _live_procs_lock:
+            _live_procs.discard(proc)
+
+
+def _kill_live_processes() -> int:
+    """Tree-kill every spawn still running; returns how many there were.
+
+    Called from the interrupting thread, which is never the thread blocked in
+    ``communicate()``. Killing the tree is also what makes the pool's own
+    ``shutdown(wait=True)`` cheap: each worker's drain returns at once instead of
+    holding the wave open for the rest of its budget.
+    """
+    with _live_procs_lock:
+        procs = list(_live_procs)
+    for proc in procs:
+        _kill_process_tree(proc)
+    return len(procs)
+
+
+def _communicate_bounded(
+    proc: subprocess.Popen, input_text: str | None, timeout: float | None
+) -> tuple[int, str, str, bool]:
+    """``proc.communicate`` with a post-kill drain that cannot outlive the kill.
+
+    Shared by the worker launcher and the preflight prober, because both hit the
+    same stdlib defect: ``subprocess.run`` kills only the direct child and then,
+    on Windows, calls ``communicate()`` a second time with **no timeout** (see
+    the ``_mswindows`` branch of CPython's ``subprocess.run``). ``cursor-agent``
+    resolves to ``cursor-agent.CMD``, which spawns ``node``, so killing the
+    wrapper leaves node holding the inherited handles and that second drain
+    blocks until node exits on its own -- observed wall times of 1253, 1293 and
+    1977 s against a 900 s ceiling.
+
+    Returns ``(rc, stdout, stderr, timed_out)``. The caller decides what a
+    timeout means: a 124 row for a worker, a raised ``TimeoutExpired`` for a
+    probe whose callers already branch on that.
+    """
+    try:
+        stdout, stderr = proc.communicate(input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        out = err = ""
+        try:
+            out, err = proc.communicate(timeout=_DRAIN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # Something the tree kill missed still holds the pipes. Abandon them
+            # rather than block the wave: this bound is the whole difference
+            # between a 900 s ceiling and a 1977 s one.
+            _close_streams(proc)
+        return 124, out or "", err or "", True
+    except BaseException:
+        # An interrupt raised *in this thread* -- never the operator's Ctrl-C,
+        # which is why ``_live_procs`` exists -- must not leave the child behind.
+        _kill_process_tree(proc)
+        raise
+    return proc.returncode, stdout or "", stderr or "", False
+
+
 def default_claude_runner(
     cmd: list[str],
     *,
@@ -724,27 +1034,37 @@ def default_claude_runner(
 
     ``env`` defaults to ``subscription_env(cli)`` rather than to inheritance.
     Callers that pass an explicit ``env=`` own that mapping unchanged.
+
+    Deliberately ``Popen`` rather than ``subprocess.run``: ``run`` enforces a
+    timeout that this wave could not rely on -- see :func:`_communicate_bounded`,
+    which owns that reasoning and is shared with the preflight prober. The
+    ``Popen`` is registered in :data:`_live_procs` for the whole call, so an
+    operator's Ctrl-C on the main thread can kill this worker even though the
+    interrupt never reaches the thread blocked here.
     """
     child_env = dict(env) if env is not None else subscription_env(cli)
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=input_text,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=timeout,
-            env=child_env,
-        )
-    except subprocess.TimeoutExpired as exc:
+    popen_kwargs: dict[str, Any] = {}
+    if os.name != "nt":
+        # Its own process group, so the whole tree can be signalled at once.
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(cwd),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=child_env,
+        **popen_kwargs,
+    )
+    with _tracked(proc):
+        rc, stdout, stderr, timed_out = _communicate_bounded(proc, input_text, timeout)
+    if timed_out:
         detail = f"timeout after {timeout:g}s"
-        err = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        return 124, out, (err.strip() or detail)
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+        return 124, stdout, (stderr.strip() or detail)
+    return rc, stdout, stderr
 
 
 def _normalize_cli(cli: str) -> str:
@@ -830,18 +1150,45 @@ _AUTH_PROBE_TIMEOUT_S = 30.0
 def _default_auth_prober(
     argv: list[str], *, env: Mapping[str, str], cwd: Path | str, timeout: float
 ) -> tuple[int, str, str]:
-    proc = subprocess.run(
+    """Run one preflight probe under the same bounded-drain rules as a worker.
+
+    Not ``subprocess.run``, for the reason :func:`_communicate_bounded` gives.
+    Three probes run before a wave -- ``status``, ``models``, and the empty-stdin
+    ``--model`` check -- and a hung one used to block the wave with no bound at
+    all: the ``TimeoutExpired`` handler in :func:`subscription_auth_error` can
+    never be reached while ``run`` is stuck inside that unbounded drain, so the
+    30 s ceiling those callers document was not real on Windows.
+
+    Raises ``TimeoutExpired`` rather than returning 124, so every caller keeps
+    the semantics it already documents: :func:`subscription_auth_error` fails
+    closed with a "timed out" message, :func:`cursor_model_error` fails open.
+
+    stdin is an explicitly closed pipe rather than the inherited handle, which is
+    what :func:`cursor_model_error` means by "an empty stdin": a probe can no
+    longer block reading from whatever the parent happened to be attached to.
+    """
+    popen_kwargs: dict[str, Any] = {}
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
         argv,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(cwd),
         text=True,
         encoding="utf-8",
         errors="replace",
-        check=False,
-        timeout=timeout,
-        cwd=str(cwd),
         env=dict(env),
+        **popen_kwargs,
     )
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+    with _tracked(proc):
+        rc, stdout, stderr, timed_out = _communicate_bounded(proc, "", timeout)
+    if timed_out:
+        raise subprocess.TimeoutExpired(
+            cmd=argv, timeout=timeout, output=stdout, stderr=stderr
+        )
+    return rc, stdout, stderr
 
 
 def _cursor_auth_error(cli_bin: str, obj: dict[str, Any]) -> str | None:
@@ -1028,12 +1375,26 @@ def preflight_error(
     )
     if auth_error:
         return auth_error
+    # Same gate the wave applies, hoisted for the same reason as the others: a
+    # slot root over budget kills every long job with a message that reads as a
+    # provider outage, and the dashboard should catch that before it spends.
+    if cli_name == "cursor":
+        path_error = _slot_path_error(_slot_root())
+        if path_error is not None:
+            return path_error
     # Third gate, same order `run_headless_wave` applies it in (after auth, so a
     # logged-out CLI is reported as logged out rather than as a model problem).
     # Token-free and fails open in every direction, so hoisting it can only turn
     # "the job died after prepare" into "the estimate never went green".
     if cli_name == "cursor" and model:
-        return cursor_model_error(resolved, model)
+        # Through an isolated config dir, for the reason the wave gives at its
+        # own model gate: this probe spawns a worker-shaped `-p --model` argv,
+        # and the dashboard calls it against the operator's live Cursor config.
+        probe_env = subscription_env(cli_name)
+        with _cursor_slot(_cursor_config_dir(probe_env)):
+            return cursor_model_error(
+                resolved, model, env=dict(_slot_env(cli_name, probe_env))
+            )
     return None
 
 
@@ -1347,6 +1708,13 @@ def run_headless_wave(
         if cli_name == "cursor" and runner is None
         else None
     )
+    # Refuse a root that would kill every long job, before anything spawns. The
+    # symptom names Cursor's own endpoint, so left to the jobs it reads as a
+    # provider outage rather than as a path length.
+    if slot_source is not None:
+        slot_path_error = _slot_path_error(_slot_root())
+        if slot_path_error is not None:
+            return _error_result(slot_path_error, cwd)
     if runner is None:
         def run(cmd: list[str], *, input_text: str, cwd: Path) -> tuple[int, str, str]:
             # The slot is held only across the subprocess call -- precisely the
@@ -1392,9 +1760,16 @@ def run_headless_wave(
     # fan-out must stay a pure no-op, right down to not creating a slot.
     probe_env = wave_env
     if jobs and slot_source is not None:
-        slot_zero = _temp_root() / _SLOT_ROOT_NAME / "slot-0"
-        if _seed_slot_config(slot_zero, slot_source):
-            probe_env = {**wave_env, _CURSOR_CONFIG_DIR_VAR: str(slot_zero)}
+        # Snapshot a seeded slot's env the same way a worker would, then release
+        # the slot back to the free list *before* the probe runs. The directory
+        # stays on disk, so auth still sees the seeded copy; holding the index
+        # through a 30s probe would just pin it for no reason. It used to seed
+        # ``slot-0`` by hand and fall through on failure -- and slot-0 is
+        # precisely the index a foreign-owned directory poisons, so the probe
+        # silently ran on the shared config exactly when isolation was broken,
+        # proving nothing about the directory the workers would actually use.
+        with _cursor_slot(slot_source):
+            probe_env = dict(_slot_env(cli_name, wave_env))
     if jobs and (prober is not None or runner is None):
         auth_error = subscription_auth_error(
             cli_name, cli_bin, probe_env, cwd=cwd, prober=prober
@@ -1405,7 +1780,12 @@ def run_headless_wave(
         # checks are token-free and fail open, so this can only ever convert N
         # identical failures into one message with zero spawns.
         if cli_name == "cursor":
-            model_error = cursor_model_error(cli_bin, model, probe=prober)
+            # Through the same seeded slot the auth probe used: this spawn's argv
+            # has a worker job's shape, so on the shared config it could rewrite
+            # the operator's own selectedModel.
+            model_error = cursor_model_error(
+                cli_bin, model, probe=prober, env=probe_env
+            )
             if model_error:
                 return _error_result(f"model preflight failed: {model_error}", cwd)
 
@@ -1475,6 +1855,7 @@ def run_headless_wave(
                 error=detail,
                 effort=effort_label,
                 cache=cache_label,
+                timed_out=rc == 124,
             )
 
         try:
@@ -1516,6 +1897,7 @@ def run_headless_wave(
             return job_id, False, detail, _record(detail)
 
     records: list[dict[str, Any]] = []
+    booked: set[str] = set()
     wave_started = time.monotonic()
     done_count = 0
 
@@ -1544,6 +1926,12 @@ def run_headless_wave(
     def _collect(outcome: tuple[str, bool, str, dict[str, Any]]) -> None:
         nonlocal done_count
         job_id, ok, detail, record = outcome
+        # Idempotent: the interrupt path re-walks every done future, including
+        # ones ``as_completed`` already booked. A second pass would duplicate
+        # ``wrote``/``failed`` and punch a second row into ``usage.jsonl``.
+        if job_id in booked:
+            return
+        booked.add(job_id)
         if ok:
             wrote.append(job_id)
         else:
@@ -1570,23 +1958,63 @@ def run_headless_wave(
     # which was 31% of worker time across 230 rebuilt Cursor judge groups.
     # Guarded on ``jobs`` because ``max_workers=0`` is a ValueError, and an
     # empty fan-out must stay the idempotent no-op callers rely on.
+    # After the preflight, which takes a slot of its own and must not count as a
+    # worker in the tally below.
+    _reset_slot_stats()
     if jobs:
         with ThreadPoolExecutor(max_workers=min(concurrency, len(jobs))) as pool:
-            start = 0
-            if use_warm_first and len(jobs) > 1 and concurrency > 1:
-                _collect(pool.submit(_run_one, jobs[0], _warm_label(0)).result())
-                start = 1
-            futures = [
-                pool.submit(_run_one, job, _warm_label(start + offset))
-                for offset, job in enumerate(jobs[start:])
-            ]
+            # Everything submitted but not yet handed to ``_collect``. The except
+            # path below reads it, so the warm-up belongs inside the ``try`` too:
+            # an interrupt during that one job used to reach no cleanup at all.
+            futures: list[Any] = []
             try:
+                start = 0
+                if use_warm_first and len(jobs) > 1 and concurrency > 1:
+                    warm = pool.submit(_run_one, jobs[0], _warm_label(0))
+                    futures.append(warm)
+                    outcome = warm.result()
+                    futures.clear()  # collected here, not by the except path
+                    _collect(outcome)
+                    start = 1
+                futures = [
+                    pool.submit(_run_one, job, _warm_label(start + offset))
+                    for offset, job in enumerate(jobs[start:])
+                ]
                 for fut in as_completed(futures):
                     _collect(fut.result())
             except BaseException:
-                # The whole wave is queued up front now, so without this an
-                # interrupt would let the entire backlog run on spending tokens.
+                # Three steps, in this order, and none of them is optional.
+                #
+                # Cancelling drops the queued backlog -- the whole wave is queued
+                # up front, so without it an interrupt lets every remaining job
+                # run on spending tokens. Killing the live children is the part
+                # the operator's Ctrl-C cannot do for itself: KeyboardInterrupt
+                # reaches only this thread, while the Popens live in the pool's,
+                # so the per-spawn cleanup never fires. And the explicit wait is
+                # then cheap, where ``__exit__``'s own ``shutdown(wait=True)``
+                # would otherwise sit out every in-flight job -- measured at a
+                # full extra job's wall, and up to the CLI's 900 s ceiling each.
                 pool.shutdown(wait=False, cancel_futures=True)
+                _kill_live_processes()
+                pool.shutdown(wait=True)
+                # A job that finished already wrote its draft. Collect what
+                # landed rather than dropping it from `wrote`/`failed` and from
+                # usage.jsonl, which is an A/B corpus a killed wave must not
+                # silently punch holes in.
+                for fut in futures:
+                    if not fut.done() or fut.cancelled():
+                        continue
+                    # ``exception()`` rather than a try around ``result()``: a
+                    # job that died of the interrupt itself raises BaseException,
+                    # which would escape an ``except Exception`` here and abandon
+                    # every future after it -- losing the rows this loop exists
+                    # to save.
+                    if fut.exception() is not None:
+                        continue
+                    try:
+                        _collect(fut.result())
+                    except Exception:  # noqa: BLE001 - never mask the interrupt
+                        logger.exception("could not collect a job after an interrupt")
                 raise
 
     out: dict[str, Any] = {
@@ -1601,7 +2029,18 @@ def run_headless_wave(
         },
     }
     usage_summary = rollup(records)
+    tally = _slot_tally() if slot_source is not None else None
+    if usage_summary is None and tally is not None:
+        # ``rollup`` is None when no job reported tokens -- an all-failed or
+        # all-timed-out wave. That is precisely the wave whose isolation tally
+        # matters most, so give it a summary of its own rather than dropping the
+        # signal in exactly the failure shape it was added to make audible.
+        usage_summary = {}
     if usage_summary is not None:
         usage_summary["wall_s"] = round(time.monotonic() - wave_started, 1)
+        # How many workers actually got isolation. Without this a wave that lost
+        # it is indistinguishable from one that kept it.
+        if tally is not None:
+            usage_summary["slots_seeded"] = tally
         out["usage"] = usage_summary
     return out

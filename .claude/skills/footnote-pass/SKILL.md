@@ -277,7 +277,9 @@ On **Cursor + Windows**, a job failing with
 `EPERM: operation not permitted, rename '…\.cursor\cli-config.json…'` is concurrent
 `cursor-agent` processes racing that one file, not a rate limit. **Since 0.59.3.0 this
 should no longer happen** — each worker gets its own `CURSOR_CONFIG_DIR` — so treat a
-recurrence as a bug worth reporting rather than something to work around. The recovery,
+recurrence as a bug worth reporting rather than something to work around. The wave's
+usage rollup reports `slots_seeded: "n/N"`; anything below `N/N` means workers lost
+that isolation and the race is possible again. The recovery,
 if you ever need it: re-run just the failed ids at `--concurrency 1`
 (`scan-fanout --target-ids chapter_34 --concurrency 1`). Never re-`scan-prepare` to
 recover — that is destructive.
