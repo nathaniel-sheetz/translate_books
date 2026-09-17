@@ -151,6 +151,13 @@ the same reason.
 The last row is the point: a filter nobody can question is a filter nobody
 should trust. A human mark always beats a machine one.
 
+That row needs a way in, so `auto_suppressed` is its own checkbox in the status
+filter, carrying its own total, and each chapter shows a muted **N filtered out**
+chip beside the "N dealt with" one. The two are deliberately separate: one is
+what you decided, the other is what a model decided for you. Both counts are
+occurrence rows, as every chapter chip is, so a repeated word one verdict covers
+reads as the number of places it occurs.
+
 ## Calibration — the part that decides whether to trust it
 
 ```bash

@@ -198,6 +198,19 @@
     font-style: italic;
 }
 
+/* Reads as history, because that is what it is: a finding something has already
+   ruled on. It takes no colour of its own for the reason stated above -- nine
+   coloured statuses are a legend to memorise, and only `fixed`/`applied` earn
+   one because they say the book changed. A machine filter did not change the
+   book. The dotted rule is what separates it from the history chip beside it
+   without spending a colour to do it. */
+.rec-chip-suppressed {
+    background: transparent;
+    color: var(--text-muted6);
+    font-style: italic;
+    border-bottom: 1px dotted var(--text-muted6);
+}
+
 .rec-summary-history {
     color: var(--text-muted6);
 }

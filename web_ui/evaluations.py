@@ -1359,14 +1359,45 @@ def load_chapter_type_counts(
             return by_chapter.setdefault(chapter_id, {
                 "open": empty_type_counts(),
                 "history": empty_type_counts(),
+                "suppressed": empty_type_counts(),
                 "by_status": {},
             })
         return by_chapter.setdefault(chapter_id, empty_type_counts())
 
-    def _count(bucket: dict, eval_name: str, mark: Optional[dict[str, Any]]) -> None:
-        """One finding into its bucket, split by whether it carries a mark."""
+    def _count(
+        bucket: dict,
+        eval_name: str,
+        mark: Optional[dict[str, Any]],
+        triage: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """One finding into its bucket, split by who ruled on it and how.
+
+        Three buckets, not two. A human mark and a machine suppression both mean
+        "not outstanding", but folding them together would put a model's verdict
+        into the same muted count as a decision you made, and telling those apart
+        is what the recommendations screen is for.
+
+        ``by_status`` is what gives ``auto_suppressed`` its own filter checkbox:
+        :func:`app._recommendation_shell` drops a status with no total from the
+        row entirely, so while a suppressed finding landed in ``open`` the page
+        offered no way to see -- or to exclude -- what the filter had taken, and
+        counted 104 hidden findings as outstanding work.
+
+        A human mark wins over a machine verdict, matching the card in
+        ``app._finding_card``: you ruling on a finding settles it, whatever a
+        model said first. Only a ``suppress`` at or above the floor counts as
+        suppression -- :func:`triage_hides` is the single definition of that
+        question, so a ``keep`` or a low-confidence suppress stays ``open``,
+        exactly as it stays visible.
+        """
         if not statuses:
             bucket[eval_name] += 1
+            return
+        if mark is None and triage_hides(triage):
+            bucket["suppressed"][eval_name] += 1
+            bucket["by_status"]["auto_suppressed"] = (
+                bucket["by_status"].get("auto_suppressed", 0) + 1
+            )
             return
         if mark is None:
             bucket["open"][eval_name] += 1
@@ -1419,7 +1450,7 @@ def load_chapter_type_counts(
             # which is the one thing this cheaper second walk exists to avoid.
             if is_triaged(tr_by_key, eval_name, ni) and not statuses:
                 continue
-            _count(counts, eval_name, mark)
+            _count(counts, eval_name, mark, triage_mark(tr_by_key, eval_name, ni))
 
         judges = data.get("judges")
         if not isinstance(judges, dict):

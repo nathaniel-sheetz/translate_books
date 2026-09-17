@@ -9447,13 +9447,20 @@ def _recommendation_shell(project_id: str, project_dir: Path) -> dict:
         split = counts_by_chapter.get(chapter_id) or {}
         kinds = {k: n for k, n in (split.get("open") or {}).items() if n}
         history = sum((split.get("history") or {}).values())
+        suppressed = sum((split.get("suppressed") or {}).values())
         # The kind filter has to know about a kind that exists only in this
-        # chapter's history, or unticking it would leave those cards on screen.
+        # chapter's history, or among what the filter hid, or unticking it would
+        # leave those cards on screen. A chapter whose findings are *all*
+        # suppressed has to stay listed for the same reason: `seen_kinds` is what
+        # decides that below, and its cards are served either way — they become
+        # reachable the moment the box is ticked.
         seen_kinds = dict(kinds)
-        for kind, n in (split.get("history") or {}).items():
-            if n:
-                seen_kinds[kind] = seen_kinds.get(kind, 0) + n
-        # `by_status` covers the marked findings only; an unmarked one is `open`
+        for source in ("history", "suppressed"):
+            for kind, n in (split.get(source) or {}).items():
+                if n:
+                    seen_kinds[kind] = seen_kinds.get(kind, 0) + n
+        # `by_status` covers every finding something is known about — a human
+        # mark, or a machine suppression. An unmarked, unsuppressed one is `open`
         # and is counted here, so every status box carries a real total.
         if kinds:
             status_totals["open"] = status_totals.get("open", 0) + sum(kinds.values())
@@ -9483,6 +9490,7 @@ def _recommendation_shell(project_id: str, project_dir: Path) -> dict:
             "label": _chapter_display_label(chapter_id, manifest, chapter_prefix),
             "counts": kinds,
             "history": history,
+            "suppressed": suppressed,
             "favorites": favorites_by_chapter.get(chapter_id, 0),
         })
 

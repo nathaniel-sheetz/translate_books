@@ -148,6 +148,10 @@ STRINGS = {
         "rec_fav_remove": "Remove from favorites",
         "rec_fav_failed": "Could not save",
         "rec_history_chip": "{n} dealt with",
+        # Deliberately not folded into `rec_history_chip`. That count is what you
+        # decided; this one is what a model decided for you, and the whole reason
+        # these findings stay on the page is that the two must be told apart.
+        "rec_suppressed_chip": "{n} filtered out",
         "rec_summary_history": "{history} more already dealt with.",
         # An item whose prose has moved on since the model wrote about it: the
         # card shows the text as it stood then, because whatever sentence lives
@@ -541,6 +545,7 @@ STRINGS = {
         "rec_fav_remove": "Quitar de favoritos",
         "rec_fav_failed": "No se pudo guardar",
         "rec_history_chip": "{n} ya resuelto(s)",
+        "rec_suppressed_chip": "{n} descartado(s) autom\u00e1ticamente",
         "rec_summary_history": "{history} m\u00e1s ya resuelto(s).",
         "rec_original_then": "Como se le\u00eda entonces",
         "rec_text_changed": "el libro ha cambiado desde que se escribi\u00f3 esto",

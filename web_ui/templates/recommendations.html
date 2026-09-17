@@ -128,6 +128,16 @@
                     <span class="rec-chip rec-chip-history">{{ t.rec_history_chip
                         | replace('{n}', chapter.history | string) }}</span>
                     {% endif %}
+                    {#- Its own chip, never folded into the history one: that
+                        count is what you decided, this is what a model decided
+                        for you. Without it a chapter header would account for
+                        fewer findings than the chapter holds, with no hint the
+                        rest exist -- the quieter version of the bug where these
+                        were counted as outstanding work. -#}
+                    {% if chapter.suppressed %}
+                    <span class="rec-chip rec-chip-suppressed">{{ t.rec_suppressed_chip
+                        | replace('{n}', chapter.suppressed | string) }}</span>
+                    {% endif %}
                 </div>
             </div>
             {#- Filled by recommendations.js. The placeholder carries the height
