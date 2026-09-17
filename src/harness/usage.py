@@ -221,6 +221,7 @@ def job_record(
     error: str | None = None,
     effort: str | None = None,
     cache: str | None = None,
+    timed_out: bool = False,
 ) -> dict[str, Any]:
     """One JSONL row: what we sent, what was billed, and under which argv.
 
@@ -228,6 +229,11 @@ def job_record(
     ``1h`` / ``off``, or ``None`` on Cursor). An account in overage is silently
     downgraded to the 5-minute TTL, so rows are only comparable within the same
     account state — do not infer the TTL from billed rates.
+
+    ``timed_out`` is written **only when true**, so the shape of every row this
+    corpus already holds is unchanged — ``usage.jsonl`` is an A/B corpus and a
+    silently re-shaped row is a corrupted one. It makes a killed job queryable
+    instead of inferable from ``rc``.
     """
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -244,6 +250,8 @@ def job_record(
     }
     if usage:
         record.update(usage)
+    if timed_out:
+        record["timed_out"] = True
     if error:
         record["error"] = error[:300]
     return record

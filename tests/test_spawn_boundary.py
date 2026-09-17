@@ -40,7 +40,8 @@ _OS_SPAWNS = frozenset({
 # `run_headless_wave` instead.
 _KNOWN_SPAWNS: frozenset[tuple[str, str]] = frozenset({
     ("src/harness/flow.py", "subprocess.Popen"),                 # sys.executable, repo scripts
-    ("src/harness/headless.py", "subprocess.run"),               # THE sanctioned CLI spawn + auth probe
+    ("src/harness/headless.py", "subprocess.Popen"),             # THE sanctioned CLI spawn
+    ("src/harness/headless.py", "subprocess.run"),               # auth probe + taskkill on timeout
     ("src/judges/runner.py", "subprocess.run"),                  # git rev-parse
     ("scripts/compare_models.py", "subprocess.check_output"),    # git rev-parse
 })

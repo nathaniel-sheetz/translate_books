@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -432,49 +437,109 @@ def test_subscription_env_reads_os_environ_by_default(monkeypatch):
     assert "PATH" in env
 
 
+class _FakeProc:
+    """A stand-in for ``Popen``: the launcher drives it, never ``subprocess.run``.
+
+    ``run`` enforced its timeout by killing only the direct child and then
+    draining the pipes unbounded, which a wrapper's surviving grandchild turned
+    into a 2-3x overrun. The launcher therefore owns the ``Popen`` itself.
+    """
+
+    returncode = 0
+    stdin = stdout = stderr = None
+
+    def communicate(self, input=None, timeout=None):  # noqa: A002 - Popen's own name
+        return "ok", ""
+
+
 def test_default_claude_runner_passes_scrubbed_env_to_subprocess(monkeypatch):
     """The regression test for the actual bug: no `env=` meant full inheritance."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
     seen: dict[str, object] = {}
 
-    class _Proc:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         seen.update(kwargs)
         seen["cmd"] = cmd
-        return _Proc()
+        return _FakeProc()
 
-    monkeypatch.setattr(headless.subprocess, "run", fake_run)
+    monkeypatch.setattr(headless.subprocess, "Popen", fake_popen)
     rc, out, err = headless.default_claude_runner(
         ["claude", "-p"], input_text="x", cwd=Path(".")
     )
     assert (rc, out, err) == (0, "ok", "")
     env = seen["env"]
-    assert env is not None, "subprocess.run must be given an explicit env"
+    assert env is not None, "the child must be given an explicit env"
     assert "ANTHROPIC_API_KEY" not in env
     assert "PATH" in env, "the scrub is a denylist; ordinary runtime must survive"
 
 
 def test_default_claude_runner_accepts_a_precomputed_env(monkeypatch):
-    class _Proc:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
     seen: dict[str, object] = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         seen.update(kwargs)
-        return _Proc()
+        return _FakeProc()
 
-    monkeypatch.setattr(headless.subprocess, "run", fake_run)
+    monkeypatch.setattr(headless.subprocess, "Popen", fake_popen)
     headless.default_claude_runner(
         ["claude", "-p"], input_text="x", cwd=Path("."), env={"PATH": "/usr/bin"}
     )
     assert seen["env"] == {"PATH": "/usr/bin"}
+
+
+def test_a_running_spawn_is_registered_so_an_interrupt_can_reach_it(monkeypatch):
+    """``KeyboardInterrupt`` lands on the main thread; the Popen is in a worker.
+
+    Without the registry the interrupting thread holds no handle on the children
+    it has to kill, which is exactly why the ``except BaseException`` guarding a
+    spawn never fired for an operator's Ctrl-C.
+    """
+    live_during: list[int] = []
+
+    class _RegisteredProc(_FakeProc):
+        pid = 4242
+
+        def communicate(self, input=None, timeout=None):  # noqa: A002 - Popen's name
+            live_during.append(len(headless._live_procs))
+            return "ok", ""
+
+    monkeypatch.setattr(
+        headless.subprocess, "Popen", lambda cmd, **kwargs: _RegisteredProc()
+    )
+    headless.default_claude_runner(["claude", "-p"], input_text="x", cwd=Path("."))
+
+    assert live_during == [1], "the spawn must be registered while it runs"
+    assert not headless._live_procs, "and discarded the moment it returns"
+
+
+def test_kill_live_processes_tree_kills_everything_registered(monkeypatch):
+    killed: list[object] = []
+    monkeypatch.setattr(headless, "_kill_process_tree", killed.append)
+
+    proc = _FakeProc()
+    with headless._tracked(proc):
+        assert headless._kill_live_processes() == 1
+    assert killed == [proc]
+    assert not headless._live_procs
+
+
+def test_the_auth_prober_bounds_its_own_drain(tmp_path: Path):
+    """The preflight spawns hit the same stdlib defect the workers did.
+
+    ``subprocess.run`` kills only the direct child and then, on Windows, drains
+    with no timeout — so ``subscription_auth_error``'s ``TimeoutExpired`` handler
+    was unreachable and the 30 s ceiling it documents was not real. It must still
+    *raise*, so that handler keeps failing closed.
+    """
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        headless._default_auth_prober(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            env=dict(os.environ),
+            cwd=tmp_path,
+            timeout=0.5,
+        )
+    assert time.monotonic() - started < headless._DRAIN_TIMEOUT_S + 5
 
 
 def test_subscription_auth_error_accepts_subscription():
@@ -919,13 +984,469 @@ def test_unwritable_usage_log_does_not_fail_the_wave(tmp_path: Path):
     assert result["usage"]["jobs"] == 1
 
 
+def _distinct_jobs(tmp_path: Path, n: int) -> list[dict]:
+    """Like ``_jobs`` but each body identifies its job, so a stub runner can tell them apart."""
+    return [
+        {"id": f"c{i}", "input_text": f"body-{i}", "output_path": str(tmp_path / f"d{i}.txt")}
+        for i in range(n)
+    ]
+
+
 def test_warm_first_runs_job_one_alone_then_fans_out(tmp_path: Path):
-    """One job warms the shared prefix so its siblings read it instead of re-creating it."""
-    assert headless._wave_batches(list(range(8)), 5, True) == [[0], [1, 2, 3, 4, 5], [6, 7]]
-    assert headless._wave_batches(list(range(8)), 5, False) == [[0, 1, 2, 3, 4], [5, 6, 7]]
-    # Nothing to warm: a single job, or a serial wave, is unchanged.
-    assert headless._wave_batches([0], 5, True) == [[0]]
-    assert headless._wave_batches(list(range(3)), 1, True) == [[0], [1], [2]]
+    """The warm-up only warms anything if it finishes before its siblings start."""
+    lock = threading.Lock()
+    in_flight: list[str] = []
+    overlapped_the_warm_job: list[str] = []
+    peak = 0
+
+    def runner(cmd, *, input_text, cwd):
+        nonlocal peak
+        with lock:
+            in_flight.append(input_text)
+            peak = max(peak, len(in_flight))
+            if "body-0" in in_flight and len(in_flight) > 1:
+                overlapped_the_warm_job.append(input_text)
+        time.sleep(0.02)
+        with lock:
+            in_flight.remove(input_text)
+        return 0, _envelope("ok"), ""
+
+    result = headless.run_headless_wave(
+        _distinct_jobs(tmp_path, 8), model="sonnet", concurrency=5, runner=runner,
+    )
+    assert result["counts"]["wrote"] == 8
+    assert overlapped_the_warm_job == []  # job 0 had the machine to itself
+    assert peak <= 5  # and the pool never exceeded the requested width
+
+
+def test_a_slow_job_does_not_hold_up_the_rest(tmp_path: Path):
+    """The rolling-pool win. Fixed batches made every job wait for the slowest in its group.
+
+    Deadlocks (and so fails) on the old batching: with ``concurrency=3`` only the
+    first three jobs could ever run, so the slow job's release condition — every
+    *other* job having landed — was unreachable.
+    """
+    release = threading.Event()
+    finished: list[str] = []
+    lock = threading.Lock()
+
+    def runner(cmd, *, input_text, cwd):
+        if input_text == "body-1":
+            assert release.wait(timeout=10), "the pool never rolled past the slow job"
+        with lock:
+            finished.append(input_text)
+            if len(finished) == 7:  # everything except the slow job
+                release.set()
+        return 0, _envelope("ok"), ""
+
+    result = headless.run_headless_wave(
+        _distinct_jobs(tmp_path, 8), model="sonnet", concurrency=3,
+        runner=runner, warm_first=False,
+    )
+    assert result["counts"]["wrote"] == 8
+    assert finished[-1] == "body-1"
+
+
+def test_an_empty_wave_is_a_no_op_not_a_crash(tmp_path: Path):
+    """``max_workers=0`` is a ValueError, and an empty fan-out must stay idempotent."""
+    result = headless.run_headless_wave(
+        [], model="sonnet", concurrency=5, runner=lambda *a, **k: (0, "", ""),
+    )
+    assert result["counts"] == {"wrote": 0, "failed": 0, "todo": 0}
+    assert "error" not in result
+
+
+def test_warm_label_survives_a_serial_wave(tmp_path: Path):
+    """At concurrency 1 the old batching still marked job 0 warm.
+
+    Nothing is serialized for its benefit there, but ``usage.jsonl`` is an A/B
+    corpus and a silently relabelled row is a corrupted one. This case was
+    unpinned before the rolling pool replaced the batching.
+    """
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        _jobs(tmp_path, 3), model="sonnet", concurrency=1,
+        runner=lambda *a, **k: (0, _envelope("ok"), ""), usage_log=log,
+    )
+    rows = {
+        json.loads(line)["id"]: json.loads(line)["warm"]
+        for line in log.read_text(encoding="utf-8").splitlines()
+    }
+    assert rows == {"c0": True, "c1": False, "c2": False}
+
+
+# ---------------------------------------------------------------------------
+# Per-worker Cursor config directories
+#
+# Concurrent cursor-agent processes raced ~/.cursor/cli-config.json, failing
+# ~3% of jobs at widths 2-5 with EPERM on the rename. Each worker now gets its
+# own CURSOR_CONFIG_DIR.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slot_source(tmp_path: Path, monkeypatch) -> Path:
+    """A seeded Cursor config dir, with the module's slot state isolated.
+
+    The free list, the poisoned set and the tally are all module-level, so
+    without this a test that takes a slot changes what the next test sees.
+    """
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    monkeypatch.setattr(headless, "_slot_free", [])
+    monkeypatch.setattr(headless, "_slot_high", 0)
+    monkeypatch.setattr(headless, "_slot_poisoned", set())
+    monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
+    monkeypatch.setattr(headless, "_slot_first_error", None)
+    source = tmp_path / "cursor-home"
+    source.mkdir()
+    (source / "cli-config.json").write_text('{"selectedModel": {}}', encoding="utf-8")
+    return source
+
+
+def test_concurrent_slots_are_distinct_and_seeded(tmp_path: Path, slot_source: Path):
+    """Four genuinely overlapping workers must get four different directories."""
+    seen: list[str] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(4)
+
+    def worker():
+        with headless._cursor_slot(slot_source):
+            env = headless._slot_env("cursor", {"PATH": "/x"})
+            barrier.wait(timeout=10)  # hold every slot at once
+            with lock:
+                seen.append(env["CURSOR_CONFIG_DIR"])
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(set(seen)) == 4
+    for path in seen:
+        # Only the one small file is seeded -- never a recursive copy of
+        # ~/.cursor, and no torn .tmp left behind.
+        assert sorted(p.name for p in Path(path).iterdir()) == ["cli-config.json"]
+
+
+def test_slots_are_reused_across_waves(slot_source: Path, tmp_path: Path):
+    """A monotonic counter would leak a directory per wave; the free-list must not."""
+    for _ in range(5):
+        with headless._cursor_slot(slot_source):
+            pass
+    assert [p.name for p in (tmp_path / "slots").iterdir()] == ["slot-0"]
+
+
+def test_a_failed_seed_leaves_the_config_dir_alone(slot_source: Path, tmp_path: Path):
+    """Fail open means today's behavior, NOT an empty config dir.
+
+    ``cli-config.json`` carries ``permissions.allow``/``deny`` and
+    ``privacyCache``, so pointing a worker at an unseeded directory would
+    silently change its permissions and data-retention posture.
+    """
+    with headless._cursor_slot(tmp_path / "no-such-config-dir"):
+        assert headless._slot_env("cursor", {"PATH": "/x"}) == {"PATH": "/x"}
+
+
+def test_a_poisoned_slot_is_retired_not_recycled(
+    slot_source: Path, tmp_path: Path, monkeypatch
+):
+    """A slot that cannot be seeded must never come back around.
+
+    The nightly task runs under another identity and leaves ``slot-0`` with an
+    ACL this user can neither read nor delete. Returning that index to the free
+    list would make every job of every later wave retry it.
+    """
+    bad = tmp_path / "slots" / "slot-0"
+    real_seed = headless._seed_slot_config
+
+    def seed(slot_dir: Path, source_dir: Path) -> bool:
+        return False if slot_dir == bad else real_seed(slot_dir, source_dir)
+
+    monkeypatch.setattr(headless, "_seed_slot_config", seed)
+
+    seen: list[str] = []
+    for _ in range(3):
+        with headless._cursor_slot(slot_source):
+            seen.append(headless._slot_env("cursor", {})["CURSOR_CONFIG_DIR"])
+
+    assert "slot-0" not in {Path(p).name for p in seen}
+    assert 0 in headless._slot_poisoned
+    # Retired once: the free list then serves the same good index every time.
+    assert len(set(seen)) == 1
+    assert headless._slot_tally() == "3/3"
+
+
+def test_giving_up_on_isolation_is_counted_and_logged(
+    slot_source: Path, tmp_path: Path, caplog
+):
+    """Failing open is right; failing open *silently* is the defect.
+
+    A wave with isolation working and one with it disabled used to be
+    byte-identical from the outside, which is what made the poisoned-directory
+    and long-path failures so expensive to diagnose.
+    """
+    with caplog.at_level(logging.WARNING, logger="src.harness.headless"):
+        with headless._cursor_slot(tmp_path / "no-such-config-dir"):
+            assert headless._slot_env("cursor", {"PATH": "/x"}) == {"PATH": "/x"}
+
+    assert headless._slot_tally() == "0/1"
+    assert "could not be seeded" in caplog.text
+    # A missing *source* is not a poisoned slot: advancing cannot help when the
+    # file is absent at the same path every time, so no index is burned...
+    assert headless._slot_poisoned == set()
+    # ...and the warning names the file that is actually missing, rather than a
+    # destination slot that was never at fault.
+    assert "no-such-config-dir" in caplog.text
+    assert "cli-config.json" in caplog.text
+    assert "slot-" not in caplog.text
+
+
+def test_the_slot_root_is_short_and_per_user(monkeypatch):
+    """Two unrelated properties, both load-bearing -- see ``_slot_root``."""
+    monkeypatch.delenv(headless._SLOT_ROOT_VAR, raising=False)
+    root = headless._slot_root()
+    assert root.parent == Path.home()  # per-user by construction
+    assert headless._slot_path_error(root) is None  # and inside the budget
+
+    monkeypatch.setenv(headless._SLOT_ROOT_VAR, "C:/ct")
+    assert headless._slot_root() == Path("C:/ct").expanduser().resolve()
+
+
+def test_an_over_budget_slot_root_is_refused_before_anything_spawns(
+    monkeypatch, tmp_path: Path
+):
+    """A 261-character root killed 4 of 4 long jobs with rc=124 and a *Cursor
+    endpoint* reconnect message, which reads exactly like a provider outage. It
+    must never reach the jobs."""
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setenv(headless._SLOT_ROOT_VAR, "C:/" + "x" * 130)
+    seeded: list[tuple] = []
+    monkeypatch.setattr(
+        headless, "_seed_slot_config", lambda *args: seeded.append(args) or True
+    )
+
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 2), model="grok-4.6", concurrency=2, cli="cursor",
+    )
+
+    assert "over the 120-character budget" in result["error"]
+    assert headless._SLOT_ROOT_VAR in result["error"]  # names the way out
+    assert result["wrote"] == [] and result["failed"] == []
+    assert seeded == []
+
+
+def test_a_relative_slot_root_is_measured_after_resolve(tmp_path: Path, monkeypatch):
+    """A relative override would otherwise pass the budget as a few characters."""
+    pad = "p" * max(0, headless._SLOT_PATH_BUDGET + 1 - len(str(tmp_path)))
+    deep = tmp_path / pad if pad else tmp_path
+    deep.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(deep)
+    monkeypatch.setenv(headless._SLOT_ROOT_VAR, "slots")
+    resolved = headless._slot_root()
+    assert resolved.is_absolute()
+    err = headless._slot_path_error(resolved)
+    assert err is not None
+    assert "over the 120-character budget" in err
+
+
+def test_a_timed_out_worker_dies_with_its_whole_tree(tmp_path: Path, monkeypatch):
+    """The ceiling is not real until the post-kill drain is bounded.
+
+    ``subprocess.run`` kills only the direct child and then drains the pipes with
+    **no** timeout, so a surviving grandchild held the wave open for two to three
+    times the job budget -- 1253, 1293 and 1977 s against a 900 s ceiling.
+    """
+    killed: list[int] = []
+    real_kill = headless._kill_process_tree
+
+    def spy(proc):
+        killed.append(proc.pid)
+        real_kill(proc)
+
+    monkeypatch.setattr(headless, "_kill_process_tree", spy)
+    started = time.monotonic()
+    rc, _out, err = headless.default_claude_runner(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        input_text="",
+        cwd=tmp_path,
+        timeout=0.5,
+        env=dict(os.environ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert rc == 124
+    assert killed, "the tree killer must run"
+    assert "timeout after 0.5s" in err
+    assert elapsed < headless._DRAIN_TIMEOUT_S + 5  # nowhere near the child's 30 s
+
+
+def test_timed_out_is_recorded_only_when_true():
+    """``usage.jsonl`` is an A/B corpus; every row it already holds keeps shape."""
+    base = dict(job_id="j", cli="cursor", model="m", prompt_sent=1, wall_s=1.0, rc=0)
+    assert "timed_out" not in usage.job_record(**base)
+    assert usage.job_record(**base, timed_out=True)["timed_out"] is True
+
+
+def test_slots_seeded_reaches_the_usage_rollup(tmp_path: Path, monkeypatch):
+    """A wave that lost isolation must not read like one that kept it.
+
+    This is the signal whose absence made the other slot defects expensive: the
+    rollup is already rendered by every caller and by the dashboard, so the
+    count rides along with no call-site changes.
+    """
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    monkeypatch.setattr(headless, "_slot_free", [])
+    monkeypatch.setattr(headless, "_slot_high", 0)
+    monkeypatch.setattr(headless, "_slot_poisoned", set())
+    monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
+    monkeypatch.setattr(headless, "_slot_first_error", None)
+
+    source = tmp_path / "cursor-home"
+    source.mkdir()
+    (source / "cli-config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(headless, "_cursor_config_dir", lambda env: source)
+    monkeypatch.setattr(headless, "subscription_auth_error", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "cursor_model_error", lambda *a, **k: None)
+    monkeypatch.setattr(
+        headless,
+        "default_claude_runner",
+        lambda cmd, **kw: (0, _envelope("ok"), ""),
+    )
+
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 3), model="grok-4.6", concurrency=2, cli="cursor",
+    )
+
+    assert result["counts"]["wrote"] == 3
+    # Three workers, three slots. The preflight takes one of its own and is
+    # excluded on purpose -- it is not a worker, and counting it would make a
+    # clean wave report 4/4 against 3 jobs.
+    assert result["usage"]["slots_seeded"] == "3/3"
+
+
+def test_slots_seeded_survives_a_wave_where_every_job_failed(
+    tmp_path: Path, monkeypatch
+):
+    """The tally must not vanish in the one failure shape it exists to expose.
+
+    ``rollup`` returns ``None`` when no job reported tokens -- an all-timed-out
+    wave, which reports nothing at all -- and that used to take ``slots_seeded``
+    down with it, precisely when isolation was most worth checking.
+    """
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    monkeypatch.setattr(headless, "_slot_free", [])
+    monkeypatch.setattr(headless, "_slot_high", 0)
+    monkeypatch.setattr(headless, "_slot_poisoned", set())
+    monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
+    monkeypatch.setattr(headless, "_slot_first_error", None)
+
+    source = tmp_path / "cursor-home"
+    source.mkdir()
+    (source / "cli-config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(headless, "_cursor_config_dir", lambda env: source)
+    monkeypatch.setattr(headless, "subscription_auth_error", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "cursor_model_error", lambda *a, **k: None)
+    # rc=124 and no JSON: what a killed cursor-agent actually leaves behind.
+    monkeypatch.setattr(
+        headless,
+        "default_claude_runner",
+        lambda cmd, **kw: (124, "", "timeout after 900s"),
+    )
+
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 2), model="grok-4.6", concurrency=2, cli="cursor",
+    )
+
+    assert result["counts"]["failed"] == 2
+    assert result["usage"]["slots_seeded"] == "2/2"
+
+
+def test_claude_never_gets_a_cursor_config_dir(slot_source: Path):
+    with headless._cursor_slot(slot_source):
+        assert "CURSOR_CONFIG_DIR" not in headless._slot_env("claude", {"PATH": "/x"})
+
+
+def test_slot_env_preserves_the_credential_scrub(slot_source: Path):
+    """The per-slot env must be derived from the scrubbed wave env, never os.environ."""
+    scrubbed = headless.subscription_env(
+        "cursor", base={"ANTHROPIC_API_KEY": "sk-x", "CURSOR_API_KEY": "c", "PATH": "/x"}
+    )
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", scrubbed)
+    assert "ANTHROPIC_API_KEY" not in env and "CURSOR_API_KEY" not in env
+    assert env["PATH"] == "/x" and env["CURSOR_CONFIG_DIR"]
+
+
+def test_a_newer_operator_config_is_re_seeded(slot_source: Path):
+    """The operator changed their model picker mid-run; slots must not pin the old one."""
+    with headless._cursor_slot(slot_source):
+        slot = Path(headless._slot_env("cursor", {})["CURSOR_CONFIG_DIR"])
+    assert json.loads((slot / "cli-config.json").read_text(encoding="utf-8")) == {
+        "selectedModel": {}
+    }
+
+    config = slot_source / "cli-config.json"
+    config.write_text('{"selectedModel": {"modelId": "grok-4.6"}}', encoding="utf-8")
+    later = time.time() + 10
+    os.utime(config, (later, later))
+    with headless._cursor_slot(slot_source):
+        pass
+    assert json.loads((slot / "cli-config.json").read_text(encoding="utf-8")) == {
+        "selectedModel": {"modelId": "grok-4.6"}
+    }
+
+
+def test_cursor_config_dir_follows_the_clis_own_precedence(tmp_path: Path):
+    """Verified against the 2026.09.10-fd3934a bundle's own resolver."""
+    assert headless._cursor_config_dir({"CURSOR_CONFIG_DIR": str(tmp_path)}) == tmp_path
+    assert (
+        headless._cursor_config_dir({"XDG_CONFIG_HOME": str(tmp_path)}) == tmp_path / "cursor"
+    )
+    assert headless._cursor_config_dir({}) == Path.home() / ".cursor"
+    # An operator's explicit relocation wins over XDG, and blank is not a choice.
+    assert headless._cursor_config_dir(
+        {"CURSOR_CONFIG_DIR": str(tmp_path), "XDG_CONFIG_HOME": "/other"}
+    ) == tmp_path
+    assert headless._cursor_config_dir({"CURSOR_CONFIG_DIR": "   "}) == Path.home() / ".cursor"
+
+
+def test_an_empty_cursor_wave_seeds_no_slot(tmp_path: Path, monkeypatch):
+    """An empty fan-out is an idempotent no-op, down to not creating a directory.
+
+    Uses the real-runner path (no ``runner=``), which is the only one that seeds
+    at all; nothing spawns because both the preflight and the pool are guarded
+    on there being jobs.
+    """
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    seeded: list[tuple] = []
+    monkeypatch.setattr(
+        headless, "_seed_slot_config", lambda *args: seeded.append(args) or True
+    )
+    result = headless.run_headless_wave(
+        [], model="grok-4.6", concurrency=3, cli="cursor",
+    )
+    assert result["counts"] == {"wrote": 0, "failed": 0, "todo": 0}
+    assert seeded == []
+
+
+def test_a_stub_runner_never_touches_the_cursor_config(tmp_path: Path, monkeypatch):
+    """Unit tests must never reach the operator's ~/.cursor or seed a slot."""
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    seeded: list[tuple] = []
+    monkeypatch.setattr(
+        headless, "_seed_slot_config", lambda *args: seeded.append(args) or True
+    )
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 3), model="grok-4.6", concurrency=2, cli="cursor",
+        runner=lambda *a, **k: (0, _envelope("ok"), ""),
+    )
+    assert result["counts"]["wrote"] == 3
+    assert seeded == []
+    assert not (tmp_path / "slots").exists()
 
 
 def test_warm_flag_is_recorded_per_job(tmp_path: Path):
@@ -1099,7 +1620,7 @@ def test_resolve_cache_mode_no_history_assumes_fast():
     ) == "5m"
 
 
-def test_cache_off_collapses_warm_first_batches(tmp_path: Path):
+def test_cache_off_skips_the_warm_up(tmp_path: Path):
     """off has nothing to warm — skip the serialized job-1 warm-up."""
     log = tmp_path / "usage.jsonl"
     headless.run_headless_wave(
@@ -1608,6 +2129,111 @@ def test_worker_model_suggestions_cursor_include_the_selected_model(monkeypatch)
     assert headless.worker_model_suggestions("cursor") == [
         "auto", "gpt-5.2", "grok-4.5[effort=high]",
     ]
+
+
+def test_the_model_probes_never_touch_the_operators_cursor_config(
+    tmp_path: Path, monkeypatch
+):
+    """Both model probes spawn a worker-shaped ``-p --model`` argv.
+
+    Run against the real ``~/.cursor``, either can rewrite ``selectedModel`` --
+    the exact mutation per-worker config dirs exist to prevent. ``preflight_error``
+    is the dashboard's path to them, so it has to isolate them too.
+    """
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    monkeypatch.setattr(headless, "_slot_free", [])
+    monkeypatch.setattr(headless, "_slot_high", 0)
+    monkeypatch.setattr(headless, "_slot_poisoned", set())
+    monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
+    monkeypatch.setattr(headless, "_slot_first_error", None)
+
+    source = tmp_path / "cursor-home"
+    source.mkdir()
+    (source / "cli-config.json").write_text('{"selectedModel": {}}', encoding="utf-8")
+    monkeypatch.setattr(headless, "_cursor_config_dir", lambda env: source)
+
+    calls: list[tuple[list[str], dict]] = []
+
+    def probe(argv, *, env, cwd, timeout):
+        calls.append((list(argv), dict(env)))
+        if "models" in argv:
+            return 0, "Available models\n\nauto - Auto\n", ""
+        if "status" in argv:
+            return 0, json.dumps(_CURSOR_AUTHENTICATED), ""
+        return 1, "", "Error: No prompt provided for print mode"
+
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    assert headless.preflight_error("cursor", model="grok-4.5") is None
+
+    model_envs = [
+        env for argv, env in calls if "models" in argv or "--model" in argv
+    ]
+    assert model_envs, "the model gate must actually have probed"
+    slot_root = str(tmp_path / "slots")
+    for env in model_envs:
+        assert env.get("CURSOR_CONFIG_DIR", "").startswith(slot_root)
+        assert str(source) != env.get("CURSOR_CONFIG_DIR")
+
+
+def test_an_interrupt_still_books_the_jobs_that_finished(tmp_path: Path):
+    """A killed wave must not punch holes in ``usage.jsonl``.
+
+    The pool queues the whole wave up front, so on an interrupt the futures that
+    had already landed were dropped from ``wrote``/``failed`` and from the log,
+    even though their drafts were sitting on disk.
+    """
+    log = tmp_path / "usage.jsonl"
+    calls: list[int] = []
+    lock = threading.Lock()
+
+    def runner(cmd, *, input_text, cwd):
+        with lock:
+            calls.append(1)
+            nth = len(calls)
+        if nth >= 3:
+            raise KeyboardInterrupt("simulated Ctrl-C")
+        return 0, _envelope("ok"), ""
+
+    with pytest.raises(KeyboardInterrupt):
+        headless.run_headless_wave(
+            _jobs(tmp_path, 6),
+            model="sonnet",
+            concurrency=2,
+            runner=runner,
+            usage_log=log,
+            warm_first=False,
+        )
+
+    rows = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) >= 2, "jobs that finished before the interrupt must be logged"
+    ids = [row["id"] for row in rows]
+    assert len(ids) == len(set(ids)), "an interrupt must not double-book a finished job"
+    assert all(row["rc"] == 0 for row in rows)
+
+
+def test_an_interrupt_during_warm_up_still_kills_live_children(
+    tmp_path: Path, monkeypatch
+):
+    """Warm-up used to sit outside the ``try``, so Ctrl-C on job 1 skipped cleanup."""
+    killed: list[int] = []
+    monkeypatch.setattr(headless, "_kill_live_processes", lambda: killed.append(1) or 0)
+
+    def runner(cmd, *, input_text, cwd):
+        raise KeyboardInterrupt("simulated Ctrl-C")
+
+    with pytest.raises(KeyboardInterrupt):
+        headless.run_headless_wave(
+            _jobs(tmp_path, 4),
+            model="sonnet",
+            concurrency=3,
+            runner=runner,
+        )
+    assert killed, "Ctrl-C during warm-up must still tree-kill live children"
 
 
 def test_worker_model_suggestions_survive_a_missing_cursor_cli(monkeypatch):

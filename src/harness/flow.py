@@ -2384,9 +2384,9 @@ def translate_fanout(
     cross-invocation cache on Sonnet). Cursor has no system-prompt-file flag —
     fan-out skips the split and sends the full prompt on stdin.
 
-    Processes entries in waves of ``concurrency`` (default: manifest
-    ``spawn_plan.batch_size``, else 3), finishing each wave before the next.
-    Already-drafted entries are skipped (idempotent). Does **not** call
+    Runs entries in a rolling pool ``concurrency`` wide (default: manifest
+    ``spawn_plan.batch_size``, else 3); a free slot takes the next job as soon
+    as it frees. Already-drafted entries are skipped (idempotent). Does **not** call
     ``translate-commit`` — the agent still commits after the wave.
 
     ``chunk_ids``, when given, limits the wave to those ids (chapter-parallel /

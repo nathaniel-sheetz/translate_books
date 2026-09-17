@@ -187,6 +187,62 @@ itself on 4 of 20 rows.
 
 Cursor waves record `cache: null` on every row, since no mode was requested.
 
+#### Each Cursor worker gets its own config directory
+
+`cursor-agent` saves `cli-config.json` and `statsig-cache.json` by writing a
+`<name>.<pid>.<uuid>.tmp` sibling and renaming it over the original. Every worker
+shared one directory, so concurrent renames collided — `EPERM: operation not
+permitted, rename '…\.cursor\cli-config.json…'` — on roughly 3% of jobs at widths
+2–5, each needing a hand re-run. Since 0.59.3.0 each concurrent worker runs with its
+own `CURSOR_CONFIG_DIR`, seeded with a copy of `cli-config.json` alone.
+
+Verified against the CLI bundle (2026.09.10-fd3934a), which resolves that variable as
+`CURSOR_CONFIG_DIR` → `XDG_CONFIG_HOME/cursor` → `~/.cursor`. Two things are
+deliberately **not** relocated:
+
+- **The login.** It lives in `%APPDATA%\Cursor\auth.json`, computed from the home root
+  and never from the config dir, so workers stay authenticated. Had auth lived under
+  the config dir, the preflight would pass on the real directory and then every worker
+  would run logged out.
+- **Chats and projects.** Those follow `CURSOR_DATA_DIR`, a different variable.
+
+`statsig-cache.json` is never copied into a slot — duplicating a live file the
+interactive Cursor may be mid-rename on would mean handling torn reads. Each slot
+refetches it once, ever, so the first wave after upgrading looks marginally slower.
+Slots are reused across waves. An *unseeded* directory is never an option, because
+`cli-config.json` carries `permissions.allow`/`deny` and `privacyCache`.
+
+**Where the slots live, and why it is not `%TEMP%`.** The root is `~/.cursor-slots`,
+overridable with `HEADLESS_SLOT_ROOT` (resolved to an absolute path, so a relative
+value cannot slip past the character budget). Home rather than the temp root, for two
+independent reasons:
+
+- **Per-user by construction.** Under the shared temp root, a scheduled task running
+  as another identity created `slot-0..N` first with an ACL the interactive user
+  could neither read nor delete — so every interactive wave that day allocated
+  slot-0, failed to seed it, and ran unisolated.
+- **Short.** `cursor-agent` writes `chats/<id>/<uuid>/store.db-wal` about **118
+  characters** below each slot (`CURSOR_CONFIG_DIR`). Past Windows' 260-character limit the job dies with
+  `rc=124` and a *Cursor endpoint* reconnect message that reads exactly like a
+  provider outage — a 261-character root failed 4 of 4 long jobs while a 139-character
+  one passed 2 of 2, same target and model. `LongPathsEnabled=1` does **not** help:
+  it only serves binaries with a `longPathAware` manifest, and node/sqlite have none
+  for these writes. A root over **120 characters** is therefore refused before
+  anything spawns, by the wave and by `preflight_error` alike.
+
+**When seeding fails**, the worker advances to the next index and retires the bad one
+rather than silently dropping isolation; only after 8 failures does it fall back to
+running as it did before. A missing **source** `cli-config.json` is the one exception,
+and does not advance: the file is absent at the same path on every attempt, so retrying
+burned 8 indices per spawn and blamed a destination slot that was never at fault. That
+case is checked once, up front, and fails open immediately.
+
+The fallback is no longer silent — the first failure of a wave logs a warning naming the
+file that actually failed (the source, or the destination slot) and its errno, and the
+usage rollup carries `slots_seeded: "n/N"`, the count of workers that actually got a
+slot. That tally is attached even when no job reported tokens, so an all-failed or
+all-timed-out wave — the shape where isolation is most worth checking — still reports it.
+
 #### Effort has two channels — one per CLI
 
 `cursor-agent` has **no `--effort` flag**; it takes its knobs inside the model
@@ -359,6 +415,21 @@ layers. Neither subsumes the other:
    not recognise all block the wave with a top-level `error` and zero jobs run.
    There is no override flag — metered spend goes through `--backend api`, which
    is what that backend is for.
+
+On Cursor a third, token-free gate follows: `cursor_model_error` validates `--model`
+before anything spawns (`cursor-agent models`, then an empty-stdin probe for the ids
+that list does not carry), turning N identical bad-model failures into one message with
+zero jobs run. Both of its spawns go through a **seeded slot**, not the shared
+`~/.cursor` — the second has a worker job's exact argv shape, so against the operator's
+own config it could rewrite their `selectedModel`. `run_headless_wave` passes the slot
+env it already built for the auth probe; `preflight_error`, the dashboard's route to the
+same gate, takes a slot of its own.
+
+All three probes spawn through the same bounded launcher the workers use, never
+`subprocess.run`: that kills only the direct child and then drains the pipes with no
+timeout, so a hung probe could block a wave before it started — past the 30 s ceiling
+these callers document, with no bound at all. They still raise `TimeoutExpired`, so auth
+keeps failing closed and the model gate keeps failing open.
 
 Why both layers on Claude: `claude auth status` reports a clean subscription even
 with `ANTHROPIC_BASE_URL` or `ANTHROPIC_CUSTOM_HEADERS` set, so only the scrub
