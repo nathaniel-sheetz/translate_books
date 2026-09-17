@@ -78,7 +78,9 @@ from web_ui.evaluations import (
     REVIEW_TYPES,
     IgnoreHits,
     append_feedback,
+    attach_text_in_chunk,
     build_dismissed,
+    build_triaged,
     chapter_id_from_chunk_id,
     chapter_judge_status_detail,
     count_ignored_hits,
@@ -89,10 +91,12 @@ from web_ui.evaluations import (
     evaluator_freshness_detail,
     feedback_mark,
     is_ignored,
+    is_triaged,
     issue_key,
     issue_term,
     iter_chapter_chunks,
     load_all_feedback_by_chunk,
+    load_all_triage_by_chunk,
     load_chapter_type_counts,
     load_chunk_evaluation,
     load_feedback_for_chunk,
@@ -100,6 +104,7 @@ from web_ui.evaluations import (
     load_project_summary,
     merge_llm_judge_result,
     rollup_group_state,
+    row_containing_offset,
     run_coded_evaluators,
 )
 from web_ui import favorites as favorites_store
@@ -1664,74 +1669,11 @@ def project_reference(project_id, kind):
     return jsonify(payload)
 
 
-def _attach_text_in_chunk(alignment_data: dict, chunks_dir: Path, target_lang: str = "es") -> None:
-    """Mutate alignment rows to include `text_in_chunk` (and chunk char offsets).
-
-    The aligner emits `es` text via pysbd.split + .strip() + " ".join() for N:1
-    groups, which is NOT byte-identical to chunk.translated_text. The reader's
-    retranslate flow needs the literal chunk substring so /api/sentence/replace
-    can find it without fuzzy matching. We re-split each chunk's translated_text
-    with the same splitter the aligner uses and walk char positions.
-    """
-    from collections import defaultdict
-    from src.sentence_aligner import _split_sentences_with_para_indices
-
-    rows_by_chunk: dict[str, list[dict]] = defaultdict(list)
-    for row in alignment_data.get("alignments", []):
-        cid = row.get("chunk_id")
-        if cid and "es_idx" in row:
-            rows_by_chunk[cid].append(row)
-
-    for chunk_id, rows in rows_by_chunk.items():
-        chunk_path = chunks_dir / f"{chunk_id}.json"
-        if not chunk_path.exists():
-            continue
-        try:
-            chunk_data = json.loads(chunk_path.read_text(encoding="utf-8"))
-            chunk_mtime = chunk_path.stat().st_mtime
-        except (json.JSONDecodeError, OSError):
-            continue
-        chunk_text = chunk_data.get("translated_text") or ""
-        if not chunk_text:
-            continue
-
-        try:
-            sentences, _ = _split_sentences_with_para_indices(chunk_text, target_lang)
-        except Exception:
-            continue
-
-        ranges: list[Optional[tuple[int, int]]] = []
-        cursor = 0
-        for sent in sentences:
-            idx = chunk_text.find(sent, cursor)
-            if idx == -1:
-                stripped = sent.strip()
-                idx = chunk_text.find(stripped, cursor) if stripped else -1
-                if idx == -1:
-                    ranges.append(None)
-                    continue
-                ranges.append((idx, idx + len(stripped)))
-                cursor = idx + len(stripped)
-            else:
-                ranges.append((idx, idx + len(sent)))
-                cursor = idx + len(sent)
-
-        # The aligner offsets es_idx by cumulative chunk counts. The minimum
-        # es_idx in this chunk's rows is the chunk-local offset.
-        es_offset = min(r["es_idx"] for r in rows)
-
-        for row in rows:
-            indices = row.get("es_indices") or [row["es_idx"]]
-            local = [i - es_offset for i in indices]
-            valid = [li for li in local if 0 <= li < len(ranges) and ranges[li] is not None]
-            if not valid:
-                continue
-            start = ranges[valid[0]][0]
-            end = ranges[valid[-1]][1]
-            row["text_in_chunk"] = chunk_text[start:end]
-            row["chunk_offset_start"] = start
-            row["chunk_offset_end"] = end
-            row["chunk_mtime"] = chunk_mtime
+# Moved to web_ui/evaluations.py so non-web callers (src/triage) can anchor a
+# finding onto a sentence without importing the Flask module. Re-bound here
+# under its original private name: both call sites below, and
+# tests/test_reader_retranslate.py, import it from this module.
+_attach_text_in_chunk = attach_text_in_chunk
 
 
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]")
@@ -6072,38 +6014,11 @@ _REVIEW_CODED_TYPES = frozenset(REVIEW_CODED_TYPES)
 _REVIEW_JUDGE_TYPES = frozenset(REVIEW_JUDGE_TYPES)
 
 
-def _row_containing_offset(
-    rows_sorted: list[dict], offset: int, chunk_text: str = ""
-) -> Optional[dict]:
-    """Return the alignment row whose chunk char span contains ``offset``.
-
-    ``rows_sorted`` must be sorted by ``chunk_offset_start``. Uses a half-open
-    ``[start, end)`` test — the same coordinate space as the coded evaluators'
-    ``char_start`` (both index into the chunk's ``translated_text``).
-
-    Fallback tier: sentence spans do not tile the chunk, so an offset can land
-    in the gap between two rows — most often the blank run a paragraph break
-    leaves behind. Given ``chunk_text``, such an offset is attributed to the
-    *following* row, but only when every character from the offset up to that
-    row's start is whitespace. A finding sitting on the blank run in front of a
-    sentence belongs to that sentence; one sitting on real prose no row covers
-    (an ``[IMAGE:…]`` token, a sentence the splitter dropped) must not silently
-    jump over it, so it stays unanchored and reaches the reader's overflow bin.
-    """
-    following = None
-    for row in rows_sorted:
-        start = row.get("chunk_offset_start")
-        end = row.get("chunk_offset_end")
-        if start is None or end is None:
-            continue
-        if start <= offset < end:
-            return row
-        if following is None and start > offset:
-            following = row
-    if following is None or not chunk_text or offset < 0:
-        return None
-    gap = chunk_text[offset:following["chunk_offset_start"]]
-    return following if gap and not gap.strip() else None
+# Moved to web_ui/evaluations.py alongside `attach_text_in_chunk` — the two are
+# one mechanism (stamp the offsets, then resolve one) and splitting them across
+# modules would leave the coordinate-space contract documented in only half of
+# it. Re-bound under its original private name for the two call sites below.
+_row_containing_offset = row_containing_offset
 
 
 def _locate_match(text_in_chunk: str, match_text: str) -> tuple[Optional[int], Optional[int]]:
@@ -6287,6 +6202,7 @@ def _build_chapter_review(
     from src.utils.text_utils import normalize_newlines
 
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    triage_by_chunk = load_all_triage_by_chunk(project_dir)
     ignored_terms = load_project_ignored_terms(project_dir)
 
     for chunk_id, crows in rows_by_chunk.items():
@@ -6296,6 +6212,7 @@ def _build_chapter_review(
 
         feedback = feedback_by_chunk.get(chunk_id, [])
         fb_by_key, fb_by_index = build_dismissed(feedback)
+        tr_by_key = build_triaged(triage_by_chunk.get(chunk_id, []))
         crows_sorted = sorted(crows, key=lambda r: r["chunk_offset_start"])
 
         # The chunk text serves two coordinate spaces. `raw_text` is what the
@@ -6338,6 +6255,13 @@ def _build_chapter_review(
             if mark is not None and not include_dismissed:
                 continue
             if is_ignored(ignored_terms, eval_name, ni):
+                continue
+            # A machine verdict is the third gate, and the narrowest: only a
+            # high-confidence `suppress` hides anything. It rides with
+            # `include_dismissed` so the recommendations screen still shows what
+            # was suppressed and why — a filter nobody can audit is a filter
+            # nobody should trust.
+            if is_triaged(tr_by_key, eval_name, ni) and not include_dismissed:
                 continue
             match_text = loc.get("match") or ""
             excerpt = match_text or (

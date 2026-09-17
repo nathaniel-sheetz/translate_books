@@ -101,9 +101,12 @@ def load_coded_findings(project_dir: Path) -> dict[str, list[str]]:
     from web_ui.evaluations import (  # local import: web_ui is the persistence layer
         REVIEW_CODED_TYPES,
         build_dismissed,
+        build_triaged,
         is_dismissed,
         is_ignored,
+        is_triaged,
         load_all_feedback_by_chunk,
+        load_all_triage_by_chunk,
         load_project_ignored_terms,
     )
 
@@ -114,6 +117,7 @@ def load_coded_findings(project_dir: Path) -> dict[str, list[str]]:
 
     ignored = load_project_ignored_terms(project_dir)
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    triage_by_chunk = load_all_triage_by_chunk(project_dir)
     coded: dict[str, list[str]] = {}
 
     for path in sorted(evaluations_dir.glob("*.json")):
@@ -127,6 +131,7 @@ def load_coded_findings(project_dir: Path) -> dict[str, list[str]]:
             continue
 
         by_key, by_index = build_dismissed(feedback_by_chunk.get(chunk_id, []))
+        tr_by_key = build_triaged(triage_by_chunk.get(chunk_id, []))
         lines: list[str] = []
         for result in payload.get("results") or []:
             if not isinstance(result, dict):
@@ -140,6 +145,8 @@ def load_coded_findings(project_dir: Path) -> dict[str, list[str]]:
                 if is_dismissed(by_key, by_index, eval_name, index, issue):
                     continue
                 if is_ignored(ignored, eval_name, issue):
+                    continue
+                if is_triaged(tr_by_key, eval_name, issue):
                     continue
                 message = str(issue.get("message") or "").strip()
                 if message:
