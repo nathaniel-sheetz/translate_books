@@ -74,6 +74,18 @@ sentences, the LanguageTool `rule_id` for grammar findings, and any glossary
 entries whose Spanish appears in them. A job opens with the book's style guide
 and style rules.
 
+**Items are numbered, and the number is what comes back.** Each item carries
+`item`, its 1-based position in the job, and the draft answers with that number
+rather than the finding's id. The stored id ends in a 16-hex-character
+`issue_key`, and a model asked to echo one gets it wrong: the first real wave
+returned `8f3aae189ee24ad1e` against a true key of `8f3b32300d4cf994`, then on a
+re-run of the same job returned `8f3c10691e2fdf8c` — the right first three
+characters and then invention, twice, on the same finding. Since `parse_draft`
+rejects a draft whose ids are not exactly the job's, each attempt cost all 18
+findings in that job rather than the one it got wrong. Numbers resolve against
+`jobs[].item_ids`, which `prepare` writes in the order it rendered them, so
+neither side may ever re-sort a batch.
+
 **One item is one finding, not one occurrence.** A checker reports a repeated
 unknown word once — `'pudín': Unknown word ... (found 3 time(s))` — and the
 normalizer fans it into an entry per occurrence so the reader can highlight each

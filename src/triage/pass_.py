@@ -287,14 +287,17 @@ def prepare(
     try:
         for n, batch in enumerate(batches, 1):
             job_id = f"job-{n:0{width}d}"
+            # 1-based, and the same order `jobs[].item_ids` is written in below:
+            # that shared order is the whole join, so nothing here may re-sort.
             views = [
                 tfindings.item_prompt_view(
                     it,
                     glossary_hits_for_sentence(
                         book.get("glossary"), "\n".join(it.get("sentences") or ())
                     ),
+                    number=n,
                 )
-                for it in batch
+                for n, it in enumerate(batch, 1)
             ]
             prefix, body = build_prompt_parts(views, book_context)
             if preamble is None:
@@ -594,15 +597,56 @@ _COMMIT_SCHEMA = {
 }
 
 
+def _item_number(value: Any) -> Optional[int]:
+    """``value`` as a 1-based item number, or ``None`` if it is not one.
+
+    Accepts ``3``, ``3.0`` and ``"3"``. A model that quoted its number or emitted
+    it as a JSON float has still said unambiguously which finding it means, and
+    rejecting the draft over that would cost the whole job to make a point about
+    types -- the same twenty-findings-for-one-mistake trade this scheme exists to
+    end.
+
+    ``True`` is not a number here. ``bool`` subclasses ``int``, so a stray
+    ``"item": true`` would otherwise resolve to item 1 and file that verdict
+    against a real finding.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def parse_draft(raw: str, item_ids: list[str]) -> list[dict[str, Any]]:
-    """The verdicts in one job's draft.
+    """The verdicts in one job's draft, resolved back onto the job's item ids.
+
+    The draft answers with ``item``, each finding's 1-based position in the
+    prompt. Those positions resolve against ``item_ids``, which ``prepare`` wrote
+    in the order it rendered them, and the returned records carry the full ``id``
+    again so ``commit`` joins them to the manifest exactly as before.
+
+    Positions rather than the stored id because a model cannot copy a
+    16-hex-character key back reliably; see
+    :func:`src.triage.findings.item_prompt_view` for the two different hashes one
+    real wave invented for a single finding. The cost of the trade is that a
+    number carries no evidence of which finding it means, so the order written
+    here and the order rendered there have to stay the same order -- which is why
+    neither side ever re-sorts a batch.
 
     Raises:
-        JudgeParseError: not a JSON array; an item with an unknown verdict or a
-            confidence that is not a number in [0, 1]; or ids that are not
-            exactly the job's. A batch answering about the wrong findings must
-            never be joined to them, and a malformed confidence must never be
-            coerced upward into a suppression.
+        JudgeParseError: not a JSON array; an entry with an unknown verdict, a
+            confidence that is not a number in [0, 1], or an ``item`` that is not
+            a whole number; or item numbers that are not exactly the job's. A
+            batch answering about the wrong findings must never be joined to
+            them, and a malformed confidence must never be coerced upward into a
+            suppression.
     """
     from web_ui.evaluations import TRIAGE_VERDICTS
 
@@ -616,13 +660,17 @@ def parse_draft(raw: str, item_ids: list[str]) -> list[dict[str, Any]]:
     verdicts: list[dict[str, Any]] = []
     for n, obj in enumerate(data):
         if not isinstance(obj, dict):
-            raise JudgeParseError(f"item {n} is not an object")
-        item_id = str(obj.get("id") or "").strip()
-        label = item_id or f"#{n}"
+            raise JudgeParseError(f"entry {n} is not an object")
+        number = _item_number(obj.get("item"))
+        if number is None:
+            raise JudgeParseError(
+                f"entry {n}: item {obj.get('item')!r} is not a whole number"
+            )
+        label = f"item {number}"
         verdict = str(obj.get("verdict") or "").strip().lower()
         if verdict not in TRIAGE_VERDICTS:
             raise JudgeParseError(
-                f"item {label}: verdict {obj.get('verdict')!r} is not one of "
+                f"{label}: verdict {obj.get('verdict')!r} is not one of "
                 f"{sorted(TRIAGE_VERDICTS)}"
             )
         raw_confidence = obj.get("confidence")
@@ -630,29 +678,39 @@ def parse_draft(raw: str, item_ids: list[str]) -> list[dict[str, Any]]:
             confidence = float(raw_confidence)
         except (TypeError, ValueError):
             raise JudgeParseError(
-                f"item {label}: confidence {raw_confidence!r} is not a number"
+                f"{label}: confidence {raw_confidence!r} is not a number"
             ) from None
         if not 0.0 <= confidence <= 1.0:
             raise JudgeParseError(
-                f"item {label}: confidence {confidence} is outside [0, 1]"
+                f"{label}: confidence {confidence} is outside [0, 1]"
             )
         verdicts.append({
-            "id": item_id,
+            "item": number,
             "verdict": verdict,
             "confidence": confidence,
             "reason": str(obj.get("reason") or "").strip(),
         })
 
-    ids = [v["id"] for v in verdicts]
-    if len(ids) != len(set(ids)):
-        raise JudgeParseError("an id appears more than once")
-    if set(ids) != set(item_ids):
-        missing = sorted(set(item_ids) - set(ids))
-        unexpected = sorted(set(ids) - set(item_ids))
+    numbers = [v["item"] for v in verdicts]
+    if len(numbers) != len(set(numbers)):
+        raise JudgeParseError("an item number appears more than once")
+    expected = set(range(1, len(item_ids) + 1))
+    if set(numbers) != expected:
+        missing = sorted(expected - set(numbers))
+        unexpected = sorted(set(numbers) - expected)
         raise JudgeParseError(
-            f"ids do not match the job: missing {missing}, unexpected {unexpected}"
+            f"item numbers do not match the job: missing {missing}, "
+            f"unexpected {unexpected}"
         )
-    return verdicts
+    return [
+        {
+            "id": item_ids[v["item"] - 1],
+            "verdict": v["verdict"],
+            "confidence": v["confidence"],
+            "reason": v["reason"],
+        }
+        for v in verdicts
+    ]
 
 
 def commit(project_dir: Path | str) -> dict[str, Any]:

@@ -257,8 +257,11 @@ def test_chapters_filter_limits_the_walk(tmp_path: Path):
 def test_prompt_view_hides_bookkeeping_and_the_checkers_guess(book: Path):
     """The model sees the question, not the sidecar's keys or the checker's fix."""
     items, _ = tf.collect_book(book)
-    view = tf.item_prompt_view(items[0], ["spring → manantial"])
-    assert set(view) == {"id", "eval_name", "term", "message", "sentences", "glossary"}
+    view = tf.item_prompt_view(items[0], ["spring → manantial"], number=1)
+    assert set(view) == {"item", "eval_name", "term", "message", "sentences", "glossary"}
+    assert view["item"] == 1
+    # The opaque key never reaches the model: it cannot copy one back reliably.
+    assert "id" not in view
     assert "issue_key" not in view and "chunk_id" not in view
     assert "suggestion" not in view
     assert view["glossary"] == ["spring → manantial"]

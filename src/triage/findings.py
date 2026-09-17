@@ -301,7 +301,12 @@ def collect_book(
     return items, skips
 
 
-def item_prompt_view(item: dict[str, Any], glossary: Optional[list[str]] = None) -> dict[str, Any]:
+def item_prompt_view(
+    item: dict[str, Any],
+    glossary: Optional[list[str]] = None,
+    *,
+    number: int,
+) -> dict[str, Any]:
     """One item as the model reads it. The key order is the prompt's.
 
     Deliberately narrower than the stored item: ``issue_key``, ``chunk_id`` and
@@ -309,9 +314,19 @@ def item_prompt_view(item: dict[str, Any], glossary: Optional[list[str]] = None)
     reason about bookkeeping. ``suggestion`` is left out for the same reason the
     pass proposes no rewrites — it is the checker's guess, and showing it anchors
     the verdict to it.
+
+    ``number`` is the item's 1-based position in its job, and is what the model
+    echoes back. The stored ``id`` ends in a 16-hex-character ``issue_key``, and
+    a model asked to copy that gets it wrong: on the first real wave, one item
+    came back as ``8f3aae189ee24ad1e`` (seventeen characters) and then, on a
+    re-run of the same job, as ``8f3c10691e2fdf8c`` — the true key's first three
+    characters followed by invention, twice. ``parse_draft`` rejects a draft
+    whose ids are not exactly the job's, so each of those cost all 18 findings in
+    the job. A small integer is inside what a model can copy reliably, and
+    position is the one thing the prompt and the manifest already agree on.
     """
     view = {
-        "id": item["id"],
+        "item": number,
         "eval_name": item["eval_name"],
         "term": item.get("term") or "",
         "message": item.get("message") or "",

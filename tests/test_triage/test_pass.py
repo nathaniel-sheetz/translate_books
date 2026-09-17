@@ -101,7 +101,7 @@ def _answering_runner(verdict="suppress", confidence=0.95, seen=None):
         if seen is not None:
             seen.append(input_text)
         return 0, json.dumps([
-            {"id": it["id"], "verdict": verdict, "confidence": confidence,
+            {"item": it["item"], "verdict": verdict, "confidence": confidence,
              "reason": "a proper noun"}
             for it in _items_in_body(input_text)
         ]), ""
@@ -268,42 +268,89 @@ def test_commit_reports_a_job_with_no_draft_as_missing(book: Path):
     assert out["written"] == 0
 
 
-def test_a_draft_answering_about_other_findings_is_rejected(book: Path):
-    """The guard that stops verdicts being filed against the wrong findings."""
-    tp.prepare(book, worker_model="m", cli="cursor")
-    manifest, _ = tp.load_manifest(book)
-    real = manifest["jobs"][0]["item_ids"]
+def _write_draft(book: Path, rows: list[dict]) -> Path:
     draft = tp.triage_dir(book) / "drafts" / "m" / "job-001.json"
     draft.parent.mkdir(parents=True, exist_ok=True)
-    # Distinct ids, none of them the job's: the right count, the wrong findings.
-    # Repeating one id would trip the duplicate-id guard first and never reach
-    # the id-set check this test is about.
-    draft.write_text(json.dumps([
-        {"id": f"other:finding:{n}:key", "verdict": "suppress",
-         "confidence": 0.99, "reason": "x"}
-        for n in range(len(real))
-    ]), encoding="utf-8")
+    draft.write_text(json.dumps(rows), encoding="utf-8")
+    return draft
+
+
+def test_a_draft_numbering_items_the_job_does_not_have_is_rejected(book: Path):
+    """The guard that stops verdicts being filed against the wrong findings.
+
+    An out-of-range number is what is left of that failure once the opaque key
+    is off the wire: the model can no longer name a finding in another book, only
+    a position this job does not hold.
+    """
+    tp.prepare(book, worker_model="m", cli="cursor")
+    manifest, _ = tp.load_manifest(book)
+    count = len(manifest["jobs"][0]["item_ids"])
+    _write_draft(book, [
+        {"item": 900 + n, "verdict": "suppress", "confidence": 0.99, "reason": "x"}
+        for n in range(count)
+    ])
     out = tp.commit(book)
     assert out["failed"]
-    assert "ids do not match" in out["failed"][0]["problem"]
+    assert "do not match" in out["failed"][0]["problem"]
     assert load_all_triage_by_chunk(book) == {}
 
 
-def test_a_draft_repeating_one_id_is_rejected(book: Path):
+def test_a_draft_repeating_one_item_number_is_rejected(book: Path):
     """The sibling guard: two verdicts for one finding, and no way to pick."""
     tp.prepare(book, worker_model="m", cli="cursor")
-    manifest, _ = tp.load_manifest(book)
-    first = manifest["jobs"][0]["item_ids"][0]
-    draft = tp.triage_dir(book) / "drafts" / "m" / "job-001.json"
-    draft.parent.mkdir(parents=True, exist_ok=True)
-    draft.write_text(json.dumps([
-        {"id": first, "verdict": "suppress", "confidence": 0.99, "reason": "x"},
-        {"id": first, "verdict": "keep", "confidence": 0.10, "reason": "y"},
-    ]), encoding="utf-8")
+    _write_draft(book, [
+        {"item": 1, "verdict": "suppress", "confidence": 0.99, "reason": "x"},
+        {"item": 1, "verdict": "keep", "confidence": 0.10, "reason": "y"},
+    ])
     out = tp.commit(book)
     assert out["failed"]
     assert "more than once" in out["failed"][0]["problem"]
     assert load_all_triage_by_chunk(book) == {}
+
+
+def test_a_draft_missing_an_item_is_rejected(book: Path):
+    """A short answer is not a partial success: the job re-runs whole."""
+    tp.prepare(book, worker_model="m", cli="cursor")
+    _write_draft(book, [
+        {"item": 1, "verdict": "suppress", "confidence": 0.99, "reason": "x"},
+    ])
+    out = tp.commit(book)
+    assert out["failed"]
+    assert "do not match" in out["failed"][0]["problem"]
+    assert load_all_triage_by_chunk(book) == {}
+
+
+def test_item_numbers_map_back_to_the_right_findings(book: Path):
+    """The risk the ordinal scheme introduces, in exchange for the one it removes.
+
+    A number carries no evidence of which finding it means, so a mapping that
+    silently shifted by one would file every verdict against its neighbour and
+    nothing would look wrong. The two items here take opposite verdicts, so a
+    swap cannot pass.
+    """
+    tp.prepare(book, worker_model="m", cli="cursor")
+    manifest, _ = tp.load_manifest(book)
+    item_ids = manifest["jobs"][0]["item_ids"]
+    wanted = {
+        manifest["items"][iid]["eval_name"]: n
+        for n, iid in enumerate(item_ids, 1)
+    }
+    _write_draft(book, [
+        {"item": wanted["dictionary"], "verdict": "suppress",
+         "confidence": 0.99, "reason": "a proper noun"},
+        {"item": wanted["grammar"], "verdict": "keep",
+         "confidence": 0.99, "reason": "a real defect"},
+    ])
+    out = tp.commit(book)
+    assert not out["failed"], out
+    assert out["written"] == 2
+
+    records = load_all_triage_by_chunk(book)[CHUNK]
+    by_eval = {r["eval_name"]: r for r in records}
+    assert by_eval["dictionary"]["verdict"] == "suppress"
+    assert by_eval["dictionary"]["term"] == "Sigfridos"
+    assert by_eval["grammar"]["verdict"] == "keep"
+    assert by_eval["grammar"]["term"] == "escuchaba"
 
 
 def test_commit_writes_a_report_listing_what_it_suppressed(book: Path):
