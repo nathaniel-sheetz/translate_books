@@ -19,12 +19,46 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-#: Optional per-book sidecar holding the style guide's hard rules broken out with
-#: stable ids. It is a sidecar rather than a reshape of ``style.json`` because
-#: that file is one free-text blob across every book in ``projects/``, and
-#: tiering its schema would mean regenerating all of them. A book without the
-#: sidecar still judges — it just cannot cite rule ids.
+#: Optional per-book sidecar holding rules specific to one book, with stable
+#: ids. It is a sidecar rather than a reshape of ``style.json`` because that file
+#: is one free-text blob across every book in ``projects/``, and tiering its
+#: schema would mean regenerating all of them. Since the house set below is
+#: merged in for every book, a book without the sidecar still cites rule ids —
+#: the sidecar adds only what is specific to that book.
 STYLE_RULES_FILENAME = "style_rules.json"
+
+#: The house rules every book is held to, shipped with the repo rather than
+#: copied into each book. A house standard lives in ``prompts/`` because that is
+#: where what the models are told lives.
+#:
+#: Per-user like the other prompts: the operator's own copy is gitignored and the
+#: ``.example`` twin is what a fresh clone has. Keep ids and wording as shipped
+#: unless you mean to diverge — ``Issue.rule_id`` is the key rule suppressions and
+#: per-rule precision are computed on, so two installs disagreeing about what an
+#: id means would corrupt both.
+_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+HOUSE_STYLE_RULES_FILE = _PROMPTS_DIR / "house_style_rules.json"
+HOUSE_STYLE_RULES_EXAMPLE_FILE = _PROMPTS_DIR / "house_style_rules.example.json"
+
+
+def _house_rules_path() -> Path:
+    """The operator's house rules if present, else the checked-in example.
+
+    Mirrors the per-user prompt convention in
+    ``style_guide_wizard._resolve_prompt_path``, resolved locally for the same
+    reason ``text_utils._resolve_dialogue_path`` does rather than importing it:
+    judges, triage and the audit panel all import this module, and reaching into
+    the style-guide wizard would pull the setup tooling — and a private name —
+    into every one of those runs for an eight-line lookup.
+
+    Returns the user path when neither exists, so the caller reports the name the
+    operator would expect to create.
+    """
+    if HOUSE_STYLE_RULES_FILE.exists():
+        return HOUSE_STYLE_RULES_FILE
+    if HOUSE_STYLE_RULES_EXAMPLE_FILE.exists():
+        return HOUSE_STYLE_RULES_EXAMPLE_FILE
+    return HOUSE_STYLE_RULES_FILE
 
 #: Accepted/dismissed examples, generated from the human feedback corpus by
 #: ``scripts/editorial_metrics.py --write-examples``.
@@ -52,26 +86,107 @@ def format_style_rules(rules: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def load_style_rules(project_dir: Path) -> str:
-    """Load the optional hard-rule sidecar, or an empty string if absent.
+def load_house_rules() -> list[dict[str, Any]]:
+    """The ``every_book`` rules every book is held to, or ``[]``.
 
-    A malformed sidecar is logged and treated as absent rather than raised: the
-    judge degrades to un-cited STYLE_GUIDE findings, which is a lesser failure
-    than refusing to review the book.
+    ``where_the_guide_agrees`` is deliberately not returned. Those rules are
+    adopted one book at a time, by copying the rule into that book's sidecar;
+    injecting them everywhere would hold a book to a rule its style guide never
+    agreed to, which is the condition that section is named for.
+
+    Reads the operator's copy when present and the checked-in example otherwise,
+    so a clone that was never hand-primed with ``cp`` still judges against the
+    house standard instead of nothing.
+
+    An unreadable house file degrades to no house rules rather than raising, so
+    a book's own rules still reach the judge.
     """
-    path = Path(project_dir) / STYLE_RULES_FILENAME
-    if not path.exists():
-        return ""
+    path = _house_rules_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Ignoring unreadable %s: %s", path, exc)
-        return ""
+        return []
+    rules = data.get("every_book") if isinstance(data, dict) else None
+    if not isinstance(rules, list):
+        logger.warning("Ignoring %s: expected an 'every_book' list", path)
+        return []
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def load_book_rules(project_dir: Path) -> list[dict[str, Any]]:
+    """This book's own sidecar rules, or ``[]`` when it has none.
+
+    A malformed sidecar is logged and treated as absent rather than raised, and
+    the house rules still reach the judge: one unreadable file must not cost a
+    book the rules it shares with every other book.
+    """
+    path = Path(project_dir) / STYLE_RULES_FILENAME
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Ignoring unreadable %s: %s", path, exc)
+        return []
     rules = data.get("rules") if isinstance(data, dict) else data
     if not isinstance(rules, list):
         logger.warning("Ignoring %s: expected a 'rules' list", path)
-        return ""
-    return format_style_rules(rules)
+        return []
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def has_book_rules(project_dir: Path) -> bool:
+    """Whether this book adds rules of its own to the house set.
+
+    Once the house rules reach every book, "does this book have style rules" is
+    always yes and reports nothing. What a manifest can still say is whether the
+    book adds anything, so that is what this answers.
+    """
+    return bool(load_book_rules(project_dir))
+
+
+def merge_style_rules(
+    house: list[dict[str, Any]], book: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """House rules first, then the book's own, deduped by ``id``.
+
+    On a collision the house wording wins and the book's ``note`` overrides it.
+    That is the house file's own contract: ids and wording stay identical across
+    books so findings aggregate by rule, while a book's note may vary.
+    """
+    merged: list[dict[str, Any]] = []
+    index_of: dict[str, int] = {}
+    for rule in house:
+        rule_id = str(rule.get("id") or "").strip()
+        if not rule_id or rule_id in index_of:
+            continue
+        index_of[rule_id] = len(merged)
+        merged.append(dict(rule))
+    for rule in book:
+        rule_id = str(rule.get("id") or "").strip()
+        if not rule_id:
+            continue
+        at = index_of.get(rule_id)
+        if at is None:
+            index_of[rule_id] = len(merged)
+            merged.append(dict(rule))
+            continue
+        note = str(rule.get("note") or "").strip()
+        if note:
+            merged[at]["note"] = note
+    return merged
+
+
+def load_style_rules(project_dir: Path) -> str:
+    """The rules this book is judged against: the house set plus its own.
+
+    Every book gets the house rules whether or not it has a sidecar, so a judge
+    can always cite a rule id. Empty only when both sources are.
+    """
+    return format_style_rules(
+        merge_style_rules(load_house_rules(), load_book_rules(project_dir))
+    )
 
 
 def load_calibration_examples(project_dir: Path) -> str:
@@ -269,7 +384,11 @@ def build_judge_context(
 __all__ = [
     "build_judge_context",
     "format_style_rules",
+    "has_book_rules",
+    "load_book_rules",
     "load_calibration_examples",
     "load_coded_findings",
+    "load_house_rules",
     "load_style_rules",
+    "merge_style_rules",
 ]

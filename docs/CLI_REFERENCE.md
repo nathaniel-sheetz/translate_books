@@ -334,8 +334,10 @@ Reads the rows `ledger_census.py --export` writes. `prepare` renders them in
 batches (`--rows-per-job`, default 20) into a new or empty run directory for the
 panel: Grok 4.6, Gemini 3.8 Flash and GPT-5.6 Terra by default, and `--model`
 repeats to change it. A batch holds one book's edits and opens with that book's
-own standard: its `style.json` guide, `style_rules.json` and `address_map.json`,
-each named as absent when the book lacks it. Each edit carries its glossary
+own standard: its `style.json` guide, the house rules every book is held to plus
+any `style_rules.json` of its own, and `address_map.json`. The guide and the
+address map are named as absent when the book lacks them; the house rules are
+always there. Each edit carries its glossary
 hits, the text around it in both languages (the paragraph before, and the rest
 of its own paragraph, where a speaker tag sits) and a `quote_continues` flag
 read from the English, so a model can tell a continuing speaker's » from a stray

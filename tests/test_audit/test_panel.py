@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.audit import panel
+from src.judges import context as judge_context
 from src.judges.llm_io import JudgeParseError
 
 EN = (
@@ -150,7 +151,16 @@ def _standard(book: Path, *, style: str, rules: list, address: str, terms: list)
     (book / "glossary.json").write_text(json.dumps({"terms": terms}, ensure_ascii=False), encoding="utf-8")
 
 
-def test_each_job_holds_one_book_and_opens_with_its_standard(tmp_path):
+def test_each_job_holds_one_book_and_opens_with_its_standard(tmp_path, monkeypatch):
+    # Pin the house rules to a fixture. Asserting against the real
+    # prompts/house_style_rules.json would fail every time an actual house rule
+    # is edited, and this test is about the merge, not about the rule set.
+    house = tmp_path / "house.json"
+    house.write_text(
+        json.dumps({"every_book": [{"id": "house-sentinel", "rule": "Sentinel rule."}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(judge_context, "HOUSE_STYLE_RULES_FILE", house)
     root = tmp_path / "projects"
     _standard(
         _book(root, "uncle"),
@@ -185,7 +195,12 @@ def test_each_job_holds_one_book_and_opens_with_its_standard(tmp_path):
     assert '- "names-keep": A name keeps one rendering.' in uncle
     assert "FORMS OF ADDRESS\nThe children address their uncle with tú." in uncle
     assert "Warm register" not in bare
-    assert "STYLE RULES\n(none recorded for this book)" in bare
+    # The house rules reach a book with no sidecar of its own, and come first;
+    # only the book's *own* rules can be absent now.
+    assert '- "house-sentinel": Sentinel rule.' in bare
+    assert '- "house-sentinel": Sentinel rule.' in uncle
+    assert uncle.index('"house-sentinel"') < uncle.index('"names-keep"')
+    assert "STYLE RULES\n(none recorded for this book)" not in bare
     assert "FORMS OF ADDRESS\n(no address map for this book)" in bare
     items = {item["id"]: item for item in _items(uncle)}
     assert items["a1"]["glossary"] == ["volcano → volcán (also: monte de fuego)"]

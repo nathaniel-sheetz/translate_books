@@ -71,8 +71,10 @@ python scripts/harness.py config-set --project my-book \
 
 Each item carries the checker, the flagged term, the checker's message, the
 sentences, the LanguageTool `rule_id` for grammar findings, and any glossary
-entries whose Spanish appears in them. A job opens with the book's style guide
-and style rules.
+entries whose Spanish appears in them. A job opens with the book's style guide,
+the house rules every book is held to (`prompts/house_style_rules.json`), and
+any style rules of its own. A book with no `style_rules.json` sidecar still
+carries the house set.
 
 **Items are numbered, and the number is what comes back.** Each item carries
 `item`, its 1-based position in the job, and the draft answers with that number
@@ -146,7 +148,7 @@ the same reason.
 | Reader Review Mode | suppressed findings are not painted |
 | Chapter and project badges | counts drop by the same number |
 | Editorial judge's do-not-repeat list | suppressed findings drop off it, as dismissals do |
-| Recommendations screen | still listed, as **Filtered out automatically**, with the model's reason — unticked on arrival |
+| Recommendations screen | still listed, as **Filtered out automatically**, with the model's verdict, score and reason — unticked on arrival, and markable in place |
 
 The last row is the point: a filter nobody can question is a filter nobody
 should trust. A human mark always beats a machine one.
@@ -157,6 +159,35 @@ chip beside the "N dealt with" one. The two are deliberately separate: one is
 what you decided, the other is what a model decided for you. Both counts are
 occurrence rows, as every chapter chip is, so a repeated word one verdict covers
 reads as the number of places it occurs.
+
+### Reading the filter, and overruling it
+
+Every finding a verdict exists for carries a chip naming that verdict and its
+confidence — `suppress 0.94`, `keep 0.30`, `suppress 0.60 · below the floor` —
+and the model's stated reason below it under **Filter said**. All three show
+whether or not the verdict hid anything, because choosing a floor means reading
+the scores on both sides of it: a page that showed only the verdicts above the
+floor could never justify moving it.
+
+Each finding also carries the reader's own four mark buttons, posting to the
+reader's own endpoint (`/api/project/<id>/evaluations/<chunk_id>/feedback`) with
+the reader's own four labels. One vocabulary and one writer, because
+`_feedback.jsonl` is the corpus both per-rule precision and this pass's floor are
+computed from, and a row's meaning must not depend on which screen wrote it.
+
+That control is what makes calibration reachable. A suppressed finding is
+invisible in Review Mode by design, so until it existed the only surface that
+could show you one was the only surface that could not let you rule on it.
+
+**Marking is how the floor stops being a guess.** `replay_triage.py` scores
+recorded verdicts against human marks, and `prepare` skips every finding a human
+has already marked — so a fresh wave and the labelled corpus start with *zero*
+overlap, and the wave is unscoreable until someone marks the set it just judged.
+The row the exam most needs is the one a model hid and a human then called a
+real defect: that, and only that, is how "real defects lost" is ever measured.
+So a card's status and its triage chip are deliberately independent — a human
+mark changes the status and leaves the machine's verdict on display beside it,
+rather than overwriting the evidence of the disagreement.
 
 ## Calibration — the part that decides whether to trust it
 

@@ -62,6 +62,7 @@ The overridable six, exactly as listed in `.gitignore`:
 | `prompts/glossary_bootstrap.txt` | `glossary_bootstrap.example.txt` | Glossary candidate translation |
 | `prompts/dialogue.txt` | `dialogue.example.txt` | Spanish dialogue formatting rules |
 | `prompts/translator_note_default.txt` | `translator_note_default.example.txt` | Pre-filled "Note from the Translator" |
+| `prompts/house_style_rules.json` | `house_style_rules.example.json` | The house rules every book is judged against |
 
 Every other prompt in `prompts/` is tracked directly — edit it in place and the change is
 a normal commit.
@@ -101,6 +102,17 @@ a normal commit.
 | `address_forms.txt` | The shared usted/tú detection rubric both address judges load |
 | `judge_absolute.txt` + `_full_context` / `_no_voice` | Absolute-score evaluator variants |
 | `judge_pairwise.txt` + `_full_context` / `_no_voice` | Pairwise model comparison |
+| `house_style_rules.json` | The house rules merged into every book's editorial-judge, audit-panel and triage prompts |
+
+`house_style_rules.json` is **data, not a template**: it is parsed with
+`json.loads`, never passed through `render_prompt`, so the `{{placeholder}}`
+format above does not apply to it. It follows the per-user rule all the same —
+your copy wins, and a fresh clone falls back to the checked-in
+`house_style_rules.example.json`, so the rules are never simply missing. Keep
+rule `id`s and their wording as shipped unless you mean to diverge: that id is
+the key rule suppressions and per-rule precision are computed on, so two installs
+disagreeing about what an id means would corrupt both. A book's own
+`style_rules.json` sidecar adds to it.
 
 See [`JUDGES_FRAMEWORK.md`](JUDGES_FRAMEWORK.md) and
 [`LLM_JUDGE_EVALUATOR.md`](LLM_JUDGE_EVALUATOR.md).
