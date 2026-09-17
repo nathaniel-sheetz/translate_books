@@ -639,9 +639,10 @@ _slot_lock = threading.Lock()
 _slot_free: list[int] = []
 _slot_high = 0
 # Indices whose directory could not be seeded. Never returned to the free list:
-# a scheduled task running under another identity leaves ``slot-0..N`` owned by
-# someone this user can neither read nor delete, and recycling such an index
-# would make every job retry it forever.
+# a scheduled task leaves files in ``slot-0..N`` owned by BUILTIN\Administrators
+# -- the same user's task, not another account -- which an interactive token
+# holds deny-only, so this user can neither read nor delete them, and recycling
+# such an index would make every job retry it forever.
 _slot_poisoned: set[int] = set()
 # Per-wave isolation tally, so a wave that quietly lost isolation says so.
 _slot_stats = {"seeded": 0, "unseeded": 0}
@@ -659,10 +660,15 @@ def _slot_root() -> Path:
     properties the temp root could not (2026-09-16 field findings, issues 2-3):
 
     - **Per-user by construction.** The slot root used to sit under the *shared*
-      temp root, so a scheduled task running under another identity created
-      ``slot-0..N`` first, with an ACL the interactive user could neither read
-      nor delete. Every interactive wave that day then allocated slot-0, failed
-      to seed it, and silently ran unisolated.
+      temp root, so a task running as another user created ``slot-0..N`` first,
+      with an ACL the interactive user could neither read nor delete. Every
+      interactive wave that day then allocated slot-0, failed to seed it, and
+      silently ran unisolated. Home-scoping fixes *that* collision, but it does
+      not make a slot immune to ownership -- on 2026-09-17 the same lockout
+      reproduced under ``~/.cursor-slots``, because a scheduled task creates
+      files owned by ``BUILTIN\\Administrators`` wherever they land. What keeps
+      the slot usable there is this root's inheritable per-user ACE; see
+      :func:`_slot_dir_mode`.
     - **Short.** See :data:`_SLOT_PATH_BUDGET`. ``%TEMP%`` is already deep on
       Windows and an agent session can point it deeper still -- the root that
       broke this was 261 characters.
@@ -787,6 +793,45 @@ def _cursor_config_dir(env: Mapping[str, str]) -> Path:
     return Path.home() / ".cursor"
 
 
+def _slot_dir_mode() -> int:
+    """The mode a slot directory is created with.
+
+    ``0o700`` on POSIX: ``cli-config.json`` carries ``authInfo.email`` and
+    ``userId``, this module already withholds that email from probe output, and
+    a world-readable copy would widen it straight back.
+
+    **Never on Windows**, where Python translates that mode into a *protected*
+    security descriptor -- ``D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)``
+    -- which blocks inheritance and carries no ACE for the creating user's own
+    SID, leaving access to rest entirely on owning the file. Two facts then
+    multiply. A scheduled task here creates files owned by
+    ``BUILTIN\\Administrators`` rather than by the user it runs as (the
+    ``nodefaultadminowner`` default for an admin-group member), and an
+    interactive token carries Administrators as *deny-only*. So the nightly's
+    copy matched no ACE the operator could use and denied them even
+    ``READ_CONTROL``: every job drawing that slot died in 6-8 s with ``EPERM:
+    operation not permitted, open '...slot-0\\cli-config.json'``, and the file
+    could be neither read, re-moded nor deleted without elevation. Three waves
+    on 2026-09-17 each lost a third of their jobs to it while reporting
+    ``slots_seeded: "N/N"``.
+
+    ``0o777`` is :meth:`Path.mkdir`'s own default, so passing it changes nothing
+    and leaves the parent's inheritable ACL in place. Under the default root
+    that is what rescues the slot: ``~/.cursor-slots`` inherits an explicit
+    per-user ACE from the profile, which grants this user access whoever ends up
+    owning the file -- the same reason the nightly's files in this repo, equally
+    Administrators-owned, stay perfectly usable.
+
+    That is a property of *that root*, not of the mode. A ``HEADLESS_SLOT_ROOT``
+    pointed elsewhere inherits whatever its parent grants, and a parent carrying
+    only ``OW`` (owner rights) -- ``%TEMP%`` and pytest's basetemp both do --
+    locks a foreign-owned file out exactly as before. The override is validated
+    for length only, so a root on a world-readable path also widens
+    ``authInfo.email`` and ``userId`` to other local users.
+    """
+    return 0o777 if os.name == "nt" else 0o700
+
+
 def _seed_slot_config(slot_dir: Path, source_dir: Path) -> bool:
     """Copy ``cli-config.json`` into ``slot_dir``; True when the slot is usable.
 
@@ -812,11 +857,10 @@ def _seed_slot_config(slot_dir: Path, source_dir: Path) -> bool:
         return False
     staged = slot_dir / f"cli-config.json.{os.getpid()}.tmp"
     try:
-        # 0o700: cli-config.json carries authInfo.email and userId. Under the
-        # home root that is belt-and-braces rather than load-bearing, but this
-        # module already withholds that email from probe output and a
-        # world-readable copy would widen it straight back.
-        slot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Restrictive on POSIX, the platform default on Windows, where a
+        # restrictive mode blocks ACL inheritance and locks the operator out of
+        # anything another identity writes here -- see _slot_dir_mode.
+        slot_dir.mkdir(parents=True, exist_ok=True, mode=_slot_dir_mode())
         try:
             if dest.stat().st_mtime >= src_stat.st_mtime:
                 return True
@@ -852,9 +896,10 @@ def _cursor_slot(source_dir: Path) -> Iterator[None]:
     On a seed failure the loop **advances** to the next index rather than
     yielding an unisolated slot, and retires the bad one. Scoping the root per
     user (:func:`_slot_root`) fixes the collision that actually reproduced here;
-    advancing self-heals whatever it does not catch -- a stale elevated run, a
-    changed ACL -- at a cost of one leaked directory per poisoned index, paid
-    once per process rather than once per job.
+    advancing self-heals whatever it does not catch -- a slot holding files a
+    scheduled task created as ``BUILTIN\\Administrators``, a changed ACL -- at a
+    cost of one leaked directory per poisoned index, paid once per process
+    rather than once per job.
 
     A missing **source**, though, is not a poisoned slot, and advancing cannot
     help: the file is absent at the same path on every attempt, so the loop would

@@ -217,10 +217,11 @@ overridable with `HEADLESS_SLOT_ROOT` (resolved to an absolute path, so a relati
 value cannot slip past the character budget). Home rather than the temp root, for two
 independent reasons:
 
-- **Per-user by construction.** Under the shared temp root, a scheduled task running
-  as another identity created `slot-0..N` first with an ACL the interactive user
-  could neither read nor delete — so every interactive wave that day allocated
-  slot-0, failed to seed it, and ran unisolated.
+- **Per-user by construction.** Under the shared temp root, a task running as another
+  user created `slot-0..N` first with an ACL the interactive user could neither read
+  nor delete — so every interactive wave that day allocated slot-0, failed to seed it,
+  and ran unisolated. Home-scoping fixes *that* collision, but it does not make a slot
+  immune to ownership — see **When a slot is locked out** below.
 - **Short.** `cursor-agent` writes `chats/<id>/<uuid>/store.db-wal` about **118
   characters** below each slot (`CURSOR_CONFIG_DIR`). Past Windows' 260-character limit the job dies with
   `rc=124` and a *Cursor endpoint* reconnect message that reads exactly like a
@@ -236,6 +237,38 @@ running as it did before. A missing **source** `cli-config.json` is the one exce
 and does not advance: the file is absent at the same path on every attempt, so retrying
 burned 8 indices per spawn and blamed a destination slot that was never at fault. That
 case is checked once, up front, and fails open immediately.
+
+**When a slot is locked out** (`EPERM: operation not permitted, open
+'…slot-0\cli-config.json'`). Jobs die in 6–8 seconds against 40–70 for a healthy one —
+that instant-death signature is how you tell this from a provider outage — and
+`slots_seeded` still reads `N/N`, because the tally records the seed call's return
+value and the `mtime` shortcut trusts a `stat` that succeeds where an `open` would not.
+
+The cause is ownership, not a second account. A Windows scheduled task creates files
+owned by `BUILTIN\Administrators` rather than by the user it runs as, and an
+interactive token holds Administrators *deny-only*. Before 0.59.3.1 each slot was
+created `0o700`, which Python translates on Windows into a **protected** descriptor —
+inheritance blocked, granting only owner rights, SYSTEM and Administrators — so a file
+the nightly wrote there matched no usable ACE and denied the operator everything,
+including `READ_CONTROL`. `Get-Acl` throws rather than returning a descriptor, and the
+file cannot be read, re-moded or deleted without elevation. Diagnose it on the **file**,
+never the directory: the directory's own ACL looks entirely normal.
+
+Since 0.59.3.1 a new slot inherits `~/.cursor-slots`' ACL, whose explicit per-user ACE
+survives whoever ends up owning the file. **Existing roots are not repaired**, because
+`mkdir(exist_ok=True)` ignores the mode for a directory that already exists — clear the
+tree once, elevated, and the pool rebuilds itself correctly:
+
+```powershell
+Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-Command',
+  'Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor-slots"'
+```
+
+Until that is done, point `HEADLESS_SLOT_ROOT` at a short, fresh, user-owned directory
+for any wave run after the nightly. Note it inherits whatever its parent grants: a root
+under `%TEMP%` carries only owner rights and is locked out by a foreign owner exactly as
+before, and one on a world-readable path widens `authInfo.email` and `userId` to every
+local user.
 
 The fallback is no longer silent — the first failure of a wave logs a warning naming the
 file that actually failed (the source, or the destination slot) and its errno, and the
