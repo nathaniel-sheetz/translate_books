@@ -406,7 +406,8 @@
 .rec-hide-status-deleted .rec-status-deleted,
 .rec-hide-status-not_a_problem .rec-status-not_a_problem,
 .rec-hide-status-bad_message .rec-status-bad_message,
-.rec-hide-status-missing_context_gap .rec-status-missing_context_gap {
+.rec-hide-status-missing_context_gap .rec-status-missing_context_gap,
+.rec-hide-status-auto_suppressed .rec-status-auto_suppressed {
     display: none;
 }
 

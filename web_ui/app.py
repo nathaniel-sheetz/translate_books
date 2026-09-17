@@ -106,6 +106,8 @@ from web_ui.evaluations import (
     rollup_group_state,
     row_containing_offset,
     run_coded_evaluators,
+    triage_hides,
+    triage_mark,
 )
 from web_ui import favorites as favorites_store
 from web_ui.project_cards import PROJECT_STATUSES, build_project_card
@@ -6263,6 +6265,10 @@ def _build_chapter_review(
             # nobody should trust.
             if is_triaged(tr_by_key, eval_name, ni) and not include_dismissed:
                 continue
+            # Carried so the recommendations screen can say a machine suppressed
+            # this and why. Only the standing record is attached, never a
+            # judgement about it: `_finding_item` decides what to show.
+            triage = triage_mark(tr_by_key, eval_name, ni)
             match_text = loc.get("match") or ""
             excerpt = match_text or (
                 (loc.get("snippet_before") or "")
@@ -6295,6 +6301,7 @@ def _build_chapter_review(
                     "rule_id": ni.get("rule_id"),
                     "category": ni.get("category"),
                     "feedback": mark,
+                    "triage": triage,
                 })
                 type_counts[eval_name] += 1
                 continue
@@ -6315,6 +6322,7 @@ def _build_chapter_review(
                 "rule_id": ni.get("rule_id"),
                 "category": ni.get("category"),
                 "feedback": mark,
+                "triage": triage,
             })
             type_counts[eval_name] += 1
 
@@ -8915,6 +8923,7 @@ _RECOMMENDATION_STATUSES: tuple[str, ...] = (
     "open", "stale",
     "fixed", "applied", "settled", "deleted",
     "not_a_problem", "bad_message", "missing_context_gap",
+    "auto_suppressed",
 )
 _RECOMMENDATION_OPEN_STATUSES = frozenset({"open", "stale"})
 # Unticked on arrival. These say the finding was *wrong* - the judge misread the
@@ -8922,7 +8931,14 @@ _RECOMMENDATION_OPEN_STATUSES = frozenset({"open", "stale"})
 # noise for reading a book. They are 831 of the corpus's 1,132 marks, enough to
 # bury the 285 findings that record a real change to the text. The boxes are
 # there, with their counts, for when the question is how well the judges did.
-_RECOMMENDATION_STATUSES_OFF = frozenset({"not_a_problem", "bad_message"})
+# `auto_suppressed` joins them: it says a model judged the finding noise, which
+# is the same kind of claim, made by a machine rather than by you. It is
+# unticked on arrival for the same reason and for one more — these are the
+# findings the reader never saw, so the box is how you go looking for what the
+# filter took away.
+_RECOMMENDATION_STATUSES_OFF = frozenset(
+    {"not_a_problem", "bad_message", "auto_suppressed"}
+)
 
 
 def _coerce_es_idx(value) -> Optional[int]:
@@ -9049,9 +9065,18 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
     """
     eval_name = finding.get("eval_name")
     mark = finding.get("feedback") or {}
+    triage = finding.get("triage") or {}
     fav_id = favorites_store.finding_id(
         finding.get("chunk_id"), finding.get("issue_key")
     )
+    # A human mark always wins: you ruling on a finding settles it, whatever a
+    # model said first. Only a `suppress` that actually hides the finding shows
+    # as auto_suppressed — a `keep`, or a suppress under the floor, changed
+    # nothing about what you see, so labelling it would claim an effect it had
+    # no part in.
+    status = FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open")
+    if not mark and triage_hides(triage):
+        status = "auto_suppressed"
     return {
         "source": "judge" if eval_name in _REVIEW_JUDGE_TYPES else "coded",
         "kind": eval_name,
@@ -9071,8 +9096,16 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
         "match_end": finding.get("match_end"),
         "unanchored_reason": unanchored_reason,
         "stale": False,
-        "status": FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open"),
-        "status_at": mark.get("ts"),
+        "status": status,
+        "status_at": mark.get("ts") or (triage.get("ts") if status == "auto_suppressed" else None),
+        # Why the machine suppressed it, and what judged it. Shown only on an
+        # auto_suppressed card: a filter nobody can question is a filter nobody
+        # should trust.
+        "triage_reason": triage.get("reason") if status == "auto_suppressed" else None,
+        "triage_model": triage.get("model") if status == "auto_suppressed" else None,
+        "triage_confidence": (
+            triage.get("confidence") if status == "auto_suppressed" else None
+        ),
         # `obsolete` only. That reason means the excerpt *was* the prose and the
         # prose moved on, so the quote is a snapshot of the text as it read.
         # `unplaceable` means the quote was never verbatim in the book at all -

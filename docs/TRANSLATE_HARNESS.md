@@ -257,8 +257,8 @@ makes it idempotent.
 
 `config-set --key` accepts exactly: `backend`, `footnotes_decision`, `headless_cli`,
 `always_include_dialogue`, `always_include_image_instructions`, `headless_extra_flags`,
-`headless_prompt_cache`, and the five `headless_effort_*` keys (`translate`, `judges`,
-`annotations`, `footnotes`, `footnote_scan`).
+`headless_prompt_cache`, and the six `headless_effort_*` keys (`translate`, `judges`,
+`annotations`, `footnotes`, `footnote_scan`, `triage`).
 
 ---
 

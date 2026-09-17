@@ -139,6 +139,7 @@ STRINGS = {
             "not_a_problem": "Not a problem",
             "bad_message": "Badly worded",
             "missing_context_gap": "Missing context",
+            "auto_suppressed": "Filtered out automatically",
         },
         # A favorite is not a verdict: every status above says you are done with
         # an item, and this says the opposite - come back to this one.
@@ -533,6 +534,7 @@ STRINGS = {
             "not_a_problem": "No era un problema",
             "bad_message": "Mal redactado",
             "missing_context_gap": "Faltaba contexto",
+            "auto_suppressed": "Descartado automáticamente",
         },
         "rec_favorites_only": "Solo favoritos",
         "rec_fav_add": "A\u00f1adir a favoritos",

@@ -304,6 +304,27 @@ def triage_mark(
     return by_key.get((eval_name, issue_key(eval_name, issue)))
 
 
+def triage_hides(
+    record: Optional[dict[str, Any]], *, floor: float = TRIAGE_CONFIDENCE_FLOOR
+) -> bool:
+    """Whether one triage record actually suppresses the finding it names.
+
+    The single definition of that question. :func:`is_triaged` answers it for a
+    finding, and the recommendations screen answers it for a record it already
+    holds; both go through here so a card can never label a finding
+    ``auto_suppressed`` that the review list still shows.
+
+    Only ``suppress`` at or above ``floor`` hides anything. A malformed
+    confidence is not a licence to hide a finding.
+    """
+    if not record or record.get("verdict") != "suppress":
+        return False
+    try:
+        return float(record.get("confidence") or 0.0) >= floor
+    except (TypeError, ValueError):
+        return False
+
+
 def is_triaged(
     by_key: dict[tuple[str, str], dict[str, Any]],
     eval_name: str,
@@ -330,14 +351,7 @@ def is_triaged(
     :func:`is_ignored` a read-time filter rather than an evaluate-time
     suppression.
     """
-    record = triage_mark(by_key, eval_name, issue)
-    if record is None or record.get("verdict") != "suppress":
-        return False
-    try:
-        return float(record.get("confidence") or 0.0) >= floor
-    except (TypeError, ValueError):
-        # A malformed confidence is not a licence to hide a finding.
-        return False
+    return triage_hides(triage_mark(by_key, eval_name, issue), floor=floor)
 
 
 # ---------------------------------------------------------------------------

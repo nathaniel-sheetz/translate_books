@@ -258,6 +258,38 @@ candidate, with the English original attached to the ones whose `source_check`
 asked for it. Not idempotent — a verified chunk is skipped until `--force`.
 Full reference: [`EDITORIAL_JUDGE.md`](EDITORIAL_JUDGE.md).
 
+### `run_triage.py` — filter the noise out of the coded checkers
+
+```bash
+python scripts/run_triage.py prepare --project my-book \
+    --worker-model "grok-4.6[effort=medium,fast=false]"
+python scripts/run_triage.py fanout  --project my-book
+python scripts/run_triage.py commit  --project my-book
+```
+
+`dictionary` and `grammar` accept at 7% and 16%, and produce ~70% of all
+finding-clearing work. This asks a model whether each flagged word is really a
+defect *in its sentence*, and records the answer in
+`evaluations/_triage.jsonl` — nothing is deleted and no prose is touched. Only a
+`suppress` at or above `TRIAGE_CONFIDENCE_FLOOR` hides a finding; suppressed
+ones still appear on the recommendations screen with the model's reason.
+
+The model is pinned at `prepare` and inherited by `fanout` from the manifest, so
+the pass never rides the book's default backend. `commit` is re-runnable.
+Full reference: [`TRIAGE.md`](TRIAGE.md).
+
+### `replay_triage.py` — score the triage filter and set its cutoff
+
+```bash
+python scripts/replay_triage.py --exam
+python scripts/replay_triage.py --exam --out report.json
+```
+
+Replays recorded verdicts against the human marks in `_feedback.jsonl` and
+sweeps the confidence floor, reporting real defects lost (**must be 0** — the
+veto) against noise removed at each. `--exam` excludes the three frozen holdout
+books, which must never be tuned on. Costs nothing: it calls no model.
+
 ### `editorial_metrics.py` — editorial judge precision report
 
 ```bash
