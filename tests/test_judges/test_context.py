@@ -149,6 +149,55 @@ def test_the_user_copy_wins_over_the_example(tmp_path, monkeypatch):
     assert '"shipped"' not in rendered
 
 
+def test_a_broken_user_copy_falls_back_to_the_example(tmp_path, monkeypatch):
+    """A JSON typo must not cost every book the house standard.
+
+    An *absent* override already degraded to the example, so a malformed one was
+    the only way left to have every book judged against no rules at all —
+    silently, across triage, the editorial judge and the audit panel at once.
+    """
+    mine = tmp_path / "house.json"
+    mine.write_text('{"every_book": [{"id": "mine",', encoding="utf-8")
+    example = tmp_path / "house.example.json"
+    example.write_text(
+        json.dumps({"every_book": [{"id": "shipped", "rule": "Shipped."}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_FILE", mine)
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_EXAMPLE_FILE", example)
+
+    assert '- "shipped": Shipped.' in context.load_style_rules(_book(tmp_path, None))
+
+
+def test_a_user_copy_of_the_wrong_shape_falls_back_too(tmp_path, monkeypatch):
+    """Parseable JSON with no ``every_book`` list is just as empty in effect."""
+    mine = tmp_path / "house.json"
+    mine.write_text(json.dumps({"rules": [{"id": "mine", "rule": "Mine."}]}),
+                    encoding="utf-8")
+    example = tmp_path / "house.example.json"
+    example.write_text(
+        json.dumps({"every_book": [{"id": "shipped", "rule": "Shipped."}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_FILE", mine)
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_EXAMPLE_FILE", example)
+
+    assert '"shipped"' in context.load_style_rules(_book(tmp_path, None))
+
+
+def test_both_house_files_broken_still_delivers_the_book_s_own(tmp_path, monkeypatch):
+    """The fallback may not become a new way to raise."""
+    for name in ("house.json", "house.example.json"):
+        (tmp_path / name).write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_FILE", tmp_path / "house.json")
+    monkeypatch.setattr(
+        context, "HOUSE_STYLE_RULES_EXAMPLE_FILE", tmp_path / "house.example.json"
+    )
+
+    book = _book(tmp_path, [{"id": "book-one", "rule": "Book rule."}])
+    assert context.load_style_rules(book) == '- "book-one": Book rule.'
+
+
 def test_has_book_rules_ignores_the_house_set(house, tmp_path):
     assert context.has_book_rules(_book(tmp_path, None)) is False
     assert context.has_book_rules(_book(tmp_path, [{"id": "x", "rule": "y"}])) is True

@@ -108,6 +108,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
         worker_model=args.worker_model,
         cli=args.cli,
         effort=args.effort,
+        keep_drafts=args.keep_drafts,
     ))
 
 
@@ -160,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_prepare.add_argument(
         "--effort", choices=("low", "medium", "high", "xhigh", "default"), default=None,
         help="default: headless_effort_triage, else medium",
+    )
+    p_prepare.add_argument(
+        "--keep-drafts", action="store_true",
+        help="refuse to render if drafts from an earlier run are still there, "
+             "instead of clearing them. Use when a wave is in flight",
     )
 
     p_fanout = sub.add_parser("fanout", help="run one headless wave over the prepared jobs")

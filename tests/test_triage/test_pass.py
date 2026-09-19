@@ -140,14 +140,77 @@ def test_prepare_batches_by_items_per_job(book: Path):
     assert out["jobs"] == 2
 
 
-def test_prepare_refuses_to_render_over_existing_drafts(book: Path):
+def test_prepare_clears_a_stale_draft_rather_than_refusing(book: Path):
+    """A draft from the previous run must never survive into this one.
+
+    The join is positional, so a surviving ``job-001.json`` would be read as
+    this run's ``job-001`` and file its verdicts against whatever findings now
+    sit in those slots. Cleared, never reused — which is also why this is not
+    the sibling pipelines' ``keep_drafts``-means-resume.
+    """
     tp.prepare(book, worker_model="m", cli="cursor")
     draft = tp.triage_dir(book) / "drafts" / "m" / "job-001.json"
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text("[]", encoding="utf-8")
+
     out = tp.prepare(book, worker_model="m", cli="cursor")
+    assert out["status"] == "ok"
+    assert out["cleared_drafts"] == 1
+    assert not draft.exists()
+
+
+def test_keep_drafts_refuses_instead_of_clearing(book: Path):
+    """The opt-out, for a wave still in flight: refuse, and touch nothing."""
+    tp.prepare(book, worker_model="m", cli="cursor")
+    draft = tp.triage_dir(book) / "drafts" / "m" / "job-001.json"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("[]", encoding="utf-8")
+
+    out = tp.prepare(book, worker_model="m", cli="cursor", keep_drafts=True)
     assert out["status"] == "error"
-    assert "drafts" in out["error"]
+    assert "keep_drafts" in out["error"]
+    assert draft.exists(), "refusing must not delete the work it refused over"
+
+
+def test_a_second_wave_prepares_over_the_first_one_s_committed_drafts(book: Path):
+    """The bug this pass shipped with: no book could be triaged twice.
+
+    ``commit`` keeps its drafts on purpose — they are what make a second
+    ``commit`` report ``already_recorded`` instead of ``missing`` — so the next
+    ``prepare`` met a directory it refused to render into, and only a manual
+    delete unblocked it. Wave 1 rules on ``dictionary`` here and wave 2 on
+    ``grammar``, which is the real shape: new findings, same run directory.
+    """
+    assert tp.prepare(book, worker_model="m", cli="cursor",
+                      eval_names=("dictionary",))["status"] == "ok"
+    tp.fanout(book, runner=_answering_runner(), concurrency=1)
+    assert tp.commit(book)["written"] == 1
+    assert tp._live_drafts(book), "commit keeps the draft; that is not the bug"
+
+    out = tp.prepare(book, worker_model="m", cli="cursor", eval_names=("grammar",))
+    assert out["status"] == "ok"
+    assert out["cleared_drafts"] == 1
+    assert tp._live_drafts(book) == []
+
+
+def test_a_rejected_draft_is_evidence_and_never_blocks_a_run(book: Path):
+    """``<job>.rejected.json`` is kept to be read by a human, not by ``commit``.
+
+    It matched the old ``*.json`` guard, so one malformed draft would have
+    blocked every future run of the pass on that book.
+    """
+    tp.prepare(book, worker_model="m", cli="cursor")
+    draft = tp.triage_dir(book) / "drafts" / "m" / "job-001.json"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("not json at all", encoding="utf-8")
+    assert tp.commit(book)["failed"]
+    rejected = draft.with_name("job-001.rejected.json")
+    assert rejected.exists()
+
+    out = tp.prepare(book, worker_model="m", cli="cursor")
+    assert out["status"] == "ok"
+    assert out["cleared_drafts"] == 0
+    assert rejected.exists(), "the evidence survives the next prepare"
 
 
 def test_prepare_errors_when_there_is_nothing_to_triage(tmp_path: Path):
@@ -317,6 +380,53 @@ def test_a_draft_missing_an_item_is_rejected(book: Path):
     out = tp.commit(book)
     assert out["failed"]
     assert "do not match" in out["failed"][0]["problem"]
+    assert load_all_triage_by_chunk(book) == {}
+
+
+def test_a_bool_confidence_is_rejected_not_stored_as_one(book: Path):
+    """``float(True)`` is ``1.0``, a full-confidence suppress.
+
+    ``bool`` subclasses ``int``, so a stray ``"confidence": true`` would
+    otherwise hide the finding. The same trap ``_item_number`` already refuses.
+    """
+    tp.prepare(book, worker_model="m", cli="cursor")
+    _write_draft(book, [
+        {"item": 1, "verdict": "suppress", "confidence": True, "reason": "x"},
+        {"item": 2, "verdict": "keep", "confidence": 0.10, "reason": "y"},
+    ])
+    out = tp.commit(book)
+    assert out["failed"]
+    assert "not a number" in out["failed"][0]["problem"]
+    assert load_all_triage_by_chunk(book) == {}
+
+
+def test_a_bool_item_is_rejected_not_filed_as_item_one(book: Path):
+    """``True`` would otherwise resolve to 1 and file that verdict against a real finding."""
+    tp.prepare(book, worker_model="m", cli="cursor")
+    _write_draft(book, [
+        {"item": True, "verdict": "suppress", "confidence": 0.99, "reason": "x"},
+        {"item": 2, "verdict": "keep", "confidence": 0.10, "reason": "y"},
+    ])
+    out = tp.commit(book)
+    assert out["failed"]
+    assert "not a whole number" in out["failed"][0]["problem"]
+    assert load_all_triage_by_chunk(book) == {}
+
+
+@pytest.mark.parametrize("confidence, needle", [
+    (1.5, "outside"),
+    ("high", "not a number"),
+])
+def test_a_malformed_confidence_is_rejected(book: Path, confidence, needle):
+    """A score that is not a number in [0, 1] must never coerce into a suppression."""
+    tp.prepare(book, worker_model="m", cli="cursor")
+    _write_draft(book, [
+        {"item": 1, "verdict": "suppress", "confidence": confidence, "reason": "x"},
+        {"item": 2, "verdict": "keep", "confidence": 0.10, "reason": "y"},
+    ])
+    out = tp.commit(book)
+    assert out["failed"]
+    assert needle in out["failed"][0]["problem"]
     assert load_all_triage_by_chunk(book) == {}
 
 

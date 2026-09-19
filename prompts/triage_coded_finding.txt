@@ -7,7 +7,7 @@
 # split. A job holds one book's findings, so the book's standard opens the body.
 # Preamble variables: none.
 # Body variables: book_context, item_count, items (rendered by
-# src/triage/pass.py, with sentences from src/triage/findings.py).
+# src/triage/pass_.py, with sentences from src/triage/findings.py).
 
 You are triaging the output of two deterministic checkers that run over a literary translation into Mexican Spanish (children's and general-audience books). Your job is to decide which findings are worth a human's attention. You are a filter, not an editor: never propose a rewrite.
 

@@ -25,13 +25,13 @@ the *lowest* one that still loses nothing, and when in doubt it goes up.
 judge on an exam book"). Nothing in the code enforces that list, so pass them to
 ``--exclude-project`` when calibrating; ``--exam`` does it for you.
 
-**Recovering a resolved finding's sentence.** A ``resolved`` mark means the word
-was fixed, so the finding no longer reproduces against the current chunk — the
-same problem ``replay_grammar_marks.py`` solved with a message lexicon. Here the
-pre-edit text comes from ``ledger_census.original_translation``, which reads the
-chunk's ``last_llm_log`` and validates it is that chunk's log before returning
-the translation as the LLM first produced it. A mark whose original cannot be
-verified is reported as unscoreable rather than guessed at.
+**What "scoreable" means here.** A finding is scored only when it carries both a
+human mark and a triage verdict. ``unscored_labels`` counts the labelled
+findings no verdict exists for — it is *not* a count of marks whose pre-edit text
+could not be recovered, which nothing in this script checks. Because ``prepare``
+skips every finding a human has already marked, a fresh wave and the labelled
+corpus begin with zero overlap, so the sweep stays structural until some of the
+triaged set has been marked.
 
 Costs nothing to run: it reads verdicts already on disk and calls no model.
 
@@ -56,7 +56,7 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8")
 
-from scripts.ledger_census import discover_projects, original_translation  # noqa: E402
+from scripts.ledger_census import discover_projects  # noqa: E402
 from web_ui.evaluations import (  # noqa: E402
     TRIAGE_CONFIDENCE_FLOOR,
     build_triaged,
@@ -84,31 +84,46 @@ NOISE = "false_positive"
 _FLOORS = (0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99)
 
 
-def marked_findings(project_dir: Path) -> dict[tuple[str, str], str]:
-    """``{(eval_name, issue_key): label}`` for the labelled coded findings.
+def marked_findings(project_dir: Path) -> dict[tuple[str, str, str], str]:
+    """``{(chunk_id, eval_name, issue_key): label}`` for the labelled findings.
 
-    Last mark wins, matching ``build_dismissed``: the file is append-only and a
-    finding can be re-marked, so the label standing now is the one to score
-    against. Records with no ``issue_key`` (written before the key existed) are
-    skipped — they can only be matched positionally, and a position means
-    nothing once an evaluator has re-run.
+    Keyed by chunk as well as by content, because ``issue_key`` is only unique
+    *within* a chunk: it hashes ``(eval_name, severity, message, location)``, and
+    for these two checkers ``location`` is a character offset. The same unknown
+    word at the same offset in two chapters therefore hashes identically, and
+    flattening the book into one map would let one chunk's label overwrite
+    another's. Every other reader of this key — ``app.py`` included — builds the
+    map one chunk at a time for exactly this reason.
+
+    Last mark wins *within a chunk*, matching ``build_dismissed``: the file is
+    append-only and a finding can be re-marked, so the label standing now is the
+    one to score against. Records with no ``issue_key`` (written before the key
+    existed) are skipped — they can only be matched positionally, and a position
+    means nothing once an evaluator has re-run.
     """
-    out: dict[tuple[str, str], str] = {}
-    for records in load_all_feedback_by_chunk(project_dir).values():
+    out: dict[tuple[str, str, str], str] = {}
+    for chunk_id, records in load_all_feedback_by_chunk(project_dir).items():
         for record in records:
             eval_name = record.get("eval_name")
             key = record.get("issue_key")
             label = record.get("feedback_type")
             if eval_name in EVAL_NAMES and key and label in (REAL, NOISE):
-                out[(eval_name, key)] = label
+                out[(chunk_id, eval_name, key)] = label
     return out
 
 
-def triage_verdicts(project_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
-    """``{(eval_name, issue_key): verdict record}`` for every triaged finding."""
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for records in load_all_triage_by_chunk(project_dir).values():
-        out.update(build_triaged(records))
+def triage_verdicts(project_dir: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """``{(chunk_id, eval_name, issue_key): verdict}`` for every triaged finding.
+
+    Chunk-keyed for the reason :func:`marked_findings` gives: ``build_triaged``
+    indexes one chunk's records, and ``update``-ing every chunk into one map let
+    a verdict in the last chapter silently replace the verdict on an identically
+    worded finding in an earlier one.
+    """
+    out: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for chunk_id, records in load_all_triage_by_chunk(project_dir).items():
+        for (eval_name, key), record in build_triaged(records).items():
+            out[(chunk_id, eval_name, key)] = record
     return out
 
 
@@ -143,31 +158,21 @@ def score_project(project_dir: Path) -> dict[str, Any]:
         "noise": sum(1 for lbl in labels.values() if lbl == NOISE),
         "triaged": len(verdicts),
         "scored": len(joined),
+        # The veto's evidence, counted apart from the join: "lost 0" is only a
+        # fact about a floor if some scored finding was a real defect to begin
+        # with. Without this a sweep over nothing but false positives reads
+        # exactly like a sweep that proved the floor safe.
+        "scored_real": sum(1 for label, _ in joined if label == REAL),
         "unscored_labels": len(labels) - len(joined),
         "per_floor": per_floor,
     }
 
 
-def original_sentence_available(project_dir: Path, chunk_id: str) -> bool:
-    """Whether the pre-edit translation for a chunk can be recovered.
-
-    Reported rather than acted on: it tells you how much of the ``resolved``
-    slice a future re-triage could actually be re-run against, since those
-    findings no longer reproduce on the current text.
-    """
-    path = Path(project_dir) / "chunks" / f"{chunk_id}.json"
-    try:
-        chunk = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    text, _info = original_translation(chunk)
-    return bool(text)
-
-
 def _totals(reports: list[dict[str, Any]]) -> dict[str, Any]:
     total: dict[str, Any] = {
         key: sum(r[key] for r in reports)
-        for key in ("labelled", "real", "noise", "triaged", "scored", "unscored_labels")
+        for key in ("labelled", "real", "noise", "triaged", "scored",
+                    "scored_real", "unscored_labels")
     }
     total["per_floor"] = {
         f"{floor:.2f}": {
@@ -180,7 +185,21 @@ def _totals(reports: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def recommended_floor(total: dict[str, Any]) -> Optional[str]:
-    """The lowest floor that loses no real defect, or ``None`` if none does."""
+    """The lowest floor that loses no real defect, or ``None``.
+
+    ``None`` also when there is nothing to choose on. With an empty join every
+    floor trivially loses zero real defects, so the old version answered "0.50
+    is safe" to a sweep that had scored nothing — and 0.50 is the bottom of the
+    table, the largest suppression this pass can be asked to do. That is the
+    normal state right after a commit, since ``prepare`` skips already-marked
+    findings and the wave it just judged is therefore entirely unmarked.
+
+    Requiring a ``resolved`` row and not merely a join is the same argument one
+    step further: the veto is *real defects lost*, and a join made only of
+    false positives cannot test it.
+    """
+    if not total.get("scored") or not total.get("scored_real"):
+        return None
     for floor in _FLOORS:
         if total["per_floor"][f"{floor:.2f}"]["lost"] == 0:
             return f"{floor:.2f}"
@@ -225,7 +244,8 @@ def main() -> int:
     print(f"  labelled findings:     {total['labelled']} "
           f"({total['real']} resolved, {total['noise']} false positive)")
     print(f"  triage verdicts:       {total['triaged']}")
-    print(f"  joined (scoreable):    {total['scored']}")
+    print(f"  joined (scoreable):    {total['scored']} "
+          f"({total['scored_real']} resolved — the veto's evidence)")
     print(f"  labelled, not triaged: {total['unscored_labels']}")
 
     print()
@@ -237,9 +257,22 @@ def main() -> int:
         flag = "  <-- VETO" if row["lost"] else ""
         print(f"  {floor:>6.2f}  {row['lost']:>9}  {row['removed']:>13}  {share:>8}{flag}")
 
+    # Why no floor can be recommended comes first, so a reader never meets the
+    # recommendation before the reason it is missing.
     print()
+    if total["scored"] == 0:
+        print("  Nothing was scoreable: no finding carries both a human mark and a")
+        print("  triage verdict yet. The sweep above is structural, not evidence.")
+    elif total["scored_real"] == 0:
+        print("  Nothing scoreable is a real defect: every joined finding is marked")
+        print("  `false_positive`, so the sweep measures benefit and not the veto.")
+
     recommended = recommended_floor(total)
-    if recommended is None:
+    if recommended is None and not total["scored_real"]:
+        print("  No floor is recommended — there is no evidence to choose one on.")
+        print(f"  TRIAGE_CONFIDENCE_FLOOR stays at {TRIAGE_CONFIDENCE_FLOOR:.2f}. Mark some")
+        print("  of the triaged findings on the recommendations screen, then re-run.")
+    elif recommended is None:
         print("  No floor loses zero real defects. Do not ship suppression:")
         print("  tune the prompt until the top floor is clean.")
     else:
@@ -249,11 +282,6 @@ def main() -> int:
         print(f"  TRIAGE_CONFIDENCE_FLOOR is currently {TRIAGE_CONFIDENCE_FLOOR:.2f}")
         if float(recommended) > TRIAGE_CONFIDENCE_FLOOR:
             print("  ! The current floor is BELOW the safe one — it would lose a real defect.")
-
-    if total["scored"] == 0:
-        print()
-        print("  Nothing was scoreable: no finding carries both a human mark and a")
-        print("  triage verdict yet. The sweep above is structural, not evidence.")
 
     print()
     print("=== per book ===")

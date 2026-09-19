@@ -153,6 +153,20 @@ STRINGS = {
         # these findings stay on the page is that the two must be told apart.
         "rec_suppressed_chip": "{n} filtered out",
         "rec_summary_history": "{history} more already dealt with.",
+        # What the filter said about one finding, and how sure it was. Shown on
+        # every finding a verdict exists for, including the ones it did not
+        # hide: picking a floor means reading the scores on both sides of it,
+        # and a page that showed only the verdicts above the floor could never
+        # justify moving it.
+        "rec_triage_suppress": "suppress {c}",
+        "rec_triage_keep": "keep {c}",
+        "rec_triage_below_floor": "suppress {c} · below the floor",
+        "rec_triage_model": "judged by {model}",
+        # The card's own mark buttons. The four labels on them are the reader's
+        # (`review_fb_*` below) rather than new words - one vocabulary, because
+        # both surfaces write one corpus.
+        "rec_mark_label": "Your verdict",
+        "rec_mark_failed": "Could not save that mark.",
         # An item whose prose has moved on since the model wrote about it: the
         # card shows the text as it stood then, because whatever sentence lives
         # at that position now is not the one this was about.
@@ -163,6 +177,10 @@ STRINGS = {
             "note_text": "Note it would add",
             "evidence": "Checked",
             "manual_reason": "Needs a hand",
+            # The triage model's own words. A filter nobody can question is a
+            # filter nobody should trust, and this is the sentence being
+            # questioned.
+            "triage_reason": "Filter said",
         },
         # Card kinds: the seven evaluator categories plus the four annotation
         # types, in one map because the page renders them as one list of chips.
@@ -547,6 +565,12 @@ STRINGS = {
         "rec_history_chip": "{n} ya resuelto(s)",
         "rec_suppressed_chip": "{n} descartado(s) autom\u00e1ticamente",
         "rec_summary_history": "{history} m\u00e1s ya resuelto(s).",
+        "rec_triage_suppress": "descartar {c}",
+        "rec_triage_keep": "conservar {c}",
+        "rec_triage_below_floor": "descartar {c} \u00b7 por debajo del umbral",
+        "rec_triage_model": "evaluado por {model}",
+        "rec_mark_label": "Su veredicto",
+        "rec_mark_failed": "No se pudo guardar la marca.",
         "rec_original_then": "Como se le\u00eda entonces",
         "rec_text_changed": "el libro ha cambiado desde que se escribi\u00f3 esto",
         "rec_detail_labels": {
@@ -554,6 +578,7 @@ STRINGS = {
             "note_text": "Nota que a\u00f1adir\u00eda",
             "evidence": "Comprobado",
             "manual_reason": "Requiere intervenci\u00f3n",
+            "triage_reason": "El filtro dijo",
         },
         "rec_kinds": {
             "blacklist": "Lista negra",

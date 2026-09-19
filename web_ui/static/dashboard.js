@@ -2206,10 +2206,18 @@
         // stage's lower count with no visible explanation. Same treatment as a
         // dismissal, which is already shown-but-marked via `labeled`.
         var ignoredClass = issue.ignored ? ' ignored' : '';
-        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + labeledClass + ignoredClass + '" ' +
+        // The third gate, shown the same way and for the same reason -- it hides
+        // more than the other two, so leaving it off this card was what made the
+        // Review stage's drop unexplainable from here. Dimmed only when the
+        // verdict actually hid the row: a keep, or a suppress under the floor,
+        // changed nothing about what Review shows.
+        var triage = issue.triage || null;
+        var triagedClass = issue.triage_hid ? ' triaged' : '';
+        var html = '<div class="eval-issue severity-' + escapeHtml(sev) + labeledClass + ignoredClass + triagedClass + '" ' +
             'data-eval-name="' + escapeHtml(evalName) + '" ' +
             'data-issue-index="' + issueIdx + '"' +
             (issue.ignored ? ' data-ignored="1"' : '') +
+            (issue.triage_hid ? ' data-triage-hid="1"' : '') +
             (feedbackType ? ' data-feedback-type="' + escapeHtml(feedbackType) + '"' : '') +
             '>';
 
@@ -2218,6 +2226,20 @@
         html += '<span class="eval-evaluator-tag">' + escapeHtml(evalName) + '</span>';
         if (issue.ignored) {
             html += '<span class="eval-ignored-tag" title="On this book’s ignore list — not counted in Review. Clear it from the Ignored terms panel.">ignored</span>';
+        }
+        if (triage) {
+            // Verdict and confidence both, never the verdict alone: the score is
+            // the axis the floor moves along, and "suppress" reads as settled
+            // until you can see it was 0.55.
+            var conf = typeof triage.confidence === 'number'
+                ? triage.confidence.toFixed(2)
+                : '?';
+            var triageTitle = (triage.reason || 'No reason recorded.') +
+                (triage.model ? ' — judged by ' + triage.model : '');
+            html += '<span class="eval-triaged-tag' + (issue.triage_hid ? ' hid' : '') +
+                '" title="' + escapeHtml(triageTitle) + '">' +
+                escapeHtml(triage.verdict || '?') + ' ' + conf +
+                (issue.triage_hid ? '' : ' · hid nothing') + '</span>';
         }
         html += '<span class="eval-issue-message">' + escapeHtml(issue.message || '') + '</span>';
         html += '</div>';

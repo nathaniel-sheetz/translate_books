@@ -5821,6 +5821,29 @@ def project_chunk_evaluation_get(project_id, chunk_id):
             if isinstance(ni, dict):
                 ni["ignored"] = is_ignored(ignored_terms, ni.get("eval_name"), ni)
 
+    # The third gate, flagged for the same reason and in the same way. It is the
+    # one that hides the most — a suppressed finding is invisible in Review by
+    # design — so a card that marked dismissals and ignores but not these left
+    # the largest share of the Review stage's drop unexplainable from here.
+    # Carries the verdict rather than only the fact: the confidence is the axis
+    # `TRIAGE_CONFIDENCE_FLOOR` moves along, and `triage_hid` is deliberately
+    # not "a verdict exists" — a keep, and a suppress under the floor, hid
+    # nothing and must not be drawn as though they had.
+    triaged = build_triaged(load_all_triage_by_chunk(project_dir).get(chunk_id, []))
+    if triaged:
+        for ni in payload.get("normalized_issues") or []:
+            if not isinstance(ni, dict):
+                continue
+            record = triage_mark(triaged, ni.get("eval_name"), ni)
+            if record:
+                ni["triage"] = {
+                    "verdict": record.get("verdict"),
+                    "confidence": record.get("confidence"),
+                    "reason": record.get("reason"),
+                    "model": record.get("model"),
+                }
+                ni["triage_hid"] = triage_hides(record)
+
     return jsonify(payload)
 
 
@@ -6101,14 +6124,16 @@ def _build_chapter_review(
     Powers the reader's opt-in Review Mode and, through
     :func:`_recommendation_items`, the read-only recommendations screen. Reuses
     the alignment builder and the persisted per-chunk evaluations — no new
-    persistence format. Findings that already have feedback are treated as
-    dismissed and omitted, as are those naming a term on the book's ignore list
-    (``projects/<id>/ignored_terms.json``).
+    persistence format. Three gates omit a finding: existing feedback, a term
+    on the book's ignore list (``projects/<id>/ignored_terms.json``), and a
+    high-confidence machine-triage ``suppress`` (``is_triaged``).
 
     ``include_dismissed`` keeps the marked ones, each carrying the standing
-    feedback record as ``feedback``. It is off by default because Review Mode is
-    a working surface — a finding you have already ruled on must not come back
-    as a tint — and on only for the recommendations screen, which is a record of
+    feedback record as ``feedback``, and also keeps auto-suppressed rows so
+    the recommendations screen can show what the filter hid and why. It is
+    off by default because Review Mode is a working surface — a finding you
+    have already ruled on, or that triage already hid, must not come back as
+    a tint — and on only for the recommendations screen, which is a record of
     what was decided rather than a list of what is left. The ignore list gates
     both ways round: an entry there is a standing instruction about a term, not
     a decision made once about one finding.
@@ -6133,9 +6158,10 @@ def _build_chapter_review(
 
     Each anchored finding: ``{eval_name, issue_index, issue_key, chunk_id,
     severity, message, suggestion, excerpt, match, match_start, match_end, term,
-    rule_id, feedback}`` where ``match_start is None`` ⇒ paint a whole-sentence
-    tint and ``feedback`` is the standing mark (always ``None`` unless
-    ``include_dismissed``).
+    rule_id, feedback, triage}`` where ``match_start is None`` ⇒ paint a whole-sentence
+    tint, ``feedback`` is the standing mark (always ``None`` unless
+    ``include_dismissed``), and ``triage`` is the standing machine-verdict
+    record (``None`` when the pass has not ruled on this finding).
     ``issue_key`` is the finding's content hash (:func:`evaluations.issue_key`) —
     the identity that survives an evaluator re-run, where ``issue_index`` is a
     position that does not. It is derived here rather than by each caller so that
@@ -8940,6 +8966,16 @@ _RECOMMENDATION_STATUSES_OFF = frozenset(
     {"not_a_problem", "bad_message", "auto_suppressed"}
 )
 
+# The four labels a human mark may carry, in the order the reader's Review Mode
+# offers them (`web_ui/static/reader.js`). Same words, same endpoint, same
+# append-only corpus: a second vocabulary for the same four records would make
+# `_feedback.jsonl` mean one thing when the reader wrote a row and another when
+# this page did, and that file is what per-rule precision and the triage floor
+# are both computed from.
+_RECOMMENDATION_MARKS: tuple[str, ...] = (
+    "resolved", "false_positive", "bad_message", "missing_context_gap",
+)
+
 
 def _coerce_es_idx(value) -> Optional[int]:
     """``es_idx`` as an ``int``, or ``None`` when it is not one.
@@ -9062,6 +9098,11 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
     two cases that lose their sentence are exactly the two where the prose moved
     on, so the excerpt *is* the text as it read when the model wrote about it -
     the one honest thing left to render.
+
+    The ``triage_*`` fields are what the coded-checker filter said, and they
+    ride on the card whenever a verdict exists - not only when one hid
+    something. See the comment on them below: the gap between ``triage_hid``
+    and a ``status`` of ``auto_suppressed`` is where calibration lives.
     """
     eval_name = finding.get("eval_name")
     mark = finding.get("feedback") or {}
@@ -9077,16 +9118,29 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
     status = FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open")
     if not mark and triage_hides(triage):
         status = "auto_suppressed"
+    # The filter's stated reason, as a labelled block rather than a chip: it is
+    # a sentence of prose, and it is the only thing on the card that says *why*
+    # a finding was hidden. The docs have claimed this screen shows it since the
+    # pass was built; until now the field reached the payload and no renderer
+    # ever read it.
+    detail: list[dict] = []
+    if triage.get("reason"):
+        detail.append({"label": "triage_reason", "text": str(triage["reason"])})
     return {
         "source": "judge" if eval_name in _REVIEW_JUDGE_TYPES else "coded",
         "kind": eval_name,
+        # Carried beside `kind` rather than left implicit in it. They hold the
+        # same string for a finding, but only by construction, and the card's
+        # mark buttons post this one back as `eval_name` - a silent coupling is
+        # a poor thing to hang a write on.
+        "eval_name": eval_name,
         "severity": finding.get("severity"),
         "chapter_id": chapter,
         "es_idx": es_idx,
         "excerpt": finding.get("excerpt") or "",
         "suggestion": finding.get("suggestion") or None,
         "explanation": finding.get("message") or "",
-        "detail": [],
+        "detail": detail,
         "rule_id": finding.get("rule_id"),
         "category": finding.get("category"),
         "term": finding.get("term"),
@@ -9098,14 +9152,27 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
         "stale": False,
         "status": status,
         "status_at": mark.get("ts") or (triage.get("ts") if status == "auto_suppressed" else None),
-        # Why the machine suppressed it, and what judged it. Shown only on an
-        # auto_suppressed card: a filter nobody can question is a filter nobody
-        # should trust.
-        "triage_reason": triage.get("reason") if status == "auto_suppressed" else None,
-        "triage_model": triage.get("model") if status == "auto_suppressed" else None,
-        "triage_confidence": (
-            triage.get("confidence") if status == "auto_suppressed" else None
-        ),
+        # What the filter said, how sure it was, what judged it, and whether
+        # that verdict actually hid anything. Present whenever a verdict exists
+        # rather than only when one suppressed something: a `keep`, a suppress
+        # under the floor, and a suppress a human has since overruled are
+        # exactly the rows calibration is read from, and the confidence is the
+        # axis `TRIAGE_CONFIDENCE_FLOOR` moves along. You cannot choose a floor
+        # from a page that only shows you the verdicts above it.
+        #
+        # `triage_hid` is deliberately not `status == "auto_suppressed"`. The
+        # two part company on the single most valuable card on this screen - one
+        # a model hid and a human then called a real defect - which is the only
+        # way the veto number (real defects lost) is ever measured.
+        "triage_verdict": triage.get("verdict"),
+        "triage_confidence": triage.get("confidence"),
+        "triage_reason": triage.get("reason"),
+        "triage_model": triage.get("model"),
+        "triage_hid": triage_hides(triage),
+        # The mark as recorded, not the status it maps to. The card's buttons
+        # are labelled with feedback types, so the one already chosen has to be
+        # named in the same vocabulary to show as chosen.
+        "feedback_type": mark.get("feedback_type"),
         # `obsolete` only. That reason means the excerpt *was* the prose and the
         # prose moved on, so the quote is a snapshot of the text as it read.
         # `unplaceable` means the quote was never verbatim in the book at all -
@@ -9187,6 +9254,18 @@ def _annotation_item(row: dict, context: dict, *, stale: bool,
     return {
         "source": "annotation",
         "kind": _recommendation_kind(row.get("type")),
+        # Null, like `chunk_id` and `issue_index` below and for the same reason:
+        # a note is not an evaluator finding, so there is nothing for
+        # `append_feedback` to name and the card renders no mark buttons. The
+        # keys are present rather than absent so the two builders keep one
+        # shape for anyone reading the payload.
+        "eval_name": None,
+        "feedback_type": None,
+        "triage_verdict": None,
+        "triage_confidence": None,
+        "triage_reason": None,
+        "triage_model": None,
+        "triage_hid": False,
         "severity": None,
         "chapter_id": row.get("chapter_id"),
         "es_idx": _coerce_es_idx(row.get("es_idx")),
@@ -9515,13 +9594,30 @@ def recommendations_page(project_id):
     if not project_dir.exists():
         return "Project not found", 404
 
+    strings = _reader_strings()
     return render_template(
         "recommendations.html",
-        t=_reader_strings(),
+        t=strings,
         lang=_get_ui_lang(),
         project_id=project_id,
         project_title=_project_title(project_id),
         shell=_recommendation_shell(project_id, project_dir),
+        # The mark buttons' labels, borrowed wholesale from the reader's Review
+        # Mode, and the server's own feedback -> status map. Both are stamped
+        # into the page rather than restated in the script: the labels so the
+        # two surfaces cannot drift into different words for one record, and the
+        # map so the card a browser re-styles after a mark lands on the same
+        # status the server will report on the next load.
+        # `review_fb_*` live in the nested `js` block — the dict the reader
+        # ships to its own script as `window.__i18n` — not at the top level
+        # where the `rec_*` strings sit. Reading the wrong level fails *open*:
+        # the `.get` default hands every button its own key, so the page
+        # renders "false_positive" where it means "False positive".
+        mark_labels={
+            ftype: (strings.get("js") or {}).get(f"review_fb_{ftype}", ftype)
+            for ftype in _RECOMMENDATION_MARKS
+        },
+        feedback_statuses=FEEDBACK_STATUSES,
     )
 
 

@@ -86,6 +86,24 @@ def format_style_rules(rules: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _read_house_rules(path: Path) -> Optional[list[dict[str, Any]]]:
+    """The ``every_book`` rules in one file, or ``None`` when it is unusable.
+
+    ``None`` rather than ``[]`` so the caller can tell "this file is broken"
+    from "this file records no house rules", and fall back only on the first.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Ignoring unreadable %s: %s", path, exc)
+        return None
+    rules = data.get("every_book") if isinstance(data, dict) else None
+    if not isinstance(rules, list):
+        logger.warning("Ignoring %s: expected an 'every_book' list", path)
+        return None
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
 def load_house_rules() -> list[dict[str, Any]]:
     """The ``every_book`` rules every book is held to, or ``[]``.
 
@@ -98,20 +116,19 @@ def load_house_rules() -> list[dict[str, Any]]:
     so a clone that was never hand-primed with ``cp`` still judges against the
     house standard instead of nothing.
 
-    An unreadable house file degrades to no house rules rather than raising, so
-    a book's own rules still reach the judge.
+    A *broken* operator copy falls back to the example too, not to nothing. An
+    absent override already degraded to the example, so a JSON typo in one was
+    the only way left to have every book judged against no rules at all —
+    silently, across triage, the editorial judge and the audit panel at once.
     """
     path = _house_rules_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Ignoring unreadable %s: %s", path, exc)
-        return []
-    rules = data.get("every_book") if isinstance(data, dict) else None
-    if not isinstance(rules, list):
-        logger.warning("Ignoring %s: expected an 'every_book' list", path)
-        return []
-    return [rule for rule in rules if isinstance(rule, dict)]
+    rules = _read_house_rules(path)
+    if rules is None and path != HOUSE_STYLE_RULES_EXAMPLE_FILE:
+        logger.warning(
+            "Falling back to %s for the house rules", HOUSE_STYLE_RULES_EXAMPLE_FILE
+        )
+        rules = _read_house_rules(HOUSE_STYLE_RULES_EXAMPLE_FILE)
+    return rules or []
 
 
 def load_book_rules(project_dir: Path) -> list[dict[str, Any]]:

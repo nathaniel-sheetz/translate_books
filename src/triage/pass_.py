@@ -23,10 +23,9 @@ imported.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from src.audit.panel import load_book, model_slug
 from src.harness import state as hstate
@@ -96,6 +95,23 @@ def _has_draft(path: Path) -> bool:
         return bool(path.read_text(encoding="utf-8").strip())
     except (OSError, UnicodeDecodeError):
         return False
+
+
+def _live_drafts(project_dir: Path) -> list[Path]:
+    """Draft files a ``commit`` would still read, oldest path first.
+
+    ``<job>.rejected.json`` is deliberately not one. ``commit`` renames a draft
+    it could not parse so the evidence survives, and that file is never read
+    again — counting it as live would let one malformed draft block every future
+    run of the pass on this book.
+    """
+    root = triage_dir(project_dir) / "drafts"
+    if not root.exists():
+        return []
+    return [
+        path for path in sorted(root.rglob("*.json"))
+        if not path.name.endswith(".rejected.json")
+    ]
 
 
 def load_manifest(project_dir: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -209,6 +225,8 @@ _PREPARE_SCHEMA = {
     "skipped": "{dismissed, ignored, already_triaged, unanchored, stale_moved, no_evaluation}: "
     "findings deliberately not sent, and why. unanchored and stale_moved are the two that "
     "mean 'no sentence to judge from' — they stay live for the human",
+    "cleared_drafts": "drafts from an earlier run deleted before rendering this one. "
+    "Pass keep_drafts to refuse instead, when a wave is still in flight",
     "effective": "the resolved profile this run is pinned to (cli, worker_model, effort, "
     "effort_channel, ...). fanout inherits it from the manifest rather than the book's config",
     "preamble_chars": "size of the cacheable preamble every job carries",
@@ -225,13 +243,25 @@ def prepare(
     cli: Optional[str] = None,
     effort: Optional[str] = None,
     eval_names: tuple[str, ...] = tfindings.TRIAGE_EVAL_NAMES,
+    keep_drafts: bool = False,
     cfg: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Render one prompt per batch of findings, plus a manifest. No spend.
 
-    The run directory must be new or hold no drafts: re-rendering over drafts
-    would pair verdicts with other findings. Findings are sorted by id before
-    batching, so the same book and filters always produce the same jobs.
+    Drafts from an earlier run are cleared before rendering, the same default
+    ``src/annotations/review.py`` and the editorial pipeline settled on. It
+    matters more here than it does there: those two key a draft by note or chunk
+    id, while this pass joins by *position*, so a surviving ``job-001.json``
+    would answer a fresh ``job-001`` about entirely different findings. Pass
+    ``keep_drafts`` to refuse rather than clear when a wave is still in flight.
+
+    Clearing rather than refusing is also what lets a book be triaged twice: a
+    committed draft is never removed by ``commit`` — it is what makes a second
+    ``commit`` idempotent — so before this, the wave after the first one could
+    not be prepared at all.
+
+    Findings are sorted by id before batching, so the same book and filters
+    always produce the same jobs.
     """
     from src.harness.profile import resolve_profile
     from src.harness.state import load_config
@@ -241,10 +271,11 @@ def prepare(
         return _error(f"items_per_job must be at least 1, got {items_per_job}", _PREPARE_SCHEMA)
 
     run_dir = triage_dir(project_dir)
-    if run_dir.exists() and any((run_dir / "drafts").rglob("*.json")):
+    stale = _live_drafts(project_dir)
+    if stale and keep_drafts:
         return _error(
-            f"{run_dir} already holds drafts; commit them or clear the directory "
-            "before preparing a new run",
+            f"{run_dir} holds {len(stale)} draft(s) and keep_drafts was asked for; "
+            "commit them, or re-run without keep_drafts to clear them",
             _PREPARE_SCHEMA,
         )
 
@@ -309,6 +340,11 @@ def prepare(
         return _error(f"could not render the prompts: {exc}", _PREPARE_SCHEMA)
 
     (run_dir / "jobs").mkdir(parents=True, exist_ok=True)
+    # Here rather than beside the check above: everything is rendered before
+    # anything is written, so a render that failed part-way leaves the previous
+    # run's drafts intact and still committable.
+    for path in stale:
+        path.unlink(missing_ok=True)
     (run_dir / PREAMBLE_FILENAME).write_text(preamble or "", encoding="utf-8")
 
     run_id = f"triage-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -358,6 +394,7 @@ def prepare(
         "items_per_job": items_per_job,
         "by_eval": by_eval,
         "skipped": skips,
+        "cleared_drafts": len(stale),
         "effective": prof.to_payload(),
         "preamble_chars": len(preamble or ""),
         "instructions": (
@@ -674,6 +711,13 @@ def parse_draft(raw: str, item_ids: list[str]) -> list[dict[str, Any]]:
                 f"{sorted(TRIAGE_VERDICTS)}"
             )
         raw_confidence = obj.get("confidence")
+        # bool subclasses int, so float(True) is 1.0 — a malformed draft
+        # would otherwise suppress at full confidence. Same guard as
+        # ``_item_number``.
+        if isinstance(raw_confidence, bool):
+            raise JudgeParseError(
+                f"{label}: confidence {raw_confidence!r} is not a number"
+            )
         try:
             confidence = float(raw_confidence)
         except (TypeError, ValueError):
@@ -726,7 +770,6 @@ def commit(project_dir: Path | str) -> dict[str, Any]:
         append_triage,
         build_triaged,
         load_all_triage_by_chunk,
-        triage_mark,
     )
 
     project_dir = Path(project_dir)

@@ -421,6 +421,64 @@ class TestEvalCardFlag:
         assert payload["normalized_issues"][0]["ignored"] is False
 
 
+class TestEvalCardTriageFlag:
+    """The same contract for the third gate, which hides the most of the three.
+
+    Here rather than with the triage tests because what is pinned is this
+    endpoint's flag-don't-filter shape, which is the ignore list's own contract
+    above. A suppressed finding is invisible in Review Mode by design, so a card
+    that marked dismissals and ignores but not these left the largest share of
+    the Review stage's drop unexplainable from the one surface meant to explain
+    it.
+    """
+
+    def _triage(self, project, verdict="suppress", confidence=0.95):
+        from web_ui.evaluations import append_triage, issue_key
+
+        append_triage(
+            project, "chapter_01_chunk_000",
+            eval_name="dictionary",
+            issue_index=0,
+            verdict=verdict,
+            key=issue_key("dictionary", _dict_issue("Deum", 10)),
+            confidence=confidence,
+            reason="a Latin word, correctly left in Latin",
+            model="grok-4.6",
+        )
+
+    def _issue(self, client):
+        return client.get(
+            "/api/project/proj1/evaluations/chapter_01_chunk_000"
+        ).get_json()["normalized_issues"][0]
+
+    def test_a_suppressed_finding_is_listed_and_flagged(self, client, project):
+        _write_evaluation(project, [_dict_issue("Deum", 10)])
+        self._triage(project)
+
+        issue = self._issue(client)
+        assert issue["triage_hid"] is True
+        assert issue["triage"]["verdict"] == "suppress"
+        assert issue["triage"]["confidence"] == 0.95
+        assert issue["triage"]["reason"]
+        assert issue["triage"]["model"] == "grok-4.6"
+
+    def test_a_verdict_that_hid_nothing_says_so(self, client, project):
+        """``triage_hides`` is the single definition of suppression, so a
+        sub-floor ``suppress`` must not be drawn as though it had hidden the
+        row — it is still live work, and the card has to agree with Review."""
+        _write_evaluation(project, [_dict_issue("Deum", 10)])
+        self._triage(project, confidence=0.50)
+
+        issue = self._issue(client)
+        assert issue["triage_hid"] is False
+        assert issue["triage"]["confidence"] == 0.50
+
+    def test_an_untriaged_finding_carries_no_verdict(self, client, project):
+        _write_evaluation(project, [_dict_issue("Deum", 10)])
+
+        assert "triage" not in self._issue(client)
+
+
 class TestNoRerunNeeded:
     """The whole point of filtering at read time rather than in the evaluator."""
 

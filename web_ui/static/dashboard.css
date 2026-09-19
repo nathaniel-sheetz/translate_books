@@ -1272,6 +1272,10 @@ a.btn-secondary {
 /* Same dimming as a dismissal -- both mean "still here, no longer counted". */
 .eval-issue.ignored { opacity: 0.55; }
 
+/* Only a verdict that actually hid the row dims it; a keep is drawn at full
+   strength with its tag, because the finding is still live work. */
+.eval-issue.triaged { opacity: 0.55; }
+
 .eval-ignored-tag {
     font-size: 11px;
     text-transform: uppercase;
@@ -1280,6 +1284,20 @@ a.btn-secondary {
     border-radius: 3px;
     border: 1px solid var(--border, #d0d0d0);
     color: var(--text-muted, #666);
+    white-space: nowrap;
+}
+
+/* Reads as a sibling of the ignored tag, italic to mark it as a machine's
+   judgment rather than one of yours -- the same distinction the recommendations
+   screen draws with its dotted suppressed chip. */
+.eval-triaged-tag {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px dotted var(--border, #d0d0d0);
+    color: var(--text-muted, #666);
+    font-style: italic;
     white-space: nowrap;
 }
 
