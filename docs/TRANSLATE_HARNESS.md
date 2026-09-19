@@ -257,8 +257,14 @@ makes it idempotent.
 
 `config-set --key` accepts exactly: `backend`, `footnotes_decision`, `headless_cli`,
 `always_include_dialogue`, `always_include_image_instructions`, `headless_extra_flags`,
-`headless_prompt_cache`, and the six `headless_effort_*` keys (`translate`, `judges`,
-`annotations`, `footnotes`, `footnote_scan`, `triage`).
+`headless_prompt_cache`, `triage_worker_model`, `triage_after_coded`, and the six
+`headless_effort_*` keys (`translate`, `judges`, `annotations`, `footnotes`,
+`footnote_scan`, `triage`).
+
+The two `triage_*` keys belong to the coded-checker triage pass rather than to a
+harness stage: `triage_worker_model` pins the model it judges on (the floor was
+calibrated on one, see [`TRIAGE.md`](TRIAGE.md)), and `triage_after_coded` is
+whether the dashboard chains a triage wave onto a deterministic rerun.
 
 ---
 

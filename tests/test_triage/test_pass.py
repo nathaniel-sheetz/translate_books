@@ -252,6 +252,32 @@ def test_fanout_resumes_past_written_drafts(book: Path):
     assert seen == []
 
 
+def test_fanout_reports_each_job_as_it_lands(book: Path):
+    """The seam a progress bar hangs off.
+
+    A whole-book wave is minutes of silence otherwise, and the caller that needs
+    this — the dashboard, running the pass inside a job whose only output is a
+    progress modal — cannot report a job count it never hears about.
+    """
+    tp.prepare(book, worker_model="m", cli="cursor", items_per_job=1)
+    seen: list[dict] = []
+    out = tp.fanout(
+        book, runner=_answering_runner(), concurrency=1, progress=seen.append
+    )
+
+    assert out["counts"]["wrote"] == 2
+    assert [rec["id"] for rec in seen] == ["job-001", "job-002"]
+    assert all(rec["ok"] for rec in seen)
+    assert [rec["done"] for rec in seen] == [1, 2]
+    assert all(rec["total"] == 2 for rec in seen)
+
+
+def test_fanout_without_a_progress_callback_is_unchanged(book: Path):
+    tp.prepare(book, worker_model="m", cli="cursor")
+    out = tp.fanout(book, runner=_answering_runner(), concurrency=1)
+    assert out["counts"]["wrote"] == 1
+
+
 def test_fanout_refuses_unknown_job_ids(book: Path):
     tp.prepare(book, worker_model="m", cli="cursor")
     out = tp.fanout(book, job_ids=["job-999"], runner=_answering_runner())

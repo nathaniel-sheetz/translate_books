@@ -4275,6 +4275,12 @@ _CONFIG_SET_KEYS = {
     "headless_cli": frozenset(state.CLI_VALUES),
     "headless_prompt_cache": frozenset(state.CACHE_VALUES),
     "headless_extra_flags": FREE_TEXT,
+    # The triage model, and whether the dashboard chains a triage wave onto a
+    # deterministic run. Both are here rather than in the pass because the floor
+    # a verdict is scored against is one number for the whole corpus: a book that
+    # wants a different model has to say so somewhere a later reader can find.
+    "triage_worker_model": FREE_TEXT,
+    "triage_after_coded": frozenset({"on", "off"}),
     # Prompt-prefix opt-ins. Read at render time by ``translate_prepare`` (never
     # baked into chunks/*.json), so these stay adjustable mid-book: change one and
     # re-run ``translate-prepare`` and only the chunks that still need a

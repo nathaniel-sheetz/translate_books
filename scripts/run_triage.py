@@ -9,21 +9,31 @@ answer beside the finding rather than deleting anything.
 
 Each subcommand prints one JSON object with a ``_schema`` block:
 
+    status    what a wave would do: findings, jobs, model, CLI  (no spend, no writes)
     prepare   render batched prompts + a manifest under .harness/triage  (no spend)
     fanout    run one headless wave over those jobs                      (subscription)
     commit    parse the drafts; append verdicts to _triage.jsonl         (no spend)
 
 A run:
 
+    python scripts/run_triage.py status  --project five-little-peppers
     python scripts/run_triage.py prepare --project five-little-peppers \\
         --worker-model "grok-4.6[effort=medium,fast=false]"
     python scripts/run_triage.py fanout  --project five-little-peppers
     python scripts/run_triage.py commit  --project five-little-peppers
 
+``status`` writes nothing and is the one to open with: it answers how many
+findings are in scope, which model would judge them and whether the CLI can
+start -- none of which ``prepare`` can be asked without clearing the drafts.
+
 The model is pinned at ``prepare`` and recorded in the manifest, so ``fanout``
 inherits it instead of the book's default ``worker_model``. That is the whole
 point of the pass having its own wave type: pointing it at a different model, or
 later at local inference, never touches how the book is translated or judged.
+With no ``--worker-model`` the pin comes from this book's ``triage_worker_model``
+config key, and failing that from the model the confidence floor was calibrated
+against -- so a run started from a button is judged by the same model the floor
+was swept on.
 
 ``fanout`` skips jobs that already have a draft, so re-running it resumes.
 Nothing here edits the book: a verdict suppresses a finding at read time, and
@@ -100,6 +110,16 @@ def _parse_chapters(raw: str | None) -> list[str] | None:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _cmd_status(args: argparse.Namespace) -> int:
+    return _print(triage.status(
+        _resolve_project(args.project),
+        chapters=_parse_chapters(args.chapters),
+        worker_model=args.worker_model,
+        cli=args.cli,
+        effort=args.effort,
+    ))
+
+
 def _cmd_prepare(args: argparse.Namespace) -> int:
     return _print(triage.prepare(
         _resolve_project(args.project),
@@ -139,6 +159,24 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_status = sub.add_parser(
+        "status", help="what a wave would do: findings, jobs, model, CLI (no spend, no writes)"
+    )
+    p_status.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    p_status.add_argument(
+        "--chapters", default=None,
+        help="comma-separated chapter ids (default: every chapter with an alignment)",
+    )
+    p_status.add_argument(
+        "--worker-model", default=None,
+        help="price the answer against this model instead of the resolved one",
+    )
+    p_status.add_argument("--cli", choices=("claude", "cursor"), default=None, help="headless CLI")
+    p_status.add_argument(
+        "--effort", choices=("low", "medium", "high", "xhigh", "default"), default=None,
+        help="default: headless_effort_triage, else medium",
+    )
 
     p_prepare = sub.add_parser(
         "prepare", help="render prompts + manifest under .harness/triage (no spend)"
@@ -202,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {
+            "status": _cmd_status,
             "prepare": _cmd_prepare,
             "fanout": _cmd_fanout,
             "commit": _cmd_commit,
