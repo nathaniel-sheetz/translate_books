@@ -126,6 +126,13 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # inheriting whatever the installed CLI defaults to (high, per
     # project_headless_effort_default_high). Re-measure and move the row.
     "footnote_scan": "medium",
+    # The coded-checker triage pass. The smallest job any wave runs — one
+    # flagged word and its sentence, answered with a verdict and a number — and
+    # named medium for the same reason the judge waves are, rather than from its
+    # own sweep: an unmeasured band stated explicitly beats inheriting whatever
+    # the installed CLI defaults to (high, per
+    # project_headless_effort_default_high). Re-measure and move the row.
+    "triage": "medium",
 }
 
 

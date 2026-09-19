@@ -28,6 +28,14 @@ This is distinct from the model-comparison **LLM judge** documented in
 better than model B?"; tailored judges answer "does *this* translation comply
 with *this* rule?" and write findings back into the per-chunk evaluation store.
 
+It is also distinct from **coded-checker triage** ([TRIAGE.md](TRIAGE.md)),
+which runs in the other direction: rather than producing findings, it reads the
+ones the deterministic `dictionary` and `grammar` evaluators already produced
+and decides which are noise. Those two accept at 7% and 16% against this
+framework's 61–82%, so they are filtered rather than trusted. A triage verdict
+suppresses a finding at read time — including on the editorial judge's
+do-not-repeat list — but never deletes it.
+
 ## Two kinds of judge
 
 - **Verdict** (implemented): scores / flags a target and returns an

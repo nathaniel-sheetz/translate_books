@@ -44,7 +44,7 @@ from typing import Any, Iterable, Optional
 from src.audit.context import NO_CONTEXT, edit_context
 from src.harness.usage import read_recent, rollup
 from src.judges.base import _CACHE_PREFIX_SPLIT_MARKER
-from src.judges.context import load_style_rules
+from src.judges.context import has_book_rules, load_style_rules
 from src.judges.llm_io import (
     JudgeParseError,
     extract_json,
@@ -250,12 +250,24 @@ def _load_chunk(book_dir: Optional[Path], chunk_id: str) -> Optional[dict[str, A
 def load_book(book_dir: Optional[Path]) -> dict[str, Any]:
     """The book's own standard: style guide, style rules, address map and glossary.
 
-    Loaded as the judges load them: the style guide's ``content``, the rule
-    sidecar through :func:`load_style_rules`, and the address map's prose
-    ``content``, falling back to its ``global_rules``. Every part is optional; a
-    missing or unreadable file comes back empty (``None`` for the glossary).
+    Loaded as the judges load them: the style guide's ``content``, the house
+    rules plus this book's own sidecar through :func:`load_style_rules`, and the
+    address map's prose ``content``, falling back to its ``global_rules``. Every
+    part is optional; a missing or unreadable file comes back empty (``None`` for
+    the glossary).
+
+    ``style_rules`` therefore carries the house set even for a book with no
+    sidecar. ``style_rules_own`` records whether the book added any of its own,
+    which is the part a manifest can still report once the house set is
+    universal.
     """
-    book: dict[str, Any] = {"style_guide": "", "style_rules": "", "address_map": "", "glossary": None}
+    book: dict[str, Any] = {
+        "style_guide": "",
+        "style_rules": "",
+        "style_rules_own": False,
+        "address_map": "",
+        "glossary": None,
+    }
     if book_dir is None:
         return book
     try:
@@ -263,6 +275,7 @@ def load_book(book_dir: Optional[Path]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - an unusable file is an absent one
         pass
     book["style_rules"] = load_style_rules(book_dir)
+    book["style_rules_own"] = has_book_rules(book_dir)
     try:
         amap = load_address_map(book_dir / "address_map.json")
         book["address_map"] = (amap.content or "").strip() or (amap.global_rules or "").strip()
@@ -276,10 +289,15 @@ def load_book(book_dir: Optional[Path]) -> dict[str, Any]:
 
 
 def book_summary(book: dict[str, Any]) -> dict[str, Any]:
-    """Which parts of its standard a book's jobs carry, for the manifest."""
+    """Which parts of its standard a book's jobs carry, for the manifest.
+
+    ``style_rules`` reports whether the book adds rules of its *own*. Every book
+    now carries the house set, so reporting "has any rules" would be a constant
+    ``True`` and would tell a reader of the manifest nothing.
+    """
     return {
         "style_guide": bool(book["style_guide"]),
-        "style_rules": bool(book["style_rules"]),
+        "style_rules": bool(book.get("style_rules_own")),
         "address_map": bool(book["address_map"]),
         "glossary_terms": len(book["glossary"].terms) if book["glossary"] else 0,
     }
@@ -372,7 +390,9 @@ _PREPARE_SCHEMA = {
     "rows_per_job": "edits rendered into one prompt",
     "by_project": "rows per book",
     "books": "{slug: {style_guide, style_rules, address_map, glossary_terms}}: the parts of its "
-    "own standard each book's jobs open with. A part the book lacks is named as absent in the prompt",
+    "own standard each book's jobs open with. A part the book lacks is named as absent in the "
+    "prompt. style_rules is whether the book adds rules of its OWN: every book now carries the "
+    "house set from prompts/house_style_rules.json, so 'has any rules' would always be true",
     "context_missing": "{count, rows}: rows whose sentence was not found in its chunk in "
     "one language or both. They still render, with empty context for that language. "
     "rows lists at most the first 20; the manifest keeps them all",

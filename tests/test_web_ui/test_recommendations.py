@@ -27,6 +27,7 @@ from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocati
 from web_ui.app import app
 from web_ui.evaluations import (
     append_feedback,
+    append_triage,
     load_chapter_type_counts,
     merge_judge_result,
     save_chunk_evaluation,
@@ -126,10 +127,15 @@ def plant_judge(proj_dir, *, location="El perro ladro fuerte.",
     )
 
 
-def plant_coded(proj_dir):
-    """Persist one target-side coded finding: 'negro' at char 8 of the chunk."""
+def plant_coded(proj_dir, *, eval_name="blacklist"):
+    """Persist one target-side coded finding: 'negro' at char 8 of the chunk.
+
+    ``eval_name`` is a parameter because triage only ever rules on ``dictionary``
+    and ``grammar`` findings, so a test that suppressed a ``blacklist`` one would
+    be exercising a combination production cannot produce.
+    """
     issue = NormalizedIssue(
-        eval_name="blacklist",
+        eval_name=eval_name,
         eval_version="1.0.0",
         issue_index=0,
         severity="error",
@@ -142,7 +148,7 @@ def plant_coded(proj_dir):
     save_chunk_evaluation(
         proj_dir, "chapter_01_chunk_000",
         results=[], aggregated={}, normalized_issues=[issue],
-        enabled_evals=["blacklist"],
+        enabled_evals=[eval_name],
     )
 
 
@@ -183,6 +189,43 @@ def mark_finding(proj_dir, eval_name, feedback_type, *, issue_index=0):
         issue_index=issue_index,
         feedback_type=feedback_type,
         key=_resolve_issue_key(proj_dir, "chapter_01_chunk_000", eval_name, issue_index),
+    )
+
+
+def triage_finding(proj_dir, eval_name, verdict="suppress", *,
+                   confidence=0.95, issue_index=0, reason="a proper noun"):
+    """Record a machine verdict the way ``run_triage.py commit`` does.
+
+    The key comes from the stored ``normalized_issues``, not from
+    ``_resolve_issue_key``. That helper reads ``payload["results"]``, which
+    :func:`plant_coded` does not write, so it returns ``None`` here — and a
+    triage record with no key is dropped by :func:`build_triaged`, which keeps no
+    positional tier because this codebase writes every one of these records and
+    always has a key. :func:`mark_finding` survives the same ``None`` only
+    because feedback *does* keep that tier.
+
+    The assert is the point: a helper that quietly wrote an unjoinable key would
+    leave these tests asserting that nothing happened, and passing.
+    """
+    from web_ui.evaluations import issue_key, load_chunk_evaluation
+
+    payload = load_chunk_evaluation(proj_dir, "chapter_01_chunk_000") or {}
+    matching = [
+        ni for ni in payload.get("normalized_issues") or []
+        if ni.get("eval_name") == eval_name and ni.get("issue_index") == issue_index
+    ]
+    assert matching, f"no stored {eval_name} finding at index {issue_index} to triage"
+    key = issue_key(eval_name, matching[0])
+
+    append_triage(
+        proj_dir, "chapter_01_chunk_000",
+        eval_name=eval_name,
+        issue_index=issue_index,
+        verdict=verdict,
+        key=key,
+        confidence=confidence,
+        reason=reason,
+        model="grok-4.6",
     )
 
 
@@ -565,6 +608,117 @@ def test_the_judge_being_wrong_is_the_one_thing_not_shown_by_default(client, boo
     html = client.get("/recommendations/recbook").get_data(as_text=True)
     assert re.search(r'value="not_a_problem"\s*\n?\s*>', html)      # unticked
     assert re.search(r'value="open"\s*\n?\s*checked>', html)        # ticked
+
+
+# --- What a machine decided -------------------------------------------------
+#
+# A third thing that can become of a finding, beside what you decided and what
+# is still outstanding. It is counted apart from both: folding it into history
+# would put a model's verdict in the same tally as your own, and folding it into
+# `open` is the bug these pin -- 117 hidden findings counted as work to do, in
+# the very row that says what work is left.
+
+
+def test_a_suppressed_finding_is_counted_apart_from_both(client, book):
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+
+    split = load_chapter_type_counts(book, statuses=True)["chapter_01"]
+    assert split["open"]["dictionary"] == 0
+    assert split["history"]["dictionary"] == 0
+    assert split["suppressed"]["dictionary"] == 1
+    assert split["by_status"] == {"auto_suppressed": 1}
+
+    shell = client.get("/api/project/recbook/recommendations").get_json()["shell"]
+    (chapter,) = shell["chapters"]
+    assert chapter["counts"] == {}
+    assert chapter["history"] == 0
+    assert chapter["suppressed"] == 1
+    assert shell["status_totals"] == {"auto_suppressed": 1}
+    assert shell["total"] == 0, "nothing here is outstanding work"
+
+
+def test_a_chapter_of_only_suppressed_findings_still_lists(client, book):
+    """``seen_kinds`` decides whether a chapter renders at all, so a chapter the
+    filter emptied would vanish — taking its cards with it, and leaving the box
+    you tick with nothing to show."""
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+
+    html = client.get("/recommendations/recbook").get_data(as_text=True)
+    assert 'data-chapter="chapter_01"' in html
+    assert "empty-state" not in html
+
+
+def test_the_filter_offers_a_box_for_what_the_machine_hid(client, book):
+    """The bug itself. ``status_totals`` never saw a triage verdict, so
+    ``auto_suppressed`` carried no total, so ``_recommendation_shell`` dropped it
+    from the row — leaving no way to see, or to exclude, what the filter took."""
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+    plant_judge(book)                       # something open, so an `open` box exists
+
+    html = client.get("/recommendations/recbook").get_data(as_text=True)
+    assert re.search(r'value="auto_suppressed"\s*\n?\s*>', html)    # unticked
+    assert re.search(r'value="open"\s*\n?\s*checked>', html)        # ticked
+    assert "Filtered out automatically" in html                     # the checkbox
+    assert "1 filtered out" in html                                 # the chapter chip
+
+
+def test_the_chapter_chip_is_on_the_page_as_data_the_script_can_move(client, book):
+    """Marking a suppressed finding takes it out of that set, so the chip has to
+    come down with it. It can only do that if the count and the chip's own
+    ``{n}`` string are both on the page — the count was rendered into text
+    alone, leaving the number frozen until a reload."""
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+
+    html = client.get("/recommendations/recbook").get_data(as_text=True)
+    assert 'data-suppressed="1"' in html
+    assert 'data-suppressed-chip="{n} filtered out"' in html
+
+
+def test_the_reader_still_never_sees_a_suppressed_finding(client, book):
+    """The counts may show it; Review Mode is a working surface and must not."""
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+
+    assert load_chapter_type_counts(book).get("chapter_01", {}).get("dictionary", 0) == 0
+    review = client.get("/api/project/recbook/review/chapter_01").get_json()
+    assert review["by_es_idx"] == {}
+
+
+@pytest.mark.parametrize("verdict, confidence", [("keep", 1.0), ("suppress", 0.5)])
+def test_a_verdict_that_hides_nothing_leaves_the_finding_open(
+    client, book, verdict, confidence
+):
+    """``triage_hides`` is the single definition of suppression, so a ``keep``
+    and a sub-floor ``suppress`` have to count exactly as they display: still
+    outstanding, still yours to read."""
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary", verdict, confidence=confidence)
+
+    split = load_chapter_type_counts(book, statuses=True)["chapter_01"]
+    assert split["open"]["dictionary"] == 1
+    assert split["suppressed"]["dictionary"] == 0
+    assert split["by_status"] == {}
+
+
+def test_a_human_mark_beats_a_machine_verdict_in_the_counts_too(client, book):
+    """The card already rules this way (``app._finding_card``). The counts have
+    to agree, or the box you tick and the card you see disagree about one
+    finding — which is how this page lost its way in the first place."""
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+    mark_finding(book, "dictionary", "false_positive")
+
+    split = load_chapter_type_counts(book, statuses=True)["chapter_01"]
+    assert split["suppressed"]["dictionary"] == 0
+    assert split["history"]["dictionary"] == 1
+    assert split["by_status"] == {"not_a_problem": 1}
+
+    (item,) = items_of(client)
+    assert item["status"] == "not_a_problem"
 
 
 # --- Text that has moved on -------------------------------------------------
@@ -1432,3 +1586,177 @@ def test_the_whole_snapshot_is_bounded_and_not_only_each_field(client, book):
     assert snapshot["eval_name"] == "dialogue"
     assert snapshot["severity"] == "error"
     assert 0 < len(snapshot["message"]) <= favorites_store._SNAPSHOT_MAX_CHARS
+
+
+# --- What the filter said, and overruling it ---------------------------------
+
+
+def coded_item(client, eval_name="dictionary"):
+    """The one coded finding's card."""
+    matching = [it for it in items_of(client) if it["kind"] == eval_name]
+    assert len(matching) == 1, f"expected exactly one {eval_name} card"
+    return matching[0]
+
+
+@pytest.mark.parametrize("verdict, confidence, hid", [
+    ("keep", 0.30, False),
+    ("suppress", 0.50, False),
+    ("suppress", 0.95, True),
+])
+def test_every_verdict_reaches_the_card_with_its_score(
+    client, book, verdict, confidence, hid
+):
+    """Not just the ones that hid something.
+
+    ``_finding_item`` gated all three ``triage_*`` fields on the card's status
+    being ``auto_suppressed``, so a ``keep`` and a sub-floor ``suppress``
+    arrived carrying nothing — and those are exactly the verdicts a floor is
+    chosen *between*. Setting ``TRIAGE_CONFIDENCE_FLOOR`` means reading the
+    scores on both sides of it; a page showing only what was suppressed could
+    never justify moving it.
+    """
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary", verdict, confidence=confidence)
+
+    item = coded_item(client)
+    assert item["triage_verdict"] == verdict
+    assert item["triage_confidence"] == confidence
+    assert item["triage_hid"] is hid
+    assert item["triage_model"] == "grok-4.6"
+
+
+def test_a_human_mark_leaves_the_machine_verdict_on_display(client, book):
+    """The most valuable card on the screen, and why ``triage_hid`` is not
+    spelled ``status == "auto_suppressed"``.
+
+    A finding the filter hid and a human then called a real defect is the only
+    way ``replay_triage.py`` ever measures *real defects lost* — the veto that
+    decides whether this pass may be trusted at all. The human mark takes the
+    status, as it must; carrying the verdict away with it would destroy the
+    record of the disagreement, which *is* the measurement.
+    """
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary", "suppress", confidence=0.95)
+    mark_finding(book, "dictionary", "resolved")
+
+    item = coded_item(client)
+    assert item["status"] == "fixed"                # the human won
+    assert item["feedback_type"] == "resolved"
+    assert item["triage_verdict"] == "suppress"     # the machine is still on record
+    assert item["triage_confidence"] == 0.95
+    assert item["triage_hid"] is True
+
+
+def test_the_filter_states_its_reason_on_the_card(client, book):
+    """In the payload since the pass landed, and read by nothing.
+
+    ``docs/TRIAGE.md`` has promised this screen shows the model's reason from
+    the day the sidecar was written, and the field was indeed there — but
+    ``_finding_item`` left ``detail`` empty for every finding, so the one
+    sentence saying *why* something was hidden reached the browser and was
+    dropped on the floor. A filter nobody can question is a filter nobody
+    should trust.
+    """
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary", reason="a Norse proper noun")
+
+    assert coded_item(client)["detail"] == [
+        {"label": "triage_reason", "text": "a Norse proper noun"}
+    ]
+
+
+def test_a_finding_card_names_everything_a_mark_needs(client, book):
+    """The card posts to the reader's feedback endpoint, which addresses a
+    finding by ``(chunk_id, eval_name, issue_index)``. All three have to be on
+    the item or no buttons can be drawn. ``eval_name`` is carried explicitly
+    rather than read back off ``kind``, which holds the same string only by
+    construction and is a poor thing to hang a write on."""
+    plant_coded(book, eval_name="dictionary")
+
+    item = coded_item(client)
+    assert item["chunk_id"] == "chapter_01_chunk_000"
+    assert item["eval_name"] == "dictionary"
+    assert item["issue_index"] == 0
+    assert item["feedback_type"] is None             # nothing ruled yet
+
+
+def test_an_annotation_card_names_nothing_to_mark(client, book):
+    """A reviewed note is not an evaluator finding: there is no chunk and no
+    position for ``append_feedback`` to address, so the page draws no mark
+    buttons on it. The keys are present and null rather than absent, so both
+    builders hand back one shape."""
+    plant_annotation(book)
+
+    (note,) = [it for it in items_of(client) if it["source"] == "annotation"]
+    assert note["eval_name"] is None
+    assert note["chunk_id"] is None
+    assert note["issue_index"] is None
+
+
+def test_marking_from_this_page_writes_the_corpus(client, book):
+    """End to end, through the very fields the card stamps into the DOM.
+
+    The point is that this screen needs no writer of its own: the three fields
+    it carries are exactly the three the reader's Review Mode posts, to the same
+    endpoint, in the same vocabulary. ``_feedback.jsonl`` is the corpus per-rule
+    precision and the triage floor are both computed from, so a second writer
+    would mean a second meaning for one kind of row.
+
+    Note what this does *not* prove. ``plant_coded`` writes ``results=[]``, so
+    ``_resolve_issue_key`` returns ``None`` and the mark joins back through
+    feedback's positional tier; in production the key resolves. This pins the
+    request contract, not key resolution.
+    """
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary", "suppress", confidence=0.95)
+    assert coded_item(client)["status"] == "auto_suppressed"
+
+    card = coded_item(client)
+    rv = client.post(
+        f"/api/project/recbook/evaluations/{card['chunk_id']}/feedback",
+        json={
+            "eval_name": card["eval_name"],
+            "issue_index": card["issue_index"],
+            "feedback_type": "false_positive",
+        },
+    )
+    assert rv.status_code == 200, rv.get_data(as_text=True)
+
+    marked = coded_item(client)
+    assert marked["status"] == "not_a_problem"
+    assert marked["feedback_type"] == "false_positive"
+    # Still on record beside it: the disagreement is the measurement.
+    assert marked["triage_hid"] is True
+
+
+def test_the_page_stamps_what_the_script_needs_to_mark(client, book):
+    """Without these the cards render no buttons at all.
+
+    The four labels are the reader's own (``review_fb_*``) and the map is the
+    server's ``FEEDBACK_STATUSES``, both stamped into the page rather than
+    restated in the script: one vocabulary for one corpus, and a card restyled
+    after a mark lands on the same status the next load will report.
+    """
+    plant_coded(book, eval_name="dictionary")
+    triage_finding(book, "dictionary")
+
+    html = client.get("/recommendations/recbook").get_data(as_text=True)
+
+    labels = re.search(r"data-mark-labels='([^']*)'", html)
+    assert labels, "the page must stamp the mark labels"
+    assert json.loads(labels.group(1)) == {
+        "resolved": "Resolved",
+        "false_positive": "False positive",
+        "bad_message": "Bad message",
+        "missing_context_gap": "Missing context",
+    }
+
+    statuses = re.search(r"data-feedback-statuses='([^']*)'", html)
+    assert statuses, "the page must stamp the feedback -> status map"
+    assert json.loads(statuses.group(1))["false_positive"] == "not_a_problem"
+
+    # The chip templates, which carry the score the whole point of this is to
+    # show. A missing one renders "undefined" against every verdict.
+    assert "data-triage-suppress=" in html
+    assert "data-triage-keep=" in html
+    assert "data-triage-below-floor=" in html

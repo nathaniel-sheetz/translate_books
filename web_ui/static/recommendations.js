@@ -6,12 +6,14 @@
  * `_build_chapter_review` (the reader's own builder) plus the reviewed
  * annotations, so this screen and the reader never disagree about what is live.
  *
- * Nothing here acts on the book: no apply, no reject, no dismiss. The inbox and
- * the reader own those, along with the locks and the staleness checks that
- * writing safely needs.
+ * Nothing here edits the book: no apply, no reject. The inbox and the reader
+ * own those, along with the locks and the staleness checks that writing
+ * safely needs.
  *
- * The one exception is the heart, which records that you want an item again
- * later. It changes no prose, so it needs none of that machinery.
+ * Two writes, both labels on the finding rather than edits of the prose: the
+ * heart (want this item again later) and the mark row (resolved / false
+ * positive / skipped). The mark row is the labelled corpus the triage floor
+ * is tuned on.
  */
 (function () {
     'use strict';
@@ -23,6 +25,15 @@
     var KINDS = parseMap(list.dataset.kinds);
     var DETAIL_LABELS = parseMap(list.dataset.detailLabels);
     var STATUSES = parseMap(list.dataset.statuses);
+    /* The reader's four mark labels, and the server's feedback -> status map.
+       Both come from the page rather than being restated here: the labels so
+       the two marking surfaces cannot drift into different words for one kind
+       of record, and the map so a card restyled after a mark lands on the same
+       status the next page load will report. Object key order survives
+       JSON.parse for string keys, so the buttons render in the order the
+       server listed them. */
+    var MARK_LABELS = parseMap(list.dataset.markLabels);
+    var MARK_STATUSES = parseMap(list.dataset.feedbackStatuses);
 
     function parseMap(raw) {
         try {
@@ -30,6 +41,14 @@
         } catch (e) {
             return {};
         }
+    }
+
+    /* split/join rather than replace(): $&, $` and $' are substitution patterns
+       in a String.replace replacement, so a model name carrying one would
+       render a different string than the one it was handed. Same helper, and
+       the same reason, as reader.js. */
+    function fillSlot(s, slot, value) {
+        return String(s == null ? '' : s).split(slot).join(value);
     }
 
     function el(tag, className, text) {
@@ -168,11 +187,78 @@
         return btn;
     }
 
+    /* What the coded-checker filter said about this finding, and how sure it
+       was. Rendered whenever a verdict exists rather than only when one hid
+       something: a `keep`, a suppress under the floor, and a suppress you have
+       since overruled are the rows the floor is calibrated from, and a page
+       showing only the verdicts above the floor could never justify moving it.
+
+       The status chip beside it says what *became* of the finding; this one
+       says what the model thought. The two disagree exactly when a human has
+       overruled the machine — which is the card worth going to find. */
+    function triageChip(item) {
+        if (!item.triage_verdict) return null;
+        var score = typeof item.triage_confidence === 'number'
+            ? item.triage_confidence.toFixed(2)
+            : '—';
+        var template = item.triage_verdict === 'suppress'
+            ? (item.triage_hid ? list.dataset.triageSuppress
+                               : list.dataset.triageBelowFloor)
+            : list.dataset.triageKeep;
+        var node = chip('rec-chip-triage rec-chip-triage-' + item.triage_verdict +
+                        (item.triage_hid ? ' rec-chip-triage-hid' : ''),
+                        fillSlot(template, '{c}', score));
+        if (item.triage_model) {
+            node.title = fillSlot(list.dataset.triageModel, '{model}',
+                                  item.triage_model);
+        }
+        return node;
+    }
+
+    /* The only control on this page that records a verdict. It posts to the
+       reader's own feedback endpoint with the reader's own four labels, so both
+       surfaces write one corpus in one vocabulary — `_feedback.jsonl` is what
+       per-rule precision and the triage floor are computed from, and a row's
+       meaning must not depend on which screen wrote it.
+
+       A finding is markable wherever the reader could mark it: it needs a chunk
+       and a position to name, which a reviewed annotation has not.
+       `issue_index` is tested against null rather than for truthiness — it is 0
+       on the first finding of every chunk. */
+    function markRow(item) {
+        if (item.source === 'annotation') return null;
+        if (!item.chunk_id || item.issue_index === null ||
+            item.issue_index === undefined) return null;
+        var row = el('div', 'rec-mark');
+        row.appendChild(el('span', 'rec-mark-label', list.dataset.markLabel));
+        Object.keys(MARK_LABELS).forEach(function (ftype) {
+            var btn = el('button', 'rec-mark-btn rec-mark-' + ftype,
+                         MARK_LABELS[ftype]);
+            btn.type = 'button';
+            btn.dataset.markType = ftype;
+            if (item.feedback_type === ftype) {
+                btn.setAttribute('aria-pressed', 'true');
+            }
+            row.appendChild(btn);
+        });
+        return row;
+    }
+
     function card(chapterId, item) {
         var node = el('article', 'rec-card rec-kind-' + item.kind +
                                  ' rec-source-' + item.source +
                                  ' rec-status-' + (item.status || 'open'));
         node.setAttribute('role', 'listitem');
+        /* What a mark has to name, kept on the card so the click handler needs
+           no closure over the item — the same delegation the heart uses. The
+           status rides here too, because marking has to know which filter count
+           to take one off. */
+        node.dataset.status = item.status || 'open';
+        if (item.chunk_id) node.dataset.chunkId = item.chunk_id;
+        if (item.eval_name) node.dataset.evalName = item.eval_name;
+        if (item.issue_index !== null && item.issue_index !== undefined) {
+            node.dataset.issueIndex = String(item.issue_index);
+        }
         if (item.favorite) node.classList.add('rec-card-fav');
         if (item.stale) node.classList.add('rec-card-stale');
         if (item.status && item.status !== 'open' && item.status !== 'stale') {
@@ -193,6 +279,8 @@
             if (item.status_at) label += ' \u00b7 ' + item.status_at.slice(0, 10);
             meta.appendChild(chip('rec-chip-status rec-chip-status-' + item.status, label));
         }
+        var triage = triageChip(item);
+        if (triage) meta.appendChild(triage);
         /* Not alongside the status chip: `stale` is set precisely when the
            status is `stale`, so both chips would say "edited since" in a row. */
         if (item.stale && item.status !== 'stale') {
@@ -242,6 +330,11 @@
             });
             node.appendChild(detail);
         }
+        /* Last on the card, below everything you would read before deciding:
+           the sentence, the suggestion, the explanation, and what the filter
+           said about it. */
+        var mark = markRow(item);
+        if (mark) node.appendChild(mark);
         return node;
     }
 
@@ -359,6 +452,141 @@
                 setFavorite(btn, !on);
                 btn.disabled = false;
                 btn.title = list.dataset.favFailed;
+            });
+    });
+
+    /* Keep the filter row honest as you mark. Those counts are the progress bar
+       for a calibration pass — "Filtered out automatically 117" is the number
+       you are burning down — so leaving them at their page-load values would
+       make the one control you are watching the one control that lies.
+
+       A status carrying no findings at page load has no checkbox to bump, since
+       the shell renders a box only for a status with a total. The first mark
+       into such a status therefore goes uncounted until a reload; the card
+       itself is still right, and so is the tally it lands in next time. */
+    function bumpStatusCount(status, delta) {
+        var box = document.querySelector(
+            '.rec-filter-status-' + status + ' .rec-filter-count');
+        if (!box) return;
+        var n = parseInt(box.textContent, 10);
+        if (isNaN(n)) return;
+        box.textContent = String(Math.max(0, n + delta));
+    }
+
+    /* The chapter's "N filtered out" chip, kept in step as cards leave that set.
+       Same job as the favorites bump above and for the same reason: it is the
+       number you are burning down, and the status box beside it already moves.
+
+       Approximate, and only until a reload. The server counts occurrence rows
+       while a card is one collapsed finding, so a repeated word reads as two or
+       three in the chip and comes off as one here. A number that drifts by a
+       repeat beats one that is stale by everything you just marked, but the
+       server's count is still the true one. */
+    function bumpSuppressedChip(card, delta) {
+        var section = card.closest('.rec-chapter');
+        if (!section) return;
+        var n = parseInt(section.dataset.suppressed, 10);
+        if (isNaN(n)) return;
+        n = Math.max(0, n + delta);
+        section.dataset.suppressed = String(n);
+        var node = section.querySelector('.rec-chip-suppressed');
+        if (!node) return;
+        /* The server renders no chip at zero, so neither do we. */
+        if (n === 0) {
+            node.remove();
+            return;
+        }
+        node.textContent = fillSlot(list.dataset.suppressedChip, '{n}', n);
+    }
+
+    /* Repaint the status chip for a mark that has just landed. No date, unlike
+       the chip the server renders: the record's timestamp is the server's
+       clock, and this page is often open on a different machine over the
+       tailnet. A date guessed from the browser would be wrong exactly where it
+       mattered, so the word stands alone until a reload can date it. */
+    function setStatusChip(card, status) {
+        var meta = card.querySelector('.rec-meta');
+        if (!meta) return;
+        var node = meta.querySelector('.rec-chip-status');
+        if (!node) {
+            node = chip('rec-chip-status', '');
+            meta.insertBefore(node, meta.querySelector('.rec-open'));
+        }
+        node.className = 'rec-chip rec-chip-status rec-chip-status-' + status;
+        node.textContent = STATUSES[status] || status;
+    }
+
+    /* Move the card to the status the mark implies, using the server's own map
+       so the two cannot drift. Everything that reads a status reads it off the
+       class, so swapping the class is the whole update — the status filter
+       included, which re-hides the card for free when you have that box
+       unticked. That is what turns this row into a work queue: mark a
+       suppressed finding and it leaves the set you are clearing. */
+    function applyMark(card, row, ftype) {
+        var next = MARK_STATUSES[ftype] || 'open';
+        var prev = card.dataset.status || 'open';
+        if (next !== prev) {
+            card.classList.remove('rec-status-' + prev);
+            card.classList.add('rec-status-' + next);
+            card.dataset.status = next;
+            card.classList.add('rec-card-history');
+            bumpStatusCount(prev, -1);
+            bumpStatusCount(next, 1);
+            /* Only ever down: `MARK_STATUSES` maps the four human labels, none
+               of which is `auto_suppressed`, so a mark can leave that set and
+               never join it. */
+            if (prev === 'auto_suppressed') bumpSuppressedChip(card, -1);
+            setStatusChip(card, next);
+        }
+        Array.prototype.forEach.call(row.querySelectorAll('.rec-mark-btn'),
+            function (b) {
+                b.disabled = false;
+                if (b.dataset.markType === ftype) {
+                    b.setAttribute('aria-pressed', 'true');
+                } else {
+                    b.removeAttribute('aria-pressed');
+                }
+            });
+    }
+
+    /* Marking is deliberately not optimistic, unlike the heart. A heart is a
+       note to yourself and a lost one costs nothing; a mark is a row in the
+       corpus the filter's own floor is tuned against, so the card must never
+       claim a verdict the server did not store. */
+    list.addEventListener('click', function (event) {
+        var btn = event.target.closest && event.target.closest('.rec-mark-btn');
+        if (!btn || btn.disabled) return;
+        var card = btn.closest('.rec-card');
+        var row = btn.closest('.rec-mark');
+        if (!card || !row || !card.dataset.chunkId) return;
+
+        var ftype = btn.dataset.markType;
+        var buttons = row.querySelectorAll('.rec-mark-btn');
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+        row.classList.remove('rec-mark-failed');
+        row.removeAttribute('title');
+
+        fetch('/api/project/' + encodeURIComponent(PROJECT) + '/evaluations/' +
+              encodeURIComponent(card.dataset.chunkId) + '/feedback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                eval_name: card.dataset.evalName,
+                issue_index: parseInt(card.dataset.issueIndex, 10),
+                feedback_type: ftype,
+            }),
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (!data || !data.ok) throw new Error(data && data.error);
+                applyMark(card, row, ftype);
+            })
+            .catch(function () {
+                Array.prototype.forEach.call(buttons, function (b) {
+                    b.disabled = false;
+                });
+                row.classList.add('rec-mark-failed');
+                row.title = list.dataset.markFailed;
             });
     });
 

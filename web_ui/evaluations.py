@@ -42,6 +42,31 @@ _ALLOWED_FEEDBACK_TYPES = frozenset(
     {"false_positive", "bad_message", "missing_context_gap", "resolved"}
 )
 
+# ── Machine triage of the coded checkers ─────────────────────────────────────
+#
+# Deliberately a SEPARATE file from ``_feedback.jsonl``. That file is the
+# labelled corpus ``scripts/replay_dictionary_marks.py`` and
+# ``scripts/replay_grammar_marks.py`` compute per-rule precision from, and its
+# records carry no author field — a machine verdict written there would be
+# indistinguishable from a human one and would contaminate the very numbers the
+# suppression cutoff is tuned against. The reader's "Ignore in this book" button
+# already refuses to bulk-write there for the same reason
+# (``web_ui/static/reader.js``).
+_TRIAGE_FILENAME = "_triage.jsonl"
+
+#: What a triage verdict may say. ``suppress`` hides the finding from the
+#: working surfaces; ``keep`` suppresses nothing and is recorded only so a
+#: re-run does not pay to ask again.
+TRIAGE_VERDICTS = frozenset({"suppress", "keep"})
+
+#: A ``suppress`` verdict below this confidence suppresses nothing. Set from the
+#: loss/benefit curve ``scripts/replay_triage.py`` prints: the floor is chosen so
+#: that no ``resolved`` mark in the labelled corpus is suppressed, which is the
+#: only veto. Raising it lets more noise through, which costs a reader a glance;
+#: lowering it risks a real defect, which is lost silently. It moves only with a
+#: replay number attached.
+TRIAGE_CONFIDENCE_FLOOR = 0.85
+
 # What a mark means to a reader, as opposed to what it means to evaluator
 # tuning. `resolved` is the only one that says the *book* changed, and reading
 # "fixed" off a card is the point of showing marked findings at all; the other
@@ -242,6 +267,93 @@ def is_ignored(
     return ignored.matches(eval_name, issue_term(eval_name, issue), issue.get("rule_id"))
 
 
+def build_triaged(
+    triage_records: Iterable[dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Index machine-triage records by ``(eval_name, issue_key)``.
+
+    One map, where :func:`build_dismissed` returns two: triage records are
+    written by this codebase and always carry a key, so there is no legacy
+    position-keyed tier to fall back to.
+
+    The file is append-only and a finding can be re-triaged — a new model, a new
+    prompt version — so the last record for a key wins. That is the verdict
+    standing now.
+    """
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in triage_records:
+        key = record.get("issue_key")
+        if key:
+            by_key[(record.get("eval_name"), key)] = record
+    return by_key
+
+
+def triage_mark(
+    by_key: dict[tuple[str, str], dict[str, Any]],
+    eval_name: str,
+    issue: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """The triage record standing against this finding, whatever it says.
+
+    :func:`is_triaged`'s answer with the record attached, and the way a surface
+    that wants to *show* the machine's reasoning gets at it — the recommendations
+    screen renders the verdict and its reason rather than hiding the finding.
+    """
+    if issue is None:
+        return None
+    return by_key.get((eval_name, issue_key(eval_name, issue)))
+
+
+def triage_hides(
+    record: Optional[dict[str, Any]], *, floor: float = TRIAGE_CONFIDENCE_FLOOR
+) -> bool:
+    """Whether one triage record actually suppresses the finding it names.
+
+    The single definition of that question. :func:`is_triaged` answers it for a
+    finding, and the recommendations screen answers it for a record it already
+    holds; both go through here so a card can never label a finding
+    ``auto_suppressed`` that the review list still shows.
+
+    Only ``suppress`` at or above ``floor`` hides anything. A malformed
+    confidence is not a licence to hide a finding.
+    """
+    if not record or record.get("verdict") != "suppress":
+        return False
+    try:
+        return float(record.get("confidence") or 0.0) >= floor
+    except (TypeError, ValueError):
+        return False
+
+
+def is_triaged(
+    by_key: dict[tuple[str, str], dict[str, Any]],
+    eval_name: str,
+    issue: Optional[dict[str, Any]],
+    *,
+    floor: float = TRIAGE_CONFIDENCE_FLOOR,
+) -> bool:
+    """True if a machine verdict suppresses this finding.
+
+    A *third* gate beside :func:`is_dismissed` and :func:`is_ignored`, and the
+    narrowest of the three: a dismissal is one human judgment about one finding,
+    an ignore is one human judgment about a term applied book-wide, and this is
+    a model's judgment about one finding — so it is the only one carrying a
+    confidence, and the only one with a floor under it.
+
+    Only ``suppress`` at or above ``floor`` hides anything. A ``keep``, and a
+    ``suppress`` the model was not sure enough about, both leave the finding live
+    for the human.
+
+    The finding itself is never deleted: it stays in
+    ``evaluations/<chunk_id>.json`` exactly as the checker wrote it, so the
+    per-rule precision arithmetic stays measurable and the triage pass's own
+    false-positive rate stays auditable. That is the same reasoning that keeps
+    :func:`is_ignored` a read-time filter rather than an evaluate-time
+    suppression.
+    """
+    return triage_hides(triage_mark(by_key, eval_name, issue), floor=floor)
+
+
 # ---------------------------------------------------------------------------
 # Paths
 
@@ -259,6 +371,127 @@ def _eval_file(project_dir: Path, chunk_id: str) -> Path:
 def _feedback_file(project_dir: Path) -> Path:
     """Return the path to the per-project feedback JSONL file."""
     return _eval_results_dir(project_dir) / _FEEDBACK_FILENAME
+
+
+def _triage_file(project_dir: Path) -> Path:
+    """Return the path to the per-project machine-triage JSONL file."""
+    return _eval_results_dir(project_dir) / _TRIAGE_FILENAME
+
+
+# ---------------------------------------------------------------------------
+# Anchoring findings onto reader sentences
+#
+# These two live here rather than in ``web_ui/app.py`` so that non-web callers
+# can reuse them — ``src/triage`` needs a finding's sentence, and importing the
+# Flask module to get two pure functions would instantiate the whole server.
+# ``app.py`` imports them back under their original private names, the same way
+# ``src/utils/text_utils.py`` already hosts helpers moved out of ``app.py``.
+
+
+def attach_text_in_chunk(
+    alignment_data: dict, chunks_dir: Path, target_lang: str = "es"
+) -> None:
+    """Mutate alignment rows to include `text_in_chunk` (and chunk char offsets).
+
+    The aligner emits `es` text via pysbd.split + .strip() + " ".join() for N:1
+    groups, which is NOT byte-identical to chunk.translated_text. The reader's
+    retranslate flow needs the literal chunk substring so /api/sentence/replace
+    can find it without fuzzy matching. We re-split each chunk's translated_text
+    with the same splitter the aligner uses and walk char positions.
+    """
+    from collections import defaultdict
+    from src.sentence_aligner import _split_sentences_with_para_indices
+
+    rows_by_chunk: dict[str, list[dict]] = defaultdict(list)
+    for row in alignment_data.get("alignments", []):
+        cid = row.get("chunk_id")
+        if cid and "es_idx" in row:
+            rows_by_chunk[cid].append(row)
+
+    for chunk_id, rows in rows_by_chunk.items():
+        chunk_path = chunks_dir / f"{chunk_id}.json"
+        if not chunk_path.exists():
+            continue
+        try:
+            chunk_data = json.loads(chunk_path.read_text(encoding="utf-8"))
+            chunk_mtime = chunk_path.stat().st_mtime
+        except (json.JSONDecodeError, OSError):
+            continue
+        chunk_text = chunk_data.get("translated_text") or ""
+        if not chunk_text:
+            continue
+
+        try:
+            sentences, _ = _split_sentences_with_para_indices(chunk_text, target_lang)
+        except Exception:
+            continue
+
+        ranges: list[Optional[tuple[int, int]]] = []
+        cursor = 0
+        for sent in sentences:
+            idx = chunk_text.find(sent, cursor)
+            if idx == -1:
+                stripped = sent.strip()
+                idx = chunk_text.find(stripped, cursor) if stripped else -1
+                if idx == -1:
+                    ranges.append(None)
+                    continue
+                ranges.append((idx, idx + len(stripped)))
+                cursor = idx + len(stripped)
+            else:
+                ranges.append((idx, idx + len(sent)))
+                cursor = idx + len(sent)
+
+        # The aligner offsets es_idx by cumulative chunk counts. The minimum
+        # es_idx in this chunk's rows is the chunk-local offset.
+        es_offset = min(r["es_idx"] for r in rows)
+
+        for row in rows:
+            indices = row.get("es_indices") or [row["es_idx"]]
+            local = [i - es_offset for i in indices]
+            valid = [li for li in local if 0 <= li < len(ranges) and ranges[li] is not None]
+            if not valid:
+                continue
+            start = ranges[valid[0]][0]
+            end = ranges[valid[-1]][1]
+            row["text_in_chunk"] = chunk_text[start:end]
+            row["chunk_offset_start"] = start
+            row["chunk_offset_end"] = end
+            row["chunk_mtime"] = chunk_mtime
+
+
+def row_containing_offset(
+    rows_sorted: list[dict], offset: int, chunk_text: str = ""
+) -> Optional[dict]:
+    """Return the alignment row whose chunk char span contains ``offset``.
+
+    ``rows_sorted`` must be sorted by ``chunk_offset_start``. Uses a half-open
+    ``[start, end)`` test — the same coordinate space as the coded evaluators'
+    ``char_start`` (both index into the chunk's ``translated_text``).
+
+    Fallback tier: sentence spans do not tile the chunk, so an offset can land
+    in the gap between two rows — most often the blank run a paragraph break
+    leaves behind. Given ``chunk_text``, such an offset is attributed to the
+    *following* row, but only when every character from the offset up to that
+    row's start is whitespace. A finding sitting on the blank run in front of a
+    sentence belongs to that sentence; one sitting on real prose no row covers
+    (an ``[IMAGE:…]`` token, a sentence the splitter dropped) must not silently
+    jump over it, so it stays unanchored and reaches the reader's overflow bin.
+    """
+    following = None
+    for row in rows_sorted:
+        start = row.get("chunk_offset_start")
+        end = row.get("chunk_offset_end")
+        if start is None or end is None:
+            continue
+        if start <= offset < end:
+            return row
+        if following is None and start > offset:
+            following = row
+    if following is None or not chunk_text or offset < 0:
+        return None
+    gap = chunk_text[offset:following["chunk_offset_start"]]
+    return following if gap and not gap.strip() else None
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +1136,100 @@ def load_all_feedback_by_chunk(
     return out
 
 
+def append_triage(
+    project_dir: Path,
+    chunk_id: str,
+    eval_name: str,
+    issue_index: int,
+    verdict: str,
+    *,
+    key: str,
+    confidence: float,
+    reason: Optional[str] = None,
+    term: Optional[str] = None,
+    rule_id: Optional[str] = None,
+    model: Optional[str] = None,
+    prompt_version: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Path:
+    """Append one machine-triage verdict to ``_triage.jsonl``.
+
+    Append-only, like ``_feedback.jsonl`` and for the same reason: it sidesteps
+    the read-modify-write race a whole-file rewrite has when two writers overlap.
+
+    ``term`` and ``rule_id`` are recorded beside ``key`` on purpose. Neither
+    coded checker sets ``finding_key``, so :func:`issue_key` falls back to
+    hashing ``(eval_name, severity, message, location)`` — and for these two
+    checkers ``location`` is a character offset. Any edit to the chunk moves that
+    offset and orphans the verdict. Keeping the term and the rule means re-keying
+    is a script rather than a re-run of the whole pass, and they are the join
+    keys ``replay_dictionary_marks.py`` and ``replay_grammar_marks.py`` already
+    trust.
+
+    Raises:
+        ValueError: If ``verdict`` is not one of :data:`TRIAGE_VERDICTS`.
+    """
+    if verdict not in TRIAGE_VERDICTS:
+        raise ValueError(
+            f"Unknown triage verdict {verdict!r}; "
+            f"expected one of {sorted(TRIAGE_VERDICTS)}"
+        )
+
+    record = {
+        "ts": datetime.now().isoformat(),
+        "chunk_id": chunk_id,
+        "eval_name": eval_name,
+        "issue_index": issue_index,
+        "issue_key": key,
+        "term": term,
+        "rule_id": rule_id,
+        "verdict": verdict,
+        "confidence": confidence,
+        "reason": reason,
+        "model": model,
+        "prompt_version": prompt_version,
+        "run_id": run_id,
+    }
+
+    path = _triage_file(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def load_all_triage_by_chunk(project_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Return every machine-triage record grouped by ``chunk_id``.
+
+    The :func:`load_all_feedback_by_chunk` of the triage sidecar, read once per
+    chapter for the same reason. A book that has never been triaged has no file,
+    so every caller sees an empty map and behaves exactly as it did before the
+    feature existed.
+    """
+    path = _triage_file(project_dir)
+    if not path.exists():
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as e:
+                    logger.debug("Skipping malformed triage line in %s: %s", path, e)
+                    continue
+                chunk_id = record.get("chunk_id")
+                if not chunk_id:
+                    continue
+                out.setdefault(chunk_id, []).append(record)
+    except OSError as e:
+        logger.warning("Failed to read triage file %s: %s", path, e)
+    return out
+
+
 def load_project_summary(project_dir: Path) -> dict[str, dict[str, int]]:
     """Walk ``evaluations/*.json`` and return a per-chunk counts map.
 
@@ -1032,14 +1359,45 @@ def load_chapter_type_counts(
             return by_chapter.setdefault(chapter_id, {
                 "open": empty_type_counts(),
                 "history": empty_type_counts(),
+                "suppressed": empty_type_counts(),
                 "by_status": {},
             })
         return by_chapter.setdefault(chapter_id, empty_type_counts())
 
-    def _count(bucket: dict, eval_name: str, mark: Optional[dict[str, Any]]) -> None:
-        """One finding into its bucket, split by whether it carries a mark."""
+    def _count(
+        bucket: dict,
+        eval_name: str,
+        mark: Optional[dict[str, Any]],
+        triage: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """One finding into its bucket, split by who ruled on it and how.
+
+        Three buckets, not two. A human mark and a machine suppression both mean
+        "not outstanding", but folding them together would put a model's verdict
+        into the same muted count as a decision you made, and telling those apart
+        is what the recommendations screen is for.
+
+        ``by_status`` is what gives ``auto_suppressed`` its own filter checkbox:
+        :func:`app._recommendation_shell` drops a status with no total from the
+        row entirely, so while a suppressed finding landed in ``open`` the page
+        offered no way to see -- or to exclude -- what the filter had taken, and
+        counted 104 hidden findings as outstanding work.
+
+        A human mark wins over a machine verdict, matching the card in
+        ``app._finding_card``: you ruling on a finding settles it, whatever a
+        model said first. Only a ``suppress`` at or above the floor counts as
+        suppression -- :func:`triage_hides` is the single definition of that
+        question, so a ``keep`` or a low-confidence suppress stays ``open``,
+        exactly as it stays visible.
+        """
         if not statuses:
             bucket[eval_name] += 1
+            return
+        if mark is None and triage_hides(triage):
+            bucket["suppressed"][eval_name] += 1
+            bucket["by_status"]["auto_suppressed"] = (
+                bucket["by_status"].get("auto_suppressed", 0) + 1
+            )
             return
         if mark is None:
             bucket["open"][eval_name] += 1
@@ -1051,6 +1409,7 @@ def load_chapter_type_counts(
     coded_types = frozenset(REVIEW_CODED_TYPES)
     judge_types = frozenset(REVIEW_JUDGE_TYPES)
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    triage_by_chunk = load_all_triage_by_chunk(project_dir)
     ignored = load_project_ignored_terms(project_dir)
 
     for path in sorted(eval_dir.glob("*.json")):
@@ -1067,6 +1426,7 @@ def load_chapter_type_counts(
 
         chunk_id = data.get("chunk_id") or path.stem
         fb_by_key, fb_by_index = build_dismissed(feedback_by_chunk.get(chunk_id, []))
+        tr_by_key = build_triaged(triage_by_chunk.get(chunk_id, []))
         counts = _bucket(chapter_id_from_chunk_id(chunk_id))
 
         for ni in data.get("normalized_issues") or []:
@@ -1085,7 +1445,12 @@ def load_chapter_type_counts(
                 continue
             if is_ignored(ignored, eval_name, ni):
                 continue
-            _count(counts, eval_name, mark)
+            # The same third gate `_build_chapter_review` applies, applied here
+            # too or the badge and the list disagree about the same chapter —
+            # which is the one thing this cheaper second walk exists to avoid.
+            if is_triaged(tr_by_key, eval_name, ni) and not statuses:
+                continue
+            _count(counts, eval_name, mark, triage_mark(tr_by_key, eval_name, ni))
 
         judges = data.get("judges")
         if not isinstance(judges, dict):

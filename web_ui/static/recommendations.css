@@ -198,6 +198,37 @@
     font-style: italic;
 }
 
+/* Reads as history, because that is what it is: a finding something has already
+   ruled on. It takes no colour of its own for the reason stated above -- nine
+   coloured statuses are a legend to memorise, and only `fixed`/`applied` earn
+   one because they say the book changed. A machine filter did not change the
+   book. The dotted rule is what separates it from the history chip beside it
+   without spending a colour to do it. */
+.rec-chip-suppressed {
+    background: transparent;
+    color: var(--text-muted6);
+    font-style: italic;
+    border-bottom: 1px dotted var(--text-muted6);
+}
+
+/* The machine's verdict on one finding, and the score behind it. Monospace,
+   because during a calibration pass these are read as a column down a page of
+   cards and a proportional 0.94 above a 0.60 does not line up. No colour of its
+   own, for the reason severity states above; the border carries the only
+   distinction that matters instead - dotted for a verdict that changed nothing,
+   solid for one that actually hid the finding. */
+.rec-chip-triage {
+    background: transparent;
+    color: var(--text-muted6);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    border: 1px dotted var(--text-muted6);
+}
+
+.rec-chip-triage-hid {
+    border-style: solid;
+}
+
 .rec-summary-history {
     color: var(--text-muted6);
 }
@@ -217,6 +248,62 @@
 }
 
 .rec-open:hover { color: var(--text-link-hover); text-decoration: underline; }
+
+/* --- Your verdict -------------------------------------------------------- */
+
+/* The only control on this page that writes one, so it sits at the foot of the
+   card, below everything you would read before deciding. Separated by a rule
+   rather than a heading: it is an action, and the card above it is the case. */
+.rec-mark {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid var(--border);
+}
+
+.rec-mark-label {
+    font-size: 11px;
+    color: var(--text-muted6);
+}
+
+.rec-mark-btn {
+    font-size: 11px;
+    line-height: 1.6;
+    padding: 2px 9px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+    color: var(--text-muted3);
+    cursor: pointer;
+}
+
+.rec-mark-btn:hover:not(:disabled) {
+    border-color: var(--text-muted3);
+    color: var(--text);
+}
+
+.rec-mark-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* The mark that stands. Filled rather than outlined, so a finding you have
+   already ruled on says so from across the page - which is what a marking pass
+   needs, since the card may well stay on screen under a ticked status box. */
+.rec-mark-btn[aria-pressed="true"] {
+    background: var(--accent-bg);
+    border-color: var(--text-muted3);
+    color: var(--text);
+}
+
+/* The write failed and the card is claiming nothing. The buttons stay live for
+   a retry; the row says why on hover. */
+.rec-mark-failed .rec-mark-label {
+    color: var(--badge-warn-color);
+}
 
 /* --- The sentence and its neighbours ------------------------------------ */
 
@@ -406,7 +493,8 @@
 .rec-hide-status-deleted .rec-status-deleted,
 .rec-hide-status-not_a_problem .rec-status-not_a_problem,
 .rec-hide-status-bad_message .rec-status-bad_message,
-.rec-hide-status-missing_context_gap .rec-status-missing_context_gap {
+.rec-hide-status-missing_context_gap .rec-status-missing_context_gap,
+.rec-hide-status-auto_suppressed .rec-status-auto_suppressed {
     display: none;
 }
 

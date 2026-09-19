@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "approved_at": "2026-09-14",
+  "about": "The house rule set every book is judged against. `every_book` is merged into every book's rules by src/judges/context.py::load_style_rules, so the editorial judge, the audit panel and the triage pass all cite these ids whether or not a book has a style_rules.json sidecar. `where_the_guide_agrees` is NOT injected: a book adopts one of those by copying the rule into its own sidecar, because a book whose style guide disagrees must not be held to it. Only rules the editorial judge's first pass can check from the Spanish alone belong here. Dialogue punctuation is left to the dialogue judge, and tú/usted to the address judge and address map. Rule ids and wording stay identical across books so findings aggregate by rule; a book's note may vary, and a book's sidecar note overrides the one here.",
+  "every_book": [
+    {
+      "id": "no-iberianisms",
+      "rule": "No Iberian vocabulary, idiom or grammar.",
+      "note": "For example coger (agarrar), ordenador, zumo, patata, chaval; and leísmo with a male person (le vi → lo vi). Words also normal in Mexico (vale, enfadarse, piso, gafas) are not Iberianisms."
+    },
+    {
+      "id": "no-vos-vosotros",
+      "rule": "Only tú, usted and ustedes.",
+      "note": "No vuestro/vuestra, no -áis/-éis verb endings, no -ad/-ed/-id imperatives."
+    },
+    {
+      "id": "no-source-caps",
+      "rule": "Do not carry over the English edition's all-caps chapter openings.",
+      "note": "—LA tierra → —La tierra."
+    },
+    {
+      "id": "rio-no-tilde",
+      "rule": "Write the preterite of reír as rio, never rió.",
+      "note": "Current RAE orthography counts it a monosyllable, so it takes no tilde: —Eso es muy cierto —rio Ben. The noun río (river) is a different word and keeps its accent on the i."
+    }
+  ],
+  "where_the_guide_agrees": [
+    {
+      "id": "one-rendering-per-term",
+      "rule": "A recurring name, epithet or key term keeps one rendering, the glossary's; never varied for elegance."
+    },
+    {
+      "id": "everyday-lexicon",
+      "rule": "Use the everyday word a Mexican reader knows, not a technical, regional or field-guide term."
+    },
+    {
+      "id": "standard-spelling",
+      "rule": "Standard spelling in every voice: register comes from word choice and grammar, never phonetic respelling."
+    }
+  ]
+}

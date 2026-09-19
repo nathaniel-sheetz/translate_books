@@ -258,6 +258,38 @@ candidate, with the English original attached to the ones whose `source_check`
 asked for it. Not idempotent — a verified chunk is skipped until `--force`.
 Full reference: [`EDITORIAL_JUDGE.md`](EDITORIAL_JUDGE.md).
 
+### `run_triage.py` — filter the noise out of the coded checkers
+
+```bash
+python scripts/run_triage.py prepare --project my-book \
+    --worker-model "grok-4.6[effort=medium,fast=false]"
+python scripts/run_triage.py fanout  --project my-book
+python scripts/run_triage.py commit  --project my-book
+```
+
+`dictionary` and `grammar` accept at 7% and 16%, and produce ~70% of all
+finding-clearing work. This asks a model whether each flagged word is really a
+defect *in its sentence*, and records the answer in
+`evaluations/_triage.jsonl` — nothing is deleted and no prose is touched. Only a
+`suppress` at or above `TRIAGE_CONFIDENCE_FLOOR` hides a finding; suppressed
+ones still appear on the recommendations screen with the model's reason.
+
+The model is pinned at `prepare` and inherited by `fanout` from the manifest, so
+the pass never rides the book's default backend. `commit` is re-runnable.
+Full reference: [`TRIAGE.md`](TRIAGE.md).
+
+### `replay_triage.py` — score the triage filter and set its cutoff
+
+```bash
+python scripts/replay_triage.py --exam
+python scripts/replay_triage.py --exam --out report.json
+```
+
+Replays recorded verdicts against the human marks in `_feedback.jsonl` and
+sweeps the confidence floor, reporting real defects lost (**must be 0** — the
+veto) against noise removed at each. `--exam` excludes the three frozen holdout
+books, which must never be tuned on. Costs nothing: it calls no model.
+
 ### `editorial_metrics.py` — editorial judge precision report
 
 ```bash
@@ -302,8 +334,10 @@ Reads the rows `ledger_census.py --export` writes. `prepare` renders them in
 batches (`--rows-per-job`, default 20) into a new or empty run directory for the
 panel: Grok 4.6, Gemini 3.8 Flash and GPT-5.6 Terra by default, and `--model`
 repeats to change it. A batch holds one book's edits and opens with that book's
-own standard: its `style.json` guide, `style_rules.json` and `address_map.json`,
-each named as absent when the book lacks it. Each edit carries its glossary
+own standard: its `style.json` guide, the house rules every book is held to plus
+any `style_rules.json` of its own, and `address_map.json`. The guide and the
+address map are named as absent when the book lacks them; the house rules are
+always there. Each edit carries its glossary
 hits, the text around it in both languages (the paragraph before, and the rest
 of its own paragraph, where a speaker tag sits) and a `quote_continues` flag
 read from the English, so a model can tell a continuing speaker's » from a stray

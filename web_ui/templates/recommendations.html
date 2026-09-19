@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ t.rec_title }} — {{ project_title }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
-    <link rel="stylesheet" href="{{ url_for('static', filename='recommendations.css') }}?v=3">
+    <link rel="stylesheet" href="{{ url_for('static', filename='recommendations.css') }}?v=4">
 </head>
 <body>
 <script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
@@ -105,15 +105,30 @@
          data-fav-add="{{ t.rec_fav_add }}"
          data-fav-remove="{{ t.rec_fav_remove }}"
          data-fav-failed="{{ t.rec_fav_failed }}"
+         {#- The chapter chip's own string, so the script can re-render it after
+             a mark takes a card out of the suppressed set. -#}
+         data-suppressed-chip="{{ t.rec_suppressed_chip }}"
          {#- Single-quoted, because `tojson` escapes `'` but not `"`: the label
              maps are JSON objects and would end the attribute early inside
              double quotes. -#}
          data-kinds='{{ t.rec_kinds | tojson }}'
          data-detail-labels='{{ t.rec_detail_labels | tojson }}'
-         data-statuses='{{ t.rec_statuses | tojson }}'>
+         data-statuses='{{ t.rec_statuses | tojson }}'
+         data-triage-suppress="{{ t.rec_triage_suppress }}"
+         data-triage-keep="{{ t.rec_triage_keep }}"
+         data-triage-below-floor="{{ t.rec_triage_below_floor }}"
+         data-triage-model="{{ t.rec_triage_model }}"
+         data-mark-label="{{ t.rec_mark_label }}"
+         data-mark-failed="{{ t.rec_mark_failed }}"
+         {#- The reader's own four mark labels, and the server's feedback ->
+             status map so a card restyled after a mark lands on the status the
+             next page load will report. Single-quoted like the maps above. -#}
+         data-mark-labels='{{ mark_labels | tojson }}'
+         data-feedback-statuses='{{ feedback_statuses | tojson }}'>
         {% for chapter in shell.chapters %}
         <section class="rec-chapter" data-chapter="{{ chapter.id }}"
-                 data-favorites="{{ chapter.favorites }}">
+                 data-favorites="{{ chapter.favorites }}"
+                 data-suppressed="{{ chapter.suppressed }}">
             <div class="rec-chapter-header">
                 <h2><a href="/read/{{ project_id }}/{{ chapter.id }}">{{ chapter.label }}</a></h2>
                 <div class="rec-chapter-counts">
@@ -128,6 +143,16 @@
                     <span class="rec-chip rec-chip-history">{{ t.rec_history_chip
                         | replace('{n}', chapter.history | string) }}</span>
                     {% endif %}
+                    {#- Its own chip, never folded into the history one: that
+                        count is what you decided, this is what a model decided
+                        for you. Without it a chapter header would account for
+                        fewer findings than the chapter holds, with no hint the
+                        rest exist -- the quieter version of the bug where these
+                        were counted as outstanding work. -#}
+                    {% if chapter.suppressed %}
+                    <span class="rec-chip rec-chip-suppressed">{{ t.rec_suppressed_chip
+                        | replace('{n}', chapter.suppressed | string) }}</span>
+                    {% endif %}
                 </div>
             </div>
             {#- Filled by recommendations.js. The placeholder carries the height
@@ -141,6 +166,6 @@
     {% endif %}
 </div>
 
-<script src="{{ url_for('static', filename='recommendations.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='recommendations.js') }}?v=5"></script>
 </body>
 </html>

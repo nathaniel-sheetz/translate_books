@@ -78,7 +78,9 @@ from web_ui.evaluations import (
     REVIEW_TYPES,
     IgnoreHits,
     append_feedback,
+    attach_text_in_chunk,
     build_dismissed,
+    build_triaged,
     chapter_id_from_chunk_id,
     chapter_judge_status_detail,
     count_ignored_hits,
@@ -89,10 +91,12 @@ from web_ui.evaluations import (
     evaluator_freshness_detail,
     feedback_mark,
     is_ignored,
+    is_triaged,
     issue_key,
     issue_term,
     iter_chapter_chunks,
     load_all_feedback_by_chunk,
+    load_all_triage_by_chunk,
     load_chapter_type_counts,
     load_chunk_evaluation,
     load_feedback_for_chunk,
@@ -100,7 +104,10 @@ from web_ui.evaluations import (
     load_project_summary,
     merge_llm_judge_result,
     rollup_group_state,
+    row_containing_offset,
     run_coded_evaluators,
+    triage_hides,
+    triage_mark,
 )
 from web_ui import favorites as favorites_store
 from web_ui.project_cards import PROJECT_STATUSES, build_project_card
@@ -1664,74 +1671,11 @@ def project_reference(project_id, kind):
     return jsonify(payload)
 
 
-def _attach_text_in_chunk(alignment_data: dict, chunks_dir: Path, target_lang: str = "es") -> None:
-    """Mutate alignment rows to include `text_in_chunk` (and chunk char offsets).
-
-    The aligner emits `es` text via pysbd.split + .strip() + " ".join() for N:1
-    groups, which is NOT byte-identical to chunk.translated_text. The reader's
-    retranslate flow needs the literal chunk substring so /api/sentence/replace
-    can find it without fuzzy matching. We re-split each chunk's translated_text
-    with the same splitter the aligner uses and walk char positions.
-    """
-    from collections import defaultdict
-    from src.sentence_aligner import _split_sentences_with_para_indices
-
-    rows_by_chunk: dict[str, list[dict]] = defaultdict(list)
-    for row in alignment_data.get("alignments", []):
-        cid = row.get("chunk_id")
-        if cid and "es_idx" in row:
-            rows_by_chunk[cid].append(row)
-
-    for chunk_id, rows in rows_by_chunk.items():
-        chunk_path = chunks_dir / f"{chunk_id}.json"
-        if not chunk_path.exists():
-            continue
-        try:
-            chunk_data = json.loads(chunk_path.read_text(encoding="utf-8"))
-            chunk_mtime = chunk_path.stat().st_mtime
-        except (json.JSONDecodeError, OSError):
-            continue
-        chunk_text = chunk_data.get("translated_text") or ""
-        if not chunk_text:
-            continue
-
-        try:
-            sentences, _ = _split_sentences_with_para_indices(chunk_text, target_lang)
-        except Exception:
-            continue
-
-        ranges: list[Optional[tuple[int, int]]] = []
-        cursor = 0
-        for sent in sentences:
-            idx = chunk_text.find(sent, cursor)
-            if idx == -1:
-                stripped = sent.strip()
-                idx = chunk_text.find(stripped, cursor) if stripped else -1
-                if idx == -1:
-                    ranges.append(None)
-                    continue
-                ranges.append((idx, idx + len(stripped)))
-                cursor = idx + len(stripped)
-            else:
-                ranges.append((idx, idx + len(sent)))
-                cursor = idx + len(sent)
-
-        # The aligner offsets es_idx by cumulative chunk counts. The minimum
-        # es_idx in this chunk's rows is the chunk-local offset.
-        es_offset = min(r["es_idx"] for r in rows)
-
-        for row in rows:
-            indices = row.get("es_indices") or [row["es_idx"]]
-            local = [i - es_offset for i in indices]
-            valid = [li for li in local if 0 <= li < len(ranges) and ranges[li] is not None]
-            if not valid:
-                continue
-            start = ranges[valid[0]][0]
-            end = ranges[valid[-1]][1]
-            row["text_in_chunk"] = chunk_text[start:end]
-            row["chunk_offset_start"] = start
-            row["chunk_offset_end"] = end
-            row["chunk_mtime"] = chunk_mtime
+# Moved to web_ui/evaluations.py so non-web callers (src/triage) can anchor a
+# finding onto a sentence without importing the Flask module. Re-bound here
+# under its original private name: both call sites below, and
+# tests/test_reader_retranslate.py, import it from this module.
+_attach_text_in_chunk = attach_text_in_chunk
 
 
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]")
@@ -5877,6 +5821,29 @@ def project_chunk_evaluation_get(project_id, chunk_id):
             if isinstance(ni, dict):
                 ni["ignored"] = is_ignored(ignored_terms, ni.get("eval_name"), ni)
 
+    # The third gate, flagged for the same reason and in the same way. It is the
+    # one that hides the most — a suppressed finding is invisible in Review by
+    # design — so a card that marked dismissals and ignores but not these left
+    # the largest share of the Review stage's drop unexplainable from here.
+    # Carries the verdict rather than only the fact: the confidence is the axis
+    # `TRIAGE_CONFIDENCE_FLOOR` moves along, and `triage_hid` is deliberately
+    # not "a verdict exists" — a keep, and a suppress under the floor, hid
+    # nothing and must not be drawn as though they had.
+    triaged = build_triaged(load_all_triage_by_chunk(project_dir).get(chunk_id, []))
+    if triaged:
+        for ni in payload.get("normalized_issues") or []:
+            if not isinstance(ni, dict):
+                continue
+            record = triage_mark(triaged, ni.get("eval_name"), ni)
+            if record:
+                ni["triage"] = {
+                    "verdict": record.get("verdict"),
+                    "confidence": record.get("confidence"),
+                    "reason": record.get("reason"),
+                    "model": record.get("model"),
+                }
+                ni["triage_hid"] = triage_hides(record)
+
     return jsonify(payload)
 
 
@@ -6072,38 +6039,11 @@ _REVIEW_CODED_TYPES = frozenset(REVIEW_CODED_TYPES)
 _REVIEW_JUDGE_TYPES = frozenset(REVIEW_JUDGE_TYPES)
 
 
-def _row_containing_offset(
-    rows_sorted: list[dict], offset: int, chunk_text: str = ""
-) -> Optional[dict]:
-    """Return the alignment row whose chunk char span contains ``offset``.
-
-    ``rows_sorted`` must be sorted by ``chunk_offset_start``. Uses a half-open
-    ``[start, end)`` test — the same coordinate space as the coded evaluators'
-    ``char_start`` (both index into the chunk's ``translated_text``).
-
-    Fallback tier: sentence spans do not tile the chunk, so an offset can land
-    in the gap between two rows — most often the blank run a paragraph break
-    leaves behind. Given ``chunk_text``, such an offset is attributed to the
-    *following* row, but only when every character from the offset up to that
-    row's start is whitespace. A finding sitting on the blank run in front of a
-    sentence belongs to that sentence; one sitting on real prose no row covers
-    (an ``[IMAGE:…]`` token, a sentence the splitter dropped) must not silently
-    jump over it, so it stays unanchored and reaches the reader's overflow bin.
-    """
-    following = None
-    for row in rows_sorted:
-        start = row.get("chunk_offset_start")
-        end = row.get("chunk_offset_end")
-        if start is None or end is None:
-            continue
-        if start <= offset < end:
-            return row
-        if following is None and start > offset:
-            following = row
-    if following is None or not chunk_text or offset < 0:
-        return None
-    gap = chunk_text[offset:following["chunk_offset_start"]]
-    return following if gap and not gap.strip() else None
+# Moved to web_ui/evaluations.py alongside `attach_text_in_chunk` — the two are
+# one mechanism (stamp the offsets, then resolve one) and splitting them across
+# modules would leave the coordinate-space contract documented in only half of
+# it. Re-bound under its original private name for the two call sites below.
+_row_containing_offset = row_containing_offset
 
 
 def _locate_match(text_in_chunk: str, match_text: str) -> tuple[Optional[int], Optional[int]]:
@@ -6184,14 +6124,16 @@ def _build_chapter_review(
     Powers the reader's opt-in Review Mode and, through
     :func:`_recommendation_items`, the read-only recommendations screen. Reuses
     the alignment builder and the persisted per-chunk evaluations — no new
-    persistence format. Findings that already have feedback are treated as
-    dismissed and omitted, as are those naming a term on the book's ignore list
-    (``projects/<id>/ignored_terms.json``).
+    persistence format. Three gates omit a finding: existing feedback, a term
+    on the book's ignore list (``projects/<id>/ignored_terms.json``), and a
+    high-confidence machine-triage ``suppress`` (``is_triaged``).
 
     ``include_dismissed`` keeps the marked ones, each carrying the standing
-    feedback record as ``feedback``. It is off by default because Review Mode is
-    a working surface — a finding you have already ruled on must not come back
-    as a tint — and on only for the recommendations screen, which is a record of
+    feedback record as ``feedback``, and also keeps auto-suppressed rows so
+    the recommendations screen can show what the filter hid and why. It is
+    off by default because Review Mode is a working surface — a finding you
+    have already ruled on, or that triage already hid, must not come back as
+    a tint — and on only for the recommendations screen, which is a record of
     what was decided rather than a list of what is left. The ignore list gates
     both ways round: an entry there is a standing instruction about a term, not
     a decision made once about one finding.
@@ -6216,9 +6158,10 @@ def _build_chapter_review(
 
     Each anchored finding: ``{eval_name, issue_index, issue_key, chunk_id,
     severity, message, suggestion, excerpt, match, match_start, match_end, term,
-    rule_id, feedback}`` where ``match_start is None`` ⇒ paint a whole-sentence
-    tint and ``feedback`` is the standing mark (always ``None`` unless
-    ``include_dismissed``).
+    rule_id, feedback, triage}`` where ``match_start is None`` ⇒ paint a whole-sentence
+    tint, ``feedback`` is the standing mark (always ``None`` unless
+    ``include_dismissed``), and ``triage`` is the standing machine-verdict
+    record (``None`` when the pass has not ruled on this finding).
     ``issue_key`` is the finding's content hash (:func:`evaluations.issue_key`) —
     the identity that survives an evaluator re-run, where ``issue_index`` is a
     position that does not. It is derived here rather than by each caller so that
@@ -6287,6 +6230,7 @@ def _build_chapter_review(
     from src.utils.text_utils import normalize_newlines
 
     feedback_by_chunk = load_all_feedback_by_chunk(project_dir)
+    triage_by_chunk = load_all_triage_by_chunk(project_dir)
     ignored_terms = load_project_ignored_terms(project_dir)
 
     for chunk_id, crows in rows_by_chunk.items():
@@ -6296,6 +6240,7 @@ def _build_chapter_review(
 
         feedback = feedback_by_chunk.get(chunk_id, [])
         fb_by_key, fb_by_index = build_dismissed(feedback)
+        tr_by_key = build_triaged(triage_by_chunk.get(chunk_id, []))
         crows_sorted = sorted(crows, key=lambda r: r["chunk_offset_start"])
 
         # The chunk text serves two coordinate spaces. `raw_text` is what the
@@ -6339,6 +6284,17 @@ def _build_chapter_review(
                 continue
             if is_ignored(ignored_terms, eval_name, ni):
                 continue
+            # A machine verdict is the third gate, and the narrowest: only a
+            # high-confidence `suppress` hides anything. It rides with
+            # `include_dismissed` so the recommendations screen still shows what
+            # was suppressed and why — a filter nobody can audit is a filter
+            # nobody should trust.
+            if is_triaged(tr_by_key, eval_name, ni) and not include_dismissed:
+                continue
+            # Carried so the recommendations screen can say a machine suppressed
+            # this and why. Only the standing record is attached, never a
+            # judgement about it: `_finding_item` decides what to show.
+            triage = triage_mark(tr_by_key, eval_name, ni)
             match_text = loc.get("match") or ""
             excerpt = match_text or (
                 (loc.get("snippet_before") or "")
@@ -6371,6 +6327,7 @@ def _build_chapter_review(
                     "rule_id": ni.get("rule_id"),
                     "category": ni.get("category"),
                     "feedback": mark,
+                    "triage": triage,
                 })
                 type_counts[eval_name] += 1
                 continue
@@ -6391,6 +6348,7 @@ def _build_chapter_review(
                 "rule_id": ni.get("rule_id"),
                 "category": ni.get("category"),
                 "feedback": mark,
+                "triage": triage,
             })
             type_counts[eval_name] += 1
 
@@ -8991,6 +8949,7 @@ _RECOMMENDATION_STATUSES: tuple[str, ...] = (
     "open", "stale",
     "fixed", "applied", "settled", "deleted",
     "not_a_problem", "bad_message", "missing_context_gap",
+    "auto_suppressed",
 )
 _RECOMMENDATION_OPEN_STATUSES = frozenset({"open", "stale"})
 # Unticked on arrival. These say the finding was *wrong* - the judge misread the
@@ -8998,7 +8957,24 @@ _RECOMMENDATION_OPEN_STATUSES = frozenset({"open", "stale"})
 # noise for reading a book. They are 831 of the corpus's 1,132 marks, enough to
 # bury the 285 findings that record a real change to the text. The boxes are
 # there, with their counts, for when the question is how well the judges did.
-_RECOMMENDATION_STATUSES_OFF = frozenset({"not_a_problem", "bad_message"})
+# `auto_suppressed` joins them: it says a model judged the finding noise, which
+# is the same kind of claim, made by a machine rather than by you. It is
+# unticked on arrival for the same reason and for one more — these are the
+# findings the reader never saw, so the box is how you go looking for what the
+# filter took away.
+_RECOMMENDATION_STATUSES_OFF = frozenset(
+    {"not_a_problem", "bad_message", "auto_suppressed"}
+)
+
+# The four labels a human mark may carry, in the order the reader's Review Mode
+# offers them (`web_ui/static/reader.js`). Same words, same endpoint, same
+# append-only corpus: a second vocabulary for the same four records would make
+# `_feedback.jsonl` mean one thing when the reader wrote a row and another when
+# this page did, and that file is what per-rule precision and the triage floor
+# are both computed from.
+_RECOMMENDATION_MARKS: tuple[str, ...] = (
+    "resolved", "false_positive", "bad_message", "missing_context_gap",
+)
 
 
 def _coerce_es_idx(value) -> Optional[int]:
@@ -9122,22 +9098,49 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
     two cases that lose their sentence are exactly the two where the prose moved
     on, so the excerpt *is* the text as it read when the model wrote about it -
     the one honest thing left to render.
+
+    The ``triage_*`` fields are what the coded-checker filter said, and they
+    ride on the card whenever a verdict exists - not only when one hid
+    something. See the comment on them below: the gap between ``triage_hid``
+    and a ``status`` of ``auto_suppressed`` is where calibration lives.
     """
     eval_name = finding.get("eval_name")
     mark = finding.get("feedback") or {}
+    triage = finding.get("triage") or {}
     fav_id = favorites_store.finding_id(
         finding.get("chunk_id"), finding.get("issue_key")
     )
+    # A human mark always wins: you ruling on a finding settles it, whatever a
+    # model said first. Only a `suppress` that actually hides the finding shows
+    # as auto_suppressed — a `keep`, or a suppress under the floor, changed
+    # nothing about what you see, so labelling it would claim an effect it had
+    # no part in.
+    status = FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open")
+    if not mark and triage_hides(triage):
+        status = "auto_suppressed"
+    # The filter's stated reason, as a labelled block rather than a chip: it is
+    # a sentence of prose, and it is the only thing on the card that says *why*
+    # a finding was hidden. The docs have claimed this screen shows it since the
+    # pass was built; until now the field reached the payload and no renderer
+    # ever read it.
+    detail: list[dict] = []
+    if triage.get("reason"):
+        detail.append({"label": "triage_reason", "text": str(triage["reason"])})
     return {
         "source": "judge" if eval_name in _REVIEW_JUDGE_TYPES else "coded",
         "kind": eval_name,
+        # Carried beside `kind` rather than left implicit in it. They hold the
+        # same string for a finding, but only by construction, and the card's
+        # mark buttons post this one back as `eval_name` - a silent coupling is
+        # a poor thing to hang a write on.
+        "eval_name": eval_name,
         "severity": finding.get("severity"),
         "chapter_id": chapter,
         "es_idx": es_idx,
         "excerpt": finding.get("excerpt") or "",
         "suggestion": finding.get("suggestion") or None,
         "explanation": finding.get("message") or "",
-        "detail": [],
+        "detail": detail,
         "rule_id": finding.get("rule_id"),
         "category": finding.get("category"),
         "term": finding.get("term"),
@@ -9147,8 +9150,29 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
         "match_end": finding.get("match_end"),
         "unanchored_reason": unanchored_reason,
         "stale": False,
-        "status": FEEDBACK_STATUSES.get(mark.get("feedback_type"), "open"),
-        "status_at": mark.get("ts"),
+        "status": status,
+        "status_at": mark.get("ts") or (triage.get("ts") if status == "auto_suppressed" else None),
+        # What the filter said, how sure it was, what judged it, and whether
+        # that verdict actually hid anything. Present whenever a verdict exists
+        # rather than only when one suppressed something: a `keep`, a suppress
+        # under the floor, and a suppress a human has since overruled are
+        # exactly the rows calibration is read from, and the confidence is the
+        # axis `TRIAGE_CONFIDENCE_FLOOR` moves along. You cannot choose a floor
+        # from a page that only shows you the verdicts above it.
+        #
+        # `triage_hid` is deliberately not `status == "auto_suppressed"`. The
+        # two part company on the single most valuable card on this screen - one
+        # a model hid and a human then called a real defect - which is the only
+        # way the veto number (real defects lost) is ever measured.
+        "triage_verdict": triage.get("verdict"),
+        "triage_confidence": triage.get("confidence"),
+        "triage_reason": triage.get("reason"),
+        "triage_model": triage.get("model"),
+        "triage_hid": triage_hides(triage),
+        # The mark as recorded, not the status it maps to. The card's buttons
+        # are labelled with feedback types, so the one already chosen has to be
+        # named in the same vocabulary to show as chosen.
+        "feedback_type": mark.get("feedback_type"),
         # `obsolete` only. That reason means the excerpt *was* the prose and the
         # prose moved on, so the quote is a snapshot of the text as it read.
         # `unplaceable` means the quote was never verbatim in the book at all -
@@ -9230,6 +9254,18 @@ def _annotation_item(row: dict, context: dict, *, stale: bool,
     return {
         "source": "annotation",
         "kind": _recommendation_kind(row.get("type")),
+        # Null, like `chunk_id` and `issue_index` below and for the same reason:
+        # a note is not an evaluator finding, so there is nothing for
+        # `append_feedback` to name and the card renders no mark buttons. The
+        # keys are present rather than absent so the two builders keep one
+        # shape for anyone reading the payload.
+        "eval_name": None,
+        "feedback_type": None,
+        "triage_verdict": None,
+        "triage_confidence": None,
+        "triage_reason": None,
+        "triage_model": None,
+        "triage_hid": False,
         "severity": None,
         "chapter_id": row.get("chapter_id"),
         "es_idx": _coerce_es_idx(row.get("es_idx")),
@@ -9490,13 +9526,20 @@ def _recommendation_shell(project_id: str, project_dir: Path) -> dict:
         split = counts_by_chapter.get(chapter_id) or {}
         kinds = {k: n for k, n in (split.get("open") or {}).items() if n}
         history = sum((split.get("history") or {}).values())
+        suppressed = sum((split.get("suppressed") or {}).values())
         # The kind filter has to know about a kind that exists only in this
-        # chapter's history, or unticking it would leave those cards on screen.
+        # chapter's history, or among what the filter hid, or unticking it would
+        # leave those cards on screen. A chapter whose findings are *all*
+        # suppressed has to stay listed for the same reason: `seen_kinds` is what
+        # decides that below, and its cards are served either way — they become
+        # reachable the moment the box is ticked.
         seen_kinds = dict(kinds)
-        for kind, n in (split.get("history") or {}).items():
-            if n:
-                seen_kinds[kind] = seen_kinds.get(kind, 0) + n
-        # `by_status` covers the marked findings only; an unmarked one is `open`
+        for source in ("history", "suppressed"):
+            for kind, n in (split.get(source) or {}).items():
+                if n:
+                    seen_kinds[kind] = seen_kinds.get(kind, 0) + n
+        # `by_status` covers every finding something is known about — a human
+        # mark, or a machine suppression. An unmarked, unsuppressed one is `open`
         # and is counted here, so every status box carries a real total.
         if kinds:
             status_totals["open"] = status_totals.get("open", 0) + sum(kinds.values())
@@ -9526,6 +9569,7 @@ def _recommendation_shell(project_id: str, project_dir: Path) -> dict:
             "label": _chapter_display_label(chapter_id, manifest, chapter_prefix),
             "counts": kinds,
             "history": history,
+            "suppressed": suppressed,
             "favorites": favorites_by_chapter.get(chapter_id, 0),
         })
 
@@ -9550,13 +9594,30 @@ def recommendations_page(project_id):
     if not project_dir.exists():
         return "Project not found", 404
 
+    strings = _reader_strings()
     return render_template(
         "recommendations.html",
-        t=_reader_strings(),
+        t=strings,
         lang=_get_ui_lang(),
         project_id=project_id,
         project_title=_project_title(project_id),
         shell=_recommendation_shell(project_id, project_dir),
+        # The mark buttons' labels, borrowed wholesale from the reader's Review
+        # Mode, and the server's own feedback -> status map. Both are stamped
+        # into the page rather than restated in the script: the labels so the
+        # two surfaces cannot drift into different words for one record, and the
+        # map so the card a browser re-styles after a mark lands on the same
+        # status the server will report on the next load.
+        # `review_fb_*` live in the nested `js` block — the dict the reader
+        # ships to its own script as `window.__i18n` — not at the top level
+        # where the `rec_*` strings sit. Reading the wrong level fails *open*:
+        # the `.get` default hands every button its own key, so the page
+        # renders "false_positive" where it means "False positive".
+        mark_labels={
+            ftype: (strings.get("js") or {}).get(f"review_fb_{ftype}", ftype)
+            for ftype in _RECOMMENDATION_MARKS
+        },
+        feedback_statuses=FEEDBACK_STATUSES,
     )
 
 

@@ -125,7 +125,7 @@ walk cost real I/O that a dialogue-only wave has no use for.
 | input | source | required |
 |---|---|---|
 | style guide | `projects/<slug>/style.json` → `content` | no |
-| hard rules | `projects/<slug>/style_rules.json` (sidecar) | no |
+| hard rules | `prompts/house_style_rules.json` (every book) + `projects/<slug>/style_rules.json` (sidecar) | house set always |
 | glossary | `projects/<slug>/glossary.json`, prompt-formatted | no |
 | calibration examples | `projects/<slug>/editorial_examples.txt` | no |
 | already reported | live coded findings, per chunk | no |
@@ -152,7 +152,10 @@ mean regenerating twenty style guides. So the hard rules live beside it:
 
 The judge cites `id` in a finding's `rule`, which becomes `Issue.rule_id` — the
 key a rule is suppressed and precision-measured by. A book without the sidecar
-still judges; it just emits un-cited `STYLE_GUIDE` findings.
+still cites rule ids: the house set in `prompts/house_style_rules.json` is
+merged in for every book, and the sidecar adds only what is specific to this
+one. On an id collision the house wording wins and the book's `note` overrides,
+so findings still aggregate by rule across books.
 
 ### Already-reported findings
 
