@@ -3736,7 +3736,7 @@
 
         tbody.querySelectorAll('.ch-rerun-coded').forEach(function(btn) {
             btn.addEventListener('click', function() {
-                startCodedRun([btn.dataset.chapter]);
+                openCodedModal([btn.dataset.chapter]);
             });
         });
 
@@ -3860,6 +3860,27 @@
                 summary += ' · adjudicated ' + adj.chunks + ' chunk(s): ' +
                     parts.join(', ');
             }
+            // The half of the run that filtered the checkers. Without this the
+            // modal reports "12 of 12 done" for a job whose second half hid 104
+            // findings, and the only way to learn that is the recommendations
+            // screen.
+            if (data.triage) {
+                var tri = data.triage;
+                if (tri.status === 'ok') {
+                    summary += ' · triage: ' + (tri.suppressed || 0) + ' filtered, ' +
+                        (tri.kept || 0) + ' kept';
+                    if (tri.failed) summary += ', ' + tri.failed + ' job(s) failed';
+                } else if (tri.status === 'nothing_to_triage') {
+                    summary += ' · triage: nothing left to filter';
+                } else {
+                    // The checkers still ran, so this is not a `fatal`: it goes
+                    // in the error detail beside a summary that still reports
+                    // the evaluator work that landed.
+                    summary += ' · triage did not run';
+                    errText = (errText ? errText + ' — ' : '') +
+                        'Triage: ' + (tri.error || 'unknown error');
+                }
+            }
             // What the wave actually consumed, so the token estimate the user
             // confirmed can be checked against the run rather than trusted.
             // `input` alone is the *uncached* slice (4 tokens on a cached wave)
@@ -3886,10 +3907,166 @@
         };
     }
 
-    function startCodedRun(chapterIds) {
-        var scope = chapterIds && chapterIds.length ? chapterIds : reviewScope();
-        openJobModal('Rerunning deterministic evaluators');
-        apiPost('/api/project/' + PROJECT + '/review/run-coded', { chapter_ids: scope })
+    // ── Review: deterministic rerun, and the triage wave that can follow it ──
+
+    // Chapters the open modal will run over; null means the whole book.
+    var codedScope = null;
+
+    function codedEl(id) { return document.getElementById(id); }
+
+    function setTriageBlocked(reason) {
+        var tick = codedEl('coded-triage');
+        tick.checked = false;
+        tick.disabled = true;
+        var warn = codedEl('coded-triage-warnings');
+        warn.textContent = reason;
+        warn.style.display = '';
+    }
+
+    function renderTriageConsent(data) {
+        var panel = codedEl('coded-triage-consent');
+        var warn = codedEl('coded-triage-warnings');
+        var tick = codedEl('coded-triage');
+        var eff = (data && data.effective) || {};
+
+        panel.textContent = '';
+        warn.textContent = '';
+        warn.style.display = 'none';
+        tick.disabled = false;
+
+        if (!data || data.error) {
+            panel.style.display = 'none';
+            setTriageBlocked((data && data.error) || 'Could not read triage status.');
+            return;
+        }
+
+        var rows = [['Findings', (data.triageable || 0) + ' in ' + (data.jobs || 0) + ' job(s)']];
+        var byEval = data.by_eval || {};
+        var kinds = Object.keys(byEval);
+        if (kinds.length) {
+            rows.push(['Checkers', kinds.map(function(k) {
+                return k + ' ' + byEval[k];
+            }).join(' · ')]);
+        }
+        // The model and where it came from, together: the floor below was swept
+        // against one model, so "which model" and "who chose it" are the two
+        // facts that decide whether this run is the calibrated one. Spelled out
+        // rather than relayed raw — "sonnet · cli" reads as though a flag chose
+        // it, which is the one thing `unpinned` exists to deny.
+        var PIN = {
+            'cli': 'pinned for this run',
+            'config': 'pinned for this book',
+            'repo-default': 'the calibrated default',
+            'unpinned': "the CLI's own default — nothing pinned one"
+        };
+        rows.push(['Model', (eff.worker_model || '?') + ' · ' +
+            (PIN[data.model_source] || data.model_source || '?')]);
+        rows.push(['CLI', (eff.cli || '?') + ' (' + (eff.cli_source || '?') + ')']);
+        rows.push(['Floor', 'hides a suppress at ' +
+            (data.floor === undefined ? '?' : data.floor) + ' or above']);
+
+        var dl = document.createElement('dl');
+        rows.forEach(function(row) {
+            var dt = document.createElement('dt');
+            dt.textContent = row[0];
+            var dd = document.createElement('dd');
+            dd.textContent = row[1];
+            dl.appendChild(dt);
+            dl.appendChild(dd);
+        });
+        panel.appendChild(dl);
+        panel.style.display = '';
+
+        var notes = [];
+        // A run on some other model is allowed; going quiet about it is not.
+        // The floor that decides what gets hidden was swept on `calibrated_model`,
+        // and a screen that printed only the model could not say so.
+        if (data.calibrated_model && eff.worker_model !== data.calibrated_model) {
+            notes.push('The confidence floor was calibrated on ' + data.calibrated_model +
+                ', not on this model. Verdicts will be scored against a floor nobody ' +
+                'swept for it.');
+        } else if (!data.calibrated_model) {
+            notes.push('No model on this CLI has been through the calibration exam, so ' +
+                'the floor is not known to hold for this run.');
+        }
+        if (data.pending_drafts) {
+            notes.push(data.pending_drafts + ' draft(s) from an earlier wave are still on ' +
+                'disk. Preparing a new one clears them.');
+        }
+        (eff.warnings || []).forEach(function(w) { notes.push(w); });
+
+        if (data.preflight_error) {
+            setTriageBlocked(data.preflight_error);
+            return;
+        }
+        if (!data.triageable) {
+            setTriageBlocked('Nothing left to triage in this scope — every finding is ' +
+                'already dismissed, ignored, triaged, or has no sentence to judge from.');
+            return;
+        }
+        if (notes.length) {
+            notes.forEach(function(text) {
+                var p = document.createElement('p');
+                p.textContent = text;
+                warn.appendChild(p);
+            });
+            warn.style.display = '';
+        }
+    }
+
+    function openCodedModal(chapterIds) {
+        codedScope = (chapterIds && chapterIds.length) ? chapterIds : reviewScope();
+
+        var scope = codedEl('coded-scope');
+        scope.textContent = codedScope
+            ? (codedScope.length === 1 ? '1 chapter: ' + codedScope[0]
+                                       : codedScope.length + ' chapters')
+            : 'The whole book.';
+
+        codedEl('coded-remember').checked = false;
+        codedEl('coded-triage').disabled = true;
+        codedEl('coded-triage-warnings').style.display = 'none';
+        var panel = codedEl('coded-triage-consent');
+        // The CLI auth probe behind this takes seconds, so say what is being
+        // waited on rather than leaving a bare "Checking…" over a dead Run button.
+        panel.textContent = 'Counting findings and checking the CLI…';
+        panel.style.display = '';
+        setStatus('coded-modal-status', '', '');
+        codedEl('btn-coded-run').disabled = true;
+        codedEl('coded-modal').classList.add('visible');
+
+        var query = codedScope ? '?chapters=' + encodeURIComponent(codedScope.join(',')) : '';
+        apiGet('/api/project/' + PROJECT + '/triage/status' + query)
+            .then(function(data) {
+                renderTriageConsent(data);
+                // `after_coded` is what this book answered last time. Never asked
+                // means ticked: the checkers are right about one finding in ten,
+                // so filtering them is the normal tail of a rerun.
+                if (!codedEl('coded-triage').disabled) {
+                    codedEl('coded-triage').checked = (data.after_coded !== 'off');
+                }
+                codedEl('btn-coded-run').disabled = false;
+            })
+            .catch(function(e) {
+                renderTriageConsent({ error: String(e && e.message ? e.message : e) });
+                codedEl('btn-coded-run').disabled = false;
+            });
+    }
+
+    function closeCodedModal() {
+        codedEl('coded-modal').classList.remove('visible');
+    }
+
+    function startCodedRun() {
+        var payload = {
+            chapter_ids: codedScope,
+            triage: codedEl('coded-triage').checked,
+            remember: codedEl('coded-remember').checked
+        };
+        closeCodedModal();
+        openJobModal(payload.triage ? 'Rerunning deterministic evaluators, then triaging'
+                                    : 'Rerunning deterministic evaluators');
+        apiPost('/api/project/' + PROJECT + '/review/run-coded', payload)
             .then(function(data) {
                 if (!data || data.error || !data.job_id) {
                     finishJobModal('Could not start', (data && data.error) || 'No job started.');
@@ -3904,6 +4081,7 @@
                 finishJobModal('Could not start', String(e && e.message ? e.message : e));
             });
     }
+
 
     // ── Review: LLM judge panel ──
 
@@ -4268,7 +4446,7 @@
         }
 
         var rerunBtn = document.getElementById('btn-rerun-coded');
-        if (rerunBtn) rerunBtn.addEventListener('click', function() { startCodedRun(null); });
+        if (rerunBtn) rerunBtn.addEventListener('click', function() { openCodedModal(null); });
 
         var judgesBtn = document.getElementById('btn-run-judges');
         if (judgesBtn) judgesBtn.addEventListener('click', function() { openJudgesModal(null); });
@@ -4505,6 +4683,13 @@
                 document.getElementById('review-job-modal').classList.remove('visible');
             });
         }
+
+        var codedRun = document.getElementById('btn-coded-run');
+        if (codedRun) codedRun.addEventListener('click', startCodedRun);
+        ['btn-coded-cancel', 'coded-modal-close'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('click', closeCodedModal);
+        });
     }
 
     initReviewControls();
