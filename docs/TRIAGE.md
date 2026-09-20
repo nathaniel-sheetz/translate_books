@@ -33,14 +33,14 @@ scratch and deliberately not tracked in the repo.
   auditable.
 - **It never edits the book.** No prose is touched; there is no apply step.
 - **It proposes no rewrites.** It is a filter, not an editor.
-- **It runs on its own pinned model**, not the book's default backend.
+- **It runs on its own pinned CLI and model**, not the book's default
+  backend. Both are the pair the confidence floor was calibrated against.
 
 ## The four commands
 
 ```bash
 python scripts/run_triage.py status  --project my-book
-python scripts/run_triage.py prepare --project my-book \
-    --worker-model "grok-4.6[effort=medium,fast=false]"
+python scripts/run_triage.py prepare --project my-book
 python scripts/run_triage.py fanout  --project my-book
 python scripts/run_triage.py commit  --project my-book
 ```
@@ -65,29 +65,47 @@ so re-running resumes. `commit` parses the drafts and appends verdicts to
 `commit` is re-runnable: a finding that already carries a verdict is counted and
 skipped rather than written twice.
 
-### Pinning the model
+### Pinning the CLI and the model
 
-The model is resolved at `prepare` and recorded in the manifest; `fanout`
-inherits it rather than reading the book's `worker_model`. That is why the pass
-has its own wave type (`COMMAND = "triage"`), which also gives it
+Both are resolved at `prepare` and recorded in the manifest; `fanout` inherits
+them rather than reading the book's `headless_cli` and `worker_model`. That is
+why the pass has its own wave type (`COMMAND = "triage"`), which also gives it
 `headless_effort_triage` and its own usage log at `.harness/triage/usage.jsonl`.
 Pointing triage at a different model — or later at local inference — never
 changes how the book is translated or judged.
 
-**The pin has three rungs**, highest first:
+**Each pin has three rungs**, highest first:
 
-| rung | `model_source` |
-|---|---|
-| `--worker-model` on `prepare` | `cli` |
-| the book's `triage_worker_model` | `config` |
-| `DEFAULT_TRIAGE_MODEL[cli]`, the model the floor was calibrated on | `repo-default` |
+| rung | `model_source` | `effective.cli_source` |
+|---|---|---|
+| a flag on `prepare` (`--worker-model` / `--cli`) | `cli` | `cli` |
+| the book's `triage_worker_model` / `triage_headless_cli` | `config` | `config` |
+| the calibrated pair: `DEFAULT_TRIAGE_MODEL[cli]` and `DEFAULT_TRIAGE_CLI` | `repo-default` | `repo-default` |
 
 The bottom rung is what makes this pass safe to put behind a button.
 `TRIAGE_CONFIDENCE_FLOOR` is one number for the whole corpus and it was swept
-against verdicts from one model; before the ladder, a run with no
-`--worker-model` fell through to whatever the CLI defaults to — sonnet on Claude,
-whatever `~/.cursor/cli-config.json` says on Cursor. Every surface that ran this
-pass passed the model by hand, and a button has no hand.
+against verdicts from one model on one CLI — **Cursor, `cursor-grok-4.6-medium`**.
+Before the ladders, a run with no flags fell through to whatever the book and the
+host happened to say: most books here are `headless_cli: claude` or `auto`, and
+the dashboard's Flask process is a plain shell where host detection answers
+`unknown` and the last tier answers `claude` — so the button would have judged
+findings on sonnet and scored them against a floor nobody swept for it. Every
+surface that ran this pass typed both by hand, and a button has no hand.
+
+**The CLI pin is independent of `headless_cli` on purpose.** Which backend writes
+and judges a book is a decision about its prose; this pass only filters what the
+coded checkers said about it, so a book translated on Claude still triages on
+Cursor. `triage_headless_cli` moves one book off that (`auto` un-pins it back to
+`headless_cli` and host detection) — at the cost of `calibrated_model: null`,
+which is what the next paragraph is about.
+
+**A pinned CLI is never second-guessed against PATH.** `resolve_profile` switches
+a *guessed* family when its binary is missing; a pin is a decision, so a machine
+without `cursor-agent` gets that CLI's own "not on PATH" message through
+`preflight_error` — reported by `status`, shown in the dashboard popup, and
+relayed by the skill — rather than a silent swap onto the family with no
+calibrated model. `status`'s `instructions` names `triage_headless_cli` in the
+same breath, because the pin is why the machine was asked for that CLI at all.
 
 `claude` is deliberately `None` in that table: no Claude model has been through
 `replay_triage.py --exam`, and naming one would assert a calibration that does not
@@ -111,6 +129,11 @@ rather than setting the config key, which would build
 `headless_effort_triage` remains the lever on Claude, where effort rides in argv.
 
 ```bash
+# Move one book off the calibrated CLI. Its model rung goes with it: there is
+# no calibrated Claude model, so such a run reports calibrated_model: null.
+python scripts/harness.py config-set --project my-book \
+    --key triage_headless_cli --value claude
+
 # Claude: effort rides in argv, so the config key is the lever.
 python scripts/harness.py config-set --project my-book \
     --key headless_effort_triage --value low

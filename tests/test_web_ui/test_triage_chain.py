@@ -353,6 +353,25 @@ def test_status_answers_without_preparing_anything(client, project, cli_ok):
     assert not (project / ".harness" / "triage" / "manifest.json").exists()
 
 
+def test_status_pins_the_calibrated_cli_over_the_books_own_backend(client, project, cli_ok):
+    """What the popup will name, on a book that runs on the other family.
+
+    The pass pins the CLI its confidence floor was calibrated on rather than
+    following `headless_cli`, so the button judges findings on the calibrated
+    model no matter which backend writes this book's prose.
+    """
+    cfg = hstate.load_config(project)
+    cfg["headless_cli"] = "claude"
+    hstate.save_config(project, cfg)
+
+    body = client.get("/api/project/trproj/triage/status").get_json()
+
+    assert body["effective"]["cli"] == "cursor"
+    assert body["effective"]["cli_source"] == "repo-default"
+    assert body["model_source"] == "repo-default"
+    assert body["effective"]["worker_model"] == body["calibrated_model"]
+
+
 def test_status_reports_what_this_book_answered_last_time(client, project, cli_ok):
     assert client.get("/api/project/trproj/triage/status").get_json()["after_coded"] is None
 

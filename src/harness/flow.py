@@ -4275,10 +4275,16 @@ _CONFIG_SET_KEYS = {
     "headless_cli": frozenset(state.CLI_VALUES),
     "headless_prompt_cache": frozenset(state.CACHE_VALUES),
     "headless_extra_flags": FREE_TEXT,
-    # The triage model, and whether the dashboard chains a triage wave onto a
-    # deterministic run. Both are here rather than in the pass because the floor
-    # a verdict is scored against is one number for the whole corpus: a book that
-    # wants a different model has to say so somewhere a later reader can find.
+    # The triage CLI and model, and whether the dashboard chains a triage wave
+    # onto a deterministic run. All three are here rather than in the pass
+    # because the floor a verdict is scored against is one number for the whole
+    # corpus: a book that wants a different model, or the other CLI family, has
+    # to say so somewhere a later reader can find.
+    #
+    # `triage_headless_cli` is separate from `headless_cli` on purpose — the pass
+    # runs on the family its floor was calibrated on regardless of which backend
+    # writes the book's prose — and `auto` here un-pins it back to that key.
+    "triage_headless_cli": frozenset(state.CLI_VALUES),
     "triage_worker_model": FREE_TEXT,
     "triage_after_coded": frozenset({"on", "off"}),
     # Prompt-prefix opt-ins. Read at render time by ``translate_prepare`` (never

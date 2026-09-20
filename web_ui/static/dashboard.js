@@ -3961,7 +3961,19 @@
         };
         rows.push(['Model', (eff.worker_model || '?') + ' · ' +
             (PIN[data.model_source] || data.model_source || '?')]);
-        rows.push(['CLI', (eff.cli || '?') + ' (' + (eff.cli_source || '?') + ')']);
+        // Same treatment, and for the same reason: this pass pins the CLI family
+        // its floor was calibrated on rather than following the book's
+        // `headless_cli`, so a book that runs on Claude everywhere else triages
+        // on Cursor. Raw `host:*` / `fallback:*` labels are left alone — they
+        // only appear for a book that un-pinned itself, and they already say
+        // that nothing chose.
+        var CLI_PIN = {
+            'cli': 'pinned for this run',
+            'config': 'pinned for this book',
+            'repo-default': 'the calibrated CLI for this pass'
+        };
+        rows.push(['CLI', (eff.cli || '?') + ' · ' +
+            (CLI_PIN[eff.cli_source] || eff.cli_source || '?')]);
         rows.push(['Floor', 'hides a suppress at ' +
             (data.floor === undefined ? '?' : data.floor) + ' or above']);
 

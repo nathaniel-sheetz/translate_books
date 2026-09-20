@@ -262,8 +262,7 @@ Full reference: [`EDITORIAL_JUDGE.md`](EDITORIAL_JUDGE.md).
 
 ```bash
 python scripts/run_triage.py status  --project my-book
-python scripts/run_triage.py prepare --project my-book \
-    --worker-model "grok-4.6[effort=medium,fast=false]"
+python scripts/run_triage.py prepare --project my-book
 python scripts/run_triage.py fanout  --project my-book
 python scripts/run_triage.py commit  --project my-book
 ```
@@ -281,11 +280,14 @@ defect *in its sentence*, and records the answer in
 `suppress` at or above `TRIAGE_CONFIDENCE_FLOOR` hides a finding; suppressed
 ones still appear on the recommendations screen with the model's reason.
 
-The model is pinned at `prepare` and inherited by `fanout` from the manifest, so
-the pass never rides the book's default backend. With no `--worker-model` the pin
-comes from the book's `triage_worker_model`, and failing that from the model the
-floor was calibrated against — so a run started from the dashboard is judged by
-the same model the floor was swept on. `commit` is re-runnable.
+The CLI and the model are pinned at `prepare` and inherited by `fanout` from the
+manifest, so the pass never rides the book's default backend. With no flags the
+pins come from the book's `triage_headless_cli` / `triage_worker_model`, and
+failing those from the pair the floor was calibrated against (Cursor,
+`cursor-grok-4.6-medium`) — so a run started from the dashboard is judged by the
+same model on the same CLI the floor was swept on, whatever `headless_cli` says.
+A pinned CLI is never swapped for a missing binary: `status` reports
+`preflight_error` instead. `commit` is re-runnable.
 Full reference: [`TRIAGE.md`](TRIAGE.md).
 
 *Skill equivalent:* `/triage-review`. Also runs as the tail of the dashboard's

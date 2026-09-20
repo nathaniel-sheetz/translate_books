@@ -92,7 +92,16 @@ EFFORT_NONE = "none"                  # nothing carries it; say so out loud
 # it out made it a "guess", so the nightly pass emitted a provenance warning for
 # every un-pinned book on every run, and the missing-binary switch would have
 # silently flipped the family the operator had just chosen.
-_DECIDED_CLI_SOURCES = frozenset({"cli", "config", "manifest", "automation.default_cli"})
+# `repo-default` is a wave type whose *calibration* names a family — today only
+# the triage pass (`src/triage/pass_.py:DEFAULT_TRIAGE_CLI`), whose confidence
+# floor was swept against one model on one CLI. That is a decision this repo made
+# and a book can override (`triage_headless_cli`), not a guess about this machine,
+# and switching families behind it would score verdicts against a floor nobody
+# measured for the model that produced them. Failing closed at the launcher, whose
+# message names the fix, is the lesser harm.
+_DECIDED_CLI_SOURCES = frozenset({
+    "cli", "config", "manifest", "automation.default_cli", "repo-default",
+})
 
 
 def _is_guessed_cli(cli_source: str) -> bool:

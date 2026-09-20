@@ -6,7 +6,7 @@ description: |
   about one time in ten; this asks a model, for each flagged word, whether it is
   really a defect in the sentence it sits in, and records the answer beside the
   finding. Nothing is ever deleted and no prose is edited. Runs as one headless
-  wave on a pinned model (subscription, no dollars).
+  wave on a pinned CLI and model (subscription, no dollars).
   Use when asked to "run triage", "triage the coded checkers", "filter the dictionary
   findings", "filter the grammar noise", "run the triage pass", "clear the false
   positives", or "triage-review".
@@ -36,7 +36,7 @@ otherwise:
   precision stays measurable and this filter's own error rate stays auditable.
 - **It never edits the book.** There is no apply step and it proposes no rewrites.
   It is a filter, not an editor.
-- **It runs on its own pinned model**, not the book's translation backend.
+- **It runs on its own pinned CLI and model**, not the book's translation backend.
 
 ## The CLI
 
@@ -63,21 +63,33 @@ python -X utf8 scripts/run_triage.py status --project five-little-peppers
 `python -c` probes do not: always `python -X utf8`, and open JSON with
 `encoding="utf-8"`. A triage reason routinely quotes the prose, rayas and all.
 
-### The model is pinned, and the pin is the point
+### The CLI and the model are pinned, and the pins are the point
 
 `TRIAGE_CONFIDENCE_FLOOR` (0.85) is one number for the whole corpus, swept against
-verdicts from one model. A wave on some other model is scored by a floor nobody
-tuned for it. Three rungs, highest first:
+verdicts from one model on one CLI — **Cursor, `cursor-grok-4.6-medium`**. A wave
+on some other pair is scored by a floor nobody tuned for it. Three rungs each,
+highest first:
 
-1. `--worker-model` on `prepare`
-2. this book's `triage_worker_model` (`harness.py config-set`)
-3. the calibrated model for the resolved CLI (`DEFAULT_TRIAGE_MODEL` in `src/triage/pass_.py`)
+1. `--worker-model` / `--cli` on `prepare`
+2. this book's `triage_worker_model` / `triage_headless_cli` (`harness.py config-set`)
+3. the calibrated pair (`DEFAULT_TRIAGE_MODEL`, `DEFAULT_TRIAGE_CLI` in `src/triage/pass_.py`)
 
-`status` reports `model_source` (which rung answered) and `calibrated_model` (what
-the floor was swept on). **If those disagree, say so in your consent block** — the
-run is allowed, but the floor applied to it was not measured for that model. There
-is no calibrated Claude model today, so a Claude-CLI run always carries that
-caveat.
+**The CLI rung ignores the book's `headless_cli`.** A book translated and judged
+on Claude still triages on Cursor: this pass filters checker findings, not prose,
+and the floor only holds where it was swept. Do not "fix" that by passing
+`--cli claude` — `DEFAULT_TRIAGE_MODEL["claude"]` is `None`, so that run is
+unpinned and uncalibrated. `triage_headless_cli: auto` un-pins the pass back to
+the book if an operator asks for it.
+
+`status` reports `model_source` (which rung answered), `effective.cli_source`, and
+`calibrated_model` (what the floor was swept on). **If the model and
+`calibrated_model` disagree, or `calibrated_model` is null, say so in your consent
+block** — the run is allowed, but the floor applied to it was not measured for it.
+
+A pinned CLI is never swapped for a missing binary, so on a machine without
+`cursor-agent` the pass stops at `preflight_error` rather than quietly running
+sonnet. Relay that message verbatim; `status`'s `instructions` adds the one way
+off the pin.
 
 Effort depends on the CLI. On Claude it rides in argv, so
 `headless_effort_triage` (default `medium`) is the lever. On Cursor it is part of
@@ -102,8 +114,10 @@ Put all of it in one message and ask everything in a single `AskUserQuestion`:
 - findings in scope and how many jobs they batch into (`triageable`, `jobs`)
 - per-checker split (`by_eval`)
 - the model, its rung, and whether it is the calibrated one
-- the CLI and `preflight_error` if it is set — **stop here if it is**, and relay
-  the CLI's own message verbatim; it already names the fix
+- the CLI and its rung — name it even when it is the default, because this pass
+  pins a family the book may not otherwise use
+- `preflight_error` if it is set — **stop here if it is**, and relay the CLI's own
+  message verbatim; it already names the fix
 - the floor, and that only a `suppress` at or above it hides anything
 - `pending_drafts`, if non-zero: preparing clears them
 

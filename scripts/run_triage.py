@@ -17,8 +17,7 @@ Each subcommand prints one JSON object with a ``_schema`` block:
 A run:
 
     python scripts/run_triage.py status  --project five-little-peppers
-    python scripts/run_triage.py prepare --project five-little-peppers \\
-        --worker-model "grok-4.6[effort=medium,fast=false]"
+    python scripts/run_triage.py prepare --project five-little-peppers
     python scripts/run_triage.py fanout  --project five-little-peppers
     python scripts/run_triage.py commit  --project five-little-peppers
 
@@ -26,14 +25,16 @@ A run:
 findings are in scope, which model would judge them and whether the CLI can
 start -- none of which ``prepare`` can be asked without clearing the drafts.
 
-The model is pinned at ``prepare`` and recorded in the manifest, so ``fanout``
-inherits it instead of the book's default ``worker_model``. That is the whole
-point of the pass having its own wave type: pointing it at a different model, or
-later at local inference, never touches how the book is translated or judged.
-With no ``--worker-model`` the pin comes from this book's ``triage_worker_model``
-config key, and failing that from the model the confidence floor was calibrated
-against -- so a run started from a button is judged by the same model the floor
-was swept on.
+The CLI and the model are pinned at ``prepare`` and recorded in the manifest, so
+``fanout`` inherits them instead of the book's ``headless_cli`` and
+``worker_model``. That is the whole point of the pass having its own wave type:
+pointing it at a different model, or later at local inference, never touches how
+the book is translated or judged. With no flags the pins come from this book's
+``triage_headless_cli`` / ``triage_worker_model`` config keys, and failing those
+from the pair the confidence floor was calibrated against -- Cursor and
+``cursor-grok-4.6-medium`` -- so a run started from a button is judged by the same
+model on the same CLI the floor was swept on. A pinned CLI is a decision, not a
+guess: a missing binary is reported rather than swapped for the other family.
 
 ``fanout`` skips jobs that already have a draft, so re-running it resumes.
 Nothing here edits the book: a verdict suppresses a finding at read time, and
@@ -172,7 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-model", default=None,
         help="price the answer against this model instead of the resolved one",
     )
-    p_status.add_argument("--cli", choices=("claude", "cursor"), default=None, help="headless CLI")
+    p_status.add_argument("--cli", choices=("claude", "cursor"), default=None,
+                          help="headless CLI (default: the family the floor was "
+                               "calibrated on, or this book's triage_headless_cli)")
     p_status.add_argument(
         "--effort", choices=("low", "medium", "high", "xhigh", "default"), default=None,
         help="default: headless_effort_triage, else medium",
@@ -195,7 +198,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="pin the triage model, e.g. 'grok-4.6[effort=medium,fast=false]'. "
              "Recorded in the manifest; fanout inherits it. Default: the CLI's own default",
     )
-    p_prepare.add_argument("--cli", choices=("claude", "cursor"), default=None, help="headless CLI")
+    p_prepare.add_argument("--cli", choices=("claude", "cursor"), default=None,
+                           help="headless CLI (default: the family the floor was "
+                                "calibrated on, or this book's triage_headless_cli)")
     p_prepare.add_argument(
         "--effort", choices=("low", "medium", "high", "xhigh", "default"), default=None,
         help="default: headless_effort_triage, else medium",

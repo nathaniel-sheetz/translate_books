@@ -193,6 +193,116 @@ def test_the_house_model_carries_its_effort_in_its_own_id(book: Path):
     assert out["effective"]["effort_channel"] == "none"
 
 
+# --- the CLI ladder ----------------------------------------------------------
+
+def test_a_cli_flag_outranks_the_book_and_the_house():
+    cfg = {tp.CLI_CONFIG_KEY: "claude"}
+    assert tp._resolve_triage_cli(cfg, "cursor") == ("cursor", "cli")
+
+
+def test_the_book_outranks_the_house_cli():
+    assert tp._resolve_triage_cli({tp.CLI_CONFIG_KEY: "claude"}, None) == ("claude", "config")
+
+
+def test_the_house_default_is_the_calibrated_cli():
+    """The rung the model ladder is keyed by, and could not supply itself.
+
+    Pinning a model per CLI pins nothing while the CLI is still whatever the book
+    and the host happen to say: every ``claude`` answer lands on a row that is
+    ``None`` by design.
+    """
+    assert tp._resolve_triage_cli({}, None) == (tp.DEFAULT_TRIAGE_CLI, "repo-default")
+    assert tp.DEFAULT_TRIAGE_CLI == "cursor"
+
+
+def test_auto_unpins_the_pass_back_to_the_book():
+    """A book saying "do not pin this pass", handed back to resolve_profile."""
+    assert tp._resolve_triage_cli({tp.CLI_CONFIG_KEY: "auto"}, None) == (None, "auto")
+
+
+@pytest.mark.parametrize("value", ["", "   ", None, 17, "sonnet"])
+def test_a_blank_or_bogus_cli_config_value_is_not_a_pin(value):
+    assert tp._resolve_triage_cli({tp.CLI_CONFIG_KEY: value}, None) == (
+        tp.DEFAULT_TRIAGE_CLI, "repo-default"
+    )
+
+
+def test_a_book_on_the_other_backend_still_triages_on_the_calibrated_pair(book: Path):
+    """The case the dashboard button is for.
+
+    Most books here are pinned ``headless_cli: claude`` or left on ``auto``, and
+    the Flask process detection reads is a plain shell. Following that key would
+    put the wave on a family with no calibrated model — so it is not followed:
+    how a book's prose is written is a different decision from which model
+    filters what the checkers said about it.
+    """
+    out = tp.prepare(book, cfg={"headless_cli": "claude"})
+
+    assert out["effective"]["cli"] == tp.DEFAULT_TRIAGE_CLI
+    assert out["effective"]["cli_source"] == "repo-default"
+    assert out["effective"]["worker_model"] == tp.DEFAULT_TRIAGE_MODEL["cursor"]
+    assert out["model_source"] == "repo-default"
+
+    manifest, error = tp.load_manifest(book)
+    assert error is None
+    # fanout re-resolves from here, with cli_source "manifest": the pin survives
+    # into the wave rather than being re-derived from the book's config.
+    assert manifest["cli"] == tp.DEFAULT_TRIAGE_CLI
+
+
+def test_a_cli_flag_still_wins_at_prepare(book: Path):
+    out = tp.prepare(book, cli="claude")
+    assert out["effective"]["cli"] == "claude"
+    assert out["effective"]["cli_source"] == "cli"
+
+
+def test_unpinning_the_cli_costs_the_calibrated_model(book: Path):
+    """What ``triage_headless_cli`` buys, and what it costs, in one place.
+
+    The escape hatch works — the book's own key answers again — and ``status``
+    says plainly that nothing on that family was ever calibrated, rather than
+    printing a model and going quiet.
+    """
+    cfg = {tp.CLI_CONFIG_KEY: "auto", "headless_cli": "claude"}
+    out = tp.status(book, check_cli=False, cfg=cfg)
+
+    assert out["effective"]["cli"] == "claude"
+    assert out["effective"]["cli_source"] == "config"
+    assert out["model_source"] == "unpinned"
+    assert out["calibrated_model"] is None
+
+
+def test_the_cli_pin_is_not_swapped_for_a_missing_binary(book: Path, monkeypatch):
+    """A pin is a decision, and ``resolve_profile`` only second-guesses guesses.
+
+    Swapping here would be the worst of both: the wave would run on the family
+    whose row is ``None``, judged by whatever the launcher defaults to, and the
+    only screen that could have said so would be showing the other CLI's name.
+    The launcher's own "not on PATH" message is the better failure.
+    """
+    import src.harness.profile as profile
+
+    assert profile._is_guessed_cli("repo-default") is False
+    monkeypatch.setattr(profile, "cli_binary_present", lambda name: name == "claude")
+    out = tp.prepare(book)
+
+    assert out["effective"]["cli"] == tp.DEFAULT_TRIAGE_CLI
+    assert not [w for w in out["effective"]["warnings"] if "falling back" in w]
+
+
+def test_status_names_the_way_off_the_pin_when_the_cli_cannot_start(book: Path, monkeypatch):
+    """The pin is why this machine was asked for a CLI it may not have."""
+    import src.harness.headless as headless
+
+    monkeypatch.setattr(
+        headless, "preflight_error", lambda cli, **kw: "cursor-agent is not on PATH"
+    )
+    out = tp.status(book)
+
+    assert out["preflight_error"] == "cursor-agent is not on PATH"
+    assert tp.CLI_CONFIG_KEY in out["instructions"]
+
+
 # --- status ------------------------------------------------------------------
 
 def test_status_counts_the_work_without_doing_any_of_it(book: Path):

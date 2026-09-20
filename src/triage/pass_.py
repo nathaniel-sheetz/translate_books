@@ -7,11 +7,13 @@ headless wave, and ``commit`` writes the verdicts into
 ``src.triage.findings`` can anchor onto a sentence, and everything except the
 verdicts themselves lands under ``.harness/triage/``.
 
-The model is pinned at ``prepare`` time and recorded in the manifest, so
-``fanout`` inherits it rather than re-reading the book's ``worker_model``. That
-is what keeps this pass off the book's default backend — the reason it has its
-own wave type at all — and it is the mechanism ``src/footnote_pass/scan.py``
-already uses.
+The CLI and the model are both pinned at ``prepare`` time and recorded in the
+manifest, so ``fanout`` inherits them rather than re-reading the book's
+``headless_cli`` and ``worker_model``. That is what keeps this pass off the
+book's default backend — the reason it has its own wave type at all — and it is
+the mechanism ``src/footnote_pass/scan.py`` already uses. The pins are the
+calibrated pair: the confidence floor every verdict is scored against was swept
+on one model, on one CLI.
 
 Nothing here edits the book. A verdict suppresses a finding at read time; the
 finding stays on disk exactly as the checker wrote it.
@@ -81,6 +83,30 @@ DEFAULT_TRIAGE_MODEL: dict[str, Optional[str]] = {
 #: Per-book override of the row above, set with
 #: ``harness.py config-set --key triage_worker_model``.
 MODEL_CONFIG_KEY = "triage_worker_model"
+
+#: The CLI family ``TRIAGE_CONFIDENCE_FLOOR`` was calibrated on.
+#:
+#: The model row above is keyed by CLI, so pinning a model without pinning the
+#: family pins nothing. Most books here are ``headless_cli: claude`` or ``auto``,
+#: and the dashboard's Flask process is a plain shell where ``detect_host`` says
+#: ``unknown`` and the ladder's last tier answers ``claude`` -- all of which land
+#: on the ``claude`` row, which is ``None`` on purpose, and the wave then runs
+#: whatever the launcher defaults to against a floor nobody swept for it. Every
+#: surface that ran this pass typed ``--cli cursor`` by hand, and a button has no
+#: hand: the same gap the model ladder closed, one rung further out.
+#:
+#: Deliberately independent of the book's ``headless_cli``, for the reason the
+#: model ladder ignores its ``worker_model``: which backend writes and judges a
+#: book is a decision about its prose, while this pass only filters what the
+#: coded checkers said about it. A book that must triage on the other family says
+#: so with ``triage_headless_cli`` -- and ``status`` reports ``calibrated_model``
+#: as ``None`` there, because that is what moving off this row costs.
+DEFAULT_TRIAGE_CLI = "cursor"
+
+#: Per-book override of the row above, set with
+#: ``harness.py config-set --key triage_headless_cli``. ``auto`` un-pins this
+#: pass back to the book's own ``headless_cli`` and host detection.
+CLI_CONFIG_KEY = "triage_headless_cli"
 
 #: Glossary entries shown per item at most. A long sentence in a book with a
 #: large glossary can match many, and the list is a reference, not the task.
@@ -272,6 +298,34 @@ def _resolve_triage_model(
     return None, "unpinned"
 
 
+def _resolve_triage_cli(cfg: dict, override: Optional[str]) -> tuple[Optional[str], str]:
+    """``(cli, source)`` for a triage wave, over the same three rungs.
+
+    A flag beats the book's ``triage_headless_cli``, which beats the family the
+    floor was calibrated on. The labels are ``resolve_profile``'s ``cli_source``
+    vocabulary, and ``repo-default`` is a *decided* source there: a pin is never
+    second-guessed against PATH, so a machine without ``cursor-agent`` gets the
+    launcher's own "not on PATH" message rather than a silent swap onto a family
+    with no calibrated model at all.
+
+    ``(None, "auto")`` when the book pins ``auto``, which is a book saying "do
+    not pin this pass". The answer goes back to ``resolve_profile``'s own ladder
+    -- the book's ``headless_cli``, then host detection, then the fallback --
+    exactly as it behaved before this rung existed, missing-binary switch
+    included. The label is unused in that case: ``resolve_cli`` only reads an
+    ``override_source`` when there is an override to label.
+    """
+    pinned = (override or "").strip().lower()
+    if pinned in hstate.HEADLESS_CLIS:
+        return pinned, "cli"
+    configured = str(cfg.get(CLI_CONFIG_KEY) or "").strip().lower()
+    if configured in hstate.HEADLESS_CLIS:
+        return configured, "config"
+    if configured == "auto":
+        return None, "auto"
+    return DEFAULT_TRIAGE_CLI, "repo-default"
+
+
 def resolve_triage_profile(
     project_dir: Path,
     cfg: dict,
@@ -281,15 +335,18 @@ def resolve_triage_profile(
     effort: Optional[str] = None,
     check_binary: bool = True,
 ) -> tuple[Any, str]:
-    """``(profile, model_source)`` for a wave, with the model ladder applied.
+    """``(profile, model_source)`` for a wave, with both ladders applied.
 
-    ``resolve_profile`` is called twice, on purpose. The ladder is keyed by CLI,
-    and which CLI a run lands on is not settled until the first call has run its
-    binary check: a *guess* pointing at a CLI that is not installed falls back to
-    the other one. Reading the ladder before that would pin Cursor's model onto a
+    The CLI ladder runs first because the model ladder is keyed by its answer,
+    and ``resolve_profile`` is then called twice, on purpose. Which CLI a run
+    lands on is still not settled by the ladder alone: an *un-pinned* book
+    (``triage_headless_cli: auto``) falls through to config and host detection,
+    where a guess pointing at a CLI that is not installed switches to the other
+    one. Reading the model ladder before that would pin Cursor's model onto a
     wave that fell back to Claude, handing the launcher a model id it cannot
     parse -- the same class of cross-family error the effort inheritance in
-    :func:`fanout` guards against.
+    :func:`fanout` guards against. A pinned CLI survives both calls untouched,
+    because ``repo-default`` is a decided source.
 
     The probe call passes no model, so the second call is the only one whose
     effort resolution sees the pinned model; a level typed into a Cursor model's
@@ -298,11 +355,12 @@ def resolve_triage_profile(
     from src.harness.profile import resolve_profile
 
     usage_log = usage_log_for(project_dir, COMMAND)
+    cli_name, cli_source = _resolve_triage_cli(cfg, cli)
     probe = resolve_profile(
         project_dir,
         command=COMMAND,
-        cli=cli,
-        cli_source="cli",
+        cli=cli_name,
+        cli_source=cli_source,
         effort=effort,
         effort_source="cli",
         cfg=cfg,
@@ -338,7 +396,9 @@ _STATUS_SCHEMA = {
     "findings a wave would not send, and why",
     "chapters": "the scope this answer covers; null means every chapter with an alignment",
     "effective": "the profile a wave would run under (cli, worker_model, effort, "
-    "effort_channel, ...), with provenance",
+    "effort_channel, ...), with provenance. cli_source 'repo-default' is the family the "
+    "floor was calibrated on, pinned by this pass rather than read from the book's "
+    "headless_cli; 'config' is this book's triage_headless_cli or, under 'auto', its own",
     "model_source": "which rung pinned the model: 'cli' a flag, 'config' this book's "
     "triage_worker_model, 'repo-default' the calibrated model for this CLI, 'unpinned' "
     "nothing did and the CLI's own default answered (see effective.worker_model_source)",
@@ -409,6 +469,16 @@ def status(
         instructions = "Nothing to triage in this scope."
     elif preflight:
         instructions = "Fix the CLI error above; nothing can run until then."
+        if prof.cli_source == "repo-default":
+            # The pin is why this machine is being asked for a CLI it may not
+            # have, so the way off it belongs in the same breath. Not a
+            # recommendation: the other family has no calibrated model, which is
+            # what `calibrated_model: null` beside it says.
+            instructions += (
+                f" This pass pins {prof.cli} because the confidence floor was "
+                f"calibrated there; `harness.py config-set --key {CLI_CONFIG_KEY}` "
+                "moves this book off it, at the cost of running uncalibrated."
+            )
     else:
         instructions = (
             f"Run `prepare --project {project_dir.name}` to render {jobs} job(s)."
