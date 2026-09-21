@@ -4275,6 +4275,18 @@ _CONFIG_SET_KEYS = {
     "headless_cli": frozenset(state.CLI_VALUES),
     "headless_prompt_cache": frozenset(state.CACHE_VALUES),
     "headless_extra_flags": FREE_TEXT,
+    # The triage CLI and model, and whether the dashboard chains a triage wave
+    # onto a deterministic run. All three are here rather than in the pass
+    # because the floor a verdict is scored against is one number for the whole
+    # corpus: a book that wants a different model, or the other CLI family, has
+    # to say so somewhere a later reader can find.
+    #
+    # `triage_headless_cli` is separate from `headless_cli` on purpose — the pass
+    # runs on the family its floor was calibrated on regardless of which backend
+    # writes the book's prose — and `auto` here un-pins it back to that key.
+    "triage_headless_cli": frozenset(state.CLI_VALUES),
+    "triage_worker_model": FREE_TEXT,
+    "triage_after_coded": frozenset({"on", "off"}),
     # Prompt-prefix opt-ins. Read at render time by ``translate_prepare`` (never
     # baked into chunks/*.json), so these stay adjustable mid-book: change one and
     # re-run ``translate-prepare`` and only the chunks that still need a
@@ -4317,7 +4329,7 @@ def config_set(project: str, *, key: str, value: str) -> dict:
             tokens = state.split_extra_flags(value)
         except ValueError as exc:
             raise HarnessValidationError(
-                f"headless_extra_flags is not parseable ({exc}); check the quoting"
+                f"{key} is not parseable ({exc}); check the quoting"
             ) from None
         # Every token is appended verbatim to a child argv, and on Windows that
         # argv goes through the ``claude.CMD`` shim — i.e. ``cmd.exe``, which
@@ -4327,14 +4339,14 @@ def config_set(project: str, *, key: str, value: str) -> dict:
         if unsafe:
             shown = ", ".join(repr(t) for t in unsafe)
             raise HarnessValidationError(
-                f"headless_extra_flags contains token(s) that are not a plain "
+                f"{key} contains token(s) that are not a plain "
                 f"flag or value: {shown} — these are appended to the headless "
                 "CLI's argv, which on Windows is re-parsed by cmd.exe, so shell "
                 "metacharacters (& | < > ^ % \") are refused"
             )
         if "--bare" in tokens:
             raise HarnessValidationError(
-                "headless_extra_flags must not contain --bare "
+                f"{key} must not contain --bare "
                 "(its auth is strictly ANTHROPIC_API_KEY/apiKeyHelper — "
                 "OAuth and keychain are never read)"
             )
@@ -4346,7 +4358,7 @@ def config_set(project: str, *, key: str, value: str) -> dict:
                 state.effort_config_key(cmd) for cmd in state.COMMAND_EFFORT_DEFAULTS
             )
             raise HarnessValidationError(
-                "headless_extra_flags must not contain --effort (it applies to "
+                f"{key} must not contain --effort (it applies to "
                 f"every wave type at once); set one of: {keys} — or pass "
                 "--effort on the individual fanout command for a single run"
             )

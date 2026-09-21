@@ -933,6 +933,50 @@
     </div>
 </div>
 
+<!-- ── Review: deterministic rerun, and the triage wave that can follow it ── -->
+<div class="modal-overlay" id="coded-modal">
+    <div class="modal">
+        <button class="modal-close" id="coded-modal-close">&times;</button>
+        <h3>Rerun deterministic evaluators</h3>
+        <p style="font-size:13px; color:#666; margin-top:0;">
+            The coded checkers &mdash; dictionary, grammar and the rest. No API spend.
+        </p>
+
+        <div id="coded-scope" style="margin:12px 0; font-size:13px; color:#666;"></div>
+
+        <!-- Ticked by default, and remembered per book. The dictionary and
+             grammar checkers are right about one finding in ten, so the wave
+             that filters them is the normal tail of a rerun rather than a
+             separate thing to remember to do. It stays a tick because it spends
+             a subscription's context budget, which is not consented to by
+             having clicked something else. -->
+        <label class="inline-check">
+            <input type="checkbox" id="coded-triage" checked>
+            Also triage the dictionary and grammar findings
+        </label>
+        <div class="field-hint" style="margin-left:22px;">
+            Asks a model whether each flagged word is really a defect in the sentence it
+            sits in. Nothing is deleted and no prose is edited &mdash; a filtered finding
+            stays readable, and markable, on the recommendations screen. It runs over
+            whatever the checkers leave behind, so it is safe to tick before they have
+            found anything: if the rerun turns up nothing to filter, the wave is skipped
+            and nothing is spent.
+        </div>
+
+        <div id="coded-triage-consent" class="consent-panel" style="display:none;"></div>
+        <div id="coded-triage-warnings" class="consent-warnings" style="display:none;"></div>
+
+        <label class="inline-check" style="margin-top:10px;">
+            <input type="checkbox" id="coded-remember"> Remember this choice for this book
+        </label>
+
+        <div class="btn-row">
+            <button class="btn-secondary" id="btn-coded-cancel">Cancel</button>
+            <button class="btn-primary" id="btn-coded-run">Run</button>
+        </div>
+    </div>
+</div>
+
 <!-- ── Review: shared job progress modal ── -->
 <div class="modal-overlay" id="review-job-modal">
     <div class="modal">

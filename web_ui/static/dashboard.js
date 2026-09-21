@@ -3736,7 +3736,7 @@
 
         tbody.querySelectorAll('.ch-rerun-coded').forEach(function(btn) {
             btn.addEventListener('click', function() {
-                startCodedRun([btn.dataset.chapter]);
+                openCodedModal([btn.dataset.chapter]);
             });
         });
 
@@ -3808,6 +3808,11 @@
     function streamJob(jobId, total, label, onDone) {
         var source = new EventSource('/api/project/' + PROJECT + '/jobs/' + jobId + '/sse');
         var seen = 0;
+        // A job can run more than one counted stage -- a deterministic rerun
+        // followed by a triage wave -- and each has its own total and its own
+        // verb. Fixing the label at call time made the second stage read
+        // "Evaluated 1 of 3" while it was triaging.
+        var stage = label;
 
         function progress(e) {
             var data = {};
@@ -3817,7 +3822,7 @@
             var pct = total ? Math.round((seen / total) * 100) : 0;
             document.getElementById('review-job-fill').style.width = pct + '%';
             document.getElementById('review-job-text').textContent =
-                label + ' ' + seen + ' of ' + total + '…';
+                stage + ' ' + seen + ' of ' + total + '…';
         }
 
         // A CLI wave is prepare → fan-out → commit, and the two ends emit no
@@ -3826,7 +3831,10 @@
         function phase(e) {
             var data = {};
             try { data = JSON.parse(e.data); } catch (err) { return; }
-            if (data.total) total = data.total;
+            // A new total means a new counted stage, so the bar restarts rather
+            // than carrying the previous stage's position into it.
+            if (data.total) { total = data.total; seen = 0; }
+            if (data.label) stage = data.label;
             if (data.message) {
                 document.getElementById('review-job-text').textContent = data.message;
             }
@@ -3860,6 +3868,27 @@
                 summary += ' · adjudicated ' + adj.chunks + ' chunk(s): ' +
                     parts.join(', ');
             }
+            // The half of the run that filtered the checkers. Without this the
+            // modal reports "12 of 12 done" for a job whose second half hid 104
+            // findings, and the only way to learn that is the recommendations
+            // screen.
+            if (data.triage) {
+                var tri = data.triage;
+                if (tri.status === 'ok') {
+                    summary += ' · triage: ' + (tri.suppressed || 0) + ' filtered, ' +
+                        (tri.kept || 0) + ' kept';
+                    if (tri.failed) summary += ', ' + tri.failed + ' job(s) failed';
+                } else if (tri.status === 'nothing_to_triage') {
+                    summary += ' · triage: nothing left to filter';
+                } else {
+                    // The checkers still ran, so this is not a `fatal`: it goes
+                    // in the error detail beside a summary that still reports
+                    // the evaluator work that landed.
+                    summary += ' · triage did not run';
+                    errText = (errText ? errText + ' — ' : '') +
+                        'Triage: ' + (tri.error || 'unknown error');
+                }
+            }
             // What the wave actually consumed, so the token estimate the user
             // confirmed can be checked against the run rather than trusted.
             // `input` alone is the *uncached* slice (4 tokens on a cached wave)
@@ -3886,10 +3915,201 @@
         };
     }
 
-    function startCodedRun(chapterIds) {
-        var scope = chapterIds && chapterIds.length ? chapterIds : reviewScope();
-        openJobModal('Rerunning deterministic evaluators');
-        apiPost('/api/project/' + PROJECT + '/review/run-coded', { chapter_ids: scope })
+    // ── Review: deterministic rerun, and the triage wave that can follow it ──
+
+    // Chapters the open modal will run over; null means the whole book.
+    var codedScope = null;
+
+    function codedEl(id) { return document.getElementById(id); }
+
+    // The status probe behind the consent panel runs a CLI auth check and takes
+    // seconds, so a reopen on a different scope can easily outrun the first
+    // request. Only the newest one may paint: a chapter-scoped reply landing
+    // after a whole-book reopen would otherwise show the wrong counts, the
+    // wrong remembered tick and a preflight error for a scope nobody asked for.
+    var codedStatusGen = 0;
+
+    function setTriageBlocked(reason) {
+        var tick = codedEl('coded-triage');
+        tick.checked = false;
+        tick.disabled = true;
+        // Remember goes with it. The tick is forced off here by something about
+        // this moment -- a logged-out CLI, a missing binary -- not by a decision
+        // about this book, and remembering it would write `triage_after_coded:
+        // "off"` permanently: the book would stop offering the wave, with
+        // nothing on this screen to say why and only `config-set` to undo it.
+        var remember = codedEl('coded-remember');
+        remember.checked = false;
+        remember.disabled = true;
+        var warn = codedEl('coded-triage-warnings');
+        warn.textContent = reason;
+        warn.style.display = '';
+    }
+
+    function renderTriageConsent(data) {
+        var panel = codedEl('coded-triage-consent');
+        var warn = codedEl('coded-triage-warnings');
+        var tick = codedEl('coded-triage');
+        var eff = (data && data.effective) || {};
+
+        panel.textContent = '';
+        warn.textContent = '';
+        warn.style.display = 'none';
+        tick.disabled = false;
+
+        if (!data || data.error) {
+            panel.style.display = 'none';
+            setTriageBlocked((data && data.error) || 'Could not read triage status.');
+            return;
+        }
+
+        // The count is what is on disk *now*. The wave runs after the checkers,
+        // so what it actually filters is whatever they leave behind -- which is
+        // why a scope that is empty here is still worth ticking, and why this
+        // row must not state a number as though it were the final one.
+        var already = (data.skipped || {}).already_triaged || 0;
+        var rows = [['Findings', data.triageable
+            ? data.triageable + ' in ' + (data.jobs || 0) + ' job(s) now — recounted ' +
+              'after the checkers finish'
+            : 'none in scope right now' +
+              (already ? ' (' + already + ' already triaged)' : '') +
+              " — the rerun's own findings are counted when the checkers finish"]];
+        var byEval = data.by_eval || {};
+        var kinds = Object.keys(byEval);
+        if (kinds.length) {
+            rows.push(['Checkers', kinds.map(function(k) {
+                return k + ' ' + byEval[k];
+            }).join(' · ')]);
+        }
+        // The model and where it came from, together: the floor below was swept
+        // against one model, so "which model" and "who chose it" are the two
+        // facts that decide whether this run is the calibrated one. Spelled out
+        // rather than relayed raw — "sonnet · cli" reads as though a flag chose
+        // it, which is the one thing `unpinned` exists to deny.
+        var PIN = {
+            'cli': 'pinned for this run',
+            'config': 'pinned for this book',
+            'repo-default': 'the calibrated default',
+            'unpinned': "the CLI's own default — nothing pinned one"
+        };
+        rows.push(['Model', (eff.worker_model || '?') + ' · ' +
+            (PIN[data.model_source] || data.model_source || '?')]);
+        // Same treatment, and for the same reason: this pass pins the CLI family
+        // its floor was calibrated on rather than following the book's
+        // `headless_cli`, so a book that runs on Claude everywhere else triages
+        // on Cursor. Raw `host:*` / `fallback:*` labels are left alone — they
+        // only appear for a book that un-pinned itself, and they already say
+        // that nothing chose.
+        var CLI_PIN = {
+            'cli': 'pinned for this run',
+            'config': 'pinned for this book',
+            'repo-default': 'the calibrated CLI for this pass'
+        };
+        rows.push(['CLI', (eff.cli || '?') + ' · ' +
+            (CLI_PIN[eff.cli_source] || eff.cli_source || '?')]);
+        rows.push(['Floor', 'hides a suppress at ' +
+            (data.floor === undefined ? '?' : data.floor) + ' or above']);
+
+        var dl = document.createElement('dl');
+        rows.forEach(function(row) {
+            var dt = document.createElement('dt');
+            dt.textContent = row[0];
+            var dd = document.createElement('dd');
+            dd.textContent = row[1];
+            dl.appendChild(dt);
+            dl.appendChild(dd);
+        });
+        panel.appendChild(dl);
+        panel.style.display = '';
+
+        var notes = [];
+        // A run on some other model is allowed; going quiet about it is not.
+        // The floor that decides what gets hidden was swept on `calibrated_model`,
+        // and a screen that printed only the model could not say so.
+        if (data.calibrated_model && eff.worker_model !== data.calibrated_model) {
+            notes.push('The confidence floor was calibrated on ' + data.calibrated_model +
+                ', not on this model. Verdicts will be scored against a floor nobody ' +
+                'swept for it.');
+        } else if (!data.calibrated_model) {
+            notes.push('No model on this CLI has been through the calibration exam, so ' +
+                'the floor is not known to hold for this run.');
+        }
+        if (data.pending_drafts) {
+            notes.push(data.pending_drafts + ' draft(s) from an earlier wave are still on ' +
+                'disk. Preparing a new one clears them.');
+        }
+        (eff.warnings || []).forEach(function(w) { notes.push(w); });
+
+        if (data.preflight_error) {
+            setTriageBlocked(data.preflight_error);
+            return;
+        }
+        if (notes.length) {
+            notes.forEach(function(text) {
+                var p = document.createElement('p');
+                p.textContent = text;
+                warn.appendChild(p);
+            });
+            warn.style.display = '';
+        }
+    }
+
+    function openCodedModal(chapterIds) {
+        codedScope = (chapterIds && chapterIds.length) ? chapterIds : reviewScope();
+
+        var scope = codedEl('coded-scope');
+        scope.textContent = codedScope
+            ? (codedScope.length === 1 ? '1 chapter: ' + codedScope[0]
+                                       : codedScope.length + ' chapters')
+            : 'The whole book.';
+
+        codedEl('coded-remember').checked = false;
+        codedEl('coded-remember').disabled = false;
+        codedEl('coded-triage').disabled = true;
+        codedEl('coded-triage-warnings').style.display = 'none';
+        var panel = codedEl('coded-triage-consent');
+        // The CLI auth probe behind this takes seconds, so say what is being
+        // waited on rather than leaving a bare "Checking…" over a dead Run button.
+        panel.textContent = 'Counting findings and checking the CLI…';
+        panel.style.display = '';
+        codedEl('btn-coded-run').disabled = true;
+        codedEl('coded-modal').classList.add('visible');
+
+        var query = codedScope ? '?chapters=' + encodeURIComponent(codedScope.join(',')) : '';
+        var gen = ++codedStatusGen;
+        apiGet('/api/project/' + PROJECT + '/triage/status' + query)
+            .then(function(data) {
+                if (gen !== codedStatusGen) return;
+                renderTriageConsent(data);
+                // `after_coded` is what this book answered last time. Never asked
+                // means ticked: the checkers are right about one finding in ten,
+                // so filtering them is the normal tail of a rerun.
+                if (!codedEl('coded-triage').disabled) {
+                    codedEl('coded-triage').checked = (data.after_coded !== 'off');
+                }
+                codedEl('btn-coded-run').disabled = false;
+            })
+            .catch(function(e) {
+                if (gen !== codedStatusGen) return;
+                renderTriageConsent({ error: String(e && e.message ? e.message : e) });
+                codedEl('btn-coded-run').disabled = false;
+            });
+    }
+
+    function closeCodedModal() {
+        codedEl('coded-modal').classList.remove('visible');
+    }
+
+    function startCodedRun() {
+        var payload = {
+            chapter_ids: codedScope,
+            triage: codedEl('coded-triage').checked,
+            remember: codedEl('coded-remember').checked
+        };
+        closeCodedModal();
+        openJobModal(payload.triage ? 'Rerunning deterministic evaluators, then triaging'
+                                    : 'Rerunning deterministic evaluators');
+        apiPost('/api/project/' + PROJECT + '/review/run-coded', payload)
             .then(function(data) {
                 if (!data || data.error || !data.job_id) {
                     finishJobModal('Could not start', (data && data.error) || 'No job started.');
@@ -4268,7 +4488,7 @@
         }
 
         var rerunBtn = document.getElementById('btn-rerun-coded');
-        if (rerunBtn) rerunBtn.addEventListener('click', function() { startCodedRun(null); });
+        if (rerunBtn) rerunBtn.addEventListener('click', function() { openCodedModal(null); });
 
         var judgesBtn = document.getElementById('btn-run-judges');
         if (judgesBtn) judgesBtn.addEventListener('click', function() { openJudgesModal(null); });
@@ -4505,6 +4725,13 @@
                 document.getElementById('review-job-modal').classList.remove('visible');
             });
         }
+
+        var codedRun = document.getElementById('btn-coded-run');
+        if (codedRun) codedRun.addEventListener('click', startCodedRun);
+        ['btn-coded-cancel', 'coded-modal-close'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('click', closeCodedModal);
+        });
     }
 
     initReviewControls();

@@ -6831,6 +6831,18 @@ def project_review_run_coded(project_id):
 
     No API spend, so no cost gate. Runs on a background job because the grammar
     evaluator alone can take minutes over a whole book.
+
+    With ``triage``, one triage wave runs as the tail of the same job. Chained
+    server-side rather than by a second request from the browser, for the reason
+    the judges route runs its three stages in one body: ``prepare`` is
+    destructive, and two jobs mean a window where a second request can unlink
+    drafts the first is still writing. One job also means one book lock, one
+    progress stream, and one place a failure can be reported.
+
+    A triage problem never blocks the checkers. Unlike ``run-judges``, where the
+    wave *is* the request, here it is the tail of one — so a CLI that cannot
+    start degrades to a deterministic-only run reporting ``triage_skipped``,
+    rather than a 409 that costs the operator the evaluator pass as well.
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
@@ -6842,6 +6854,9 @@ def project_review_run_coded(project_id):
     chapter_ids, err = _parse_chapter_ids(data)
     if err:
         return jsonify({"error": err}), 400
+
+    want_triage = bool(data.get("triage"))
+    remember = bool(data.get("remember"))
 
     evaluators = data.get("evaluators")
     if evaluators is not None:
@@ -6861,7 +6876,33 @@ def project_review_run_coded(project_id):
     blacklist = _load_project_blacklist(project_dir)
     total = len(chunk_paths)
 
+    # Resolved at request time, not inside the body. A CLI that cannot start is
+    # worth knowing before the operator watches a progress modal open, and the
+    # answer decides what this job will *do* rather than what it reports. The
+    # popup has already checked the same thing through `triage/status`; this is
+    # the guard for the window between that check and this request.
+    triage_ready, triage_skipped = False, None
+    if want_triage:
+        from src.harness.headless import preflight_error
+        from src.harness.state import load_config
+        from src.triage import pass_ as triage
+
+        prof, _ = triage.resolve_triage_profile(project_dir, load_config(project_dir))
+        triage_skipped = preflight_error(prof.cli, model=prof.worker_model)
+        triage_ready = triage_skipped is None
+
     def body(emit):
+        if remember:
+            # Written here rather than at request time, for two reasons. It is
+            # the first thing the job does, so the preference still survives a
+            # wave that cannot start -- losing the tick because the CLI was
+            # logged out would make the box look broken. But it is now *past*
+            # the evaluator and scope validation and the 409 lock check, so a
+            # rejected request no longer mutates `.harness/config.json` on its
+            # way out; and it runs under `_locked_body`, so the read-modify-write
+            # is serialized against whatever else holds the book.
+            _remember_triage_choice(project_dir, want_triage)
+
         done = 0
         errors: list[str] = []
         for index, path in enumerate(chunk_paths):
@@ -6886,10 +6927,19 @@ def project_review_run_coded(project_id):
                     "chunk_error", chunk_id=chunk_id, error=str(exc),
                     index=index + 1, total=total,
                 )
-        return {
+        summary = {
             "evaluated": done, "total": total,
             "error_count": len(errors), "errors": errors[:5],
         }
+        if triage_skipped:
+            summary["triage"] = {"status": "skipped", "error": triage_skipped}
+        elif triage_ready:
+            try:
+                summary["triage"] = _run_triage_pass(project_dir, chapter_ids, emit)
+            except Exception as exc:  # noqa: BLE001 - the checkers already landed
+                app.logger.exception("Triage after coded run failed for %s", project_id)
+                summary["triage"] = {"status": "error", "error": str(exc)}
+        return summary
 
     conflict_response = _lock_conflict(project_dir)
     if conflict_response is not None:
@@ -6902,7 +6952,146 @@ def project_review_run_coded(project_id):
     except jobs.JobConflict as conflict:
         return jsonify({"error": str(conflict), "job_id": conflict.job_id}), 409
 
-    return jsonify({"ok": True, "job_id": job_id, "total": total})
+    return jsonify({
+        "ok": True, "job_id": job_id, "total": total,
+        "triage": triage_ready,
+        "triage_skipped": triage_skipped,
+    })
+
+
+def _remember_triage_choice(project_dir: Path, want_triage: bool) -> None:
+    """Persist the popup's tick, so the answer is asked once per book.
+
+    The same one-key write :func:`project_judges_pin_cli` does, and for the same
+    reason: this is a decision about how this book is reviewed, not a property of
+    one request, and a preference that lives in a browser is a preference the
+    nightly pass and the CLI cannot see.
+    """
+    from src.harness import state as hstate
+
+    cfg = hstate.load_config(project_dir)
+    cfg["triage_after_coded"] = "on" if want_triage else "off"
+    hstate.save_config(project_dir, cfg)
+
+
+def _run_triage_pass(project_dir: Path, chapter_ids: Optional[list], emit) -> dict:
+    """prepare -> fanout -> commit, as the tail of a deterministic run.
+
+    The same three stages ``_run_judges_headless`` runs, with a ``phase`` event
+    per stage so the progress modal has something to say through the two ends of
+    the wave that emit no per-job progress.
+
+    Every failure is reported *inside* the returned block rather than raised.
+    The checkers have already run and persisted their findings by the time this
+    is called, and a triage wave that could not start must not make a completed
+    evaluator pass read as a failed job — the operator would have no way to tell
+    which half of the run they still need to redo.
+    """
+    from src.triage import pass_ as triage
+
+    emit("phase", phase="triage_prepare", message="Preparing triage…")
+    prep = triage.prepare(project_dir, chapters=chapter_ids)
+    if prep.get("status") == "error":
+        # A clean scope is the expected outcome on a book that has been triaged
+        # before, so it is reported as a result, not an error. Branching on the
+        # code rather than the message is why `prepare` stamps one.
+        if prep.get("reason") == "nothing_to_triage":
+            return {
+                "status": "nothing_to_triage",
+                "triaged": 0,
+                "skipped": prep.get("skipped") or {},
+            }
+        return {"status": "error", "error": prep.get("error")}
+
+    effective = prep.get("effective") or {}
+    job_count = prep.get("jobs") or 0
+    emit(
+        # `label` re-verbs the progress bar: the same stream has just counted
+        # the deterministic evaluators, and "Evaluated 1 of 3" over a triage
+        # wave describes the wrong half of the job.
+        "phase", phase="triage_fanout",
+        message=f"Triaging {prep.get('items', 0)} finding(s) in {job_count} job(s)…",
+        total=job_count, label="Triaged",
+    )
+    wave = triage.fanout(
+        project_dir,
+        progress=lambda rec: emit(
+            "target_done",
+            target_id=rec.get("id"),
+            index=rec.get("done"),
+            total=rec.get("total"),
+            ok=rec.get("ok"),
+        ),
+    )
+    if wave.get("error") and not wave.get("wrote"):
+        # The launcher refused; no job ever ran. Report it as the stop it is
+        # rather than as 0 of N triaged.
+        return {
+            "status": "error",
+            "error": wave["error"],
+            "model": effective.get("worker_model"),
+        }
+
+    emit("phase", phase="triage_commit", message="Recording verdicts…")
+    landed = triage.commit(project_dir)
+    if landed.get("status") == "error":
+        return {
+            "status": "error",
+            "error": f"commit failed: {landed.get('error') or 'unknown error'}",
+            "model": effective.get("worker_model"),
+        }
+
+    return {
+        "status": "ok",
+        "triaged": prep.get("items", 0),
+        "jobs": job_count,
+        "wrote": len(wave.get("wrote") or []),
+        "failed": len(wave.get("failed") or []),
+        "suppressed": landed.get("suppressed", 0),
+        "kept": landed.get("kept", 0),
+        "floor": landed.get("floor"),
+        "model": effective.get("worker_model"),
+        "model_source": prep.get("model_source"),
+        "report_path": landed.get("report_path"),
+        "usage": wave.get("usage"),
+    }
+
+
+@app.route("/api/project/<project_id>/triage/status", methods=["GET"])
+def project_triage_status(project_id):
+    """What a triage wave would do here, without preparing one. No spend.
+
+    The popup on the deterministic-rerun button is built from this. A
+    subscription wave must not be consented to without naming the model that
+    will judge the findings, how many there are, and whether the CLI can start
+    at all — and ``prepare``, the only other thing that knows, answers by
+    clearing the drafts and rewriting the manifest.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    raw = (request.args.get("chapters") or "").strip()
+    chapters = [c.strip() for c in raw.split(",") if c.strip()] if raw else None
+    if chapters and not all(_safe_id(c) for c in chapters):
+        return jsonify({"error": "Invalid chapter ID"}), 400
+
+    from src.harness import state as hstate
+    from src.triage import pass_ as triage
+
+    try:
+        payload = triage.status(project_dir, chapters=chapters)
+    except (OSError, ValueError) as exc:
+        app.logger.exception("Triage status failed for %s", project_id)
+        return jsonify({"error": f"Could not read triage status: {exc}"}), 400
+
+    # Not part of what a wave would do, which is why it is added here rather
+    # than inside `status`: it is what this book answered last time the popup
+    # asked. `None` means never asked, and the popup opens ticked.
+    payload["after_coded"] = hstate.load_config(project_dir).get("triage_after_coded")
+    return jsonify(payload)
 
 
 def _public_lock(holder: Optional[dict]) -> dict:

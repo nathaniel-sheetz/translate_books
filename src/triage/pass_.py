@@ -7,11 +7,13 @@ headless wave, and ``commit`` writes the verdicts into
 ``src.triage.findings`` can anchor onto a sentence, and everything except the
 verdicts themselves lands under ``.harness/triage/``.
 
-The model is pinned at ``prepare`` time and recorded in the manifest, so
-``fanout`` inherits it rather than re-reading the book's ``worker_model``. That
-is what keeps this pass off the book's default backend — the reason it has its
-own wave type at all — and it is the mechanism ``src/footnote_pass/scan.py``
-already uses.
+The CLI and the model are both pinned at ``prepare`` time and recorded in the
+manifest, so ``fanout`` inherits them rather than re-reading the book's
+``headless_cli`` and ``worker_model``. That is what keeps this pass off the
+book's default backend — the reason it has its own wave type at all — and it is
+the mechanism ``src/footnote_pass/scan.py`` already uses. The pins are the
+calibrated pair: the confidence floor every verdict is scored against was swept
+on one model, on one CLI.
 
 Nothing here edits the book. A verdict suppresses a finding at read time; the
 finding stays on disk exactly as the checker wrote it.
@@ -23,6 +25,7 @@ imported.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -51,6 +54,60 @@ TEMPLATE = "triage_coded_finding.txt"
 #: verdicts no more than a re-run did. Re-measure before moving it.
 DEFAULT_ITEMS_PER_JOB = 20
 DEFAULT_CONCURRENCY = 3
+
+#: The model ``TRIAGE_CONFIDENCE_FLOOR`` was calibrated against, per CLI.
+#:
+#: The floor is one number for the whole corpus and it was swept against
+#: verdicts from one model. A wave run on some other model is scored by a floor
+#: nobody tuned for it, so the model has to be pinned somewhere every surface
+#: reaches rather than typed onto a flag each time -- which is what stood
+#: between this pass and a button.
+#:
+#: ``claude`` is ``None`` deliberately: no Claude model has been through
+#: ``scripts/replay_triage.py --exam``, and naming one here would assert a
+#: calibration that does not exist. That book falls through to the CLI's own
+#: default and :func:`status` reports the mismatch rather than hiding it.
+#:
+#: The cursor row is grok 4.6 at medium effort, not fast — the model all 502
+#: recorded verdicts ran on. It is spelled in the CLI's *current* id scheme:
+#: the calibration ran as ``grok-4.6[effort=medium,fast=false]``, and
+#: ``cursor-agent`` has since renamed that exact combination to
+#: ``cursor-grok-4.6-medium`` (the bracket form is now rejected outright —
+#: "Cannot use this model"). Same model, same effort, same fast flag, so the
+#: floor still applies; only the spelling moved. If it moves again, a wave fails
+#: closed at the launcher's model gate rather than running something else.
+DEFAULT_TRIAGE_MODEL: dict[str, Optional[str]] = {
+    "cursor": "cursor-grok-4.6-medium",
+    "claude": None,
+}
+
+#: Per-book override of the row above, set with
+#: ``harness.py config-set --key triage_worker_model``.
+MODEL_CONFIG_KEY = "triage_worker_model"
+
+#: The CLI family ``TRIAGE_CONFIDENCE_FLOOR`` was calibrated on.
+#:
+#: The model row above is keyed by CLI, so pinning a model without pinning the
+#: family pins nothing. Most books here are ``headless_cli: claude`` or ``auto``,
+#: and the dashboard's Flask process is a plain shell where ``detect_host`` says
+#: ``unknown`` and the ladder's last tier answers ``claude`` -- all of which land
+#: on the ``claude`` row, which is ``None`` on purpose, and the wave then runs
+#: whatever the launcher defaults to against a floor nobody swept for it. Every
+#: surface that ran this pass typed ``--cli cursor`` by hand, and a button has no
+#: hand: the same gap the model ladder closed, one rung further out.
+#:
+#: Deliberately independent of the book's ``headless_cli``, for the reason the
+#: model ladder ignores its ``worker_model``: which backend writes and judges a
+#: book is a decision about its prose, while this pass only filters what the
+#: coded checkers said about it. A book that must triage on the other family says
+#: so with ``triage_headless_cli`` -- and ``status`` reports ``calibrated_model``
+#: as ``None`` there, because that is what moving off this row costs.
+DEFAULT_TRIAGE_CLI = "cursor"
+
+#: Per-book override of the row above, set with
+#: ``harness.py config-set --key triage_headless_cli``. ``auto`` un-pins this
+#: pass back to the book's own ``headless_cli`` and host detection.
+CLI_CONFIG_KEY = "triage_headless_cli"
 
 #: Glossary entries shown per item at most. A long sentence in a book with a
 #: large glossary can match many, and the list is a reference, not the task.
@@ -210,6 +267,257 @@ def build_prompt_parts(
 
 
 # ---------------------------------------------------------------------------
+# the model ladder, and what a wave would do
+# ---------------------------------------------------------------------------
+
+def _resolve_triage_model(
+    cfg: dict, cli_name: str, override: Optional[str]
+) -> tuple[Optional[str], str]:
+    """``(model, source)`` for a triage wave, over three rungs.
+
+    A flag beats the book's config, which beats the calibrated default for this
+    CLI. The source label is what ``resolve_profile`` prints as provenance, so a
+    consent block can say *why* this model -- "a flag said so" and "the house
+    default for cursor" must not read identically.
+
+    ``(None, "unpinned")`` when nothing pins anything, which leaves
+    ``resolve_profile`` free to fall back to the CLI's own default exactly as it
+    did before this ladder existed. That case gets its own label rather than
+    reusing ``"cli"``: a flag having chosen the model and nothing having chosen
+    it are different facts, and a consent block that renders them identically
+    tells an operator a pin exists where none does.
+    """
+    pinned = (override or "").strip()
+    if pinned:
+        return pinned, "cli"
+    configured = cfg.get(MODEL_CONFIG_KEY)
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip(), "config"
+    house = DEFAULT_TRIAGE_MODEL.get(cli_name)
+    if house:
+        return house, "repo-default"
+    return None, "unpinned"
+
+
+def _resolve_triage_cli(cfg: dict, override: Optional[str]) -> tuple[Optional[str], str]:
+    """``(cli, source)`` for a triage wave, over the same three rungs.
+
+    A flag beats the book's ``triage_headless_cli``, which beats the family the
+    floor was calibrated on. The labels are ``resolve_profile``'s ``cli_source``
+    vocabulary, and ``repo-default`` is a *decided* source there: a pin is never
+    second-guessed against PATH, so a machine without ``cursor-agent`` gets the
+    launcher's own "not on PATH" message rather than a silent swap onto a family
+    with no calibrated model at all.
+
+    ``(None, "auto")`` when the book pins ``auto``, which is a book saying "do
+    not pin this pass". The answer goes back to ``resolve_profile``'s own ladder
+    -- the book's ``headless_cli``, then host detection, then the fallback --
+    exactly as it behaved before this rung existed, missing-binary switch
+    included. The label is unused in that case: ``resolve_cli`` only reads an
+    ``override_source`` when there is an override to label.
+    """
+    pinned = (override or "").strip().lower()
+    if pinned in hstate.HEADLESS_CLIS:
+        return pinned, "cli"
+    configured = str(cfg.get(CLI_CONFIG_KEY) or "").strip().lower()
+    if configured in hstate.HEADLESS_CLIS:
+        return configured, "config"
+    if configured == "auto":
+        return None, "auto"
+    return DEFAULT_TRIAGE_CLI, "repo-default"
+
+
+def resolve_triage_profile(
+    project_dir: Path,
+    cfg: dict,
+    *,
+    cli: Optional[str] = None,
+    worker_model: Optional[str] = None,
+    effort: Optional[str] = None,
+    check_binary: bool = True,
+) -> tuple[Any, str]:
+    """``(profile, model_source)`` for a wave, with both ladders applied.
+
+    The CLI ladder runs first because the model ladder is keyed by its answer,
+    and ``resolve_profile`` is then called twice, on purpose. Which CLI a run
+    lands on is still not settled by the ladder alone: an *un-pinned* book
+    (``triage_headless_cli: auto``) falls through to config and host detection,
+    where a guess pointing at a CLI that is not installed switches to the other
+    one. Reading the model ladder before that would pin Cursor's model onto a
+    wave that fell back to Claude, handing the launcher a model id it cannot
+    parse -- the same class of cross-family error the effort inheritance in
+    :func:`fanout` guards against. A pinned CLI survives both calls untouched,
+    because ``repo-default`` is a decided source.
+
+    The probe call passes no model, so the second call is the only one whose
+    effort resolution sees the pinned model; a level typed into a Cursor model's
+    own bracket therefore still outranks ``headless_effort_triage``.
+    """
+    from src.harness.profile import resolve_profile
+
+    usage_log = usage_log_for(project_dir, COMMAND)
+    cli_name, cli_source = _resolve_triage_cli(cfg, cli)
+    probe = resolve_profile(
+        project_dir,
+        command=COMMAND,
+        cli=cli_name,
+        cli_source=cli_source,
+        effort=effort,
+        effort_source="cli",
+        cfg=cfg,
+        usage_log=usage_log,
+        check_binary=check_binary,
+    )
+    model, model_source = _resolve_triage_model(cfg, probe.cli, worker_model)
+    prof = resolve_profile(
+        project_dir,
+        command=COMMAND,
+        cli=probe.cli,
+        cli_source=probe.cli_source,
+        worker_model=model,
+        # With no model there is nothing to label, and resolve_profile reports
+        # which of its own defaults answered instead.
+        worker_model_source=model_source if model else "cli",
+        effort=effort,
+        effort_source="cli",
+        cfg=cfg,
+        usage_log=usage_log,
+        check_binary=check_binary,
+    )
+    # Only the probe call sees the missing-binary switch: it emits the warning
+    # *and* moves `cli_source` to `fallback:<bin>-missing`, so the second call is
+    # handed a CLI that is already present, regenerates nothing, and returns an
+    # empty list. Dropping the probe's warnings therefore loses exactly the one
+    # an operator most needs -- that an un-pinned book just fell through to the
+    # other CLI family, which is not the family the floor was calibrated on --
+    # from `status`, from the dashboard consent panel and from the skill at once.
+    # Merged rather than replaced, and de-duplicated, because a warning both
+    # calls raise (neither binary present) must still be said once.
+    merged = list(probe.warnings)
+    merged += [w for w in prof.warnings if w not in merged]
+    if merged != list(prof.warnings):
+        prof = replace(prof, warnings=merged)
+    return prof, model_source
+
+
+_STATUS_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "triageable": "findings a wave would send, after every skip filter",
+    "jobs": "headless processes those findings would batch into",
+    "items_per_job": "findings rendered into one prompt",
+    "by_eval": "triageable findings per checker",
+    "skipped": "{dismissed, ignored, already_triaged, unanchored, stale_moved, no_evaluation}: "
+    "findings a wave would not send, and why",
+    "chapters": "the scope this answer covers; null means every chapter with an alignment",
+    "effective": "the profile a wave would run under (cli, worker_model, effort, "
+    "effort_channel, ...), with provenance. cli_source 'repo-default' is the family the "
+    "floor was calibrated on, pinned by this pass rather than read from the book's "
+    "headless_cli; 'config' is this book's triage_headless_cli or, under 'auto', its own",
+    "model_source": "which rung pinned the model: 'cli' a flag, 'config' this book's "
+    "triage_worker_model, 'repo-default' the calibrated model for this CLI, 'unpinned' "
+    "nothing did and the CLI's own default answered (see effective.worker_model_source)",
+    "calibrated_model": "the model the floor was swept against on this CLI, or null when "
+    "none has been. Compare with effective.worker_model before trusting the floor",
+    "preflight_error": "why a wave could not start here (binary missing, not logged in, "
+    "model rejected), or null",
+    "floor": "TRIAGE_CONFIDENCE_FLOOR: the confidence at or above which a suppress hides",
+    "pending_drafts": "drafts already on disk that a commit would read. prepare clears "
+    "these unless keep_drafts refuses instead",
+    "instructions": "next step",
+}
+
+
+def status(
+    project_dir: Path | str,
+    *,
+    chapters: Optional[list[str]] = None,
+    items_per_job: int = DEFAULT_ITEMS_PER_JOB,
+    worker_model: Optional[str] = None,
+    cli: Optional[str] = None,
+    effort: Optional[str] = None,
+    eval_names: tuple[str, ...] = tfindings.TRIAGE_EVAL_NAMES,
+    check_cli: bool = True,
+    cfg: Optional[dict] = None,
+) -> dict[str, Any]:
+    """What a wave would do, without doing any of it. No spend, no writes.
+
+    ``prepare`` is the only other thing that can answer "how many findings, on
+    which model, and can the CLI even start" -- and it answers by clearing the
+    drafts and rewriting the manifest. A dashboard asking for consent to a
+    subscription wave, and a skill deciding whether there is anything here worth
+    running, both need those numbers *before* anything is destroyed.
+
+    Unlike ``prepare``, a book with nothing to triage is ``ok`` with
+    ``triageable: 0``. That is an answer, not a failure, and a caller that has to
+    read an error string to tell the two apart cannot be written.
+    """
+    from src.harness.state import load_config
+    from web_ui.evaluations import TRIAGE_CONFIDENCE_FLOOR
+
+    project_dir = Path(project_dir)
+    if items_per_job < 1:
+        return _error(
+            f"items_per_job must be at least 1, got {items_per_job}", _STATUS_SCHEMA
+        )
+
+    cfg = load_config(project_dir) if cfg is None else cfg
+    prof, model_source = resolve_triage_profile(
+        project_dir, cfg, cli=cli, worker_model=worker_model, effort=effort
+    )
+
+    items, skips = tfindings.collect_book(
+        project_dir, chapters=chapters, eval_names=eval_names
+    )
+    by_eval: dict[str, int] = {}
+    for it in items:
+        by_eval[it["eval_name"]] = by_eval.get(it["eval_name"], 0) + 1
+
+    preflight = None
+    if check_cli:
+        from src.harness.headless import preflight_error
+
+        preflight = preflight_error(prof.cli, model=prof.worker_model)
+
+    jobs = (len(items) + items_per_job - 1) // items_per_job
+    if not items:
+        instructions = "Nothing to triage in this scope."
+    elif preflight:
+        instructions = "Fix the CLI error above; nothing can run until then."
+        if prof.cli_source == "repo-default":
+            # The pin is why this machine is being asked for a CLI it may not
+            # have, so the way off it belongs in the same breath. Not a
+            # recommendation: the other family has no calibrated model, which is
+            # what `calibrated_model: null` beside it says.
+            instructions += (
+                f" This pass pins {prof.cli} because the confidence floor was "
+                f"calibrated there; `harness.py config-set --key {CLI_CONFIG_KEY}` "
+                "moves this book off it, at the cost of running uncalibrated."
+            )
+    else:
+        instructions = (
+            f"Run `prepare --project {project_dir.name}` to render {jobs} job(s)."
+        )
+
+    return {
+        "status": "ok",
+        "triageable": len(items),
+        "jobs": jobs,
+        "items_per_job": items_per_job,
+        "by_eval": by_eval,
+        "skipped": skips,
+        "chapters": list(chapters) if chapters else None,
+        "effective": prof.to_payload(),
+        "model_source": model_source,
+        "calibrated_model": DEFAULT_TRIAGE_MODEL.get(prof.cli),
+        "preflight_error": preflight,
+        "floor": TRIAGE_CONFIDENCE_FLOOR,
+        "pending_drafts": len(_live_drafts(project_dir)),
+        "instructions": instructions,
+        "_schema": _STATUS_SCHEMA,
+    }
+
+
+# ---------------------------------------------------------------------------
 # prepare
 # ---------------------------------------------------------------------------
 
@@ -227,8 +535,13 @@ _PREPARE_SCHEMA = {
     "mean 'no sentence to judge from' — they stay live for the human",
     "cleared_drafts": "drafts from an earlier run deleted before rendering this one. "
     "Pass keep_drafts to refuse instead, when a wave is still in flight",
+    "reason": "on error only, a stable code where one exists: 'nothing_to_triage' when the "
+    "scope is clean. Branch on this, never on the message",
     "effective": "the resolved profile this run is pinned to (cli, worker_model, effort, "
     "effort_channel, ...). fanout inherits it from the manifest rather than the book's config",
+    "model_source": "which rung pinned the model: 'cli', 'config', 'repo-default', or "
+    "'unpinned'. The floor was calibrated on one model, so this is how a wave says "
+    "whether it ran on it",
     "preamble_chars": "size of the cacheable preamble every job carries",
     "instructions": "next step",
 }
@@ -263,7 +576,6 @@ def prepare(
     Findings are sorted by id before batching, so the same book and filters
     always produce the same jobs.
     """
-    from src.harness.profile import resolve_profile
     from src.harness.state import load_config
 
     project_dir = Path(project_dir)
@@ -280,27 +592,23 @@ def prepare(
         )
 
     cfg = load_config(project_dir) if cfg is None else cfg
-    prof = resolve_profile(
-        project_dir,
-        command=COMMAND,
-        cli=cli,
-        cli_source="cli",
-        worker_model=worker_model,
-        worker_model_source="cli",
-        effort=effort,
-        effort_source="cli",
-        cfg=cfg,
-        usage_log=usage_log_for(project_dir, COMMAND),
+    prof, model_source = resolve_triage_profile(
+        project_dir, cfg, cli=cli, worker_model=worker_model, effort=effort
     )
 
     items, skips = tfindings.collect_book(
         project_dir, chapters=chapters, eval_names=eval_names
     )
     if not items:
+        # A clean scope is a normal outcome, and a caller chaining this after the
+        # checkers must be able to tell it from a real failure without matching
+        # on the message. The status stays `error` and the CLI still exits 1:
+        # asking for a wave that cannot run is a failed request at a prompt.
         return _error(
             "no findings left to triage: every coded finding is already dismissed, "
             "ignored, triaged, or could not be anchored to a sentence",
             _PREPARE_SCHEMA,
+            reason="nothing_to_triage",
             skipped=skips,
         )
     items.sort(key=lambda it: it["id"])
@@ -371,6 +679,7 @@ def prepare(
         "template": TEMPLATE,
         "prompt_version": prompt_version(TEMPLATE),
         "model": prof.worker_model,
+        "model_source": model_source,
         "cli": prof.cli,
         "effort": prof.effort,
         "items_per_job": items_per_job,
@@ -396,6 +705,7 @@ def prepare(
         "skipped": skips,
         "cleared_drafts": len(stale),
         "effective": prof.to_payload(),
+        "model_source": model_source,
         "preamble_chars": len(preamble or ""),
         "instructions": (
             f"Run `fanout --project {Path(project_dir).name}`, then "
@@ -446,6 +756,7 @@ def fanout(
     effort: Optional[str] = None,
     cli_bin: Optional[str] = None,
     runner=None,
+    progress=None,
     cfg: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Run one headless wave over the prepared jobs.
@@ -459,6 +770,13 @@ def fanout(
     manifest is rewritten so ``commit`` records what actually ran.
 
     ``runner`` is a test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+
+    ``progress`` is called once per finished job with the launcher's own record
+    (``{id, ok, done, total, ...}``). A whole-book wave is minutes of silence
+    otherwise, and the caller that needs this -- the dashboard, running the pass
+    inside a job whose only output is a progress modal -- cannot report a job
+    count it never hears about. Nothing here depends on it; a caller that does
+    not pass one gets exactly the behaviour it got before.
     """
     from src.harness.headless import run_headless_wave
     from src.harness.profile import resolve_profile
@@ -574,6 +892,7 @@ def fanout(
         usage_log=usage_log_for(project_dir, COMMAND),
         extra_flags=extra_flags,
         effort=prof.effort,
+        on_job_done=progress,
     )
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
         return {

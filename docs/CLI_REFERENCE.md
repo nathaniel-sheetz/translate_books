@@ -261,11 +261,17 @@ Full reference: [`EDITORIAL_JUDGE.md`](EDITORIAL_JUDGE.md).
 ### `run_triage.py` — filter the noise out of the coded checkers
 
 ```bash
-python scripts/run_triage.py prepare --project my-book \
-    --worker-model "grok-4.6[effort=medium,fast=false]"
+python scripts/run_triage.py status  --project my-book
+python scripts/run_triage.py prepare --project my-book
 python scripts/run_triage.py fanout  --project my-book
 python scripts/run_triage.py commit  --project my-book
 ```
+
+Sub-verbs: `status`, `prepare`, `fanout`, `commit`. `status` writes nothing and
+is the one to open with — it answers how many findings are in scope, which model
+would judge them, and whether the CLI can start, none of which `prepare` can be
+asked without clearing the drafts. It exits 0 on a book with nothing to triage;
+`prepare` treats the same state as an error (`reason: "nothing_to_triage"`).
 
 `dictionary` and `grammar` accept at 7% and 16%, and produce ~70% of all
 finding-clearing work. This asks a model whether each flagged word is really a
@@ -274,9 +280,18 @@ defect *in its sentence*, and records the answer in
 `suppress` at or above `TRIAGE_CONFIDENCE_FLOOR` hides a finding; suppressed
 ones still appear on the recommendations screen with the model's reason.
 
-The model is pinned at `prepare` and inherited by `fanout` from the manifest, so
-the pass never rides the book's default backend. `commit` is re-runnable.
+The CLI and the model are pinned at `prepare` and inherited by `fanout` from the
+manifest, so the pass never rides the book's default backend. With no flags the
+pins come from the book's `triage_headless_cli` / `triage_worker_model`, and
+failing those from the pair the floor was calibrated against (Cursor,
+`cursor-grok-4.6-medium`) — so a run started from the dashboard is judged by the
+same model on the same CLI the floor was swept on, whatever `headless_cli` says.
+A pinned CLI is never swapped for a missing binary: `status` reports
+`preflight_error` instead. `commit` is re-runnable.
 Full reference: [`TRIAGE.md`](TRIAGE.md).
+
+*Skill equivalent:* `/triage-review`. Also runs as the tail of the dashboard's
+**Rerun deterministic** button.
 
 ### `replay_triage.py` — score the triage filter and set its cutoff
 

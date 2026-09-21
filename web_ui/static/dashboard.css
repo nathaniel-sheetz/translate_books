@@ -1043,7 +1043,12 @@ a.btn-secondary {
 .judge-pip.pip-stale { background: #fef2f2; color: #b91c1c; }
 .judge-pip.pip-none { background: #f5f5f5; color: #999; }
 
-.judges-check {
+/* The three rules below are not judges-specific: the triage popup on the
+   deterministic-rerun button asks for consent in exactly this shape — a grey
+   block of the facts a run was approved on, and an amber one for anything that
+   would stop it. Aliased rather than renamed, so the judges modal's markup and
+   JS stay untouched. */
+.judges-check, .inline-check {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1061,7 +1066,7 @@ a.btn-secondary {
 
 /* The profile's own warnings — a mid-book CLI flip, a Claude alias on Cursor, an
    effort that nothing will carry. Relayed verbatim, so they need room to wrap. */
-.judges-warnings {
+.judges-warnings, .consent-warnings {
     margin: 8px 0 16px;
     padding: 8px 10px;
     background: #fff8e1;
@@ -1072,10 +1077,10 @@ a.btn-secondary {
     color: #7a5c00;
 }
 
-.judges-warnings p { margin: 0 0 4px; }
-.judges-warnings p:last-child { margin-bottom: 0; }
+.judges-warnings p, .consent-warnings p { margin: 0 0 4px; }
+.judges-warnings p:last-child, .consent-warnings p:last-child { margin-bottom: 0; }
 
-.judges-estimate {
+.judges-estimate, .consent-panel {
     margin: 12px 0;
     padding: 10px 12px;
     background: #f8f9fa;
@@ -1085,15 +1090,15 @@ a.btn-secondary {
     line-height: 1.5;
 }
 
-.judges-estimate dl {
+.judges-estimate dl, .consent-panel dl {
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 2px 12px;
     margin: 0;
 }
 
-.judges-estimate dt { color: #666; }
-.judges-estimate dd { margin: 0; font-variant-numeric: tabular-nums; }
+.judges-estimate dt, .consent-panel dt { color: #666; }
+.judges-estimate dd, .consent-panel dd { margin: 0; font-variant-numeric: tabular-nums; }
 
 .judges-estimate details { margin-top: 8px; }
 .judges-estimate summary { cursor: pointer; color: #666; font-size: 12px; }

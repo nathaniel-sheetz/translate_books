@@ -239,6 +239,7 @@ pytest --cov=src tests/         # with coverage
 | [`docs/JUDGES_FRAMEWORK.md`](docs/JUDGES_FRAMEWORK.md) | Tailored LLM judges: run them, add them, configure suites |
 | [`docs/ADDRESS_JUDGE.md`](docs/ADDRESS_JUDGE.md) | The address map and the usted/tú judge |
 | [`docs/EDITORIAL_JUDGE.md`](docs/EDITORIAL_JUDGE.md) | The editorial defect judge and its adjudication pass |
+| [`docs/TRIAGE.md`](docs/TRIAGE.md) | Machine triage of the dictionary and grammar checkers, and its calibration |
 | [`docs/ANNOTATION_REVIEW.md`](docs/ANNOTATION_REVIEW.md) | Resolving reader annotations and drafting footnote glosses |
 | [`docs/FOOTNOTE_PASS.md`](docs/FOOTNOTE_PASS.md) | Authoring *new* editorial footnotes: scan, research, validated write |
 | [`docs/NIGHTLY_PASS.md`](docs/NIGHTLY_PASS.md) | The scheduled cross-book pass, its locks, and the `/review-inbox` funnel |

@@ -33,16 +33,28 @@ scratch and deliberately not tracked in the repo.
   auditable.
 - **It never edits the book.** No prose is touched; there is no apply step.
 - **It proposes no rewrites.** It is a filter, not an editor.
-- **It runs on its own pinned model**, not the book's default backend.
+- **It runs on its own pinned CLI and model**, not the book's default
+  backend. Both are the pair the confidence floor was calibrated against.
 
-## The three commands
+## The four commands
 
 ```bash
-python scripts/run_triage.py prepare --project my-book \
-    --worker-model "grok-4.6[effort=medium,fast=false]"
+python scripts/run_triage.py status  --project my-book
+python scripts/run_triage.py prepare --project my-book
 python scripts/run_triage.py fanout  --project my-book
 python scripts/run_triage.py commit  --project my-book
 ```
+
+`status` writes nothing and is the one to open with. It reports the findings in
+scope, the jobs they would batch into, the resolved model and **which rung pinned
+it**, whether the CLI could start, the floor, and any drafts a `prepare` would
+clear. It exists because everything on that list used to be answerable only by
+running `prepare`, which answers by clearing the drafts and rewriting the
+manifest — so neither a consent dialog nor an agent deciding whether there was
+anything to do could ask without destroying something first. A book with nothing
+to triage is `ok` with `triageable: 0`, and exits 0; `prepare` reports the same
+state as an error carrying `reason: "nothing_to_triage"`, which is right at a
+prompt and is why a caller must branch on the code rather than the message.
 
 `prepare` collects every live finding it can anchor to a sentence, batches them
 (`--items-per-job`, default 20) and renders prompts under `.harness/triage/`. No
@@ -53,19 +65,137 @@ so re-running resumes. `commit` parses the drafts and appends verdicts to
 `commit` is re-runnable: a finding that already carries a verdict is counted and
 skipped rather than written twice.
 
-### Pinning the model
+### Pinning the CLI and the model
 
-The model is resolved at `prepare` and recorded in the manifest; `fanout`
-inherits it rather than reading the book's `worker_model`. That is why the pass
-has its own wave type (`COMMAND = "triage"`), which also gives it
+Both are resolved at `prepare` and recorded in the manifest; `fanout` inherits
+them rather than reading the book's `headless_cli` and `worker_model`. That is
+why the pass has its own wave type (`COMMAND = "triage"`), which also gives it
 `headless_effort_triage` and its own usage log at `.harness/triage/usage.jsonl`.
 Pointing triage at a different model — or later at local inference — never
 changes how the book is translated or judged.
 
+**Each pin has three rungs**, highest first:
+
+| rung | `model_source` | `effective.cli_source` |
+|---|---|---|
+| a flag on `prepare` (`--worker-model` / `--cli`) | `cli` | `cli` |
+| the book's `triage_worker_model` / `triage_headless_cli` | `config` | `config` |
+| the calibrated pair: `DEFAULT_TRIAGE_MODEL[cli]` and `DEFAULT_TRIAGE_CLI` | `repo-default` | `repo-default` |
+
+The bottom rung is what makes this pass safe to put behind a button.
+`TRIAGE_CONFIDENCE_FLOOR` is one number for the whole corpus and it was swept
+against verdicts from one model on one CLI — **Cursor, `cursor-grok-4.6-medium`**.
+Before the ladders, a run with no flags fell through to whatever the book and the
+host happened to say: most books here are `headless_cli: claude` or `auto`, and
+the dashboard's Flask process is a plain shell where host detection answers
+`unknown` and the last tier answers `claude` — so the button would have judged
+findings on sonnet and scored them against a floor nobody swept for it. Every
+surface that ran this pass typed both by hand, and a button has no hand.
+
+**The CLI pin is independent of `headless_cli` on purpose.** Which backend writes
+and judges a book is a decision about its prose; this pass only filters what the
+coded checkers said about it, so a book translated on Claude still triages on
+Cursor. `triage_headless_cli` moves one book off that (`auto` un-pins it back to
+`headless_cli` and host detection) — at the cost of `calibrated_model: null`,
+which is what the next paragraph is about.
+
+**A pinned CLI is never second-guessed against PATH.** `resolve_profile` switches
+a *guessed* family when its binary is missing; a pin is a decision, so a machine
+without `cursor-agent` gets that CLI's own "not on PATH" message through
+`preflight_error` — reported by `status`, shown in the dashboard popup, and
+relayed by the skill — rather than a silent swap onto the family with no
+calibrated model. `status`'s `instructions` names `triage_headless_cli` in the
+same breath, because the pin is why the machine was asked for that CLI at all.
+
+`claude` is deliberately `None` in that table: no Claude model has been through
+`replay_triage.py --exam`, and naming one would assert a calibration that does not
+exist. `status` reports `calibrated_model` beside `effective.worker_model` so a
+caller can compare them, and both the dashboard popup and the skill say so when
+they disagree. Overriding is allowed; going quiet about it is not.
+
+The ladder is read *after* the CLI is settled, because `resolve_profile` falls
+back to the other CLI when a guessed one's binary is missing — pinning Cursor's
+model onto a wave that fell back to Claude would hand the launcher a model id it
+cannot parse.
+
+**On Cursor, the effort is part of the model id, not a config key.** The
+calibration ran as `grok-4.6[effort=medium,fast=false]`; `cursor-agent` has since
+renamed that exact model to `cursor-grok-4.6-medium` and now rejects the bracket
+form outright. Nothing appends a bracket to a bracket-less id, so
+`headless_effort_triage` has nothing to act on there — to run the pass at a
+different effort on Cursor, pin the id that names it (`cursor-grok-4.6-low`)
+rather than setting the config key, which would build
+`cursor-grok-4.6-medium[effort=low]`, an id the CLI was never asked about.
+`headless_effort_triage` remains the lever on Claude, where effort rides in argv.
+
 ```bash
+# Move one book off the calibrated CLI. Its model rung goes with it: there is
+# no calibrated Claude model, so such a run reports calibrated_model: null.
+python scripts/harness.py config-set --project my-book \
+    --key triage_headless_cli --value claude
+
+# Claude: effort rides in argv, so the config key is the lever.
 python scripts/harness.py config-set --project my-book \
     --key headless_effort_triage --value low
+
+# Cursor: effort rides in the model id, so pin the id that names it.
+python scripts/harness.py config-set --project my-book \
+    --key triage_worker_model --value cursor-grok-4.6-low
 ```
+
+## Three ways to run it
+
+The pass is one implementation with three front doors. All of them end in the
+same `prepare` -> `fanout` -> `commit` over the same manifest, so a wave started
+from one is resumable and committable from any other.
+
+| surface | how |
+|---|---|
+| CLI | `python scripts/run_triage.py status\|prepare\|fanout\|commit` |
+| Claude Code | the **`/triage-review`** skill |
+| Dashboard | ticked in the popup on **Rerun deterministic** |
+
+### From the dashboard
+
+The Review tab's **Rerun deterministic** button opens a popup first, and its tick
+— *Also triage the dictionary and grammar findings* — runs one triage wave as the
+tail of the same background job. Ticked by default and remembered per book in
+`triage_after_coded`, because the two checkers are right about one finding in ten
+and filtering them is the normal end of a rerun rather than a separate thing to
+remember.
+
+It is still a tick rather than an automatic step: the wave spends a
+subscription's context budget, and that is not consented to by having clicked
+something else. So the popup is built from `status` and names what will run — the
+findings, the jobs, the model and its rung, the CLI, and the floor — before
+anything is prepared. It is the only read of that data that does not destroy the
+drafts, which is what `status` exists for.
+
+**The finding count it names is the pre-run one, and never gates the tick.** The
+wave runs *after* the checkers, so what it filters is whatever they leave behind
+— a number that does not exist when consent is asked. A book that has never been
+evaluated therefore still offers the tick, ticked, and says `none in scope right
+now` rather than claiming `0 in 0 job(s)`; the findings the rerun is about to
+write are filtered in the same job. Gating on the pre-run count instead cost the
+operator a whole second deterministic pass — the slow grammar evaluator twice —
+to reach a wave they had wanted from the start. The one thing that does disable
+the tick is a failed CLI preflight, because then nothing can run whatever the
+checkers turn up.
+
+**Chained inside one job, not by a second request.** `prepare` is destructive, so
+two jobs would leave a window where a second request unlinks drafts the first is
+still writing. One job also means one book lock, one progress stream, and one
+place a failure can be reported. The route emits a `phase` event per stage and
+one `target_done` per finished CLI job, so the progress modal has something to say
+through the two ends of a wave that emit no per-job progress of their own.
+
+**A triage problem never blocks the checkers.** This is the one place the
+behaviour departs from `run-judges`, where the wave *is* the request and a failed
+preflight is a 409. Here the checkers are the main event and have already
+persisted their findings by the time the wave starts, so a CLI that cannot start
+degrades to a deterministic-only run reporting `triage_skipped`, and a wave that
+fails reports inside its own block rather than as a fatal job. An operator who
+saw "Stopped" would have no way to tell which half they still need to redo.
 
 ## What reaches a prompt
 
@@ -217,6 +347,33 @@ reproduces against current text. The pre-edit translation is recovered through
 is really that chunk's before returning it. A mark whose original cannot be
 verified is reported as unscoreable rather than guessed at.
 
+## Where this is heading
+
+The destination is one harness quality stage — deterministic checkers, then
+triage, then the LLM judges — run as a single command. That is Phase 6 of the
+quality-automation plan (design scratch, not tracked).
+
+What blocks it today is that **step one has no CLI at all**. The persisting entry
+point is `evaluate_and_persist_chunk` in `web_ui/evaluations.py`; it is per-chunk,
+and its only callers are the dashboard and `translate_commit`. There is no
+book-wide "run the deterministic checkers" command for a harness stage to call,
+which is why the chain above lives in a Flask route rather than in
+`src/harness/flow.py`.
+
+The shape of the work, when it is picked up:
+
+1. Lift a book-wide evaluator runner out of `web_ui/evaluations.py` into `src/`,
+   leaving the route and `translate_commit` calling the same code.
+2. Compose the three passes as a `harness.py` subcommand through `flow.py`'s
+   existing `_run_script` pattern, which already wraps `chunk`, `cost`,
+   `translate`, `epub` and `footnotes`.
+3. Teach `flow.status` about evaluation coverage and `_triage.jsonl`, so
+   `suggested_reference` can route into a quality phase — today its last branch
+   returns `references/reviews.md` and knows nothing about any of this.
+
+Until then, the dashboard chain and `/triage-review` are the two composed
+surfaces, and neither duplicates the pass: both call `src/triage/pass_.py`.
+
 ## Files
 
 | path | what |
@@ -225,6 +382,7 @@ verified is reported as unscoreable rather than guessed at.
 | `src/triage/pass_.py` | prepare / fanout / commit |
 | `scripts/run_triage.py` | the CLI |
 | `scripts/replay_triage.py` | calibration and the floor |
+| `.claude/skills/triage-review/SKILL.md` | the skill (`/triage-review`) |
 | `prompts/triage_coded_finding.txt` | the prompt |
 | `projects/<slug>/evaluations/_triage.jsonl` | the verdicts |
 | `projects/<slug>/.harness/triage/` | manifest, prompts, drafts, usage, report |
