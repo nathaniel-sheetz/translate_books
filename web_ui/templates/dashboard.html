@@ -957,13 +957,16 @@
         <div class="field-hint" style="margin-left:22px;">
             Asks a model whether each flagged word is really a defect in the sentence it
             sits in. Nothing is deleted and no prose is edited &mdash; a filtered finding
-            stays readable, and markable, on the recommendations screen.
+            stays readable, and markable, on the recommendations screen. It runs over
+            whatever the checkers leave behind, so it is safe to tick before they have
+            found anything: if the rerun turns up nothing to filter, the wave is skipped
+            and nothing is spent.
         </div>
 
         <div id="coded-triage-consent" class="consent-panel" style="display:none;"></div>
         <div id="coded-triage-warnings" class="consent-warnings" style="display:none;"></div>
 
-        <label class="inline-check" id="coded-remember-wrap" style="margin-top:10px;">
+        <label class="inline-check" style="margin-top:10px;">
             <input type="checkbox" id="coded-remember"> Remember this choice for this book
         </label>
 
@@ -971,7 +974,6 @@
             <button class="btn-secondary" id="btn-coded-cancel">Cancel</button>
             <button class="btn-primary" id="btn-coded-run">Run</button>
         </div>
-        <div id="coded-modal-status" class="status-msg" style="margin-top:8px;"></div>
     </div>
 </div>
 

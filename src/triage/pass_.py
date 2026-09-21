@@ -25,6 +25,7 @@ imported.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -383,6 +384,19 @@ def resolve_triage_profile(
         usage_log=usage_log,
         check_binary=check_binary,
     )
+    # Only the probe call sees the missing-binary switch: it emits the warning
+    # *and* moves `cli_source` to `fallback:<bin>-missing`, so the second call is
+    # handed a CLI that is already present, regenerates nothing, and returns an
+    # empty list. Dropping the probe's warnings therefore loses exactly the one
+    # an operator most needs -- that an un-pinned book just fell through to the
+    # other CLI family, which is not the family the floor was calibrated on --
+    # from `status`, from the dashboard consent panel and from the skill at once.
+    # Merged rather than replaced, and de-duplicated, because a warning both
+    # calls raise (neither binary present) must still be said once.
+    merged = list(probe.warnings)
+    merged += [w for w in prof.warnings if w not in merged]
+    if merged != list(prof.warnings):
+        prof = replace(prof, warnings=merged)
     return prof, model_source
 
 

@@ -171,6 +171,17 @@ findings, the jobs, the model and its rung, the CLI, and the floor — before
 anything is prepared. It is the only read of that data that does not destroy the
 drafts, which is what `status` exists for.
 
+**The finding count it names is the pre-run one, and never gates the tick.** The
+wave runs *after* the checkers, so what it filters is whatever they leave behind
+— a number that does not exist when consent is asked. A book that has never been
+evaluated therefore still offers the tick, ticked, and says `none in scope right
+now` rather than claiming `0 in 0 job(s)`; the findings the rerun is about to
+write are filtered in the same job. Gating on the pre-run count instead cost the
+operator a whole second deterministic pass — the slow grammar evaluator twice —
+to reach a wave they had wanted from the start. The one thing that does disable
+the tick is a failed CLI preflight, because then nothing can run whatever the
+checkers turn up.
+
 **Chained inside one job, not by a second request.** `prepare` is destructive, so
 two jobs would leave a window where a second request unlinks drafts the first is
 still writing. One job also means one book lock, one progress stream, and one

@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_status.add_argument(
         "--worker-model", default=None,
-        help="price the answer against this model instead of the resolved one",
+        help="answer as though this model were pinned, instead of the resolved one",
     )
     p_status.add_argument("--cli", choices=("claude", "cursor"), default=None,
                           help="headless CLI (default: the family the floor was "

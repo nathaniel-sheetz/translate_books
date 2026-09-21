@@ -290,6 +290,53 @@ def test_the_cli_pin_is_not_swapped_for_a_missing_binary(book: Path, monkeypatch
     assert not [w for w in out["effective"]["warnings"] if "falling back" in w]
 
 
+def test_an_unpinned_book_still_says_it_fell_onto_the_other_family(book: Path, monkeypatch):
+    """The warning the *probe* call raises has to survive the second one.
+
+    ``resolve_triage_profile`` resolves twice on purpose, and the missing-binary
+    switch happens only in the first: it emits the warning *and* moves
+    ``cli_source`` to ``fallback:<bin>-missing``, so the second call is handed a
+    CLI that is already present, regenerates nothing, and returns an empty list.
+    Reading only the second call therefore lost exactly the warning that matters
+    most -- an un-pinned book just ran on the family the floor was *not*
+    calibrated against -- from ``status``, from the dashboard consent panel and
+    from the skill at once, leaving nothing anywhere to say the number the run
+    is scored by does not apply to it.
+    """
+    import src.harness.profile as profile
+
+    # The dashboard's own case: a Flask server launched from a plain shell, so
+    # `detect_host` says `unknown`, tier 4 guesses claude, and this machine has
+    # only cursor-agent.
+    monkeypatch.setattr(profile, "cli_binary_present", lambda name: name == "cursor")
+
+    prof, _ = tp.resolve_triage_profile(book, {tp.CLI_CONFIG_KEY: "auto"})
+
+    assert prof.cli == "cursor"
+    assert prof.cli_source.startswith("fallback:")
+    assert [w for w in prof.warnings if "falling back to cursor" in w]
+    assert [w for w in tp.status(book, cfg={tp.CLI_CONFIG_KEY: "auto"},
+                                 check_cli=False)["effective"]["warnings"]
+            if "falling back to cursor" in w]
+
+
+def test_a_warning_both_calls_raise_is_still_said_once(book: Path, monkeypatch):
+    """Merged, not concatenated.
+
+    With neither binary installed there is nothing to switch to, so ``cli_source``
+    stays a guess and *both* resolutions raise the same warning. An operator
+    reading the consent panel should see it once.
+    """
+    import src.harness.profile as profile
+
+    monkeypatch.setattr(profile, "cli_binary_present", lambda name: False)
+
+    prof, _ = tp.resolve_triage_profile(book, {tp.CLI_CONFIG_KEY: "auto"})
+
+    hits = [w for w in prof.warnings if "neither is" in w]
+    assert len(hits) == 1
+
+
 def test_status_names_the_way_off_the_pin_when_the_cli_cannot_start(book: Path, monkeypatch):
     """The pin is why this machine was asked for a CLI it may not have."""
     import src.harness.headless as headless

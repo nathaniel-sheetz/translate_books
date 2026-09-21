@@ -3808,6 +3808,11 @@
     function streamJob(jobId, total, label, onDone) {
         var source = new EventSource('/api/project/' + PROJECT + '/jobs/' + jobId + '/sse');
         var seen = 0;
+        // A job can run more than one counted stage -- a deterministic rerun
+        // followed by a triage wave -- and each has its own total and its own
+        // verb. Fixing the label at call time made the second stage read
+        // "Evaluated 1 of 3" while it was triaging.
+        var stage = label;
 
         function progress(e) {
             var data = {};
@@ -3817,7 +3822,7 @@
             var pct = total ? Math.round((seen / total) * 100) : 0;
             document.getElementById('review-job-fill').style.width = pct + '%';
             document.getElementById('review-job-text').textContent =
-                label + ' ' + seen + ' of ' + total + '…';
+                stage + ' ' + seen + ' of ' + total + '…';
         }
 
         // A CLI wave is prepare → fan-out → commit, and the two ends emit no
@@ -3826,7 +3831,10 @@
         function phase(e) {
             var data = {};
             try { data = JSON.parse(e.data); } catch (err) { return; }
-            if (data.total) total = data.total;
+            // A new total means a new counted stage, so the bar restarts rather
+            // than carrying the previous stage's position into it.
+            if (data.total) { total = data.total; seen = 0; }
+            if (data.label) stage = data.label;
             if (data.message) {
                 document.getElementById('review-job-text').textContent = data.message;
             }
@@ -3914,10 +3922,25 @@
 
     function codedEl(id) { return document.getElementById(id); }
 
+    // The status probe behind the consent panel runs a CLI auth check and takes
+    // seconds, so a reopen on a different scope can easily outrun the first
+    // request. Only the newest one may paint: a chapter-scoped reply landing
+    // after a whole-book reopen would otherwise show the wrong counts, the
+    // wrong remembered tick and a preflight error for a scope nobody asked for.
+    var codedStatusGen = 0;
+
     function setTriageBlocked(reason) {
         var tick = codedEl('coded-triage');
         tick.checked = false;
         tick.disabled = true;
+        // Remember goes with it. The tick is forced off here by something about
+        // this moment -- a logged-out CLI, a missing binary -- not by a decision
+        // about this book, and remembering it would write `triage_after_coded:
+        // "off"` permanently: the book would stop offering the wave, with
+        // nothing on this screen to say why and only `config-set` to undo it.
+        var remember = codedEl('coded-remember');
+        remember.checked = false;
+        remember.disabled = true;
         var warn = codedEl('coded-triage-warnings');
         warn.textContent = reason;
         warn.style.display = '';
@@ -3940,7 +3963,17 @@
             return;
         }
 
-        var rows = [['Findings', (data.triageable || 0) + ' in ' + (data.jobs || 0) + ' job(s)']];
+        // The count is what is on disk *now*. The wave runs after the checkers,
+        // so what it actually filters is whatever they leave behind -- which is
+        // why a scope that is empty here is still worth ticking, and why this
+        // row must not state a number as though it were the final one.
+        var already = (data.skipped || {}).already_triaged || 0;
+        var rows = [['Findings', data.triageable
+            ? data.triageable + ' in ' + (data.jobs || 0) + ' job(s) now — recounted ' +
+              'after the checkers finish'
+            : 'none in scope right now' +
+              (already ? ' (' + already + ' already triaged)' : '') +
+              " — the rerun's own findings are counted when the checkers finish"]];
         var byEval = data.by_eval || {};
         var kinds = Object.keys(byEval);
         if (kinds.length) {
@@ -4011,11 +4044,6 @@
             setTriageBlocked(data.preflight_error);
             return;
         }
-        if (!data.triageable) {
-            setTriageBlocked('Nothing left to triage in this scope — every finding is ' +
-                'already dismissed, ignored, triaged, or has no sentence to judge from.');
-            return;
-        }
         if (notes.length) {
             notes.forEach(function(text) {
                 var p = document.createElement('p');
@@ -4036,6 +4064,7 @@
             : 'The whole book.';
 
         codedEl('coded-remember').checked = false;
+        codedEl('coded-remember').disabled = false;
         codedEl('coded-triage').disabled = true;
         codedEl('coded-triage-warnings').style.display = 'none';
         var panel = codedEl('coded-triage-consent');
@@ -4043,13 +4072,14 @@
         // waited on rather than leaving a bare "Checking…" over a dead Run button.
         panel.textContent = 'Counting findings and checking the CLI…';
         panel.style.display = '';
-        setStatus('coded-modal-status', '', '');
         codedEl('btn-coded-run').disabled = true;
         codedEl('coded-modal').classList.add('visible');
 
         var query = codedScope ? '?chapters=' + encodeURIComponent(codedScope.join(',')) : '';
+        var gen = ++codedStatusGen;
         apiGet('/api/project/' + PROJECT + '/triage/status' + query)
             .then(function(data) {
+                if (gen !== codedStatusGen) return;
                 renderTriageConsent(data);
                 // `after_coded` is what this book answered last time. Never asked
                 // means ticked: the checkers are right about one finding in ten,
@@ -4060,6 +4090,7 @@
                 codedEl('btn-coded-run').disabled = false;
             })
             .catch(function(e) {
+                if (gen !== codedStatusGen) return;
                 renderTriageConsent({ error: String(e && e.message ? e.message : e) });
                 codedEl('btn-coded-run').disabled = false;
             });
@@ -4093,7 +4124,6 @@
                 finishJobModal('Could not start', String(e && e.message ? e.message : e));
             });
     }
-
 
     // ── Review: LLM judge panel ──
 

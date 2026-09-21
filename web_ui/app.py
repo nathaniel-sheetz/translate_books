@@ -6856,11 +6856,7 @@ def project_review_run_coded(project_id):
         return jsonify({"error": err}), 400
 
     want_triage = bool(data.get("triage"))
-    if data.get("remember"):
-        # Before anything can fail: the tick is a preference, not part of the
-        # run, and losing it because a wave could not start would make the box
-        # look broken.
-        _remember_triage_choice(project_dir, want_triage)
+    remember = bool(data.get("remember"))
 
     evaluators = data.get("evaluators")
     if evaluators is not None:
@@ -6896,6 +6892,17 @@ def project_review_run_coded(project_id):
         triage_ready = triage_skipped is None
 
     def body(emit):
+        if remember:
+            # Written here rather than at request time, for two reasons. It is
+            # the first thing the job does, so the preference still survives a
+            # wave that cannot start -- losing the tick because the CLI was
+            # logged out would make the box look broken. But it is now *past*
+            # the evaluator and scope validation and the 409 lock check, so a
+            # rejected request no longer mutates `.harness/config.json` on its
+            # way out; and it runs under `_locked_body`, so the read-modify-write
+            # is serialized against whatever else holds the book.
+            _remember_triage_choice(project_dir, want_triage)
+
         done = 0
         errors: list[str] = []
         for index, path in enumerate(chunk_paths):
@@ -6999,9 +7006,12 @@ def _run_triage_pass(project_dir: Path, chapter_ids: Optional[list], emit) -> di
     effective = prep.get("effective") or {}
     job_count = prep.get("jobs") or 0
     emit(
+        # `label` re-verbs the progress bar: the same stream has just counted
+        # the deterministic evaluators, and "Evaluated 1 of 3" over a triage
+        # wave describes the wrong half of the job.
         "phase", phase="triage_fanout",
         message=f"Triaging {prep.get('items', 0)} finding(s) in {job_count} job(s)…",
-        total=job_count,
+        total=job_count, label="Triaged",
     )
     wave = triage.fanout(
         project_dir,

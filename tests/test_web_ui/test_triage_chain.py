@@ -211,6 +211,35 @@ def test_a_whole_book_run_scopes_prepare_to_the_whole_book(
     assert dict(calls)["prepare"]["chapters"] is None
 
 
+def test_a_book_with_no_findings_yet_may_still_ask_for_the_wave(
+    client, project, cli_ok, monkeypatch
+):
+    """The count on disk when the run starts decides nothing.
+
+    The popup used to disable its tick when `status` answered `triageable: 0`,
+    which made the one run where triage is most obviously wanted -- the first
+    one, before any findings exist -- the one run that could not ask for it.
+    The count that matters is the one the checkers are about to write, so the
+    route must reach the wave without consulting a pre-run total at all. This
+    project has no `evaluations/` directory; `status` raising is what says the
+    route never asks.
+    """
+    import src.triage.pass_ as tp
+
+    def _no_asking(*a, **kw):
+        raise AssertionError("run-coded must not gate the wave on a pre-run count")
+
+    monkeypatch.setattr(tp, "status", _no_asking)
+    calls = _fake_wave(monkeypatch)
+
+    rv, body = post(client, {"triage": True})
+
+    assert rv.status_code == 200
+    assert body["triage"] is True
+    assert not (project / "evaluations").exists()
+    assert [name for name, _ in calls] == ["prepare", "fanout", "commit"]
+
+
 # ── the ways it can go wrong, none of which may sink the checkers ────────────
 
 def test_a_clean_scope_is_reported_not_raised(client, project, cli_ok, monkeypatch):
@@ -321,6 +350,32 @@ def test_without_remember_the_config_is_untouched(client, project, cli_ok, monke
 
     post(client, {"triage": True})
 
+    assert "triage_after_coded" not in hstate.load_config(project)
+
+
+@pytest.mark.parametrize("payload,fragment", [
+    ({"evaluators": ["no-such-evaluator"]}, "Unknown evaluators"),
+    ({"chapter_ids": ["chapter_99"]}, "No translated chunks in scope"),
+])
+def test_a_rejected_request_writes_no_preference(
+    client, project, cli_ok, monkeypatch, payload, fragment
+):
+    """A 400 must not leave a decision behind on its way out.
+
+    The write used to happen at request time, ahead of the evaluator and scope
+    validation and the 409 lock check, so a request the server then refused
+    still mutated `.harness/config.json` -- and did it outside the book lock,
+    read-modify-writing the file against whatever held it. It runs inside the
+    job body now, which is still before the wave (a CLI that cannot start must
+    not cost the operator the tick) but after everything that can say no.
+    """
+    _fake_wave(monkeypatch)
+    payload = dict(payload, triage=True, remember=True)
+
+    rv, body = post(client, payload)
+
+    assert rv.status_code == 400
+    assert fragment in body["error"]
     assert "triage_after_coded" not in hstate.load_config(project)
 
 
