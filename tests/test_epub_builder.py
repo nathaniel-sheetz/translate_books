@@ -191,6 +191,70 @@ class TestDetectChapterHeading:
         assert opening in body
         assert body.startswith(opening)
 
+    def test_explicit_arabic_rewrites_matching_roman_heading(self):
+        """A configured numeral style wins over a mixed source heading."""
+        opening = "En el corazón del bosque había un pequeño claro."
+        text = f"CAPÍTULO III\n\n{opening}\n\nEl claro era muy angosto."
+        heading, subtitle, body = detect_chapter_heading(
+            text,
+            chapter_number=3,
+            heading_config={
+                "label": "Capítulo",
+                "numeral_style": "arabic",
+                "promote_subtitles": False,
+            },
+        )
+        assert heading == "Capítulo 3"
+        assert subtitle == ""
+        assert body.startswith(opening)
+
+    def test_explicit_style_numbers_from_the_heading_not_the_file(self):
+        """Without a manifest chapter_number is a file position, off by a preface."""
+        heading, _, _ = detect_chapter_heading(
+            "CAPÍTULO III\n\nCuerpo.",
+            chapter_number=2,
+            heading_config={"label": "Capítulo", "numeral_style": "arabic"},
+        )
+        assert heading == "Capítulo 3"
+
+    def test_explicit_style_falls_back_to_chapter_number_for_a_bad_numeral(self):
+        heading, _, _ = detect_chapter_heading(
+            "CAPÍTULO IIII\n\nCuerpo.",
+            chapter_number=4,
+            heading_config={"label": "Capítulo", "numeral_style": "arabic"},
+        )
+        assert heading == "Capítulo 4"
+
+    def test_explicit_roman_rewrites_an_arabic_heading(self):
+        heading, _, _ = detect_chapter_heading(
+            "Capítulo 3\n\nCuerpo.",
+            chapter_number=3,
+            heading_config={"label": "Capítulo", "numeral_style": "roman"},
+        )
+        assert heading == "Capítulo III"
+
+    def test_omitted_numeral_style_keeps_source_heading(self):
+        text = "CAPÍTULO III\n\nEl título\n\nCuerpo."
+        heading, subtitle, body = detect_chapter_heading(
+            text,
+            chapter_number=3,
+            heading_config={"label": "Capítulo"},
+        )
+        assert heading == "CAPÍTULO III"
+        assert subtitle == "El título"
+        assert "El título" not in body
+
+    def test_explicit_style_does_not_rewrite_a_different_label(self):
+        text = "SERMÓN I.\n\nHay un Dios.\n\nCuerpo."
+        heading, subtitle, body = detect_chapter_heading(
+            text,
+            chapter_number=1,
+            heading_config={"label": "Capítulo", "numeral_style": "arabic"},
+        )
+        assert heading == "SERMÓN I."
+        assert subtitle == "Hay un Dios."
+        assert body == "Cuerpo."
+
     def test_promote_subtitles_default_still_promotes_title(self):
         """Default (true) still lifts a short title line to subtitle."""
         text = "Capítulo 1\n\nANTES DE LA TORMENTA\n\nBody paragraph."

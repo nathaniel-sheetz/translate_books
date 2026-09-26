@@ -814,6 +814,15 @@ quotes, and a plan is not revalidated by `--select`. Passing both judges to *one
 avoids the problem entirely; within a run, a fix an earlier judge superseded is reported in
 `failed[]` with a warning rather than forced into an approximate span.
 
+**Applied findings are marked `applied`.** Each finding `apply` splices in gets an `applied`
+feedback mark (reported as `applied_marked`), which is what takes it off the reader — without it,
+an applied fix keeps showing in the end-of-chapter bin, or still tints its sentence. It is a
+machine label, **not** `resolved`: `resolved` is the human "real defect" label precision and the
+triage floor are scored from, so never write it on the user's behalf. For fixes applied before the
+mark existed, `run_judges.py mark-applied --project <slug> --dry-run` shows what the audit log can
+backfill; drop `--dry-run` to write it. A fix you made by hand (a reader correction for a finding
+apply withheld) is not in the judge rows it reads — the user marks that one *fixed* in the reader.
+
 9c. **Refresh the badges.** Applying stale-marks each edited chunk's `evaluations/<chunk>.json`
 (a fixed finding must not keep asserting a failure). The marker is written at the **top level** of
 that file — `stale`, `stale_since`, `stale_reason`, *not* inside `judges[<judge>]` next to the

@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from ebooklib import epub
 
+from src.book_splitter import roman_to_int
 from src.utils.text_utils import is_caption_block, strip_caption_marker
 from src.utils.verse import is_verse_block
 
@@ -203,6 +204,15 @@ def _is_roman_numeral(token: str) -> bool:
     return bool(token) and bool(_ROMAN_NUMERAL_RE.fullmatch(token))
 
 
+def _heading_numeral_value(token: str) -> Optional[int]:
+    """The chapter number a heading's own numeral states (``III`` -> 3), else None."""
+    if token.isdigit():
+        return int(token) or None
+    if _is_roman_numeral(token):
+        return roman_to_int(token)
+    return None
+
+
 def _normalize_allcaps_title(text: str) -> str:
     """Title-case an ALL-CAPS subtitle; leave mixed-/lower-case text alone.
 
@@ -317,6 +327,15 @@ def detect_chapter_heading(
     promotion (numeral-only books whose short opening paragraphs would
     otherwise become a spurious ``<h2>``).
 
+    When ``heading_config["numeral_style"]`` is set explicitly and the
+    detected label matches the resolved label (``heading_config["label"]``,
+    else the language default; case-insensitive), the heading's own numeral
+    is rewritten in that style (``chapter_number`` is used only when the
+    numeral does not parse). A source line of ``CAPÍTULO III`` with
+    ``{"label": "Capítulo", "numeral_style": "arabic"}`` becomes
+    ``Capítulo 3`` whatever ``chapter_number`` says. Labels that do not match (for example ``Sermón``) are
+    left as written. Omitting ``numeral_style`` preserves the source numeral.
+
     Returns:
         (heading, subtitle, body) where heading/subtitle may be ''
         if no heading was detected and synthesis was not requested.
@@ -332,7 +351,32 @@ def detect_chapter_heading(
     heading_match = _HEADING_RE.match(first_line)
 
     if heading_match:
-        heading = first_line
+        detected_label = (heading_match.group(1) or "").strip()
+        cfg_label = cfg["label"].strip()
+        explicit_style = None
+        if heading_config and heading_config.get("numeral_style") in (
+            "arabic",
+            "roman",
+        ):
+            explicit_style = heading_config["numeral_style"]
+        # Honor an explicit numeral style for this book's own chapter label.
+        # "CAPÍTULO III" with label "Capítulo" and style "arabic" becomes
+        # "Capítulo 3". A different label ("Sermón I") is left untouched.
+        # The number comes from the heading itself: chapter_number can be a
+        # file position (no manifest) and be off by a preface.
+        number = _heading_numeral_value(heading_match.group(2))
+        if number is None:
+            number = chapter_number
+        if (
+            explicit_style
+            and number is not None
+            and detected_label
+            and cfg_label
+            and detected_label.casefold() == cfg_label.casefold()
+        ):
+            heading = synthesize_chapter_heading(number, heading_config)
+        else:
+            heading = first_line
         idx = 1
     elif chapter_number is not None:
         # Synthesize a heading from the chapter number; after skipping blanks

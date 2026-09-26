@@ -345,10 +345,21 @@ and are the more valuable half: they state the threshold in the reviewer's own
 decisions rather than in adjectives.
 
 Record marks through the existing loop — the reader's four feedback buttons, or
-`web_ui.evaluations.append_feedback`. **Do not add a `feedback_type` value.** The
-four in `_ALLOWED_FEEDBACK_TYPES` are load-bearing for 879 rows, `is_dismissed`,
-and both replay scripts; a finer dismissal reason belongs as a sub-field on a
-`false_positive` record.
+`web_ui.evaluations.append_feedback`. **Do not add a human `feedback_type`.** The
+four in `HUMAN_FEEDBACK_TYPES` are load-bearing for the marked corpus,
+`is_dismissed`, and every replay script; a finer dismissal reason belongs as a
+sub-field on a `false_positive` record.
+
+There is exactly one machine label, `applied` (`MACHINE_FEEDBACK_TYPES`), and it
+exists to keep that corpus clean rather than to extend it. `run_judges.py apply`
+writes it for every finding whose fix it spliced in, so the finding stops showing
+as open work; `run_judges.py mark-applied` backfills it from
+`corrections_applied.jsonl` for fixes applied before it did. It hides a finding
+like any mark, but it is **not** a precision label: a fix applied from a
+bulk-approved plan was never individually judged real, so the scripts that score
+precision (`editorial_metrics.py`, `replay_triage.py`, the dictionary/grammar
+replays) count only `resolved` and `false_positive`, and the web feedback route
+refuses `applied` from a button. Only a person writes `resolved`.
 
 The decision gate for pass two: if source checking fires rarely and rarely
 changes a verdict, tighten `source_check` or drop it for some categories. If it

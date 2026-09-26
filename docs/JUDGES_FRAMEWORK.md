@@ -282,6 +282,15 @@ False positives can be recorded with `web_ui.evaluations.append_feedback`
 (`feedback_type` ∈ `false_positive` | `bad_message` | `missing_context_gap`),
 the same loop the coded evaluators use — useful for tuning a judge's prompt.
 
+`apply` also marks every finding whose fix it spliced in with the machine label
+`applied`, so the reader stops showing it as open work (an unmarked finding from
+an out-of-date verdict is kept on purpose, and lands in the overflow bin once its
+quote is gone). `applied` is not `resolved`: only a person writes `resolved`, and
+it is the label precision and the triage floor are scored from. Fixes applied
+before the mark existed are backfilled with `run_judges.py mark-applied --project
+<slug> [--dry-run]`, which matches each `judge:*` row of
+`corrections_applied.jsonl` to the finding it came from.
+
 `apply` stale-stamps every chunk whose text it rewrote: `stale`, `stale_since`
 and `stale_reason` at the **top level** of `evaluations/<chunk>.json`, not inside
 `judges.<judge_name>` — a fixed finding must not keep asserting a failure, and
