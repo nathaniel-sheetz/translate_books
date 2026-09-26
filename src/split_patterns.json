@@ -62,6 +62,7 @@
     "^\\s*introduction\\s*$",
     "^\\s*note\\s+to\\s+(the\\s+)?reader\\s*$",
     "^\\s*dedication\\s*$",
+    "^\\s*epigraph\\s*$",
     "^\\s*acknowledge?ments\\s*$",
     "^\\s*author'?s\\s+note\\s*$"
   ],

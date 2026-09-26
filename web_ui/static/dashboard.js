@@ -549,8 +549,74 @@
             var mode = btn.dataset.mode;
             document.getElementById('source-mode-file').style.display = mode === 'file' ? '' : 'none';
             document.getElementById('source-mode-gutenberg').style.display = mode === 'gutenberg' ? '' : 'none';
+            document.getElementById('source-mode-epub').style.display = mode === 'epub' ? '' : 'none';
         });
     });
+
+    // EPUB import (multipart upload; apiPost is JSON-only)
+    document.getElementById('btn-epub-ingest').addEventListener('click', function() {
+        var input = document.getElementById('epub-file-input');
+        if (!input.files.length) {
+            setStatus('epub-status', 'Choose an .epub file', 'error');
+            return;
+        }
+        var form = new FormData();
+        form.append('file', input.files[0]);
+        form.append('download_images', document.getElementById('epub-extract-images').checked ? 'true' : 'false');
+        var btn = document.getElementById('btn-epub-ingest');
+        btn.disabled = true;
+        setStatus('epub-status', 'Importing EPUB…', '');
+
+        fetch('/api/project/' + PROJECT + '/ingest-epub', { method: 'POST', body: form })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                btn.disabled = false;
+                if (data.error) {
+                    setStatus('epub-status', data.error, 'error');
+                    return;
+                }
+                setStatus('epub-status', 'Import complete — ' + data.words.toLocaleString() + ' words', 'success');
+                showEpubReport(data);
+                loadStatus();
+            }).catch(function() {
+                btn.disabled = false;
+                setStatus('epub-status', 'Network error', 'error');
+            });
+    });
+
+    function showEpubReport(data) {
+        var chapters = data.chapter_report || [];
+        document.getElementById('epub-report').style.display = '';
+        var html = '<table class="report-table"><thead><tr>' +
+            '<th>#</th><th>Heading</th><th>Words</th><th>Est. Chunks</th>' +
+            '</tr></thead><tbody>';
+        chapters.forEach(function(ch) {
+            html += '<tr><td>' + ch.number + '</td>' +
+                '<td>' + escapeHtml(ch.heading) + '</td>' +
+                '<td>' + (ch.words || 0).toLocaleString() + '</td>' +
+                '<td>' + (ch.chunks || 0) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        document.getElementById('epub-report-table').innerHTML = html;
+
+        var notes = [];
+        if (data.images_downloaded) notes.push(data.images_downloaded + ' images extracted');
+        if (data.subtitles) notes.push(data.subtitles + ' chapter subtitles kept as the first body line');
+        if (data.recased) notes.push(data.recased + ' all-caps lead-ins recased');
+        if (data.joins) notes.push(data.joins + ' paragraphs rejoined across page breaks');
+        (data.synthetic_headings || []).forEach(function(s) {
+            notes.push('Added heading “' + escapeHtml(s.label) + '” to unheaded front matter (' + escapeHtml(s.doc) + ')');
+        });
+        var out = notes.map(function(n) { return '<div>' + n + '</div>'; }).join('');
+        var dropped = data.dropped_docs || [];
+        if (dropped.length) {
+            out += '<div style="margin-top:6px"><strong>Dropped publisher/edition pages:</strong><ul style="margin:4px 0 0 18px">' +
+                dropped.map(function(d) {
+                    return '<li>' + escapeHtml(d.doc) + ' — ' + escapeHtml(d.reason) + '</li>';
+                }).join('') + '</ul></div>';
+        }
+        document.getElementById('epub-report-notes').innerHTML = out;
+    }
 
     // Gutenberg import
     document.getElementById('btn-gutenberg-ingest').addEventListener('click', function() {

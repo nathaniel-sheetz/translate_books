@@ -27,7 +27,8 @@ under development — reading a public page is the carve-out.
 python scripts/harness.py setup \
   --target-lang Spanish --locale mx \
   --title "<Title>" --author "<Author>"
-# add --url <gutenberg-url> if there is no local source.txt yet.
+# add --url <gutenberg-url> if there is no local source.txt yet,
+#   or --epub <path/to/Book.epub> for a publisher EPUB (title/author default to its metadata).
 # add --project <slug> only to re-run on / target a specific existing project folder.
 # --always-dialogue / --always-images pin the prompt-prefix opt-ins (see below);
 #   omit them unless the user asks — they default to auto, which is usually right.
@@ -63,7 +64,16 @@ translated — and each stripped heading is reported back under `dropped` in the
 (foreword, preface, prologue, dedication, author's note …) is auto-detected and **kept**, and it
 renders its *translated* heading in the EPUB automatically — no manual relabel.
 
-**Footnotes — keep as reader footnotes, or drop?** On the `--url` path, `setup` **imports**
+**EPUB sources (`--epub`).** Before splitting, the importer drops publisher and edition
+documents: the cover, title page, copyright/ISBN page, TOC and publisher ads. It returns
+them as `epub_dropped_docs` (`[{doc, reason}]`, with `source_format: "epub"`). **Relay that
+list to the user.** If a real page was dropped, or an ad kept, re-run `setup` with
+`--keep-doc <file>` / `--drop-doc <file>`. Headings come from the EPUB's own table of
+contents, so expect `pattern_used: "headings"`. A chapter's subtitle is kept as its first
+body line, not split on. The full decision record is `ingest_report.json`; the rules
+are in `docs/INGEST_EPUB.md`. Footnotes behave as on the `--url` path below.
+
+**Footnotes — keep as reader footnotes, or drop?** On the `--url` / `--epub` path, `setup` **imports**
 Gutenberg footnotes by default: it captures each note as a survivable `[FOOTNOTE:N]` token in the
 body plus a `footnotes.json` sidecar, and reports `footnotes_detected` (count) and `footnotes_mode`
 (`import`) in its output. **If `footnotes_detected > 0`, STOP and ask the user** — AskUserQuestion
@@ -84,7 +94,7 @@ noticeably change the reader experience and add a small paid step later (`refere
     --event footnotes_decision --data '{"decision":"drop"}'
   ```
 
-Footnote detection only happens on the `--url`/HTML path — a project seeded from a local
+Footnote detection only happens on the `--url`/`--epub` paths — a project seeded from a local
 `source.txt` can't detect or import them (`footnotes_detected` is `0`), so there is nothing to ask.
 When none are detected, persist that so later sessions skip the footnotes beat:
 ```bash

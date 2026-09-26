@@ -34,6 +34,24 @@ translatable `[FOOTNOTE:N]` tokens. Full detail: [`INGEST_GUTENBERG.md`](INGEST_
 *Harness equivalent:* `harness setup --url ...`
 *Dashboard equivalent:* Stage 1 → Gutenberg URL tab
 
+### `ingest_epub.py` — EPUB → `source.txt`
+
+```bash
+python scripts/ingest_epub.py projects/my-book/Book.epub --list          # dry run
+python scripts/ingest_epub.py projects/my-book/Book.epub --output projects/my-book/
+```
+
+Produces the same outputs as the Gutenberg importer, plus `ingest_report.json`. It
+drops publisher and edition artifacts: cover, title page, copyright/ISBN page, TOC,
+logos, spacer images. Headings are taken from the EPUB's own TOC, and CSS italics are
+carried through. The cleanup also rejoins paragraphs split across files and recases
+all-caps drop-cap lead-ins. Override decisions with `--keep-doc` / `--drop-doc`.
+Other flags: `--no-images`, `--footnotes import|drop`, `--no-recase`,
+`--boundary-images previous|next`. Full detail: [`INGEST_EPUB.md`](INGEST_EPUB.md).
+
+*Harness equivalent:* `harness setup --epub ...`
+*Dashboard equivalent:* Stage 1 → EPUB file tab
+
 ### `split_book.py` — `source.txt` → `chapters/`
 
 ```bash

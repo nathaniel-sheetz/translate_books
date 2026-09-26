@@ -72,7 +72,7 @@ The registry also classifies non-chapter sections by heading text:
 
 | Category | Recognized headings |
 |---|---|
-| **Front matter** | Preface, Foreword, Prologue, Introduction, Note to the Reader, Dedication, Acknowledgments, Author's Note |
+| **Front matter** | Preface, Foreword, Prologue, Introduction, Note to the Reader, Dedication, Epigraph, Acknowledgments, Author's Note |
 | **Back matter** | Epilogue, Afterword, Appendix, Colophon, Bibliography |
 | **Dropped** | Contents, Table of Contents, List of Illustrations, Illustrations, Title Page, Copyright, Transcriber's Note |
 

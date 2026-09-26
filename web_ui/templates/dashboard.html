@@ -108,6 +108,7 @@
                 <div class="source-mode-toggle">
                     <button class="mode-btn active" data-mode="file">File / Paste</button>
                     <button class="mode-btn" data-mode="gutenberg">Gutenberg URL</button>
+                    <button class="mode-btn" data-mode="epub">EPUB file</button>
                 </div>
 
                 <div id="source-mode-file">
@@ -145,6 +146,28 @@
                         <h3>Chapter Report</h3>
                         <div id="gutenberg-report-table"></div>
                         <div id="gutenberg-suggested-pattern" style="margin-top:8px; font-size:13px; color:#555"></div>
+                    </div>
+                </div>
+
+                <div id="source-mode-epub" style="display:none">
+                    <div class="dash-field">
+                        <label>EPUB file</label>
+                        <input type="file" id="epub-file-input" accept=".epub">
+                    </div>
+                    <div class="dash-field-row" style="margin-bottom:0">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="epub-extract-images" checked>
+                            Extract images
+                        </label>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn-primary" id="btn-epub-ingest">Import EPUB</button>
+                        <span class="status-msg" id="epub-status"></span>
+                    </div>
+                    <div id="epub-report" style="display:none; margin-top:20px">
+                        <h3>Chapter Report</h3>
+                        <div id="epub-report-table"></div>
+                        <div id="epub-report-notes" style="margin-top:8px; font-size:13px; color:#555"></div>
                     </div>
                 </div>
             </div>

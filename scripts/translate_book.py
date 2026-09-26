@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -131,12 +132,17 @@ def discover_chapters(chunks_dir: Path) -> dict[str, list[Path]]:
 
 
 def stage_ingest(args, project_dir: Path, state: dict) -> dict:
-    """Stage 1: Ingest from Gutenberg URL."""
+    """Stage 1: Ingest from a Gutenberg URL or a local EPUB."""
     from bs4 import BeautifulSoup
 
     # Import ingest functions from script
     scripts_dir = Path(__file__).parent
     sys.path.insert(0, str(scripts_dir))
+
+    epub = getattr(args, "epub", "")
+    if isinstance(epub, (str, Path)) and str(epub):
+        return _stage_ingest_epub(args, project_dir, state, Path(epub))
+
     from ingest_gutenberg import (
         Converter,
         fetch_html,
@@ -211,11 +217,47 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
     state["footnote_count"] = len(fn_matches)
     state["footnote_mode"] = fn_mode
     state["url"] = url
+    state["source_format"] = "gutenberg"
+    state.pop("source_file", None)
+    state.pop("epub_dropped_docs", None)
     # Heading-derived hints the agent can relay (parity with the web GUI's
     # Gutenberg report): a per-chapter report and an auto-suggested split
     # pattern, both computed from the HTML headings the Converter tracked.
     state["chapter_report"] = build_chapter_report(converter.chapters, word_count)
     state["suggested_pattern"] = suggest_split_pattern(converter.chapters)
+    return state
+
+
+def _stage_ingest_epub(args, project_dir: Path, state: dict, epub_path: Path) -> dict:
+    """Ingest a local EPUB (scripts/ingest_epub.py) into source.txt + sidecars."""
+    from ingest_epub import ingest_epub
+    from ingest_gutenberg import build_chapter_report, suggest_split_pattern
+
+    if not epub_path.is_file():
+        raise FileNotFoundError(f"EPUB not found: {epub_path}")
+    fn_mode = getattr(args, "footnotes", "drop") or "drop"
+    print(f"  Reading {epub_path} ...")
+    result = ingest_epub(
+        epub_path, project_dir, footnotes=fn_mode,
+        keep_docs=getattr(args, "epub_keep_docs", None) or (),
+        drop_docs=getattr(args, "epub_drop_docs", None) or (),
+    )
+    word_count = result.word_count
+    dropped = [d for d in result.docs if d["decision"] == "drop"]
+    print(f"  Ingested: {word_count:,} words, {result.images_extracted} images, "
+          f"{len(dropped)} publisher/edition documents dropped")
+
+    state["stage_completed"] = "ingest"
+    state["source_words"] = word_count
+    state["footnote_count"] = result.footnotes_count
+    state["footnote_mode"] = fn_mode
+    # No "url": fetch_missing_images treats it as a Gutenberg base URL.
+    state.pop("url", None)
+    state["source_format"] = "epub"
+    state["source_file"] = str(epub_path)
+    state["epub_dropped_docs"] = [{"doc": d["doc"], "reason": d["reason"]} for d in dropped]
+    state["chapter_report"] = build_chapter_report(result.chapters, word_count)
+    state["suggested_pattern"] = suggest_split_pattern(result.chapters)
     return state
 
 
@@ -950,6 +992,9 @@ def main():
 
     # Source
     parser.add_argument("--url", help="Gutenberg HTML URL to ingest")
+    parser.add_argument("--epub", default="",
+                        help="Local .epub file to ingest (instead of --url); publisher "
+                             "artifacts are dropped, see docs/INGEST_EPUB.md")
     parser.add_argument(
         "--project-dir",
         help="Existing project directory (skip ingest if source.txt exists)",
@@ -1068,8 +1113,13 @@ def main():
             name = Path(parsed.path).stem or "book"
             name = name.replace("-h", "").replace("_h", "")
         project_dir = Path("projects") / name
+    elif args.epub:
+        name = args.project_name or Path(args.epub).stem
+        project_dir = Path("projects") / re.sub(r"[^\w-]+", "-", name.lower()).strip("-")
     else:
-        parser.error("Either --url or --project-dir is required")
+        parser.error("Either --url, --epub or --project-dir is required")
+    if args.url and args.epub:
+        parser.error("--url and --epub are mutually exclusive")
 
     project_dir.mkdir(parents=True, exist_ok=True)
     print(f"Project directory: {project_dir}")

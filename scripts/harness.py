@@ -126,6 +126,16 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Project id (under projects/) or path; omit to name the "
                          "folder from --title (collisions get a -2, -3, ... suffix)")
     sp.add_argument("--url", default="", help="Gutenberg URL (omit if source.txt is in place)")
+    sp.add_argument("--epub", default="",
+                    help="Local .epub file to ingest instead of --url. Publisher/edition "
+                         "pages are dropped; --title/--author default to the EPUB's own "
+                         "metadata. See docs/INGEST_EPUB.md")
+    sp.add_argument("--keep-doc", dest="epub_keep_docs", action="append", default=None,
+                    metavar="DOC", help="--epub: keep a spine document the artifact "
+                                        "heuristics dropped (file name; repeatable)")
+    sp.add_argument("--drop-doc", dest="epub_drop_docs", action="append", default=None,
+                    metavar="DOC", help="--epub: drop a spine document the heuristics "
+                                        "kept (file name; repeatable)")
     sp.add_argument("--chapter-pattern", default="auto",
                     choices=_chapter_pattern_choices(), help=_CHAPTER_PATTERN_HELP)
     sp.add_argument("--custom-regex", default=None)
@@ -170,7 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          "instead of stripping it (default: strip)")
     sp.add_argument("--footnotes", dest="footnotes", choices=["import", "drop"],
                     default="import",
-                    help="Gutenberg footnote handling at ingest (URL path only): "
+                    help="Footnote handling at ingest (--url / --epub paths): "
                          "'import' (default) captures them as translatable [FOOTNOTE:N] "
                          "tokens + footnotes.json; 'drop' removes them. Detected either way "
                          "and reported as footnotes_detected/footnotes_mode.")
@@ -653,7 +663,8 @@ def _dispatch(args: argparse.Namespace):
     cmd = args.command
     if cmd == "setup":
         return flow.setup(
-            args.project, url=args.url, chapter_pattern=args.chapter_pattern,
+            args.project, url=args.url, epub=args.epub, chapter_pattern=args.chapter_pattern,
+            epub_keep_docs=args.epub_keep_docs, epub_drop_docs=args.epub_drop_docs,
             custom_regex=_resolve_custom_regex(args),
             case_sensitive_custom=args.case_sensitive_custom,
             heading_level=args.heading_level, target_language=args.target_language,
