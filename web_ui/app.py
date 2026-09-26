@@ -72,6 +72,7 @@ from web_ui import jobs
 from web_ui.evaluations import (
     CODED_EVAL_NAMES,
     FEEDBACK_STATUSES,
+    HUMAN_FEEDBACK_TYPES,
     JUDGE_STATUS_GROUPS,
     REVIEW_CODED_TYPES,
     REVIEW_JUDGE_TYPES,
@@ -6000,6 +6001,13 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
 
     if not eval_name or not feedback_type:
         return jsonify({"error": "eval_name and feedback_type are required"}), 400
+    # `applied` is written by `run_judges.py apply` alone. A person marking a
+    # finding is giving a human label, and those are what precision is scored
+    # from; letting a button post the machine label would blur the two.
+    if feedback_type not in HUMAN_FEEDBACK_TYPES:
+        return jsonify({
+            "error": f"feedback_type must be one of {sorted(HUMAN_FEEDBACK_TYPES)}",
+        }), 400
 
     try:
         issue_index = int(raw_index)
@@ -9275,6 +9283,7 @@ def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
 
     ``status`` is what became of the finding, read off the feedback mark
     :func:`_build_chapter_review` attached: ``fixed`` when you edited the prose,
+    ``applied`` when ``run_judges.py apply`` spliced the fix in,
     ``not_a_problem`` / ``bad_message`` / ``missing_context_gap`` when the
     finding itself was wrong, ``open`` when nothing has been decided.
 

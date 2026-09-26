@@ -38,9 +38,25 @@ from src.utils.text_utils import normalize_newlines
 logger = logging.getLogger(__name__)
 
 _FEEDBACK_FILENAME = "_feedback.jsonl"
-_ALLOWED_FEEDBACK_TYPES = frozenset(
+
+#: The four labels a person gives a finding. These are the ground truth the
+#: replay scripts and ``editorial_metrics`` score precision from — ``resolved``
+#: is "real defect", ``false_positive`` is "noise" — so only a human may write
+#: them. The web feedback route accepts exactly this set.
+HUMAN_FEEDBACK_TYPES = frozenset(
     {"false_positive", "bad_message", "missing_context_gap", "resolved"}
 )
+
+#: ``applied``: ``run_judges.py apply`` spliced this finding's suggestion into
+#: the text. Written by the machine, never by a button. It hides the finding
+#: like any mark (:func:`is_dismissed`), but it is *not* a precision label: a
+#: fix applied from a bulk-approved plan was never individually judged real,
+#: and counting it as ``resolved`` would feed unreviewed labels into the triage
+#: floor and per-rule precision. Every replay script whitelists
+#: ``resolved``/``false_positive``, so this label is invisible to them.
+MACHINE_FEEDBACK_TYPES = frozenset({"applied"})
+
+_ALLOWED_FEEDBACK_TYPES = HUMAN_FEEDBACK_TYPES | MACHINE_FEEDBACK_TYPES
 
 # ── Machine triage of the coded checkers ─────────────────────────────────────
 #
@@ -70,11 +86,14 @@ TRIAGE_CONFIDENCE_FLOOR = 0.85
 # What a mark means to a reader, as opposed to what it means to evaluator
 # tuning. `resolved` is the only one that says the *book* changed, and reading
 # "fixed" off a card is the point of showing marked findings at all; the other
-# three say the finding was wrong in one of three ways. The recommendations
-# screen renders these as its status chips (`web_ui/app.py:_finding_item`); an
-# unmarked finding is `open` and appears in no map.
+# three say the finding was wrong in one of three ways. `applied` also says the
+# book changed, but that a machine changed it from an approved plan rather than
+# that you ruled on this one finding. The recommendations screen renders these as
+# its status chips (`web_ui/app.py:_finding_item`); an unmarked finding is `open`
+# and appears in no map.
 FEEDBACK_STATUSES: dict[str, str] = {
     "resolved": "fixed",
+    "applied": "applied",
     "false_positive": "not_a_problem",
     "bad_message": "bad_message",
     "missing_context_gap": "missing_context_gap",
@@ -166,10 +185,11 @@ def is_dismissed(
 ) -> bool:
     """True if this finding carries any feedback label.
 
-    All four feedback types count as dismissal — the distinction between them is
-    tuning signal, not display state. A surface that wants the distinction (the
-    recommendations screen labels a finding you *fixed* differently from one you
-    called a false positive) asks :func:`feedback_mark` instead.
+    Every feedback type counts as dismissal, the machine-written ``applied``
+    included — the distinction between them is tuning signal, not display
+    state. A surface that wants the distinction (the recommendations screen
+    labels a finding you *fixed* differently from one you called a false
+    positive) asks :func:`feedback_mark` instead.
     """
     if issue is not None and (eval_name, issue_key(eval_name, issue)) in by_key:
         return True
@@ -1136,6 +1156,46 @@ def load_all_feedback_by_chunk(
     return out
 
 
+def mark_applied(
+    project_dir: Path,
+    marks: Iterable[dict[str, Any]],
+    *,
+    note: Optional[str] = None,
+) -> int:
+    """Write an ``applied`` mark for each finding whose fix was spliced in.
+
+    Each entry is ``{chunk_id, eval_name, issue_index, issue}``, ``issue`` being
+    the persisted finding dict its :func:`issue_key` is derived from. A finding
+    that already carries any mark is skipped — a human ``resolved`` or
+    ``false_positive`` is a decision this must never overwrite, and an earlier
+    ``applied`` makes the call idempotent. Returns how many marks were written.
+    """
+    marks = list(marks)
+    if not marks:
+        return 0
+    existing = load_all_feedback_by_chunk(project_dir)
+    lookups: dict[str, tuple[dict, dict]] = {}
+    written = 0
+    for mark in marks:
+        chunk_id = mark["chunk_id"]
+        eval_name = mark["eval_name"]
+        issue = mark["issue"]
+        if chunk_id not in lookups:
+            lookups[chunk_id] = build_dismissed(existing.get(chunk_id, []))
+        by_key, by_index = lookups[chunk_id]
+        if is_dismissed(by_key, by_index, eval_name, mark["issue_index"], issue):
+            continue
+        key = issue_key(eval_name, issue)
+        append_feedback(
+            project_dir, chunk_id, eval_name, mark["issue_index"], "applied",
+            message=issue.get("message"), note=note, key=key,
+        )
+        # Seen within this call too, so a finding listed twice is marked once.
+        by_key[(eval_name, key)] = {"feedback_type": "applied"}
+        written += 1
+    return written
+
+
 def append_triage(
     project_dir: Path,
     chunk_id: str,
@@ -2045,6 +2105,9 @@ __all__ = [
     "merge_judge_result",
     "mark_evaluation_stale",
     "append_feedback",
+    "mark_applied",
+    "HUMAN_FEEDBACK_TYPES",
+    "MACHINE_FEEDBACK_TYPES",
     "issue_key",
     "build_dismissed",
     "is_dismissed",

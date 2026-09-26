@@ -1091,3 +1091,245 @@ def test_errors_always_carry_the_schema(project, capsys):
     )
     assert rc == 1
     assert "unknown_ids" in payload["_schema"]
+
+
+# --- `applied` marks: an applied fix must stop showing as open --------------
+#
+# The reader hides a finding only when it carries a feedback mark, and keeps an
+# unmarked finding from an out-of-date verdict on purpose. Before `apply` wrote
+# a mark, every applied fix stayed on screen — in the overflow bin once its
+# quote was gone, or still tinting its sentence when the quote's head survived.
+
+
+def _marks(project) -> list[dict]:
+    path = project / "evaluations" / "_feedback.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _hidden(project, eval_name: str, index: int) -> bool:
+    """The gate the reader's review map applies (`_build_chapter_review`)."""
+    from web_ui.evaluations import build_dismissed, is_dismissed, load_all_feedback_by_chunk
+
+    issue = load_chunk_evaluation(project, CHUNK_ID)["judges"][eval_name]["issues"][index]
+    by_key, by_index = build_dismissed(load_all_feedback_by_chunk(project).get(CHUNK_ID, []))
+    return is_dismissed(by_key, by_index, eval_name, index, issue)
+
+
+def _select(project, *ids, judges=("dialogue",)):
+    argv = ["apply", "--project", str(project), "--scope", f"chunk:{CHUNK_ID}"]
+    for judge in judges:
+        argv += ["--judge", judge]
+    return argv + ["--select", ",".join(ids)]
+
+
+def test_apply_marks_each_applied_finding_applied(project, capsys, monkeypatch):
+    from web_ui.evaluations import issue_key
+
+    _stub_realign(monkeypatch)
+    rc, payload = _run(capsys, _select(project, f"{CHUNK_ID}#0"))
+    assert rc == 0
+    assert payload["applied_marked"] == 1
+
+    marks = _marks(project)
+    assert len(marks) == 1
+    issue = load_chunk_evaluation(project, CHUNK_ID)["judges"]["dialogue"]["issues"][0]
+    assert marks[0]["feedback_type"] == "applied"
+    assert marks[0]["eval_name"] == "dialogue"
+    assert marks[0]["issue_index"] == 0
+    assert marks[0]["issue_key"] == issue_key("dialogue", issue)
+    assert _hidden(project, "dialogue", 0)
+    # The withheld findings were not applied, so they are still open work.
+    assert not any(_hidden(project, "dialogue", i) for i in (1, 2, 3, 4))
+
+
+def test_every_judge_in_the_run_gets_its_own_mark(project, capsys, monkeypatch):
+    _stub_realign(monkeypatch)
+    _add_address_findings(
+        project,
+        [{"severity": "error", "message": "[wrong-form-tu-expected] usted expected",
+          "location": "dijo él", "suggestion": "dijo usted"}],
+    )
+    rc, payload = _run(
+        capsys,
+        _select(project, f"dialogue:{CHUNK_ID}#0", f"address:{CHUNK_ID}#0",
+                judges=("dialogue", "address")),
+    )
+    assert rc == 0
+    assert payload["applied_marked"] == 2
+    assert sorted(m["eval_name"] for m in _marks(project)) == ["address", "dialogue"]
+    assert _hidden(project, "address", 0) and _hidden(project, "dialogue", 0)
+
+
+def test_rerunning_the_select_backfills_a_missing_mark_once(project, capsys, monkeypatch):
+    """An apply that predates the mark is settled by re-running its --select."""
+    _stub_realign(monkeypatch)
+    argv = _select(project, f"{CHUNK_ID}#0")
+    _run(capsys, argv)
+    (project / "evaluations" / "_feedback.jsonl").unlink()  # as if applied before marks existed
+
+    rc, payload = _run(capsys, argv)
+    assert rc == 0
+    assert payload["already_applied"] == [f"{CHUNK_ID}#0"]
+    assert payload["applied_marked"] == 1
+
+    rc, payload = _run(capsys, argv)
+    assert payload["applied_marked"] == 0
+    assert len(_marks(project)) == 1
+
+
+def test_a_human_mark_is_never_overwritten(project, capsys, monkeypatch):
+    from web_ui.evaluations import append_feedback, issue_key
+
+    _stub_realign(monkeypatch)
+    issue = load_chunk_evaluation(project, CHUNK_ID)["judges"]["dialogue"]["issues"][0]
+    append_feedback(project, CHUNK_ID, "dialogue", 0, "resolved", key=issue_key("dialogue", issue))
+
+    rc, payload = _run(capsys, _select(project, f"{CHUNK_ID}#0"))
+    assert rc == 0
+    assert payload["applied_marked"] == 0
+    assert [m["feedback_type"] for m in _marks(project)] == ["resolved"]
+
+
+def test_applied_is_a_status_not_an_open_finding():
+    from web_ui.evaluations import FEEDBACK_STATUSES, HUMAN_FEEDBACK_TYPES
+
+    assert FEEDBACK_STATUSES["applied"] == "applied"
+    assert "applied" not in HUMAN_FEEDBACK_TYPES
+
+
+def test_triage_replay_never_reads_applied_as_ground_truth(tmp_path):
+    """`resolved` is the veto the triage floor is set from; `applied` must not count."""
+    from scripts.replay_triage import marked_findings
+    from web_ui.evaluations import append_feedback
+
+    append_feedback(tmp_path, "c1", "dictionary", 0, "applied", key="k-applied")
+    append_feedback(tmp_path, "c1", "dictionary", 1, "resolved", key="k-real")
+    assert marked_findings(tmp_path) == {("c1", "dictionary", "k-real"): "resolved"}
+
+
+def test_the_feedback_route_refuses_the_machine_label(tmp_path, monkeypatch):
+    import web_ui.app as app_module
+
+    projects_dir = tmp_path / "projects"
+    (projects_dir / "demo" / "evaluations").mkdir(parents=True)
+    monkeypatch.setattr(app_module, "_get_projects_dir", lambda: projects_dir)
+    with app_module.app.test_client() as client:
+        resp = client.post(
+            f"/api/project/demo/evaluations/{CHUNK_ID}/feedback",
+            json={"eval_name": "dialogue", "issue_index": 0, "feedback_type": "applied"},
+        )
+    assert resp.status_code == 400
+    assert not (projects_dir / "demo" / "evaluations" / "_feedback.jsonl").exists()
+
+
+# --- mark-applied: backfill from the audit log --------------------------------
+
+
+def _stamp_run(project, when: str) -> None:
+    """Give the persisted dialogue verdict a run time (real runs always carry one)."""
+    path = project / "evaluations" / f"{CHUNK_ID}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["judges"]["dialogue"]["executed_at"] = when
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _backfill_case(project, capsys, monkeypatch):
+    _stub_realign(monkeypatch)
+    _stamp_run(project, "2020-01-01T00:00:00.500000")
+    _run(capsys, _select(project, f"{CHUNK_ID}#0"))
+    (project / "evaluations" / "_feedback.jsonl").unlink()
+
+
+def test_mark_applied_dry_run_writes_nothing(project, capsys, monkeypatch):
+    _backfill_case(project, capsys, monkeypatch)
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project), "--dry-run"])
+    assert rc == 0
+    assert payload["mode"] == "dry_run"
+    assert (payload["rows"], payload["matched"], payload["would_mark"]) == (1, 1, 1)
+    assert payload["marked"] == 0
+    assert _marks(project) == []
+
+
+def test_mark_applied_backfills_and_is_idempotent(project, capsys, monkeypatch):
+    _backfill_case(project, capsys, monkeypatch)
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project)])
+    assert rc == 0
+    assert payload["marked"] == 1
+    assert payload["by_judge"]["dialogue"]["marked"] == 1
+    assert _hidden(project, "dialogue", 0)
+    assert "backfilled" in _marks(project)[0]["note"]
+
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project)])
+    assert (payload["already_marked"], payload["marked"]) == (1, 0)
+    assert len(_marks(project)) == 1
+
+
+def test_mark_applied_leaves_a_later_rerun_alone(project, capsys, monkeypatch):
+    """A verdict re-run after the apply can word a new defect identically; that
+    finding is open work, not the one the audit row fixed."""
+    _backfill_case(project, capsys, monkeypatch)
+    _stamp_run(project, "2999-01-01T00:00:00")
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project)])
+    assert rc == 0
+    assert (payload["matched"], payload["unmatched"], payload["marked"]) == (0, 1, 0)
+    assert not _hidden(project, "dialogue", 0)
+
+
+def _edit_dialogue_issues(project, edit) -> None:
+    """Rewrite the persisted dialogue findings in place, keeping the run time."""
+    path = project / "evaluations" / f"{CHUNK_ID}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    edit(data["judges"]["dialogue"]["issues"])
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_mark_applied_prefers_an_open_match_over_a_marked_one(project, capsys, monkeypatch):
+    """Two findings can match one row; the first being marked must not strand the other."""
+    from web_ui.evaluations import append_feedback
+
+    _backfill_case(project, capsys, monkeypatch)
+
+    def _twin(issues):
+        issues[0]["finding_key"] = "k-first"
+        issues.append(dict(issues[0], finding_key="k-twin"))
+
+    _edit_dialogue_issues(project, _twin)
+    append_feedback(project, CHUNK_ID, "dialogue", 0, "false_positive", key="k-first")
+
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project)])
+    assert rc == 0
+    assert (payload["matched"], payload["already_marked"], payload["marked"]) == (1, 0, 1)
+    assert _hidden(project, "dialogue", 5)
+    assert [m["feedback_type"] for m in _marks(project)] == ["false_positive", "applied"]
+
+
+def test_mark_applied_needs_an_exact_excerpt_not_a_substring(project, capsys, monkeypatch):
+    _backfill_case(project, capsys, monkeypatch)
+    _edit_dialogue_issues(project, lambda issues: issues[0].update(location="— Hola, dijo él"))
+
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project)])
+    assert rc == 0
+    assert (payload["matched"], payload["unmatched"], payload["marked"]) == (0, 1, 0)
+    assert _marks(project) == []
+
+
+def test_mark_applied_compares_an_aware_run_time(project, capsys, monkeypatch):
+    """A timezone-aware executed_at must compare, not raise TypeError."""
+    _backfill_case(project, capsys, monkeypatch)
+    _stamp_run(project, "2020-01-01T00:00:00+00:00")
+
+    rc, payload = _run(capsys, ["mark-applied", "--project", str(project)])
+    assert rc == 0
+    assert (payload["matched"], payload["marked"]) == (1, 1)
+
+
+def test_mark_applied_warns_on_a_judge_with_no_rows(project, capsys, monkeypatch):
+    _backfill_case(project, capsys, monkeypatch)
+    rc, payload = _run(
+        capsys, ["mark-applied", "--project", str(project), "--judge", "dialog", "--dry-run"],
+    )
+    assert rc == 0
+    assert payload["rows"] == 0
+    assert any("--judge dialog" in w for w in payload["warnings"])

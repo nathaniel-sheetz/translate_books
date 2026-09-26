@@ -64,6 +64,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import json
 import logging
@@ -73,6 +74,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -186,6 +188,26 @@ _STATUS_SCHEMA = {
     "suspicion rather than proof) and stale_reason",
 }
 
+_MARK_APPLIED_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "mode": "'dry_run' (nothing written) | 'marked'",
+    "project": "resolved project directory",
+    "judges": "judges whose applied rows were considered (null = every judge in the log)",
+    "scopes": "the --scope args resolved (default ['book'])",
+    "rows": "judge:* rows in corrections_applied.jsonl for chunks in scope",
+    "matched": "rows that matched a finding still persisted in evaluations/<chunk>.json — same "
+    "judge and message, the row's original_es equal to the finding's stripped location and "
+    "corrected_es to its stripped suggestion, and the verdict run (judges[<judge>].executed_at) no later than the "
+    "row's applied_at, so a same-worded finding from a LATER re-run is never marked",
+    "already_marked": "matched findings that already carry a mark (human or applied); left alone",
+    "marked": "`applied` marks written (0 on --dry-run; see would_mark)",
+    "would_mark": "--dry-run: how many marks a real run would write",
+    "unmatched": "rows with no persisted finding to mark — usually because the judge re-ran since "
+    "the apply (its new verdict no longer holds the finding) or the row came from a manual edit",
+    "by_judge": "{judge: {rows, matched, already_marked, marked|would_mark, unmatched}}",
+    "warnings": "non-fatal notes (e.g. a --judge with no rows in scope), else null",
+}
+
 _APPLY_SCHEMA = {
     "status": "'ok' | 'error' | 'partial'",
     "mode": "'plan' (nothing changed) | 'applied' | 'realign' (--realign-only: no text changed)",
@@ -227,6 +249,11 @@ _APPLY_SCHEMA = {
     "is written at the TOP LEVEL of evaluations/<chunk>.json (stale, stale_since, stale_reason) — "
     "not inside judges[<judge>] beside that judge's score/issues — and stale_reason is "
     "single-valued, so a chunk edited by two judges' applies names only the most recent",
+    "applied_marked": "applied mode: `applied` feedback marks written to evaluations/_feedback.jsonl "
+    "— one per applied finding (already_applied ones included, so re-running a --select backfills "
+    "an apply that predates the mark), skipping any finding already marked. The mark is what hides "
+    "an applied finding from the reader; it is a machine label, never counted as precision truth "
+    "(that is `resolved`, which only a person writes)",
     "archived_to": "applied mode: corrections_applied.jsonl path (shared reader/judge audit log)",
     "backups": "applied mode: pre-edit chunk backup paths under .chunk_edits/",
     "warnings": "applied mode: non-fatal notes (e.g. a fix that no longer located), else null",
@@ -824,6 +851,35 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Target language code for realignment (default: es)",
     )
     ap.add_argument("--verbose", action="store_true", help="Debug logging")
+
+    # mark-applied — backfill `applied` marks from the audit log -------------
+    mp = sub.add_parser(
+        "mark-applied",
+        help="Backfill `applied` feedback marks for judge fixes already in the book "
+        "(reads corrections_applied.jsonl; changes no text)",
+    )
+    mp.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    mp.add_argument(
+        "--judge",
+        action="append",
+        default=None,
+        metavar="JUDGE",
+        help="Only this judge's applied rows (repeatable; default: every judge in the log)",
+    )
+    mp.add_argument(
+        "--scope",
+        action="append",
+        default=None,
+        metavar="SCOPE",
+        help="Same grammar as apply; default 'book'. Repeatable.",
+    )
+    mp.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Report what would be marked and write nothing",
+    )
+    mp.add_argument("--verbose", action="store_true", help="Debug logging")
 
     # --schema on every subcommand. The blocks cost real tokens on every call
     # (_APPLY_SCHEMA alone is ~910), so they are opt-in on success — and, per
@@ -1448,7 +1504,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     )
     from src.judges.fixes import ProposedFix, classify_fix, to_correction_record
     from src.utils.file_io import load_chunk, save_chunk
-    from web_ui.evaluations import load_chunk_evaluation, mark_evaluation_stale
+    from web_ui.evaluations import load_chunk_evaluation, mark_applied, mark_evaluation_stale
 
     judges: list[str] = list(dict.fromkeys(args.judge or ["dialogue"]))
 
@@ -1589,7 +1645,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                 result = classify_fix(issue, translated_text)
                 seen_issues[qid] = {
                     "id": fid, "judge": judge, "chunk_id": chunk_id,
-                    "chapter_id": chapter_id, "issue": issue,
+                    "chapter_id": chapter_id, "issue": issue, "index": i,
                     "excerpt": result.excerpt or "", "suggestion": result.suggestion or "",
                     "text": translated_text, "rule": result.rule,
                     "severity": result.severity, "message": result.message,
@@ -1738,6 +1794,18 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     archive_path: Path | None = None
     stale_marked: list[str] = []
     backups: list[str] = []
+    applied_marked = 0
+
+    def _applied_marks(qids: list[str]) -> list[dict]:
+        return [
+            {
+                "chunk_id": seen_issues[qid]["chunk_id"],
+                "eval_name": seen_issues[qid]["judge"],
+                "issue_index": seen_issues[qid]["index"],
+                "issue": seen_issues[qid]["issue"],
+            }
+            for qid in qids
+        ]
 
     for chunk_id, entry in by_chunk.items():
         chapter_id = entry["chapter_id"]
@@ -1842,6 +1910,14 @@ def _cmd_apply(args: argparse.Namespace) -> int:
             f"({', '.join(judges_that_edited)})",
         ) is not None:
             stale_marked.append(chunk_id)
+        # Last in the sequence: an applied fix whose finding stays unmarked is
+        # shown by the reader forever — in the overflow bin once its quote is
+        # gone, or still tinting its sentence when the quote's head survived.
+        # `applied`, not `resolved`: see MACHINE_FEEDBACK_TYPES.
+        applied_marked += mark_applied(
+            project_dir, _applied_marks(chunk_applied),
+            note=f"judge-review apply {applied_at}",
+        )
 
         applied_ids.extend(chunk_applied)
         if chapter_id not in affected_chapters:
@@ -1852,6 +1928,15 @@ def _cmd_apply(args: argparse.Namespace) -> int:
             f"[apply] {chunk_id}: {len(chunk_applied)} fix(es) written + archived",
             file=sys.stderr,
         )
+
+    # An already-applied id is proved in the book (audit row or snapshot) above,
+    # so its finding is owed the same mark; an apply that predates the mark, or
+    # died before writing it, is settled by re-running the same --select.
+    # mark_applied skips anything already marked, so a repeat writes nothing.
+    applied_marked += mark_applied(
+        project_dir, _applied_marks(already_applied),
+        note=f"judge-review apply {applied_at} (already applied)",
+    )
 
     # 5. Repair pass. An id that was *already* applied, in a chapter whose
     #    alignment is older than its chunks, is the signature of a run that died
@@ -1956,6 +2041,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                 "chapters_pending_realign": pending_realign or None,
                 "epub": str(epub_path) if epub_path else None,
                 "stale_marked": stale_marked,
+                "applied_marked": applied_marked,
                 "archived_to": str(archive_path) if archive_path else None,
                 "warnings": warnings_out or None,
             },
@@ -1985,6 +2071,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                 "chapters_pending_realign": pending_realign or None,
                 "epub": str(epub_path) if epub_path else None,
                 "stale_marked": stale_marked,
+                "applied_marked": applied_marked,
                 "archived_to": str(archive_path) if archive_path else None,
                 "backups": backups,
                 "warnings": warnings_out or None,
@@ -2005,12 +2092,183 @@ def _cmd_apply(args: argparse.Namespace) -> int:
             "chapters_pending_realign": pending_realign or None,
             "epub": str(epub_path) if epub_path else None,
             "stale_marked": stale_marked,
+            "applied_marked": applied_marked,
             "archived_to": str(archive_path) if archive_path else None,
             "backups": backups,
             "warnings": warnings_out or None,
         },
         _APPLY_SCHEMA,
     )
+    return 0
+
+
+def _iso_second(value: Any) -> datetime | None:
+    """An ISO timestamp truncated to the second, or ``None`` if unparseable.
+
+    ``applied_at`` is written to the second and ``executed_at`` to the
+    microsecond; comparing them unrounded would call an apply in the same second
+    as its verdict "earlier". An aware value is brought to naive local time, the
+    form every writer uses today, so the two always compare.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed.replace(microsecond=0)
+
+
+def _cmd_mark_applied(args: argparse.Namespace) -> int:
+    """Backfill ``applied`` marks for judge fixes already spliced into the book.
+
+    ``apply`` writes the mark itself now; this is for fixes applied before it
+    did. Reads the ``judge:*`` rows of ``corrections_applied.jsonl`` and, for
+    each, finds the persisted finding it came from. Changes no text.
+
+    A row matches a finding when the judge and message agree, the row's
+    ``original_es`` equals the finding's stripped ``location`` and its
+    ``corrected_es`` its stripped ``suggestion`` (``classify_fix`` only strips
+    them), and the verdict holding the finding ran no later than
+    the row was applied. That last test is what keeps a re-run's finding safe: a
+    judge re-run after the apply can word a *new* defect identically, and that
+    finding is open work, not the one this row fixed.
+    """
+    project_dir = _resolve_project(args.project)
+
+    from web_ui.evaluations import (
+        build_dismissed,
+        is_dismissed,
+        load_all_feedback_by_chunk,
+        load_chunk_evaluation,
+        mark_applied,
+    )
+
+    scopes = args.scope or ["book"]
+    judges = list(dict.fromkeys(args.judge)) if args.judge else None
+
+    in_scope: set[str] = set()
+    try:
+        for scope in scopes:
+            for target in build_targets(project_dir, scope):
+                if target.target_type == "chunk":
+                    in_scope.add(target.id)
+    except (ScopeError, NotImplementedError, FileNotFoundError, ValueError) as exc:
+        _emit({"status": "error", "error": str(exc), "scopes": scopes}, _MARK_APPLIED_SCHEMA)
+        return 1
+
+    rows = []
+    for rec in _load_archived_records(project_dir):
+        source = str(rec.get("source") or "")
+        if not source.startswith("judge:"):
+            continue
+        judge = source.split(":", 1)[1]
+        if judges is not None and judge not in judges:
+            continue
+        if rec.get("chunk_id") not in in_scope:
+            continue
+        rows.append((judge, rec))
+
+    feedback = load_all_feedback_by_chunk(project_dir)
+    payloads: dict[str, dict] = {}
+    lookups: dict[str, tuple[dict, dict]] = {}
+    by_judge: dict[str, collections.Counter] = {}
+    marks: list[dict] = []
+    queued: set[tuple[str, str, int]] = set()
+
+    for judge, rec in rows:
+        chunk_id = rec["chunk_id"]
+        tally = by_judge.setdefault(judge, collections.Counter())
+        tally["rows"] += 1
+        if chunk_id not in payloads:
+            payloads[chunk_id] = load_chunk_evaluation(project_dir, chunk_id) or {}
+            lookups[chunk_id] = build_dismissed(feedback.get(chunk_id, []))
+        entry = (payloads[chunk_id].get("judges") or {}).get(judge)
+        issues = entry.get("issues") if isinstance(entry, dict) else None
+        run_at = _iso_second(entry.get("executed_at")) if isinstance(entry, dict) else None
+        applied_at = _iso_second(rec.get("applied_at") or rec.get("timestamp"))
+        if not issues or run_at is None or applied_at is None or run_at > applied_at:
+            tally["unmatched"] += 1
+            continue
+        original = (rec.get("original_es") or "").strip()
+        corrected = (rec.get("corrected_es") or "").strip()
+        by_key, by_index = lookups[chunk_id]
+        # classify_fix only strips location/suggestion, so equality is exact.
+        # More than one finding can match a row (templated messages); prefer
+        # one still open over counting the row already_marked on the first.
+        candidates = [
+            (i, issue) for i, issue in enumerate(issues)
+            if isinstance(issue, dict)
+            and issue.get("message") == rec.get("message")
+            and original and original == str(issue.get("location") or "").strip()
+            and corrected == str(issue.get("suggestion") or "").strip()
+        ]
+        if not candidates:
+            tally["unmatched"] += 1
+            continue
+        tally["matched"] += 1
+        open_hits = [
+            (i, issue) for i, issue in candidates
+            if (chunk_id, judge, i) not in queued
+            and not is_dismissed(by_key, by_index, judge, i, issue)
+        ]
+        if not open_hits:
+            tally["already_marked"] += 1
+            continue
+        i, issue = open_hits[0]
+        queued.add((chunk_id, judge, i))
+        tally["would_mark"] += 1
+        marks.append({"chunk_id": chunk_id, "eval_name": judge, "issue_index": i, "issue": issue})
+
+    marked = 0
+    if not args.dry_run and marks:
+        marked = mark_applied(
+            project_dir, marks, note="backfilled by run_judges.py mark-applied",
+        )
+
+    def _counts(t: collections.Counter) -> dict:
+        out = {
+            "rows": t["rows"], "matched": t["matched"],
+            "already_marked": t["already_marked"], "unmatched": t["unmatched"],
+        }
+        # Per judge, "marked" is what was planned; the total below is what was
+        # actually written, and a gap between them is reported as a warning.
+        out["would_mark" if args.dry_run else "marked"] = t["would_mark"]
+        return out
+
+    total = collections.Counter()
+    for t in by_judge.values():
+        total.update(t)
+    payload = {
+        "status": "ok",
+        "mode": "dry_run" if args.dry_run else "marked",
+        "project": str(project_dir),
+        "judges": judges,
+        "scopes": scopes,
+        "rows": total["rows"],
+        "matched": total["matched"],
+        "already_marked": total["already_marked"],
+        "unmatched": total["unmatched"],
+        "by_judge": {j: _counts(t) for j, t in sorted(by_judge.items())},
+        "warnings": None,
+    }
+    warnings_out: list[str] = [
+        f"--judge {j}: no judge:{j} rows in corrections_applied.jsonl for this scope "
+        "(misspelled judge name?)"
+        for j in (judges or []) if j not in by_judge
+    ]
+    if args.dry_run:
+        payload["would_mark"] = total["would_mark"]
+        payload["marked"] = 0
+    else:
+        payload["marked"] = marked
+        if marked != total["would_mark"]:
+            warnings_out.append(
+                f"planned {total['would_mark']} marks but wrote {marked}: a mark landed "
+                "between the scan and the write (another process marking these findings?)"
+            )
+    payload["warnings"] = warnings_out or None
+    _emit(payload, _MARK_APPLIED_SCHEMA)
     return 0
 
 
@@ -2022,6 +2280,7 @@ _DISPATCH = {
     "fanout": _cmd_fanout,
     "commit": _cmd_commit,
     "apply": _cmd_apply,
+    "mark-applied": _cmd_mark_applied,
 }
 
 

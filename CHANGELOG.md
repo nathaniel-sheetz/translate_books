@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.62.0.0] - 2026-09-25
+
+### Fixed
+- **An applied judge fix no longer stays on screen as open work.** `run_judges.py apply` rewrote the text and stale-stamped the verdict but never marked the finding it had just fixed, and the reader keeps any unmarked finding from an out-of-date verdict on purpose. So every applied fix stayed visible: in the end-of-chapter bin as "the text this quotes has changed" once its quote was gone, or still tinting its sentence when the quote's head survived the edit (a paragraph split). On five-little-peppers chapter 12, 13 of 14 dialogue findings were applied and all 14 still showed. `apply` now writes a mark for each finding it applies, as the last step of each chunk's snapshot → edit → audit → stale sequence, and reports the count as `applied_marked`; re-running a `--select` backfills the mark for ids already in the book. Dialogue, address and editorial all go through this path.
+
+### Added
+- **`applied`, a machine-written feedback label, kept apart from `resolved`.** `resolved` is the human "real defect" label that `replay_triage.py` sets the triage floor from and `editorial_metrics.py` and the dictionary/grammar replays score precision from; a fix applied from a bulk-approved plan was never individually judged, so writing `resolved` would have fed unreviewed labels into those numbers. `applied` hides a finding like any mark, maps to the recommendations screen's existing *Applied* status, and is invisible to every replay script (they whitelist `resolved`/`false_positive`). The web feedback route refuses it — only `apply` writes it. `HUMAN_FEEDBACK_TYPES` / `MACHINE_FEEDBACK_TYPES` in `web_ui/evaluations.py` name the split.
+- **`run_judges.py mark-applied`** backfills `applied` marks for fixes applied before `apply` wrote them. It reads the `judge:*` rows of `corrections_applied.jsonl` and matches each to the persisted finding by judge, message and the exact excerpt and suggestion, and only when the verdict ran no later than the row was applied — a verdict re-run afterwards can word a *new* defect identically, and that one is open work. When two findings match one row it marks the one still open. Changes no text; `--dry-run` reports matched / unmatched / already-marked counts per judge, and a `--judge` with no rows in scope comes back with a warning rather than a silent zero.
+- **An explicit `numeral_style` now restyles a source chapter heading, not just a synthesized one.** With `{"label": "Capítulo", "numeral_style": "arabic"}` a chapter that opens `CAPÍTULO III` builds as `Capítulo 3`, so a book whose source mixes numeral styles comes out consistent. The number is read from the heading itself (falling back to the chapter number only when it does not parse), because without a chapter manifest the chapter number is a file position and a preface would shift it by one. Headings under a different label (`SERMÓN I.`) and books that leave `numeral_style` unset keep the source heading as written.
+
 ## [0.61.0.0] - 2026-09-20
 
 ### Added
