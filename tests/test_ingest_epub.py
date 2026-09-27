@@ -330,6 +330,14 @@ class TestHeadingsAndNav:
         result = ingest_epub(make_epub(tmp_path / "b.epub", docs), tmp_path / "p")
         assert "Before after." in result.text
 
+    def test_italic_font_family_class_becomes_underscores(self, tmp_path):
+        """Living Book Press marks italics with an italic font, not font-style."""
+        docs = {"c1.xhtml": '<h1>One</h1><p>The <span class="em">love</span> of animals.</p>'}
+        css = ('@font-face { font-family: "GandhiSerif-Italic"; src: url("../fonts/g.otf"); }\n'
+               ".em { font-family: GandhiSerif-Italic; }")
+        result = ingest_epub(make_epub(tmp_path / "b.epub", docs, css=css), tmp_path / "p")
+        assert "The _love_ of animals." in result.text
+
 
 class TestFootnotes:
     @pytest.fixture
@@ -374,6 +382,27 @@ class TestHelpers:
                ".Off { font-style: normal }")
         got = parse_italic_classes([css])
         assert got == {"Italic": {"span"}, "Em": {"*"}, "Other": {"em"}}
+
+    def test_parse_italic_classes_from_italic_font_family(self):
+        css = (
+            # Faces: an italic file with no font-style, an explicit italic face,
+            # and a family with both a normal and an italic face.
+            '@font-face { font-family: "Body"; src: url("../fonts/BodyItalic.ttf"); }'
+            '@font-face { font-family: "Slanted"; font-style: italic; src: url("s.ttf"); }'
+            '@font-face { font-family: "Serif"; src: url("Serif.ttf"); }'
+            '@font-face { font-family: "Serif"; font-style: italic; src: url("Serif-Italic.ttf"); }'
+            ".em { font-family: GandhiSerif-Italic; }"
+            "span.em1 { font-family: 'CambriaItalic', serif; }"
+            ".it { font-family: Body; } .sl { font-family: Slanted; }"
+            ".plain { font-family: Serif; } .reg { font-family: Cambria; }"
+            # A later non-italic family does not cancel an earlier font-style,
+            # and a later non-italic family does cancel an earlier italic one.
+            ".keep { font-style: italic; } .keep { font-family: Cambria; }"
+            ".swap { font-family: CambriaItalic; } .swap { font-family: Cambria; }"
+        )
+        got = parse_italic_classes([css])
+        assert got == {"em": {"*"}, "em1": {"span"}, "it": {"*"}, "sl": {"*"},
+                       "keep": {"*"}}
 
     def test_recase_keeps_caps_only_acronym(self):
         text = "TITLE\n\nNASA ENGINEERS built it.\n\nThey said NASA would call the engineers."

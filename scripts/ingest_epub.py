@@ -375,7 +375,43 @@ class EpubPackage:
 
 _CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
 _FONT_STYLE_RE = re.compile(r"font-style\s*:\s*(italic|oblique|normal)", re.I)
+_FONT_FAMILY_RE = re.compile(r"font-family\s*:\s*([^;]+)", re.I)
+_FONT_SRC_RE = re.compile(r"url\(\s*['\"]?([^'\")]+)", re.I)
+_ITALIC_NAME_RE = re.compile(r"italic|oblique", re.I)
 _SIMPLE_SEL_RE = re.compile(r"^([a-zA-Z][\w-]*|\*)?((?:\.[\w-]+)+)$")
+
+
+def _first_family(body: str) -> str | None:
+    m = _FONT_FAMILY_RE.search(body)
+    if not m:
+        return None
+    return m.group(1).split(",")[0].strip().strip("'\"").strip().casefold() or None
+
+
+def _italic_font_families(css_texts: list[str]) -> set[str]:
+    """Families whose every ``@font-face`` is an italic face.
+
+    A face is italic by its ``font-style``, or, when it declares none, by an
+    italic/oblique font file name. A family with both a normal and an italic
+    face (the standard two-rule pattern) is not italic on its own.
+    """
+    faces: dict[str, list[bool]] = defaultdict(list)
+    for css in css_texts:
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        for sel_text, body in _CSS_RULE_RE.findall(css):
+            if sel_text.strip().lower() != "@font-face":
+                continue
+            family = _first_family(body)
+            if not family:
+                continue
+            m = _FONT_STYLE_RE.search(body)
+            if m:
+                italic = m.group(1).lower() != "normal"
+            else:
+                italic = any(_ITALIC_NAME_RE.search(u.rsplit("/", 1)[-1])
+                             for u in _FONT_SRC_RE.findall(body))
+            faces[family].append(italic)
+    return {f for f, flags in faces.items() if all(flags)}
 
 
 def parse_italic_classes(css_texts: list[str]) -> dict[str, set]:
@@ -383,19 +419,28 @@ def parse_italic_classes(css_texts: list[str]) -> dict[str, set]:
 
     Only the last compound of each selector is considered and only when it is a
     plain ``tag.class`` / ``.class``; that covers the generated stylesheets
-    publishers ship (InDesign, Sigil, Calibre). Later rules override earlier
-    ones, so ``font-style: normal`` switches a class back off.
+    publishers ship (InDesign, Sigil, Calibre). A class is italic by
+    ``font-style`` or by pointing at an italic font family
+    (``font-family: CambriaItalic``, or a family whose ``@font-face`` rules are
+    all italic faces). The two properties cascade separately, each last rule
+    winning, so ``font-style: normal`` switches off a ``font-style`` italic but
+    a later non-italic ``font-family`` does not.
     """
-    result: dict[str, set] = defaultdict(set)
+    italic_families = _italic_font_families(css_texts)
+    style_state: dict[tuple[str, str], bool] = {}
+    family_state: dict[tuple[str, str], bool] = {}
     for css in css_texts:
         css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
         for sel_text, body in _CSS_RULE_RE.findall(css):
             if sel_text.strip().startswith("@"):
                 continue
             m = _FONT_STYLE_RE.search(body)
-            if not m:
+            style = None if not m else m.group(1).lower() != "normal"
+            family_name = _first_family(body)
+            family = None if family_name is None else bool(
+                _ITALIC_NAME_RE.search(family_name) or family_name in italic_families)
+            if style is None and family is None:
                 continue
-            italic = m.group(1).lower() != "normal"
             for sel in sel_text.split(","):
                 last = re.split(r"[\s>+~]+", sel.strip())[-1]
                 sm = _SIMPLE_SEL_RE.match(last)
@@ -403,11 +448,15 @@ def parse_italic_classes(css_texts: list[str]) -> dict[str, set]:
                     continue
                 tag = (sm.group(1) or "*").lower()
                 for cls in sm.group(2).strip(".").split("."):
-                    if italic:
-                        result[cls].add(tag)
-                    else:
-                        result[cls].discard(tag)
-    return {k: v for k, v in result.items() if v}
+                    if style is not None:
+                        style_state[(cls, tag)] = style
+                    if family is not None:
+                        family_state[(cls, tag)] = family
+    result: dict[str, set] = defaultdict(set)
+    for key in style_state.keys() | family_state.keys():
+        if style_state.get(key) or family_state.get(key):
+            result[key[0]].add(key[1])
+    return dict(result)
 
 
 # ---------------------------------------------------------------------------
