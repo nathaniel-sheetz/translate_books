@@ -137,6 +137,31 @@ def test_setup_derives_folder_from_title_when_project_omitted(tmp_path: Path, mo
     assert result["chapter_count"] == 2
 
 
+def _small_epub(tmp_path: Path) -> Path:
+    from tests.test_ingest_epub import make_epub
+
+    docs = {f"c{i}.xhtml": f"<h1>Chapter {i}</h1><p>{_chapter_body(f'Walker {i}')}</p>"
+            for i in (1, 2)}
+    return make_epub(tmp_path / "book.epub", docs,
+                     metadata={"title": "Metadata Title", "creator": "Meta Author"})
+
+
+def test_setup_epub_fills_title_from_metadata_but_keeps_a_hand_set_one(tmp_path: Path):
+    epub = _small_epub(tmp_path)
+    proj = tmp_path / "epubbook"
+
+    flow.setup(str(proj), url="", epub=str(epub), target_language="Spanish")
+    cfg = state.load_config(proj)
+    assert (cfg["title"], cfg["author"]) == ("Metadata Title", "Meta Author")
+
+    cfg["title"] = "Título a mano"
+    state.save_config(proj, cfg)
+    flow.setup(str(proj), url="", epub=str(epub), target_language="Spanish")
+    cfg = state.load_config(proj)
+    assert cfg["title"] == "Título a mano"
+    assert cfg["author"] == "Meta Author"
+
+
 def test_setup_requires_project_or_title():
     """Neither --project nor --title is an actionable error, not a cryptic folder."""
     with pytest.raises(ValueError, match="--title"):

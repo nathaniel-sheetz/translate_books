@@ -214,6 +214,19 @@ class TestClassification:
         epub = make_epub(tmp_path / "b.epub", docs, ncx=[("Chapter 1", "ch1.xhtml#c", [])])
         assert _decisions(epub)["ch1.xhtml"][0] == "keep"
 
+    def test_publisher_name_matches_whole_words_only(self, tmp_path):
+        """Publisher "Tork" must not match "storky" and drop an unlisted epilogue."""
+        docs = {
+            "ch1.xhtml": '<h1 id="c">Chapter 1</h1><p>Body text.</p>',
+            "end.xhtml": "<p>And that was the storky end of the tale.</p>",
+            "ad.xhtml": "<p>Look for more from Tork this spring.</p>",
+        }
+        epub = make_epub(tmp_path / "b.epub", docs, ncx=[("Chapter 1", "ch1.xhtml#c", [])],
+                         metadata={"title": "T", "creator": "A", "publisher": "Tork"})
+        dec = _decisions(epub)
+        assert dec["end.xhtml"][0] == "keep"
+        assert dec["ad.xhtml"] == ("drop", "publisher back matter")
+
 
 # ---------------------------------------------------------------------------
 # Full ingest
@@ -338,6 +351,38 @@ class TestHeadingsAndNav:
         result = ingest_epub(make_epub(tmp_path / "b.epub", docs, css=css), tmp_path / "p")
         assert "The _love_ of animals." in result.text
 
+    def test_part_and_chapter_in_one_doc_are_not_subtitles(self, tmp_path):
+        """Chapter 2 opens its own doc, so level 2 is structural: Chapter 1
+        under "Part One" is a chapter, not Part One's subtitle."""
+        docs = {
+            "p1.xhtml": "<h1>Part One</h1><h2>Chapter 1</h2><p>Alpha.</p>",
+            "c2.xhtml": "<h2>Chapter 2</h2><p>Beta.</p>",
+            "p2.xhtml": "<h1>Part Two</h1><h2>Chapter 3</h2><p>Gamma.</p>",
+            "c4.xhtml": "<h2>Chapter 4</h2><p>Delta.</p>",
+        }
+        result = ingest_epub(make_epub(tmp_path / "b.epub", docs), tmp_path / "p")
+        assert result.subtitles == []
+        assert [(c["level"], c["heading"]) for c in result.chapters] == [
+            (1, "Part One"), (2, "Chapter 1"), (2, "Chapter 2"),
+            (1, "Part Two"), (2, "Chapter 3"), (2, "Chapter 4")]
+
+    def test_heading_text_normalized_like_source(self, tmp_path):
+        """A soft hyphen or ligature in a heading must not break the outline match."""
+        docs = {"c1.xhtml": "<h1>Chap­ter Oﬁve</h1><p>Body.</p>"}
+        out = tmp_path / "p"
+        ingest_epub(make_epub(tmp_path / "b.epub", docs), out)
+        outline = json.loads((out / "headings.json").read_text(encoding="utf-8"))["headings"]
+        assert outline == [{"level": 1, "text": "Chapter Ofive"}]
+        assert "\nChapter Ofive\n" in "\n" + (out / "source.txt").read_text(encoding="utf-8")
+
+    def test_unsafe_image_names_stay_inside_images(self, tmp_path):
+        docs = {"c1.xhtml": '<h1>One</h1><p>Text.</p><p><img src="../Images/G:evil.png" alt=""/></p>'}
+        epub = make_epub(tmp_path / "b.epub", docs, images={"G:evil.png": _png()})
+        out = tmp_path / "p"
+        result = ingest_epub(epub, out)
+        assert [p.name for p in (out / "images").iterdir()] == ["G_evil.png"]
+        assert "[IMAGE:images/G_evil.png]" in result.text
+
 
 class TestFootnotes:
     @pytest.fixture
@@ -439,7 +484,18 @@ class TestHelpers:
     def test_assign_image_names(self):
         names = assign_image_names(["A/img.jpg", "B/img.jpg", "A/cover.jpg"])
         assert names == {"A/img.jpg": "img.jpg", "B/img.jpg": "B_img.jpg",
-                         "A/cover.jpg": "source_cover.jpg"}
+                         "A/cover.jpg": "img_cover.jpg"}
+
+    def test_assign_image_names_sanitizes_and_avoids_cover_slot(self):
+        names = assign_image_names(["I/G:evil.png", "I/a]b.png", "I/..x.png",
+                                    "I/source_cover.jpg"])
+        assert names == {"I/G:evil.png": "G_evil.png", "I/a]b.png": "a_b.png",
+                         "I/..x.png": "x.png", "I/source_cover.jpg": "img_source_cover.jpg"}
+
+    def test_recase_stops_at_sentence_end(self):
+        text = "TITLE\n\nSTOP THIEF! STOP!"
+        out, changes = recase_lead_ins(text, ["TITLE"], set())
+        assert out == text and changes == []
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +567,9 @@ class TestWebRoute:
         assert {d["doc"] for d in body["dropped_docs"]} == {
             "cover.xhtml", "title.xhtml", "copyright.xhtml", "toc.xhtml"}
         assert (proj / "source.txt").exists() and (proj / "headings.json").exists()
-        assert (proj / "My_Book.epub").exists()
+        # Stored outside the root, where *.epub means the built translation.
+        assert (proj / "source" / "source.epub").exists()
+        assert not list(proj.glob("*.epub"))
         config = json.loads((proj / "project.json").read_text(encoding="utf-8"))
         assert config["source_format"] == "epub"
 
@@ -521,3 +579,39 @@ class TestWebRoute:
                          data={"file": (io.BytesIO(b"x"), "book.txt")},
                          content_type="multipart/form-data")
         assert rv.status_code == 400
+
+    def test_rejects_junk_and_keeps_nothing(self, client):
+        client, proj = client
+        rv = client.post("/api/project/p1/ingest-epub",
+                         data={"file": (io.BytesIO(b"not a zip"), "小说.epub")},
+                         content_type="multipart/form-data")
+        assert rv.status_code == 400
+        assert "Not a valid EPUB" in rv.get_json()["error"]
+        assert not list(proj.rglob("*.epub*"))
+
+    def test_accepts_non_latin_file_name(self, client, publisher_epub):
+        client, proj = client
+        with open(publisher_epub, "rb") as fh:
+            rv = client.post("/api/project/p1/ingest-epub",
+                             data={"file": (fh, "小说.epub")},
+                             content_type="multipart/form-data")
+        assert rv.status_code == 200, rv.get_json()
+        assert (proj / "source" / "source.epub").exists()
+
+    def test_imports_footnotes_and_clears_gutenberg_url(self, client, tmp_path):
+        client, proj = client
+        (proj / "project.json").write_text(
+            json.dumps({"gutenberg_url": "https://www.gutenberg.org/ebooks/1"}), encoding="utf-8")
+        docs = {"c1.xhtml": ('<h1>One</h1><p>A claim<a epub:type="noteref" href="#n1">1</a>.</p>'
+                             '<aside epub:type="footnote" id="n1"><p>The note.</p></aside>')}
+        epub = make_epub(tmp_path / "noted.epub", docs)
+        with open(epub, "rb") as fh:
+            rv = client.post("/api/project/p1/ingest-epub",
+                             data={"file": (fh, "noted.epub")},
+                             content_type="multipart/form-data")
+        assert rv.status_code == 200, rv.get_json()
+        assert rv.get_json()["footnotes"] == 1
+        assert (proj / "footnotes.json").exists()
+        config = json.loads((proj / "project.json").read_text(encoding="utf-8"))
+        assert "gutenberg_url" not in config
+        assert config["source_file"] == "source/source.epub"

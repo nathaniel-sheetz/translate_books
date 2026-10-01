@@ -3607,6 +3607,8 @@ def project_ingest_gutenberg(project_id):
         # Save metadata into project config
         config = _load_project_config(project_id)
         config["gutenberg_url"] = url
+        config.pop("source_file", None)
+        config.pop("source_format", None)
         config["suggested_split_pattern"] = pattern
         config["gutenberg_chapter_report"] = report
         _save_project_config(project_id, config)
@@ -3632,9 +3634,10 @@ def project_ingest_epub(project_id):
     upload = request.files.get("file")
     if upload is None or not upload.filename:
         return jsonify({"error": "No EPUB file provided"}), 400
-    from werkzeug.utils import secure_filename
-    filename = secure_filename(upload.filename) or "book.epub"
-    if not filename.lower().endswith(".epub"):
+    # Check the extension on the raw name: secure_filename strips non-ASCII,
+    # so "小说.epub" would become "epub". The upload is never saved under
+    # this name (fixed path below), so it needs no sanitizing.
+    if not upload.filename.lower().endswith(".epub"):
         return jsonify({"error": "Expected an .epub file"}), 400
     download_images = (request.form.get("download_images", "true").lower() != "false")
 
@@ -3648,18 +3651,29 @@ def project_ingest_epub(project_id):
         _spec.loader.exec_module(_mod)
 
         project_dir = _resolve_project_dir(project_id)
-        project_dir.mkdir(parents=True, exist_ok=True)
-        epub_path = project_dir / filename
-        upload.save(str(epub_path))
+        # Kept out of the project root: project_dir/*.epub means "the built
+        # translation" to the Export tab, download and retranslate snapshots.
+        source_dir = project_dir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        epub_path = source_dir / "source.epub"
+        staged = source_dir / "source.epub.upload"
+        upload.save(str(staged))
+        import zipfile
+        if not zipfile.is_zipfile(staged):
+            staged.unlink(missing_ok=True)
+            return jsonify({"error": "Not a valid EPUB (zip) file"}), 400
+        staged.replace(epub_path)
 
-        result = _mod.ingest_epub(epub_path, project_dir, extract_images=download_images)
+        result = _mod.ingest_epub(epub_path, project_dir, footnotes="import",
+                                  extract_images=download_images)
         report = _mod.build_chapter_report(result.chapters, result.word_count)
         pattern = _mod.suggest_split_pattern(result.chapters)
         dropped = [{"doc": d["doc"], "reason": d["reason"]}
                    for d in result.docs if d["decision"] == "drop"]
 
         config = _load_project_config(project_id)
-        config["source_file"] = filename
+        config.pop("gutenberg_url", None)  # else "Fetch missing images" hits the old URL
+        config["source_file"] = "source/source.epub"
         config["source_format"] = "epub"
         config["suggested_split_pattern"] = pattern
         config["gutenberg_chapter_report"] = report
@@ -3672,6 +3686,7 @@ def project_ingest_epub(project_id):
             "suggested_pattern": pattern,
             "images_downloaded": result.images_extracted,
             "images_skipped": 0,
+            "footnotes": result.footnotes_count,
             "dropped_docs": dropped,
             "subtitles": len(result.subtitles),
             "synthetic_headings": result.synthetic_headings,

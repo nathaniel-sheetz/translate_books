@@ -9,10 +9,10 @@ way it drops publisher and edition artifacts.
 
 ```bash
 # Dry run: show every spine document and whether it will be kept, and why
-python scripts/ingest_epub.py "projects/mybook/Book.epub" --list
+python scripts/ingest_epub.py "projects/mybook/source/Book.epub" --list
 
 # Ingest
-python scripts/ingest_epub.py "projects/mybook/Book.epub" --output projects/mybook/
+python scripts/ingest_epub.py "projects/mybook/source/Book.epub" --output projects/mybook/
 
 # Override a decision (file name, path, or manifest id; repeatable)
 python scripts/ingest_epub.py Book.epub --output projects/mybook/ \
@@ -24,6 +24,10 @@ python scripts/ingest_epub.py Book.epub --output projects/mybook/ \
     --no-recase              # keep "THE black yearling" lead-ins verbatim
     --boundary-images next   # plates between chapters open the next chapter
 ```
+
+Keep the source EPUB **out of the project root** (e.g. in `source/`): a `*.epub` there
+is taken to be the built translation by the Export tab, the download endpoint, and
+retranslate snapshots.
 
 **Harness:** `python scripts/harness.py setup --epub Book.epub` runs ingest and split in
 one step. `--title` and `--author` default to the EPUB's own metadata, and `--keep-doc`

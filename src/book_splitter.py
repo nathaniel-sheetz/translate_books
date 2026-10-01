@@ -1301,6 +1301,12 @@ def split_book_into_chapters(
     # behavior; only this path is affected.
     kind_overrides: dict[int, Tuple[SectionKind, str]] = {}
     if pattern_type == "headings":
+        # Common words ("Notes.", "Index.") are only safe to match against a
+        # real outline heading; the regex paths scan every line of the last
+        # chapter, where a standalone "Notes." paragraph would end it early.
+        outline_back = back_patterns + (
+            _compile_matter_patterns("outline_back_matter_patterns")
+            if auto_detect_back_matter else [])
         for m in matches:
             heading = m.group(0)
             user_label = _matches_user_title(heading, front_matter_titles)
@@ -1315,7 +1321,7 @@ def split_book_into_chapters(
             if label is not None:
                 kind_overrides[m.start()] = ("front_matter", label)
                 continue
-            label = _matches_builtin_pattern(heading, back_patterns)
+            label = _matches_builtin_pattern(heading, outline_back)
             if label is not None:
                 kind_overrides[m.start()] = ("back_matter", label)
 

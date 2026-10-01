@@ -85,10 +85,12 @@ The backend fetches the HTML, strips PG boilerplate (headers/footers), converts 
 ### EPUB file
 
 Upload a publisher `.epub`. The **Extract images** checkbox is on by default. The file
-is saved into the project directory and converted by `scripts/ingest_epub.py` (see
-[INGEST_EPUB.md](INGEST_EPUB.md)). The report adds several lines below the chapter
-table:
+is saved as `source/source.epub` (never the project root, where `*.epub` means the
+built translation) and converted by `scripts/ingest_epub.py` with footnotes imported
+(see [INGEST_EPUB.md](INGEST_EPUB.md)). The report adds several lines below the
+chapter table:
 
+- the number of footnotes imported
 - the publisher and edition pages that were dropped, each with its reason
 - the subtitles kept as first body lines
 - the lead-ins that were recased
@@ -100,7 +102,7 @@ Stage 2 splits on the EPUB's own table of contents (`headings.json`).
 **APIs:**
 - `POST /api/project/<id>/ingest` — accepts multipart file upload or JSON `{ "text": "..." }`
 - `POST /api/project/<id>/ingest-gutenberg` — `{ "url": "...", "download_images": true }` → `{ "ok": true, "words": N, "chapter_report": [...], "suggested_pattern": "roman", "images_downloaded": N, "images_skipped": N }`
-- `POST /api/project/<id>/ingest-epub` — multipart `file` (.epub) + `download_images` (`true`/`false`) → the same fields as `ingest-gutenberg`, plus `dropped_docs` (`[{doc, reason}]`), `subtitles`, `recased`, `joins` and `synthetic_headings`
+- `POST /api/project/<id>/ingest-epub` — multipart `file` (.epub) + `download_images` (`true`/`false`) → the same fields as `ingest-gutenberg`, plus `footnotes` (count imported), `dropped_docs` (`[{doc, reason}]`), `subtitles`, `recased`, `joins` and `synthetic_headings`
 - `GET /api/project/<id>/config` — returns project config JSON (e.g. `{ "title": "..." }`)
 - `POST /api/project/<id>/config` — saves project config; accepts `{ "title": "...", "spanish_title": "..." }`
 

@@ -264,10 +264,13 @@ def setup(
     difficulty score. Wipes any prior ``.harness/`` working state for a clean run.
 
     ``epub`` ingests a local EPUB instead of a Gutenberg ``url``; the book's own
-    title/author metadata fill in ``title``/``author`` when those are omitted.
+    title/author metadata fill in ``title``/``author`` when those are omitted
+    and the project config has none yet (a re-run never overwrites a title
+    set by hand).
     """
     if url and epub:
         raise ValueError("--url and --epub are mutually exclusive")
+    md_title = md_author = None
     if epub:
         epub_file = Path(epub)
         if not epub_file.is_file():
@@ -277,8 +280,8 @@ def setup(
                 sys.path.insert(0, str(state.REPO_ROOT))
             from scripts.ingest_epub import EpubPackage
             md = EpubPackage(epub_file).metadata
-            title = title if title is not None else (md.get("title") or None)
-            author = author if author is not None else (md.get("creator") or None)
+            md_title = md.get("title") or None
+            md_author = md.get("creator") or None
 
     # Name the project folder. An explicit --project is honored verbatim (and may
     # reuse an existing dir — the re-run-on-the-same-project path). Otherwise the
@@ -286,8 +289,8 @@ def setup(
     # of the same book lands beside the first instead of clobbering it (#22).
     if project:
         project_dir = state.resolve_project_dir(project, must_exist=False)
-    elif title:
-        project_dir = state.available_project_dir(state.slugify(title))
+    elif title or md_title:
+        project_dir = state.available_project_dir(state.slugify(title or md_title))
     else:
         raise ValueError(
             "provide --title (the folder is named from it) or --project <slug>"
@@ -308,6 +311,9 @@ def setup(
         "always_include_image_instructions": always_include_image_instructions,
     }.items():
         if value is not None:
+            cfg[key] = value
+    for key, value in (("title", md_title), ("author", md_author)):
+        if value is not None and not cfg.get(key):
             cfg[key] = value
 
     state.ensure_harness_dir(project_dir, clean=True)  # fresh drafts/prompts
@@ -381,7 +387,7 @@ def setup(
             hints["heading_outline"], hints["sections"], pstate.get("dropped", [])),
         "footnotes_detected": pstate.get("footnote_count", 0),  # notes found at ingest
         "footnotes_mode": pstate.get("footnote_mode"),  # 'import' | 'drop' | None
-        "source_format": pstate.get("source_format") or ("gutenberg" if url else None),
+        "source_format": (pstate.get("source_format") or ("gutenberg" if url else None)) if (url or epub) else None,
         # EPUB path: publisher/edition documents left out, with the reason
         # (full record in ingest_report.json). Empty on every other path.
         "epub_dropped_docs": pstate.get("epub_dropped_docs", []) if epub else [],

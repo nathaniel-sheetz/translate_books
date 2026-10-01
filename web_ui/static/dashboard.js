@@ -601,6 +601,7 @@
 
         var notes = [];
         if (data.images_downloaded) notes.push(data.images_downloaded + ' images extracted');
+        if (data.footnotes) notes.push(data.footnotes + ' footnotes imported');
         if (data.subtitles) notes.push(data.subtitles + ' chapter subtitles kept as the first body line');
         if (data.recased) notes.push(data.recased + ' all-caps lead-ins recased');
         if (data.joins) notes.push(data.joins + ' paragraphs rejoined across page breaks');

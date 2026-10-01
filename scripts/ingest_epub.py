@@ -298,6 +298,10 @@ class EpubPackage:
             if rec is None or not self.exists(rec["path"]):
                 continue
             soup = BeautifulSoup(decode_html_bytes(self.read(rec["path"])), "html.parser")
+            # data-ingest-* is our own markup; never trust copies in the source.
+            for el in soup.find_all(True):
+                for attr in [a for a in el.attrs if a.startswith("data-ingest-")]:
+                    del el[attr]
             docs.append(SpineDoc(index=i, path=rec["path"], idref=idref, linear=linear, soup=soup))
         return docs
 
@@ -488,6 +492,13 @@ def _analyze(doc: SpineDoc) -> None:
             doc.images.append(path)
 
 
+def _mentions_publisher(text: str, publisher: str) -> bool:
+    # Whole-word and >= 4 chars: a bare substring test makes publisher "Tor"
+    # match "story" and drop an unlisted epilogue as back matter.
+    return bool(publisher) and len(publisher) >= 4 and re.search(
+        r"(?<!\w)" + re.escape(publisher) + r"(?!\w)", text, re.I) is not None
+
+
 def _copyright_signals(text: str, publisher: str) -> tuple[list[str], bool]:
     found, strong = [], False
     for name, rx in _STRONG_COPYRIGHT:
@@ -497,7 +508,7 @@ def _copyright_signals(text: str, publisher: str) -> tuple[list[str], bool]:
     for name, rx in _WEAK_COPYRIGHT:
         if rx.search(text):
             found.append(name)
-    if publisher and len(publisher) >= 4 and publisher.casefold() in text.casefold():
+    if _mentions_publisher(text, publisher):
         found.append("publisher-name")
     return found, strong
 
@@ -527,8 +538,8 @@ def classify_docs(pkg: EpubPackage, docs: list[SpineDoc], *, drop_docs=(), keep_
     Explicit semantics (linear=no, the nav doc, guide/landmark/epub:type
     artifact types, artifact TOC labels) are trusted outright. Content
     heuristics (copyright signals, link-dense TOC pages, title pages, publisher
-    ads) are applied only to documents that hold no content heading, so a
-    short chapter that happens to mention a copyright can never be dropped.
+    ads) are applied only to documents the TOC does not list as content, so a
+    short TOC chapter that happens to mention a copyright can never be dropped.
     ``drop_docs`` / ``keep_docs`` override everything.
     """
     drop_docs, keep_docs = set(drop_docs), set(keep_docs)
@@ -582,8 +593,7 @@ def classify_docs(pkg: EpubPackage, docs: list[SpineDoc], *, drop_docs=(), keep_
                   and title_key in _norm(text)):
                 reason = "title page"
             elif (doc.index > last_content and doc.words < 800
-                  and (_BACK_AD_RE.search(text)
-                       or (publisher and publisher.casefold() in text.casefold()))):
+                  and (_BACK_AD_RE.search(text) or _mentions_publisher(text, publisher))):
                 reason = "publisher back matter"
             elif doc.words == 0 and not doc.images:
                 reason = "empty"
@@ -701,18 +711,29 @@ def mark_headings(pkg: EpubPackage, kept: list[SpineDoc]) -> dict:
     # recorded as its own level it would tie the title level, and the splitter
     # breaks ties toward the deeper level -- splitting on subtitles and
     # stranding every title at the end of the previous chapter.
-    subtitles = 0
+    # A level that also opens a heading on its own somewhere (no shallower
+    # heading directly above it) is structural, not a subtitle level: in
+    # "Part One / Chapter 1 ... Chapter 2" the chapters are real headings.
+    candidates: list[tuple[Tag, Tag, int]] = []
+    structural: set[int] = set()
     for doc in kept:
         prev = None
         for item in _leaf_items(doc.body):
             lvl = _heading_level_of(item) if isinstance(item, Tag) else None
             prev_lvl = _heading_level_of(prev) if isinstance(prev, Tag) else None
-            if (lvl is not None and prev_lvl is not None and prev_lvl < lvl
-                    and not prev.get("data-ingest-subtitle")
-                    and len(item.get_text(" ", strip=True).split()) <= 20):
-                item["data-ingest-subtitle"] = "1"
-                subtitles += 1
+            if lvl is not None:
+                if (prev_lvl is not None and prev_lvl < lvl
+                        and len(item.get_text(" ", strip=True).split()) <= 20):
+                    candidates.append((prev, item, lvl))
+                else:
+                    structural.add(lvl)
             prev = item
+    subtitles = 0
+    for prev, item, lvl in candidates:
+        if lvl in structural or prev.get("data-ingest-subtitle"):
+            continue
+        item["data-ingest-subtitle"] = "1"
+        subtitles += 1
     return {"marked": marked, "unresolved": unresolved, "subtitles": subtitles}
 
 
@@ -972,7 +993,7 @@ class EpubConverter(Converter):
                         walk(child)
 
         walk(node)
-        return re.sub(r"\s+", " ", "".join(parts)).strip()
+        return re.sub(r"\s+", " ", normalize_chars("".join(parts))).strip()
 
     def _is_italic(self, node: Tag, tag: str, classes: set) -> bool:
         if tag in ITALIC_TAGS:
@@ -1022,24 +1043,37 @@ class EpubConverter(Converter):
         self.parts.append(f"\n\n{placeholder}\n\n")
 
 
+def _safe_image_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).lstrip(".") or "image"
+
+
+def _safe_image_ext(path: str) -> str:
+    ext = posixpath.splitext(path)[1]
+    return ext if re.fullmatch(r"\.[A-Za-z0-9]{1,5}", ext) else ".jpg"
+
+
 def assign_image_names(paths) -> dict[str, str]:
     """Flat, unique file names for images/ (the EPUB builder stores them flat).
 
     A basename shared by two directories gets its parent folder prefixed, and
     an in-book image called cover.* is renamed so the EPUB builder's cover
-    auto-detection (images/cover.jpg) never picks up the source cover.
+    auto-detection (images/cover.jpg) never picks up the source cover (and so
+    it can't collide with source_cover.*, where the real cover is written).
+    Names come from an untrusted zip, so they are reduced to [A-Za-z0-9._-]:
+    on Windows "G:evil.png" would otherwise resolve outside images/, and ':'
+    or ']' would break the [IMAGE:...] placeholder.
     """
     names: dict[str, str] = {}
     used: set[str] = set()
     for path in paths:
         if path in names:
             continue
-        base = posixpath.basename(path)
-        if posixpath.splitext(base)[0].lower() == "cover":
-            base = "source_" + base
+        base = _safe_image_name(posixpath.basename(path))
+        if posixpath.splitext(base)[0].lower() in ("cover", "source_cover"):
+            base = "img_" + base
         name = base
         if name.lower() in used:
-            parent = posixpath.basename(posixpath.dirname(path)) or "img"
+            parent = _safe_image_name(posixpath.basename(posixpath.dirname(path)) or "img")
             name = f"{parent}_{base}"
             n = 2
             while name.lower() in used:
@@ -1227,8 +1261,14 @@ def recase_lead_ins(text: str, headings: list[str], subtitles: set) -> tuple[str
             if any(c.islower() for c in core):
                 break
             run.append((m, core))
+            # A lead-in never crosses a sentence end ("STOP THIEF! STOP!").
+            if re.search(r"[.!?]", m.group(0)[m.group(0).index(core) + len(core):]):
+                break
         letters = sum(sum(c.isalpha() for c in core) for _, core in run)
         if not run or letters < 2:
+            continue
+        # Nothing but capitals: an inscription or telegram, not a lead-in.
+        if not any(c.islower() for c in block[run[-1][0].end():]):
             continue
         pieces, last = [], 0
         for idx, (m, core) in enumerate(run):
@@ -1372,8 +1412,8 @@ def ingest_epub(
 
     cover = None
     if pkg.cover_image and pkg.exists(pkg.cover_image):
-        cover = "images/source_cover" + (posixpath.splitext(pkg.cover_image)[1] or ".jpg")
         if do_images:
+            cover = "images/source_cover" + _safe_image_ext(pkg.cover_image)
             (output_dir / cover).write_bytes(pkg.read(pkg.cover_image))
 
     dropped_images = [posixpath.basename(p) for p in conv.dropped_images]

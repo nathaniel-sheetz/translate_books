@@ -37,8 +37,8 @@ translatable `[FOOTNOTE:N]` tokens. Full detail: [`INGEST_GUTENBERG.md`](INGEST_
 ### `ingest_epub.py` — EPUB → `source.txt`
 
 ```bash
-python scripts/ingest_epub.py projects/my-book/Book.epub --list          # dry run
-python scripts/ingest_epub.py projects/my-book/Book.epub --output projects/my-book/
+python scripts/ingest_epub.py projects/my-book/source/Book.epub --list          # dry run
+python scripts/ingest_epub.py projects/my-book/source/Book.epub --output projects/my-book/
 ```
 
 Produces the same outputs as the Gutenberg importer, plus `ingest_report.json`. It

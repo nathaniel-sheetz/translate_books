@@ -1115,7 +1115,7 @@ def main():
         project_dir = Path("projects") / name
     elif args.epub:
         name = args.project_name or Path(args.epub).stem
-        project_dir = Path("projects") / re.sub(r"[^\w-]+", "-", name.lower()).strip("-")
+        project_dir = Path("projects") / (re.sub(r"[^\w-]+", "-", name.lower()).strip("-") or "book")
     else:
         parser.error("Either --url, --epub or --project-dir is required")
     if args.url and args.epub:
