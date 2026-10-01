@@ -136,6 +136,7 @@ Every stage is also a script in `scripts/`, which is what both surfaces call und
 
 ```bash
 python scripts/ingest_gutenberg.py <url> --output projects/my-book/
+python scripts/ingest_epub.py Book.epub --output projects/my-book/
 python scripts/harness.py status --project my-book
 python scripts/run_judges.py status --project my-book
 ```
@@ -219,6 +220,7 @@ pytest --cov=src tests/         # with coverage
 | [`docs/TRANSLATE_HARNESS.md`](docs/TRANSLATE_HARNESS.md) | The harness: beats, backends, cost gates, full CLI reference |
 | [`docs/LLM_PROVIDERS.md`](docs/LLM_PROVIDERS.md) | Providers, models, subscription CLIs |
 | [`docs/INGEST_GUTENBERG.md`](docs/INGEST_GUTENBERG.md) | Gutenberg HTML → `source.txt`, footnote handling |
+| [`docs/INGEST_EPUB.md`](docs/INGEST_EPUB.md) | Publisher EPUB → `source.txt`, artifact removal rules |
 | [`docs/CHAPTER_DETECTION_GUIDE.md`](docs/CHAPTER_DETECTION_GUIDE.md) | Chapter splitting patterns and the pattern registry |
 | [`docs/CHUNKING_GUIDE.md`](docs/CHUNKING_GUIDE.md) | Chunking algorithm, configuration, per-chapter overrides |
 | [`docs/PROMPT_GUIDE.md`](docs/PROMPT_GUIDE.md) | Prompt templates and how to customize them |

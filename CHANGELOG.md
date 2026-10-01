@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.63.0.0] - 2026-09-30
+
+### Added
+- **Publisher EPUBs can be ingested the way Gutenberg HTML is.** `scripts/ingest_epub.py` reads the package (spine, NCX/nav, guide, CSS) and writes `source.txt`, `headings.json`, `images/` and an `ingest_report.json` that records every keep/drop decision. Publisher and edition documents (cover, title page, copyright/ISBN page, TOC, ads) are dropped by structural signals first and content heuristics second. `--list` previews the decisions and `--keep-doc` / `--drop-doc` override them. Headings come from the book's own TOC, so class-styled titles (InDesign's `p.cta`) are found. Subtitles stay in the text but out of the outline. CSS italics carry through, including classes that only name an italic font family. Paragraphs cut across files are rejoined, a plate between chapters stays with the chapter it followed, and all-caps drop-cap lead-ins are recased from the book's own casing. See `docs/INGEST_EPUB.md`.
+- **`--epub` on `translate_book.py` and `harness setup`, and an EPUB upload tab in the dashboard.** Harness setup fills title/author from the EPUB metadata only when the project has none, so a re-run never overwrites a hand-set title. The dashboard stores the upload as `source/source.epub` and imports footnotes. It is never stored in the project root, where `*.epub` means the built translation.
+- **New back-matter headings: Glossary (including "Glossary of …"), Notes, Index, About the Author, Postscript.** Notes, Index, About the Author and Postscript are matched only against real outline headings (`outline_back_matter_patterns`), so a standalone "Notes." paragraph cannot end a Gutenberg book's last chapter on the regex path.
+
+### Changed
+- The Gutenberg `Converter` gains overridable predicates, with behavior unchanged, and no longer inserts a space between an opening quote and an italic marker.
+
+### Fixed (found in pre-ship review)
+- **Untrusted file names.** Image file names from the EPUB zip are reduced to `[A-Za-z0-9._-]`, so an entry like `G:evil.png` can no longer resolve outside `images/` on Windows or corrupt the `[IMAGE:…]` placeholder.
+- **Uploads.** An upload that isn't a zip is rejected instead of being kept. Non-Latin upload names (`小说.epub`) are accepted.
+- **Headings.**
+  - A "Part One / Chapter 1" pair no longer turns the chapter into a subtitle. A heading level that also opens a document on its own is structural.
+  - Heading text is normalized (soft hyphens, zero-width characters, ligatures) like `source.txt`, so those headings are found by the splitter.
+- **Document classification.**
+  - The publisher-name back-matter check matches whole words only, so publisher "Tor" no longer drops an epilogue that says "story".
+  - Source HTML carrying its own `data-ingest-*` attributes no longer crashes the import.
+- **Recasing.** Lead-in recasing stops at a sentence end and skips all-caps paragraphs, so "STOP THIEF! STOP!" and inscriptions are left alone.
+- **Provenance.** Switching a project between Gutenberg and EPUB sources clears the other source's provenance keys, so "Fetch missing images" no longer hits a stale Gutenberg URL.
+
 ## [0.62.0.0] - 2026-09-25
 
 ### Fixed

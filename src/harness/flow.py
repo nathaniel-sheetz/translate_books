@@ -236,6 +236,9 @@ def setup(
     project: str | None = None,
     *,
     url: str = "",
+    epub: str = "",
+    epub_keep_docs: list[str] | None = None,
+    epub_drop_docs: list[str] | None = None,
     chapter_pattern: str = "auto",
     custom_regex: str | None = None,
     target_language: str | None = None,
@@ -259,15 +262,35 @@ def setup(
 
     Chunking is deferred to ``chunk`` so it can use the glossary-informed
     difficulty score. Wipes any prior ``.harness/`` working state for a clean run.
+
+    ``epub`` ingests a local EPUB instead of a Gutenberg ``url``; the book's own
+    title/author metadata fill in ``title``/``author`` when those are omitted
+    and the project config has none yet (a re-run never overwrites a title
+    set by hand).
     """
+    if url and epub:
+        raise ValueError("--url and --epub are mutually exclusive")
+    md_title = md_author = None
+    if epub:
+        epub_file = Path(epub)
+        if not epub_file.is_file():
+            raise ValueError(f"EPUB not found: {epub}")
+        if title is None or author is None:
+            if str(state.REPO_ROOT) not in sys.path:
+                sys.path.insert(0, str(state.REPO_ROOT))
+            from scripts.ingest_epub import EpubPackage
+            md = EpubPackage(epub_file).metadata
+            md_title = md.get("title") or None
+            md_author = md.get("creator") or None
+
     # Name the project folder. An explicit --project is honored verbatim (and may
     # reuse an existing dir — the re-run-on-the-same-project path). Otherwise the
     # folder is named from the book title, suffixing on collision so a second copy
     # of the same book lands beside the first instead of clobbering it (#22).
     if project:
         project_dir = state.resolve_project_dir(project, must_exist=False)
-    elif title:
-        project_dir = state.available_project_dir(state.slugify(title))
+    elif title or md_title:
+        project_dir = state.available_project_dir(state.slugify(title or md_title))
     else:
         raise ValueError(
             "provide --title (the folder is named from it) or --project <slug>"
@@ -289,6 +312,9 @@ def setup(
     }.items():
         if value is not None:
             cfg[key] = value
+    for key, value in (("title", md_title), ("author", md_author)):
+        if value is not None and not cfg.get(key):
+            cfg[key] = value
 
     state.ensure_harness_dir(project_dir, clean=True)  # fresh drafts/prompts
     cfg["run_id"] = state.new_run_id(project_dir)  # a clean run starts a new run id
@@ -305,6 +331,9 @@ def setup(
 
     args = SimpleNamespace(
         url=url or "",
+        epub=epub or "",
+        epub_keep_docs=epub_keep_docs or [],
+        epub_drop_docs=epub_drop_docs or [],
         chapter_pattern=chapter_pattern,
         custom_regex=custom_regex,
         min_chapter_size=min_chapter_size if min_chapter_size is not None else 100,
@@ -358,6 +387,10 @@ def setup(
             hints["heading_outline"], hints["sections"], pstate.get("dropped", [])),
         "footnotes_detected": pstate.get("footnote_count", 0),  # notes found at ingest
         "footnotes_mode": pstate.get("footnote_mode"),  # 'import' | 'drop' | None
+        "source_format": (pstate.get("source_format") or ("gutenberg" if url else None)) if (url or epub) else None,
+        # EPUB path: publisher/edition documents left out, with the reason
+        # (full record in ingest_report.json). Empty on every other path.
+        "epub_dropped_docs": pstate.get("epub_dropped_docs", []) if epub else [],
         "source_words": pstate.get("source_words"),
         "suggested_pattern": pstate.get("suggested_pattern") or hints["detected"],
         "chapter_report": pstate.get("chapter_report") or _local_chapter_report(hints["sections"]),
@@ -4855,6 +4888,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "ledger": "{outline_headings, chapter_level, chapter_level_headings, sections, dropped, unlocated} — at-a-glance accounting of what became of each heading. A gap between chapter_level_headings and sections is a prompt to read `dropped`, not an error (merged numeral+title headings consume two)",
         "footnotes_detected": "count of Gutenberg footnotes found at ingest (0 if none, or on the local source.txt path which skips detection)",
         "footnotes_mode": "how footnotes were handled: 'import' (default; kept as [FOOTNOTE:N] tokens + footnotes.json) or 'drop'; null when none detected. On 'import' with footnotes_detected>0, prompt keep/drop and run `footnotes drop` to discard",
+        "source_format": "'epub' (--epub), 'gutenberg' (--url), or null when an existing source.txt was used",
+        "epub_dropped_docs": "--epub only: list of {doc, reason} for publisher/edition documents left out (cover, title page, copyright, TOC, ...). Relay it; re-run setup with --keep-doc DOC to restore a wrongly dropped page (--drop-doc for the reverse). Full record in ingest_report.json. Empty on other paths",
         "source_words": "word count of the ingested source (null on the no-URL path)",
         "suggested_pattern": "best-fit chapter pattern detected from the text (or the HTML on the URL path); compare to pattern_used to catch a wrong pick",
         "chapter_report": "per-chapter {number, heading, words, chunks} report; now populated on the local source.txt path too",

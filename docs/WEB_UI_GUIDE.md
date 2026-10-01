@@ -82,9 +82,27 @@ Import directly from a Project Gutenberg HTML page:
 
 The backend fetches the HTML, strips PG boilerplate (headers/footers), converts to clean plain text, downloads images into `projects/<id>/images/`, and writes `source.txt`. After import, a **Chapter Report** table shows detected chapters with word counts and estimated chunk counts. The detected heading pattern (roman, numeric, etc.) is saved to `project.json` and auto-applied to the Stage 2 pattern selector.
 
+### EPUB file
+
+Upload a publisher `.epub`. The **Extract images** checkbox is on by default. The file
+is saved as `source/source.epub` (never the project root, where `*.epub` means the
+built translation) and converted by `scripts/ingest_epub.py` with footnotes imported
+(see [INGEST_EPUB.md](INGEST_EPUB.md)). The report adds several lines below the
+chapter table:
+
+- the number of footnotes imported
+- the publisher and edition pages that were dropped, each with its reason
+- the subtitles kept as first body lines
+- the lead-ins that were recased
+- the paragraphs that were rejoined
+- any synthetic front-matter headings
+
+Stage 2 splits on the EPUB's own table of contents (`headings.json`).
+
 **APIs:**
 - `POST /api/project/<id>/ingest` — accepts multipart file upload or JSON `{ "text": "..." }`
 - `POST /api/project/<id>/ingest-gutenberg` — `{ "url": "...", "download_images": true }` → `{ "ok": true, "words": N, "chapter_report": [...], "suggested_pattern": "roman", "images_downloaded": N, "images_skipped": N }`
+- `POST /api/project/<id>/ingest-epub` — multipart `file` (.epub) + `download_images` (`true`/`false`) → the same fields as `ingest-gutenberg`, plus `footnotes` (count imported), `dropped_docs` (`[{doc, reason}]`), `subtitles`, `recased`, `joins` and `synthetic_headings`
 - `GET /api/project/<id>/config` — returns project config JSON (e.g. `{ "title": "..." }`)
 - `POST /api/project/<id>/config` — saves project config; accepts `{ "title": "...", "spanish_title": "..." }`
 

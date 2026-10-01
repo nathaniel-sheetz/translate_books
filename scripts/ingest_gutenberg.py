@@ -244,27 +244,16 @@ class Converter:
 
         tag = node.name.lower() if node.name else ""
 
-        if tag in SKIP_TAGS:
-            return
-
-        # Skip elements by CSS class (e.g. page number spans)
+        # Skip non-content tags and elements by CSS class (e.g. page number spans)
         classes = set(node.get("class") or [])
-        if classes & SKIP_CLASSES:
+        if self._should_skip(node, tag, classes):
             return
 
-        if tag in HEADING_TAGS:
-            text = node.get_text(separator=" ", strip=True)
-            # `separator` only joins *separate* text nodes -- it does not collapse
-            # whitespace *within* one. A hand-typeset "staircase" title
-            # (<h2>The GRASSHOPPER\nand\nthe MEASURING\nWORM</h2>) would keep its
-            # embedded newlines, which later paragraph handling reads as blank-line
-            # breaks, shattering the heading into fragments that leak into the
-            # neighboring chapters. Body text already gets this treatment in the
-            # NavigableString branch above; the heading path returns early and
-            # would otherwise skip it.
-            text = re.sub(r"\s+", " ", text).strip()
+        level = self._heading_level(node, tag)
+        if level is not None:
+            text = self._heading_text(node)
             if text:
-                self._flush_heading(tag, text)
+                self._flush_heading(level, text)
             return
 
         if tag == "img":
@@ -305,7 +294,7 @@ class Converter:
             self.parts.append("\n\n")
             return
 
-        if tag in ITALIC_TAGS:
+        if self._is_italic(node, tag, classes):
             # Render inner content into a temporary buffer, then wrap the
             # joined text with underscore markers so downstream stages
             # (chunker, LLM, EPUB builder) can carry italics through.
@@ -321,7 +310,10 @@ class Converter:
                 # Ensure the italic marker is not immediately preceded by an
                 # alphanumeric char or a closing `_`, both of which would fool
                 # the lookbehind in EM_RE into refusing the match.
-                if self.parts and self.parts[-1] and not self.parts[-1][-1].isspace():
+                # Punctuation such as an opening quote is fine: “_word_” matches.
+                if self.parts and self.parts[-1] and (
+                    self.parts[-1][-1].isalnum() or self.parts[-1][-1] == "_"
+                ):
                     self.parts.append(" ")
                 self.parts.append(f"_{inner}_")
             return
@@ -331,14 +323,41 @@ class Converter:
             self._walk(child)
 
     # ------------------------------------------------------------------
-    def _flush_heading(self, tag: str, text: str):
+    # Overridable predicates. The EPUB importer (scripts/ingest_epub.py)
+    # subclasses Converter and swaps these for CSS- and nav-aware versions;
+    # the defaults below are the Gutenberg behavior.
+    def _should_skip(self, node: Tag, tag: str, classes: set) -> bool:
+        return tag in SKIP_TAGS or bool(classes & SKIP_CLASSES)
+
+    def _heading_level(self, node: Tag, tag: str) -> int | None:
+        if tag in HEADING_TAGS:
+            return int(tag[1])
+        return None
+
+    def _heading_text(self, node: Tag) -> str:
+        text = node.get_text(separator=" ", strip=True)
+        # `separator` only joins *separate* text nodes -- it does not collapse
+        # whitespace *within* one. A hand-typeset "staircase" title
+        # (<h2>The GRASSHOPPER\nand\nthe MEASURING\nWORM</h2>) would keep its
+        # embedded newlines, which later paragraph handling reads as blank-line
+        # breaks, shattering the heading into fragments that leak into the
+        # neighboring chapters. Body text already gets this treatment in the
+        # NavigableString branch of _walk; the heading path returns early and
+        # would otherwise skip it.
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _is_italic(self, node: Tag, tag: str, classes: set) -> bool:
+        return tag in ITALIC_TAGS
+
+    # ------------------------------------------------------------------
+    def _flush_heading(self, level: int, text: str):
         # Record chapter info before emitting. `level` is the h-tag depth: it is
         # what lets the splitter anchor on the document's own outline instead of
         # re-guessing chapter boundaries by regexing the flattened text.
         current_words = _word_count("".join(self.parts))
         self.chapters.append({
             "heading": text,
-            "level": int(tag[1]) if len(tag) > 1 and tag[1].isdigit() else 0,
+            "level": level,
             "word_offset": current_words,
         })
         self.parts.append(f"\n\n{text}\n\n")
@@ -518,9 +537,11 @@ def print_report(
     images_skipped: int,
     footnotes_count: int = 0,
     footnotes_mode: str = "drop",
+    banner: str = "PROJECT GUTENBERG IMPORT",
+    split_hint: list[str] | None = None,
 ):
     print()
-    print("=== PROJECT GUTENBERG IMPORT ===")
+    print(f"=== {banner} ===")
     print(f"Source : {source}")
     if images_downloaded or images_skipped:
         img_msg = f"{images_downloaded} downloaded"
@@ -556,7 +577,10 @@ def print_report(
     rel_source = output_dir / "source.txt"
     rel_chapters = output_dir / "chapters/"
     print()
-    if pattern == "roman":
+    if split_hint:
+        for line in split_hint:
+            print(line)
+    elif pattern == "roman":
         print(f"Heading pattern: \"Chapter I / II / III ...\" -> --pattern roman")
         print("Suggested split command:")
         print(f"  python scripts/split_book.py {rel_source} \\")

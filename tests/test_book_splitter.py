@@ -92,6 +92,32 @@ class TestFrontBackMatterDetection:
         assert sections[0].label == "Preface"
         assert sections[-1].label == "Epilogue"
 
+    def test_glossary_heading_is_back_matter_but_a_glossary_sentence_is_not(self):
+        text = (
+            "Chapter I\n\n" + CHAPTER_BODY + "\n\n"
+            + "Chapter II\n\n" + CHAPTER_BODY + "\n\n"
+            + "Glossary of the words the Indians used for the animals of the woods, "
+              "gathered by the author over many summers in the northern wilderness\n\n"
+            + CHAPTER_BODY + "\n\n"
+            + "Glossary of Indian Names\n\n" + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        assert [s.kind for s in sections] == ["chapter", "chapter", "back_matter"]
+        assert sections[-1].label == "Glossary Of Indian Names"
+        assert "Glossary of the words" in sections[1].content
+
+    def test_outline_only_back_matter_words_do_not_end_the_last_chapter(self):
+        # "Notes." / "Index." are only back matter as real outline headings; on
+        # the regex path a standalone paragraph like this is chapter text.
+        text = (
+            "Chapter I\n\n" + CHAPTER_BODY + "\n\n"
+            + "Chapter II\n\n" + CHAPTER_BODY + "\n\nNotes.\n\n" + CHAPTER_BODY
+            + "\n\nIndex.\n\n" + CHAPTER_BODY
+        )
+        sections = split_book_into_chapters(text, pattern_type="roman")
+        assert [s.kind for s in sections] == ["chapter", "chapter"]
+        assert "Notes." in sections[1].content and "Index." in sections[1].content
+
     def test_user_supplied_front_matter_title(self):
         text = (
             "To the Teacher\n\n"
@@ -794,6 +820,21 @@ class TestHeadingOutlineSplit:
         assert by_title["Epilogue"] == "back_matter"
         assert by_title["Half Title"] == "chapter"
         # Chapter numbering skips the matter sections.
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2, 3, 4, 5, 6]
+
+    def test_titled_glossary_is_back_matter(self):
+        # Wilderness Ways ends with "GLOSSARY OF INDIAN NAMES." at chapter level.
+        text, outline = _outline_book(_titles(6) + [(2, "GLOSSARY OF INDIAN NAMES.")])
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline)
+        assert sections[-1].kind == "back_matter"
+        assert [s.number for s in sections if s.kind == "chapter"] == [1, 2, 3, 4, 5, 6]
+
+    def test_outline_notes_heading_is_back_matter(self):
+        text, outline = _outline_book(_titles(6) + [(2, "Notes"), (2, "Index")])
+        sections = split_book_into_chapters(
+            text, pattern_type="headings", heading_outline=outline)
+        assert [s.kind for s in sections[-2:]] == ["back_matter", "back_matter"]
         assert [s.number for s in sections if s.kind == "chapter"] == [1, 2, 3, 4, 5, 6]
 
     def test_user_declared_matter_title_is_tagged_in_place(self):

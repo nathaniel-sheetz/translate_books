@@ -72,8 +72,9 @@ The registry also classifies non-chapter sections by heading text:
 
 | Category | Recognized headings |
 |---|---|
-| **Front matter** | Preface, Foreword, Prologue, Introduction, Note to the Reader, Dedication, Acknowledgments, Author's Note |
-| **Back matter** | Epilogue, Afterword, Appendix, Colophon, Bibliography |
+| **Front matter** | Preface, Foreword, Prologue, Introduction, Note to the Reader, Dedication, Epigraph, Acknowledgments, Author's Note |
+| **Back matter** | Epilogue, Afterword, Appendix, Colophon, Bibliography, Glossary |
+| **Back matter (outline headings only)** | Notes, Index, About the Author, Postscript |
 | **Dropped** | Contents, Table of Contents, List of Illustrations, Illustrations, Title Page, Copyright, Transcriber's Note |
 
 Dropped sections are stripped by default; pass `--no-auto-strip` to keep them. Front and
