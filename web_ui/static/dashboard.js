@@ -4258,6 +4258,10 @@
             return 'Resolved: ' + level + ' — carried in the model bracket ' +
                 '[effort=' + level + ']' + source + '.';
         }
+        if (p.effort_channel === 'model_id') {
+            return 'Resolved: ' + level + ' — named by the model id itself' +
+                source + '.';
+        }
         return 'Resolved: ' + level + ' — nothing on this CLI carries it' + source + '.';
     }
 
@@ -4386,10 +4390,19 @@
             ['Projected tokens', formatTokens(data.projected_tokens) + ' — ' +
                 formatTokens(data.baseline_tokens) + '/job baseline (' +
                 (data.baseline_source || '?') + ')'],
-            ['CLI', (eff.cli || '?') + ' · ' + (eff.worker_model || '?')],
+            // Input and output are quoted apart: a model with no logged jobs has
+            // no output projection, and that must read as unknown rather than 0.
+            ['Projected output', (data.output_tokens == null ?
+                'unknown' : formatTokens(data.output_tokens)) +
+                ' — ' + (data.output_source || 'not measured')],
+            ['CLI', (eff.cli || '?') + ' · ' + (eff.worker_model || '?') +
+                (eff.worker_model_resolved &&
+                 eff.worker_model_resolved !== eff.worker_model ?
+                    ' → ' + eff.worker_model_resolved + ' (last run)' : '')],
             ['Effort', (eff.effort || 'none') + ' · ' +
                 (eff.effort_channel === 'argv' ? '--effort' :
-                 eff.effort_channel === 'model_bracket' ? 'model bracket' : 'not carried') +
+                 eff.effort_channel === 'model_bracket' ? 'model bracket' :
+                 eff.effort_channel === 'model_id' ? 'model id' : 'not carried') +
                 ' (' + (eff.effort_source || '?') + ')']
         ];
         if (data.cache) rows.push(['Prompt cache', data.cache]);

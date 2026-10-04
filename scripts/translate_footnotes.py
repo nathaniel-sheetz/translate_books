@@ -107,7 +107,8 @@ def translate_footnotes(
 def main():
     parser = argparse.ArgumentParser(description="Translate imported Gutenberg footnotes (whole book).")
     parser.add_argument("--project-dir", required=True, help="Project directory containing footnotes.json")
-    parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
+    from src.api_translator import default_provider_arg, provider_arg
+    parser.add_argument("--provider", default=default_provider_arg(), type=provider_arg)
     parser.add_argument("--model", default=None, help="Model id (defaults to the translator default)")
     parser.add_argument("--source-lang", default="English")
     parser.add_argument("--target-lang", default="Spanish")

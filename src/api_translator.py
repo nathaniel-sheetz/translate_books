@@ -8,6 +8,7 @@ real-time and batch modes.  Provider and model configuration is loaded from
 """
 
 import json
+import logging
 import os
 import time
 from datetime import datetime
@@ -34,6 +35,8 @@ from src.utils.text_utils import (
     image_placeholder_instruction,
     source_has_dialogue,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _structure_preservation_instructions(source_text: str, *, always_include_images: bool) -> str:
@@ -119,18 +122,84 @@ _FALLBACK_CONFIG = {
 }
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+LLM_CONFIG_FILE = _REPO_ROOT / "llm_config.json"
+LLM_CONFIG_EXAMPLE_FILE = _REPO_ROOT / "llm_config.example.json"
+
+
 def load_llm_config(*, force_reload: bool = False) -> dict:
-    """Load LLM provider/model configuration from ``llm_config.json``."""
+    """Load LLM provider/model configuration.
+
+    The operator's ``llm_config.json`` when present, else the checked-in
+    ``llm_config.example.json`` — the same per-user-file-then-tracked-example
+    convention as ``prompts/house_style_rules.json``. So a clone that was never
+    primed with ``cp`` runs on the catalog the repo ships, and adding a model for
+    everyone is an edit to that JSON file rather than to this module.
+    ``_FALLBACK_CONFIG`` is only the last resort for a tree with neither file.
+
+    A *present but broken* operator file still raises instead of falling back:
+    this is the catalog that decides which provider a request is billed to and
+    at what price, and quietly swapping in the example's would be worse than
+    stopping.
+    """
     global _LLM_CONFIG_CACHE
     if _LLM_CONFIG_CACHE is not None and not force_reload:
         return _LLM_CONFIG_CACHE
 
-    config_path = Path(__file__).resolve().parent.parent / "llm_config.json"
-    if config_path.exists():
-        _LLM_CONFIG_CACHE = json.loads(config_path.read_text(encoding="utf-8"))
-    else:
-        _LLM_CONFIG_CACHE = _FALLBACK_CONFIG
+    for config_path in (LLM_CONFIG_FILE, LLM_CONFIG_EXAMPLE_FILE):
+        if not config_path.exists():
+            continue
+        try:
+            _LLM_CONFIG_CACHE = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            hint = (
+                "Fix it."
+                if config_path == LLM_CONFIG_EXAMPLE_FILE
+                else f"Fix it, or remove it to fall back to {LLM_CONFIG_EXAMPLE_FILE.name}."
+            )
+            raise ValueError(f"{config_path} is not valid JSON ({exc}). {hint}") from exc
+        return _LLM_CONFIG_CACHE
+    _LLM_CONFIG_CACHE = _FALLBACK_CONFIG
     return _LLM_CONFIG_CACHE
+
+
+def provider_arg(value: str) -> str:
+    """argparse ``type=`` for ``--provider``: any provider id the config defines.
+
+    Replaces ``choices=["anthropic", "openai"]``, which rejected a provider that
+    was perfectly valid in ``llm_config.json`` (DeepInfra, or any other
+    OpenAI-compatible endpoint) before the config was ever consulted — so the
+    harness could set a book up on one and then die at ``chunk``.
+    """
+    import argparse
+
+    # argparse reports any ValueError from a `type=` as "invalid value", which
+    # turned a config that would not load into a complaint about --provider.
+    try:
+        providers = load_llm_config().get("providers", [])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    known = [p["id"] for p in providers]
+    if value not in known:
+        raise argparse.ArgumentTypeError(
+            f"unknown provider {value!r}; llm_config.json defines: {', '.join(known)}"
+        )
+    return value
+
+
+def default_provider_arg() -> str:
+    """The ``default=`` to pair with ``type=provider_arg``.
+
+    argparse runs ``type`` over a string default, so a hard-coded
+    ``"anthropic"`` made every invocation fail on a catalog that does not
+    define that id — including the ones that never call a model. The catalog's
+    own ``default_provider`` is the one id it is guaranteed to mean. A config
+    that will not load falls through to ``provider_arg``, which reports it.
+    """
+    try:
+        return get_default_provider()
+    except ValueError:
+        return "anthropic"
 
 
 def get_provider_config(provider_id: str) -> dict:
@@ -182,16 +251,45 @@ def get_default_provider() -> str:
     return load_llm_config().get("default_provider", "anthropic")
 
 
+# What an uncatalogued model is priced at. A placeholder, not a rate: it exists so
+# an estimate never raises, and :func:`get_model_pricing` announces it once per
+# model. :func:`get_pricing_table` fills it in silently: that is a listing of the
+# catalog, not a quote for a model somebody is about to run.
+_PLACEHOLDER_PRICING = {"input": 5.00, "output": 15.00}
+_PLACEHOLDER_PRICING_WARNED: set[tuple[str, str]] = set()
+
+
+def _placeholder_pricing(provider_id: str, model_id: str) -> dict:
+    """The placeholder rate, said out loud the first time each model gets it.
+
+    A model missing from the catalog still runs — the id is passed straight to
+    the provider — but its cost estimate used to be silently computed at
+    $5/$15, which reads as a real quote. ``default`` is a caller's own sentinel
+    for "no model chosen", not a model somebody forgot to price.
+    """
+    key = (provider_id, model_id)
+    if model_id and model_id != "default" and key not in _PLACEHOLDER_PRICING_WARNED:
+        _PLACEHOLDER_PRICING_WARNED.add(key)
+        logger.warning(
+            "No pricing for model %r under provider %r in llm_config.json; cost "
+            "estimates for it use a $%.2f/$%.2f per-1M placeholder. Add the model "
+            "to llm_config.json for a real quote.",
+            model_id, provider_id,
+            _PLACEHOLDER_PRICING["input"], _PLACEHOLDER_PRICING["output"],
+        )
+    return dict(_PLACEHOLDER_PRICING)
+
+
 def get_model_pricing(provider_id: str, model_id: str) -> dict:
     """Return ``{"input": ..., "output": ...}`` for the given provider/model."""
     try:
         pconfig = get_provider_config(provider_id)
     except ValueError:
-        return {"input": 5.00, "output": 15.00}
+        return _placeholder_pricing(provider_id, model_id)
     for m in pconfig.get("models", []):
         if m["id"] == model_id:
-            return m.get("pricing", {"input": 5.00, "output": 15.00})
-    return {"input": 5.00, "output": 15.00}
+            return m.get("pricing") or _placeholder_pricing(provider_id, model_id)
+    return _placeholder_pricing(provider_id, model_id)
 
 
 def resolve_provider_for_model(model_id: str) -> str:
@@ -213,7 +311,7 @@ def get_pricing_table() -> dict:
     for p in config["providers"]:
         table[p["id"]] = {}
         for m in p.get("models", []):
-            table[p["id"]][m["id"]] = m.get("pricing", {"input": 5.00, "output": 15.00})
+            table[p["id"]][m["id"]] = m.get("pricing") or dict(_PLACEHOLDER_PRICING)
     return table
 
 
@@ -222,18 +320,111 @@ DEFAULT_MODEL = "claude-sonnet-5"
 
 # Anthropic models from the Opus 4.7+ generation (incl. Sonnet 5 and Fable 5)
 # removed the sampling params (temperature/top_p/top_k) and return HTTP 400 if any
-# are sent. Match by prefix so date-suffixed snapshots are covered too.
-_NO_SAMPLING_PARAM_MODELS = (
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "claude-sonnet-5",
-    "claude-fable-5",
+# are sent.
+#
+# Named the other way round on purpose. The models that *reject* the params are
+# every release from here on — a list that would need a new entry, and a code
+# change, each time one ships. The models that still *accept* them are a closed
+# set that can only shrink, so that is the one written down, and any other
+# ``claude-`` id is treated as current. Matched by prefix so date-suffixed
+# snapshots are covered too.
+_LEGACY_SAMPLING_PREFIXES = (
+    "claude-2",
+    "claude-3",
+    "claude-instant",
+    "claude-sonnet-4",
+    "claude-haiku-4",
 )
+# Opus 4 straddles the line: 4.0-4.6 are legacy, 4.7 and 4.8 are not.
+_OPUS_4_PREFIX = "claude-opus-4"
+_OPUS_4_CURRENT_PREFIXES = ("claude-opus-4-7", "claude-opus-4-8")
+
+# The always-thinking family: ``{"type": "disabled"}`` is a 400, so thinking can
+# be neither toggled nor turned off. By family rather than by version, for the
+# same reason as above.
+_ALWAYS_THINKING_PREFIX = "claude-fable-"
+
+
+_THINKING_MODES = ("always", "optional", "none")
+
+
+def _model_capabilities(model: str) -> dict:
+    """What ``llm_config.json`` declares about *model*'s request shape, if anything.
+
+    The prefix rules below are a guess, and the 400 repair in
+    :func:`call_anthropic_api` only covers a realtime call. Two optional fields
+    on an Anthropic model's catalog entry settle it without a code change, and
+    are the only thing a batch (which cannot be repaired after the fact) has:
+
+    - ``"sampling_params": true | false`` — whether it accepts ``temperature``
+    - ``"thinking": "always" | "optional" | "none"`` — cannot be turned off /
+      can be toggled / takes no ``thinking`` param at all
+
+    Either may be omitted; an absent or unrecognised value falls back to the
+    guess. A config that fails to load is treated as declaring nothing, so these
+    stay total functions of the model id.
+    """
+    try:
+        providers = load_llm_config().get("providers", [])
+    except ValueError:
+        return {}
+    for provider in providers:
+        if provider.get("type") != "anthropic":
+            continue
+        for entry in provider.get("models", []):
+            if entry.get("id") == model:
+                return entry
+    return {}
+
+
+def _is_current_claude(model: str) -> bool:
+    """True for a ``claude-`` id outside the closed legacy set."""
+    return model.startswith("claude-") and not _is_legacy_claude(model)
+
+
+def _is_legacy_claude(model: str) -> bool:
+    """True for a Claude model from before the sampling params were removed."""
+    if model.startswith(_LEGACY_SAMPLING_PREFIXES):
+        return True
+    return model.startswith(_OPUS_4_PREFIX) and not model.startswith(
+        _OPUS_4_CURRENT_PREFIXES
+    )
 
 
 def _rejects_sampling_params(model: str) -> bool:
-    """True if *model* is an Anthropic model that 400s on temperature/top_p/top_k."""
-    return model.startswith(_NO_SAMPLING_PARAM_MODELS)
+    """True if *model* is an Anthropic model that 400s on temperature/top_p/top_k.
+
+    Every ``claude-`` id that is not in the closed legacy set, so a release this
+    file has never heard of is handled like the current generation it belongs
+    to. ``sampling_params`` on the model's catalog entry overrides the guess
+    (see :func:`_model_capabilities`). A wrong guess on a realtime call is
+    repaired once per model by :func:`_drop_rejected_params`; a batch has no
+    such repair, which is what the catalog field is for.
+    """
+    declared = _model_capabilities(model).get("sampling_params")
+    if isinstance(declared, bool):
+        return not declared
+    return _is_current_claude(model)
+
+
+def _thinking_mode(model: str) -> str:
+    """``"always"``, ``"optional"`` or ``"none"``: what *model* does with thinking.
+
+    ``always`` thinks on every request and 400s on ``{"type": "disabled"}``;
+    ``optional`` accepts both ``adaptive`` and ``disabled``; ``none`` predates the
+    param and is sent nothing. Read from the catalog when it says, else guessed.
+    """
+    declared = _model_capabilities(model).get("thinking")
+    if declared in _THINKING_MODES:
+        return declared
+    if model.startswith(_ALWAYS_THINKING_PREFIX):
+        return "always"
+    return "optional" if _is_current_claude(model) else "none"
+
+
+def _always_thinks(model: str) -> bool:
+    """True if *model* thinks on every request and cannot be told not to."""
+    return _thinking_mode(model) == "always"
 
 
 def _thinking_enabled() -> bool:
@@ -259,11 +450,12 @@ def _thinking_param(model: str, enabled: bool) -> dict | None:
     a 400, so we omit the param for it. Older models default thinking off already
     and may reject the param, so we leave it unset for them.
     """
-    if not _rejects_sampling_params(model):
+    mode = _thinking_mode(model)
+    if mode == "none":
         return None  # older model: thinking already off by default; don't send it
     if enabled:
         return {"type": "adaptive"}
-    if model.startswith("claude-fable-5"):
+    if mode == "always":
         # Fable 5 is always-on: {"type": "disabled"} returns 400. It can't be
         # turned off, so omit the param and accept adaptive thinking.
         return None
@@ -279,7 +471,7 @@ def model_supports_thinking(model: str) -> bool:
     ``disabled``. Fable 5 is excluded (always-on; can't be disabled) and older
     models are excluded (always-off; the param isn't accepted).
     """
-    return _rejects_sampling_params(model) and not model.startswith("claude-fable-5")
+    return _thinking_mode(model) == "optional"
 
 
 def _resolve_thinking(model: str, enable_thinking: bool | None) -> dict | None:
@@ -305,8 +497,61 @@ def _max_tokens_with_thinking(model: str, max_tokens: int, thinking: dict | None
     Applies when adaptive thinking is requested, or on Fable 5 (always-on
     regardless of the param). Leaves ``max_tokens`` untouched otherwise.
     """
-    thinks = (thinking or {}).get("type") == "adaptive" or model.startswith("claude-fable-5")
+    thinks = (thinking or {}).get("type") == "adaptive" or _always_thinks(model)
     return max(max_tokens, _THINKING_MAX_TOKENS_FLOOR) if thinks else max_tokens
+
+
+def _drop_rejected_params(create_kwargs: dict, message: str) -> list[str]:
+    """Remove the request params a 400 complains about; return what was removed.
+
+    The tables above are a guess about a model this file may never have seen.
+    When the guess is wrong the API says exactly which parameter it will not
+    take, so the request is repaired from that message instead of from a list
+    someone has to keep current: ``temperature`` sent to a model that dropped
+    the sampling params, or ``thinking`` sent to one that does not accept the
+    value. An empty return means the 400 was about something else and must
+    surface unchanged.
+
+    Dropping ``thinking`` hands the decision back to the model, which may then
+    think by default — and thinking tokens count against ``max_tokens`` — so the
+    cap is raised to the thinking floor with it. The same goes for a refused
+    ``temperature`` when no ``thinking`` param is being sent: only the current
+    generation refuses it, and that generation thinks unless told not to.
+    """
+    text = (message or "").lower()
+    dropped: list[str] = []
+    if any(
+        word in text for word in ("temperature", "top_p", "top_k", "sampling")
+    ) and _drop_param(create_kwargs, "temperature"):
+        dropped.append("temperature")
+    if "thinking" in text and _drop_param(create_kwargs, "thinking"):
+        dropped.append("thinking")
+    return dropped
+
+
+def _drop_param(create_kwargs: dict, name: str) -> bool:
+    """Remove one request param, keeping ``max_tokens`` right; False if absent."""
+    if name not in create_kwargs:
+        return False
+    del create_kwargs[name]
+    if name == "thinking" or "thinking" not in create_kwargs:
+        create_kwargs["max_tokens"] = max(
+            int(create_kwargs.get("max_tokens") or 0), _THINKING_MAX_TOKENS_FLOOR
+        )
+    return True
+
+
+# Params a model has already refused in this process. Without it the repair is
+# paid for on every chunk: a 300-chunk book on a mis-guessed model is 300 failed
+# requests and 300 identical warnings. Per process on purpose, since the lasting
+# fix is the model's catalog entry (see :func:`_model_capabilities`).
+_REJECTED_PARAMS: dict[str, set[str]] = {}
+
+
+def _apply_known_rejections(model: str, create_kwargs: dict) -> None:
+    """Drop the params *model* refused earlier in this process, before sending."""
+    for name in sorted(_REJECTED_PARAMS.get(model, ())):
+        _drop_param(create_kwargs, name)
 
 
 class APIError(Exception):
@@ -703,9 +948,27 @@ def call_anthropic_api(
     if thinking is not None:
         create_kwargs["thinking"] = thinking
     create_kwargs["max_tokens"] = _max_tokens_with_thinking(model, max_tokens, thinking)
+    _apply_known_rejections(model, create_kwargs)
 
     try:
-        response = client.messages.create(**create_kwargs)
+        try:
+            response = client.messages.create(**create_kwargs)
+        except anthropic.BadRequestError as e:
+            # A model newer than the capability guesses above: repair the request
+            # from what the API named and try once more. Anything else re-raises.
+            dropped = _drop_rejected_params(create_kwargs, str(e))
+            if not dropped:
+                raise
+            logger.warning(
+                "%s rejected %s; retrying without, and for the rest of this run. "
+                "Declare it on the model's entry in llm_config.json "
+                "(sampling_params / thinking) to stop guessing.",
+                model, " and ".join(dropped),
+            )
+            response = client.messages.create(**create_kwargs)
+            # Only once the repaired request went through: a 400 that merely
+            # mentions a param must not be remembered as that param's fault.
+            _REJECTED_PARAMS.setdefault(model, set()).update(dropped)
 
         usage = getattr(response, "usage", None)
         def _usage_int(name: str) -> int:
@@ -1055,7 +1318,7 @@ def submit_batch(
             always_include_dialogue=always_include_dialogue,
         )
     else:
-        raise ValueError(f"Unknown provider: {provider}")
+        raise _no_batch_support(provider)
 
 
 def _submit_anthropic_batch(
@@ -1118,6 +1381,7 @@ def _submit_anthropic_batch(
         if thinking is not None:
             params["thinking"] = thinking
         params["max_tokens"] = _max_tokens_with_thinking(model, params["max_tokens"], thinking)
+        _apply_known_rejections(model, params)
         requests.append({
             "custom_id": chunk.id,
             "params": params,
@@ -1327,7 +1591,7 @@ def check_batch_status(
     elif provider == "openai":
         return _check_openai_batch(job_id)
     else:
-        raise ValueError(f"Unknown provider: {provider}")
+        raise _no_batch_support(provider)
 
 
 def _check_anthropic_batch(job_id: str) -> dict:
@@ -1428,10 +1692,7 @@ def retrieve_batch_results(
     elif provider == "openai":
         return _retrieve_openai_results(job_id, original_chunks, output_dir, model, chunk_log_map, project_slug=project_slug)
     else:
-        raise ValueError(f"Unknown provider: {provider}")
-
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+        raise _no_batch_support(provider)
 
 
 def _resolve_submission_log_path(
@@ -1643,6 +1904,24 @@ def _retrieve_openai_results(
 
 
 _BATCH_CAPABLE_PROVIDERS = {"anthropic", "openai"}
+
+
+def supports_batch(provider: str) -> bool:
+    """True if *provider* has a Batch API implementation here."""
+    return provider in _BATCH_CAPABLE_PROVIDERS
+
+
+def _no_batch_support(provider: str) -> ValueError:
+    """The error for a batch call on a provider with no Batch API wired up.
+
+    Any provider in ``llm_config.json`` can translate realtime; only these two
+    have a batch implementation. Saying "unknown provider" for one the config
+    defines sent people to check a config that was fine.
+    """
+    return ValueError(
+        f"Provider {provider!r} has no Batch API support here (only "
+        f"{', '.join(sorted(_BATCH_CAPABLE_PROVIDERS))} do). Run it realtime instead."
+    )
 
 
 def translate_chapter_with_model(

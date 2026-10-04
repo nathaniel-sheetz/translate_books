@@ -367,6 +367,10 @@ def resolve_triage_profile(
         cfg=cfg,
         usage_log=usage_log,
         check_binary=check_binary,
+        # The probe resolves the CLI's *default* model, which this pass is about
+        # to replace; its warnings are merged below, and one about a model the
+        # wave will not run would be merged with them.
+        model_history=False,
     )
     model, model_source = _resolve_triage_model(cfg, probe.cli, worker_model)
     prof = resolve_profile(

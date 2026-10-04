@@ -174,7 +174,11 @@ def test_the_launcher_never_detects_a_host():
     is allowed to live, and nothing in the wave path imports it.
     """
     offenders: list[str] = []
-    for rel in ("src/harness/headless.py", "src/harness/usage.py"):
+    for rel in (
+        "src/harness/headless.py",
+        "src/harness/usage.py",
+        "src/harness/model_ids.py",
+    ):
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

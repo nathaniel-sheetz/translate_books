@@ -26,10 +26,13 @@ Two outputs, split by who pays for them:
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+from src.harness.model_ids import model_family
 
 # Same ~4 chars/token estimate as ``src.judges.llm_io.estimate_tokens``. Copied
 # rather than imported: the harness layer must not depend on the judges layer,
@@ -54,11 +57,12 @@ _CHARS_PER_TOKEN = 4
 # The prefix depends on the *model*, not only the CLI. The 2026-09-14 panel probe
 # (cursor-agent 2026.09.10) measured Grok 4.6 ~17.9k, Gemini 3.8 Flash ~16.3k,
 # GPT-5.6 Terra ~16.3k and Claude Sonnet 5 ~30.6k. So this constant fits the
-# non-Claude models and quotes a Claude-on-Cursor wave ~13k low per job, until
-# that model's rows are most of the Cursor rows among the last 40 logged jobs.
+# non-Claude models and would quote a Claude-on-Cursor wave ~13k low per job.
 #
-# Only load-bearing on a cold machine: three logged jobs *of that CLI* and
-# baseline_tokens() switches to the measured median.
+# Only load-bearing on a cold machine: three logged jobs of the wave's own
+# model (in this book or another) and baseline_tokens() switches to that
+# model's measured median; three of any model on the CLI and it switches to
+# theirs, labelled as borrowed.
 DEFAULT_BASELINE_TOKENS: dict[str, int] = {
     "claude": 3900,
     "cursor": 17200,
@@ -194,7 +198,43 @@ def usage_from_envelope(obj: Any, *, model: str | None = None) -> dict[str, Any]
     side = _side_calls(obj.get("modelUsage"), model)
     if side:
         out["side_calls"] = side
+    # Written only when the envelope names one, so every row this corpus already
+    # holds keeps its shape (the same rule ``timed_out`` follows in job_record).
+    resolved = _resolved_model(obj.get("modelUsage"), model)
+    if resolved:
+        out["resolved_model"] = resolved
     return out
+
+
+def _resolved_model(model_usage: Any, model: str | None) -> str | None:
+    """The full model id the CLI actually ran ``model`` as, if it reports one.
+
+    ``modelUsage`` is keyed by full id while ``--model`` is usually an alias, so
+    this is the key :func:`_side_calls` treats as "ours" — the busiest one when
+    an alias matches several. ``None`` for a Cursor envelope (no ``modelUsage``)
+    and for an id the envelope does not echo.
+    """
+    if not isinstance(model_usage, Mapping):
+        return None
+    alias = (model or "").strip().lower()
+    if not alias:
+        return None
+    best: tuple[int, str] | None = None
+    for key, entry in model_usage.items():
+        if alias not in str(key).lower() or not isinstance(entry, Mapping):
+            continue
+        total = sum(
+            _first_int(entry, *names) or 0
+            for names in (
+                ("inputTokens", "input_tokens"),
+                ("outputTokens", "output_tokens"),
+                ("cacheCreationInputTokens", "cache_creation_input_tokens"),
+                ("cacheReadInputTokens", "cache_read_input_tokens"),
+            )
+        )
+        if best is None or total > best[0]:
+            best = (total, str(key))
+    return best[1] if best else None
 
 
 def _first_number(source: Mapping[str, Any], *names: str) -> float | None:
@@ -321,8 +361,14 @@ def rollup(records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
     return out
 
 
-def read_recent(path: Path | str | None, limit: int = _BASELINE_WINDOW) -> list[dict[str, Any]]:
-    """Last ``limit`` parseable rows of a usage log (newest last); [] if absent."""
+def read_recent(
+    path: Path | str | None, limit: int | None = _BASELINE_WINDOW
+) -> list[dict[str, Any]]:
+    """Last ``limit`` parseable rows of a usage log (newest last); [] if absent.
+
+    ``limit=None`` reads the whole log, for a caller that has to filter before
+    it windows (see :func:`_model_rows`).
+    """
     if path is None:
         return []
     try:
@@ -330,7 +376,7 @@ def read_recent(path: Path | str | None, limit: int = _BASELINE_WINDOW) -> list[
     except (OSError, UnicodeDecodeError):
         return []
     rows: list[dict[str, Any]] = []
-    for line in lines[-limit:]:
+    for line in lines if limit is None else lines[-limit:]:
         line = line.strip()
         if not line:
             continue
@@ -341,6 +387,112 @@ def read_recent(path: Path | str | None, limit: int = _BASELINE_WINDOW) -> list[
         if isinstance(obj, dict):
             rows.append(obj)
     return rows
+
+
+# Whole-log reads, keyed by path and invalidated by (mtime, size). One resolved
+# profile asks four per-model questions of this book's log and of every sibling
+# book's, and a library of twenty books would otherwise re-parse each of them
+# four times per `status` call. Rows are shared, so readers must not mutate them.
+_ROWS_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+
+
+def _all_rows(path: Path | str | None) -> list[dict[str, Any]]:
+    """Every parseable row of a usage log, re-read only when the file changed."""
+    if path is None:
+        return []
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return []
+    key, stamp = str(path), (stat.st_mtime_ns, stat.st_size)
+    cached = _ROWS_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    rows = read_recent(path, limit=None)
+    _ROWS_CACHE[key] = (stamp, rows)
+    return rows
+
+
+def _model_rows(
+    paths: Iterable[Path | str | None],
+    *,
+    cli: str | None,
+    family: str,
+    limit: int = _BASELINE_WINDOW,
+) -> list[dict[str, Any]]:
+    """The last ``limit`` rows across ``paths`` that ran ``family`` on ``cli``.
+
+    Filtered *before* it is windowed, unlike :func:`read_recent`: a book that ran
+    twenty jobs on one model and then a hundred on another still has those twenty
+    rows, and they are the only measurement of that model there is.
+
+    A row belongs to ``family`` by the id it was *asked* for or by the id the CLI
+    says it *ran as* (``resolved_model``), so an alias and the full id behind it
+    are one history: 564 ``sonnet`` jobs that ran as ``claude-sonnet-5`` are a
+    measurement of ``claude-sonnet-5`` whichever of the two a book pins.
+
+    And an alias is only its newest meaning. Once a row shows ``sonnet`` running
+    as a different id, the rows that say they ran as the old one are dropped:
+    they measured a model this alias no longer names. Rows from before
+    ``resolved_model`` was logged cannot be told apart and are kept; they age
+    out of the window as new rows arrive.
+    """
+    wanted = (cli or "").strip().lower() or None
+    family = _snapshot_free(family)
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        for row in _all_rows(path):
+            if wanted and str(row.get("cli") or "").strip().lower() != wanted:
+                continue
+            if family in (_asked_for(row), _ran_as(row)):
+                rows.append(row)
+    # Rows from several books interleave by timestamp; a stable sort keeps one
+    # log's own order where the stamps tie or are missing.
+    rows.sort(key=lambda r: str(r.get("ts") or ""))
+    current = next(
+        (
+            _ran_as(row)
+            for row in reversed(rows)
+            if _asked_for(row) == family and _ran_as(row)
+        ),
+        "",
+    )
+    if current:
+        rows = [
+            row
+            for row in rows
+            if _asked_for(row) != family or _ran_as(row) in ("", current)
+        ]
+    return rows[-limit:]
+
+
+# A dated snapshot (``claude-haiku-4-5-20251001``) is the model its undated id
+# names. Only for matching a logged ``resolved_model`` against a requested id;
+# :func:`~src.harness.model_ids.model_family` itself stays a pure knob-stripper.
+_SNAPSHOT_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _snapshot_free(family: str) -> str:
+    return _SNAPSHOT_SUFFIX_RE.sub("", family)
+
+
+def _asked_for(row: Mapping[str, Any]) -> str:
+    """The family of the id a row's job was launched with."""
+    return _snapshot_free(model_family(str(row.get("model") or "")))
+
+
+def _ran_as(row: Mapping[str, Any]) -> str:
+    """The family of the id the CLI reported running, or ``""`` if it did not say."""
+    return _snapshot_free(model_family(str(row.get("resolved_model") or "")))
+
+
+def _overheads(rows: Iterable[Mapping[str, Any]]) -> list[int]:
+    """Billed input beyond the prompt, for each successful job that reported any."""
+    return [
+        max(0, _billed_input(row) - int(row.get("prompt_sent") or 0))
+        for row in rows
+        if _has_tokens(row) and row.get("rc") == 0
+    ]
 
 
 def default_baseline_tokens(cli: str | None = None) -> tuple[int, str]:
@@ -356,6 +508,8 @@ def baseline_tokens(
     default: int | None = None,
     *,
     cli: str | None = None,
+    model: str | None = None,
+    sibling_logs: Iterable[Path | str] = (),
 ) -> tuple[int, str]:
     """``(per_job_overhead, provenance)`` for the pre-spawn estimate.
 
@@ -371,6 +525,21 @@ def baseline_tokens(
     Claude ones would quote ~3.9k against a real ~17.2k. Rows with no ``cli`` key
     are excluded when filtering — unknown provenance cannot calibrate a family.
 
+    ``model`` narrows it again, to the model a wave will actually run. The fixed
+    prefix depends on the model and not only the CLI (Claude Sonnet 5 on Cursor
+    is ~30.6k against ~17.9k for Grok 4.6), so the first tier that holds
+    :data:`_BASELINE_MIN_ROWS` answers, and the provenance says which it was:
+
+    1. this log, this model
+    2. this log plus ``sibling_logs`` (the same wave type in other books), this
+       model — so a model already measured elsewhere is not quoted off a constant
+       the first time a new book uses it
+    3. this log, every model on ``cli`` — the pre-``model`` behaviour, now
+       labelled as a different model's number rather than passed off as this one's
+    4. the per-CLI constant
+
+    Nothing here names a model: a new release calibrates itself after three jobs.
+
     ``default`` overrides the per-CLI constant (kept for callers that already
     hold a measurement); ``None`` means use the constant for ``cli``.
     """
@@ -379,19 +548,136 @@ def baseline_tokens(
         fallback, provenance = int(default), "caller-supplied"
 
     wanted = (cli or "").strip().lower() or None
+    scope = f" {wanted}" if wanted else ""
+    family = model_family(model)
+    if family:
+        for paths, where in (
+            ((path,), ""),
+            ((path, *sibling_logs), " across books"),
+        ):
+            own = _overheads(_model_rows(paths, cli=wanted, family=family))
+            if len(own) >= _BASELINE_MIN_ROWS:
+                return int(statistics.median(own)), (
+                    f"measured: median of {len(own)} logged{scope} {family} "
+                    f"jobs{where}"
+                )
+
     rows = read_recent(path)
     if wanted is not None:
         rows = [r for r in rows if str(r.get("cli") or "").strip().lower() == wanted]
-    overheads = [
-        max(0, _billed_input(row) - int(row.get("prompt_sent") or 0))
-        for row in rows
-        if _has_tokens(row) and row.get("rc") == 0
-    ]
+    overheads = _overheads(rows)
     if len(overheads) < _BASELINE_MIN_ROWS:
         return fallback, f"default: {fallback} ({provenance})"
     measured = int(statistics.median(overheads))
-    scope = f" {wanted}" if wanted else ""
-    return measured, f"measured: median of {len(overheads)} logged{scope} jobs"
+    note = f" including other models (too few {family} rows yet)" if family else ""
+    return measured, f"measured: median of {len(overheads)} logged{scope} jobs{note}"
+
+
+def output_ratio(
+    path: Path | str | None,
+    *,
+    cli: str | None = None,
+    model: str | None = None,
+    sibling_logs: Iterable[Path | str] = (),
+) -> tuple[float | None, str]:
+    """``(output tokens per prompt token, provenance)`` for ``model``, if measured.
+
+    The input side of a quote is roughly a property of the CLI; the output side
+    is a property of the model. Grok 4.7 at medium returned ~1 output token per
+    input token where the gate had projected none (440k unquoted, 2026-09-28),
+    because the estimate was input-only and the only history was another model's.
+
+    So unlike :func:`baseline_tokens` this **never borrows another model's
+    number**: with fewer than :data:`_BASELINE_MIN_ROWS` rows for ``model`` — in
+    this log, then across ``sibling_logs`` — it returns ``None`` and says there
+    is no data, which is the honest quote for a model nobody has run yet.
+    """
+    family = model_family(model)
+    if not family:
+        return None, "no worker model to calibrate output on"
+    wanted = (cli or "").strip().lower() or None
+    have = 0
+    for paths, where in (
+        ((path,), ""),
+        ((path, *sibling_logs), " across books"),
+    ):
+        ratios = [
+            int(row["output"]) / int(row["prompt_sent"])
+            for row in _model_rows(paths, cli=wanted, family=family)
+            if row.get("rc") == 0
+            and isinstance(row.get("output"), int)
+            and isinstance(row.get("prompt_sent"), int)
+            and row["prompt_sent"] > 0
+        ]
+        if len(ratios) >= _BASELINE_MIN_ROWS:
+            return round(statistics.median(ratios), 3), (
+                f"measured: median output/prompt of {len(ratios)} logged "
+                f"{family} jobs{where}"
+            )
+        have = len(ratios)
+    if have:
+        plural = "s" if have > 1 else ""
+        return None, (
+            f"only {have} output row{plural} for {family} yet "
+            f"({_BASELINE_MIN_ROWS} needed)"
+        )
+    return None, f"no output rows for {family} yet"
+
+
+def estimate_output_tokens(prompt_tokens: int, ratio: float | None) -> int | None:
+    """Projected output for a wave, or ``None`` when its model is unmeasured.
+
+    ``None`` rather than 0 on purpose: a gate that prints 0 reads as "this wave
+    writes nothing", and a missing number has to look missing.
+    """
+    if ratio is None:
+        return None
+    return int(round(max(0, int(prompt_tokens)) * ratio))
+
+
+def model_seen(
+    path: Path | str | None,
+    *,
+    cli: str | None = None,
+    model: str | None = None,
+    sibling_logs: Iterable[Path | str] = (),
+) -> bool:
+    """True when a successful job on ``model`` is logged here or in a sibling book."""
+    family = model_family(model)
+    if not family:
+        return False
+    wanted = (cli or "").strip().lower() or None
+    return any(
+        row.get("rc") == 0
+        for row in _model_rows((path, *sibling_logs), cli=wanted, family=family)
+    )
+
+
+def last_resolved_model(
+    path: Path | str | None,
+    *,
+    cli: str | None = None,
+    model: str | None = None,
+    sibling_logs: Iterable[Path | str] = (),
+) -> str | None:
+    """The full model id ``model`` most recently ran as, from the log, or ``None``.
+
+    A tier alias is resolved by the CLI, not by this repo, and it lags a release:
+    on 2026-09-29 ``sonnet`` still meant ``claude-sonnet-5`` with Sonnet 5.5
+    available, and nothing at the gate said so. The envelope does say which id
+    answered (see :func:`usage_from_envelope`), so the last logged answer is the
+    best available evidence of what the alias will mean this time. Evidence, not
+    a promise — the CLI can move the alias between two waves.
+    """
+    family = model_family(model)
+    if not family:
+        return None
+    wanted = (cli or "").strip().lower() or None
+    for row in reversed(_model_rows((path, *sibling_logs), cli=wanted, family=family)):
+        resolved = row.get("resolved_model")
+        if isinstance(resolved, str) and resolved.strip():
+            return resolved.strip()
+    return None
 
 
 def median_wall_s(

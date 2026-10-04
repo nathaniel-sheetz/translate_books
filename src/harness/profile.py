@@ -28,9 +28,10 @@ that a structural fact rather than a rule someone has to remember;
 ``tests/test_spawn_boundary.py`` pins it.
 
 Resolution costs no subprocess and no LLM call — the heaviest things it does are
-``shutil.which`` and reading a few small files (the book's ``config.json``, the
-Cursor CLI config, and ``usage.jsonl`` for the overhead baseline). It is safe to
-call from a read-only command.
+``shutil.which``, a walk of ``projects/`` for the other books, and reading files
+(the book's ``config.json``, the Cursor CLI config, and this wave type's
+``usage.jsonl`` in this book and every sibling, cached by mtime). Measured at
+~25 ms cold across 39 books. It is safe to call from a read-only command.
 """
 
 from __future__ import annotations
@@ -43,13 +44,20 @@ from src.harness import state as hstate
 from src.harness.headless import (
     cli_binary,
     cli_binary_present,
+    cursor_effort_in_id,
     cursor_model_effort,
     default_worker_model,
     warn_cursor_claude_model,
     with_cursor_effort,
 )
 from src.harness.host import detect_host, host_cli
-from src.harness.usage import baseline_tokens, read_recent
+from src.harness.usage import (
+    baseline_tokens,
+    last_resolved_model,
+    model_seen,
+    output_ratio,
+    read_recent,
+)
 
 # Where each wave type's per-job rows live, relative to the project dir. Kept in
 # one place so a caller cannot silently get the *constant* baseline (rather than
@@ -75,6 +83,7 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
 # How the resolved effort actually reaches the model.
 EFFORT_ARGV = "argv"                  # claude: --effort <level>
 EFFORT_MODEL_BRACKET = "model_bracket"  # cursor: grok-4.5[effort=<level>]
+EFFORT_MODEL_ID = "model_id"          # cursor: grok-4.7-<level>, no bracket
 EFFORT_NONE = "none"                  # nothing carries it; say so out loud
 
 # ``cli_source`` values that mean someone chose this. A flag (``cli``), a pin
@@ -120,6 +129,42 @@ def usage_log_for(project_dir: Path | str, command: str) -> Path | None:
     if not parts:
         return None
     return Path(project_dir).joinpath(*parts)
+
+
+def sibling_usage_logs(
+    project_dir: Path | str, usage_log: Path | str | None
+) -> list[Path]:
+    """The same log in every *other* book of this library, for cross-book history.
+
+    A model's fixed prefix and output verbosity are facts about the model, so a
+    book's first wave on a model another book has already run should be quoted
+    from that measurement rather than from a constant. Matched by the log's path
+    relative to its project, so a wave type with its own log (the editorial
+    pass, the footnote scan) is only ever compared with the same wave type.
+
+    Empty unless ``project_dir`` lives under the repo's ``projects/`` and the log
+    lives under ``project_dir`` — anything else is a path this module has no
+    business guessing siblings for.
+    """
+    if usage_log is None:
+        return []
+    try:
+        here = Path(project_dir).resolve()
+        rel = Path(usage_log).resolve().relative_to(here)
+        here.relative_to(hstate.projects_root().resolve())
+    except (OSError, ValueError):
+        return []
+    logs: list[Path] = []
+    for book in hstate.iter_project_dirs():
+        try:
+            if book.resolve() == here:
+                continue
+        except OSError:
+            continue
+        candidate = book / rel
+        if candidate.is_file():
+            logs.append(candidate)
+    return logs
 
 
 def resolve_cli(
@@ -182,6 +227,19 @@ class HeadlessProfile:
     baseline_source: str
     host: str
     warnings: list[str] = field(default_factory=list)
+    # What this machine's own logs know about ``worker_model``. Every one of
+    # these is read back from ``usage.jsonl`` and none is looked up in a table,
+    # which is what lets a model nobody has named here quote itself after three
+    # jobs. Defaulted so a hand-built profile (tests, a stubbed dashboard) reads
+    # as "nothing measured" rather than failing to construct.
+    #
+    # ``worker_model_resolved`` is the full id the CLI last ran ``worker_model``
+    # as — the only place a lagging alias (``sonnet`` still meaning Sonnet 5 with
+    # 5.5 out) shows up before a wave is spent finding out.
+    worker_model_resolved: str | None = None
+    model_seen: bool = False
+    output_ratio: float | None = None
+    output_ratio_source: str = "not measured"
 
     def to_payload(self) -> dict[str, Any]:
         """JSON-safe form, for a CLI payload the agent relays verbatim."""
@@ -191,11 +249,15 @@ class HeadlessProfile:
             "cli_source": self.cli_source,
             "worker_model": self.worker_model,
             "worker_model_source": self.worker_model_source,
+            "worker_model_resolved": self.worker_model_resolved,
+            "model_seen": self.model_seen,
             "effort": self.effort,
             "effort_source": self.effort_source,
             "effort_channel": self.effort_channel,
             "baseline_tokens": self.baseline_tokens,
             "baseline_source": self.baseline_source,
+            "output_ratio": self.output_ratio,
+            "output_ratio_source": self.output_ratio_source,
             "host": self.host,
             "warnings": list(self.warnings),
         }
@@ -227,6 +289,8 @@ def resolve_profile(
     env: Mapping[str, str] | None = None,
     usage_log: Path | str | None = None,
     check_binary: bool = True,
+    model_history: bool = True,
+    wave_label: str | None = None,
 ) -> HeadlessProfile:
     """Resolve every knob for one wave type of one book, with provenance.
 
@@ -234,6 +298,16 @@ def resolve_profile(
     ``--effort``); ``cli`` is ``--cli``. ``cfg`` defaults to the book's config and
     ``usage_log`` to this wave type's own log — pass them only to avoid a re-read
     or in tests.
+
+    ``model_history=False`` skips everything that is read back from the usage
+    logs about the *model* (per-model baseline, output ratio, the unseen-model
+    warning). For a caller that resolves once only to learn the CLI and will
+    resolve again with the real model — its answers here would describe a model
+    the wave is not going to run.
+
+    ``wave_label`` names the wave in operator-facing warnings when ``command``
+    is only the effort-config key it borrows (adjudication resolves as
+    ``judges`` but keeps its own log, so "no judges job" would be false).
 
     ``cli_source`` / ``worker_model_source`` / ``effort_source`` label where a
     passed-in value came from. ``fanout`` sets them to ``"manifest"`` for values
@@ -305,6 +379,20 @@ def resolve_profile(
     resolved_effort: str | None
     override = (effort or "").strip() or None
     override_source = effort_source
+    # An effort read back from the manifest is the level the *manifest's* model
+    # was consented at. A model typed on this run that names its own level
+    # (`--worker-model grok-4.7-high`, or a bracket) is the newer and more
+    # specific instruction; inheriting over it rewrote the id back to the
+    # manifest's level and ran a model nobody asked for.
+    if (
+        override is not None
+        and override_source == "manifest"
+        and cli_name == "cursor"
+        and pinned_model
+        and worker_model_source != "manifest"
+        and cursor_model_effort(pinned_model)
+    ):
+        override = None
 
     if override in hstate.EFFORT_LEVELS:
         resolved_effort, effort_source = override, override_source
@@ -329,8 +417,13 @@ def resolve_profile(
             # specific instruction than the book-level default, so it outranks
             # `headless_effort_<type>` — the ladder docs/LLM_PROVIDERS.md
             # promises. Reading the config first used to silently overwrite the
-            # bracket the operator typed on `--worker-model`.
-            resolved_effort, effort_source = pinned_bracket, "model-bracket"
+            # bracket the operator typed on `--worker-model`. A flat id that
+            # names its own level (`grok-4.7-medium`) is the same instruction
+            # spelled the only way that family allows.
+            resolved_effort = pinned_bracket
+            effort_source = (
+                "model-id" if cursor_effort_in_id(resolved_model) else "model-bracket"
+            )
         elif configured in hstate.EFFORT_LEVELS:
             resolved_effort, effort_source = configured, "config"
         elif configured == "default":
@@ -362,7 +455,11 @@ def resolve_profile(
     elif cli_name == "cursor":
         resolved_model = with_cursor_effort(resolved_model, resolved_effort)
         if cursor_model_effort(resolved_model) == resolved_effort:
-            effort_channel = EFFORT_MODEL_BRACKET
+            effort_channel = (
+                EFFORT_MODEL_ID
+                if cursor_effort_in_id(resolved_model)
+                else EFFORT_MODEL_BRACKET
+            )
         else:
             # `auto` takes no bracket, so nothing carries the level. Say so
             # rather than reporting an effort the wave will not run at.
@@ -377,12 +474,48 @@ def resolve_profile(
         effort_channel = EFFORT_ARGV
 
     # ── baseline the consent estimate is quoted in ──────────────────────────
-    baseline, baseline_source = baseline_tokens(usage_log, cli=cli_name)
+    # Per model, not only per CLI: this book's rows for the model first, then the
+    # same wave type in other books, then the CLI-wide median it used to stop at.
+    if model_history:
+        history = {
+            "cli": cli_name,
+            "model": resolved_model,
+            "sibling_logs": sibling_usage_logs(project_dir, usage_log),
+        }
+        baseline, baseline_source = baseline_tokens(usage_log, **history)
+        ratio, ratio_source = output_ratio(usage_log, **history)
+        seen = model_seen(usage_log, **history)
+        resolved_id = last_resolved_model(usage_log, **history)
+    else:
+        baseline, baseline_source = baseline_tokens(usage_log, cli=cli_name)
+        ratio, ratio_source, seen, resolved_id = None, "not measured", False, None
 
     # ── warnings ────────────────────────────────────────────────────────────
     alias_warning = warn_cursor_claude_model(cli_name, resolved_model)
     if alias_warning:
         warnings.append(alias_warning)
+
+    # A model with no history here is run anyway — a new release must not need a
+    # code change, and the launcher's own preflight still stops a bad id — but
+    # the quote beside it is another model's, and that has to be said at the gate
+    # rather than discovered in the bill (440k unprojected output tokens on the
+    # first Grok 4.7 wave). Silent for an un-pinned default on a log with no
+    # history at all: that is a cold machine, which `baseline_source` already
+    # reports as a default, not somebody trying a model for the first time.
+    # A model read back from the manifest is not a pin either: it is whatever
+    # `prepare` resolved, and `prepare` is where a real pin was already warned
+    # about — counting it here made `fanout` warn where `prepare` was silent.
+    chosen = bool(pinned_model) and worker_model_source != "manifest"
+    if (
+        model_history
+        and not seen
+        and (chosen or baseline_source.startswith("measured:"))
+    ):
+        warnings.append(
+            f"no {wave_label or command} job on {resolved_model!r} is logged yet for {cli_name}; "
+            f"input is quoted from [{baseline_source}] and output tokens are not "
+            f"projected until three jobs on this model have run"
+        )
 
     # A book flipping CLI mid-way is legal and sometimes intended, but it must
     # never be silent: on translate/footnotes it changes the model a book's own
@@ -419,4 +552,8 @@ def resolve_profile(
         baseline_source=baseline_source,
         host=host,
         warnings=warnings,
+        worker_model_resolved=resolved_id,
+        model_seen=seen,
+        output_ratio=ratio,
+        output_ratio_source=ratio_source,
     )

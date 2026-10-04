@@ -93,10 +93,12 @@ off the pin.
 
 Effort depends on the CLI. On Claude it rides in argv, so
 `headless_effort_triage` (default `medium`) is the lever. On Cursor it is part of
-the model id — the calibrated `cursor-grok-4.6-medium` names its own — so pin a
-different id (`cursor-grok-4.6-low`) rather than setting the config key, which
-would build a bracketed id the CLI was never asked about. `status` reports
-`effective.effort_channel`, which says which of the two is live.
+the model id — the calibrated `cursor-grok-4.6-medium` names its own, and
+`status` reports it as `effort: medium`, `effort_channel: model_id`. To run a
+different level, pin the listed id for it (`cursor-grok-4.6-low`) or pass
+`--effort low`, which swaps the suffix to the same id; neither adds a bracket.
+The config key does not move it: a level named in the pinned id outranks
+`headless_effort_triage`.
 
 ## Flow
 

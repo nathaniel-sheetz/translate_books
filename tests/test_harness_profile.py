@@ -15,6 +15,7 @@ from src.harness import state as hstate
 from src.harness.profile import (
     EFFORT_ARGV,
     EFFORT_MODEL_BRACKET,
+    EFFORT_MODEL_ID,
     EFFORT_NONE,
     resolve_cli,
     resolve_profile,
@@ -254,6 +255,60 @@ def test_a_bare_pinned_model_gets_no_invented_bracket(book, cursor_selected):
     assert prof.effort_channel == EFFORT_NONE
 
 
+def test_a_flat_id_reports_the_effort_its_own_name_carries(book, cursor_selected):
+    """`grok-4.7-medium` used to resolve `effort: null, channel: none`."""
+    _write_cfg(book, headless_effort_judges="high")
+    prof = resolve_profile(
+        book,
+        command="judges",
+        cli="cursor",
+        worker_model="grok-4.7-medium",
+        check_binary=False,
+    )
+    assert prof.worker_model == "grok-4.7-medium"
+    # The typed id outranks the book-level default, exactly as a bracket does.
+    assert prof.effort == "medium"
+    assert prof.effort_source == "model-id"
+    assert prof.effort_channel == EFFORT_MODEL_ID
+
+
+def test_a_manifest_effort_does_not_bracket_a_flat_id(book, cursor_selected):
+    """The 2026-09-28 launch: `fanout` re-resolving a manifest's `effort: medium`.
+
+    It was read as an override and composed into `grok-4.7-medium[effort=medium]`,
+    which `cursor-agent` rejects. Only `--effort default` produced a valid argv.
+    """
+    _write_cfg(book)
+    prof = resolve_profile(
+        book,
+        command="judges",
+        cli="cursor",
+        cli_source="manifest",
+        worker_model="grok-4.7-medium",
+        worker_model_source="manifest",
+        effort="medium",
+        effort_source="manifest",
+        check_binary=False,
+    )
+    assert prof.worker_model == "grok-4.7-medium"
+    assert (prof.effort, prof.effort_channel) == ("medium", EFFORT_MODEL_ID)
+
+
+def test_an_explicit_effort_swaps_a_flat_ids_suffix(book, cursor_selected):
+    _write_cfg(book)
+    prof = resolve_profile(
+        book,
+        command="judges",
+        cli="cursor",
+        worker_model="grok-4.7-medium-fast",
+        effort="high",
+        check_binary=False,
+    )
+    assert prof.worker_model == "grok-4.7-high-fast"
+    assert (prof.effort, prof.effort_source) == ("high", "cli")
+    assert prof.effort_channel == EFFORT_MODEL_ID
+
+
 def test_the_auto_model_cannot_carry_an_effort_and_says_so(book, monkeypatch):
     """`auto` takes no bracket, so report no effort rather than one that won't run."""
     from src.harness import headless
@@ -460,6 +515,199 @@ def test_payload_is_json_safe_and_complete(book):
     json.dumps(payload)
     assert set(payload) == {
         "command", "cli", "cli_source", "worker_model", "worker_model_source",
+        "worker_model_resolved", "model_seen",
         "effort", "effort_source", "effort_channel", "baseline_tokens",
-        "baseline_source", "host", "warnings",
+        "baseline_source", "output_ratio", "output_ratio_source", "host", "warnings",
     }
+
+
+# ── what the logs know about the model ──────────────────────────────────────
+
+
+def _log_jobs(log, n, *, model, cli="cursor", overhead=18_000, output=100, **extra):
+    """Append ``n`` successful jobs on ``model`` to a usage log."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as handle:
+        for _ in range(n):
+            handle.write(json.dumps({
+                "cli": cli, "model": model, "rc": 0, "prompt_sent": 1000,
+                "input": 1000 + overhead, "output": output, **extra,
+            }) + "\n")
+
+
+def test_an_unseen_pinned_model_is_run_but_said_out_loud(book):
+    """Warn and proceed: no allowlist, but no silent borrowed quote either.
+
+    The first Grok 4.7 wave was quoted off 38 rows that were all grok-4.6, input
+    only, and wrote 440k output tokens nobody had projected.
+    """
+    _write_cfg(book)
+    log = book / ".harness" / "judges" / "usage.jsonl"
+    _log_jobs(log, 5, model="grok-4.6[effort=medium,fast=false]")
+
+    prof = resolve_profile(
+        book, command="judges", cli="cursor", worker_model="grok-4.7-medium",
+        check_binary=False,
+    )
+    assert prof.worker_model == "grok-4.7-medium"      # accepted as typed
+    assert prof.model_seen is False
+    assert prof.baseline_tokens == 18_000
+    assert "other models" in prof.baseline_source
+    assert prof.output_ratio is None
+    assert prof.output_ratio_source == "no output rows for grok-4.7 yet"
+    warning = next(w for w in prof.warnings if "is logged yet" in w)
+    assert "'grok-4.7-medium'" in warning and "output tokens are not projected" in warning
+
+
+def test_a_model_with_history_quotes_itself_and_does_not_warn(book):
+    _write_cfg(book)
+    log = book / ".harness" / "judges" / "usage.jsonl"
+    _log_jobs(log, 5, model="grok-4.6-medium")
+    _log_jobs(log, 3, model="grok-4.7-medium", overhead=30_000, output=1000)
+
+    # A different effort of the same model reads the same rows.
+    prof = resolve_profile(
+        book, command="judges", cli="cursor", worker_model="grok-4.7-high",
+        check_binary=False,
+    )
+    assert prof.model_seen is True
+    assert prof.baseline_tokens == 30_000 and "grok-4.7" in prof.baseline_source
+    assert prof.output_ratio == 1.0
+    assert not any("is logged yet" in w for w in prof.warnings)
+
+
+def test_an_unpinned_default_on_a_cold_book_is_not_a_new_model(book):
+    """Nobody chose it and nothing is logged: `default:` already says so."""
+    _write_cfg(book)
+    prof = resolve_profile(book, command="judges", env=_CLAUDE_HOST)
+    assert prof.model_seen is False
+    assert prof.baseline_source.startswith("default:")
+    assert not any("is logged yet" in w for w in prof.warnings)
+
+
+def test_a_pinned_full_id_warns_even_on_a_cold_book(book):
+    """`--worker-model claude-sonnet-5-5` used to be accepted in silence."""
+    _write_cfg(book)
+    prof = resolve_profile(
+        book, command="translate", cli="claude", worker_model="claude-sonnet-5-5"
+    )
+    assert prof.worker_model == "claude-sonnet-5-5"
+    assert any("'claude-sonnet-5-5' is logged yet" in w for w in prof.warnings)
+
+
+def test_a_model_read_back_from_the_manifest_is_not_a_pin(book):
+    """`fanout` warned where `prepare` was silent: the manifest held prepare's own default."""
+    _write_cfg(book)
+    prof = resolve_profile(
+        book, command="judges", cli="claude", worker_model="sonnet",
+        worker_model_source="manifest", check_binary=False,
+    )
+    assert not any("is logged yet" in w for w in prof.warnings)
+
+
+def test_the_unseen_model_warning_names_the_wave_it_checked(book):
+    """Adjudication resolves as `judges` but reads its own log."""
+    _write_cfg(book)
+    prof = resolve_profile(
+        book, command="judges", cli="claude", worker_model="claude-sonnet-5-5",
+        wave_label="editorial adjudication", check_binary=False,
+    )
+    warning = next(w for w in prof.warnings if "is logged yet" in w)
+    assert warning.startswith("no editorial adjudication job on")
+
+
+def test_a_level_typed_on_the_model_outranks_the_manifests_effort(book):
+    """`fanout --worker-model grok-4.7-high` ran medium: the manifest's level won."""
+    _write_cfg(book)
+    inherited = dict(
+        command="judges", cli="cursor", cli_source="manifest",
+        effort="medium", effort_source="manifest", check_binary=False,
+    )
+
+    prof = resolve_profile(
+        book, worker_model="grok-4.7-high", worker_model_source="cli", **inherited
+    )
+    assert prof.worker_model == "grok-4.7-high"
+    assert (prof.effort, prof.effort_source) == ("high", "model-id")
+    prof = resolve_profile(
+        book, worker_model="grok-4.6[effort=high,fast=false]",
+        worker_model_source="cli", **inherited,
+    )
+    assert prof.worker_model == "grok-4.6[effort=high,fast=false]"
+
+    # The manifest's own model still runs at the manifest's level...
+    prof = resolve_profile(
+        book, worker_model="grok-4.7-medium", worker_model_source="manifest", **inherited
+    )
+    assert prof.worker_model == "grok-4.7-medium" and prof.effort_source == "manifest"
+    # ...a typed model that names no level inherits it...
+    prof = resolve_profile(
+        book, worker_model="grok-4.5", worker_model_source="cli", **inherited
+    )
+    assert prof.worker_model == "grok-4.5[effort=medium]"
+    # ...and an explicit --effort still beats what the id says.
+    prof = resolve_profile(
+        book, command="judges", cli="cursor", worker_model="grok-4.7-high",
+        effort="low", check_binary=False,
+    )
+    assert prof.worker_model == "grok-4.7-low"
+
+
+def test_the_profile_reports_what_an_alias_last_resolved_to(book):
+    """`sonnet` still meant Sonnet 5 with 5.5 out, and nothing at the gate said so."""
+    _write_cfg(book)
+    log = book / ".harness" / "judges" / "usage.jsonl"
+    _log_jobs(log, 3, cli="claude", model="sonnet", overhead=3900,
+              resolved_model="claude-sonnet-5")
+
+    prof = resolve_profile(book, command="judges", cli="claude")
+    assert prof.worker_model == "sonnet"
+    assert prof.worker_model_resolved == "claude-sonnet-5"
+    assert prof.to_payload()["worker_model_resolved"] == "claude-sonnet-5"
+
+
+def test_model_history_can_be_skipped_for_a_probe_resolution(book):
+    """A caller resolving only to learn the CLI must not warn about its model."""
+    _write_cfg(book)
+    log = book / ".harness" / "judges" / "usage.jsonl"
+    _log_jobs(log, 5, model="grok-4.6-medium")
+
+    prof = resolve_profile(
+        book, command="judges", cli="cursor", worker_model="grok-4.7-medium",
+        check_binary=False, model_history=False,
+    )
+    assert prof.baseline_tokens == 18_000
+    assert not any("is logged yet" in w for w in prof.warnings)
+
+
+def test_another_books_history_calibrates_this_ones_first_wave(tmp_path, monkeypatch):
+    """Sibling logs are only read for books under the repo's projects/ root."""
+    monkeypatch.setattr(hstate, "REPO_ROOT", tmp_path)
+    here = tmp_path / "projects" / "new-book"
+    other = tmp_path / "projects" / "series" / "old-book"   # grouped a level down
+    for project in (here, other):
+        (project / "chunks").mkdir(parents=True)
+        (project / ".harness").mkdir()
+    _write_cfg(here)
+    _log_jobs(other / ".harness" / "judges" / "usage.jsonl", 4,
+              model="grok-4.7-medium", overhead=30_000, output=1000)
+    # Another wave type's log in that book is a different shape of job.
+    _log_jobs(other / ".harness" / "triage" / "usage.jsonl", 4,
+              model="grok-4.7-medium", overhead=5, output=5)
+
+    prof = resolve_profile(
+        here, command="judges", cli="cursor", worker_model="grok-4.7-medium",
+        check_binary=False,
+    )
+    assert prof.model_seen is True
+    assert prof.baseline_tokens == 30_000 and "across books" in prof.baseline_source
+    assert prof.output_ratio == 1.0
+    assert not any("is logged yet" in w for w in prof.warnings)
+
+
+def test_sibling_logs_are_not_guessed_outside_the_projects_root(tmp_path):
+    from src.harness.profile import sibling_usage_logs
+
+    log = tmp_path / ".harness" / "judges" / "usage.jsonl"
+    assert sibling_usage_logs(tmp_path, log) == []
+    assert sibling_usage_logs(tmp_path, None) == []

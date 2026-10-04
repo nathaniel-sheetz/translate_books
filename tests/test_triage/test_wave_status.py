@@ -179,18 +179,19 @@ def test_the_house_model_carries_its_effort_in_its_own_id(book: Path):
     """Nothing appends a bracket to the calibrated model, and that is correct.
 
     Cursor's current id scheme names the effort in the id itself
-    (``cursor-grok-4.6-medium``), so there is no bracket to read and nothing for
-    the effort ladder to set. ``resolve_profile`` says so plainly rather than
-    inventing a level — which matters here because appending one would produce
+    (``cursor-grok-4.6-medium``), so there is no bracket to read. The level is
+    read off the id instead and reported as the one the wave runs at, rather
+    than as "none" beside a medium wave — and nothing is appended, which matters
+    here because appending one would produce
     ``cursor-grok-4.6-medium[effort=medium]``, an id this CLI was never asked
     about, in place of one it lists.
     """
     assert "[" not in tp.DEFAULT_TRIAGE_MODEL["cursor"]
     out = tp.prepare(book, cli="cursor")
     assert out["effective"]["worker_model"] == tp.DEFAULT_TRIAGE_MODEL["cursor"]
-    assert out["effective"]["effort"] is None
-    assert out["effective"]["effort_source"] == "cursor-default"
-    assert out["effective"]["effort_channel"] == "none"
+    assert out["effective"]["effort"] == "medium"
+    assert out["effective"]["effort_source"] == "model-id"
+    assert out["effective"]["effort_channel"] == "model_id"
 
 
 # --- the CLI ladder ----------------------------------------------------------

@@ -247,9 +247,14 @@ resolved the whole wave once and reported it with the provenance of every field:
   `headless_cli` pin, or host detection
 - `worker_model` — **as prepare printed it**, bracket included
 - `effort` **and** `effort_channel` — `argv` means a `--effort` flag carries it,
-  `model_bracket` means the Cursor model string does, `none` means nothing does
+  `model_bracket` means the Cursor model string's `[effort=…]` does, `model_id`
+  means the id itself names the level (`grok-4.7-medium`), `none` means nothing does
+- `model_seen` / `output_ratio` — `model_seen: false` means no footnote-scan job on this
+  model is logged in any book (other wave types are not consulted), so the token
+  baseline is another model's and
+  `output_ratio` is `null`: say output is unknown rather than quoting a number
 
-Those four are only interpretable together, which is why they are relayed as a block
+These are only interpretable together, which is why they are relayed as a block
 and not cherry-picked. Two rules, both learned the expensive way:
 
 - **Do not quote `usage_summary.headless_effort` on a Cursor wave** — use
@@ -271,7 +276,9 @@ python scripts/footnote_pass.py scan-fanout --project fabre2
 ```
 
 On 529, re-run with a lower `--concurrency`. Cursor needs a Cursor model id
-(`grok-4.6`, `auto`); `--worker-model sonnet` with `--cli cursor` returns a warning.
+(`grok-4.6`, `auto`, or any id copied verbatim from `cursor-agent models`, such as
+the flat `grok-4.7-medium`); `--worker-model sonnet` with `--cli cursor` returns a
+warning.
 
 On **Cursor + Windows**, a job failing with
 `EPERM: operation not permitted, rename '…\.cursor\cli-config.json…'` is concurrent

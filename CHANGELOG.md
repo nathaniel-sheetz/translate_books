@@ -2,7 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.63.0.0] - 2026-09-30
+## [0.64.0.0] - 2026-10-04
+
+### Added
+- **A newly released model runs without a code edit.** Nothing in the harness names a model any more. `src/harness/model_ids.py` reads what an id says about itself: the bracket form (`grok-4.5[effort=high,fast=false]`), the flat form where the level is part of the id (`grok-4.7-medium`, `grok-4.7-medium-fast`), and a bracket that spells the level `reasoning=` (`gpt-5.6-terra[context=272k,reasoning=medium,fast=false]`). `--effort` rewrites whichever form the id uses and never adds a bracket to a flat id. `effort_channel` gains `model_id` and `effort_source` gains `model-id`.
+- **Estimates calibrate themselves per model.** The per-job input baseline is read from the usage logs for the wave's own model: this book first, then the same wave type in every other book, then other models on that CLI (labelled as borrowed), then the per-CLI constant. An alias and the full id the CLI ran it as are one history, and once an alias moves to a new release the rows labelled with the old model stop counting for it.
+- **Output tokens are projected, or reported as unknown.** Judge and adjudication gates carry `estimated_output_tokens`, from the model's own logged output/prompt ratio. A model with fewer than three logged jobs gets `null` and a reason, never another model's ratio and never `0`. The dashboard shows it as "unknown".
+- **An unseen model is run, and named.** `effective` gains `model_seen`, `output_ratio`, `output_ratio_source` and `worker_model_resolved` (the full id a tier alias last ran as, so a lagging `sonnet` shows before a wave is spent finding out). A pinned model with no logged job on that wave type produces a warning that says whose numbers the quote uses. `translate-prepare` now returns `effective` and `warnings` too, including one when a full model id is pinned that a Task subagent cannot honour.
+- **Optional capability fields in `llm_config.json`.** `sampling_params` (`true`/`false`) and `thinking` (`"always"`, `"optional"`, `"none"`) on an Anthropic model entry override the guess made from the id. See `docs/LLM_PROVIDERS.md`.
+- **`--provider` accepts any provider the config defines** in `translate_book.py`, `translate_api.py`, `translate_footnotes.py`, `generate_style_guide.py` and `extract_glossary_candidates.py`, and defaults to the catalog's `default_provider`.
+
+### Changed
+- **Claude capability rules are inverted.** The legacy models that still accept `temperature` are the closed list. Any other `claude-` id is treated as current generation, so a release this code has never seen is handled like the generation it belongs to.
+- **A wrong capability guess repairs itself.** A realtime request the API refuses over `temperature` or `thinking` is retried once without that parameter, with room left for the model to think, and the model is not sent it again for the rest of the process. A batch submitted afterwards starts from the same memory.
+- **`llm_config.json` falls back to the tracked `llm_config.example.json`** when the per-user file is absent. A per-user file that is present but not valid JSON still stops with an error.
+- An uncatalogued model's cost estimate still uses the $5/$15 placeholder, and now says so once per model.
+- A rejected Cursor model id is answered with the ids of the same family ("Did you mean") before the full list.
+
+### Fixed (found in pre-ship review)
+- **`fanout --worker-model` with a level in the id ran at the manifest's level.** `--worker-model grok-4.7-high` on a manifest prepared at medium was rewritten back to `grok-4.7-medium`. A level typed on the model now outranks an effort inherited from the manifest; an explicit `--effort` still wins.
+- **No-LLM commands failed on a catalog without an `anthropic` provider.** argparse validated the hard-coded default, so `footnotes apply` and `generate_style_guide.py --fixed-only` exited before doing any work. A config that will not load is now reported as itself and not as a bad `--provider`.
+- **`translate_api.py --batch` on a provider with no Batch API** quoted a discounted cost and asked for confirmation before crashing. It now refuses first.
+- **The unseen-model warning** no longer fires at `fanout` for a default nobody pinned, and on an adjudication wave it names that wave and not pass 1.
+- `baseline_for` reads the same sibling logs as the profile, so the adjudication baseline and `effective` answer one question.
+- Corrected comments, schema text and skill wording that described the old per-CLI calibration, or said `model_seen: false` means a model has never run in any book. It is per wave type and per CLI.
 
 ### Added
 - **Publisher EPUBs can be ingested the way Gutenberg HTML is.** `scripts/ingest_epub.py` reads the package (spine, NCX/nav, guide, CSS) and writes `source.txt`, `headings.json`, `images/` and an `ingest_report.json` that records every keep/drop decision. Publisher and edition documents (cover, title page, copyright/ISBN page, TOC, ads) are dropped by structural signals first and content heuristics second. `--list` previews the decisions and `--keep-doc` / `--drop-doc` override them. Headings come from the book's own TOC, so class-styled titles (InDesign's `p.cta`) are found. Subtitles stay in the text but out of the outline. CSS italics carry through, including classes that only name an italic font family. Paragraphs cut across files are rejoined, a plate between chapters stays with the chapter it followed, and all-caps drop-cap lead-ins are recased from the book's own casing. See `docs/INGEST_EPUB.md`.

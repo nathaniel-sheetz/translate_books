@@ -249,6 +249,408 @@ def test_rejects_sampling_params():
     assert _rejects_sampling_params("claude-sonnet-4-6") is False
 
 
+@pytest.mark.parametrize("model", [
+    "claude-sonnet-5-5",
+    "claude-opus-5",
+    "claude-opus-5-5-20270101",
+    "claude-haiku-5",
+    "claude-fable-6",
+    "claude-some-family-nobody-has-named-yet",
+])
+def test_an_unreleased_claude_model_is_treated_as_current(model):
+    """The legacy set is the closed one, so a new release needs no edit here.
+
+    Listing the *modern* models meant every release 400'd on `temperature`
+    until someone added it; `claude-sonnet-5-5` only worked because it happened
+    to share a prefix with `claude-sonnet-5`.
+    """
+    assert _rejects_sampling_params(model) is True
+
+
+@pytest.mark.parametrize("model", [
+    "claude-2.1",
+    "claude-instant-1.2",
+    "claude-3-opus-20240229",
+    "claude-3-7-sonnet-20250219",
+    "claude-sonnet-4-20250514",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5-20251001",
+    "claude-opus-4-20250514",
+    "claude-opus-4-1-20250805",
+    "claude-opus-4-6",
+])
+def test_legacy_claude_models_still_get_sampling_params(model):
+    assert _rejects_sampling_params(model) is False
+
+
+@pytest.mark.parametrize("model", ["gpt-4o", "google/gemma-4-31B-it", "grok-4.7", ""])
+def test_non_claude_models_are_never_treated_as_claude(model):
+    """The dashboard asks this of every catalogued model, whatever its provider."""
+    from src.api_translator import model_supports_thinking
+
+    assert _rejects_sampling_params(model) is False
+    assert model_supports_thinking(model) is False
+
+
+def _bad_request(message: str):
+    import anthropic
+
+    response = Mock()
+    response.status_code = 400
+    response.headers = {}
+    return anthropic.BadRequestError(message, response=response, body={})
+
+
+def _text_response(text: str = "Translated text"):
+    response = Mock()
+    response.content = [Mock(type="text", text=text)]
+    return response
+
+
+def test_a_400_naming_temperature_is_retried_without_it():
+    """A wrong capability guess repairs itself from what the API said."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_client.messages.create.side_effect = [
+            _bad_request("temperature: this parameter is not supported by this model"),
+            _text_response(),
+        ]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            # A legacy-looking id, so temperature is sent on the first attempt.
+            out = call_anthropic_api("Translate", model="claude-sonnet-4-9")
+
+        assert out == "Translated text"
+        first, second = mock_client.messages.create.call_args_list
+        assert "temperature" in first.kwargs
+        assert "temperature" not in second.kwargs
+
+
+def test_a_400_naming_thinking_is_retried_without_it_and_with_room_to_think():
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_client.messages.create.side_effect = [
+            _bad_request("thinking.type: 'disabled' is not supported for this model"),
+            _text_response(),
+        ]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}, clear=False):
+            os.environ.pop("TRANSLATE_THINKING", None)
+            call_anthropic_api("Translate", model="claude-opus-5", max_tokens=4096)
+
+        first, second = mock_client.messages.create.call_args_list
+        assert first.kwargs["thinking"] == {"type": "disabled"}
+        assert "thinking" not in second.kwargs
+        # The model may now think by default, and thinking counts against the cap.
+        assert second.kwargs["max_tokens"] >= 8192
+
+
+def test_an_unrelated_400_is_not_retried():
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_client.messages.create.side_effect = _bad_request(
+            "messages: prompt is too long"
+        )
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            with pytest.raises(APIError, match="prompt is too long"):
+                call_anthropic_api("Translate", model="claude-sonnet-4-6")
+
+        assert mock_client.messages.create.call_count == 1
+
+
+@pytest.fixture(autouse=True)
+def _forget_rejected_params():
+    """The 400-repair memo is per process; no test may inherit another's."""
+    from src import api_translator
+
+    api_translator._REJECTED_PARAMS.clear()
+    yield
+    api_translator._REJECTED_PARAMS.clear()
+
+
+def test_a_repaired_model_is_not_asked_again_in_the_same_run(sample_chunk, tmp_path):
+    """One failed request per model, not one per chunk — and a batch learns from it."""
+    pytest.importorskip("anthropic")
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_client.messages.create.side_effect = [
+            _bad_request("temperature: this parameter is not supported by this model"),
+            _text_response(),
+            _text_response(),
+        ]
+        mock_batch = Mock()
+        mock_batch.id = "batch_abc123"
+        mock_batch.processing_status = "in_progress"
+        mock_client.messages.batches.create.return_value = mock_batch
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            call_anthropic_api("Translate", model="claude-sonnet-4-9")
+            call_anthropic_api("Translate", model="claude-sonnet-4-9")
+            # A batch cannot be repaired after the fact, so it starts from the memo.
+            submit_batch(
+                chunks=[sample_chunk],
+                provider='anthropic',
+                model='claude-sonnet-4-9',
+                output_dir=tmp_path / "translated",
+            )
+
+        assert mock_client.messages.create.call_count == 3
+        assert "temperature" not in mock_client.messages.create.call_args.kwargs
+        _, kwargs = mock_client.messages.batches.create.call_args
+        assert "temperature" not in kwargs["requests"][0]["params"]
+
+
+def test_a_repair_that_did_not_help_is_not_remembered():
+    """A 400 that merely mentions a param must not cost that param for the run."""
+    pytest.importorskip("anthropic")
+    from src import api_translator
+
+    with patch('anthropic.Anthropic') as mock_anthropic_class:
+        mock_client = Mock()
+        mock_client.messages.create.side_effect = [
+            _bad_request("temperature: this parameter is not supported by this model"),
+            _bad_request("messages: prompt is too long"),
+        ]
+        mock_anthropic_class.return_value = mock_client
+
+        with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test-key'}):
+            with pytest.raises(APIError, match="prompt is too long"):
+                call_anthropic_api("Translate", model="claude-sonnet-4-9")
+
+    assert api_translator._REJECTED_PARAMS == {}
+
+
+def test_the_catalog_can_declare_what_the_prefix_rules_would_guess_wrong(monkeypatch):
+    """`sampling_params` / `thinking` on a model entry beat the guess, with no edit here."""
+    from src import api_translator
+
+    config = {"providers": [{"id": "anthropic", "type": "anthropic", "models": [
+        {"id": "claude-sonnet-4-9", "sampling_params": False, "thinking": "optional"},
+        {"id": "claude-opus-6", "thinking": "always"},
+        {"id": "claude-haiku-9", "sampling_params": True, "thinking": "none"},
+        {"id": "claude-sonnet-5", "thinking": "sometimes"},
+    ]}]}
+    monkeypatch.setattr(api_translator, "_LLM_CONFIG_CACHE", config)
+
+    # Looks legacy by prefix; the catalog says it is not.
+    assert _rejects_sampling_params("claude-sonnet-4-9") is True
+    assert api_translator.model_supports_thinking("claude-sonnet-4-9") is True
+    # An always-thinking model outside the family the code knows by prefix.
+    assert api_translator._thinking_param("claude-opus-6", False) is None
+    assert api_translator.model_supports_thinking("claude-opus-6") is False
+    assert api_translator._max_tokens_with_thinking("claude-opus-6", 4096, None) >= 8192
+    # Looks current by prefix; the catalog says it takes neither change.
+    assert _rejects_sampling_params("claude-haiku-9") is False
+    assert api_translator._thinking_param("claude-haiku-9", True) is None
+    # An unrecognised value, or no entry at all, falls back to the guess.
+    assert api_translator.model_supports_thinking("claude-sonnet-5") is True
+    assert _rejects_sampling_params("claude-opus-4-6") is False
+
+
+def test_batch_mode_refuses_a_provider_with_no_batch_api_before_quoting(monkeypatch):
+    """`--provider` accepts any configured id now; `--batch` must not quote a discount for one it cannot run."""
+    from argparse import Namespace
+    from scripts import translate_api
+
+    loaded = Mock()
+    monkeypatch.setattr(translate_api, "load_chunks_with_paths", loaded)
+    assert translate_api.translate_batch(Namespace(provider="deepinfra")) == 1
+    loaded.assert_not_called()
+
+
+# ── the catalog: config-driven, with nothing to edit here ───────────────────
+
+
+@pytest.fixture
+def catalog(monkeypatch):
+    """Install a known llm_config in place of the developer's own file."""
+    from src import api_translator
+
+    config = {
+        "default_provider": "anthropic",
+        "default_model": "claude-sonnet-5",
+        "providers": [
+            {"id": "anthropic", "type": "anthropic",
+             "api_key_env_var": "ANTHROPIC_API_KEY",
+             "models": [{"id": "claude-sonnet-5",
+                         "pricing": {"input": 2.0, "output": 10.0}}]},
+            {"id": "deepinfra", "type": "openai-compatible",
+             "api_key_env_var": "DEEPINFRA_API_KEY",
+             "base_url": "https://example.invalid/v1", "models": []},
+        ],
+    }
+    monkeypatch.setattr(api_translator, "_LLM_CONFIG_CACHE", config)
+    monkeypatch.setattr(api_translator, "_PLACEHOLDER_PRICING_WARNED", set())
+    return config
+
+
+def test_provider_arg_accepts_any_configured_provider(catalog):
+    """`choices=["anthropic", "openai"]` rejected a provider the config defined."""
+    import argparse
+
+    from src.api_translator import provider_arg
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--provider", default="anthropic", type=provider_arg)
+    assert parser.parse_args(["--provider", "deepinfra"]).provider == "deepinfra"
+    assert parser.parse_args([]).provider == "anthropic"
+
+    with pytest.raises(argparse.ArgumentTypeError, match="anthropic, deepinfra"):
+        provider_arg("nonesuch")
+
+
+def test_no_provider_flag_parses_on_a_catalog_without_anthropic(monkeypatch):
+    """argparse runs `type` over a string default, so `"anthropic"` failed every run."""
+    import argparse
+
+    from src import api_translator
+
+    monkeypatch.setattr(api_translator, "_LLM_CONFIG_CACHE", {
+        "default_provider": "deepinfra",
+        "providers": [{"id": "deepinfra", "type": "openai-compatible", "models": []}],
+    })
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--provider",
+        default=api_translator.default_provider_arg(),
+        type=api_translator.provider_arg,
+    )
+    assert parser.parse_args([]).provider == "deepinfra"
+
+
+def test_a_config_that_will_not_load_is_reported_as_itself(monkeypatch, tmp_path):
+    """Not as "invalid provider_arg value", which sent people to check the flag."""
+    import argparse
+
+    from src import api_translator
+
+    broken = tmp_path / "llm_config.json"
+    broken.write_text("{ nope", encoding="utf-8")
+    monkeypatch.setattr(api_translator, "_LLM_CONFIG_CACHE", None)
+    monkeypatch.setattr(api_translator, "LLM_CONFIG_FILE", broken)
+
+    assert api_translator.default_provider_arg() == "anthropic"
+    with pytest.raises(argparse.ArgumentTypeError, match="not valid JSON"):
+        api_translator.provider_arg("anthropic")
+
+
+def test_a_refused_temperature_leaves_room_to_think():
+    """Only the current generation refuses it, and that generation thinks by default."""
+    from src.api_translator import _drop_rejected_params
+
+    kwargs = {"model": "x", "max_tokens": 4096, "temperature": 0.3}
+    assert _drop_rejected_params(kwargs, "`temperature` is deprecated for this model") == [
+        "temperature"
+    ]
+    assert kwargs["max_tokens"] >= 8192
+
+    # Thinking explicitly off: nothing will think, so the cap is left alone.
+    kwargs = {"model": "x", "max_tokens": 4096, "temperature": 0.3,
+              "thinking": {"type": "disabled"}}
+    _drop_rejected_params(kwargs, "`temperature` is deprecated for this model")
+    assert kwargs["max_tokens"] == 4096 and "thinking" in kwargs
+
+
+def test_no_script_hard_codes_the_provider_list():
+    """Every script that takes ``--provider`` must defer to the config."""
+    import re
+
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    pattern = re.compile(r"""choices\s*=\s*\[\s*['"]anthropic['"]\s*,\s*['"]openai['"]\s*\]""")
+    offenders = [
+        path.name
+        for path in sorted(scripts.glob("*.py"))
+        if pattern.search(path.read_text(encoding="utf-8-sig"))
+    ]
+    assert not offenders, (
+        f"{offenders} pin --provider to anthropic/openai; use "
+        "type=provider_arg so any provider in llm_config.json is accepted"
+    )
+
+
+def test_batch_on_a_provider_without_one_says_so(catalog, sample_chunk, tmp_path):
+    with pytest.raises(ValueError, match="no Batch API support"):
+        submit_batch(
+            chunks=[sample_chunk], provider="deepinfra", model="some-model",
+            output_dir=tmp_path / "translated",
+        )
+
+
+def test_an_uncatalogued_model_is_priced_by_placeholder_and_says_so_once(catalog, caplog):
+    from src.api_translator import get_model_pricing
+
+    with caplog.at_level("WARNING", logger="src.api_translator"):
+        assert get_model_pricing("anthropic", "claude-sonnet-5") == {
+            "input": 2.0, "output": 10.0,
+        }
+        assert not caplog.records                      # catalogued: silent
+
+        first = get_model_pricing("anthropic", "claude-opus-5")
+        get_model_pricing("anthropic", "claude-opus-5")
+        get_model_pricing("anthropic", "default")      # a sentinel, not a model
+
+    assert first == {"input": 5.0, "output": 15.0}
+    warnings = [r.getMessage() for r in caplog.records]
+    assert len(warnings) == 1 and "claude-opus-5" in warnings[0]
+    # The placeholder is a fresh dict each time, so a caller cannot corrupt it.
+    first["input"] = 0
+    assert get_model_pricing("anthropic", "claude-opus-5")["input"] == 5.0
+
+
+def test_a_clone_with_no_user_config_runs_on_the_tracked_example(tmp_path, monkeypatch):
+    """Not on a third copy of the catalog kept in Python."""
+    from src import api_translator
+
+    example = tmp_path / "llm_config.example.json"
+    example.write_text(json.dumps({
+        "default_provider": "anthropic", "default_model": "from-the-example",
+        "providers": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(api_translator, "_LLM_CONFIG_CACHE", None)
+    monkeypatch.setattr(api_translator, "LLM_CONFIG_FILE", tmp_path / "llm_config.json")
+    monkeypatch.setattr(api_translator, "LLM_CONFIG_EXAMPLE_FILE", example)
+
+    assert api_translator.load_llm_config()["default_model"] == "from-the-example"
+
+    # The operator's own file wins once it exists...
+    (tmp_path / "llm_config.json").write_text(json.dumps({
+        "default_provider": "anthropic", "default_model": "mine", "providers": [],
+    }), encoding="utf-8")
+    assert api_translator.load_llm_config(force_reload=True)["default_model"] == "mine"
+
+    # ...and a broken one stops the run rather than billing off the example.
+    (tmp_path / "llm_config.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        api_translator.load_llm_config(force_reload=True)
+
+    # With neither file, the in-code last resort still answers.
+    (tmp_path / "llm_config.json").unlink()
+    example.unlink()
+    assert api_translator.load_llm_config(force_reload=True)["providers"]
+
+
+def test_the_tracked_example_config_is_loadable():
+    """It is now the fallback catalog, so it has to parse and have the keys."""
+    from src.api_translator import LLM_CONFIG_EXAMPLE_FILE
+
+    config = json.loads(LLM_CONFIG_EXAMPLE_FILE.read_text(encoding="utf-8"))
+    provider_ids = {p["id"] for p in config["providers"]}
+    assert config["default_provider"] in provider_ids
+    assert all({"id", "type", "models"} <= set(p) for p in config["providers"])
+
+
 def test_call_anthropic_api_omits_temperature_for_sonnet_5():
     """call_anthropic_api must not send temperature for a model that 400s on it."""
     pytest.importorskip("anthropic")
@@ -315,6 +717,10 @@ def test_model_supports_thinking():
     assert model_supports_thinking("claude-fable-5") is False       # always-on
     assert model_supports_thinking("claude-sonnet-4-6") is False    # always-off
     assert model_supports_thinking("claude-3-5-sonnet-20241022") is False
+    # A release this file has never heard of follows its family's rule.
+    assert model_supports_thinking("claude-sonnet-5-5") is True
+    assert model_supports_thinking("claude-opus-5") is True
+    assert model_supports_thinking("claude-fable-6") is False       # always-on
 
 
 def test_call_anthropic_api_enable_thinking_flag_overrides_env():
