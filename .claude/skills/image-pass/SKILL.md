@@ -344,11 +344,14 @@ The reader serves the new files on the next page load. **An EPUB built earlier k
 the old pictures** — rebuild it. That is translate-harness's step; this skill ends at
 `verify`.
 
-## What a live run established (codex-cli 0.157.0, Windows, 2026-10-05)
+## What live runs established (codex-cli 0.157.0, Windows, 2026-10-05)
 
-Two runs on a scratch copy of `home-geography`: `006.jpg` in `restore`, then `007.jpg`
-(the compass-points diagram) in `translate`. Update this section when a later CLI
-behaves differently.
+All on a scratch copy of `home-geography`: two first runs from the 250 px thumbnails,
+then, after `backfill`, sixteen more from the larger scans — seven images with
+lettering translated, one restore, and a cover on two models. Update this section when
+a later CLI behaves differently.
+
+### The CLI
 
 - **Login probe.** `codex login status` writes one line to **stderr**:
   `Logged in using ChatGPT`, exit 0. Logged out: `Not logged in`, exit 1. The binary's
@@ -359,12 +362,14 @@ behaves differently.
   `CODEX_API_KEY` set, `login status` still says `Logged in using ChatGPT`. The scrub is
   the only thing that keeps those out of a job, exactly as with `ANTHROPIC_BASE_URL` on
   the Claude side. (`CODEX_ACCESS_TOKEN` is read even by `login status`.)
-- **The model in `~/.codex/config.toml` may not be usable.** This machine pins
-  `gpt-5.4`, and the job failed in ten seconds, nothing spent, with *"The 'gpt-5.4'
-  model is not supported when using Codex with a ChatGPT account."* `generate` stops
-  the batch on that error and says to pass `--model`. The ids this plan offers are in
-  `~/.codex/models_cache.json`; both runs used `--model gpt-6-luna` ("fast and
-  affordable"), which is enough — the model only has to call one tool.
+- **A listed model is not necessarily a usable one.** The pin in
+  `~/.codex/config.toml` was `gpt-5.4`, and the job failed in ten seconds, nothing
+  spent, with *"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT
+  account."* `gpt-6.1-sol` failed the same way although `~/.codex/models_cache.json`
+  listed it: the cache was stale, and its next refresh dropped the id. `generate` stops
+  the batch on that error and says to pass `--model`. The only proof an id works is one
+  turn on it. `gpt-6-luna` ("fast and affordable") ran every job here and is enough —
+  the model only has to call one tool. `gpt-6-sol` is accepted too.
 - **Where the image lands.** `$CODEX_HOME/generated_images/<thread id>/exec-<uuid>.png`,
   where the thread id is the `thread_id` of the stream's first event
   (`{"type":"thread.started",…}`). `generate` reads that folder
@@ -378,32 +383,104 @@ behaves differently.
   writing 1.8 MB of base64 through a command line fails with Windows error 206 — so it
   **generated the image four times** hunting for a way (274 s, four images of plan
   usage) and saved nothing. The contract is now "call the tool exactly once, do not
-  save or resize, run no shell command", the sandbox is `read-only`, and the second run
-  made one image in 85 s. A row with `images_generated > 1` means a model ignored that:
-  say so, because it cost that many images.
-- **Time.** About 85 s for one image at one generation. `--estimate` assumes 2 minutes
-  until a project's own `usage.jsonl` has a measurement.
-- **Output size.** Roughly 1350 px on the long side from a 250 px original, with the
-  original's proportions kept to within a pixel. `apply` downscales to 1024 px.
-- **Quality, from two images only.** The restoration was faithful. The translation
-  spelled all eight labels correctly, merged each two-line diagonal label into one
-  word as instructed, and kept the line work — including which three diagonals are
-  dashed, which was only checkable against a 4x enlargement of the 250 px original.
-  Enlarge a small original before judging "same picture?"; at native size you cannot.
+  save or resize, run no shell command", and the sandbox is `read-only`. Every run
+  since has made exactly one image. A row with `images_generated > 1` means a model
+  ignored that: say so, because it cost that many images.
+- **Time.** Sixteen runs, none failed: 56-83 s for an ordinary image (median 72 s) and
+  144-216 s for the map with sixteen labels. `--estimate` uses the project's median
+  once it has one, so it **under-quotes a dense image by about three times** — say so
+  at G2 when a job has many labels.
+- **Output size.** 1200-1440 px on the long side for an edit, with the input's
+  proportions kept to within 0.1%; 1024 x 1536 for a cover. The paper comes back white
+  to within two grey levels. `apply` downscales an edit to twice the original's long
+  side, never below 1024 px.
+- **`usage.jsonl` does not record the model.** When two models fill candidates of one
+  job, write which is which in the decision's `note`.
+- **No usage limit was hit** in the sixteen runs after `backfill`, about 27 minutes of
+  generation in one afternoon on this plan.
 
-- **Backfill.** Gutenberg hosts an `NNN_l.gif` behind every thumbnail of ebook 12228.
-  The dry run on the scratch copy found 80 linked scans for 87 images (the other seven
-  were already the large files). 75 measured 0.99 or better against their thumbnail.
-  Two were **crossed on Gutenberg's side** — `005.jpg` (the star chart) links to the
+### Translating lettering
+
+Seven images, eleven runs. Every word that was asked for was eventually spelled right,
+accents included (`Ó`, `Í`, `É`, `Ñ`, `í`). What went wrong, and the instruction that
+fixed it:
+
+- **Tiny labels lose strokes.** Five grain names a few pixels high came back as `IRROZ`
+  and `CENT:NO`. Spelling the two out letter by letter, and allowing a label to be
+  slightly larger than the original, fixed both in one run.
+- **An accent can land on the wrong letter.** One of two map candidates put the acute
+  of `OCÉANO` on the `C`. Look at where each accent sits, not only whether it exists.
+- **Fragments of the English are left behind**, most often where the replacement is
+  shorter: the tail of the `y` in `Tributary` stayed as a hook on the stream, and the
+  capital of `Island` stayed beside `Isla`. Lead the instruction with "erase the whole
+  of the old word, every letter and every tail of it, and redraw what lies behind it
+  before setting the new word", then name any place it already failed.
+- **Type drifts toward one style.** Left to itself the model set most of a map in
+  italic serif and made light capitals bold. Describing the original type group by
+  group ("CITY: light upright sans-serif capitals; Road, Bridge, Cape: small upright
+  roman, not italic; …") held on the next run.
+- **A label too close to the border is clipped.** Say where it must start.
+- **Rotated lettering follows the reader, not the picture.** On a compass dial whose
+  letters face the centre, `SW → SO` came back in page reading order. "Each W becomes
+  an O in exactly the spot that W occupies; no other letter moves" got it right.
+- **A redo fixes what it was told and slips somewhere new.** The map took three
+  attempts. On a redo of an image with many labels, ask for two candidates: the third
+  attempt's pair had one clean and one with the misplaced accent.
+- **A much longer replacement fits** when told how: `CALLEJÓN DE LOS CIRUELOS` went
+  into the strip that held `PLUM LANE` with "tighten the letter-spacing or reduce the
+  size so it fits within the strip".
+
+Two of those faults were found by the user, not by the first look at the candidate.
+Before reporting, enlarge **every** label and its surroundings four or five times
+beside the same crop of the original; at page size a clipped letter or a stray hook
+does not show. `inventory.picture_similarity(original, candidate)` is a quick check
+that the artwork did not move — the engravings scored 0.96-1.0 — but a diagram that is
+mostly lettering scores low (0.86) for the right reasons.
+
+### Restoring
+
+- From a 250 px thumbnail, "clean scan noise only" changed a dial numeral from `90`
+  to `270`: with nothing to read, the model wrote what a compass ought to say.
+- From the larger scan, with every numeral and letter named and declared untouchable,
+  the dial came back intact but the whole engraving was re-inked heavier and more
+  regular. It is a redraw. After `backfill` a Gutenberg scan is already clean, and a
+  restore has little left to do; say so before proposing one.
+
+### Covers
+
+- **A cover from one of the book's own pictures** takes `"reference": "052.jpg"`. The
+  result is a recomposed picture of the same scene, not a crop: islands and houses
+  were added to fill the taller shape.
+- **Name the medium by its mechanics.** "Colourised but keeping the pencil style"
+  produced a coloured-pencil drawing. "A hand-coloured wood engraving: all the drawing
+  and shading in black engraved line, thin flat transparent tints over it, shading
+  only from the density of the lines; not coloured pencil, not a painting" produced
+  one, on both `gpt-6-luna` and `gpt-6-sol`. One sample each: the two were closer to
+  each other than to anything else, and the difference cannot be put down to the model.
+- **This house's covers are art only.** The finished covers in other projects carry a
+  typeset band (title, author, translator) across the top, deeper on the left, and a
+  round emblem in the bottom-right corner, both added outside this repo. So ask for no
+  lettering, sky and far hills in the top third, and plain ground in the bottom-right
+  corner. Confirm with the user before putting a title in the picture.
+
+### Backfill
+
+- Gutenberg hosts an `NNN_l.gif` behind every thumbnail of ebook 12228. The dry run
+  found 80 linked scans for 87 images (the other seven were already the large files).
+  75 measured 0.99 or better against their thumbnail.
+- Two were **crossed on Gutenberg's side** — `005.jpg` (the star chart) links to the
   compass and `006.jpg` to the star chart — and were relinked to each other's scan.
-  `036.jpg` (0.82) and `042.jpg` (0.87) are the same plates re-proportioned and went in
+- `036.jpg` (0.82) and `042.jpg` (0.87) are the same plates re-proportioned and went in
   with `--accept`. `084.jpg` (the huts) links to the oasis from `019`, and so does the
-  unlinked `084_l.jpg`: Gutenberg has no larger scan of it. `images/` went from 2.3 MB
-  to 8.6 MB. GIF-to-JPEG at quality 90 moved pixels by 1.1 grey levels on average.
+  unlinked `084_l.jpg`: Gutenberg has no larger scan of it.
+- `images/` went from 2.3 MB to 8.6 MB. GIF-to-JPEG at quality 90 moved pixels by 1.1
+  grey levels on average.
+- It changed the triage. At 216 px half the map's labels could not be read, by the
+  agent or by Codex; at 614 px all sixteen could. Run it before reading the images.
 
 Not yet seen: a usage-limit error (so the usage-limit stop is tested only against a
-fake), a `cover` or `replace` job, a label with an accent or `ñ`, and
-`--concurrency` above 1 against the real CLI.
+fake), a `replace` job, a cover with lettering on it, a lower-case `ñ` or an inverted
+`¿` / `¡`, and `--concurrency` above 1 against the real CLI.
 
 ## Notes
 
