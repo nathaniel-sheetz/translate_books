@@ -236,6 +236,24 @@ def image_filename_counts(text: str) -> "Counter[str]":
     return Counter(m.group(1).strip() for m in _IMAGE_PLACEHOLDER_RE.finditer(text))
 
 
+def image_placeholders(text: str) -> list[tuple[str, Optional[str]]]:
+    """Return ``(filename, description)`` for every placeholder, in text order.
+
+    The description is ``None`` for the bare ``[IMAGE:filename]`` form. Repeats
+    are kept, so a caller can count how often a file is referenced.
+
+    Example:
+        >>> image_placeholders("a [IMAGE:img/p7.jpg:a dog] b [IMAGE:fig1.png]")
+        [('img/p7.jpg', 'a dog'), ('fig1.png', None)]
+    """
+    if not text:
+        return []
+    return [
+        (m.group(1).strip(), m.group(2).strip() if m.group(2) is not None else None)
+        for m in _IMAGE_PLACEHOLDER_RE.finditer(text)
+    ]
+
+
 def strip_image_placeholders(text: str) -> str:
     """
     Replace [IMAGE:...] tokens with equal-length whitespace.

@@ -1,0 +1,14 @@
+$imagegen
+
+{{cover_task}}
+
+The book: "{{title}}"{{author_clause}}. This edition is in {{target_language}}.
+
+- Portrait orientation, the proportions of a book's front cover (about 2:3).
+- Any lettering on the cover must be spelled exactly as the editor gives it below — every accent, ñ, ¿ and ¡ — and nothing else may be written on it. If the editor gives no lettering, put no text on the cover at all.
+- No publisher marks, logos, barcodes, price stickers or mock-up framing: the image is the cover itself, edge to edge.
+{{labels_block}}
+Brief from the editor:
+{{instruction}}
+
+{{contract}}

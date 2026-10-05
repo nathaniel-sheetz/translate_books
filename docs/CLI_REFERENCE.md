@@ -426,6 +426,25 @@ Full reference: [`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md).
 
 *Skill equivalent:* `/footnote-pass`
 
+### `image_pass.py` — redo a book's images
+
+```bash
+python scripts/image_pass.py inventory --project my-book
+python scripts/image_pass.py prepare   --project my-book --json-file jobs.json
+python scripts/image_pass.py generate  --project my-book --estimate
+python scripts/image_pass.py apply     --project my-book --json-file decisions.json --dry-run
+python scripts/image_pass.py verify    --project my-book
+```
+
+Sub-verbs: `inventory`, `prepare`, `generate`, `review`, `apply`, `revert`, `verify`.
+`generate` runs the Codex CLI on a ChatGPT subscription (never a metered key — see
+[`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)) to translate lettering, clean scans, make a
+cover or replace an illustration. `apply` is the only writer to `images/`: it keeps the
+original filename and format, so no `[IMAGE:…]` token changes, and backs the original
+up to `images_original/` first. `revert` restores from there.
+
+*Skill equivalent:* `/image-pass`
+
 ### `pending_work.py` — what unattended work is available
 
 ```bash

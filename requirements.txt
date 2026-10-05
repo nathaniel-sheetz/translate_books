@@ -33,6 +33,9 @@ python-dotenv>=1.0.0  # Environment variable management
 # EPUB generation
 ebooklib>=0.18
 
+# Image pass (format conversion and dimensions for scripts/image_pass.py)
+Pillow>=10.0.0
+
 # Sentence alignment (for reader mode)
 pysbd>=0.3.4                   # Sentence boundary detection
 sentence-transformers>=5.0.0   # Multilingual sentence embeddings
