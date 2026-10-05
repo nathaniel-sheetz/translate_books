@@ -218,6 +218,224 @@ def test_baseline_ignores_failed_jobs(tmp_path: Path):
     assert usage.baseline_tokens(log)[0] == 7000
 
 
+# ── per-model calibration: a new model quotes itself, nothing names it ───────
+
+
+def _job(log: Path, *, model: str, cli: str = "cursor", overhead: int = 0,
+         output: int | None = None, prompt_sent: int = 1000, rc: int = 0, **extra):
+    """One logged job that billed ``prompt_sent + overhead`` input tokens."""
+    row = {"cli": cli, "model": model, "input": prompt_sent + overhead,
+           "prompt_sent": prompt_sent, "rc": rc, **extra}
+    if output is not None:
+        row["output"] = output
+    usage.append_usage(log, row)
+
+
+def test_baseline_prefers_the_models_own_rows(tmp_path: Path):
+    """The prefix belongs to the model: Sonnet 5 on Cursor is ~30.6k, Grok ~17.9k."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(5):
+        _job(log, model="grok-4.6[effort=medium,fast=false]", overhead=18_000)
+    for _ in range(3):
+        _job(log, model="grok-4.7-medium", overhead=30_000)
+
+    # Every spelling of one model reads the same rows — effort is not the model.
+    value, source = usage.baseline_tokens(log, cli="cursor", model="grok-4.7-high")
+    assert value == 30_000
+    assert source.startswith("measured:") and "grok-4.7" in source
+    assert usage.baseline_tokens(
+        log, cli="cursor", model="cursor-grok-4.6-medium"
+    )[0] == 18_000
+    # Without a model the CLI-wide median is unchanged.
+    assert usage.baseline_tokens(log, cli="cursor")[0] == 18_000
+
+
+def test_baseline_finds_a_models_rows_behind_the_recent_window(tmp_path: Path):
+    """Filtered before it is windowed, or a model's only rows scroll out of reach."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(3):
+        _job(log, model="grok-4.7-medium", overhead=30_000)
+    for _ in range(60):
+        _job(log, model="grok-4.6-medium", overhead=18_000)
+    assert usage.baseline_tokens(log, cli="cursor", model="grok-4.7-medium")[0] == 30_000
+
+
+def test_baseline_borrows_the_model_from_another_book(tmp_path: Path):
+    """A book's first wave on a model is quoted from where that model has run."""
+    own, other = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    for _ in range(4):
+        _job(own, model="grok-4.6-medium", overhead=18_000)
+        _job(other, model="grok-4.7-medium", overhead=30_000)
+
+    value, source = usage.baseline_tokens(
+        own, cli="cursor", model="grok-4.7-medium", sibling_logs=[other]
+    )
+    assert value == 30_000 and "across books" in source
+    # This book's own rows for the model win as soon as there are enough.
+    for _ in range(3):
+        _job(own, model="grok-4.7-medium", overhead=31_000)
+    value, source = usage.baseline_tokens(
+        own, cli="cursor", model="grok-4.7-medium", sibling_logs=[other]
+    )
+    assert value == 31_000 and "across books" not in source
+
+
+def test_baseline_on_an_unmeasured_model_says_whose_number_it_is(tmp_path: Path):
+    """Another model's median is still the best input guess — but not unlabelled."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(4):
+        _job(log, model="grok-4.6-medium", overhead=18_000)
+
+    value, source = usage.baseline_tokens(log, cli="cursor", model="grok-4.7-medium")
+    assert value == 18_000
+    assert "other models" in source and "grok-4.7" in source
+    # And with no history at all, the constant, exactly as before.
+    value, source = usage.baseline_tokens(
+        tmp_path / "absent.jsonl", cli="cursor", model="grok-4.7-medium"
+    )
+    assert value == 17_200 and source.startswith("default:")
+
+
+def test_output_ratio_is_measured_per_model_and_never_borrowed(tmp_path: Path):
+    """440k unquoted output tokens: the input-only gate had another model's history."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(4):
+        _job(log, model="grok-4.6-medium", output=100, prompt_sent=1000)
+
+    ratio, source = usage.output_ratio(log, cli="cursor", model="grok-4.6-medium")
+    assert ratio == 0.1 and source.startswith("measured:")
+
+    # A model with no rows gets no number — not the neighbour's 0.1.
+    ratio, source = usage.output_ratio(log, cli="cursor", model="grok-4.7-medium")
+    assert ratio is None
+    assert source == "no output rows for grok-4.7 yet"
+
+    # Two rows is not yet a measurement; three is.
+    for _ in range(2):
+        _job(log, model="grok-4.7-medium", output=1000, prompt_sent=1000)
+    assert usage.output_ratio(log, cli="cursor", model="grok-4.7-medium")[0] is None
+    _job(log, model="grok-4.7-medium", output=1000, prompt_sent=1000)
+    assert usage.output_ratio(log, cli="cursor", model="grok-4.7-medium")[0] == 1.0
+
+
+def test_output_ratio_reads_other_books_and_ignores_unusable_rows(tmp_path: Path):
+    own, other = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    for _ in range(3):
+        _job(other, model="grok-4.7-medium", output=2000, prompt_sent=1000)
+    # Failed jobs, jobs with no output field and zero-length prompts say nothing.
+    _job(own, model="grok-4.7-medium", output=9, prompt_sent=1000, rc=1)
+    _job(own, model="grok-4.7-medium", prompt_sent=1000)
+    _job(own, model="grok-4.7-medium", output=9, prompt_sent=0)
+
+    assert usage.output_ratio(own, cli="cursor", model="grok-4.7-medium")[0] is None
+    ratio, source = usage.output_ratio(
+        own, cli="cursor", model="grok-4.7-medium", sibling_logs=[other]
+    )
+    assert ratio == 2.0 and "across books" in source
+    assert usage.output_ratio(own, cli="cursor", model=None)[0] is None
+
+
+def test_estimate_output_tokens_is_none_not_zero_when_unmeasured():
+    assert usage.estimate_output_tokens(10_000, None) is None
+    assert usage.estimate_output_tokens(10_000, 1.25) == 12_500
+    assert usage.estimate_output_tokens(0, 1.25) == 0
+
+
+def test_model_seen_needs_one_successful_job(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    assert not usage.model_seen(log, cli="cursor", model="grok-4.7-medium")
+    _job(log, model="grok-4.7-medium", rc=1)
+    assert not usage.model_seen(log, cli="cursor", model="grok-4.7-medium")
+    _job(log, model="grok-4.7-high")
+    # Any effort of the same model counts; a different model or CLI does not.
+    assert usage.model_seen(log, cli="cursor", model="grok-4.7-medium")
+    assert not usage.model_seen(log, cli="cursor", model="grok-4.6-medium")
+    assert not usage.model_seen(log, cli="claude", model="grok-4.7-medium")
+    # A later failure does not un-see it.
+    _job(log, model="grok-4.7-medium", rc=1)
+    assert usage.model_seen(log, cli="cursor", model="grok-4.7-medium")
+
+
+def test_envelope_records_the_full_id_an_alias_resolved_to():
+    """`sonnet` is the CLI's to resolve, and it lags a release."""
+    envelope = {
+        "usage": {"input_tokens": 1},
+        "modelUsage": {
+            "claude-sonnet-5-20260615": {"inputTokens": 900, "outputTokens": 100},
+            "claude-haiku-4-5-20251001": {"inputTokens": 523, "outputTokens": 12},
+        },
+    }
+    out = usage.usage_from_envelope(envelope, model="sonnet")
+    assert out["resolved_model"] == "claude-sonnet-5-20260615"
+    # A full id resolves to itself; with no model there is nothing to resolve.
+    full = usage.usage_from_envelope(envelope, model="claude-sonnet-5-20260615")
+    assert full["resolved_model"] == "claude-sonnet-5-20260615"
+    assert "resolved_model" not in usage.usage_from_envelope(envelope, model=None)
+
+
+def test_rows_keep_their_shape_when_the_envelope_names_no_model():
+    """usage.jsonl is an A/B corpus: a new key appears only when it has a value."""
+    cursor = {"usage": {"inputTokens": 13874, "outputTokens": 29}}
+    assert usage.usage_from_envelope(cursor, model="grok-4.7-medium") == {
+        "input": 13874, "output": 29,
+    }
+
+
+def test_last_resolved_model_reads_the_most_recent_answer(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    assert usage.last_resolved_model(log, cli="claude", model="sonnet") is None
+    _job(log, cli="claude", model="sonnet", resolved_model="claude-sonnet-5",
+         ts="2026-09-01T00:00:00")
+    _job(log, cli="claude", model="sonnet", ts="2026-09-02T00:00:00")
+    assert usage.last_resolved_model(log, cli="claude", model="sonnet") == "claude-sonnet-5"
+    _job(log, cli="claude", model="sonnet", resolved_model="claude-sonnet-5-5",
+         ts="2026-09-03T00:00:00")
+    assert usage.last_resolved_model(log, cli="claude", model="sonnet") == "claude-sonnet-5-5"
+    assert usage.last_resolved_model(log, cli="claude", model="opus") is None
+
+
+def test_an_alias_and_the_id_it_ran_as_are_one_history(tmp_path: Path):
+    """564 `sonnet` jobs that ran as `claude-sonnet-5` measured `claude-sonnet-5`."""
+    log = tmp_path / "usage.jsonl"
+    for _ in range(2):
+        _job(log, cli="claude", model="sonnet", resolved_model="claude-sonnet-5",
+             overhead=4_000, output=300)
+    # A dated snapshot is the model its undated id names.
+    _job(log, cli="claude", model="sonnet", resolved_model="claude-sonnet-5-20260615",
+         overhead=4_000, output=300)
+
+    value, source = usage.baseline_tokens(log, cli="claude", model="claude-sonnet-5")
+    assert value == 4_000 and "claude-sonnet-5 jobs" in source
+    assert usage.model_seen(log, cli="claude", model="claude-sonnet-5")
+    assert usage.output_ratio(log, cli="claude", model="claude-sonnet-5")[0] == 0.3
+    # A different release is still a different model.
+    assert not usage.model_seen(log, cli="claude", model="claude-sonnet-5-5")
+    assert usage.output_ratio(log, cli="claude", model="claude-sonnet-5-5")[0] is None
+
+
+def test_an_alias_that_moved_stops_quoting_the_model_it_used_to_name(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    # From before `resolved_model` was logged: cannot be told apart, so kept.
+    _job(log, cli="claude", model="sonnet", overhead=4_000, output=300,
+         ts="2026-08-01T00:00:00")
+    for day in range(1, 5):
+        _job(log, cli="claude", model="sonnet", resolved_model="claude-sonnet-5",
+             overhead=4_000, output=300, ts=f"2026-09-0{day}T00:00:00")
+    assert usage.output_ratio(log, cli="claude", model="sonnet")[0] == 0.3
+
+    # The first job after the alias moves is the only labelled evidence of what
+    # `sonnet` means now; four jobs that say they ran as the old model are not.
+    _job(log, cli="claude", model="sonnet", resolved_model="claude-sonnet-5-5",
+         overhead=9_000, output=900, ts="2026-09-10T00:00:00")
+    ratio, source = usage.output_ratio(log, cli="claude", model="sonnet")
+    assert ratio is None and source == "only 2 output rows for sonnet yet (3 needed)"
+    _, baseline_source = usage.baseline_tokens(log, cli="claude", model="sonnet")
+    assert "other models" in baseline_source
+
+    # The old model keeps its measurement under its own id.
+    assert usage.output_ratio(log, cli="claude", model="claude-sonnet-5")[0] == 0.3
+
+
 def test_job_record_shape():
     record = usage.job_record(
         job_id="c0", cli="claude", model="sonnet", prompt_sent=100,

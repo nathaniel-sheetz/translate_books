@@ -183,8 +183,9 @@ request once; if you must re-prepare with good drafts present, pass `--keep-draf
 python scripts/review_annotations.py fanout --project fabre2 \
   [--cli claude|cursor] [--target-ids <k1,k2>] [--concurrency 5]
 ```
-Cursor needs a Cursor model id (`grok-4.5`, `auto`) — `--worker-model sonnet` with
-`--cli cursor` returns a warning. On 529, re-run with a lower `--concurrency`.
+Cursor needs a Cursor model id (`grok-4.5`, `auto`, or any id copied verbatim from
+`cursor-agent models`, such as the flat `grok-4.7-medium`) — `--worker-model sonnet`
+with `--cli cursor` returns a warning. On 529, re-run with a lower `--concurrency`.
 
 A top-level `error` with empty `wrote`/`failed` means the wave never started —
 either the binary is off PATH or the subscription preflight refused. Relay it

@@ -221,6 +221,28 @@ On a Cursor book an unpinned `worker_model` inherits the model selected in
 `--worker-model auto`. Or pass `--cli cursor` on the fan-out itself (worker model
 still comes from the manifest).
 
+**Any `--worker-model` is accepted; a new model needs no code change.** What
+`translate-prepare` does instead of validating is report: its `effective` block is
+what the logs know about this book's worker model, and its `warnings` say what they
+do not. Relay both at the usage gate. `translate-fanout` sends the manifest's
+`worker_model` exactly as written, so on Cursor an effort that `effective.worker_model`
+shows inside a bracket is not applied — pin the level in `--worker-model` itself.
+
+- `effective.model_seen: false` (with a warning saying no job "is logged yet") — no translate
+  job on this model has run in any book (judge waves are not consulted), so the token
+  baseline is borrowed and output is
+  not projected. A mistyped id looks exactly like this, so check the spelling, and
+  run the review batch before a full wave.
+- `effective.worker_model_resolved` — the full id the CLI last ran this
+  `worker_model` as. A tier alias (`sonnet`) can lag a release; to use the newer
+  one, pin its full id (`--worker-model claude-sonnet-5-5`).
+- A warning naming "Task subagent" — a full model id only takes effect on the
+  **headless** path. A Task spawn is pinned by tier alias, so it would run the
+  alias's current model, not the id in the manifest.
+- For a Cursor model, pass an id copied verbatim from `cursor-agent models`. Newer
+  families are flat ids that name their effort (`grok-4.7-medium`) and take no
+  bracket.
+
 **Claude profile (default):** each process is effectively
 `claude -p` with the body (or full prompt) on stdin, optional `--system-prompt-file <preamble_path>`,
 `--model <worker_model>`, `--tools ""`, `--output-format json` (the envelope is unwrapped, and

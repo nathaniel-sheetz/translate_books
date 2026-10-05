@@ -955,6 +955,48 @@ def test_translate_prepare_persists_spawn_mode(tmp_path: Path):
     assert state.load_config(state.resolve_project_dir(str(tmp_path)))["parallelism"] == "all"
 
 
+def test_translate_prepare_says_what_it_knows_about_the_worker_model(tmp_path: Path):
+    """`--worker-model claude-sonnet-5-5` was accepted without a word (2026-09-29).
+
+    Any id is still accepted — a new release must not need a code change — but
+    the payload now carries the resolved profile, and an id with no logged job
+    is named as one, with the Task-spawn caveat a full id comes with.
+    """
+    from src.harness import flow, state
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["Only one chunk here."])
+    project_dir = state.resolve_project_dir(str(tmp_path))
+    state.ensure_harness_dir(project_dir)
+    cfg = state.load_config(project_dir)
+    cfg["headless_cli"] = "claude"          # not whatever host runs the tests
+    state.save_config(project_dir, cfg)
+
+    prep = flow.translate_prepare(str(tmp_path), worker_model="claude-sonnet-5-5")
+    assert prep["worker_model"] == "claude-sonnet-5-5"
+    effective = prep["effective"]
+    assert effective["worker_model"] == "claude-sonnet-5-5"
+    assert effective["worker_model_source"] == "config"
+    assert effective["model_seen"] is False
+    assert any("'claude-sonnet-5-5' is logged yet" in w for w in prep["warnings"])
+    assert any("Task subagent" in w for w in prep["warnings"])
+    # --brief keeps both: they are what the usage gate reads.
+    brief = flow.translate_prepare(str(tmp_path), brief=True)
+    assert brief["effective"] == effective and brief["warnings"] == prep["warnings"]
+
+    # `status` reports the same model, where it used to show the family default
+    # (`sonnet`, `default:claude`) beside a book pinned to a full id.
+    st = flow.status(str(tmp_path))
+    assert st["worker_model"] == "claude-sonnet-5-5"
+    assert st["headless_profile"]["worker_model"] == "claude-sonnet-5-5"
+    assert st["headless_profile"]["worker_model_source"] == "config"
+
+    # A tier alias is something a Task spawn can pin, so that caveat goes away.
+    alias = flow.translate_prepare(str(tmp_path), worker_model="sonnet")
+    assert not any("Task subagent" in w for w in alias["warnings"])
+
+
 def test_translate_prepare_emits_byte_identical_preamble_and_body(tmp_path: Path):
     """Shared preamble + per-chunk body round-trip to prompt.txt; paths land on the manifest.
 

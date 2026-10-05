@@ -239,8 +239,9 @@ _PREPARE_SCHEMA = {
     "worker_model": "model tier to pin each footnote-scan-worker to",
     "batch_size": "workers per wave / default headless concurrency",
     "effective": "what the wave will run as, with provenance per field: "
-    "{cli, cli_source, worker_model, worker_model_source, effort, effort_source, "
-    "effort_channel, baseline_tokens, baseline_source, host, warnings}. Quote this "
+    "{cli, cli_source, worker_model, worker_model_source, worker_model_resolved, "
+    "model_seen, effort, effort_source, effort_channel, baseline_tokens, "
+    "baseline_source, output_ratio, output_ratio_source, host, warnings}. Quote this "
     "at the usage gate — the four fields cli/worker_model/effort/effort_channel are "
     "only interpretable together",
     "usage_summary": "{chapters, workers, sentences, already_noted, worker_model, "

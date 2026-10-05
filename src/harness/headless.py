@@ -40,6 +40,7 @@ a convention that decays.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -54,6 +55,11 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
+from src.harness.model_ids import (
+    join_effort_suffix,
+    model_family,
+    split_effort_suffix,
+)
 from src.harness.usage import (
     append_usage,
     approx_tokens,
@@ -312,6 +318,29 @@ def warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
     return None
 
 
+def warn_task_worker_model(cli: str, worker_model: str) -> str | None:
+    """Return a warning when a Task-subagent spawn could not honour ``worker_model``.
+
+    A prepared manifest serves both worker backends, and they pin a model
+    differently: a headless wave passes ``--model`` through as typed, while the
+    Task tool only accepts a tier alias. So a full id (``claude-sonnet-5-5``,
+    the only way to reach a release the ``sonnet`` alias has not moved to yet)
+    is honoured by one backend and silently replaced by the other. Said at
+    ``prepare``, which is the last point before the backend is chosen.
+    """
+    if (cli or "").strip().lower() != "claude":
+        return None
+    alias = (worker_model or "").strip().lower()
+    if not alias or alias in _CLAUDE_WORKER_ALIASES:
+        return None
+    return (
+        f"worker_model={worker_model!r} is a full model id: a headless fan-out "
+        f"runs it as given, but a Task subagent can only be pinned to a tier "
+        f"alias ({', '.join(sorted(_CLAUDE_WORKER_ALIASES))}) and would run that "
+        f"tier's current model instead"
+    )
+
+
 # The file the interactive Cursor orchestrator itself runs on: whatever model is
 # selected there is the one the operator already chose and is already paying for.
 CURSOR_CLI_CONFIG = Path.home() / ".cursor" / "cli-config.json"
@@ -434,18 +463,54 @@ def compose_cursor_model(base: str, params: Mapping[str, str] | None = None) -> 
     return f"{base}[{','.join(pairs)}]"
 
 
+def cursor_effort_in_id(model: str | None) -> bool:
+    """True when the id itself names the effort (``grok-4.7-medium``).
+
+    Such a family takes no ``[effort=…]`` bracket at all — the CLI lists each
+    level as its own id and rejects a bracket on any of them.
+    """
+    return split_effort_suffix(parse_cursor_model(model)[0])[1] is not None
+
+
 def cursor_model_effort(model: str | None) -> str | None:
-    """The effort level carried by a Cursor model argument, if it carries one."""
-    value = parse_cursor_model(model)[1].get("effort")
-    value = (value or "").strip()
-    return value or None
+    """The effort level carried by a Cursor model argument, if it carries one.
+
+    Read from the bracket first, then from a flat id's own suffix: a wave pinned
+    to ``grok-4.7-medium`` runs at medium whether or not anything else says so,
+    and reporting ``None`` for it is what had every gate on the 2026-09-28 run
+    explaining away an "effort: none" beside a medium wave.
+    """
+    base, params = parse_cursor_model(model)
+    key = _cursor_effort_key(params)
+    value = (params.get(key) or "").strip() if key else ""
+    if value:
+        return value
+    return split_effort_suffix(base)[1]
+
+
+# The bracket key a family spells its effort with. ``effort=`` on most, but
+# ``gpt-5.6-terra[context=272k,reasoning=medium,fast=false]`` says ``reasoning=``,
+# and writing ``effort=`` beside it composes a second knob for the same thing.
+# Ordered: the first one a bracket already carries is the one that is read and
+# written. A spelling Cursor adds later goes here.
+_CURSOR_EFFORT_KEYS = ("effort", "reasoning")
+
+
+def _cursor_effort_key(params: Mapping[str, str]) -> str | None:
+    """Which key in ``params`` carries the effort, or ``None`` if none does."""
+    return next((key for key in _CURSOR_EFFORT_KEYS if key in params), None)
 
 
 def with_cursor_effort(model: str | None, effort: str | None) -> str:
-    """``model`` with its ``effort=`` parameter set to ``effort``.
+    """``model`` set to run at ``effort``, in whichever form its id takes.
 
-    Other parameters are preserved (``fast=false`` survives an effort change) and
-    a ``None`` effort leaves the model untouched.
+    A bracket-form id gets its ``effort=`` parameter set (or ``reasoning=``, for
+    a family whose bracket spells it that way); other parameters are preserved
+    (``fast=false`` survives an effort change). A flat id that names
+    its own effort has the suffix swapped instead (``grok-4.7-medium`` ->
+    ``grok-4.7-high``, keeping ``-fast``) and never gains a bracket, because the
+    CLI rejects ``grok-4.7-medium[effort=medium]`` even when the two agree. A
+    ``None`` effort leaves the model untouched either way.
 
     ``auto`` is returned unchanged, deliberately: it is the "let Cursor pick"
     sentinel, there is no evidence ``cursor-agent`` accepts ``auto[effort=…]``,
@@ -458,8 +523,38 @@ def with_cursor_effort(model: str | None, effort: str | None) -> str:
     base, params = parse_cursor_model(model)
     if effort is None or not base or base.lower() in _CURSOR_AUTO_IDS:
         return compose_cursor_model(base, params)
-    params["effort"] = str(effort).strip()
+    level = str(effort).strip()
+    stem, suffix_effort, fast = split_effort_suffix(base)
+    if suffix_effort is not None:
+        # The id is the only channel this family has. A swapped id that does not
+        # exist is caught by `cursor_model_error`, which names the ones that do.
+        for key in _CURSOR_EFFORT_KEYS:
+            params.pop(key, None)
+        return compose_cursor_model(join_effort_suffix(stem, level, fast), params)
+    # Under the key the bracket already uses, in place, so `reasoning=medium`
+    # becomes `reasoning=high` rather than gaining an `effort=high` beside it.
+    params[_cursor_effort_key(params) or "effort"] = level
     return compose_cursor_model(base, params)
+
+
+def _cursor_model_candidates(model: str, known: set[str]) -> list[str]:
+    """Listed ids the operator most likely meant by a rejected ``model``.
+
+    Same-family ids first — the flat spellings of a base that was typed in
+    bracket form are exactly what a ~200-id dump buried on 2026-09-28 — with the
+    level that was asked for leading. Falls back to near-miss spellings.
+    """
+    wanted_family = model_family(model)
+    wanted_effort = (cursor_model_effort(model) or "").lower()
+    family = sorted(k for k in known if model_family(k) == wanted_family)
+    if family:
+        if wanted_effort:
+            # Stable, so the rest stay alphabetical behind the requested level.
+            family.sort(key=lambda k: split_effort_suffix(k)[1] != wanted_effort)
+        return family[:8]
+    return difflib.get_close_matches(
+        _cursor_model_base(model), sorted(known), n=5, cutoff=0.6
+    )
 
 
 def _cursor_known_models(
@@ -560,7 +655,18 @@ def cursor_model_error(
     detail = f"{stderr or ''}\n{stdout or ''}".strip()
     if "cannot use this model" not in detail.lower():
         return None
-    listed = f" Known ids: {', '.join(sorted(known))}." if known else ""
+    # Lead with what was probably meant. The full list only helps when nothing
+    # in it resembles the request; otherwise it is ~200 ids to read past.
+    candidates = _cursor_model_candidates(model, known)
+    if candidates:
+        listed = (
+            f" Did you mean: {', '.join(candidates)}? Pass an id verbatim from "
+            f"`cursor-agent models`; an id that names its effort takes no bracket."
+        )
+    elif known:
+        listed = f" Known ids: {', '.join(sorted(known))}."
+    else:
+        listed = ""
     return (
         f"cursor-agent rejected --model {model!r}: {detail.splitlines()[0][:300]}."
         f"{listed}"
@@ -1858,7 +1964,7 @@ def run_headless_wave(
     use_warm_first = warm_first
     if cli_name == "claude":
         if requested_cache == "auto":
-            baseline, _ = baseline_tokens(usage_log, cli=cli_name)
+            baseline, _ = baseline_tokens(usage_log, cli=cli_name, model=model)
             resolved_cache = resolve_cache_mode(
                 jobs, spf_tokens, baseline, median_wall_s(usage_log, cli=cli_name)
             )

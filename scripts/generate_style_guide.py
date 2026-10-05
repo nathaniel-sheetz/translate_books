@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.api_translator import DEFAULT_MODEL
+from src.api_translator import DEFAULT_MODEL, default_provider_arg, provider_arg
 from src.style_guide_wizard import (
     get_active_questions,
     build_question_prompt,
@@ -84,7 +84,7 @@ def main():
     parser.add_argument("--output", help="Output path (default: <project-dir>/style.json)")
     parser.add_argument("--fixed-only", action="store_true", help="Use only fixed questions (no LLM)")
     parser.add_argument("--non-interactive", action="store_true", help="Use default answers")
-    parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
+    parser.add_argument("--provider", default=default_provider_arg(), type=provider_arg)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--questions-config", help="Path to custom questions JSON")
     parser.add_argument(

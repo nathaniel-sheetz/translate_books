@@ -183,10 +183,17 @@ first place. (`status` and `profile` write nothing at all, by contract.)
   and rewrites `cli_source` to `cli`, so it changes nothing about the wave and
   removes the one line at the gate saying the book is pinned.
 - `--effort <level>` — per-run effort. Delivered as `--effort` on claude and inside
-  the model's `[effort=…]` bracket on cursor; either way `effective.effort` is the
-  one true answer.
+  the model argument on cursor (its `[effort=…]` bracket, or the id's own
+  `-<level>` suffix); either way `effective.effort` is the one true answer.
 - `--worker-model <tier>` — pins each spawned `judge-worker`; unset, defaults per
   the resolved CLI (`sonnet` on claude, your selected Cursor model on cursor).
+  **Any id is accepted — a new model needs no code change.** For a Cursor model,
+  pass an id copied *verbatim* from `cursor-agent models`; never compose one by
+  analogy with the previous model's spelling. A Claude tier alias (`sonnet`) is
+  resolved by the CLI and can lag a release: `effective.worker_model_resolved`
+  shows the full id it last ran as, and pinning the full id
+  (`claude-sonnet-5-5`) is how to reach a release the alias has not moved to —
+  on the headless path only, since a Task spawn takes aliases.
 - `--batch-size <n>` (default 5) — workers per spawn wave; wait for the wave to
   finish before launching the next (see 4b).
 - `--targets-per-worker <n>` (default 1) — group up to N **low-dialogue-density**
@@ -223,7 +230,11 @@ check before any spawn. An unpinned `worker_model` inherits whatever model is
 selected in `~/.cursor/cli-config.json` — the one the operator is already using and
 already paying for — so pin `--worker-model` only to override that (`grok-4.5`,
 `auto`, a `cursor-agent models` id, or the bracket form
-`grok-4.5[effort=low,fast=false]`). Cursor uses the full prompt (no cache-split /
+`grok-4.5[effort=low,fast=false]`). Newer families exist **only** as flat ids that
+name their effort (`grok-4.7-medium`, `grok-4.7-high-fast`) and take no bracket:
+pass the listed id as-is, and `--effort` then swaps the suffix rather than adding
+one. A rejected id comes back with "Did you mean: …" naming the listed spellings
+of that model. Cursor uses the full prompt (no cache-split /
 `--system-prompt-file`), and **that is measured, not assumed** — see the
 overhead note below. The **Task-worker** path (`prepare` → spawn `judge-worker` →
 `commit`) stays **Claude-only** — the Task tool spawns Claude subagents; Cursor
@@ -234,16 +245,36 @@ is offered only on the headless `fanout` path.
 | CLI | channel | how it is set | what to relay |
 |---|---|---|---|
 | `claude` | `--effort` argv | `--effort`, `headless_effort_judges` | `effective.effort` |
-| `cursor` | the model's `[effort=…]` bracket | `--effort` (rewrites the bracket), `headless_effort_judges`, else whatever `~/.cursor/cli-config.json` already selected | `effective.effort` |
+| `cursor` | the model's `[effort=…]` bracket, or a flat id's `-<level>` suffix | `--effort` (rewrites the bracket / swaps the suffix), a level typed into the pinned id, `headless_effort_judges`, else whatever `~/.cursor/cli-config.json` already selected | `effective.effort` |
 
 `cursor-agent` **has no `--effort` flag** — it is dropped from the argv. Both
 channels now resolve to one number in `effective.effort`, with `effective.effort_channel`
-saying which knob carries it (`argv` / `model_bracket` / `none`).
+saying which knob carries it (`argv` / `model_bracket` / `model_id` / `none`).
 
 > **Never quote `headless_effort` beside a Cursor wave.** That field is the Claude
 > ladder's answer. Quote `effective.effort` + `effective.effort_channel`, always.
 > An `effort_channel: "none"` means *nothing* carries the level — that happens on the
 > `auto` model, which takes no bracket; pin a concrete model to control effort.
+
+### A model with no history here
+
+Nothing validates a model against a list, so the first wave on a new one runs —
+but its quote is only as good as the logs behind it. Read three `effective` fields
+at the gate and say what they say:
+
+- `model_seen: false` plus a warning saying no job on it "is logged yet" — no judge job on
+  this model has run in any book (other wave types are not consulted, so it may still
+  have translated). Tell the user the input figure is borrowed
+  (`baseline_source` names from where) and that output is **not projected**.
+- `usage_summary.estimated_output_tokens: null` — quote output as *unknown*, never
+  as zero or as "about the same as input". It fills in after three jobs on that
+  model; a reasoning model at medium can write as many tokens as it reads.
+- A model override on `fanout` re-resolves the profile for the new model. The
+  quote the user consented to was for the old one — re-run `fanout --estimate`
+  and get consent again before spending.
+
+Run a **small first wave** (one chapter) on an unseen model: three logged jobs are
+what turn both figures from borrowed into measured.
 
 `commit` (subagent backend) takes `--project`, `--persist` and `--brief`
 (see 5b). Pass 2's `verify_editorial commit` has no `--brief` — its

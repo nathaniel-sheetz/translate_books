@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from src.evaluators import aggregate_results
-from src.harness.headless import default_worker_model
-from src.harness.usage import approx_tokens
+from src.harness.headless import default_worker_model, warn_task_worker_model
+from src.harness.usage import approx_tokens, estimate_output_tokens
 from src.judges.base import Judge, JudgeTarget
 from src.judges.llm_io import JudgeParseError, parse_judge_json
 from src.judges.registry import get_judge
@@ -192,10 +192,16 @@ _PREPARE_SCHEMA = {
     "batch_size": "recommended workers to spawn per wave",
     "usage_summary": "{pairs, targets, workers, targets_per_worker, source_words, worker_model, "
     "batch_size, estimated_api_cost, estimated_prompt_tokens, headless_baseline_tokens, "
-    "headless_baseline_source, estimated_headless_tokens, headless_effort, "
+    "headless_baseline_source, estimated_headless_tokens, estimated_output_tokens, "
+    "estimated_output_source, headless_effort, "
     "headless_effort_source}. 'headless_baseline_tokens' is PER CLI (claude ~3.9k fixed per "
-    "process, cursor ~17.2k) and self-calibrates off this project's logged rows for that cli "
-    "only. The two estimates price DIFFERENT "
+    "process, cursor ~17.2k) and self-calibrates off logged rows for the worker model on "
+    "that cli — this book's first, then other books'; 'headless_baseline_source' says which, "
+    "and says so when it had to fall back to other models' rows. 'estimated_headless_tokens' "
+    "is INPUT only; 'estimated_output_tokens' is the output side, projected from this model's "
+    "own logged output/prompt ratio, and is null (see 'estimated_output_source') until three "
+    "jobs on this model have run — quote it as unknown, not as zero. The two estimates "
+    "price DIFFERENT "
     "backends and neither bounds the other: 'estimated_api_cost' is USD **if you choose the API "
     "backend** and says nothing about the headless path, which on the 2026-07-30 measurement "
     "consumed ~2.4x the tokens. 'estimated_headless_tokens' is the subscription cost of the "
@@ -226,9 +232,10 @@ _FANOUT_SCHEMA = {
     "when the CLI reported no usage at all. Per-job detail goes to "
     ".harness/judges/usage.jsonl, never into this payload",
     "estimate": "--estimate only: {jobs, prompt_tokens, baseline_tokens, baseline_source, "
-    "projected_tokens, argv, effort, effort_source, cache} — projected, nothing spawned. "
-    "'cache' is the resolved prompt-cache mode (5m|1h|off; null on Cursor); "
-    "projected_tokens is priced under that mode",
+    "projected_tokens, output_tokens, output_source, argv, effort, effort_source, cache} — "
+    "projected, nothing spawned. 'cache' is the resolved prompt-cache mode (5m|1h|off; null "
+    "on Cursor); projected_tokens is input priced under that mode; output_tokens is null "
+    "until this worker model has three logged jobs (output_source says why)",
     "instructions": "next step (commit, or re-fanout failed/missing)",
 }
 
@@ -597,7 +604,11 @@ def prepare(
     # Also on stderr: a mis-resolved CLI is worth seeing even when the caller
     # only skims stdout's JSON, and this is the last moment before the manifest
     # is spawned against.
-    for warning in prof.warnings:
+    prepare_warnings = list(prof.warnings)
+    task_warning = warn_task_worker_model(prof.cli, worker_model)
+    if task_warning:
+        prepare_warnings.append(task_warning)
+    for warning in prepare_warnings:
         print(f"[prepare] warning: {warning}", file=sys.stderr)
 
     return {
@@ -624,6 +635,13 @@ def prepare(
             "headless_baseline_tokens": baseline,
             "headless_baseline_source": baseline_source,
             "estimated_headless_tokens": total_prompt_tokens + len(entries) * baseline,
+            # Input and output are quoted apart because they fail apart: the
+            # input side follows the CLI, the output side follows the model, and
+            # null here means "this model has not been run yet", never zero.
+            "estimated_output_tokens": estimate_output_tokens(
+                total_prompt_tokens, prof.output_ratio
+            ),
+            "estimated_output_source": prof.output_ratio_source,
             "headless_effort": prof.effort,
             "headless_effort_source": prof.effort_source,
             "headless_effort_channel": prof.effort_channel,
@@ -638,7 +656,7 @@ def prepare(
             if entries
             else "Nothing to judge — scope resolved to no targets."
         ),
-        "warnings": list(prof.warnings),
+        "warnings": prepare_warnings,
         "_schema": _PREPARE_SCHEMA,
     }
 
@@ -983,6 +1001,12 @@ def fanout(
                 "baseline_tokens": baseline,
                 "baseline_source": baseline_source,
                 "projected_tokens": projected,
+                # Input only, as it always was. Output is the model's to decide
+                # and is quoted beside it, or as null with the reason.
+                "output_tokens": estimate_output_tokens(
+                    prompt_tokens, prof.output_ratio
+                ),
+                "output_source": prof.output_ratio_source,
                 # The argv is here so a bad --headless-extra-flags entry is
                 # visible before a wave commits to it, not after N jobs fail.
                 "argv": _build_cmd(

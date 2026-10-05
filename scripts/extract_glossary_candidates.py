@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pydantic import BaseModel, Field
 
 from src.app_config import load_forced_glossary_terms
-from src.api_translator import DEFAULT_MODEL
+from src.api_translator import DEFAULT_MODEL, default_provider_arg, provider_arg
 from src.models import Glossary, GlossaryTermType
 from src.utils.file_io import load_glossary
 from src.utils.text_utils import count_words, normalize_newlines, strip_image_placeholders
@@ -1447,8 +1447,9 @@ Examples:
         help="Style guide JSON for bootstrap context"
     )
     parser.add_argument(
-        "--provider", default="anthropic", choices=["anthropic", "openai"],
-        help="API provider for bootstrap (default: anthropic)"
+        "--provider", default=default_provider_arg(), type=provider_arg,
+        help="API provider for bootstrap: any id in llm_config.json "
+             "(default: its default_provider)"
     )
     parser.add_argument(
         "--model", default=DEFAULT_MODEL,

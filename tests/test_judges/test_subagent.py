@@ -864,6 +864,49 @@ def test_prepare_baseline_self_calibrates_from_the_usage_log(tmp_path):
     assert summary["headless_baseline_source"].startswith("measured:")
 
 
+def test_prepare_projects_output_only_from_this_models_own_rows(tmp_path):
+    """Output is the model's to decide, so another model's history is no quote.
+
+    The first Grok 4.7 wave's gate was input-only and calibrated on grok-4.6:
+    440k output tokens went unprojected. Unknown has to read as unknown.
+    """
+    project, cid = _project_with_chunk(tmp_path)
+    cold = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")["usage_summary"]
+    assert cold["estimated_output_tokens"] is None
+    assert cold["estimated_output_source"] == "no output rows for sonnet yet"
+
+    log = subagent.usage_log_path(project)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    row = json.dumps({
+        "cli": "claude", "model": "sonnet", "rc": 0,
+        "input": 5000, "output": 500, "prompt_sent": 1000,
+    })
+    log.write_text((row + "\n") * 3, encoding="utf-8")
+
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    summary = out["usage_summary"]
+    assert out["effective"]["output_ratio"] == 0.5
+    assert summary["estimated_output_tokens"] == round(
+        summary["estimated_prompt_tokens"] * 0.5
+    )
+    assert summary["estimated_output_source"].startswith("measured:")
+    # Input and output stay separate figures; the input one is unchanged.
+    assert summary["estimated_headless_tokens"] == (
+        summary["estimated_prompt_tokens"]
+        + summary["workers"] * summary["headless_baseline_tokens"]
+    )
+
+    # A model nobody has run borrows the input baseline, and says so, but
+    # never the output ratio.
+    other = subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}", worker_model="claude-sonnet-5-5"
+    )
+    assert other["usage_summary"]["estimated_output_tokens"] is None
+    assert "other models" in other["usage_summary"]["headless_baseline_source"]
+    assert any("is logged yet" in w for w in other["warnings"])
+    assert any("Task subagent" in w for w in other["warnings"])
+
+
 def test_prepare_baseline_ignores_the_other_cli_s_rows(tmp_path):
     """One usage.jsonl, two families ~4.4x apart: a mixed median describes neither.
 

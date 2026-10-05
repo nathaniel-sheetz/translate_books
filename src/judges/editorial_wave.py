@@ -32,7 +32,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from src.harness.usage import approx_tokens, baseline_tokens
+from src.harness.usage import (
+    approx_tokens,
+    baseline_tokens,
+    estimate_output_tokens,
+)
 from src.judges import editorial_verify as ev
 from src.judges import llm_io
 from src.judges.context import build_judge_context
@@ -64,13 +68,25 @@ def work_dir(project_dir: Path) -> Path:
     return Path(project_dir) / ".harness" / "editorial"
 
 
+# Adjudication resolves its effort as ``judges`` but logs to its own file, so a
+# warning about what that file holds has to name this wave, not pass 1.
+WAVE_LABEL = "editorial adjudication"
+
+
 def usage_log(project_dir: Path) -> Path:
     """This pipeline's own per-job usage rows."""
     return work_dir(project_dir) / "usage.jsonl"
 
 
-def baseline_for(project_dir: Path, cli: str) -> tuple[int, str]:
+def baseline_for(
+    project_dir: Path, cli: str, model: str | None = None
+) -> tuple[int, str]:
     """Per-job token overhead for the consent gate, and where the number is from.
+
+    ``model`` is the worker model the wave will run; with it each log is read
+    for that model's own rows, here and in the other books, before any other
+    model's (see :func:`~src.harness.usage.baseline_tokens`). The pass-1 log
+    is only consulted when this pipeline's own answer is the bare constant.
 
     Adjudication keeps its own ``usage.jsonl`` on purpose: a verdict-shaped job
     is a different shape from a pass-1 finding-shaped one, so the estimate
@@ -83,10 +99,24 @@ def baseline_for(project_dir: Path, cli: str) -> tuple[int, str]:
     borrowed. The fallback stops firing on its own once adjudication has logged
     enough jobs of its own.
     """
-    tokens, source = baseline_tokens(usage_log(project_dir), cli=cli)
+    # The same sibling logs the profile reads, so the baseline quoted here and
+    # the one in ``effective`` are answers to one question.
+    from src.harness.profile import sibling_usage_logs
+
+    own = usage_log(project_dir)
+    tokens, source = baseline_tokens(
+        own,
+        cli=cli,
+        model=model,
+        sibling_logs=sibling_usage_logs(project_dir, own),
+    )
     if source.startswith("default:"):
+        pass1 = Path(project_dir) / ".harness" / "judges" / "usage.jsonl"
         alt, alt_source = baseline_tokens(
-            Path(project_dir) / ".harness" / "judges" / "usage.jsonl", cli=cli
+            pass1,
+            cli=cli,
+            model=model,
+            sibling_logs=sibling_usage_logs(project_dir, pass1),
         )
         if not alt_source.startswith("default:"):
             return alt, f"{alt_source} (pass-1 log; no adjudication rows yet)"
@@ -564,6 +594,7 @@ def prepare(
         effort=effort,
         cfg=cfg,
         usage_log=usage_log(project_dir),
+        wave_label=WAVE_LABEL,
     )
 
     pending, skipped = collect_pending(project_dir, scopes, include_verified=force)
@@ -634,7 +665,7 @@ def prepare(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    baseline, baseline_source = baseline_for(project_dir, prof.cli)
+    baseline, baseline_source = baseline_for(project_dir, prof.cli, prof.worker_model)
     effective = prof.to_payload()
     # The profile resolved its baseline against this pipeline's own (usually
     # empty) log; ``baseline_for`` is allowed to borrow pass 1's. Patch the
@@ -664,6 +695,11 @@ def prepare(
             "headless_baseline_tokens": baseline,
             "headless_baseline_source": baseline_source,
             "estimated_headless_tokens": prompt_tokens + len(entries) * baseline,
+            # The output side, from this model's own rows; null until it has any.
+            "estimated_output_tokens": estimate_output_tokens(
+                prompt_tokens, prof.output_ratio
+            ),
+            "estimated_output_source": prof.output_ratio_source,
             "headless_effort": prof.effort,
             "headless_effort_source": prof.effort_source,
             "headless_effort_channel": prof.effort_channel,
@@ -749,6 +785,7 @@ def fanout(
         effort_source=inherited_effort_source,
         cfg=cfg,
         usage_log=usage_log(project_dir),
+        wave_label=WAVE_LABEL,
     )
     cli_name = profile.cli
     resolved_model = profile.worker_model

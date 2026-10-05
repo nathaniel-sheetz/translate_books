@@ -137,13 +137,27 @@ _PROFILE_SCHEMA = {
         "cli_source": "cli | config | host:<host> | fallback[:reason]",
         "worker_model": "model each job runs, including any [effort=…] bracket",
         "worker_model_source": "cli | cursor-cli-config | default:claude",
+        "worker_model_resolved": "the full model id the CLI last ran worker_model as, from the "
+        "usage logs (how a lagging tier alias shows up: sonnet -> claude-sonnet-5); null when "
+        "no logged job says",
+        "model_seen": "false when no successful job of THIS wave type on this model and cli "
+        "is logged in this book or any other — the quote beside it is then borrowed, see "
+        "warnings. Says nothing about other wave types",
         "effort": "resolved effort level, or null for none",
-        "effort_source": "cli | cli:default | manifest | manifest:default | config | model-bracket | cursor-cli-config | default:<command> | unsupported:auto-model",
+        "effort_source": "cli | cli:default | manifest | manifest:default | config | model-bracket | model-id | cursor-cli-config | default:<command> | unsupported:auto-model",
         "effort_channel": "how the effort reaches the model: argv (claude --effort) | "
-        "model_bracket (cursor) | none (nothing carries it)",
-        "baseline_tokens": "fixed per-job token overhead used by the consent estimate, for THIS cli",
-        "baseline_source": "'default: N (probe)' or 'measured: median of N logged <cli> jobs'",
-        "warnings": "non-fatal notices (missing binary, Claude alias on cursor, CLI flip vs prior waves)",
+        "model_bracket (cursor, base[effort=…]) | model_id (cursor, the id names its "
+        "own level, e.g. grok-4.7-medium) | none (nothing carries it)",
+        "baseline_tokens": "fixed per-job INPUT token overhead used by the consent estimate, for "
+        "this cli and, when it has logged jobs, this model",
+        "baseline_source": "'default: N (probe)' | 'measured: median of N logged <cli> <model> "
+        "jobs[ across books]' | 'measured: median of N logged <cli> jobs including other models (too "
+        "few <model> rows yet)'",
+        "output_ratio": "median output tokens per prompt token for this model, or null until "
+        "three jobs on it are logged — never borrowed from another model",
+        "output_ratio_source": "where output_ratio came from, or why it is null",
+        "warnings": "non-fatal notices (missing binary, Claude alias on cursor, CLI flip vs "
+        "prior waves, a worker model with no logged jobs)",
     },
     "next": "suggested next command",
 }

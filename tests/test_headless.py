@@ -1906,6 +1906,60 @@ def test_with_cursor_effort_leaves_the_auto_sentinel_alone():
     assert headless.cursor_model_effort("auto") is None
 
 
+def test_a_flat_id_names_its_own_effort():
+    """`grok-4.7-medium` runs at medium; reporting None beside it was a lie."""
+    assert headless.cursor_model_effort("grok-4.7-medium") == "medium"
+    assert headless.cursor_model_effort("grok-4.7-xhigh-fast") == "xhigh"
+    assert headless.cursor_model_effort("cursor-grok-4.6-medium") == "medium"
+    assert headless.cursor_effort_in_id("grok-4.7-medium")
+    # A bare base and a bracket-form id carry nothing in the id itself.
+    assert headless.cursor_model_effort("grok-4.5") is None
+    assert not headless.cursor_effort_in_id("grok-4.5[effort=high]")
+
+
+def test_with_cursor_effort_never_brackets_a_flat_id():
+    """The 2026-09-28 dead launch: `grok-4.7-medium[effort=medium]` is rejected.
+
+    Cursor lists each level of a flat family as its own id and takes no bracket
+    on any of them, even one that agrees with the suffix.
+    """
+    assert headless.with_cursor_effort("grok-4.7-medium", "medium") == "grok-4.7-medium"
+    # A different level swaps the suffix, and `-fast` survives the swap.
+    assert headless.with_cursor_effort("grok-4.7-medium", "high") == "grok-4.7-high"
+    assert (
+        headless.with_cursor_effort("grok-4.7-low-fast", "xhigh")
+        == "grok-4.7-xhigh-fast"
+    )
+    # A stray effort bracket on a flat id is dropped rather than left to
+    # disagree with the suffix; unrelated parameters are the operator's own.
+    assert (
+        headless.with_cursor_effort("grok-4.7-medium[effort=low]", "high")
+        == "grok-4.7-high"
+    )
+    assert headless.with_cursor_effort("grok-4.7-medium", None) == "grok-4.7-medium"
+
+
+def test_a_bracket_that_spells_effort_as_reasoning_is_read_and_rewritten_in_place():
+    """`gpt-5.6-terra[context=272k,reasoning=medium,fast=false]` is in the logs.
+
+    Reading only `effort=` reported no effort beside a medium wave, and writing
+    `effort=` composed a second knob for the same thing next to `reasoning=`.
+    """
+    terra = "gpt-5.6-terra[context=272k,reasoning=medium,fast=false]"
+    assert headless.cursor_model_effort(terra) == "medium"
+    assert not headless.cursor_effort_in_id(terra)
+    assert (
+        headless.with_cursor_effort(terra, "high")
+        == "gpt-5.6-terra[context=272k,reasoning=high,fast=false]"
+    )
+    assert headless.with_cursor_effort(terra, "medium") == terra
+    # A bracket that names neither key still gains `effort=`, as it always did.
+    assert (
+        headless.with_cursor_effort("grok-4.5[fast=false]", "high")
+        == "grok-4.5[fast=false,effort=high]"
+    )
+
+
 def test_cursor_model_base_still_strips_brackets_for_the_alias_warning():
     """_cursor_model_base is now the parser's first element — same behaviour."""
     assert headless._cursor_model_base("sonnet[effort=low]") == "sonnet"
@@ -2017,6 +2071,16 @@ def test_warn_cursor_claude_model_strips_bracket_suffix():
     assert headless.warn_cursor_claude_model("claude", "sonnet[effort=low]") is None
 
 
+def test_warn_task_worker_model_only_for_an_id_a_task_spawn_cannot_pin():
+    """One manifest serves both backends, and only headless takes a full id."""
+    warning = headless.warn_task_worker_model("claude", "claude-sonnet-5-5")
+    assert warning and "tier alias" in warning and "sonnet" in warning
+    for alias in ("sonnet", "opus", "haiku", "fable", "Sonnet", ""):
+        assert headless.warn_task_worker_model("claude", alias) is None
+    # There is no Task backend to mislead on a Cursor wave.
+    assert headless.warn_task_worker_model("cursor", "grok-4.7-medium") is None
+
+
 def _model_probe(models_out: str, reject: str = ""):
     """Stub for both token-free model checks: `models`, then the argv probe."""
     def probe(argv, *, env, cwd, timeout):
@@ -2072,6 +2136,29 @@ def test_cursor_model_error_rejects_bogus_brackets_on_a_listed_id():
         "gpt-5.2[effort=low,fast=false]",
         probe=_model_probe("Available models\n\ngpt-5.2 - GPT-5.2\n"),
     ) is None
+
+
+def test_cursor_model_error_leads_with_the_ids_that_were_probably_meant():
+    """A rejected bracket on a flat family names that family, not ~200 ids."""
+    listing = (
+        "Available models\n\nauto - Auto\ngpt-5.2 - GPT-5.2\n"
+        "grok-4.7-high - Grok\ngrok-4.7-low - Grok\ngrok-4.7-medium - Grok\n"
+    )
+    err = headless.cursor_model_error(
+        "cursor-agent",
+        "grok-4.7[effort=medium,fast=false]",
+        probe=_model_probe(listing, reject="Cannot use this model: grok-4.7[...]"),
+    )
+    assert err and "Did you mean: grok-4.7-medium, grok-4.7-high, grok-4.7-low?" in err
+    assert "Known ids" not in err and "gpt-5.2" not in err
+
+    # A plain typo falls back to near-miss spellings.
+    err = headless.cursor_model_error(
+        "cursor-agent",
+        "gpt-5.3",
+        probe=_model_probe(listing, reject="Cannot use this model: gpt-5.3"),
+    )
+    assert err and "Did you mean: gpt-5.2?" in err
 
 
 def test_cursor_model_error_fails_open():

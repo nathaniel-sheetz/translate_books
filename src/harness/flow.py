@@ -2092,10 +2092,33 @@ def translate_prepare(
         json.dumps(manifest_doc, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    # What the profile resolver knows about this book's translate waves, with
+    # provenance. Until this was here `translate-prepare` accepted any
+    # --worker-model in silence: an id nobody had run before looked exactly like
+    # one with fifty logged jobs. `translate-fanout` does not launch from this
+    # block (it sends the manifest's worker_model as written; see TODOS.md), so
+    # the model history is the part to rely on, not the composed model string.
+    from src.harness.headless import warn_task_worker_model
+    from src.harness.profile import resolve_profile
+
+    prof = resolve_profile(
+        project_dir,
+        command="translate",
+        worker_model=cfg.get("worker_model") or None,
+        worker_model_source="config",
+        cfg=cfg,
+    )
+    prepare_warnings = list(prof.warnings)
+    task_warning = warn_task_worker_model(prof.cli, worker_model)
+    if task_warning:
+        prepare_warnings.append(task_warning)
+
     result = {
         "manifest": entries,
         "manifest_path": str(translate_dir / "manifest.json"),
         "worker_model": worker_model,
+        "effective": prof.to_payload(),
+        "warnings": prepare_warnings,
         "worker_thinking": worker_thinking,
         "spawn_plan": spawn_plan,
         "spawn_mode_moot": spawn_mode_moot,
@@ -4650,8 +4673,15 @@ def status(project: str) -> dict:
             "resolved": effort_resolved,
             "extra_flags": residual_flags,
         },
+        # With the book's own pin, so this block and `worker_model` above cannot
+        # disagree: resolved bare, it reported the family default (`sonnet`,
+        # `default:claude`) beside a book pinned to `claude-sonnet-5-5`.
         "headless_profile": resolve_profile(
-            project_dir, command="translate", cfg=cfg
+            project_dir,
+            command="translate",
+            worker_model=cfg.get("worker_model") or None,
+            worker_model_source="config",
+            cfg=cfg,
         ).to_payload(),
         "headless_prompt_cache": cfg.get("headless_prompt_cache") or "auto",
         # Raw tri-state values (null = auto). Without these the only way to learn
@@ -5043,6 +5073,21 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
             "in rather than re-running without --brief for a Task spawn"
         ),
         "worker_model": "model each worker should be pinned to",
+        "effective": (
+            "what the profile resolver reports for this book's translate waves, with provenance "
+            "(cli, worker_model, worker_model_resolved, model_seen, effort, effort_channel, "
+            "baseline_tokens, output_ratio, …). worker_model_resolved is the full id the CLI "
+            "last ran this worker_model as (how a lagging tier alias shows up); model_seen "
+            "false means no translate job on this model for this cli is logged in any book yet "
+            "(other wave types are not consulted). translate-fanout sends the manifest's "
+            "worker_model as written and does not launch from this block, so on Cursor an "
+            "effort shown bracketed into effective.worker_model is NOT applied to the wave. "
+            "Relay it whole"
+        ),
+        "warnings": (
+            "non-fatal notices from that profile — an unseen worker model, a full model id "
+            "that a Task spawn cannot pin, a Claude alias on Cursor. Relay verbatim"
+        ),
         "worker_thinking": "whether workers should get the 'think hard' trigger (false unless persisted AND the worker model supports it)",
         "spawn_plan": "dict {parallelism, window, batch_size}",
         "spawn_mode_moot": "True when every in-scope chapter is a single chunk (skip the spawn-mode question)",

@@ -34,6 +34,9 @@ from src.api_translator import (
     RateLimitError,
     CostLimitError,
     DEFAULT_MODEL,
+    default_provider_arg,
+    provider_arg,
+    supports_batch,
 )
 
 console = Console()
@@ -295,6 +298,15 @@ def translate_realtime(args):
 
 def translate_batch(args):
     """Execute batch translation."""
+    # Before the quote and the confirmation: --provider now accepts anything the
+    # config defines, and only some of those have a Batch API behind them.
+    if not supports_batch(args.provider):
+        console.print(
+            f"[red]Error: provider {args.provider!r} has no Batch API support "
+            f"here. Run it without --batch.[/red]"
+        )
+        return 1
+
     console.print("\n[bold cyan]Batch Translation Mode[/bold cyan]\n")
     console.print("[yellow]Note: Batch results take ~24 hours. 50% cost discount applied.[/yellow]\n")
 
@@ -643,9 +655,9 @@ Examples:
 
     parser.add_argument(
         '--provider',
-        choices=['anthropic', 'openai'],
-        default='anthropic',
-        help='API provider (default: anthropic)'
+        type=provider_arg,
+        default=default_provider_arg(),
+        help='API provider: any id in llm_config.json (default: its default_provider)'
     )
 
     parser.add_argument(

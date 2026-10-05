@@ -7851,7 +7851,9 @@ def _run_judges_headless(
         if "editorial" in judge_names:
             from src.judges import editorial_wave as wave
 
-            adj_baseline, adj_source = wave.baseline_for(project_dir, prof.cli)
+            adj_baseline, adj_source = wave.baseline_for(
+                project_dir, prof.cli, prof.worker_model
+            )
             adjudication = {
                 "jobs_max": len(targets),
                 "tokens_max": len(targets) * adj_baseline,
@@ -7868,6 +7870,9 @@ def _run_judges_headless(
             "jobs": estimate.get("jobs", 0),
             "prompt_tokens": estimate.get("prompt_tokens", 0),
             "projected_tokens": estimate.get("projected_tokens", 0),
+            # Null, not 0, when this worker model has no logged jobs yet.
+            "output_tokens": estimate.get("output_tokens"),
+            "output_source": estimate.get("output_source"),
             "baseline_tokens": estimate.get("baseline_tokens", 0),
             "baseline_source": estimate.get("baseline_source"),
             "argv": estimate.get("argv") or [],
@@ -8156,6 +8161,8 @@ def project_review_adjudicate_editorial(project_id):
                 "candidates": usage.get("candidates", 0),
                 "prompt_tokens": usage.get("estimated_prompt_tokens", 0),
                 "projected_tokens": usage.get("estimated_headless_tokens", 0),
+                "output_tokens": usage.get("estimated_output_tokens"),
+                "output_source": usage.get("estimated_output_source"),
                 "baseline_tokens": usage.get("headless_baseline_tokens", 0),
                 "baseline_source": usage.get("headless_baseline_source"),
                 "warnings": prep.get("warnings") or [],

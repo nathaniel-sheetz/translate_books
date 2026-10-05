@@ -634,7 +634,9 @@ def test_prepare_quotes_what_the_wave_will_cost(project, capsys):
         usage["estimated_prompt_tokens"] + 1 * usage["headless_baseline_tokens"]
     )
     assert usage["chunks"] == 1 and usage["candidates"] == 1
-    assert usage["headless_effort_channel"] in {"argv", "model_bracket", "none"}
+    assert usage["headless_effort_channel"] in {
+        "argv", "model_bracket", "model_id", "none",
+    }
 
 
 def test_prepare_quiet_keeps_the_gate_and_drops_the_echo(project, capsys):

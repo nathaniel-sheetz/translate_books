@@ -89,6 +89,22 @@ python scripts/harness.py translate-prepare --project projects/<slug> --worker-m
 # or: --worker-model auto, or any `cursor-agent models` id, or the bracket form.
 ```
 
+**A new Cursor model needs no code change.** Copy its id verbatim from
+`cursor-agent models` and pass it as `--worker-model`. Cursor spells a model's
+effort one of two ways, and the harness reads which off the id rather than
+assuming:
+
+| Form | Example | How effort is set |
+|---|---|---|
+| bracket | `grok-4.5[effort=high,fast=false]` | `--effort` rewrites the `effort=` parameter (or `reasoning=`, on a family whose bracket spells it that way, e.g. `gpt-5.6-terra[context=272k,reasoning=medium,fast=false]`) |
+| flat | `grok-4.7-medium`, `grok-4.7-medium-fast` | `--effort` swaps the suffix (`grok-4.7-high`); no bracket is ever added |
+
+A flat id takes no bracket at all: `grok-4.7-medium[effort=medium]` is rejected
+even though the two agree, which is what cost the first Grok 4.7 run two dead
+launches. If a bracket-form or swapped id does not exist, the model preflight
+rejects it and leads with the listed ids of the same model ("Did you mean:
+grok-4.7-medium, grok-4.7-high, …").
+
 A Cursor wave validates `--model` before it spawns anything (both checks are
 token-free), so a typo costs one message instead of one dead process per job.
 Note that `cursor-agent models` is **incomplete** — `grok-4.5` is accepted and
@@ -143,10 +159,37 @@ medium effort):
 | `gpt-5.6-terra-medium` | ~16.3k | all `cacheWriteTokens` (`inputTokens` ≈ 3) on every job; no reads |
 | `claude-sonnet-5-medium` | ~30.6k | `cacheWriteTokens` on the first job, then ~30.3k `cacheReadTokens` per job |
 
-`baseline_tokens()` is per CLI, not per model. The 17.2k default fits the
-non-Claude models and quotes a Claude-on-Cursor wave ~13k low per job, until
-that model's rows are most of the Cursor rows among the last 40 logged jobs. Billed input is
-still `input + cache_creation + cache_read` on every model.
+`baseline_tokens()` therefore calibrates **per model**, from the logs alone — no
+table names a model, so a new release quotes itself after three jobs. The first
+tier with three successful rows answers, and `baseline_source` says which:
+
+1. this book's log, this model
+2. the same wave type's log in every other book under `projects/`, this model
+   (`… across books`)
+3. this book's log, every model on that CLI (`… including other models (too few
+   <model> rows yet)`)
+4. the per-CLI constant above (`default: …`)
+
+"This model" ignores effort and spelling: `grok-4.7-medium`, `grok-4.7-high-fast`
+and `grok-4.7[effort=low]` are one model, and `cursor-grok-4.6-medium` is the
+`grok-4.6` the bracket form used to name. Billed input is still
+`input + cache_creation + cache_read` on every model.
+
+**Output is quoted separately, and only from the model's own rows.** The figures
+above are input. `output_ratio` is the median `output / prompt_sent` of that
+model's logged jobs (tiers 1–2 only), and `estimated_output_tokens` is the prompt
+total times that ratio. A model with fewer than three logged jobs gets `null` and
+`no output rows for <model> yet` (or `only N output rows …`) rather than a neighbour's ratio: the first
+Grok 4.7 wave wrote 440k output tokens against a gate that had projected none.
+
+**An unseen model is run, and named.** There is no allowlist. A pinned model
+with no successful logged job of that wave type on that CLI (`effective.model_seen: false`) produces a warning
+saying whose numbers the input quote is using and that output is not projected.
+For a Claude alias, `effective.worker_model_resolved` is the full id the CLI last
+ran it as (`sonnet` → `claude-sonnet-5`), which is how an alias that has not yet
+moved to a new release shows up before a wave is spent finding out. Pin the full
+id to reach a release the alias has not moved to; note that a Task-subagent spawn
+can only be pinned to a tier alias, so a full id needs the headless backend.
 
 **Cursor envelopes carry no cost,** so `cost_equiv_usd` is 0 on a Cursor wave.
 To price one, multiply the token counts by the rates on
@@ -279,13 +322,15 @@ all-timed-out wave — the shape where isolation is most worth checking — stil
 #### Effort has two channels — one per CLI
 
 `cursor-agent` has **no `--effort` flag**; it takes its knobs inside the model
-argument (`grok-4.5[effort=high,fast=false]`). So the same setting is delivered
-two different ways:
+argument — as a bracket (`grok-4.5[effort=high,fast=false]`) or, for newer
+families, as part of the id itself (`grok-4.7-medium`). So the same setting is
+delivered three different ways:
 
 | CLI | channel | delivered as |
 |---|---|---|
 | `claude` | `argv` | `--effort <level>` |
 | `cursor` | `model_bracket` | the `[effort=…]` parameter, rewritten into `--model` |
+| `cursor` | `model_id` | the id's own `-<level>` suffix, swapped in `--model`; no bracket |
 | either | `none` | nothing carries it (Cursor's `auto` model takes no bracket) |
 
 This used to be two independent knobs with only the Claude one reported: a wave
@@ -294,8 +339,9 @@ Claude ladder, and `usage.jsonl` logged `effort: null` for the same wave. Now
 `resolve_profile()` returns one `effort` plus an `effort_channel` saying which knob
 carries it, and the log records the bracket level on Cursor rows.
 
-On Cursor the ladder resolves: `--effort` → an explicit bracket on a pinned
-`--worker-model` → `headless_effort_<type>` → **whatever `~/.cursor/cli-config.json`
+On Cursor the ladder resolves: `--effort` → an explicit bracket, or an effort
+suffix, on a pinned `--worker-model` (`effort_source: "model-bracket"` /
+`"model-id"`) → `headless_effort_<type>` → **whatever `~/.cursor/cli-config.json`
 already selects** → nothing. That fourth tier matters: the effort table below was
 measured on Claude, so the harness does **not** synthesize a bracket onto a bare
 `--model grok-4.5` from an unswept default — it leaves the argv alone and reports
@@ -493,7 +539,9 @@ scrub is invariant to import order, shell exports and CI injection.
 
 ## Config File: `llm_config.json`
 
-The file lives at the project root. It defines which providers and models are available throughout the app. It is gitignored so each user can customize it independently.
+The file lives at the project root. It defines which providers and models are available throughout the app. It is gitignored so each user can customize it independently. When it is absent the tracked `llm_config.example.json` is used as-is, so a fresh clone runs on the catalog the repo ships; a present but malformed `llm_config.json` stops with an error rather than falling back.
+
+**Adding a model is an edit to this file, never to code.** A Claude model that is not listed still works: the id is passed straight to the API, and the request shape (no sampling parameters, thinking toggle) is chosen by family rather than from a list of known releases, so the next Claude generation needs no change. If that guess is ever wrong, a 400 naming `temperature` or `thinking` is retried once without the parameter and logged. An unlisted model is priced at a `$5/$15` placeholder with a one-time warning; add it here for a real quote and to have it appear in the dashboard dropdowns.
 
 ### Schema
 
@@ -533,6 +581,15 @@ The file lives at the project root. It defines which providers and models are av
 | `providers[].models[].id` | Model identifier passed to the API |
 | `providers[].models[].name` | Display name in the model dropdown |
 | `providers[].models[].pricing` | `{ "input": X, "output": Y }` per 1M tokens, used for cost estimates |
+| `providers[].models[].sampling_params` | Optional, `anthropic` providers only. `true` / `false`: whether the model accepts `temperature`. Overrides the guess the code makes from the id |
+| `providers[].models[].thinking` | Optional, `anthropic` providers only. `"always"` (cannot be turned off), `"optional"` (can be toggled) or `"none"` (takes no `thinking` param). Overrides the guess |
+
+The two capability fields are only needed when the guess is wrong. Without them a
+`claude-` id outside the closed legacy set is treated as current generation (no
+`temperature`, toggleable thinking). On a realtime call a wrong guess repairs itself:
+the request is retried once without the parameter the API refused, and that model is
+not sent it again for the rest of the process. A batch cannot be repaired after it is
+submitted, so declare the fields before batching a model the log warned about.
 
 ### Provider Types
 
@@ -572,7 +629,7 @@ Then add the API key to your `.env`:
 TOGETHER_API_KEY=your_key_here
 ```
 
-No code changes are needed. The new provider will appear in all dashboard dropdowns on the next page load.
+No code changes are needed. The new provider will appear in all dashboard dropdowns on the next page load, and `--provider together` is accepted by the harness and by every script that takes `--provider` (it is validated against this file, not against a fixed list). Batch translation is the exception: only `anthropic` and `openai` have a Batch API wired up, so other providers run realtime.
 
 ### Common Provider Base URLs
 
@@ -623,10 +680,11 @@ The batch translate modal shows provider and model dropdowns, now dynamically po
 
 | Function | Purpose |
 |---|---|
-| `load_llm_config()` | Reads and caches the config file. Falls back to a built-in default (Anthropic + OpenAI) if the file is missing. |
+| `load_llm_config()` | Reads and caches the config file. Falls back to the tracked `llm_config.example.json` if the file is missing (and to a built-in default only if both are). |
 | `get_provider_config(id)` | Looks up a provider by ID. Raises `ValueError` if not found. |
 | `get_default_model()` | Returns `default_model` from config. |
-| `get_model_pricing(provider, model)` | Returns pricing dict for cost estimation. Falls back to conservative defaults for unknown models. |
+| `get_model_pricing(provider, model)` | Returns pricing dict for cost estimation. An unknown model gets a `$5/$15` placeholder and a one-time warning. |
+| `provider_arg(value)` | argparse `type=` for `--provider`: accepts any provider id in the config. |
 | `get_pricing_table()` | Builds the full pricing table from config (backward-compatible with older code). |
 
 ### API Dispatch
@@ -676,7 +734,10 @@ The file-based batch API (`scripts/translate_api.py --batch`) is only available 
 The env var specified in `api_key_env_var` is not set. Add it to your `.env` file and restart the server.
 
 **"Unknown provider" error:**
-The `provider` value sent from the frontend doesn't match any `id` in `llm_config.json`. Check that the config file is valid JSON and contains the provider.
+The `provider` value sent from the frontend doesn't match any `id` in `llm_config.json`. Check that the config file is valid JSON and contains the provider. From a script the same mistake reads `unknown provider '<id>'; llm_config.json defines: …`, which lists the ids that would work.
+
+**"has no Batch API support here" error:**
+The provider is valid but only `anthropic` and `openai` have a batch implementation. Run it realtime (drop `--batch`).
 
 **Config changes not taking effect:**
 The config is cached in memory. Restart the server to reload, or call `load_llm_config(force_reload=True)` programmatically.
