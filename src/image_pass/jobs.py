@@ -61,6 +61,9 @@ MAX_CANDIDATES = 4
 
 INPUT_ORIGINAL = "original"
 INPUT_CURRENT = "current"
+# A cover drawn from another of the book's images: that image is attached as
+# source material, not as the thing being edited.
+INPUT_REFERENCE = "reference"
 
 # A file of this name in the run dir is harvested if one ever appears, but the
 # prompt no longer asks for it: see _CONTRACT_EDIT.
@@ -78,7 +81,9 @@ LIMIT_WARNING = (
     "harvested are kept, and re-running `generate` picks up where it stopped."
 )
 
-_JOB_KEYS = frozenset({"image", "mode", "instruction", "labels", "candidates", "input", "note"})
+_JOB_KEYS = frozenset(
+    {"image", "mode", "instruction", "labels", "candidates", "input", "reference", "note"}
+)
 
 # The first live run (2026-10-05, codex-cli 0.157.0) asked the model to save the
 # result as output.png. It could not: the tool hands back image data with no
@@ -95,6 +100,13 @@ _CONTRACT_TAIL = """- Call the tool exactly once, then stop. One call is one ima
 _CONTRACT_EDIT = """Output:
 - Use the built-in image generation tool to edit `{input_name}`, the attached image (it is also in the working directory). Never use the CLI fallback or any script that needs an API key; if the built-in tool is unavailable, stop and say so.
 - Keep the original's proportions (it is {width} wide by {height} high).
+""" + _CONTRACT_TAIL
+
+# No "keep the original's proportions" here: the cover is a new picture in a
+# cover's shape, recomposed from an illustration that is usually landscape.
+_CONTRACT_REFERENCE = """Output:
+- Use the built-in image generation tool, with `{input_name}`, the attached image, as its source (it is also in the working directory). Never use the CLI fallback or any script that needs an API key; if the built-in tool is unavailable, stop and say so.
+- The result is a new picture in a cover's portrait proportions, not the attached image's ({width} wide by {height} high).
 """ + _CONTRACT_TAIL
 
 _CONTRACT_NEW = """Output:
@@ -167,7 +179,17 @@ def render_prompt(job: dict[str, Any], meta: dict[str, str]) -> str:
     """Fill ``prompts/image_pass/<mode>.txt`` for one validated job."""
     labels = job.get("labels") or {}
     input_name = job.get("input_name")
-    if input_name:
+    if input_name and job.get("reference"):
+        contract = _CONTRACT_REFERENCE.format(
+            input_name=input_name,
+            width=job.get("width"),
+            height=job.get("height"),
+        )
+        cover_task = (
+            f"Create the front cover of a book from the attached image, `{input_name}`, "
+            "one of the book's own illustrations, following the editor's brief below."
+        )
+    elif input_name:
         contract = _CONTRACT_EDIT.format(
             input_name=input_name,
             width=job.get("width"),
@@ -280,6 +302,27 @@ def _validate_job(
     elif current.is_file():
         source = current
 
+    reference: Optional[str] = None
+    if raw.get("reference") is not None:
+        wanted = image_key(raw["reference"]) if isinstance(raw["reference"], str) else ""
+        if mode != MODE_COVER:
+            problems.append(
+                "reference is for a cover job: the image a new cover is drawn from"
+            )
+        elif not is_safe_key(wanted):
+            problems.append(f"reference {raw['reference']!r} is not a path inside images/")
+        else:
+            ref_backup = originals_dir(project_dir) / wanted
+            ref_current = images_dir(project_dir) / wanted
+            # Same rule as a job's own input: the publisher's picture unless told
+            # otherwise, so a cover is not drawn from a generated replacement.
+            if which == INPUT_ORIGINAL and ref_backup.is_file():
+                source, reference = ref_backup, wanted
+            elif ref_current.is_file():
+                source, reference = ref_current, wanted
+            else:
+                problems.append(f"reference {wanted}: no such file in images/")
+
     if mode == MODE_COVER:
         if key not in COVER_NAMES:
             problems.append(
@@ -316,10 +359,15 @@ def _validate_job(
         "input": str(source) if source is not None else None,
         "input_from": (
             None if source is None
+            else INPUT_REFERENCE if reference
             else INPUT_ORIGINAL if source == backup or not backup.is_file()
             else INPUT_CURRENT
         ),
-        "input_name": f"input{source.suffix.lower()}" if source is not None else None,
+        "input_name": (
+            None if source is None
+            else f"{'reference' if reference else 'input'}{source.suffix.lower()}"
+        ),
+        "reference": reference,
         "width": width,
         "height": height,
         "status_at_prepare": ledger.status_of(state.get(key)),
@@ -352,7 +400,10 @@ def _input_changed(job_dir: Path, job: dict[str, Any]) -> bool:
         return False
     if not isinstance(previous, dict):
         return False
-    return any(previous.get(field) != job.get(field) for field in ("input_from", "width", "height"))
+    return any(
+        previous.get(field) != job.get(field)
+        for field in ("input_from", "reference", "width", "height")
+    )
 
 
 def _archive_candidates(job_dir: Path) -> int:

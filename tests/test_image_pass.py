@@ -261,6 +261,56 @@ def test_a_cover_job_needs_no_existing_image(project: Path):
     assert "input." not in prompt
 
 
+def test_a_cover_can_be_drawn_from_one_of_the_books_images(project: Path):
+    job = {"image": "cover.jpg", "mode": "cover", "reference": "images/map.jpg",
+           "instruction": "Portrait crop of the left side, hand-tinted."}
+    out = ip_jobs.prepare(project, [job])
+    assert out["status"] == "ok", out
+    assert out["prepared"][0]["input_from"] == "reference"
+    prompt = Path(out["prepared"][0]["prompt_path"]).read_text("utf-8")
+    assert "from the attached image, `reference.jpg`" in prompt
+    # The reference is landscape; the cover must not be told to keep its shape.
+    assert "Keep the original's proportions" not in prompt
+    assert "not the attached image's (300 wide by 200 high)" in prompt
+
+    codex = FakeCodex(size=(1024, 1536))
+    assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
+    cmd = codex.calls[0]["cmd"]
+    assert cmd[2] == "-i" and Path(cmd[3]).name == "reference.jpg"
+    assert Path(cmd[3]).read_bytes() == (project / "images" / "map.jpg").read_bytes()
+
+    page = Path(ip_report.review(project)["review_path"]).read_text("utf-8")
+    assert "Drawn from map.jpg" in page and "../../images/map.jpg" in page
+
+    # It lands as a new file with nothing to back up, and the reference is untouched.
+    before = ledger.sha256_file(project / "images" / "map.jpg")
+    applied = ip_apply.apply(project, [{"image": "cover.jpg", "candidate": 1}])
+    assert applied["applied"][0]["backup_action"] == "none (new file)"
+    assert applied["warnings"] == []
+    assert ledger.sha256_file(project / "images" / "map.jpg") == before
+
+    # Drawing it from a different picture is a different job.
+    again = ip_jobs.prepare(project, [{**job, "reference": "compass.png"}])
+    assert again["prepared"][0]["archived"] == 1
+
+
+@pytest.mark.parametrize(
+    "job,needle",
+    [
+        ({"image": "map.jpg", "mode": "restore", "instruction": "x", "reference": "compass.png"},
+         "reference is for a cover job"),
+        ({"image": "cover.jpg", "mode": "cover", "instruction": "x", "reference": "nope.jpg"},
+         "reference nope.jpg: no such file"),
+        ({"image": "cover.jpg", "mode": "cover", "instruction": "x", "reference": "../x.jpg"},
+         "is not a path inside images/"),
+    ],
+)
+def test_prepare_refuses_a_bad_reference(project: Path, job, needle):
+    out = ip_jobs.prepare(project, [job])
+    assert out["status"] == "error"
+    assert needle in " ".join(out["invalid"][0]["problems"])
+
+
 def test_a_cover_job_must_not_shadow_the_existing_cover(project: Path):
     _image(project / "images" / "cover.png", (600, 900))
     out = ip_jobs.prepare(

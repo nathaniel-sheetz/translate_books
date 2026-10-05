@@ -392,11 +392,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_prepare.add_argument(
         "--json-file",
         required=True,
-        help="a list of {image, mode, instruction, labels?, candidates?, input?}. "
+        help="a list of {image, mode, instruction, labels?, candidates?, input?, "
+        "reference?}. "
         "mode is translate | restore | cover | replace; labels is the approved "
         'source → target map ({"NORTH": "NORTE"}), required for translate; '
         f"candidates is 1-{ip_jobs.MAX_CANDIDATES} (default {ip_jobs.DEFAULT_CANDIDATES}); "
-        "input is 'original' (default) or 'current'",
+        "input is 'original' (default) or 'current'; reference (cover only) is "
+        "another of the book's images to draw the cover from",
     )
     p_prepare.add_argument(
         "--replace",

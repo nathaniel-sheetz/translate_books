@@ -112,6 +112,7 @@ same image everywhere a command takes one.
 | `labels` | source → replacement map. **Required for `translate`.** Optional elsewhere: lettering to put on a cover, or to keep legible in a replacement |
 | `candidates` | 1–4, default 1. Each one is a separate Codex run |
 | `input` | `original` (default) or `current`. A redo of an already-replaced image starts from the publisher's file again unless you say `current` |
+| `reference` | `cover` only: another of the book's images to draw the cover from (`"reference": "052.jpg"`). It is attached as source material, so the cover is a new portrait picture, not that image's proportions |
 
 `prepare` is **all-or-nothing**: one invalid job refuses the batch and writes nothing.
 Jobs merge into the manifest by image, so re-preparing one image leaves the others

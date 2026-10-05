@@ -77,6 +77,13 @@ def review(project_dir: Path) -> dict[str, Any]:
             )
         else:
             figures.append("<figure><figcaption>No original (new image)</figcaption></figure>")
+        drawn_from = Path(job["input"]) if job.get("reference") and job.get("input") else None
+        if drawn_from is not None and drawn_from.is_file():
+            figures.append(
+                f'<figure><img src="{html.escape(_rel(drawn_from, out_dir))}" alt="reference">'
+                f"<figcaption>Drawn from {html.escape(job['reference'])} · "
+                f"{html.escape(_size(probe_image(drawn_from)))}</figcaption></figure>"
+            )
 
         cands_out: list[dict[str, Any]] = []
         for number in numbers:
@@ -133,6 +140,7 @@ def review(project_dir: Path) -> dict[str, Any]:
             "image": key,
             "mode": job["mode"],
             "original": str(original) if original else None,
+            "reference": job.get("reference"),
             "original_size": [orig_info["width"], orig_info["height"]] if orig_info.get("width") else None,
             "labels": labels,
             "candidates": cands_out,
