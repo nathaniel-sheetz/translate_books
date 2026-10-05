@@ -430,18 +430,29 @@ Full reference: [`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md).
 
 ```bash
 python scripts/image_pass.py inventory --project my-book
+python scripts/image_pass.py backfill  --project my-book --dry-run
 python scripts/image_pass.py prepare   --project my-book --json-file jobs.json
 python scripts/image_pass.py generate  --project my-book --estimate
 python scripts/image_pass.py apply     --project my-book --json-file decisions.json --dry-run
 python scripts/image_pass.py verify    --project my-book
 ```
 
-Sub-verbs: `inventory`, `prepare`, `generate`, `review`, `apply`, `revert`, `verify`.
-`generate` runs the Codex CLI on a ChatGPT subscription (never a metered key — see
-[`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)) to translate lettering, clean scans, make a
-cover or replace an illustration. `apply` is the only writer to `images/`: it keeps the
-original filename and format, so no `[IMAGE:…]` token changes, and backs the original
-up to `images_original/` first. `revert` restores from there.
+Sub-verbs: `inventory`, `backfill`, `prepare`, `generate`, `review`, `apply`, `revert`,
+`verify`. `generate` runs the Codex CLI on a ChatGPT subscription (never a metered key —
+see [`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)) to translate lettering, clean scans, make a
+cover or replace an illustration. `apply` keeps the original filename and format, so no
+`[IMAGE:…]` token changes, and backs the original up to `images_original/` first.
+`revert` restores from there.
+
+`backfill` is for a Gutenberg book ingested with the page's thumbnails: it reads the
+source page again (`--source`, default the URL recorded in `project.json`), fetches the
+larger scan each thumbnail links to, and puts it behind the same filename. No Codex, no
+spend. The larger scan becomes the original — no backup of the thumbnail is kept, and an
+existing backup in `images_original/` is upgraded — so it cannot be reverted, only
+re-ingested. A scan is taken only if it looks like the picture it replaces: a mislinked
+one is swapped for the scan on the page that does match (`relinked_from`), and one with
+no match is listed under `unlike` and left alone until named in `--accept`. Run it with
+`--dry-run` first, and before any `prepare`: a job starts from whatever the original is.
 
 *Skill equivalent:* `/image-pass`
 

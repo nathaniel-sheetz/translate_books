@@ -6,6 +6,10 @@ Fetches (or reads) a PG HTML file, strips boilerplate, downloads images,
 inserts image placeholders, and reports chapter lengths to help you decide
 how to chunk the book.
 
+Where the page shows a thumbnail that links to a larger scan of the same
+picture (Gutenberg's ``<a href="042_l.gif"><img src="042.jpg"></a>``), the
+larger scan is the one imported. ``--inline-images`` keeps the thumbnails.
+
 Usage:
     python scripts/ingest_gutenberg.py URL --output projects/mybook/
     python scripts/ingest_gutenberg.py URL --output projects/mybook/ --no-images
@@ -17,11 +21,13 @@ and survive the chunking / translation pipeline for later re-insertion.
 """
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 # Make the project root importable when run as a standalone script
@@ -82,6 +88,10 @@ USER_AGENT = (
     "+https://github.com/example/translate-books)"
 )
 
+# A link whose target is itself an image file. Gutenberg wraps each displayed
+# thumbnail in one, pointing at the full-size scan of the same picture.
+IMAGE_LINK_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
 
 # ---------------------------------------------------------------------------
 # Fetching
@@ -121,6 +131,80 @@ def fetch_html(source: str) -> tuple[str, str]:
     resp = requests.get(clean_url, headers={"User-Agent": USER_AGENT}, timeout=30)
     resp.raise_for_status()
     return decode_html_bytes(resp.content), base_url
+
+
+def fetch_bytes(url: str, timeout: int = 20) -> bytes:
+    """Return the bytes at ``url``. Raises on any failure.
+
+    ``file://`` is read from disk, so a book ingested from a saved page (whose
+    base URL is its folder) finds the images saved beside it.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        return Path(urllib.request.url2pathname(parsed.path)).read_bytes()
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+
+# ---------------------------------------------------------------------------
+# Linked larger scans
+# ---------------------------------------------------------------------------
+
+def linked_image(anchor: Tag, base_url: str) -> dict | None:
+    """Describe ``anchor`` if it is a thumbnail linking to a larger image.
+
+    Returns ``{url, name, inline, inline_names, alt}`` -- the link's target, and
+    the image(s) displayed inside it -- or ``None`` for any other link. Two
+    displayed images under one link are the halves of a picture the page split
+    to wrap text around; the target is the picture whole.
+
+    A link that also carries visible text is left alone: its text has to
+    survive, and the ordinary walk keeps both.
+    """
+    href = anchor.get("href", "")
+    if not href or anchor.get_text(strip=True):
+        return None
+    url = urllib.parse.urljoin(base_url, href)
+    name = Path(urllib.parse.urlparse(url).path).name
+    if Path(name).suffix.lower() not in IMAGE_LINK_SUFFIXES:
+        return None
+    images = [img for img in anchor.find_all("img") if img.get("src")]
+    inline = [urllib.parse.urljoin(base_url, img["src"]) for img in images]
+    if not inline or url in inline:
+        return None
+    return {
+        "url": url,
+        "name": name,
+        "inline": inline,
+        "inline_names": [Path(urllib.parse.urlparse(u).path).name for u in inline],
+        "alt": next((img.get("alt") for img in images if img.get("alt")), ""),
+    }
+
+
+def linked_images(root: Tag, base_url: str) -> list[dict]:
+    """Every thumbnail-to-larger-image link under ``root``, in document order.
+
+    The map a backfill needs for a book ingested before the larger scans were
+    preferred: which displayed file each larger one stands behind.
+    """
+    found = (linked_image(anchor, base_url) for anchor in root.find_all("a"))
+    return [link for link in found if link is not None]
+
+
+def _pixel_size(data: bytes) -> tuple[int, int] | None:
+    """``(width, height)`` of image bytes, or ``None`` if they are not an image.
+
+    Raises ImportError without Pillow, so the caller can tell "cannot check"
+    from "checked, and it is not a picture".
+    """
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            return image.size
+    except Exception:  # noqa: BLE001 - any undecodable payload is one answer
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -189,16 +273,20 @@ class Converter:
     Tracks chapters (via heading tags) and downloads images.
     """
 
-    def __init__(self, base_url: str, images_dir: Path, download_images: bool):
+    def __init__(self, base_url: str, images_dir: Path, download_images: bool,
+                 prefer_linked_images: bool = True):
         self.base_url = base_url
         self.images_dir = images_dir
         self.download_images = download_images
+        self.prefer_linked_images = prefer_linked_images
 
         self.parts: list[str] = []
         self.chapters: list[dict] = []       # {heading, level, word_offset}
         self._word_total = 0
         self._images_downloaded = 0
         self._images_skipped = 0
+        self._images_linked = 0
+        self._images_unlike: list[str] = []
 
     # ------------------------------------------------------------------
     def convert(self, root: Tag) -> str:
@@ -258,6 +346,12 @@ class Converter:
 
         if tag == "img":
             self._handle_image(node)
+            return
+
+        # A thumbnail wrapped in a link to its larger scan: import the scan.
+        # Declined (so the walk carries on to the <img> inside) whenever the
+        # link is not one, or its target cannot be had.
+        if tag == "a" and self.prefer_linked_images and self._handle_linked_image(node):
             return
 
         # Anchor-only elements used as jump targets (no visible text)
@@ -397,9 +491,7 @@ class Converter:
             dest = self.images_dir / filename
             if not dest.exists():
                 try:
-                    r = requests.get(abs_url, headers={"User-Agent": USER_AGENT}, timeout=20)
-                    r.raise_for_status()
-                    dest.write_bytes(r.content)
+                    dest.write_bytes(fetch_bytes(abs_url))
                     self._images_downloaded += 1
                 except Exception as exc:
                     print(f"  Warning: could not download {abs_url}: {exc}", file=sys.stderr)
@@ -407,6 +499,73 @@ class Converter:
             else:
                 self._images_downloaded += 1  # already present
 
+        self._emit_image(local_rel, alt)
+
+    def _handle_linked_image(self, anchor: Tag) -> bool:
+        """Import the larger image ``anchor`` links to. False = not handled."""
+        link = linked_image(anchor, self.base_url)
+        if link is None:
+            return False
+
+        if self.download_images:
+            dest = self.images_dir / link["name"]
+            if not dest.exists():
+                try:
+                    data = fetch_bytes(link["url"])
+                except Exception as exc:
+                    print(
+                        f"  Warning: larger scan {link['url']} unavailable ({exc}); "
+                        "using the image the page displays",
+                        file=sys.stderr,
+                    )
+                    return False
+                if not self._is_the_larger_picture(data, link):
+                    return False
+                dest.write_bytes(data)
+            self._images_downloaded += 1
+        # With --no-images nothing can be checked, so the link is taken at its
+        # word: the placeholder names the file a later fetch will look for.
+        self._images_linked += 1
+        self._emit_image(f"images/{link['name']}", link["alt"])
+        return True
+
+    def _is_the_larger_picture(self, data: bytes, link: dict) -> bool:
+        """Whether a link's target is worth taking over what the page displays."""
+        try:
+            large = _pixel_size(data)
+        except ImportError:
+            return True  # no Pillow to measure with: trust the link
+        if large is None:
+            return False
+        if len(link["inline"]) != 1:
+            return True  # split halves: there is no one file to measure against
+        try:
+            thumbnail = fetch_bytes(link["inline"][0])
+        except Exception:  # noqa: BLE001 - a thumbnail we cannot fetch loses
+            return True
+        small = _pixel_size(thumbnail)
+        if small is None:
+            return True
+        if large[0] * large[1] <= small[0] * small[1]:
+            return False
+        # A link can point at the wrong plate. Putting one picture under
+        # another's caption is worse than keeping a small one, so a scan that
+        # does not look like its thumbnail is left for ``image_pass.py backfill``,
+        # which can search the page's other scans for the one that does.
+        from src.image_pass.inventory import SAME_PICTURE, picture_similarity
+
+        score = picture_similarity(thumbnail, data)
+        if score is not None and score < SAME_PICTURE:
+            self._images_unlike.append(link["inline_names"][0])
+            print(
+                f"  Warning: {link['name']} does not look like {link['inline_names'][0]} "
+                f"(similarity {score:.2f}); keeping the image the page displays",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def _emit_image(self, local_rel: str, alt: str):
         placeholder = f"[IMAGE:{local_rel}]"
         if alt:
             placeholder = f"[IMAGE:{local_rel}:{alt}]"
@@ -539,15 +698,23 @@ def print_report(
     footnotes_mode: str = "drop",
     banner: str = "PROJECT GUTENBERG IMPORT",
     split_hint: list[str] | None = None,
+    images_linked: int = 0,
+    images_unlike: list[str] | None = None,
 ):
     print()
     print(f"=== {banner} ===")
     print(f"Source : {source}")
     if images_downloaded or images_skipped:
         img_msg = f"{images_downloaded} downloaded"
+        if images_linked:
+            img_msg += f" ({images_linked} as the larger scan the page links to)"
         if images_skipped:
             img_msg += f", {images_skipped} failed"
         print(f"Images : {img_msg} -> {output_dir / 'images'}/")
+    if images_unlike:
+        print(f"         {len(images_unlike)} kept as displayed because the scan each links to "
+              f"looks like a different picture: {', '.join(images_unlike)}")
+        print("         (scripts/image_pass.py backfill can look for the right scan)")
     if footnotes_count:
         if footnotes_mode == "import":
             print(f"Footnotes : {footnotes_count} imported -> {output_dir / 'footnotes.json'}")
@@ -631,6 +798,12 @@ Examples:
         help="Insert placeholders but do not download image files",
     )
     parser.add_argument(
+        "--inline-images",
+        action="store_true",
+        help="Import the images the page displays even where each links to a "
+             "larger scan (default: import the larger scan)",
+    )
+    parser.add_argument(
         "--footnotes",
         choices=["import", "drop"],
         default="drop",
@@ -681,6 +854,7 @@ def main():
         base_url=base_url,
         images_dir=images_dir,
         download_images=download_images,
+        prefer_linked_images=not args.inline_images,
     )
     text = converter.convert(body)
     total_words = _word_count(text)
@@ -696,6 +870,8 @@ def main():
         total_words=total_words,
         images_downloaded=converter._images_downloaded,
         images_skipped=converter._images_skipped,
+        images_linked=converter._images_linked,
+        images_unlike=converter._images_unlike,
         footnotes_count=len(fn_matches),
         footnotes_mode=args.footnotes,
     )

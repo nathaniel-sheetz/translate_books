@@ -15,6 +15,9 @@ python scripts/ingest_gutenberg.py local_book.htm --output projects/mybook/
 # Skip downloading images (placeholders still inserted)
 python scripts/ingest_gutenberg.py URL --output projects/mybook/ --no-images
 
+# Keep the thumbnails the page displays instead of the larger scans they link to
+python scripts/ingest_gutenberg.py URL --output projects/mybook/ --inline-images
+
 # Import footnotes as translatable reader footnotes (default: drop)
 python scripts/ingest_gutenberg.py URL --output projects/mybook/ --footnotes import
 ```
@@ -25,6 +28,12 @@ python scripts/ingest_gutenberg.py URL --output projects/mybook/ --footnotes imp
 2. **Strip boilerplate** — Removes Project Gutenberg header/footer content. Handles both the newer `<section class="pg-boilerplate">` format and the older `*** START/END OF THE PROJECT GUTENBERG ***` text-marker format.
 3. **Convert to plain text** — Walks the HTML tree, dropping navigation, scripts, page-number spans, and other non-content elements. Block elements become double-newline-separated paragraphs; headings are preserved as plain text. `<i>` and `<em>` tags are converted to `_word_` underscore markers so italics survive through chunking and LLM translation; the EPUB builder converts these markers back to `<em>` tags at export time.
 4. **Handle images** — Downloads each image into `<output>/images/` and inserts a `[IMAGE:images/filename.jpg]` placeholder at the same position in the text. These placeholders survive chunking and translation for later re-insertion. Use `--no-images` to skip downloading while keeping placeholders.
+
+   **Larger scans.** Gutenberg usually displays a thumbnail and links it to a full-size scan of the same picture (`<a href="images/042_l.gif"><img src="images/042.jpg"></a>`), often two or three times the size. Where a link like that wraps an image, the larger scan is the one imported, under its own name (`[IMAGE:images/042_l.gif]`). Two displayed images under one link are the halves of a picture the page split to wrap text around; they become one placeholder for the whole picture. `--inline-images` turns this off.
+
+   The link is only taken when it holds up: the target has to download, be larger than the thumbnail, and look like the same picture. Publishers mislink — in *Home Geography* the star chart's thumbnail links to the compass's scan — and one picture under another's caption is worse than a small one, so anything that fails keeps the thumbnail and is named in the report. `scripts/image_pass.py backfill` can then find the right scan among the page's others.
+
+   A book ingested before this existed has the thumbnails. `python scripts/image_pass.py backfill --project <book>` brings the larger scans in under the filenames the translation was built on (see [`CLI_REFERENCE.md`](CLI_REFERENCE.md)).
 5. **Handle footnotes** — Detects Gutenberg footnotes (an inline reference anchor linked to a definition that back-links to it — the detector keys on that structure, not on class names, so both the modern "images" format and the older `files/` format work). Footnotes are always counted and reported. With `--footnotes import`, each reference becomes a survivable `[FOOTNOTE:N]` token (like `[IMAGE:...]`) at the exact marker position and the note bodies are written to `<output>/footnotes.json`; the tokens ride through translation and are later converted into editable reader footnote annotations. Without it (the default `drop`), references and note bodies are removed cleanly, leaving no `[1]` residue.
 6. **Write output** — Saves the cleaned text to `<output>/source.txt`.
 7. **Report** — Prints a chapter-by-chapter word count table and estimates how many translation chunks each chapter will produce (at ~2,000 words/chunk). Also suggests an appropriate `--pattern` flag for `split_book.py` based on the detected heading style (numeric, Roman numeral, or bare Roman numeral).
@@ -68,6 +77,8 @@ python scripts/harness.py footnotes apply     --project projects/mybook       # 
 ```bash
 pip install requests beautifulsoup4
 ```
+
+Pillow (in `requirements.txt`) is what measures a linked scan against its thumbnail. Without it the link is trusted as it stands.
 
 ## Next step
 

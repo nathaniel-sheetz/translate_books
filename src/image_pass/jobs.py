@@ -339,9 +339,26 @@ def existing_candidates(job_dir: Path) -> list[int]:
     return found
 
 
+def _input_changed(job_dir: Path, job: dict[str, Any]) -> bool:
+    """Whether ``job`` would start from a different picture than last time.
+
+    The same prompt over a different input is a different job: after a
+    ``backfill`` the original is the larger scan, and a candidate drawn from the
+    thumbnail it replaced must not be kept as if it answered the new one.
+    """
+    try:
+        previous = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(previous, dict):
+        return False
+    return any(previous.get(field) != job.get(field) for field in ("input_from", "width", "height"))
+
+
 def _archive_candidates(job_dir: Path) -> int:
-    """Move a job's candidates aside because its prompt changed. Never deletes:
-    each one cost minutes of plan usage and may still be the one wanted."""
+    """Move a job's candidates aside because its prompt or its input changed.
+    Never deletes: each one cost minutes of plan usage and may still be the one
+    wanted."""
     moved = [p for p in job_dir.glob("cand_*.png")] + [
         p for p in job_dir.glob("run_*") if p.is_dir()
     ]
@@ -416,7 +433,9 @@ def prepare(project_dir: Path, jobs: list[Any], *, replace: bool = False) -> dic
         prompt = prompts[job["id"]]
         prompt_file = job_dir / "prompt.txt"
         archived = 0
-        if prompt_file.exists() and prompt_file.read_text(encoding="utf-8") != prompt:
+        if (
+            prompt_file.exists() and prompt_file.read_text(encoding="utf-8") != prompt
+        ) or _input_changed(job_dir, job):
             archived = _archive_candidates(job_dir)
             archived_total += archived
         prompt_file.write_text(prompt, encoding="utf-8")

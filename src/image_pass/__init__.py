@@ -7,14 +7,16 @@ deterministic half of that: it inventories the images a book references, renders
 one Codex job per image, harvests the candidates, shows them beside the
 original, and swaps the approved one in place behind a backup.
 
-Five modules, each one stage:
+Six modules, each one stage:
 
 - :mod:`inventory` — every image the book references, plus the cover.
+- :mod:`backfill`  — the publisher's larger scans, behind the filenames a book
+  was ingested with. No Codex: the same picture, bigger.
 - :mod:`jobs`      — ``prepare`` (validate + render prompts) and ``generate``
   (run Codex per candidate, harvest the file).
 - :mod:`report`    — the plain-HTML review page: original beside each candidate.
-- :mod:`apply`     — ``apply``, ``revert`` and ``verify``: the only code that
-  writes into ``images/``.
+- :mod:`apply`     — ``apply``, ``revert`` and ``verify``. With ``backfill``,
+  the only code that writes into ``images/``.
 - :mod:`ledger`    — the append-only record of what was replaced with what.
 
 Two invariants the rest of the repo relies on:
@@ -25,8 +27,10 @@ original's name and format, so no ``[IMAGE:images/<file>:<alt>]`` token in
 reader and the EPUB builder pick the new pixels up as-is.
 
 **The original is never lost.** ``projects/`` is gitignored, so the first
-replacement of any file copies it to ``images_original/<file>`` and nothing ever
-overwrites that copy. ``revert`` restores from there, byte for byte.
+replacement of any file copies it to ``images_original/<file>`` and no later
+replacement overwrites that copy. ``revert`` restores from there, byte for byte.
+(``backfill`` is the exception by design: it upgrades the original itself to the
+publisher's larger scan of the same picture, which can be fetched again.)
 
 Nothing here spawns a process. The Codex call lives in
 :func:`src.harness.headless.run_image_job`, the one module allowed to launch a

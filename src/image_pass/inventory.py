@@ -11,9 +11,10 @@ and a file nothing references.
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from src.image_pass import (
     COVER_NAMES,
@@ -44,6 +45,50 @@ def probe_image(path: Path) -> dict[str, Any]:
             return {"width": width, "height": height, "format": image.format}
     except Exception as exc:  # noqa: BLE001 - any unreadable file is one answer
         return {"error": f"unreadable image: {exc}"}
+
+
+# Two files of the same picture score at or above this; in the one book measured
+# (home-geography, 80 thumbnail/scan pairs) every true pair but two re-cropped
+# ones reached 0.99 and no two different pictures passed 0.82.
+SAME_PICTURE = 0.95
+
+_SIGNATURE_SIDE = 16
+
+
+def _signature(source: Union[Path, bytes]) -> Optional[list[int]]:
+    """A picture boiled down to a 16x16 grid of grey levels, or None if unreadable."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(source) if isinstance(source, bytes) else source) as image:
+            small = image.convert("L").resize(
+                (_SIGNATURE_SIDE, _SIGNATURE_SIDE), Image.Resampling.BOX
+            )
+            return list(small.tobytes())
+    except Exception:  # noqa: BLE001 - no Pillow, or not an image: cannot compare
+        return None
+
+
+def picture_similarity(a: Union[Path, bytes], b: Union[Path, bytes]) -> Optional[float]:
+    """How alike two image files look, whatever their size or format.
+
+    1.0 is the same picture; two unrelated pictures land well below
+    :data:`SAME_PICTURE`. ``None`` means it cannot be told — a file that will
+    not open, or a blank one, which correlates with nothing.
+
+    A publisher's "larger version" link is usually right and sometimes points
+    at a different plate altogether; this is how a caller tells before it puts
+    one picture under another's caption.
+    """
+    first, second = _signature(a), _signature(b)
+    if first is None or second is None:
+        return None
+    mean_a, mean_b = sum(first) / len(first), sum(second) / len(second)
+    spread_a = sum((x - mean_a) ** 2 for x in first) ** 0.5
+    spread_b = sum((y - mean_b) ** 2 for y in second) ** 0.5
+    if not spread_a or not spread_b:
+        return None
+    return sum((x - mean_a) * (y - mean_b) for x, y in zip(first, second)) / (spread_a * spread_b)
 
 
 def _chapter_index(project_dir: Path) -> dict[str, str]:

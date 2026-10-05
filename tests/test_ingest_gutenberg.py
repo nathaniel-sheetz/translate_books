@@ -8,6 +8,7 @@ from scripts.ingest_gutenberg import (
     Converter,
     decode_html_bytes,
     fetch_html,
+    linked_images,
     write_heading_outline,
 )
 
@@ -304,3 +305,119 @@ class TestImageBlockSpacing:
         out = _convert('<body><p>text <img src="i5.jpg"/> more text</p></body>')
         blocks = [b.strip() for b in out.split("\n\n") if b.strip()]
         assert "[IMAGE:images/i5.jpg]" in blocks
+
+
+THUMB_LINK = '<a href="images/042_l.gif"><img alt="A MAP" src="images/042.jpg"></a>'
+
+
+def _picture(path, size, fmt):
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, (40, 40, 40)).save(path, format=fmt)
+    return path
+
+
+def _ingest(tmp_path, html: str, **kwargs):
+    """Convert ``html`` as a page saved in ``tmp_path/site``, images beside it."""
+    out = tmp_path / "book" / "images"
+    out.mkdir(parents=True)
+    conv = Converter(
+        base_url=(tmp_path / "site").as_uri() + "/", images_dir=out, download_images=True, **kwargs
+    )
+    text = conv.convert(BeautifulSoup(f"<body>{html}</body>", "html.parser").find("body"))
+    return text, sorted(p.name for p in out.iterdir()), conv
+
+
+class TestLinkedLargerScans:
+    """A thumbnail that links to a larger scan of itself: import the scan."""
+
+    def test_the_linked_scan_replaces_the_thumbnail(self):
+        out = _convert(f"<body><p>{THUMB_LINK} Drawings of land.</p></body>")
+        assert "[IMAGE:images/042_l.gif:A MAP]" in out
+        assert "042.jpg" not in out
+
+    def test_split_halves_under_one_link_become_one_image(self):
+        out = _convert(
+            '<body><a href="images/029_l.gif">'
+            '<img alt="RIVER" src="images/029.1.jpg"> <img alt="RIVER" src="images/029.2.jpg">'
+            "</a></body>"
+        )
+        assert out.count("[IMAGE:") == 1
+        assert "[IMAGE:images/029_l.gif:RIVER]" in out
+
+    def test_other_links_keep_the_image_the_page_displays(self):
+        for html in (
+            '<a href="notes.html"><img src="images/1.jpg"></a>',          # not an image
+            '<a href="images/1_l.gif"><img src="images/1.jpg"> Enlarge</a>',  # carries text
+            '<a href="images/1.jpg"><img src="images/1.jpg"></a>',        # links to itself
+        ):
+            assert "[IMAGE:images/1.jpg]" in _convert(f"<body>{html}</body>"), html
+
+    def test_inline_images_can_be_kept(self):
+        soup = BeautifulSoup(f"<body>{THUMB_LINK}</body>", "html.parser")
+        conv = Converter("", None, False, prefer_linked_images=False)
+        assert "[IMAGE:images/042.jpg:A MAP]" in conv.convert(soup.find("body"))
+
+    def test_only_the_larger_scan_is_downloaded(self, tmp_path):
+        _picture(tmp_path / "site" / "images" / "042_l.gif", (600, 400), "GIF")
+        _picture(tmp_path / "site" / "images" / "042.jpg", (200, 130), "JPEG")
+        text, files, conv = _ingest(tmp_path, THUMB_LINK)
+        assert "[IMAGE:images/042_l.gif:A MAP]" in text
+        assert files == ["042_l.gif"]
+        assert (conv._images_downloaded, conv._images_linked) == (1, 1)
+
+    def test_a_link_to_something_no_larger_is_not_taken(self, tmp_path):
+        _picture(tmp_path / "site" / "images" / "042_l.gif", (200, 130), "GIF")
+        _picture(tmp_path / "site" / "images" / "042.jpg", (200, 130), "JPEG")
+        text, files, conv = _ingest(tmp_path, THUMB_LINK)
+        assert "[IMAGE:images/042.jpg:A MAP]" in text
+        assert files == ["042.jpg"] and conv._images_linked == 0
+
+    def test_a_missing_or_broken_scan_falls_back_to_the_thumbnail(self, tmp_path):
+        _picture(tmp_path / "site" / "images" / "042.jpg", (200, 130), "JPEG")
+        text, files, _ = _ingest(tmp_path, THUMB_LINK)
+        assert "[IMAGE:images/042.jpg:A MAP]" in text and files == ["042.jpg"]
+
+        other = tmp_path / "second"
+        _picture(other / "site" / "images" / "042.jpg", (200, 130), "JPEG")
+        (other / "site" / "images" / "042_l.gif").write_bytes(b"<html>not found</html>")
+        text, files, _ = _ingest(other, THUMB_LINK)
+        assert "[IMAGE:images/042.jpg:A MAP]" in text and files == ["042.jpg"]
+
+    def test_a_scan_of_a_different_picture_is_not_taken(self, tmp_path):
+        from PIL import Image, ImageDraw
+
+        def plate(path, size, box):
+            image = Image.new("L", size, 255)
+            ImageDraw.Draw(image).rectangle([v * s for v, s in zip(box, size * 2)], fill=0)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            image.convert("RGB").save(path)
+
+        images = tmp_path / "site" / "images"
+        plate(images / "042.jpg", (200, 130), (0.1, 0.1, 0.4, 0.4))
+        plate(images / "042_l.gif", (600, 400), (0.6, 0.6, 0.9, 0.9))   # another plate
+        plate(images / "043.jpg", (200, 130), (0.5, 0.1, 0.9, 0.5))
+        plate(images / "043_l.gif", (600, 400), (0.5, 0.1, 0.9, 0.5))   # the same one
+        text, files, conv = _ingest(
+            tmp_path,
+            THUMB_LINK + '<a href="images/043_l.gif"><img src="images/043.jpg"></a>',
+        )
+        assert "[IMAGE:images/042.jpg:A MAP]" in text
+        assert "[IMAGE:images/043_l.gif]" in text
+        assert files == ["042.jpg", "043_l.gif"]
+        assert conv._images_unlike == ["042.jpg"]
+
+    def test_linked_images_maps_each_displayed_file_to_its_scan(self):
+        soup = BeautifulSoup(
+            f'<body>{THUMB_LINK}<a href="#top"><img src="images/x.jpg"></a>'
+            '<a href="images/029_l.gif"><img src="images/029.1.jpg"><img src="images/029.2.jpg"></a>'
+            "</body>",
+            "html.parser",
+        )
+        links = linked_images(soup, "https://pg.example/book/")
+        assert [(link["name"], link["inline_names"]) for link in links] == [
+            ("042_l.gif", ["042.jpg"]),
+            ("029_l.gif", ["029.1.jpg", "029.2.jpg"]),
+        ]
+        assert links[0]["url"] == "https://pg.example/book/images/042_l.gif"

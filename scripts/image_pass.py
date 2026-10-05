@@ -10,6 +10,7 @@ image and writes the job; Codex only makes pixels; a human picks.
 Subcommands, each printing exactly one JSON object:
 
     inventory   every image the book references, plus the cover   (no spend)
+    backfill    bring in the larger scans the source page links   (no spend)
     prepare     validate jobs and render one prompt per image     (no spend)
     generate    run Codex per candidate and harvest the image     (subscription)
     review      original beside each candidate, as one HTML page  (no spend)
@@ -28,6 +29,8 @@ scrubbed from the child environment. There is no override flag.
 Typical flow (the skill drives it, with a STOP gate before each spend or write):
 
     python scripts/image_pass.py inventory --project home-geography
+    python scripts/image_pass.py backfill  --project home-geography --dry-run
+    python scripts/image_pass.py backfill  --project home-geography
     python scripts/image_pass.py prepare   --project home-geography \
         --json-file projects/home-geography/.harness/images/jobs.json
     python scripts/image_pass.py generate  --project home-geography --estimate
@@ -59,6 +62,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8")
 
 from src.image_pass import apply as ip_apply  # noqa: E402
+from src.image_pass import backfill as ip_backfill  # noqa: E402
 from src.image_pass import inventory as ip_inventory  # noqa: E402
 from src.image_pass import jobs as ip_jobs  # noqa: E402
 from src.image_pass import report as ip_report  # noqa: E402
@@ -172,6 +176,50 @@ def _cmd_inventory(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+def _recorded_source(project_dir: Path) -> str | None:
+    """The page this book was ingested from, where an ingest wrote it down."""
+    for name, key in (("project.json", "gutenberg_url"), ("pipeline_state.json", "url")):
+        try:
+            doc = json.loads((project_dir / name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get(key), str) and doc[key].strip():
+            return doc[key].strip()
+    return None
+
+
+def _cmd_backfill(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    source = args.source or _recorded_source(project_dir)
+    if not source:
+        _die(
+            "no source page on record for this project: pass --source with the "
+            "Gutenberg HTML URL (or a saved copy of the page)"
+        )
+    # Imported here: only this command reads a source page, and the ingest
+    # module needs requests and beautifulsoup4, which the others do not.
+    from bs4 import BeautifulSoup
+
+    from scripts import ingest_gutenberg as gutenberg
+
+    try:
+        html, base_url = gutenberg.fetch_html(source)
+    except Exception as exc:  # noqa: BLE001 - one JSON error, never a traceback
+        _die(f"could not read the source page {source!r}: {exc}")
+    links = gutenberg.linked_images(BeautifulSoup(html, "html.parser"), base_url)
+    out = ip_backfill.backfill(
+        project_dir,
+        links,
+        fetch=gutenberg.fetch_bytes,
+        only=_split_ids(args.images),
+        accept=_split_ids(args.accept),
+        dry_run=args.dry_run,
+    )
+    out["source"] = source
+    _emit(out, _BACKFILL_SCHEMA)
+    return 0 if out.get("status") in ("ok", "partial") else 1
+
+
 def _cmd_prepare(args: argparse.Namespace) -> int:
     jobs = _load_json_list(args.json_file, ("jobs",), "jobs")
     out = ip_jobs.prepare(_resolve_project(args.project), jobs, replace=args.replace)
@@ -246,6 +294,30 @@ _GENERATE_SCHEMA = {
     "instructions": "what to run next",
 }
 
+_BACKFILL_SCHEMA = {
+    "status": "'ok' | 'partial' (at least one image failed) | 'error'",
+    "source": "the page the link map was read from",
+    "dry_run": "true when nothing was written to images/, images_original/ or the ledger",
+    "upgraded": "images now at the larger scan: {image, url, from_size, to_size, "
+    "score, writes, bytes, relinked_from?, accepted?, left_alone?, has_job?}. score "
+    "is how alike the scan and the old file look (1.0 = same picture). "
+    "relinked_from means the page linked a different picture and the scan that "
+    "matched was used instead — say so. left_alone means images/<file> is a "
+    "replacement and only its original was upgraded",
+    "planned": "--dry-run only: what would be upgraded",
+    "skipped": "the linked scan is no larger than what the book has (already done)",
+    "unlike": "the linked scan does not look like this image and no other scan on "
+    "the page does either: {image, url, score, have, linked}. Left alone. A person "
+    "has to look; --accept takes the ones that are the same picture re-cropped",
+    "split": "placeholders that are halves of one linked scan — reported, never joined",
+    "unmatched": "referenced images the source page links no larger scan for",
+    "failed": "could not be fetched, read or written, each with its error",
+    "stale_jobs": "upgraded images with a prepared job drawn from the smaller file",
+    "counts": "{referenced, upgraded, planned, relinked, skipped, unlike, split, "
+    "unmatched, failed, stale_jobs}",
+    "instructions": "what to run next",
+}
+
 _APPLY_SCHEMA = {
     "status": "'ok' (everything landed) | 'partial' (at least one refused) | 'error'",
     "dry_run": "true when nothing was written",
@@ -263,6 +335,7 @@ _APPLY_SCHEMA = {
 
 _DISPATCH = {
     "inventory": _cmd_inventory,
+    "backfill": _cmd_backfill,
     "prepare": _cmd_prepare,
     "generate": _cmd_generate,
     "review": _cmd_review,
@@ -283,6 +356,34 @@ def build_parser() -> argparse.ArgumentParser:
         "inventory", help="every image the book references, plus the cover (no spend)"
     )
     p_inventory.add_argument("--project", required=True, help="project id or path")
+
+    p_backfill = sub.add_parser(
+        "backfill",
+        help="swap the images a book was ingested with for the larger scans its "
+        "source page links to, under the same filenames (no spend)",
+    )
+    p_backfill.add_argument("--project", required=True, help="project id or path")
+    p_backfill.add_argument(
+        "--source",
+        default=None,
+        help="the book's Gutenberg HTML URL, or a saved copy of the page "
+        "(default: the URL the ingest recorded in project.json)",
+    )
+    p_backfill.add_argument(
+        "--images", default=None, help="comma-separated image names (default: all)"
+    )
+    p_backfill.add_argument(
+        "--accept",
+        default=None,
+        help="comma-separated image names whose linked scan to take although it "
+        "does not measure as the same picture (after looking at both)",
+    )
+    p_backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch the scans and report what would change; write nothing into "
+        "images/, images_original/ or the ledger",
+    )
 
     p_prepare = sub.add_parser(
         "prepare", help="validate jobs and render one prompt per image (no spend)"

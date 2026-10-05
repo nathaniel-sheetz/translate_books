@@ -5,9 +5,10 @@
 is built around what cannot be undone by accident:
 
 - **the backup comes first and is write-once.** The first replacement of a file
-  copies it to ``images_original/<file>``; nothing ever overwrites that copy, so
-  replacing an image a second time cannot turn a generated picture into the
-  "original".
+  copies it to ``images_original/<file>``; no later ``apply`` overwrites that
+  copy, so replacing an image a second time cannot turn a generated picture
+  into the "original". (``backfill`` is the one thing that does write there:
+  it swaps the publisher's small file for the publisher's larger scan.)
 - **the filename and format never change.** The candidate is re-encoded to the
   original's extension, so every ``[IMAGE:…]`` token keeps resolving and no text
   artefact is touched.
@@ -57,7 +58,7 @@ _COVER_LONG_SIDE = 2560
 
 _JPEG_QUALITY = 90
 
-_FORMATS = {
+FORMATS = {
     ".jpg": "JPEG",
     ".jpeg": "JPEG",
     ".png": "PNG",
@@ -91,7 +92,7 @@ def convert_candidate(
     """Encode ``candidate`` in ``target``'s format, atomically. Returns its size."""
     from PIL import Image
 
-    fmt = _FORMATS[target.suffix.lower()]
+    fmt = FORMATS[target.suffix.lower()]
     tmp = target.with_name(f".{target.name}.image-pass.tmp")
     with Image.open(candidate) as image:
         image.load()
@@ -116,7 +117,7 @@ def convert_candidate(
     return {"width": width, "height": height}
 
 
-def _copy_atomic(source: Path, target: Path) -> None:
+def copy_atomic(source: Path, target: Path) -> None:
     tmp = target.with_name(f".{target.name}.image-pass.tmp")
     shutil.copyfile(source, tmp)
     os.replace(tmp, target)
@@ -206,7 +207,7 @@ def apply(
         problems: list[str] = []
         target = images_dir(project_dir) / key
         backup = originals_dir(project_dir) / key
-        if target.suffix.lower() not in _FORMATS:
+        if target.suffix.lower() not in FORMATS:
             problems.append(f"cannot write {target.suffix or 'an extensionless file'}")
         candidate: Optional[Path] = None
         if job is None:
@@ -276,7 +277,7 @@ def apply(
         try:
             if existed and not backup.is_file():
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                _copy_atomic(target, backup)
+                copy_atomic(target, backup)
             target.parent.mkdir(parents=True, exist_ok=True)
             written = convert_candidate(candidate, target, max_side=cap)
         except Exception as exc:  # noqa: BLE001 - report it against this image
@@ -391,7 +392,7 @@ def revert(project_dir: Path, images: list[str]) -> dict[str, Any]:
                 # replaced and has to be told.
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _copy_atomic(backup, target)
+                copy_atomic(backup, target)
                 action = "restored"
         elif created and target.is_file():
             # We made this file from nothing (a new cover); "the original" is
@@ -450,6 +451,7 @@ def verify(project_dir: Path) -> dict[str, Any]:
     root = images_dir(project_dir)
     backups = originals_dir(project_dir)
     state = ledger.current_state(project_dir)
+    originals = ledger.expected_originals(project_dir)
     broken: list[dict[str, Any]] = []
     warned: list[dict[str, Any]] = []
     audited = 0
@@ -489,11 +491,11 @@ def verify(project_dir: Path) -> dict[str, Any]:
                 flag(warned, key, "changed_since_apply",
                      "the file is not the one apply wrote — edited or replaced by hand")
             if backup.is_file():
-                if row.get("sha256_original") and (
-                    ledger.sha256_file(backup) != row["sha256_original"]
-                ):
+                # A backfill since the apply replaced the backup on purpose.
+                recorded = originals.get(key) or row.get("sha256_original")
+                if recorded and ledger.sha256_file(backup) != recorded:
                     flag(broken, key, "backup_changed",
-                         "images_original/ no longer matches the original recorded at apply")
+                         "images_original/ no longer matches the original the ledger recorded")
                 now, ref = probe_image(path), probe_image(backup)
                 if now.get("width") and ref.get("width"):
                     drift = aspect_drift(now["width"], now["height"], ref["width"], ref["height"])

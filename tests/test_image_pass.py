@@ -21,6 +21,7 @@ from PIL import Image
 
 from scripts import image_pass as cli
 from src.image_pass import apply as ip_apply
+from src.image_pass import backfill as ip_backfill
 from src.image_pass import image_key, is_safe_key, jobs as ip_jobs, ledger
 from src.image_pass import inventory as ip_inventory
 from src.image_pass import report as ip_report
@@ -667,3 +668,258 @@ def test_cli_dies_with_json_on_a_missing_project(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["inventory", "--project", "no-such-book-xyz"])
     assert json.loads(str(exc.value))["status"] == "error"
+
+
+# --- backfill: the publisher's larger scans ----------------------------------
+
+class Scans:
+    """Stands in for the source site: larger scans by URL, and a fetch counter."""
+
+    def __init__(self, tmp_path: Path, **scans):
+        self.calls: list[str] = []
+        self.bytes: dict[str, bytes] = {}
+        self.links: list[dict] = []
+        for inline, (name, size) in scans.items():
+            inline = inline.replace("__", ".")
+            path = _image(tmp_path / "site" / name, size, (20, 20, 20))
+            url = f"https://pg.example/images/{name}"
+            self.bytes[url] = path.read_bytes()
+            self.links.append({"url": url, "name": name, "inline_names": [inline]})
+
+    def fetch(self, url: str) -> bytes:
+        self.calls.append(url)
+        return self.bytes[url]
+
+
+def _size(path: Path) -> tuple[int, int]:
+    with Image.open(path) as image:
+        return image.size
+
+
+def test_backfill_puts_the_larger_scan_behind_the_old_name(project: Path, tmp_path: Path):
+    scans = Scans(tmp_path, map__jpg=("map_l.gif", (900, 600)), gone__jpg=("gone_l.gif", (400, 300)))
+    out = ip_backfill.backfill(project, scans.links, fetch=scans.fetch)
+    assert out["status"] == "ok" and out["counts"]["upgraded"] == 2, out
+    assert out["unmatched"] == ["compass.png"]
+
+    target = project / "images" / "map.jpg"
+    with Image.open(target) as image:
+        assert image.format == "JPEG" and image.size == (900, 600)
+    # A token whose file was missing gets one; nothing is called a replacement,
+    # and no backup of the thumbnail is kept.
+    assert _size(project / "images" / "gone.jpg") == (400, 300)
+    assert not (project / "images_original").exists()
+    assert ledger.current_state(project) == {}
+    row = [r for r in ledger.read_rows(project) if r["image"] == "map.jpg"][0]
+    assert row["action"] == "backfill" and row["baseline"] == "images"
+    assert row["size_before"] == [300, 200] and row["size_after"] == [900, 600]
+    assert ip_apply.verify(project)["status"] == "ok"
+
+
+def test_backfill_dry_run_writes_nothing_and_a_second_run_changes_nothing(
+    project: Path, tmp_path: Path
+):
+    scans = Scans(tmp_path, map__jpg=("map_l.gif", (900, 600)))
+    before = ledger.sha256_file(project / "images" / "map.jpg")
+    out = ip_backfill.backfill(project, scans.links, fetch=scans.fetch, dry_run=True)
+    assert out["planned"][0]["from_size"] == [300, 200]
+    assert out["planned"][0]["to_size"] == [900, 600]
+    assert out["planned"][0]["writes"] == ["images/map.jpg"]
+    assert ledger.sha256_file(project / "images" / "map.jpg") == before
+    assert not ledger.ledger_path(project).exists()
+
+    assert ip_backfill.backfill(project, scans.links, fetch=scans.fetch)["counts"]["upgraded"] == 1
+    again = ip_backfill.backfill(project, scans.links, fetch=scans.fetch)
+    assert again["counts"]["upgraded"] == 0
+    assert again["skipped"][0]["reason"] == "not larger"
+    assert len(scans.calls) == 1  # the dry run's fetch served all three runs
+
+
+def test_backfill_copies_a_scan_already_in_the_right_format(project: Path, tmp_path: Path):
+    scans = Scans(tmp_path, compass__png=("compass_l.png", (480, 480)))
+    ip_backfill.backfill(project, scans.links, fetch=scans.fetch)
+    assert (project / "images" / "compass.png").read_bytes() == scans.bytes[scans.links[0]["url"]]
+
+
+def test_backfill_upgrades_the_original_of_a_replaced_image_and_leaves_the_replacement(
+    project: Path, tmp_path: Path
+):
+    _with_candidate(project)
+    ip_apply.apply(project, [{"image": "map.jpg", "candidate": 1}])
+    replacement = ledger.sha256_file(project / "images" / "map.jpg")
+
+    scans = Scans(tmp_path, map__jpg=("map_l.gif", (900, 600)))
+    out = ip_backfill.backfill(project, scans.links, fetch=scans.fetch)
+    row = out["upgraded"][0]
+    assert row["writes"] == ["images_original/map.jpg"] and "left_alone" in row
+    assert out["stale_jobs"] == ["map.jpg"]
+    assert ledger.sha256_file(project / "images" / "map.jpg") == replacement
+    assert _size(project / "images_original" / "map.jpg") == (900, 600)
+    # Still a replacement, and the upgraded backup is the original verify expects.
+    assert ledger.status_of(ledger.current_state(project)["map.jpg"]) == ledger.STATUS_REPLACED
+    verdict = ip_apply.verify(project)
+    assert "backup_changed" not in verdict["by_code"], verdict
+
+    # The job now starts from the larger scan, so the candidate drawn from the
+    # thumbnail is set aside rather than kept as its answer.
+    again = ip_jobs.prepare(project, [TRANSLATE_JOB])
+    assert again["prepared"][0]["archived"] == 1 and again["prepared"][0]["have"] == 0
+    assert ip_jobs.load_manifest(project)["jobs"][0]["width"] == 900
+
+    ip_apply.revert(project, ["map.jpg"])
+    assert _size(project / "images" / "map.jpg") == (900, 600)
+
+
+def test_backfill_upgrades_both_copies_of_a_reverted_image(project: Path, tmp_path: Path):
+    _with_candidate(project)
+    ip_apply.apply(project, [{"image": "map.jpg", "candidate": 1}])
+    ip_apply.revert(project, ["map.jpg"])
+
+    scans = Scans(tmp_path, map__jpg=("map_l.gif", (900, 600)))
+    out = ip_backfill.backfill(project, scans.links, fetch=scans.fetch)
+    assert out["upgraded"][0]["writes"] == ["images_original/map.jpg", "images/map.jpg"]
+    assert (project / "images" / "map.jpg").read_bytes() == \
+        (project / "images_original" / "map.jpg").read_bytes()
+    assert _size(project / "images" / "map.jpg") == (900, 600)
+    verdict = ip_apply.verify(project)
+    assert not {"backup_changed", "reverted_but_differs"} & set(verdict["by_code"]), verdict
+
+
+def test_backfill_reports_split_halves_and_never_joins_them(project: Path, tmp_path: Path):
+    whole = _image(tmp_path / "site" / "whole_l.gif", (900, 600))
+    link = {
+        "url": "https://pg.example/images/whole_l.gif",
+        "name": "whole_l.gif",
+        "inline_names": ["map.jpg", "compass.png"],
+    }
+    before = ledger.sha256_file(project / "images" / "map.jpg")
+    out = ip_backfill.backfill(project, [link], fetch=lambda url: whole.read_bytes())
+    assert [row["image"] for row in out["split"]] == ["map.jpg", "compass.png"]
+    assert out["counts"]["upgraded"] == 0
+    assert ledger.sha256_file(project / "images" / "map.jpg") == before
+
+
+def test_backfill_lands_what_it_can_and_names_what_it_could_not(project: Path, tmp_path: Path):
+    scans = Scans(
+        tmp_path, map__jpg=("map_l.gif", (900, 600)), compass__png=("compass_l.png", (480, 480))
+    )
+
+    def fetch(url: str) -> bytes:
+        if "compass" in url:
+            raise OSError("404 Not Found")
+        return scans.fetch(url)
+
+    out = ip_backfill.backfill(project, scans.links, fetch=fetch, only=["map.jpg", "compass.png", "nope.jpg"])
+    assert out["status"] == "partial" and out["counts"]["upgraded"] == 1
+    assert {row["image"]: row["error"] for row in out["failed"]} == {
+        "nope.jpg": "not an image this book references",
+        "compass.png": "could not fetch: 404 Not Found",
+    }
+    assert _size(project / "images" / "compass.png") == (120, 120)
+
+
+def _drawing(path: Path, size, seed: int) -> Path:
+    """A picture with something in it: the same seed is the same picture at any size."""
+    import random
+
+    from PIL import ImageDraw
+
+    rng = random.Random(seed)
+    image = Image.new("L", size, 255)
+    draw = ImageDraw.Draw(image)
+    for _ in range(12):
+        x0, y0 = rng.random() * 0.8, rng.random() * 0.8
+        x1, y1 = x0 + 0.1 + rng.random() * 0.2, y0 + 0.1 + rng.random() * 0.2
+        draw.rectangle(
+            [x0 * size[0], y0 * size[1], x1 * size[0], y1 * size[1]], fill=rng.randrange(0, 200)
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.convert("RGB").save(path)
+    return path
+
+
+def _link(tmp_path: Path, inline: str, name: str, size, seed: int) -> tuple[dict, bytes]:
+    data = _drawing(tmp_path / "site" / name, size, seed).read_bytes()
+    return {"url": f"https://pg.example/images/{name}", "name": name, "inline_names": [inline]}, data
+
+
+def test_picture_similarity_knows_the_same_picture_at_another_size(tmp_path: Path):
+    small = _drawing(tmp_path / "a.jpg", (240, 160), seed=1)
+    large = _drawing(tmp_path / "a_l.gif", (900, 600), seed=1)
+    other = _drawing(tmp_path / "b_l.gif", (900, 600), seed=2)
+    assert ip_inventory.picture_similarity(small, large) >= ip_inventory.SAME_PICTURE
+    assert ip_inventory.picture_similarity(small, other) < ip_inventory.SAME_PICTURE
+    assert ip_inventory.picture_similarity(small.read_bytes(), large) >= ip_inventory.SAME_PICTURE
+    # A blank image correlates with nothing; an unreadable one cannot be measured.
+    assert ip_inventory.picture_similarity(_image(tmp_path / "flat.png"), large) is None
+    assert ip_inventory.picture_similarity(b"not an image", large) is None
+
+
+def test_backfill_leaves_an_image_whose_linked_scan_is_another_picture(
+    project: Path, tmp_path: Path
+):
+    _drawing(project / "images" / "map.jpg", (300, 200), seed=1)
+    before = ledger.sha256_file(project / "images" / "map.jpg")
+    link, data = _link(tmp_path, "map.jpg", "map_l.gif", (900, 600), seed=2)
+
+    out = ip_backfill.backfill(project, [link], fetch=lambda url: data, dry_run=True)
+    assert out["planned"] == [] and out["unlike"][0]["image"] == "map.jpg"
+    out = ip_backfill.backfill(project, [link], fetch=lambda url: data)
+    assert out["counts"]["upgraded"] == 0 and out["unlike"][0]["score"] < 0.95
+    assert "--accept" in out["instructions"]
+    assert ledger.sha256_file(project / "images" / "map.jpg") == before
+
+    # Someone looked and says it is the same plate, re-cropped.
+    out = ip_backfill.backfill(project, [link], fetch=lambda url: data, accept=["images/map.jpg"])
+    assert out["upgraded"][0]["accepted"] is True
+    assert _size(project / "images" / "map.jpg") == (900, 600)
+
+
+def test_backfill_finds_the_right_scan_when_the_page_crosses_its_links(
+    project: Path, tmp_path: Path
+):
+    _drawing(project / "images" / "map.jpg", (300, 200), seed=1)
+    _drawing(project / "images" / "compass.png", (120, 120), seed=2)
+    # The page links each thumbnail to the other one's scan.
+    for_map, compass_scan = _link(tmp_path, "map.jpg", "map_l.gif", (480, 480), seed=2)
+    for_compass, map_scan = _link(tmp_path, "compass.png", "compass_l.gif", (900, 600), seed=1)
+    served = {for_map["url"]: compass_scan, for_compass["url"]: map_scan}
+
+    out = ip_backfill.backfill(project, [for_map, for_compass], fetch=served.__getitem__)
+    assert out["counts"] == {**out["counts"], "upgraded": 2, "relinked": 2, "unlike": 0}
+    rows = {row["image"]: row for row in out["upgraded"]}
+    assert rows["map.jpg"]["url"] == for_compass["url"]
+    assert rows["map.jpg"]["relinked_from"] == for_map["url"]
+    assert _size(project / "images" / "map.jpg") == (900, 600)
+    assert _size(project / "images" / "compass.png") == (480, 480)
+    assert ip_inventory.picture_similarity(
+        project / "images" / "map.jpg", tmp_path / "site" / "compass_l.gif"
+    ) >= ip_inventory.SAME_PICTURE
+    # And it stays put: the crossed links do not un-fix it on the next run.
+    again = ip_backfill.backfill(project, [for_map, for_compass], fetch=served.__getitem__)
+    assert again["counts"]["upgraded"] == 0 and again["counts"]["skipped"] == 2
+
+
+def test_cli_backfill_reads_a_saved_page_and_refuses_without_a_source(
+    project: Path, capsys, tmp_path: Path
+):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["backfill", "--project", str(project)])
+    assert "--source" in json.loads(str(exc.value))["error"]
+
+    site = tmp_path / "site"
+    _image(site / "images" / "map_l.gif", (900, 600))
+    page = site / "book.html"
+    page.write_text(
+        '<html><body><a href="images/map_l.gif"><img src="images/map.jpg" alt="A MAP"></a>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    code, out, _ = _run(capsys, ["backfill", "--project", str(project), "--source", str(page)])
+    assert code == 0 and out["counts"]["upgraded"] == 1, out
+    assert _size(project / "images" / "map.jpg") == (900, 600)
+
+    # The URL an ingest recorded is the default source.
+    (project / "project.json").write_text(json.dumps({"gutenberg_url": str(page)}), "utf-8")
+    code, out, _ = _run(capsys, ["backfill", "--project", str(project), "--dry-run"])
+    assert code == 0 and out["source"] == str(page) and out["skipped"][0]["image"] == "map.jpg"

@@ -19,7 +19,7 @@ allowed-tools:
 
 The work that used to be the ChatGPT web UI plus copying files into
 `projects/<slug>/images/` by hand. The deterministic surface is one non-interactive
-CLI — **`scripts/image_pass.py`** — with seven subcommands that each print JSON.
+CLI — **`scripts/image_pass.py`** — with eight subcommands that each print JSON.
 
 **Division of labour: you look, Codex draws, the user picks.** You `Read` each image
 and write its job. Codex only makes pixels. Nothing reaches `images/` until a human
@@ -47,7 +47,7 @@ text and belongs to translate-harness.
 
 ## The CLI (read first)
 
-`python scripts/image_pass.py <inventory|prepare|generate|review|apply|revert|verify>`
+`python scripts/image_pass.py <inventory|backfill|prepare|generate|review|apply|revert|verify>`
 prints one JSON object and mirrors it to
 `projects/<slug>/.harness/images/last_output.json` (`OUTPUT_JSON: <path>` on stderr) —
 **Read that file** rather than piping stdout through a second interpreter.
@@ -55,6 +55,11 @@ prints one JSON object and mirrors it to
 ```bash
 # 1. Every image the book references, plus the cover. Rows go to inventory.json.
 python scripts/image_pass.py inventory --project home-geography
+
+# 1b. Gutenberg books: bring in the larger scans the source page links to.
+python scripts/image_pass.py backfill --project home-geography --dry-run
+python scripts/image_pass.py backfill --project home-geography [--accept 036.jpg,042.jpg] \
+    [--source <url-or-saved-page>] [--images 042.jpg,057.jpg]
 
 # 2. Validate jobs and render one prompt each. Spends nothing.
 python scripts/image_pass.py prepare --project home-geography \
@@ -112,7 +117,7 @@ same image everywhere a command takes one.
 Jobs merge into the manifest by image, so re-preparing one image leaves the others
 alone; `--replace` makes the manifest exactly this batch.
 
-**Changing a job's prompt archives its candidates** to
+**Changing a job's prompt — or what it starts from — archives its candidates** to
 `jobs/<id>/previous/<stamp>/` rather than deleting them — each cost plan usage. An
 unchanged job keeps its candidates and `generate` skips them.
 
@@ -175,6 +180,39 @@ guess; the alt text is the caption, not the lettering inside the picture.
 
 Relay `missing` (a token whose file is gone — the reader shows nothing there today)
 and `unreferenced` (a file nothing points at) whether or not anyone asked.
+
+### 1b. `backfill` — before any job on a Gutenberg book
+
+A Gutenberg page shows a thumbnail and links it to a scan two or three times the
+size. A book ingested before the ingest preferred those has the thumbnails, and on a
+250-pixel map half the lettering cannot be read — by you or by Codex. `backfill`
+puts the larger scan behind the same filename. No Codex, no usage, no spend.
+
+```bash
+python scripts/image_pass.py backfill --project home-geography --dry-run
+```
+
+Do it **before `prepare`**: a job starts from whatever the original is, and a
+candidate drawn from a thumbnail is wasted usage.
+
+- **It cannot be reverted.** The larger scan becomes the original: no backup of the
+  thumbnail is kept, and a backup already in `images_original/` is upgraded in
+  place. That is the point (a redo should start from the better file), and it is why
+  `--dry-run` comes first.
+- **Relay `relinked_from`.** Publishers mislink. A scan is only taken if it measures
+  as the same picture (`score`, 1.0 = identical); when the linked one does not, the
+  page's other scans are searched and the one that matches is used. Say which images
+  that happened to.
+- **`unlike` is a person's call.** No scan on the page matched. `Read` the image and
+  the scan in `cache_dir` side by side. A re-cropped or re-proportioned plate of the
+  same picture goes in `--accept`; a different picture is left alone and reported.
+- `unmatched` has no larger scan linked; `split` is two placeholders that are halves
+  of one scan — reported, never joined (that is a text edit in four places).
+- `left_alone` means `images/<file>` is already a replacement: only its original was
+  upgraded, and its job has to be re-prepared (`stale_jobs`) and generated again.
+
+`inventory` again afterwards, and look at the images again: lettering you could not
+read is the reason you ran this.
 
 ### 2. STOP — G1: the jobs gate
 
@@ -352,6 +390,16 @@ behaves differently.
   dashed, which was only checkable against a 4x enlargement of the 250 px original.
   Enlarge a small original before judging "same picture?"; at native size you cannot.
 
+- **Backfill.** Gutenberg hosts an `NNN_l.gif` behind every thumbnail of ebook 12228.
+  The dry run on the scratch copy found 80 linked scans for 87 images (the other seven
+  were already the large files). 75 measured 0.99 or better against their thumbnail.
+  Two were **crossed on Gutenberg's side** — `005.jpg` (the star chart) links to the
+  compass and `006.jpg` to the star chart — and were relinked to each other's scan.
+  `036.jpg` (0.82) and `042.jpg` (0.87) are the same plates re-proportioned and went in
+  with `--accept`. `084.jpg` (the huts) links to the oasis from `019`, and so does the
+  unlinked `084_l.jpg`: Gutenberg has no larger scan of it. `images/` went from 2.3 MB
+  to 8.6 MB. GIF-to-JPEG at quality 90 moved pixels by 1.1 grey levels on average.
+
 Not yet seen: a usage-limit error (so the usage-limit stop is tested only against a
 fake), a `cover` or `replace` job, a label with an accent or `ñ`, and
 `--concurrency` above 1 against the real CLI.
@@ -363,8 +411,9 @@ fake), a `cover` or `replace` job, a label with an accent or `ñ`, and
 - **`python -X utf8` on every Python you run.** Windows stdout defaults to cp1252,
   which mangles every accent in a label map.
 - `.harness/images/` layout: `inventory.json`, `manifest.json`, `usage.jsonl`,
-  `images.jsonl` (the ledger), `review.html`, and `jobs/<id>/` holding `job.json`,
-  `prompt.txt`, `cand_NN.png`, `run_NN/` and `previous/`.
+  `images.jsonl` (the ledger), `review.html`, `backfill/` (the fetched scans), and
+  `jobs/<id>/` holding `job.json`, `prompt.txt`, `cand_NN.png`, `run_NN/` and
+  `previous/`.
 - The prompt templates are `prompts/image_pass/{translate,restore,cover,replace}.txt`.
   The output contract appended to each (built-in tool only, one call, save nothing) is
   in `src/image_pass/jobs.py`, because the harvest depends on it.
