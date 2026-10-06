@@ -36,6 +36,7 @@ from src.image_pass import (
     originals_dir,
 )
 from src.image_pass import ledger
+from src.image_pass.composite import load_sidecar
 from src.image_pass.inventory import probe_image, referenced_images
 from src.image_pass.jobs import candidate_path, existing_candidates, load_manifest
 
@@ -147,7 +148,7 @@ def _split_decisions(decisions: list[Any]) -> tuple[list[dict], list[dict]]:
         if verdict == VERDICT_ACCEPT and (
             isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 1
         ):
-            problems.append("an accept needs `candidate`: the 1-based number from the review page")
+            problems.append("an accept needs `candidate`: the 1-based number from the image board")
         if key in seen:
             problems.append(f"{key}: decided twice in this file")
         if problems:
@@ -290,6 +291,7 @@ def apply(
         summary["written_size"] = [written["width"], written["height"]]
         summary["bytes"] = target.stat().st_size
         applied.append(summary)
+        made_from = load_sidecar(candidate)
         ledger_file = ledger.append_row(project_dir, {
             "ts": ledger.now_stamp(),
             "action": ledger.ACTION_APPLY,
@@ -307,6 +309,10 @@ def apply(
             "sha256_original": ledger.sha256_file(backup) if backup.is_file() else None,
             "sha256_after": ledger.sha256_file(target),
             "sha256_candidate": ledger.sha256_file(candidate),
+            # A composite is two pictures: which, and where the join runs.
+            "composite": {
+                field: made_from.get(field) for field in ("from", "base", "regions", "scale")
+            } if made_from else None,
             "size_before": summary["original_size"],
             "size_after": summary["written_size"],
         })

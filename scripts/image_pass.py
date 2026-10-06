@@ -11,9 +11,12 @@ Subcommands, each printing exactly one JSON object:
 
     inventory   every image the book references, plus the cover   (no spend)
     backfill    bring in the larger scans the source page links   (no spend)
+    triage      record what you made of each image you looked at  (no spend)
     prepare     validate jobs and render one prompt per image     (no spend)
     generate    run Codex per candidate and harvest the image     (subscription)
-    review      original beside each candidate, as one HTML page  (no spend)
+    check       record what is wrong with each candidate          (no spend)
+    composite   one candidate's patch over another picture's pixels (no spend)
+    board       where the page is, and what the user said on it   (no spend)
     apply       back up, convert to the original's name, replace  (the writer)
     revert      restore originals from images_original/           (no spend)
     verify      tokens resolve, backups intact, ledger consistent (no spend)
@@ -21,6 +24,11 @@ Subcommands, each printing exactly one JSON object:
 Filenames never change, so no ``[IMAGE:…]`` token in any text artefact is
 touched, and the first replacement of a file backs the original up to
 ``images_original/`` where nothing overwrites it.
+
+The user's side of all this is one page in the web UI, ``/image-pass/<project>``:
+every image at whatever stage it is in, with the triage verdicts, the candidates
+beside their originals, and inputs that are saved where ``board`` and
+``apply --from-board`` read them.
 
 ``generate`` is subscription-only and fails closed: it refuses to start unless
 ``codex login status`` reports a ChatGPT login, and every metered credential is
@@ -31,15 +39,18 @@ Typical flow (the skill drives it, with a STOP gate before each spend or write):
     python scripts/image_pass.py inventory --project home-geography
     python scripts/image_pass.py backfill  --project home-geography --dry-run
     python scripts/image_pass.py backfill  --project home-geography
+    python scripts/image_pass.py triage    --project home-geography \
+        --json-file projects/home-geography/.harness/images/triage_rows.json
+    python scripts/image_pass.py board     --project home-geography
     python scripts/image_pass.py prepare   --project home-geography \
         --json-file projects/home-geography/.harness/images/jobs.json
     python scripts/image_pass.py generate  --project home-geography --estimate
     python scripts/image_pass.py generate  --project home-geography
-    python scripts/image_pass.py review    --project home-geography
-    python scripts/image_pass.py apply     --project home-geography --dry-run \
-        --json-file projects/home-geography/.harness/images/decisions.json
-    python scripts/image_pass.py apply     --project home-geography \
-        --json-file projects/home-geography/.harness/images/decisions.json
+    python scripts/image_pass.py check     --project home-geography \
+        --json-file projects/home-geography/.harness/images/check_rows.json
+    python scripts/image_pass.py board     --project home-geography
+    python scripts/image_pass.py apply     --project home-geography --from-board --dry-run
+    python scripts/image_pass.py apply     --project home-geography --from-board
     python scripts/image_pass.py verify    --project home-geography
     python scripts/harness.py epub --project home-geography
 """
@@ -49,6 +60,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -63,11 +76,15 @@ for _stream in (sys.stdout, sys.stderr):
 
 from src.image_pass import apply as ip_apply  # noqa: E402
 from src.image_pass import backfill as ip_backfill  # noqa: E402
+from src.image_pass import board as ip_board  # noqa: E402
+from src.image_pass import composite as ip_composite  # noqa: E402
 from src.image_pass import inventory as ip_inventory  # noqa: E402
 from src.image_pass import jobs as ip_jobs  # noqa: E402
-from src.image_pass import report as ip_report  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Where web_ui/app.py listens when it is started the usual way.
+DEFAULT_BASE_URL = "http://127.0.0.1:5000"
 
 # ``.harness/images/`` for the project this invocation names, resolved once in
 # main(). None when --project doesn't resolve (the command is about to fail on it
@@ -238,25 +255,90 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         timeout_s=args.timeout_minutes * 60 if args.timeout_minutes else None,
     )
     _emit(out, _GENERATE_SCHEMA)
-    # Exit 1 when nothing was produced, so the flow cannot walk on to `review`
+    # Exit 1 when nothing was produced, so the flow cannot walk on to `board`
     # over candidates that were never written.
     return 0 if out.get("status") in ("ok", "partial") else 1
 
 
-def _cmd_review(args: argparse.Namespace) -> int:
-    out = ip_report.review(_resolve_project(args.project))
+def _cmd_triage(args: argparse.Namespace) -> int:
+    rows = _load_json_list(args.json_file, ("triage", "images"), "triage rows")
+    out = ip_board.save_triage(_resolve_project(args.project), rows, replace=args.replace)
     _emit(out)
     return 0 if out.get("status") == "ok" else 1
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    rows = _load_json_list(args.json_file, ("checks",), "check rows")
+    out = ip_board.save_checks(_resolve_project(args.project), rows)
+    _emit(out)
+    return 0 if out.get("status") == "ok" else 1
+
+
+def _cmd_composite(args: argparse.Namespace) -> int:
+    rows = _load_json_list(args.json_file, ("composites",), "composite rows")
+    out = ip_composite.composite(_resolve_project(args.project), rows, dry_run=args.dry_run)
+    _emit(out, _COMPOSITE_SCHEMA)
+    return 0 if out.get("status") == "ok" else 1
+
+
+def _board_is_served(url: str) -> bool:
+    """Whether the web UI answers for this project's board right now."""
+    try:
+        with urllib.request.urlopen(url, timeout=1) as response:
+            return response.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _cmd_board(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = ip_board.summary(project_dir)
+    base = args.base_url.rstrip("/")
+    out["url"] = f"{base}/image-pass/{project_dir.name}"
+    out["server_running"] = _board_is_served(f"{base}/api/project/{project_dir.name}/image-pass")
+    out["instructions"] = (
+        "Give the user url. Read every candidate path under jobs yourself, beside "
+        "its original, and record what you find with `check` before asking for "
+        "picks. proposed is every image that wants a job and has none. requests is "
+        "what the user asked for on the page that no prepared job reflects yet: "
+        "fold each into its job (labels verbatim) and re-run `prepare`. picks is "
+        "what `apply --from-board` would apply."
+    )
+    if not out["server_running"]:
+        out["instructions"] = (
+            "The web UI is not answering at that address, so the page will not "
+            "open: ask the user to start it (`python web_ui/app.py`), or pass "
+            "--base-url. " + out["instructions"]
+        )
+    _emit(out, _BOARD_SCHEMA)
+    return 0
+
+
 def _cmd_apply(args: argparse.Namespace) -> int:
-    decisions = _load_json_list(args.json_file, ("decisions", "picks"), "decisions")
+    project_dir = _resolve_project(args.project)
+    stale: list[dict] = []
+    if args.from_board:
+        decisions, stale = ip_board.decisions_from_picks(ip_board.build(project_dir))
+        if not decisions and not stale:
+            _die(
+                "no picks are waiting on the board: the user accepts, sends back "
+                "or skips each image on the page first"
+            )
+    else:
+        decisions = _load_json_list(args.json_file, ("decisions", "picks"), "decisions")
     out = ip_apply.apply(
-        _resolve_project(args.project),
+        project_dir,
         decisions,
         dry_run=args.dry_run,
         max_side=args.max_side,
     )
+    if stale:
+        # A pick made on a candidate that has since been regenerated is not a
+        # decision about the picture now in that slot.
+        out["refused"] = out["refused"] + stale
+        out["counts"]["refused"] = len(out["refused"])
+        landed = out["applied"] or out["planned"] or out["noted"]
+        out["status"] = "partial" if landed else "error"
     _emit(out, _APPLY_SCHEMA)
     return 0 if out.get("status") == "ok" else 1
 
@@ -294,6 +376,28 @@ _GENERATE_SCHEMA = {
     "instructions": "what to run next",
 }
 
+_COMPOSITE_SCHEMA = {
+    "status": "'ok' | 'error' (a row was invalid: nothing was made)",
+    "dry_run": "true when no candidate was written",
+    "made": "composites written: {image, candidate, path, from, base, regions, "
+    "size, changed_share, padded_source, search}. candidate is the new number, "
+    "to check and to pick. changed_share is how much of the picture differs "
+    "from the base (0.036 = 3.6%). padded_source means the candidate the patch "
+    "came from has bands the base does not, and was fitted centred",
+    "planned": "--dry-run only: what would be made",
+    "regions": "per region, inside made/planned: {polygon, bbox, offset, "
+    "at_search_edge, surround_difference, surround_difference_unmoved}. offset "
+    "is how far the patch was slid, in base pixels, to where the drawing around "
+    "the outline matched best; surround_difference is the mean grey-level "
+    "difference left in that band (0-255)",
+    "warnings": "surroundings_differ (the band around an outline does not match "
+    "the base: look at the join) | alignment_at_edge (the best position was the "
+    "furthest one tried) | nothing_changed",
+    "invalid": "rows refused, each with its problems",
+    "counts": "{requested, made, planned, invalid, warnings}",
+    "instructions": "what to run next",
+}
+
 _BACKFILL_SCHEMA = {
     "status": "'ok' | 'partial' (at least one image failed) | 'error'",
     "source": "the page the link map was read from",
@@ -318,12 +422,40 @@ _BACKFILL_SCHEMA = {
     "instructions": "what to run next",
 }
 
+_BOARD_SCHEMA = {
+    "url": "the page to give the user",
+    "server_running": "false when the web UI did not answer at --base-url",
+    "counts": "{images, review, proposed, queued, replaced, missing, untriaged, "
+    "leave, lettering, with_input, flagged, requests, picks, stale_picks, "
+    "candidates, unchecked_candidates}",
+    "untriaged": "images nobody has recorded a verdict for",
+    "proposed": "images that want a job and have none: {image, verdict, by}. by is "
+    "'user' when the verdict is one they set on the page, over the triage or in "
+    "place of it. An image they set to leave alone is simply not here",
+    "jobs": "every prepared job: {id, image, mode, stage, original, original_size, "
+    "reference, labels, candidates: [{candidate, path, size, flags, checked, "
+    "composite}], missing}. flags names a candidate whose proportions are off "
+    "the original's; composite is {from, base, regions, changed_share} for a "
+    "candidate `composite` made, else null",
+    "requests": "what the user asked for on the page that the prepared job does "
+    "not say: {image, reasons, verdict, note, labels, candidates, triage_verdict, "
+    "job_mode}. reasons: needs_job | mode_differs | labels_differ | "
+    "candidates_differ | note_newer_than_job | job_unwanted | note_unaddressed "
+    "(a note on an image with no job: look again and re-run `triage`). A null "
+    "field means the user did not change it",
+    "picks": "the user's picks still to be applied, as `apply` decisions",
+    "stale_picks": "picks made on a candidate that has since been regenerated: "
+    "the user has to pick again",
+    "instructions": "what to do next",
+}
+
 _APPLY_SCHEMA = {
     "status": "'ok' (everything landed) | 'partial' (at least one refused) | 'error'",
     "dry_run": "true when nothing was written",
     "applied": "images replaced, each with its backup_action and sizes",
     "planned": "--dry-run only: what would be replaced",
-    "refused": "accepts NOT written, each with the problems that blocked it",
+    "refused": "accepts NOT written, each with the problems that blocked it "
+    "(with --from-board, also picks made on a candidate since regenerated)",
     "invalid": "rows that are not a usable decision",
     "noted": "skip / redo rows — recorded in the ledger, nothing written",
     "warnings": "accepts that landed (or would) despite e.g. a changed aspect ratio",
@@ -338,7 +470,10 @@ _DISPATCH = {
     "backfill": _cmd_backfill,
     "prepare": _cmd_prepare,
     "generate": _cmd_generate,
-    "review": _cmd_review,
+    "triage": _cmd_triage,
+    "check": _cmd_check,
+    "composite": _cmd_composite,
+    "board": _cmd_board,
     "apply": _cmd_apply,
     "revert": _cmd_revert,
     "verify": _cmd_verify,
@@ -436,18 +571,84 @@ def build_parser() -> argparse.ArgumentParser:
         help="per-candidate ceiling (default: 20)",
     )
 
-    p_review = sub.add_parser(
-        "review", help="write the review page: original beside each candidate"
+    p_triage = sub.add_parser(
+        "triage", help="record what you made of each image you looked at (no spend)"
     )
-    p_review.add_argument("--project", required=True, help="project id or path")
+    p_triage.add_argument("--project", required=True, help="project id or path")
+    p_triage.add_argument(
+        "--json-file",
+        required=True,
+        help="a list of {image, verdict, finding, labels?, lettering?}. verdict is "
+        "translate | restore | cover | replace | leave; finding is what you saw; "
+        "labels is every piece of lettering you could read and its replacement",
+    )
+    p_triage.add_argument(
+        "--replace",
+        action="store_true",
+        help="make the triage exactly this batch (default: merge by image)",
+    )
+
+    p_check = sub.add_parser(
+        "check", help="record what is wrong, or not, with each candidate (no spend)"
+    )
+    p_check.add_argument("--project", required=True, help="project id or path")
+    p_check.add_argument(
+        "--json-file",
+        required=True,
+        help="a list of {image, candidate, ok, finding}. finding is required when "
+        "ok is false; it is shown under that candidate on the board",
+    )
+
+    p_composite = sub.add_parser(
+        "composite",
+        help="make a candidate from two pictures: a patch of one candidate inside "
+        "an outline, another picture's pixels everywhere else (no spend)",
+    )
+    p_composite.add_argument("--project", required=True, help="project id or path")
+    p_composite.add_argument(
+        "--json-file",
+        required=True,
+        help="a list of {image, from, base?, regions, feather?, scale?, note?, "
+        "candidate?}. from "
+        "is the candidate number the patch comes from (or a path under the job's "
+        "previous/ folder); base is what everything else comes from: 'original' "
+        "(default), 'current', a candidate number or a previous/ path; regions "
+        "is a list of [x0, y0, x1, y1] or [[x, y], ...] outlines in the base "
+        f"picture's pixels; feather softens the join (default "
+        f"{ip_composite.DEFAULT_FEATHER:g} px); scale (1-{ip_composite.MAX_SCALE}) "
+        "enlarges the base first so small new lettering keeps its detail; "
+        "candidate names an existing composite to make again in place",
+    )
+    p_composite.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="measure and report; write no candidate",
+    )
+
+    p_board = sub.add_parser(
+        "board",
+        help="where the image board is, the candidates to look at, and what the "
+        "user asked for and picked on it",
+    )
+    p_board.add_argument("--project", required=True, help="project id or path")
+    p_board.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help=f"where the web UI is listening (default: {DEFAULT_BASE_URL})",
+    )
 
     p_apply = sub.add_parser(
         "apply", help="back up, convert to the original's name and format, replace"
     )
     p_apply.add_argument("--project", required=True, help="project id or path")
-    p_apply.add_argument(
+    p_apply_from = p_apply.add_mutually_exclusive_group(required=True)
+    p_apply_from.add_argument(
+        "--from-board",
+        action="store_true",
+        help="apply the picks the user made on the image board",
+    )
+    p_apply_from.add_argument(
         "--json-file",
-        required=True,
         help="a list of {image, candidate: N} to accept, or {image, verdict: "
         "'skip'|'redo', note}",
     )

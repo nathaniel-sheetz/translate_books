@@ -7,14 +7,19 @@ deterministic half of that: it inventories the images a book references, renders
 one Codex job per image, harvests the candidates, shows them beside the
 original, and swaps the approved one in place behind a backup.
 
-Six modules, each one stage:
+Eight modules:
 
 - :mod:`inventory` — every image the book references, plus the cover.
 - :mod:`backfill`  — the publisher's larger scans, behind the filenames a book
   was ingested with. No Codex: the same picture, bigger.
 - :mod:`jobs`      — ``prepare`` (validate + render prompts) and ``generate``
   (run Codex per candidate, harvest the file).
-- :mod:`report`    — the plain-HTML review page: original beside each candidate.
+- :mod:`composite` — a candidate made of two pictures: a patch of one inside
+  an outline, the pixels of another everywhere else. No Codex.
+- :mod:`board`     — the state behind the image board, the one page in the web
+  UI that shows every image at whatever stage it is in; and the agent's two
+  notes on it, ``triage`` and ``check``.
+- :mod:`feedback`  — what the user said on that page: the only file it writes.
 - :mod:`apply`     — ``apply``, ``revert`` and ``verify``. With ``backfill``,
   the only code that writes into ``images/``.
 - :mod:`ledger`    — the append-only record of what was replaced with what.

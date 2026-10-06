@@ -144,11 +144,12 @@ def _describe(project_dir: Path, key: str, state: dict[str, dict]) -> dict[str, 
     return out
 
 
-def inventory(project_dir: Path) -> dict[str, Any]:
-    """Build the inventory and write it to ``.harness/images/inventory.json``.
+def build_rows(project_dir: Path) -> tuple[list[dict[str, Any]], list[str], Optional[str]]:
+    """``(rows, unreferenced, cover)`` as they stand on disk now. Writes nothing.
 
-    Stdout carries counts and the path; the rows stay on disk, because an
-    87-image book is 87 rows nobody needs in their context twice.
+    The image board calls this on every page load, which is why it is apart
+    from :func:`inventory`: a page that rewrote ``inventory.json`` each time it
+    was looked at would change the file under an agent that is reading it.
     """
     project_dir = Path(project_dir)
     state = ledger.current_state(project_dir)
@@ -191,6 +192,19 @@ def inventory(project_dir: Path) -> dict[str, Any]:
                 key = path.relative_to(root).as_posix()
                 if key not in known:
                     unreferenced.append(key)
+    return rows, unreferenced, cover
+
+
+def inventory(project_dir: Path) -> dict[str, Any]:
+    """Build the inventory and write it to ``.harness/images/inventory.json``.
+
+    Stdout carries counts and the path; the rows stay on disk, because an
+    87-image book is 87 rows nobody needs in their context twice.
+    """
+    project_dir = Path(project_dir)
+    rows, unreferenced, cover = build_rows(project_dir)
+    root = images_dir(project_dir)
+    referenced = {row["image"] for row in rows if row["references"]}
 
     missing = [row["image"] for row in rows if row["missing"] and row["role"] != "cover"]
     unreadable = [row["image"] for row in rows if row.get("error")]

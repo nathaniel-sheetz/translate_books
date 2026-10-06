@@ -4,8 +4,9 @@ description: |
   Redo a book's images headlessly: translate the lettering on maps and diagrams,
   clean up scans, make cover art, or replace an illustration. Inventories the
   images a book references, runs Codex on a ChatGPT subscription to produce
-  candidates, shows them beside the original, and swaps the approved one in under
-  the original filename with a backup. Subscription-only and fail-closed, no dollars.
+  candidates, shows every image on one board in the web UI where the user corrects
+  the triage and picks, and swaps the approved one in under the original filename
+  with a backup. Subscription-only and fail-closed, no dollars.
   Use when asked to "redo the images", "translate the text in this map", "clean up
   the scans", "make a cover", "replace this illustration", or "image-pass".
 allowed-tools:
@@ -19,12 +20,34 @@ allowed-tools:
 
 The work that used to be the ChatGPT web UI plus copying files into
 `projects/<slug>/images/` by hand. The deterministic surface is one non-interactive
-CLI — **`scripts/image_pass.py`** — with eight subcommands that each print JSON.
+CLI — **`scripts/image_pass.py`** — with eleven subcommands that each print JSON.
 
 **Division of labour: you look, Codex draws, the user picks.** You `Read` each image
 and write its job. Codex only makes pixels. Nothing reaches `images/` until a human
 has seen the candidate beside the original. Three STOP gates sit on that path and
 none of them is optional.
+
+## The board
+
+The user's side of a run is one page in the web UI: **`/image-pass/<slug>`**. It
+lists every image the book references, grouped by where it stands — to review,
+proposed, waiting for candidates, replaced, awaiting triage, leave alone — with
+thumbnails for the ones that need nothing yet and full cards for the rest. It is
+filterable, it shows your triage and your check of each candidate, and it is where
+the user answers you:
+
+- **Before a job exists:** change a verdict ("triage missed this one"), write how
+  they want an image done, correct or add to the label map, ask for more candidates.
+- **Once candidates exist:** accept one, send the image back with a note, or skip it.
+
+Everything typed there is saved to `.harness/images/feedback.json`, and you read it
+back with `board`. So at each gate you **give the user the board's `url` and end the
+turn**; when they come back, `board` tells you what they asked for. The chat is for
+what the page cannot carry — the usage quote, a judgement call you want to raise.
+
+The page needs the web UI running (`python web_ui/app.py`). `board` reports
+`server_running: false` when it is not: say so and ask the user to start it, rather
+than handing over a link that will not open.
 
 ## What this writes
 
@@ -47,7 +70,7 @@ text and belongs to translate-harness.
 
 ## The CLI (read first)
 
-`python scripts/image_pass.py <inventory|backfill|prepare|generate|review|apply|revert|verify>`
+`python scripts/image_pass.py <inventory|backfill|triage|board|prepare|generate|check|composite|apply|revert|verify>`
 prints one JSON object and mirrors it to
 `projects/<slug>/.harness/images/last_output.json` (`OUTPUT_JSON: <path>` on stderr) —
 **Read that file** rather than piping stdout through a second interpreter.
@@ -61,32 +84,119 @@ python scripts/image_pass.py backfill --project home-geography --dry-run
 python scripts/image_pass.py backfill --project home-geography [--accept 036.jpg,042.jpg] \
     [--source <url-or-saved-page>] [--images 042.jpg,057.jpg]
 
-# 2. Validate jobs and render one prompt each. Spends nothing.
+# 2. Record what you made of each image you looked at. It shows on the board.
+python scripts/image_pass.py triage --project home-geography \
+    --json-file projects/home-geography/.harness/images/triage_rows.json [--replace]
+
+# 3. Where the board is, the candidates to look at, and what the user said on it.
+python scripts/image_pass.py board --project home-geography [--base-url http://127.0.0.1:5000]
+
+# 4. Validate jobs and render one prompt each. Spends nothing.
 python scripts/image_pass.py prepare --project home-geography \
     --json-file projects/home-geography/.harness/images/jobs.json [--replace]
 
-# 3. Estimate, then run. One Codex process per candidate.
+# 5. Estimate, then run. One Codex process per candidate.
 python scripts/image_pass.py generate --project home-geography --estimate
 python scripts/image_pass.py generate --project home-geography \
-    [--concurrency 1] [--target-ids 006.jpg,cover.jpg] [--model <id>] \
+    [--concurrency 3] [--target-ids 006.jpg,cover.jpg] [--model <id>] \
     [--cli-bin <path>] [--timeout-minutes 20]
 
-# 4. Original beside each candidate, as one static HTML page.
-python scripts/image_pass.py review --project home-geography
+# 6. Record what you found in each candidate. It shows under it on the board.
+python scripts/image_pass.py check --project home-geography \
+    --json-file projects/home-geography/.harness/images/check_rows.json
 
-# 5. The writer. Back up, convert to the original's name and format, replace.
-python scripts/image_pass.py apply --project home-geography --dry-run \
-    --json-file projects/home-geography/.harness/images/decisions.json
-python scripts/image_pass.py apply --project home-geography \
-    --json-file projects/home-geography/.harness/images/decisions.json [--max-side 1600]
+# 6b. A candidate right where it was meant to change and wrong elsewhere: keep
+#     another picture's pixels and let in only the patch. No Codex, no spend.
+python scripts/image_pass.py composite --project home-geography \
+    --json-file projects/home-geography/.harness/images/composites.json [--dry-run]
 
-# 6. Undo, and audit.
+# 7. The writer. Back up, convert to the original's name and format, replace.
+#    --from-board applies the picks the user made on the page.
+python scripts/image_pass.py apply --project home-geography --from-board --dry-run
+python scripts/image_pass.py apply --project home-geography --from-board [--max-side 1600]
+
+# 8. Undo, and audit.
 python scripts/image_pass.py revert --project home-geography --images 006.jpg   # or: all
 python scripts/image_pass.py verify --project home-geography
 ```
 
 An image is named by its path under `images/`: `006.jpg` and `images/006.jpg` are the
 same image everywhere a command takes one.
+
+### Triage (`triage --json-file`)
+
+```json
+[
+  {"image": "042.jpg", "verdict": "translate",
+   "finding": "The map lesson's map. 16 labels, all legible at 614 px.",
+   "labels": {"Tributary": "Afluente", "RIVER": "RÍO", "CITY": "CIUDAD"}},
+  {"image": "085.jpg", "verdict": "restore",
+   "finding": "No lettering. Muddy halftone, the poorest reproduction in the book."},
+  {"image": "032.jpg", "verdict": "leave",
+   "finding": "L-shaped block cut for text wrap. Artist signature (H. Hamilton): keep."}
+]
+```
+
+| Field | |
+|---|---|
+| `image` | required, and one the book references |
+| `verdict` | `translate` · `restore` · `cover` · `replace` · `leave` |
+| `finding` | required. One or two sentences: what is in the picture and why this verdict. The user reads it on the card |
+| `labels` | every piece of lettering you could read → its replacement, **in the order you read it off the picture**. The board shows it as a table the user can edit |
+| `lettering` | `true` for a picture with lettering you are *not* proposing to translate (it then answers to the "Has lettering" filter). Defaults to whether `labels` is given |
+
+All-or-nothing like `prepare`, and merged by image: a second look at three images
+leaves the rest alone. An image with no row shows as **awaiting triage**.
+
+### Checks (`check --json-file`)
+
+```json
+[
+  {"image": "042.jpg", "candidate": 1, "ok": false,
+   "finding": "The acute of OCÉANO sits on the C."},
+  {"image": "042.jpg", "candidate": 2, "ok": true,
+   "finding": "All 16 labels right. A stray tick beside the stream below Afluente."}
+]
+```
+
+`finding` is required when `ok` is false. A check is stored against the candidate
+file's hash, so when that number is generated again the finding goes with the old
+picture and the new one shows as unchecked (`counts.unchecked_candidates`).
+
+### Composites (`composite --json-file`)
+
+```json
+[
+  {"image": "illus59.jpg", "from": 1, "base": "original", "scale": 2, "feather": 1,
+   "regions": [[[341, 17], [362, 0], [434, 0], [434, 13], [372, 22], [350, 33]],
+               [396, 35, 422, 47]],
+   "note": "Poster lettering only; the crowd is the publisher's."},
+  {"image": "illus4.jpg", "from": 2, "base": "previous/20261006_011040/cand_01.png",
+   "regions": [[231, 819, 348, 867]], "candidate": 5}
+]
+```
+
+| Field | |
+|---|---|
+| `image` | required, and one with a prepared job |
+| `from` | required. The candidate the patch comes from: its number, or a path under the job's `previous/` folder |
+| `base` | what everything outside the outlines comes from: `original` (default), `current`, a candidate number, or a `previous/...` path (a candidate an earlier `prepare` archived) |
+| `regions` | required. Each one `[x0, y0, x1, y1]` or a list of `[x, y]` corners, **in the base picture's pixels** |
+| `feather` | how soft the join is, in base pixels (default 2, 0-20) |
+| `scale` | 1-4: enlarge the base first, so new lettering a few pixels high keeps its detail. The output is that many times the base's size |
+| `candidate` | an existing composite's number, to make it again in place after moving an outline. Never a candidate Codex drew |
+| `note` | kept in the composite's description |
+
+All-or-nothing. A composite is an ordinary candidate, numbered from 5 so it never
+fills a slot `generate` owes: `check` it, the user picks it, `apply` lands it. Beside
+it sits `cand_NN.composite.json`; the board reads that to say what the candidate is
+made of and to draw the outline over it in the full-size view (`O` toggles it).
+
+Each region reports `offset` (how far the patch was slid to where the drawing around
+the outline lines up) and `surround_difference` (the mean grey-level difference left
+in that band). Two warnings matter: `surroundings_differ` (the band does not match:
+look at the join) and `alignment_at_edge` (the best position was the furthest one
+tried).
 
 ### Jobs (`prepare --json-file`)
 
@@ -122,7 +232,11 @@ alone; `--replace` makes the manifest exactly this batch.
 `jobs/<id>/previous/<stamp>/` rather than deleting them — each cost plan usage. An
 unchanged job keeps its candidates and `generate` skips them.
 
-### Decisions (`apply --json-file`)
+### Decisions (`apply --from-board`, or `--json-file`)
+
+The user's picks on the board are the decisions: `apply --from-board` reads the ones
+not yet applied. `board` lists them first under `picks`, in the same shape a
+hand-written file takes:
 
 ```json
 [
@@ -131,6 +245,13 @@ unchanged job keeps its candidates and `generate` skips them.
   {"image": "cover.jpg", "verdict": "skip", "note": "keeping the current one"}
 ]
 ```
+
+`--json-file` still takes that list, for a decision the user gave you in the chat
+instead. Never write one from your own reading of the candidates.
+
+A pick is tied to the picture it was made on. If the job was re-prepared or the
+candidate regenerated since, `--from-board` refuses it (`refused`, "pick again on the
+board") rather than landing a picture the user never saw.
 
 `apply` is per-image: one refused row lands the rest and is reported by name. `skip`
 and `redo` write nothing to `images/`; they are recorded in the ledger
@@ -182,6 +303,10 @@ guess; the alt text is the caption, not the lettering inside the picture.
 Relay `missing` (a token whose file is gone — the reader shows nothing there today)
 and `unreferenced` (a file nothing points at) whether or not anyone asked.
 
+Then record what you saw, one `triage` row per image you looked at, and run `board`.
+Do this *after* `backfill` on a Gutenberg book (1b): a verdict reached from a
+thumbnail is the one most likely to be wrong.
+
 ### 1b. `backfill` — before any job on a Gutenberg book
 
 A Gutenberg page shows a thumbnail and links it to a scan two or three times the
@@ -217,8 +342,9 @@ read is the reason you ran this.
 
 ### 2. STOP — G1: the jobs gate
 
-Propose one job per image, **in the chat**: the mode, the instruction, and for
-`translate` the full label map.
+The proposal is the triage, and the user reads it on the board: give them `url` from
+`board`, say in a line or two what you propose (how many to translate, restore,
+leave) and anything you could not read, and **end the turn**.
 
 **For `translate`, the label map is the deliverable of this gate.** List every piece
 of English lettering you can read in the image — including the small ones: scale
@@ -234,10 +360,30 @@ bars, compass points, legends, "Fig. 3" — and propose the replacement for each
   list is visibly complete.
 
 Codex will spell exactly what the map says and nothing checks it afterwards except
-the user's eyes at G3. Print the map as text. `AskUserQuestion` may pick *which
-images* to do; it must never be where a label map lives — the widget truncates.
+the user's eyes at G3. The map lives in the triage row, where the board shows it as
+an editable table. `AskUserQuestion` may pick *which images* to do; it must never be
+where a label map lives — the widget truncates.
 
-On approval, `Write` `projects/<slug>/.harness/images/jobs.json` and run `prepare`.
+When the user comes back, run `board` and read `requests` — each is something they
+set on the page that no prepared job says yet:
+
+| Reason | Do |
+|---|---|
+| `needs_job` | They want this image done (often one triage left alone). Look at it again, with their `note`, and write the job |
+| `labels_differ` | Use their `labels` **verbatim** in the job. Never merge them with yours |
+| `mode_differs` · `candidates_differ` | Change the job to match |
+| `note_newer_than_job` | Carry the note into the `instruction` and re-prepare |
+| `job_unwanted` | They said leave it alone. Drop the job (`prepare --replace` with the rest) |
+| `note_unaddressed` | A note on an image with no job and no verdict: look again, then `triage` it |
+
+A `null` field in a request means they did not change it. An image they did not
+touch stands as triaged.
+
+Then `Write` `projects/<slug>/.harness/images/jobs.json` — one job per image under
+`proposed`, which already reflects what the user changed: an image they set to leave
+alone is not in it, and one they added is, marked `by: "user"`. Run `prepare`, then
+`board` once more: `requests` should now be empty, and anything still listed is
+something the jobs do not yet say.
 
 **END THE TURN before estimating.**
 
@@ -275,9 +421,14 @@ Then:
 python scripts/image_pass.py generate --project home-geography
 ```
 
-- `--concurrency` defaults to 1 and should stay there unless the user asks: parallel
-  runs burn the window faster, and more than one has not been tried against the real
-  CLI.
+- **Propose `--concurrency` at G2**, as many as there are candidates up to 3, and
+  quote the minutes that gives (`plan.estimated_minutes` already divides by it). The
+  flag defaults to 1; the user of this repo asked for parallel runs (2026-10-06)
+  after thirteen sequential ones took 29 minutes of generation and 1-2% of a 5-hour
+  window. More than one has **not yet been run against the real CLI**: the harvest
+  is by thread id, which is exact at any concurrency, but the first parallel batch
+  is the test. Say so at the gate, and afterwards check that every candidate is the
+  right picture for its job before anything else.
 - A usage-limit error **stops the batch** (`counts.not_run`) instead of failing every
   remaining candidate against it. Relay the `error`.
 - **Re-running `generate` is the recovery.** It fills only the candidates still
@@ -285,14 +436,15 @@ python scripts/image_pass.py generate --project home-geography
 - `status: partial` means some landed. Each `failed` row carries its own error;
   `jobs/<id>/run_NN/events.jsonl` holds that run's raw Codex event stream.
 
-### 4. `review` — and look again
+### 4. `board`, look again, and `check`
 
 ```bash
-python scripts/image_pass.py review --project home-geography
+python scripts/image_pass.py board --project home-geography
 ```
 
-Give the user `review_path` to open in a browser. Then `Read` every candidate
-yourself, beside its original, and report **before** asking for picks:
+`jobs` lists each candidate's `path` beside its `original`. `Read` every one
+yourself and record what you find with `check` **before** asking for picks, so the
+user sees your finding under the candidate it is about:
 
 - **Lettering.** Check each label against the map, letter by letter. Image models
   drop accents, turn `Ñ` into `N`, double a letter, or leave one English label behind.
@@ -302,26 +454,51 @@ yourself, beside its original, and report **before** asking for picks:
 - **Proportions.** `flags` already names a candidate whose aspect ratio is off the
   original's by more than 5%.
 
-Say what you could not judge. A 250-pixel original gives you little to compare.
+Say what you could not judge — in the check's `finding`, with `ok: false` if that
+leaves the candidate unverified. A 250-pixel original gives you little to compare.
 
 ### 5. STOP — G3: the pick gate
 
-Per image the user chooses: **accept candidate N**, **redo with a note**, or **skip**.
-The candidates are pictures, so the user decides from the review page, not from your
-description of it. An id-picker is fine here once they have looked.
+Per image the user chooses: **accept candidate N**, **send back with a note**, or
+**skip**. The candidates are pictures, so the user decides on the board, not from
+your description of it: clicking a picture there opens it full size, and the arrow
+keys swap original and candidate in place. Give them the `url`, summarise your
+checks in a line or two, and **end the turn**.
 
-`Write` `decisions.json`, then:
+When they come back:
 
 ```bash
-python scripts/image_pass.py apply --project home-geography --dry-run --json-file <decisions.json>
-python scripts/image_pass.py apply --project home-geography --json-file <decisions.json>
+python scripts/image_pass.py board --project home-geography      # picks, stale_picks
+python scripts/image_pass.py apply --project home-geography --from-board --dry-run
+python scripts/image_pass.py apply --project home-geography --from-board
 ```
 
 `--dry-run` first, always: it writes nothing and reports `planned` with each
 `backup_action` and any `warnings` (`aspect_changed`). Relay those, then run it live.
+An image in review with no pick is undecided, not skipped: say which are left.
 
 A `redo` is a new job: change the `instruction` (carry the user's note into it), re-run
 `prepare` for that image, and go back to G2 for the extra runs.
+
+**Before a second redo, ask whether a `composite` would do.** The image tool redraws
+the whole picture every time, so a redo fixes what it was told and breaks something
+else, and two kinds of fault no instruction reaches at all: a shaded drawing that
+comes back re-rendered, and a very wide strip that comes back padded. If some
+candidate already has the wanted lettering right, keep the pixels that are trusted
+and let in only the patch:
+
+1. Pick the base: `original` when the artwork must stay the publisher's; an earlier
+   candidate (often one in `previous/`) when it is right everywhere but one label.
+2. Find the outline. Crop the base and the candidate at 6-10x with a pixel grid drawn
+   on them and read the corners off. The outline must cover the old lettering *and*
+   the new, and should cross only what both pictures draw the same way (a road, a
+   letter both have) or blank paper.
+3. `composite --dry-run`, read `offset` and the warnings, then run it, then `Read`
+   the result at the join enlarged. Move a corner and remake it with `candidate: N`.
+4. `check` it and give the user the board. It costs no usage, so no G2.
+
+A re-`prepare` archives a job's candidates, composites included. To let the user pick
+an archived one again, composite it (`base: previous/...`) rather than moving files.
 
 ### 6. `verify`, then hand back
 
@@ -463,6 +640,45 @@ mostly lettering scores low (0.86) for the right reasons.
   lettering, sky and far hills in the top third, and plain ground in the bottom-right
   corner. Confirm with the user before putting a title in the picture.
 
+### Shaded drawings, wide strips and many labels (stormy-misty-s-foal, 2026-10-06)
+
+Six images, thirteen runs on `gpt-6-luna` (one on `gpt-6-sol`), each one image,
+51-165 s (one 481 s), no usage limit. Four landed from generation; two needed
+`composite`.
+
+- **The tool redraws; it does not edit.** Line work on white paper came back the same
+  drawing (similarity 0.997-0.998). Soft pencil shading did not: clouds, a shed roof
+  and coats came back with a fine swirling texture, and loosely sketched faces came
+  back sharper. An instruction naming exactly that ("no new texture, do not define
+  any face") changed nothing, and neither did `gpt-6-sol` on the same prompt. Say so
+  before proposing a `translate` on a shaded drawing, and plan on a composite.
+- **A very wide strip comes back padded.** A 650 x 155 original (4.19 to 1) came back
+  2170 x 725 twice, the drawing in rows 104-621 between white bands, whatever the
+  instruction said. `composite` fits such a candidate centred, so its patch still
+  lands where it belongs in the original.
+- **Lettering comes back as a font unless told otherwise.** "Hand-painted" was not
+  enough. Describing the strokes was: "thin, light, loosely printed pen capitals,
+  each stroke a single thin line, some letters leaning", "heavy capitals brushed by
+  hand, strokes of uneven thickness, rough ends, letters of slightly different
+  sizes", plus "never clean, even or typeset".
+- **A map of thirty-one labels is a lottery per attempt.** Four candidates over two
+  prompts: one right in every label, one with the island's own name garbled into
+  `ISLA DE / ISLADE ISLA`, one with `CALZADA` missing, one with a line drawn across
+  open water where the tail of an erased word had been, and a vertical label turned
+  to read downward. Read every label of every candidate; a count is not a check.
+  When one is right but for a label, composite that label in instead of redoing.
+- **Labels mapped to themselves are redrawn too**, crisply, so a reading that was a
+  guess at 4 px comes back looking certain. Say which those were in the check.
+- **An artist's own slip is copied faithfully.** A hand-drawn `G` that reads as `Q`
+  in the original came back as a `Q` in the Spanish. Name the letter and spell the
+  word out when the original's lettering is itself ambiguous.
+- **No larger scan is not the same as not having looked.** `backfill` reports what
+  the HTML links. For ebook 67298 the directory listings
+  (`/files/<id>/<id>-h/images/`, `/cache/epub/<id>/images/`, and `/files/<id>/old/`)
+  held the same files at the same sizes, byte for byte. Check them before saying so.
+- **The estimate under-quotes dense images**: the median run was 97 s, the map 165 s
+  a candidate, and one map run took 481 s.
+
 ### Backfill
 
 - Gutenberg hosts an `NNN_l.gif` behind every thumbnail of ebook 12228. The dry run
@@ -480,7 +696,7 @@ mostly lettering scores low (0.86) for the right reasons.
 
 Not yet seen: a usage-limit error (so the usage-limit stop is tested only against a
 fake), a `replace` job, a cover with lettering on it, a lower-case `ñ` or an inverted
-`¿` / `¡`, and `--concurrency` above 1 against the real CLI.
+`¿` / `¡`, and `--concurrency` above 1 against the real CLI (asked for; see G2).
 
 ## Notes
 
@@ -488,10 +704,21 @@ fake), a `replace` job, a cover with lettering on it, a lower-case `ñ` or an in
   `Read` with absolute paths for anything under a book.
 - **`python -X utf8` on every Python you run.** Windows stdout defaults to cp1252,
   which mangles every accent in a label map.
-- `.harness/images/` layout: `inventory.json`, `manifest.json`, `usage.jsonl`,
-  `images.jsonl` (the ledger), `review.html`, `backfill/` (the fetched scans), and
-  `jobs/<id>/` holding `job.json`, `prompt.txt`, `cand_NN.png`, `run_NN/` and
-  `previous/`.
+- `.harness/images/` layout: `inventory.json`, `triage.json`, `manifest.json`,
+  `checks.json`, `feedback.json` (the user's requests and picks — written only by the
+  board, never by you), `usage.jsonl`, `images.jsonl` (the ledger), `backfill/` (the
+  fetched scans), and `jobs/<id>/` holding `job.json`, `prompt.txt`, `cand_NN.png`
+  (with a `cand_NN.composite.json` beside a composite), `run_NN/` and `previous/`.
+- **A note typed on a card with no pick is not saved.** The board attaches a note to
+  a verdict, so "send both back with my notes" reaches `board` only after the user
+  clicks *Send back* on each card. If `picks` comes back empty, say that rather than
+  writing the note for them.
+- **The web UI has to be restarted to pick up a change under `src/` or `web_ui/`.**
+  The script is served fresh, but the board's state is built by code the running
+  process loaded at start.
+- **Never edit `feedback.json`.** A request stops being outstanding when the prepared
+  job says the same thing, and a pick when `apply` records it; nothing is ticked off
+  by hand.
 - The prompt templates are `prompts/image_pass/{translate,restore,cover,replace}.txt`.
   The output contract appended to each (built-in tool only, one call, save nothing) is
   in `src/image_pass/jobs.py`, because the harvest depends on it.

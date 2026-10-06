@@ -17,7 +17,9 @@ Layout, under ``<project>/.harness/images/``::
     usage.jsonl                   one row per Codex run (wall time, outcome)
     jobs/<id>/job.json            the validated job, as prepared
     jobs/<id>/prompt.txt          the rendered prompt Codex receives on stdin
-    jobs/<id>/cand_NN.png         harvested candidates, 1-based
+    jobs/<id>/cand_NN.png         harvested candidates, 1-based; a composite
+                                  (see composite.py) is numbered after them and
+                                  has a cand_NN.composite.json beside it
     jobs/<id>/run_NN/             that candidate's Codex working directory: the
                                   input copy, events.jsonl, stderr.txt
     jobs/<id>/previous/<stamp>/   candidates of an earlier prompt, never deleted
@@ -410,9 +412,13 @@ def _archive_candidates(job_dir: Path) -> int:
     """Move a job's candidates aside because its prompt or its input changed.
     Never deletes: each one cost minutes of plan usage and may still be the one
     wanted."""
-    moved = [p for p in job_dir.glob("cand_*.png")] + [
-        p for p in job_dir.glob("run_*") if p.is_dir()
-    ]
+    # A composite's description goes with it: left behind, it would describe
+    # whatever picture next took that number.
+    moved = (
+        [p for p in job_dir.glob("cand_*.png")]
+        + [p for p in job_dir.glob("cand_*.composite.json")]
+        + [p for p in job_dir.glob("run_*") if p.is_dir()]
+    )
     if not moved:
         return 0
     target = job_dir / "previous" / time.strftime("%Y%m%d_%H%M%S")
@@ -1009,8 +1015,8 @@ def generate(
     if abort_reason:
         out["error"] = abort_reason[0]
     out["instructions"] = (
-        "Run `review`, then Read each candidate beside its original before the "
-        "pick gate."
+        "Run `board`, Read each candidate beside its original, and record what "
+        "you find with `check` before the pick gate."
         if wrote
         else "No candidate was produced. Relay the error(s) verbatim."
     ) + (

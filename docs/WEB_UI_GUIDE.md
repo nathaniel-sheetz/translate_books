@@ -30,6 +30,7 @@ service, use `python scripts/serve.py` (see [`CLI_REFERENCE.md`](CLI_REFERENCE.m
 | `/read/<id>/<chapter>/chunk/<chunk_id>/edit` | Full-textarea chunk editor |
 | `/review-inbox` | Cross-book annotation resolutions awaiting a decision |
 | `/recommendations/<id>` | One book's judge findings and reviewed notes, to read |
+| `/image-pass/<id>` | One book's images: triage, candidates, and your say on each |
 | `/reports/<project_id>/<filename>` | Serves generated edit-review HTML reports (same-origin for tag API) |
 
 ---
@@ -802,6 +803,72 @@ unaided, because a reviewed note keeps its text in `results.json` and is shown
 with `status: deleted` after you delete it. What that misses is a note
 annotation-review has never seen (22 of the corpus's 253 live notes) and a
 finding a judge has since reworded.
+
+---
+
+## Image Board
+
+Served at `/image-pass/<project_id>`, linked from the book's chapter list and from
+the cover field of the Export stage. It is the user's side of an image pass (the
+`/image-pass` skill, `scripts/image_pass.py`): every image the book references, at
+whatever stage the pass has it in.
+
+Images are grouped by stage, in the order they need you:
+
+| Stage | Means | Shown as |
+|---|---|---|
+| To review | candidates have been generated and nothing has been decided since | full card, original beside each candidate |
+| Proposed | a verdict says to do something, and no job is prepared yet | card with the finding and the lettering table |
+| Waiting for candidates | a job is prepared and not all of its candidates exist | card |
+| Replaced | a candidate was applied | card, original beside what is in the book now |
+| File missing | a token names a file that is not in `images/` | thumbnail |
+| Awaiting triage | nobody has recorded a verdict | thumbnail |
+| Leave alone | the verdict is to do nothing | thumbnail |
+
+A thumbnail opens into a full card when clicked, which is how an image triage left
+alone gets a verdict from you. Chips filter by stage, and by *Has lettering*, *My
+input* and *Flagged* (a candidate with a problem found, changed proportions, a
+missing file); the search box matches file names, captions and triage notes. The
+filter lives in the URL hash, so a filtered board can be linked.
+
+Each card takes two kinds of input, saved as you type:
+
+- **A request**, before or after a job exists: what to do (translate lettering,
+  restore, replace, cover, leave alone), a note on how you want it done, the number
+  of candidates, and the lettering table — edit a replacement, add or remove a row,
+  or undo your changes to go back to the proposed map.
+- **A pick**, once there are candidates: accept one, send the image back, or skip
+  it, with a note.
+
+Neither changes the book. Both are written to `.harness/images/feedback.json`, where
+the next step of the run reads them: `image_pass.py board` lists what you asked for
+that no prepared job says yet, and `image_pass.py apply --from-board` applies your
+picks. A line on the card (*Not yet picked up: …*) says when something you set has
+not reached a job; it clears itself when the job is re-prepared to match. A pick is
+tied to the candidate it was made on, so one made before a candidate was regenerated
+is refused rather than applied to a picture you did not see.
+
+Clicking any picture opens it full size. There, ← and → swap between the original,
+the current file and the candidates in place, and + and − zoom; alternating two
+versions at the same position is the quickest way to see a clipped letter or a
+coastline that moved.
+
+A candidate made by `image_pass.py composite` says so under its picture: which
+candidate was let in, over what, and how much of the picture differs from that base.
+Full size, a dashed outline marks where the patch sits; `O` hides and shows it, so
+the join can be looked at with and without the line over it.
+
+The page re-fetches itself when you come back to its tab, unless you are in the
+middle of typing, so candidates and applied picks appear without a reload.
+
+**API.** `GET /api/project/<id>/image-pass` returns the whole board;
+`POST /api/project/<id>/image-pass/feedback` takes `{image, request?, pick?}` — a
+section left out is untouched and one sent as `null` is cleared — and answers with
+that image's row as rebuilt from disk. Label maps travel as `[source, target]` pairs
+in both directions, because their order is the order you check them in.
+`/projects/<id>/image-pass/original/<file>` and
+`/projects/<id>/image-pass/candidate/<job>/<n>` serve the two kinds of picture the
+ordinary image route does not reach.
 
 ---
 

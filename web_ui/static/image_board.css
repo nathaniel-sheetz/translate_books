@@ -1,0 +1,598 @@
+/* Image board (/image-pass/<id>). Sits on reader.css for the page chrome and
+   the theme variables; everything here is the board itself. */
+
+:root {
+    --ib-translate: #1f5fa8;
+    --ib-restore: #6a3fa0;
+    --ib-replace: #8a5a00;
+    --ib-cover: #2c6e3f;
+    --ib-leave: #6b6860;
+}
+
+[data-theme="dark"] {
+    --ib-translate: #7fb0ea;
+    --ib-restore: #b79be0;
+    --ib-replace: #d9a441;
+    --ib-cover: #7cc492;
+    --ib-leave: #a09c94;
+}
+
+.nav-page.ib-page {
+    max-width: 1280px;
+}
+
+.ib-subtitle {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin: 0 0 16px;
+    max-width: 70ch;
+}
+
+.ib-refresh,
+.ib-chip,
+.ib-pick-btn {
+    font: inherit;
+    font-size: 13px;
+    padding: 4px 12px;
+    border: 1px solid var(--border-light);
+    border-radius: 999px;
+    background: var(--bg-card);
+    color: var(--text);
+    cursor: pointer;
+}
+
+.ib-refresh:hover,
+.ib-chip:hover,
+.ib-pick-btn:hover {
+    background: var(--bg-hover);
+}
+
+/* ---- filters ---- */
+
+.ib-filters {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    padding: 10px 0;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.ib-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ib-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.ib-chip[aria-pressed="true"] {
+    background: var(--text-heading);
+    border-color: var(--text-heading);
+    color: var(--bg);
+}
+
+.ib-chip-count {
+    font-size: 12px;
+    opacity: 0.7;
+}
+
+.ib-search {
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 10px;
+    min-width: 200px;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text);
+}
+
+.ib-status {
+    color: var(--text-muted);
+}
+
+/* ---- groups and cards ---- */
+
+.ib-group-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-heading);
+    margin: 24px 0 10px;
+}
+
+.ib-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+
+.ib-card {
+    grid-column: 1 / -1;
+    position: relative;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+}
+
+/* Awaiting triage, left alone, or missing: nothing is being asked of you, so
+   the picture is a thumbnail until you open it. */
+.ib-card.ib-small {
+    grid-column: auto;
+    padding: 0;
+}
+
+.ib-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    height: 100%;
+    padding: 8px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.ib-tile:hover {
+    background: var(--bg-hover);
+}
+
+.ib-tile img {
+    max-width: 100%;
+    height: 110px;
+    object-fit: contain;
+}
+
+.ib-tile-name {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ib-tile-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 110px;
+    font-size: 12px;
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+.ib-stage-leave.ib-small img {
+    opacity: 0.6;
+}
+
+.ib-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-left: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+.ib-collapse {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+}
+
+.ib-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-heading);
+}
+
+.ib-tag {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.ib-tag-translate { color: var(--ib-translate); }
+.ib-tag-restore { color: var(--ib-restore); }
+.ib-tag-replace { color: var(--ib-replace); }
+.ib-tag-cover { color: var(--ib-cover); }
+.ib-tag-leave { color: var(--ib-leave); }
+
+.ib-tag-flag,
+.ib-warn {
+    color: var(--badge-warn-color);
+}
+
+.ib-tag-flag {
+    padding: 0 6px;
+    border-radius: 4px;
+    background: var(--badge-warn-bg);
+}
+
+.ib-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin: 2px 0 0;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.ib-meta a {
+    color: var(--text-link);
+}
+
+.ib-decision,
+.ib-drift,
+.ib-finding {
+    margin: 6px 0 0;
+    font-size: 14px;
+}
+
+.ib-decision {
+    color: var(--text-muted);
+}
+
+.ib-drift {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-color);
+}
+
+/* ---- pictures ---- */
+
+.ib-pics {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 14px;
+    margin-top: 10px;
+}
+
+.ib-fig {
+    flex: 0 1 280px;
+    margin: 0;
+    max-width: 320px;
+}
+
+/* Candidates are there to be compared with the original, so on a card that is
+   waiting for a pick every picture gets as much room as the row allows. */
+.ib-stage-review .ib-fig {
+    flex: 1 1 320px;
+    max-width: 560px;
+}
+
+.ib-fig-btn {
+    display: block;
+    padding: 0;
+    border: 1px solid var(--border-light);
+    background: #fff;
+    cursor: zoom-in;
+}
+
+.ib-fig-btn img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    max-height: 300px;
+    object-fit: contain;
+}
+
+.ib-stage-review .ib-fig-btn img {
+    max-height: 70vh;
+}
+
+.ib-fig figcaption {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ib-fig-name {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.ib-check {
+    margin: 4px 0 0;
+    font-size: 13px;
+}
+
+.ib-composite {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.ib-check-ok strong { color: var(--accent-dark); }
+.ib-check-bad strong { color: var(--badge-warn-color); }
+
+/* ---- picks ---- */
+
+.ib-pick-accept {
+    margin-top: 6px;
+}
+
+.ib-pick {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.ib-pick-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+.ib-pick-btn[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.ib-pick-note {
+    flex: 1 1 260px;
+}
+
+.ib-pick-status {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* ---- the request form ---- */
+
+.ib-instruction {
+    margin-top: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.ib-instruction pre {
+    margin: 4px 0 0;
+    font: inherit;
+    white-space: pre-wrap;
+    color: var(--text);
+}
+
+.ib-form {
+    display: grid;
+    gap: 10px;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-divider);
+    max-width: 720px;
+}
+
+.ib-form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.ib-field {
+    display: grid;
+    gap: 3px;
+}
+
+.ib-field-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.ib-form select,
+.ib-form textarea,
+.ib-form input,
+.ib-pick-note {
+    font: inherit;
+    font-size: 14px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text);
+}
+
+.ib-form textarea {
+    resize: vertical;
+}
+
+.ib-labels {
+    border-collapse: collapse;
+    margin-top: 4px;
+}
+
+.ib-labels th {
+    padding: 0 4px 2px;
+    font-size: 12px;
+    font-weight: 400;
+    text-align: left;
+    color: var(--text-muted);
+}
+
+.ib-labels td {
+    padding: 2px 4px 2px 0;
+}
+
+.ib-labels input {
+    width: 100%;
+    min-width: 170px;
+}
+
+.ib-label-remove {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.ib-label-remove:hover {
+    color: var(--status-missing);
+}
+
+.ib-label-actions {
+    display: flex;
+    gap: 14px;
+    margin-top: 4px;
+}
+
+.ib-link {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-link);
+    font: inherit;
+    font-size: 13px;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.ib-edited {
+    margin-left: 8px;
+    font-weight: 400;
+    color: var(--accent-dark);
+}
+
+.ib-labels-wrap:not([data-edited="1"]) .ib-edited,
+.ib-labels-wrap:not([data-edited="1"]) .ib-label-reset {
+    display: none;
+}
+
+.ib-save {
+    display: block;
+    min-height: 18px;
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* ---- lightbox ---- */
+
+.ib-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    background: #161616;
+    color: #eee;
+}
+
+.ib-lightbox[hidden] {
+    display: none;
+}
+
+.ib-lightbox-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 14px;
+    font-size: 13px;
+}
+
+.ib-lightbox-caption {
+    font-weight: 600;
+}
+
+.ib-lightbox-hint {
+    flex: 1;
+    color: #aaa;
+}
+
+.ib-lightbox-close {
+    border: none;
+    background: none;
+    color: #eee;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+/* The picture is centred by its own auto margins, not by justify-content on
+   the container: under justify-content a zoomed image wider than the view
+   overflows to the left, where no scrollbar reaches. */
+.ib-lightbox-stage {
+    flex: 1;
+    display: flex;
+    overflow: auto;
+    padding: 16px;
+}
+
+.ib-lightbox-pic {
+    position: relative;
+    flex: none;
+    margin: auto;
+    line-height: 0;
+}
+
+.ib-lightbox-stage img {
+    display: block;
+    height: auto;
+    background: #fff;
+    cursor: zoom-in;
+}
+
+/* Where a composite's patch was let in, over the picture at any zoom. */
+.ib-outline {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.ib-outline polygon {
+    fill: none;
+    stroke: #e0245e;
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+    vector-effect: non-scaling-stroke;
+}
+
+@media (max-width: 640px) {
+    .ib-grid {
+        grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    }
+
+    .ib-fig,
+    .ib-stage-review .ib-fig {
+        max-width: 100%;
+    }
+
+    .ib-labels {
+        width: 100%;
+    }
+
+    .ib-labels input {
+        min-width: 0;
+    }
+}

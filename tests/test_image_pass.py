@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,9 @@ from src.image_pass import apply as ip_apply
 from src.image_pass import backfill as ip_backfill
 from src.image_pass import image_key, is_safe_key, jobs as ip_jobs, ledger
 from src.image_pass import inventory as ip_inventory
-from src.image_pass import report as ip_report
+from src.image_pass import board as ip_board
+from src.image_pass import composite as ip_composite
+from src.image_pass import feedback as ip_feedback
 
 SOURCE = """THE POINTS OF THE COMPASS
 
@@ -135,6 +138,17 @@ def _prober(text: str, rc: int = 0):
 def _prepared(project: Path, *jobs) -> None:
     out = ip_jobs.prepare(project, list(jobs) or [TRANSLATE_JOB])
     assert out["status"] == "ok", out
+
+
+def _board_row(project: Path, image: str) -> dict:
+    return next(row for row in ip_board.build(project)["images"] if row["image"] == image)
+
+
+def _stamp(seconds: int) -> str:
+    """A ledger-style timestamp ``seconds`` from now. Stamps are whole seconds,
+    so a test that needs "later" has to say so rather than race the clock."""
+    moment = datetime.now().astimezone() + timedelta(seconds=seconds)
+    return moment.isoformat(timespec="seconds")
 
 
 # --- keys ------------------------------------------------------------------
@@ -279,8 +293,9 @@ def test_a_cover_can_be_drawn_from_one_of_the_books_images(project: Path):
     assert cmd[2] == "-i" and Path(cmd[3]).name == "reference.jpg"
     assert Path(cmd[3]).read_bytes() == (project / "images" / "map.jpg").read_bytes()
 
-    page = Path(ip_report.review(project)["review_path"]).read_text("utf-8")
-    assert "Drawn from map.jpg" in page and "../../images/map.jpg" in page
+    # The board shows what the cover was drawn from beside the candidate.
+    drawn = next(p for p in _board_row(project, "cover.jpg")["pictures"] if p["kind"] == "reference")
+    assert (drawn["key"], drawn["source"]) == ("map.jpg", "images")
 
     # It lands as a new file with nothing to back up, and the reference is untouched.
     before = ledger.sha256_file(project / "images" / "map.jpg")
@@ -495,19 +510,264 @@ def test_generate_measures_its_own_minutes_for_the_next_estimate(project: Path):
     assert [row["candidate"] for row in rows] == [1, 2] and all(row["ok"] for row in rows)
 
 
-# --- review ----------------------------------------------------------------
+# --- the board: triage, checks, and what the user said ----------------------
 
-def test_review_page_links_original_and_candidates_by_relative_path(project: Path):
+TRIAGE_ROWS = [
+    {"image": "map.jpg", "verdict": "translate", "finding": "Two labels, both legible.",
+     "labels": {"NORTH": "NORTE", "SCHOOL-ROOM": "SALÓN DE CLASE"}},
+    {"image": "images/compass.png", "verdict": "leave", "finding": "No lettering."},
+]
+
+
+def test_the_board_follows_an_image_through_every_stage(project: Path):
+    stages = lambda: {row["image"]: row["stage"] for row in ip_board.build(project)["images"]}
+    assert stages() == {
+        "map.jpg": "untriaged", "compass.png": "untriaged",
+        "gone.jpg": "missing", "cover.jpg": "untriaged",
+    }
+
+    out = ip_board.save_triage(project, TRIAGE_ROWS)
+    assert out["counts"] == {
+        "requested": 2, "recorded": 2, "invalid": 0, "triaged": 2, "untriaged": 2,
+        "by_verdict": {"translate": 1, "leave": 1},
+    }
+    assert (stages()["map.jpg"], stages()["compass.png"]) == ("proposed", "leave")
+    row = _board_row(project, "map.jpg")
+    assert row["labels"]["SCHOOL-ROOM"] == "SALÓN DE CLASE" and row["lettering"]
+
     _prepared(project)
+    assert stages()["map.jpg"] == "queued"
+
     ip_jobs.generate(project, runner=FakeCodex(size=(1024, 1024)))
-    out = ip_report.review(project)
-    page = Path(out["review_path"]).read_text("utf-8")
-    assert 'src="../../images/map.jpg"' in page
-    assert 'src="jobs/map.jpg/cand_01.png"' in page
-    assert "SALÓN DE CLASE" in page
+    row = _board_row(project, "map.jpg")
+    assert row["stage"] == "review"
     # 1:1 against a 3:2 original is flagged for the human, not hidden.
-    assert out["jobs"][0]["candidates"][0]["flags"]
-    assert "aspect" in page
+    assert "aspect" in row["candidates"][0]["flags"][0] and row["flagged"] == ["candidate_flag"]
+    assert [p["kind"] for p in row["pictures"]] == ["original"]
+
+    ip_apply.apply(project, [{"image": "map.jpg", "candidate": 1}])
+    row = _board_row(project, "map.jpg")
+    assert row["stage"] == "replaced"
+    # Once replaced, the publisher's file is the backup and the page shows both.
+    assert [(p["kind"], p["source"]) for p in row["pictures"]] == [
+        ("original", "images_original"), ("current", "images"),
+    ]
+
+
+def test_a_candidate_made_after_the_decision_is_up_for_review_again(project: Path):
+    _with_candidate(project)
+    ip_apply.apply(project, [{"image": "map.jpg", "verdict": "redo", "note": "accent missing"}])
+    # Sent back: the agent owes a new job, and there is nothing new to look at.
+    assert _board_row(project, "map.jpg")["stage"] == "proposed"
+
+    later = time.time() + 60
+    os.utime(project / ".harness" / "images" / "jobs" / "map.jpg" / "cand_01.png", (later, later))
+    assert _board_row(project, "map.jpg")["stage"] == "review"
+
+
+def test_triage_is_all_or_nothing_and_merges_by_image(project: Path):
+    bad = ip_board.save_triage(project, TRIAGE_ROWS + [
+        {"image": "stray.jpg", "verdict": "leave", "finding": "Not in the book."},
+        {"image": "map.jpg", "verdict": "fix", "finding": ""},
+    ])
+    assert bad["status"] == "error" and not ip_board.triage_path(project).exists()
+    problems = {row["index"]: " ".join(row["problems"]) for row in bad["invalid"]}
+    assert "does not reference" in problems[2]
+    assert "verdict" in problems[3] and "finding is required" in problems[3]
+
+    ip_board.save_triage(project, TRIAGE_ROWS)
+    ip_board.save_triage(project, [
+        {"image": "compass.png", "verdict": "restore", "finding": "Foxed lower left."},
+    ])
+    saved = ip_board.load_triage(project)
+    assert saved["compass.png"]["verdict"] == "restore" and saved["map.jpg"]["verdict"] == "translate"
+
+    ip_board.save_triage(project, [TRIAGE_ROWS[1]], replace=True)
+    assert set(ip_board.load_triage(project)) == {"compass.png"}
+
+
+def test_a_check_is_about_one_file_and_dies_with_it(project: Path):
+    _with_candidate(project)
+    refused = ip_board.save_checks(project, [
+        {"image": "map.jpg", "candidate": 1, "ok": False},
+        {"image": "map.jpg", "candidate": 2, "ok": True},
+    ])
+    assert refused["status"] == "error" and not ip_board.checks_path(project).exists()
+
+    out = ip_board.save_checks(project, [
+        {"image": "map.jpg", "candidate": 1, "ok": False, "finding": "NORTE lost its E."},
+    ])
+    assert out["counts"]["not_ok"] == 1
+    row = _board_row(project, "map.jpg")
+    assert row["candidates"][0]["check"] == {"ok": False, "finding": "NORTE lost its E."}
+    assert "check_failed" in row["flagged"]
+    assert ip_board.summary(project)["counts"]["unchecked_candidates"] == 0
+
+    # The same number, generated again, is a picture nobody has looked at.
+    _image(project / ".harness" / "images" / "jobs" / "map.jpg" / "cand_01.png",
+           (1536, 1024), (1, 2, 3), fmt="PNG")
+    assert _board_row(project, "map.jpg")["candidates"][0]["check"] is None
+    assert ip_board.summary(project)["counts"]["unchecked_candidates"] == 1
+
+
+def test_a_request_is_outstanding_until_the_job_says_the_same(project: Path):
+    drift = lambda image: _board_row(project, image)["drift"]
+    ip_board.save_triage(project, TRIAGE_ROWS)
+
+    # Triage said leave it; the user says otherwise. That is a job to write.
+    saved = ip_feedback.save_image(project, "compass.png", request={
+        "verdict": "restore", "note": "Clean the foxing, keep the plate mark.",
+    })
+    assert saved["status"] == "ok" and drift("compass.png") == ["needs_job"]
+    assert _board_row(project, "compass.png")["stage"] == "proposed"
+    # And the other way: what they set to leave alone is no longer a job to write.
+    ip_feedback.save_image(project, "map.jpg", request={"verdict": "leave"})
+    assert ip_board.summary(project)["proposed"] == [
+        {"image": "compass.png", "verdict": "restore", "by": "user"},
+    ]
+    ip_feedback.save_image(project, "map.jpg", request=None)
+    assert {"image": "map.jpg", "verdict": "translate", "by": "triage"} in (
+        ip_board.summary(project)["proposed"]
+    )
+
+    # A note alone, on an image nobody means to touch, asks for a second look.
+    ip_feedback.save_image(project, "compass.png", request={"note": "Is that a signature?"},
+                           now=_stamp(60))
+    assert drift("compass.png") == ["note_unaddressed"]
+    ip_feedback.save_image(project, "compass.png", request=None)
+    assert drift("compass.png") == [] and "compass.png" not in ip_feedback.load(project)
+
+    _prepared(project)
+    assert drift("map.jpg") == []
+    ip_feedback.save_image(project, "map.jpg", request={
+        "verdict": "restore",
+        "labels": {"NORTH": "NORTE"},
+        "candidates": 2,
+        "note": "Tighter letter-spacing.",
+    }, now=_stamp(60))
+    assert drift("map.jpg") == [
+        "mode_differs", "labels_differ", "candidates_differ", "note_newer_than_job",
+    ]
+    listed = ip_board.summary(project)["requests"]
+    assert [r["image"] for r in listed] == ["map.jpg"] and listed[0]["labels"] == {"NORTH": "NORTE"}
+
+    # Changing only the count must not make an old note look new again.
+    before = ip_feedback.load(project)["map.jpg"]["request"]["note_updated"]
+    ip_feedback.save_image(project, "map.jpg", request={
+        "note": "Tighter letter-spacing.", "candidates": 3,
+    }, now=_stamp(120))
+    assert ip_feedback.load(project)["map.jpg"]["request"]["note_updated"] == before
+
+    # Once the job carries what was asked, nothing is left to do.
+    ip_jobs.prepare(project, [{**TRANSLATE_JOB, "candidates": 3,
+                               "instruction": "Tighter letter-spacing."}])
+    job = ip_jobs.load_manifest(project)["jobs"][0]
+    job["prepared_at"] = _stamp(180)
+    ip_jobs.manifest_path(project).write_text(
+        json.dumps({"version": 1, "jobs": [job]}, ensure_ascii=False), "utf-8"
+    )
+    assert drift("map.jpg") == []
+
+    ip_feedback.save_image(project, "map.jpg", request={"verdict": "leave"})
+    assert drift("map.jpg") == ["job_unwanted"]
+
+
+@pytest.mark.parametrize(
+    "request_,needle",
+    [
+        ({"verdict": "polish"}, "verdict"),
+        ({"labels": {"NORTH": ""}}, "labels must map"),
+        ({"candidates": 9}, "candidates"),
+        ({"note": 7}, "note must be text"),
+    ],
+)
+def test_a_bad_request_is_refused_and_writes_nothing(project: Path, request_, needle):
+    out = ip_feedback.save_image(project, "map.jpg", request=request_)
+    assert out["status"] == "error" and needle in " ".join(out["problems"])
+    assert not ip_feedback.feedback_path(project).exists()
+
+
+def test_a_pick_needs_a_candidate_to_pick(project: Path):
+    out = ip_feedback.save_image(project, "map.jpg", pick={"verdict": "accept", "candidate": 1})
+    assert "no prepared job" in out["problems"][0]
+    _with_candidate(project)
+    out = ip_feedback.save_image(project, "map.jpg", pick={"verdict": "accept", "candidate": 4})
+    assert "candidate 4 does not exist" in out["problems"][0]
+
+
+def test_picks_become_decisions_and_stop_being_outstanding_once_applied(project: Path):
+    _with_candidate(project)
+    ip_feedback.save_image(project, "map.jpg", request={"note": "Keep the border."})
+    ip_feedback.save_image(project, "map.jpg", pick={
+        "verdict": "accept", "candidate": 1, "note": "Lettering is right.",
+    })
+    # Saving the pick left the request from the other control where it was.
+    assert ip_feedback.load(project)["map.jpg"]["request"]["note"] == "Keep the border."
+
+    decisions, stale = ip_board.decisions_from_picks(ip_board.build(project))
+    assert stale == [] and decisions == [
+        {"image": "map.jpg", "note": "Lettering is right.", "candidate": 1},
+    ]
+
+    # A dry run writes no ledger row, so the pick is still there to apply.
+    assert ip_apply.apply(project, decisions, dry_run=True)["counts"]["planned"] == 1
+    assert _board_row(project, "map.jpg")["pick"]["pending"] is True
+
+    assert ip_apply.apply(project, decisions)["counts"]["applied"] == 1
+    assert _board_row(project, "map.jpg")["pick"]["pending"] is False
+    assert ip_board.decisions_from_picks(ip_board.build(project)) == ([], [])
+
+
+def test_a_pick_made_on_a_regenerated_candidate_is_never_applied(project: Path, capsys):
+    _with_candidate(project)
+    ip_feedback.save_image(project, "map.jpg", pick={"verdict": "accept", "candidate": 1})
+    before = (project / "images" / "map.jpg").read_bytes()
+    _image(project / ".harness" / "images" / "jobs" / "map.jpg" / "cand_01.png",
+           (1536, 1024), (1, 2, 3), fmt="PNG")
+
+    row = _board_row(project, "map.jpg")
+    assert row["pick"]["stale"] is True and "stale_pick" in row["flagged"]
+    code, out, _ = _run(capsys, ["apply", "--project", str(project), "--from-board"])
+    assert code == 1 and out["status"] == "error" and out["counts"]["applied"] == 0
+    assert "pick again" in out["refused"][0]["problems"][0]
+    assert (project / "images" / "map.jpg").read_bytes() == before
+
+
+def test_cli_walks_from_triage_to_an_applied_pick(project: Path, capsys, tmp_path: Path):
+    rows = tmp_path / "triage_rows.json"
+    rows.write_text(json.dumps(TRIAGE_ROWS, ensure_ascii=False), "utf-8")
+    code, out, _ = _run(capsys, ["triage", "--project", str(project), "--json-file", str(rows)])
+    assert code == 0 and out["counts"]["recorded"] == 2
+
+    _with_candidate(project)
+    checks = tmp_path / "check_rows.json"
+    checks.write_text(json.dumps({"checks": [
+        {"image": "map.jpg", "candidate": 1, "ok": True, "finding": "Both labels right."},
+    ]}), "utf-8")
+    code, out, _ = _run(capsys, ["check", "--project", str(project), "--json-file", str(checks)])
+    assert code == 0 and out["counts"]["recorded"] == 1
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["apply", "--project", str(project), "--from-board"])
+    assert "no picks are waiting" in json.loads(str(exc.value))["error"]
+
+    ip_feedback.save_image(project, "map.jpg", pick={"verdict": "accept", "candidate": 1})
+    ip_feedback.save_image(project, "compass.png", request={"verdict": "restore"})
+    # Nothing listens on this port: the board still reports, and says so.
+    code, out, _ = _run(capsys, ["board", "--project", str(project),
+                                 "--base-url", "http://127.0.0.1:9"])
+    assert code == 0 and out["server_running"] is False
+    assert out["url"] == "http://127.0.0.1:9/image-pass/book"
+    assert "not answering" in out["instructions"]
+    assert out["picks"] == [{"image": "map.jpg", "note": None, "candidate": 1}]
+    assert [(r["image"], r["reasons"]) for r in out["requests"]] == [("compass.png", ["needs_job"])]
+    assert out["jobs"][0]["candidates"][0]["checked"] is True
+    assert out["untriaged"] == ["cover.jpg"]
+
+    code, out, _ = _run(capsys, ["apply", "--project", str(project), "--from-board", "--dry-run"])
+    assert code == 0 and out["counts"]["planned"] == 1
+    code, out, _ = _run(capsys, ["apply", "--project", str(project), "--from-board"])
+    assert code == 0 and out["applied"][0]["image"] == "map.jpg"
 
 
 # --- apply / revert / verify -----------------------------------------------
@@ -973,3 +1233,207 @@ def test_cli_backfill_reads_a_saved_page_and_refuses_without_a_source(
     (project / "project.json").write_text(json.dumps({"gutenberg_url": str(page)}), "utf-8")
     code, out, _ = _run(capsys, ["backfill", "--project", str(project), "--dry-run"])
     assert code == 0 and out["source"] == str(page) and out["skipped"][0]["image"] == "map.jpg"
+
+
+# --- composite: one candidate's patch over another picture's pixels -----------
+
+def _pixel(path: Path, at) -> tuple:
+    with Image.open(path) as image:
+        return image.convert("RGB").getpixel(at)
+
+
+def _job_dir(project: Path) -> Path:
+    return ip_jobs.jobs_dir(project) / "map.jpg"
+
+
+def test_a_composite_keeps_the_base_outside_the_outline(project: Path):
+    _with_candidate(project)  # a green 1536 x 1024 candidate for the red 300 x 200 map
+    original = project / "images" / "map.jpg"
+    red = _pixel(original, (10, 10))
+
+    out = ip_composite.composite(
+        project, [{"image": "images/map.jpg", "from": 1, "regions": [[100, 50, 200, 150]], "feather": 0}]
+    )
+    assert out["status"] == "ok" and out["counts"]["made"] == 1, out
+    made = out["made"][0]
+    # Numbered after every slot `generate` can fill, at the original's own size.
+    assert made["candidate"] == ip_jobs.MAX_CANDIDATES + 1 and made["size"] == [300, 200]
+    assert made["base"] == {"kind": "original"} and made["from"] == {"kind": "candidate", "candidate": 1}
+    assert 0.15 < made["changed_share"] < 0.18  # 100 x 100 of 300 x 200
+
+    path = Path(made["path"])
+    assert _pixel(path, (10, 10)) == red and _pixel(path, (99, 49)) == red
+    assert _pixel(path, (150, 100)) == (10, 120, 60)
+    assert not (project / "images_original").exists()
+
+    # It is a candidate like any other: on the board with its outline, and applied.
+    shown = _board_row(project, "map.jpg")["candidates"]
+    assert [c["candidate"] for c in shown] == [1, made["candidate"]]
+    assert shown[0]["composite"] is None
+    assert shown[1]["composite"]["regions"] == [[[100, 50], [200, 50], [200, 150], [100, 150]]]
+    applied = ip_apply.apply(project, [{"image": "map.jpg", "candidate": made["candidate"]}])
+    assert applied["counts"]["applied"] == 1
+    assert ledger.read_rows(project)[-1]["composite"]["base"]["kind"] == "original"
+    assert _size(project / "images" / "map.jpg") == (300, 200)
+
+
+def test_a_composite_lines_up_a_candidate_that_came_back_padded(project: Path):
+    """The image tool cannot make a very wide strip: it hands back the drawing
+    with white bands above and below. The patch still has to land where it
+    belongs in the original."""
+    from PIL import ImageDraw
+
+    strip = Image.new("RGB", (400, 100), (255, 255, 255))
+    ImageDraw.Draw(strip).rectangle([200, 40, 239, 59], fill=(0, 0, 0))
+    strip.save(project / "images" / "compass.png")
+    _prepared(project, {"image": "compass.png", "mode": "restore", "instruction": "x"})
+    padded = Image.new("RGB", (1200, 600), (255, 255, 255))  # 3x, centred: rows 150-449
+    ImageDraw.Draw(padded).rectangle([600, 270, 719, 329], fill=(0, 0, 255))
+    padded.save(ip_jobs.jobs_dir(project) / "compass.png" / "cand_01.png")
+
+    out = ip_composite.composite(
+        project, [{"image": "compass.png", "from": 1, "regions": [[190, 30, 250, 70]], "feather": 0}]
+    )
+    made = out["made"][0]
+    assert made["padded_source"] is True and made["size"] == [400, 100]
+    path = Path(made["path"])
+    assert _pixel(path, (220, 50)) == (0, 0, 255)       # the square, where the square was
+    assert _pixel(path, (195, 50)) == (255, 255, 255)   # and not a pixel to its left
+    assert _pixel(path, (245, 50)) == (255, 255, 255)
+
+
+def test_a_composite_slides_the_patch_to_where_its_surroundings_match(project: Path, tmp_path: Path):
+    """Two renderings of one drawing sit a few pixels apart. The patch is put
+    where the drawing around it lines up, not where the arithmetic says."""
+    from PIL import ImageChops
+
+    drawing = Image.open(_drawing(tmp_path / "drawing.png", (300, 200), seed=7)).convert("RGB")
+    drawing.save(project / "images" / "compass.png")
+    _prepared(project, {"image": "compass.png", "mode": "restore", "instruction": "x"})
+    ImageChops.offset(drawing, 2, -1).save(ip_jobs.jobs_dir(project) / "compass.png" / "cand_01.png")
+
+    out = ip_composite.composite(
+        project, [{"image": "compass.png", "from": 1, "regions": [[120, 80, 180, 120]]}]
+    )
+    region = out["made"][0]["regions"][0]
+    assert region["offset"] == [2, -1]
+    assert region["surround_difference"] < region["surround_difference_unmoved"]
+    # Shifted back, the candidate is the base: nothing is left to differ.
+    assert out["made"][0]["changed_share"] == 0
+    assert [w["code"] for w in out["warnings"]] == ["nothing_changed"]
+
+
+def test_a_composite_can_be_built_on_an_archived_candidate(project: Path):
+    """A redo that fixed one label and broke another: keep the earlier
+    candidate, take only the fixed label from the new one."""
+    _with_candidate(project, color=(10, 120, 60))
+    ip_jobs.prepare(project, [{**TRANSLATE_JOB, "instruction": "Fix the one label."}])
+    ip_jobs.generate(project, runner=FakeCodex(color=(0, 0, 200)))
+    earlier = next((_job_dir(project) / "previous").glob("*/cand_01.png"))
+    base = earlier.relative_to(_job_dir(project)).as_posix()
+
+    out = ip_composite.composite(
+        project, [{"image": "map.jpg", "from": 1, "base": base, "regions": [[0, 0, 100, 100]], "feather": 0}]
+    )
+    made = out["made"][0]
+    assert made["base"] == {"kind": "previous", "path": base} and made["size"] == [1536, 1024]
+    assert _pixel(Path(made["path"]), (50, 50)) == (0, 0, 200)
+    assert _pixel(Path(made["path"]), (800, 600)) == (10, 120, 60)
+
+
+@pytest.mark.parametrize(
+    "change,needle",
+    [
+        ({"from": 9}, "candidate 9 does not exist"),
+        ({"from": "original"}, "not a candidate number"),
+        ({"base": "../../../source.txt"}, "previous/ folder"),
+        ({"base": 1}, "same file"),
+        ({"regions": []}, "non-empty list"),
+        ({"regions": [[10, 10, 5, 50]]}, "x1 > x0"),
+        ({"regions": [[0, 0, 400, 100]]}, "outside the base picture"),
+        ({"scale": 9}, "scale must be"),
+        ({"feather": -1}, "feather must be"),
+        ({"image": "compass.png"}, "no prepared job"),
+        ({"outline": True}, "unknown field"),
+    ],
+)
+def test_composite_is_all_or_nothing(project: Path, change, needle):
+    _with_candidate(project)
+    good = {"image": "map.jpg", "from": 1, "regions": [[100, 50, 200, 150]]}
+    out = ip_composite.composite(project, [good, {**good, **change}])
+    assert out["status"] == "error" and out["counts"]["made"] == 0
+    assert needle in " ".join(out["invalid"][0]["problems"]), out["invalid"]
+    assert ip_jobs.existing_candidates(_job_dir(project)) == [1]
+
+
+def test_a_composite_dry_run_measures_and_writes_nothing(project: Path):
+    _with_candidate(project)
+    out = ip_composite.composite(
+        project, [{"image": "map.jpg", "from": 1, "regions": [[100, 50, 200, 150]]}], dry_run=True
+    )
+    assert out["counts"] == {"requested": 1, "made": 0, "planned": 1, "invalid": 0, "warnings": 0}
+    assert out["planned"][0]["candidate"] == ip_jobs.MAX_CANDIDATES + 1
+    assert ip_jobs.existing_candidates(_job_dir(project)) == [1]
+
+
+def test_a_composite_never_stands_in_for_a_candidate_generate_owes(project: Path):
+    _with_candidate(project)
+    ip_composite.composite(project, [{"image": "map.jpg", "from": 1, "regions": [[0, 0, 50, 50]]}])
+    # Asking for a second candidate still runs Codex once: the composite is not it.
+    ip_jobs.prepare(project, [{**TRANSLATE_JOB, "candidates": 2}])
+    codex = FakeCodex()
+    assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
+    assert len(codex.calls) == 1
+    assert ip_jobs.existing_candidates(_job_dir(project)) == [1, 2, ip_jobs.MAX_CANDIDATES + 1]
+
+
+def test_a_composite_can_be_made_again_in_place_but_never_over_a_generated_candidate(project: Path):
+    _with_candidate(project)
+    row = {"image": "map.jpg", "from": 1, "regions": [[0, 0, 50, 50]], "feather": 0}
+    first = ip_composite.composite(project, [row])["made"][0]
+    assert _pixel(Path(first["path"]), (150, 100)) != (10, 120, 60)
+
+    again = ip_composite.composite(
+        project, [{**row, "regions": [[100, 50, 200, 150]], "candidate": first["candidate"]}]
+    )["made"][0]
+    assert again["candidate"] == first["candidate"]
+    assert _pixel(Path(again["path"]), (150, 100)) == (10, 120, 60)
+    assert ip_jobs.existing_candidates(_job_dir(project)) == [1, first["candidate"]]
+
+    for number, needle in ((1, "composite's number"), (first["candidate"] + 1, None)):
+        out = ip_composite.composite(project, [{**row, "candidate": number}], dry_run=True)
+        assert (out["status"] == "error") == bool(needle)
+    # A file in a composite's range that Codex-style tooling put there is not ours.
+    _image(_job_dir(project) / "cand_07.png", fmt="PNG")
+    out = ip_composite.composite(project, [{**row, "candidate": 7}])
+    assert "not a composite" in out["invalid"][0]["problems"][0]
+
+
+def test_a_composites_description_is_archived_with_it_and_dies_with_its_file(project: Path):
+    _with_candidate(project)
+    out = ip_composite.composite(project, [{"image": "map.jpg", "from": 1, "regions": [[0, 0, 50, 50]]}])
+    path = Path(out["made"][0]["path"])
+    assert ip_composite.load_sidecar(path)["regions"]
+
+    # The description is about one file: over another picture it says nothing.
+    _image(path, (300, 200), (1, 2, 3), fmt="PNG")
+    assert ip_composite.load_sidecar(path) is None
+    assert _board_row(project, "map.jpg")["candidates"][-1]["composite"] is None
+
+    ip_jobs.prepare(project, [{**TRANSLATE_JOB, "instruction": "Start over."}])
+    assert not list(_job_dir(project).glob("cand_*"))
+    assert len(list((_job_dir(project) / "previous").glob("*/cand_05.composite.json"))) == 1
+
+
+def test_cli_composite_prints_one_json_object(project: Path, capsys, tmp_path: Path):
+    _with_candidate(project)
+    rows = tmp_path / "composites.json"
+    rows.write_text(json.dumps({"composites": [
+        {"image": "map.jpg", "from": 1, "regions": [[[100, 50], [200, 50], [150, 150]]], "scale": 2},
+    ]}), "utf-8")
+    code, out, _ = _run(capsys, ["composite", "--project", str(project), "--json-file", str(rows)])
+    assert code == 0 and out["made"][0]["size"] == [600, 400]
+    # The outline is reported in the composite's own pixels, where the page draws it.
+    assert out["made"][0]["regions"][0]["polygon"] == [[200, 100], [400, 100], [300, 300]]
+    code, out, _ = _run(capsys, ["board", "--project", str(project)])
+    assert out["jobs"][0]["candidates"][-1]["composite"]["from"] == {"kind": "candidate", "candidate": 1}
