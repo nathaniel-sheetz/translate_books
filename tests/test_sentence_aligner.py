@@ -6,6 +6,7 @@ from src.sentence_aligner import (
     MIN_SENTENCE_CHARS,
     split_sentences,
     _coverage_gaps,
+    _glue_units,
     _split_long_sentence,
     _normalize_for_embedding,
     _split_sentences_with_para_indices,
@@ -175,6 +176,41 @@ class TestSplitSentencesWithParaIndices:
         assert indices[-1] == 1
 
 
+class TestGlueUnits:
+    def test_inciso_fragment_joins_the_line_before_it(self):
+        es = ["—¡Abuelo!", "—exclamó—.", "¡Misty está parada en el agua!"]
+        assert _glue_units(es, [0, 0, 0]) == [[0, 1], [2]]
+
+    def test_raya_followed_by_a_capital_starts_a_new_unit(self):
+        # A new speaker's line, not a narrator's inciso.
+        es = ["—¿Y ahora hacia dónde?", "—Hacia tierra firme."]
+        assert _glue_units(es, [0, 1]) == [[0], [1]]
+
+    def test_sentence_after_a_title_abbreviation_joins_it(self):
+        es = ["El Sr.", "Hardy seguía en la biblioteca.", "Los chicos volvieron."]
+        assert _glue_units(es, [0, 0, 0]) == [[0, 1], [2]]
+
+    def test_a_run_of_fragments_forms_one_unit(self):
+        es = ["—Sí, buen día —concedió el Sr.", "Stummer.", "—dijo otra vez—."]
+        assert _glue_units(es, [0, 0, 0]) == [[0, 1, 2]]
+
+    def test_never_glues_across_a_paragraph_break(self):
+        es = ["—¡Abuelo!", "—exclamó—."]
+        assert _glue_units(es, [0, 1]) == [[0], [1]]
+
+    def test_without_paragraph_indices_everything_is_one_paragraph(self):
+        es = ["—¡Abuelo!", "—exclamó—."]
+        assert _glue_units(es) == [[0, 1]]
+
+    def test_every_sentence_appears_exactly_once(self):
+        es = ["Uno.", "—dijo—.", "Dos.", "El Dr.", "Tres."]
+        units = _glue_units(es, [0, 0, 0, 1, 1])
+        assert [i for unit in units for i in unit] == list(range(len(es)))
+
+    def test_empty(self):
+        assert _glue_units([]) == []
+
+
 class TestAlignSentences:
     """Integration tests that require sentence-transformers model.
 
@@ -214,6 +250,38 @@ class TestAlignSentences:
         assert len(result) == 1
         assert result[0]["en_idx"] == 0
         assert result[0]["es_indices"] == [0, 1]
+
+    def test_speech_tag_fragment_shares_its_lines_source(self, model):
+        """pysbd cuts '—exclamó—.' off the line it follows. On its own the tag
+        matches nothing; glued, it lands on the sentence that holds 'he cried'."""
+        from src.sentence_aligner import align_sentences
+
+        en = ['"Grandpa!" he cried.', '"Misty\'s standing in water!"']
+        es = ["—¡Abuelo!", "—exclamó—.", "¡Misty está parada en el agua!"]
+        result = align_sentences(en, es, model, es_para_indices=[0, 0, 0])
+
+        assert [r["en_idx"] for r in result] == [0, 1]
+        assert result[0]["es_indices"] == [0, 1]
+        assert result[0]["es_sentences"] == es[:2]
+        assert result[1]["es_idx"] == 2
+
+    def test_title_abbreviation_fragment_stays_with_its_sentence(self, model):
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "Mr. Hardy was still in the library when the boys returned home.",
+            "He looked up from his papers.",
+        ]
+        es = [
+            "El Sr.",
+            "Hardy seguía en la biblioteca cuando los chicos volvieron a casa.",
+            "Levantó la vista de sus papeles.",
+        ]
+        result = align_sentences(en, es, model, es_para_indices=[0, 0, 0])
+
+        assert result[0]["en_idx"] == 0
+        assert result[0]["es_indices"] == [0, 1]
+        assert result[1]["en_idx"] == 1
 
     def test_empty_input(self, model):
         from src.sentence_aligner import align_sentences

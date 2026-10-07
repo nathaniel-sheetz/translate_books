@@ -194,6 +194,44 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
     return sentences, para_indices
 
 
+# A target sentence that opens with a raya and a lowercase letter is a narrator's
+# inciso ("—exclamó—.") that pysbd cut off the line it belongs to. English keeps
+# the pair whole ('"Grandpa!" he cried.'), so on its own the fragment has nothing
+# to match and lands on whichever neighbour scores a hair higher.
+_ES_INCISO_RE = re.compile(r"^[—–]\s*[a-záéíóúüñ]")
+# Spanish titles pysbd splits after ("El Sr." | "Hardy seguía…").
+_ES_TITLE_ABBREV_RE = re.compile(r"\b(?:Sr|Sra|Srta|Sres|Dr|Dra|Mr|Mrs)\.$")
+
+
+def _glue_units(
+    sentences: list[str],
+    para_indices: list[int] | None = None,
+) -> list[list[int]]:
+    """
+    Group target sentences that must be aligned as one unit.
+
+    Returns runs of consecutive sentence indices covering every sentence once.
+    A sentence joins the unit before it when it is a narrator's inciso or when
+    the previous sentence stops at a title abbreviation — both are artefacts of
+    the Spanish split, which cannot itself change (es_idx anchors annotations
+    and corrections, and the reader re-splits the chunk live). Gluing here
+    leaves every index where it was and only makes the pieces share a source
+    sentence. Never glues across a paragraph boundary.
+    """
+    units: list[list[int]] = []
+    for i, sent in enumerate(sentences):
+        same_para = i > 0 and (
+            para_indices is None or para_indices[i] == para_indices[i - 1]
+        )
+        if same_para and (
+            _ES_INCISO_RE.match(sent) or _ES_TITLE_ABBREV_RE.search(sentences[i - 1])
+        ):
+            units[-1].append(i)
+        else:
+            units.append([i])
+    return units
+
+
 def _monotonic_alignment(
     similarity: np.ndarray,
 ) -> list[tuple[int, int, float]]:
@@ -300,14 +338,24 @@ def align_sentences(
     if model is None:
         model = _get_model()
 
+    # The DP runs over glued units, then every sentence in a unit takes the
+    # unit's source sentence; _group_nto1 folds them back into one row.
+    units = _glue_units(es_sentences, es_para_indices)
     en_for_embed = [_normalize_for_embedding(s) for s in en_sentences]
-    es_for_embed = [_normalize_for_embedding(s) for s in es_sentences]
+    es_for_embed = [
+        _normalize_for_embedding(" ".join(es_sentences[i] for i in unit))
+        for unit in units
+    ]
 
     en_embeddings = model.encode(en_for_embed, normalize_embeddings=True)
     es_embeddings = model.encode(es_for_embed, normalize_embeddings=True)
 
     similarity = np.dot(es_embeddings, en_embeddings.T)
-    raw_alignment = _monotonic_alignment(similarity)
+    raw_alignment = [
+        (es_idx, en_idx, score)
+        for unit_idx, en_idx, score in _monotonic_alignment(similarity)
+        for es_idx in units[unit_idx]
+    ]
 
     alignments = _group_nto1(
         raw_alignment,
