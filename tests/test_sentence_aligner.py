@@ -194,6 +194,17 @@ class TestGlueUnits:
         es = ["—Sí, buen día —concedió el Sr.", "Stummer.", "—dijo otra vez—."]
         assert _glue_units(es, [0, 0, 0]) == [[0, 1, 2]]
 
+    def test_continuation_punctuation_joins_the_sentence_before(self):
+        es = ["—¡Juuu!", "... ¡Ja!", "... ¡ah!", "—gritaba.", "Sonaba distinto."]
+        assert _glue_units(es, [0, 0, 0, 0, 0]) == [[0, 1, 2, 3], [4]]
+        es = ["—Sí, sí, ¡qué membrana tan buena!", ", ¡qué patas tan grandes!"]
+        assert _glue_units(es, [0, 0]) == [[0, 1]]
+
+    def test_lowercase_start_alone_does_not_glue(self):
+        # A verse line starts lowercase; lines must stay one unit each.
+        es = ["Llega el viento del norte trayendo copos de nieve:", "viste los campos del blanco más puro,"]
+        assert _glue_units(es, [0, 0]) == [[0], [1]]
+
     def test_never_glues_across_a_paragraph_break(self):
         es = ["—¡Abuelo!", "—exclamó—."]
         assert _glue_units(es, [0, 1]) == [[0], [1]]

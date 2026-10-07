@@ -205,6 +205,12 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
 _ES_INCISO_RE = re.compile(r"^[—–]\s*[a-záéíóúüñ]")
 # Spanish titles pysbd splits after ("El Sr." | "Hardy seguía…").
 _ES_TITLE_ABBREV_RE = re.compile(r"\b(?:Sr|Sra|Srta|Sres|Dr|Dra|Mr|Mrs)\.$")
+# No sentence opens with an ellipsis, comma, semicolon or colon: pysbd cut after a
+# mid-sentence "!" or "?" ("—¡Juuu!" | "... ¡Ja!" | "... ¡Ja!"). Left apart, each
+# crumb adds its own term to the DP's sum and a run of them can outvote the real
+# sentences around it. (A lowercase start is deliberately not a signal here: that
+# is what a verse line looks like.)
+_ES_CONTINUATION_RE = re.compile(r"^(?:\.\.\.|…|[,;:])")
 
 
 def _glue_units(
@@ -215,9 +221,10 @@ def _glue_units(
     Group target sentences that must be aligned as one unit.
 
     Returns runs of consecutive sentence indices covering every sentence once.
-    A sentence joins the unit before it when it is a narrator's inciso or when
-    the previous sentence stops at a title abbreviation — both are artefacts of
-    the Spanish split, which cannot itself change (es_idx anchors annotations
+    A sentence joins the unit before it when it is a narrator's inciso, when it
+    opens with continuation punctuation, or when the previous sentence stops at
+    a title abbreviation — all artefacts of the Spanish split, which cannot
+    itself change (es_idx anchors annotations
     and corrections, and the reader re-splits the chunk live). Gluing here
     leaves every index where it was and only makes the pieces share a source
     sentence. Never glues across a paragraph boundary.
@@ -228,7 +235,9 @@ def _glue_units(
             para_indices is None or para_indices[i] == para_indices[i - 1]
         )
         if same_para and (
-            _ES_INCISO_RE.match(sent) or _ES_TITLE_ABBREV_RE.search(sentences[i - 1])
+            _ES_INCISO_RE.match(sent)
+            or _ES_CONTINUATION_RE.match(sent)
+            or _ES_TITLE_ABBREV_RE.search(sentences[i - 1])
         ):
             units[-1].append(i)
         else:
