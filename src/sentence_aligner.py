@@ -6,8 +6,11 @@ oversized sentences (common in English literary dialogue), and
 sentence-transformers embeddings with monotonic dynamic programming
 to find the best alignment.
 
-Validated at 95.5% high-confidence alignment across dialogue-heavy
-chapters (fabre2 ch06/24/25, lang-faerie ch01).
+Around the DP sit three repairs for the ways the two languages split
+differently: Spanish fragments are glued into units (_glue_units), the
+source side is split inside quotations (_split_inside_quotes), and a row
+may take in an unclaimed source sentence from its own paragraph
+(_absorb_orphans).
 """
 
 import json
