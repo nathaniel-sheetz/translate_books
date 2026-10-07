@@ -12,6 +12,11 @@ Both fan-outs need the same Windows/cwd/absolutize/wave fixes:
 - Refuse to start until the CLI confirms a subscription login
   (``subscription_auth_error``).
 
+A third family, ``codex``, is an **image** family only (:func:`run_image_job`,
+driven by ``src/image_pass``). It is deliberately absent from
+``_CLI_DEFAULT_BINS``: it shares the scrub, the preflight and the bounded spawn,
+but it is not a translate worker and ``headless_cli`` must never resolve to it.
+
 CLI families are selected with ``cli`` (``claude`` | ``cursor``). The Claude profile
 preserves today's ``claude -p`` argv. The Cursor profile drives ``cursor-agent``
 under a subscription login (no metered API key).
@@ -106,7 +111,14 @@ _CLAUDE_WORKER_ALIASES = frozenset({"sonnet", "opus", "haiku", "fable"})
 # missing one silently bills money, while over-scrubbing at worst drops a model
 # default -- and fan-out always passes --model explicitly, so no ANTHROPIC_* var
 # is load-bearing here.
-_SCRUB_PREFIXES: tuple[str, ...] = ("ANTHROPIC_",)
+#
+# ``OPENAI_`` gets the same treatment for the Codex image family. Codex 0.157.0
+# reads OPENAI_API_KEY (and its bundled imagegen skill's CLI fallback bills it
+# directly), and its binary also names OPENAI_BASE_URL, OPENAI_ORGANIZATION and
+# the workload-identity pair OPENAI_FEDERATION_RULE_ID /
+# OPENAI_IDENTITY_TOKEN_FILE. Same asymmetry as above: no OPENAI_* var is
+# load-bearing for a ChatGPT-login `codex exec`.
+_SCRUB_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "OPENAI_")
 
 # One union list for every CLI family, deliberately: `claude` never reads
 # CURSOR_API_KEY and `cursor-agent` never reads the Anthropic vars, so merging
@@ -123,6 +135,11 @@ _SCRUB_NAMES: frozenset[str] = frozenset({
     "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
     # Cursor profile.
     "CURSOR_API_KEY",
+    # Codex image family. Both names sit beside OPENAI_API_KEY in the 0.157.0
+    # binary's env-auth list; either one makes `codex exec` skip the ChatGPT
+    # session. CODEX_HOME is NOT here: that is where the subscription login lives.
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
 })
 
 # CLAUDE_CODE_OAUTH_TOKEN *is* subscription auth (`claude setup-token` requires a
@@ -1133,6 +1150,15 @@ def _kill_live_processes() -> int:
     return len(procs)
 
 
+def kill_live_processes() -> int:
+    """:func:`_kill_live_processes` for a caller that runs its own pool.
+
+    ``run_headless_wave`` handles its own interrupt; ``src/image_pass`` fans
+    :func:`run_image_job` out itself and needs the same door on Ctrl-C.
+    """
+    return _kill_live_processes()
+
+
 def _communicate_bounded(
     proc: subprocess.Popen, input_text: str | None, timeout: float | None
 ) -> tuple[int, str, str, bool]:
@@ -1294,8 +1320,17 @@ _AUTH_PROBE_ARGV: dict[str, tuple[str, ...] | None] = {
     #  "hasRefreshToken":true,"userInfo":{…}}. See subscription_auth_error for
     # why this probe answers a different question than Claude's.
     "cursor": ("status", "--format", "json"),
+    # Plain text, not JSON, and on **stderr** (observed 2026-10-05 on codex-cli
+    # 0.157.0: "Logged in using ChatGPT" / exit 0, "Not logged in" / exit 1).
+    # It reports the login on file only: OPENAI_API_KEY or CODEX_API_KEY in the
+    # environment leaves the line unchanged, so for those the scrub is the whole
+    # guarantee. See _codex_auth_error for every line that binary can print.
+    "codex": ("login", "status"),
 }
 _AUTH_PROBE_TIMEOUT_S = 30.0
+
+# Probes whose answer is prose rather than a JSON object.
+_TEXT_AUTH_PROBES = frozenset({"codex"})
 
 
 def _default_auth_prober(
@@ -1362,6 +1397,54 @@ def _cursor_auth_error(cli_bin: str, obj: dict[str, Any]) -> str | None:
     )
 
 
+# The one `codex login status` line that means "this bills the ChatGPT plan".
+_CODEX_SUBSCRIPTION_LINE = "logged in using chatgpt"
+
+
+def _codex_auth_error(cli_bin: str, rc: int, stdout: str, stderr: str) -> str | None:
+    """Verdict for ``codex login status``, which prints one line of prose.
+
+    The 0.157.0 binary carries these lines: ``Logged in using ChatGPT``,
+    ``Logged in using an API key - <masked>``, ``Logged in using access token``,
+    ``… personal access token``, ``… workload identity``, ``… Amazon Bedrock API
+    key``, ``… Amazon Bedrock AWS access keys`` and ``Not logged in``. Only the
+    first is the subscription; every other login bills something else, so this
+    is an allowlist of one and anything unrecognised fails closed.
+
+    Both streams are read because the CLI writes the verdict to stderr. The
+    API-key line ends in a masked key and a future one may name an account, so
+    the raw text is never echoed -- only which kind of login it was.
+    """
+    text = f"{stdout or ''}\n{stderr or ''}".lower()
+    if "not logged in" in text:
+        return f"{cli_bin} is not logged in — run `codex login` and sign in with ChatGPT"
+    if rc != 0:
+        return (
+            f"`codex login status` failed (exit {rc}). Upgrade the Codex CLI so "
+            "the subscription preflight can run."
+        )
+    if "api key" in text:
+        return (
+            f"{cli_bin} is logged in with an API key, which bills metered API "
+            "credit. Image jobs are subscription-only — run `codex logout`, then "
+            "`codex login` and sign in with ChatGPT."
+        )
+    # Line-anchored: "logged in using chatgpt" must be the whole verdict, so a
+    # later "ChatGPT <something metered>" variant cannot pass as a prefix match.
+    if any(line.strip() == _CODEX_SUBSCRIPTION_LINE for line in text.splitlines()):
+        return None
+    kind = "an unrecognised login"
+    for marker in ("personal access token", "access token", "workload identity", "bedrock"):
+        if marker in text:
+            kind = f"a {marker} login"
+            break
+    return (
+        f"could not confirm a ChatGPT subscription login for {cli_bin} "
+        f"(`codex login status` reported {kind}). Image jobs are "
+        "subscription-only — run `codex login` and sign in with ChatGPT."
+    )
+
+
 def subscription_auth_error(
     cli: str,
     cli_bin: str,
@@ -1384,6 +1467,9 @@ def subscription_auth_error(
       this repo to route to, so the billing-safety half is already carried by the
       ``CURSOR_API_KEY`` scrub; what this adds is failing before N jobs each
       discover a logged-out CLI on their own.
+    - ``codex login status`` is a **routing** probe again, in prose: it names the
+      kind of login on file, and only ``Logged in using ChatGPT`` passes (see
+      :func:`_codex_auth_error`).
 
     Must run with the same scrubbed ``env`` *and* the same ``cwd`` as the workers.
     The CLI reads project-local settings, so probing from the repo root can report
@@ -1412,6 +1498,11 @@ def subscription_auth_error(
         return f"`{label}` timed out after {timeout:g}s"
     except OSError as exc:
         return f"could not run `{label}`: {exc}"
+
+    if cli in _TEXT_AUTH_PROBES:
+        # Before the generic rc gate: a logged-out Codex exits 1, and "upgrade
+        # the CLI" is the wrong advice for that.
+        return _codex_auth_error(cli_bin, rc, stdout, stderr)
 
     if rc != 0:
         detail = (stderr or stdout or "").strip()[:300] or f"exit {rc}"
@@ -1547,6 +1638,235 @@ def preflight_error(
                 resolved, model, env=dict(_slot_env(cli_name, probe_env))
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Image family (Codex on a ChatGPT subscription)
+# ---------------------------------------------------------------------------
+#
+# Not a wave: one `codex exec` produces one image, takes minutes, and its output
+# is a file rather than stdout. It shares the three things that make a spawn
+# safe here -- the scrubbed env, the fail-closed login probe and the bounded
+# tree-killing communicate -- and nothing of the translate argv.
+
+IMAGE_CLI = "codex"
+_IMAGE_CLI_BIN = "codex"
+
+# One generation took 85 s live (2026-10-05) and a run that regenerated four
+# times took 274 s; the ceiling is for a hung CLI, not a slow image.
+_IMAGE_JOB_TIMEOUT_S = 20 * 60
+
+
+def _image_bin_missing_error(cli_bin: str) -> str:
+    return (
+        f"codex not found: {cli_bin!r} (not on PATH / PATHEXT) — install the "
+        "Codex CLI and run `codex login`"
+    )
+
+
+def image_preflight_error(
+    cli_bin: str | None = None, *, prober: AuthProber | None = None
+) -> str | None:
+    """Why an image job would refuse to start, or ``None`` if it would run.
+
+    The binary and login gates :func:`run_image_job` applies, hoisted so
+    ``generate --estimate`` cannot go green on a logged-out or API-key Codex.
+    """
+    name = cli_bin or _IMAGE_CLI_BIN
+    resolved = shutil.which(name)
+    if not resolved:
+        return _image_bin_missing_error(name)
+    return subscription_auth_error(
+        IMAGE_CLI,
+        resolved,
+        subscription_env(IMAGE_CLI),
+        cwd=neutral_claude_cwd(),
+        prober=prober,
+    )
+
+
+def _build_image_cmd(
+    cli_bin: str,
+    *,
+    job_dir: Path | str,
+    images: Sequence[Path | str],
+    model: str | None,
+) -> list[str]:
+    """``codex exec`` argv for one image job; the prompt arrives on stdin.
+
+    ``-i`` is variadic (``-i <FILE>...``), so every image flag goes **before**
+    the other options and no positional follows: a trailing ``-`` after ``-i``
+    would be read as one more image. With no positional, exec reads the prompt
+    from stdin on its own (checked on 0.157.0: "Reading prompt from stdin...").
+
+    ``read-only``: the job has nothing to write. The built-in image tool saves
+    its result under ``$CODEX_HOME/generated_images/<thread id>/`` on its own,
+    outside the sandbox, and the caller collects it from there. ``--ephemeral``
+    keeps the session out of the operator's Codex history.
+
+    ``-c model_provider=openai`` pins the built-in provider. ``codex login
+    status`` reports the login on file, not where ``config.toml`` routes
+    requests, so a ``model_provider`` pointing at a third-party endpoint with
+    its own ``env_key`` would pass the probe and bill that key. The override is
+    the non-env half of the guarantee (checked on 0.157.0: an unknown id is
+    rejected with "Model provider … not found", so the flag is honoured).
+    """
+    cmd = [cli_bin, "exec"]
+    for image in images:
+        cmd += ["-i", str(image)]
+    cmd += [
+        "-c", "model_provider=openai",
+        "-C", str(job_dir),
+        "-s", "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--json",
+    ]
+    if model:
+        cmd += ["-m", model]
+    return cmd
+
+
+def _image_failure_detail(stdout: str, stderr: str) -> str:
+    """The last error a ``codex exec --json`` stream reported, in one line.
+
+    Failures arrive as ``{"type":"error","message":…}`` /
+    ``{"type":"turn.failed","error":{"message":…}}`` events among many
+    "Reconnecting…" lines; the final one is the cause.
+    """
+    last = ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "error":
+            message = event.get("message")
+        elif kind == "turn.failed":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+        elif kind == "item.completed":
+            item = event.get("item")
+            message = (
+                item.get("message")
+                if isinstance(item, dict) and item.get("type") == "error"
+                else None
+            )
+        else:
+            message = None
+        if isinstance(message, str) and message.strip():
+            last = _unwrap_api_error(message.strip())
+    return (last or (stderr or "").strip() or (stdout or "").strip())[:500]
+
+
+def _unwrap_api_error(message: str) -> str:
+    """Pull the sentence out of an API error the CLI relays as a JSON string.
+
+    Observed 2026-10-05: a rejected model arrives as ``{"type":"error",
+    "status":400,"error":{"type":"invalid_request_error","message":"The
+    'gpt-5.4' model is not supported when using Codex with a ChatGPT
+    account."}}`` *inside* the event's ``message`` field.
+    """
+    if not message.startswith("{"):
+        return message
+    try:
+        obj = json.loads(message)
+    except json.JSONDecodeError:
+        return message
+    error = obj.get("error") if isinstance(obj, dict) else None
+    inner = error.get("message") if isinstance(error, dict) else None
+    return inner.strip() if isinstance(inner, str) and inner.strip() else message
+
+
+def run_image_job(
+    prompt_text: str,
+    *,
+    job_dir: Path | str,
+    images: Sequence[Path | str] = (),
+    cli_bin: str | None = None,
+    model: str | None = None,
+    timeout: float | None = None,
+    runner: Optional[Runner] = None,
+    prober: Optional[AuthProber] = None,
+) -> dict[str, Any]:
+    """Run one Codex image job in ``job_dir``; the caller harvests the file.
+
+    Returns ``{ok, rc, stdout, stderr, wall_s, cmd, error}``. ``stdout`` is the
+    ``--json`` event stream, kept whole because where the image landed is read
+    out of it by ``src/image_pass``. ``error`` is ``None`` on a zero exit.
+
+    The login probe runs on **every** job when the real runner is in use (or a
+    ``prober`` is given), not once per batch: it costs a fraction of a second
+    against minutes of generation, and it is the only thing standing between a
+    mid-batch `codex login --with-api-key` and a metered image. A stub
+    ``runner`` with no ``prober`` skips it, so unit tests never spawn anything.
+    There is no flag to skip it otherwise.
+    """
+    name = cli_bin or _IMAGE_CLI_BIN
+    env = subscription_env(IMAGE_CLI)
+    if runner is None:
+        resolved = shutil.which(name)
+        if not resolved:
+            return _image_job_error(_image_bin_missing_error(name))
+        name = resolved
+    if prober is not None or runner is None:
+        auth_error = subscription_auth_error(
+            IMAGE_CLI, name, env, cwd=neutral_claude_cwd(), prober=prober
+        )
+        if auth_error:
+            return _image_job_error(auth_error)
+
+    cmd = _build_image_cmd(name, job_dir=job_dir, images=images, model=model)
+    started = time.monotonic()
+    try:
+        if runner is None:
+            rc, stdout, stderr = default_claude_runner(
+                cmd,
+                input_text=prompt_text,
+                cwd=Path(job_dir),
+                timeout=timeout if timeout is not None else _IMAGE_JOB_TIMEOUT_S,
+                cli=IMAGE_CLI,
+                env=env,
+            )
+        else:
+            rc, stdout, stderr = runner(cmd, input_text=prompt_text, cwd=Path(job_dir))
+    except OSError as exc:
+        return _image_job_error(f"could not run {name}: {exc}", cmd=cmd)
+    wall_s = round(time.monotonic() - started, 1)
+    error = None if rc == 0 else (
+        _image_failure_detail(stdout, stderr) or f"codex exec exited {rc}"
+    )
+    return {
+        "ok": rc == 0,
+        "rc": rc,
+        "stdout": stdout,
+        "stderr": stderr,
+        "wall_s": wall_s,
+        "cmd": cmd,
+        "error": error,
+        "preflight_failed": False,
+    }
+
+
+def _image_job_error(message: str, *, cmd: list[str] | None = None) -> dict[str, Any]:
+    """A job that never spawned. ``preflight_failed`` tells the caller to stop:
+    the next job would be refused for the same reason."""
+    return {
+        "ok": False,
+        "rc": None,
+        "stdout": "",
+        "stderr": "",
+        "wall_s": 0.0,
+        "cmd": cmd or [],
+        "error": message,
+        "preflight_failed": cmd is None,
+    }
 
 
 def worker_model_suggestions(cli: str, *, timeout: float = 10.0) -> list[str]:

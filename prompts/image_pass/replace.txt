@@ -1,0 +1,13 @@
+$imagegen
+
+The attached image, `{{input_name}}`, is an illustration from the book "{{title}}". Make a new illustration to take its place.
+
+- The new picture must do the same job on the page as the original: the same subject, and the same things a reader is meant to see in it.
+- Keep the original's orientation and proportions, so it fits the same space in the book.
+- Match the book's period and the look of its other illustrations unless the editor's brief says otherwise.
+- Put no lettering in the image unless the editor's brief or the label list asks for it; spell any lettering exactly as given.
+{{labels_block}}
+Brief from the editor:
+{{instruction}}
+
+{{contract}}

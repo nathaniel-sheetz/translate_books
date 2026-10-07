@@ -15,6 +15,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from flask import Flask, jsonify, make_response, redirect, render_template, request, send_from_directory
 
@@ -2087,6 +2088,166 @@ def serve_project_image(project_id, filename):
     if not images_dir.exists():
         return jsonify({"error": "Images directory not found"}), 404
     return send_from_directory(str(images_dir), filename)
+
+
+# ---------------------------------------------------------------------------
+# Image board (/image-pass/<id>): every image the book references, at whatever
+# stage the image pass has it in. The state is built by src.image_pass.board
+# from what is on disk; these routes only put URLs on it and take the one
+# thing the page writes, the user's requests and picks in feedback.json.
+# ---------------------------------------------------------------------------
+
+def _image_board_url(project_id: str, picture: dict) -> str:
+    """Where the browser fetches one of a board row's pictures from."""
+    if picture["kind"] == "candidate":
+        path = f"image-pass/candidate/{quote(picture['job_id'])}/{picture['candidate']}"
+    elif picture["source"] == "images_original":
+        path = f"image-pass/original/{quote(picture['key'])}"
+    else:
+        path = f"images/{quote(picture['key'])}"
+    # `v` is the file's mtime: a replacement keeps its filename, and without it
+    # the browser would go on showing the picture it cached before the swap.
+    return f"/projects/{quote(project_id)}/{path}?v={picture['v']}"
+
+
+def _image_board_wire(project_id: str, row: dict) -> dict:
+    """A board row for the browser: URLs in place of filesystem paths, and the
+    label map as ``[source, target]`` pairs.
+
+    Pairs because the order matters and an object does not carry it: `jsonify`
+    sorts keys, and a browser moves integer-like ones ("90", on a compass dial)
+    to the front. The agent lists lettering in the order it reads it off the
+    picture, which is the order the user checks it in.
+    """
+    out = dict(row)
+    for field in ("pictures", "candidates"):
+        out[field] = [
+            {**{k: v for k, v in picture.items() if k != "path"},
+             "url": _image_board_url(project_id, picture)}
+            for picture in row[field]
+        ]
+    out["labels"] = [[source, target] for source, target in row["labels"].items()]
+    return out
+
+
+def _image_board_labels(request_body):
+    """A request as the page sends it, with its label pairs back in a map.
+
+    Anything that is not a list of two-string pairs is passed through untouched
+    for :func:`src.image_pass.feedback.validate_request` to refuse by name.
+    """
+    if not isinstance(request_body, dict) or not isinstance(request_body.get("labels"), list):
+        return request_body
+    pairs = request_body["labels"]
+    if not all(
+        isinstance(pair, list) and len(pair) == 2 and all(isinstance(s, str) for s in pair)
+        for pair in pairs
+    ):
+        return request_body
+    return {**request_body, "labels": {source: target for source, target in pairs}}
+
+
+@app.route("/image-pass/<project_id>")
+def image_board_page(project_id):
+    """One book's images: triage, candidates, and the user's say on each."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return "Project not found", 404
+    return render_template(
+        "image_board.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        project_id=project_id,
+        project_title=_project_title(project_id),
+    )
+
+
+@app.route("/api/project/<project_id>/image-pass", methods=["GET"])
+def image_board_state(project_id):
+    """The whole board in one payload; the page re-fetches it on focus."""
+    from src.image_pass import board as image_board
+
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    state = image_board.build(project_dir)
+    state["images"] = [_image_board_wire(project_id, row) for row in state["images"]]
+    state["stages"] = list(image_board.STAGES)
+    return jsonify(state)
+
+
+@app.route("/api/project/<project_id>/image-pass/feedback", methods=["POST"])
+def image_board_feedback(project_id):
+    """Save one image's request and/or pick.
+
+    The body is ``{image, request?, pick?}``. A section that is absent is left
+    alone and one sent as ``null`` is cleared, so the two halves of a card save
+    independently. The reply carries the image's row as rebuilt from disk —
+    its stage and what is still outstanding can both change with a save.
+    """
+    from src.image_pass import board as image_board
+    from src.image_pass import feedback as image_feedback
+    from src.image_pass import image_key
+    from src.image_pass.inventory import build_rows
+
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("image"), str):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    key = image_key(data["image"])
+    if key not in {row["image"] for row in build_rows(project_dir)[0]}:
+        return jsonify({"error": f"The book does not reference {data['image']!r}"}), 404
+    saved = image_feedback.save_image(
+        project_dir,
+        key,
+        request=(
+            _image_board_labels(data["request"]) if "request" in data else image_feedback.KEEP
+        ),
+        pick=data["pick"] if "pick" in data else image_feedback.KEEP,
+    )
+    if saved["status"] != "ok":
+        return jsonify({"error": "; ".join(saved["problems"]), "problems": saved["problems"]}), 400
+
+    state = image_board.build(project_dir)
+    row = next(row for row in state["images"] if row["image"] == key)
+    return jsonify({
+        "saved": True,
+        "image": _image_board_wire(project_id, row),
+        "counts": state["counts"],
+    })
+
+
+@app.route("/projects/<project_id>/image-pass/original/<path:filename>")
+def serve_image_board_original(project_id, filename):
+    """The publisher's file behind a replaced image, from ``images_original/``."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    originals = _resolve_project_dir(project_id) / "images_original"
+    if not originals.exists():
+        return jsonify({"error": "No originals on file"}), 404
+    return send_from_directory(str(originals), filename)
+
+
+@app.route("/projects/<project_id>/image-pass/candidate/<job_id>/<int:number>")
+def serve_image_board_candidate(project_id, job_id, number):
+    """One generated candidate of one prepared job."""
+    from src.image_pass import jobs_dir
+
+    if not _safe_id(project_id) or not _safe_id(job_id):
+        return "Bad request", 400
+    job_dir = jobs_dir(_resolve_project_dir(project_id)) / job_id
+    if not job_dir.is_dir():
+        return jsonify({"error": "No such job"}), 404
+    return send_from_directory(str(job_dir), f"cand_{number:02d}.png")
 
 
 @app.route("/api/correction", methods=["POST"])

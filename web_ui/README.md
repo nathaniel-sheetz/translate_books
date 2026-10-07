@@ -31,6 +31,7 @@ web_ui/
 │   ├── chunk_edit.html         # Full-textarea chunk editor
 │   ├── review_inbox.html       # Cross-book annotation resolutions
 │   ├── recommendations.html    # Read-only screen for what the models said
+│   ├── image_board.html        # Image-pass board: triage, candidates, picks
 │   └── edit_review_report.html.j2  # Edit-review HTML report (Jinja2)
 └── static/
     ├── dashboard.js/.css       # Dashboard stage logic, batch SSE, prompts
@@ -42,6 +43,7 @@ web_ui/
     ├── chunk_edit.js/.css      # Chunk editor save flow + caret positioning
     ├── review_inbox.js/.css    # Review inbox apply/reject flow
     ├── recommendations.js/.css # Lazy chapter fill + kind filter
+    ├── image_board.js/.css     # Board cards, filters, autosave, lightbox
     ├── setup.js/.css           # Style guide + glossary wizard
     ├── edit_review_report.css  # Styles for the edit-review report
     └── manifest.webmanifest    # PWA manifest
@@ -59,6 +61,7 @@ web_ui/
 | `/read/<id>/<ch>/chunk/<chunk_id>/edit` | chunk_edit.html | Full-chunk text editor |
 | `/review-inbox` | review_inbox.html | Outstanding annotation resolutions, every book |
 | `/recommendations/<id>` | recommendations.html | One book's findings and notes, to read and to flag for later |
+| `/image-pass/<id>` | image_board.html | One book's images through an image pass, and your requests and picks |
 
 ## API surface
 

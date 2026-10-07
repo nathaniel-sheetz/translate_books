@@ -2,7 +2,7 @@
 
 Use the `/browse` skill from gstack for **interactive/QA browsing of the app under development** (clicking through pages, verifying UI, dogfooding a flow). Never use `mcp__claude-in-chrome__*` tools. To read a single fact off a static public page (e.g. a book's title/author from its source URL), use a one-shot `WebFetch` — do **not** launch a browser skill for that.
 
-Available gstack skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /retro, /investigate, /document-release, /codex, /cso, /autoplan, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn, /judge-review.
+Available gstack skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /retro, /investigate, /document-release, /codex, /cso, /autoplan, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn, /judge-review, /image-pass.
 
 ## Skill routing
 
@@ -28,4 +28,5 @@ Key routing rules:
 - Triage the coded checkers, filter dictionary/grammar false positives → invoke triage-review
 - Review reader annotations, resolve word-choice notes, draft footnote glosses → invoke annotation-review
 - Add editorial footnotes to a book, scan chapters for footnote candidates → invoke footnote-pass
+- Redo/translate/clean book images, cover art → invoke image-pass
 - Write a friction log, log what wasted time/tokens in this run → invoke friction-log

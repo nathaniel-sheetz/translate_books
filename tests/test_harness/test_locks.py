@@ -162,6 +162,24 @@ def test_breaks_a_lock_older_than_the_ceiling(book):
     assert body["run_id"] == "fresh"
 
 
+def test_an_image_run_is_not_abandoned_at_three_hours(book):
+    """A long image batch is a live one: before a day is out, only a dead owner
+    loses the image lock."""
+    path = locks.image_lock_path(book)
+    path.parent.mkdir(parents=True)
+    body = {
+        "host": socket.gethostname(), "kind": "image-generate", "run_id": None,
+        "started_at": (datetime.now() - timedelta(hours=4)).isoformat(),
+    }
+    path.write_text(json.dumps({**body, "pid": os.getpid()}), encoding="utf-8")
+    with pytest.raises(locks.LockBusy):
+        with locks.image_lock(book):
+            pass
+    path.write_text(json.dumps({**body, "pid": 999_999}), encoding="utf-8")
+    with locks.image_lock(book):
+        assert json.loads(path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+
+
 def test_another_hosts_pid_is_never_probed(book):
     """PID numbers mean nothing across machines, so only age can retire it."""
     _plant(

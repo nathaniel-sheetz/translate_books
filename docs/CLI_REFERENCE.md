@@ -426,6 +426,82 @@ Full reference: [`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md).
 
 *Skill equivalent:* `/footnote-pass`
 
+### `image_pass.py` — redo a book's images
+
+```bash
+python scripts/image_pass.py inventory --project my-book
+python scripts/image_pass.py backfill  --project my-book --dry-run
+python scripts/image_pass.py triage    --project my-book --json-file triage_rows.json
+python scripts/image_pass.py board     --project my-book
+python scripts/image_pass.py prepare   --project my-book --json-file jobs.json
+python scripts/image_pass.py generate  --project my-book --estimate
+python scripts/image_pass.py check     --project my-book --json-file check_rows.json
+python scripts/image_pass.py composite --project my-book --json-file composites.json --dry-run
+python scripts/image_pass.py apply     --project my-book --from-board --dry-run
+python scripts/image_pass.py verify    --project my-book
+```
+
+Sub-verbs: `inventory`, `backfill`, `triage`, `board`, `prepare`, `generate`, `check`,
+`composite`, `apply`, `revert`, `verify`. `generate` runs the Codex CLI on a ChatGPT subscription (never a metered key —
+see [`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)) to translate lettering, clean scans, make a
+cover or replace an illustration. `apply` keeps the original filename and format, so no
+`[IMAGE:…]` token changes, and backs the original up to `images_original/` first.
+`revert` restores from there.
+
+`generate` runs one Codex process per missing candidate, ten at a time
+(`--concurrency`, never more workers than candidates). The usage spent is the same at
+any number; `--estimate` reports the minutes at that many (`estimated_minutes`) and
+one at a time (`sequential_minutes`). `--limit N` runs only the first N missing
+candidates, as a first wave to look at, and the next run takes the rest. A candidate
+runs on the first of: its job's `model` (an id, or a list to give each candidate of
+the job a different one), `--model` (an id, or several comma-separated), the book's
+`image_model` (`harness.py config-set --key image_model --value <id>`), Codex's own
+default. A model the plan rejects stops only the candidates on it. Each run's model is
+recorded in `.harness/images/usage.jsonl`, shown under the candidate on the board and
+written to the ledger at `apply`. One `generate` runs per book at a time: a second is
+refused while the first holds `.harness/images/.generate.lock`, and so is a `prepare`,
+which would archive the folders the run is reading from. Progress goes to
+stderr, one line per finished candidate.
+
+`backfill` is for a Gutenberg book ingested with the page's thumbnails: it reads the
+source page again (`--source`, default the URL recorded in `project.json`), fetches the
+larger scan each thumbnail links to, and puts it behind the same filename. No Codex, no
+spend. The larger scan becomes the original — no backup of the thumbnail is kept, and an
+existing backup in `images_original/` is upgraded — so it cannot be reverted, only
+re-ingested. A scan is taken only if it looks like the picture it replaces: a mislinked
+one is swapped for the scan on the page that does match (`relinked_from`), and one with
+no match is listed under `unlike` and left alone until named in `--accept`. Run it with
+`--dry-run` first, and before any `prepare`: a job starts from whatever the original is.
+
+`composite` makes a candidate out of two pictures, for when a generated one is right
+where it was meant to change and wrong elsewhere (the image tool redraws the whole
+picture; it does not edit one). Each row of `--json-file` is
+`{image, from, base?, regions, feather?, scale?, note?, candidate?}`: what lies inside
+`regions` comes from candidate `from`, and everything else from `base` — `original`
+(the default), `current`, another candidate's number, or a path under the job's
+`previous/` folder for a candidate an earlier `prepare` archived. A region is
+`[x0, y0, x1, y1]` or a list of `[x, y]` corners, in the base picture's pixels.
+`scale` (1-4) enlarges the base first, so small new lettering keeps its detail.
+The patch is fitted over the base and then slid a few pixels to where the drawing
+around the outline lines up; `surroundings_differ` warns when it does not. The result
+is an ordinary candidate, numbered from 5 so it never fills a slot `generate` owes,
+with a `cand_NN.composite.json` beside it. No Codex, no spend; all-or-nothing;
+`--dry-run` measures and writes nothing; `candidate` remakes an existing composite in
+place after an outline has been moved.
+
+The user's side is the image board in the web UI, `/image-pass/<id>` (see
+[`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md#image-board)). `triage` records a verdict, a
+finding and a label map for each image looked at, and `check` a finding for each
+candidate; both show on the board. What the user sets there — a different verdict, a
+note, a corrected label map, a pick — is saved to `.harness/images/feedback.json`.
+`board` prints the page's URL, whether the web UI is answering at it (`--base-url`,
+default `http://127.0.0.1:5000`), the images that want a job, what the user asked for
+that no prepared job reflects yet, and their picks. `apply --from-board` applies those
+picks; `apply --json-file` still takes a hand-written list. A pick made on a candidate
+that has since been regenerated is refused, not applied.
+
+*Skill equivalent:* `/image-pass`
+
 ### `pending_work.py` — what unattended work is available
 
 ```bash

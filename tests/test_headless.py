@@ -761,6 +761,167 @@ def test_subscription_auth_error_cursor_probe_argv():
     assert "unknown command" in err
 
 
+# --- Codex image family: scrub + prose auth probe ---------------------------
+
+def test_subscription_env_drops_codex_and_openai_credentials():
+    base = {
+        "OPENAI_API_KEY": "sk-x",
+        "OPENAI_BASE_URL": "http://gateway.invalid",
+        "OPENAI_SOMETHING_INVENTED_LATER": "1",
+        "CODEX_API_KEY": "sk-y",
+        "CODEX_ACCESS_TOKEN": "tok",
+        "PATH": "/usr/bin",
+    }
+    assert headless.subscription_env("codex", base=base) == {"PATH": "/usr/bin"}
+    # One union list: a claude or cursor worker loses them too.
+    assert headless.subscription_env("claude", base=base) == {"PATH": "/usr/bin"}
+
+
+def test_subscription_env_keeps_codex_home():
+    """CODEX_HOME is where the ChatGPT login lives; scrubbing it would log the
+    job out, not make it safer."""
+    base = {"CODEX_HOME": "/home/u/.codex", "PATH": "/usr/bin"}
+    assert headless.subscription_env("codex", base=base) == base
+
+
+def _codex_probe(text: str, rc: int = 0, stream: str = "stderr"):
+    """`codex login status` writes its one line to stderr (0.157.0)."""
+    def probe(argv, *, env, cwd, timeout):
+        return (rc, "", text) if stream == "stderr" else (rc, text, "")
+
+    return probe
+
+
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
+def test_subscription_auth_error_accepts_codex_chatgpt_login(stream):
+    err = headless.subscription_auth_error(
+        "codex", "codex", {}, cwd=".",
+        prober=_codex_probe("Logged in using ChatGPT\n", stream=stream),
+    )
+    assert err is None
+
+
+def test_subscription_auth_error_rejects_codex_api_key_without_echoing_it():
+    err = headless.subscription_auth_error(
+        "codex", "codex", {}, cwd=".",
+        prober=_codex_probe("Logged in using an API key - sk-proj-***abcd"),
+    )
+    assert err and "API key" in err and "metered" in err
+    assert "sk-proj" not in err and "abcd" not in err
+
+
+def test_subscription_auth_error_rejects_logged_out_codex():
+    """Exit 1 + "Not logged in" is a login problem, not a CLI to upgrade."""
+    err = headless.subscription_auth_error(
+        "codex", "codex", {}, cwd=".", prober=_codex_probe("Not logged in", rc=1)
+    )
+    assert err and "not logged in" in err and "codex login" in err
+    assert "Upgrade" not in err
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Logged in using access token",
+        "Logged in using personal access token",
+        "Logged in using workload identity",
+        "Logged in using Amazon Bedrock API key",
+        "Logged in using Amazon Bedrock AWS access keys",
+        "Logged in using ChatGPT Enterprise API billing",
+        "Logged in as someone@example.com",
+        "",
+    ],
+)
+def test_subscription_auth_error_codex_fails_closed_on_every_other_login(line):
+    """An allowlist of one line: anything else bills something else, or might."""
+    err = headless.subscription_auth_error(
+        "codex", "codex", {}, cwd=".", prober=_codex_probe(line)
+    )
+    assert err
+    assert "someone@example.com" not in err
+
+
+def test_subscription_auth_error_codex_fails_closed_on_nonzero_rc():
+    err = headless.subscription_auth_error(
+        "codex", "codex", {}, cwd=".",
+        prober=_codex_probe("error: unrecognized subcommand 'status'", rc=2),
+    )
+    assert err and "exit 2" in err
+
+
+def test_subscription_auth_error_codex_probe_argv():
+    seen: dict[str, object] = {}
+
+    def probe(argv, *, env, cwd, timeout):
+        seen["argv"] = list(argv)
+        return 0, "", "Logged in using ChatGPT"
+
+    assert headless.subscription_auth_error("codex", "codex", {}, cwd=".", prober=probe) is None
+    assert seen["argv"] == ["codex", "login", "status"]
+
+
+def test_codex_is_not_a_translate_worker():
+    """An image family only: `headless_cli` must never resolve to it."""
+    assert headless.cli_binary("codex") is None
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": "unused"}],
+        model="gpt", concurrency=1, cli="codex", runner=lambda *a, **k: (0, "", ""),
+    )
+    assert "unsupported headless cli" in result["error"]
+
+
+def test_run_image_job_builds_exec_argv_and_sends_the_prompt_on_stdin(tmp_path: Path):
+    seen: dict[str, object] = {}
+
+    def runner(cmd, *, input_text, cwd):
+        seen.update(cmd=list(cmd), prompt=input_text, cwd=cwd)
+        return 0, '{"type":"turn.completed"}\n', ""
+
+    result = headless.run_image_job(
+        "$imagegen do it",
+        job_dir=tmp_path,
+        images=[tmp_path / "input.jpg"],
+        model="gpt-5.4",
+        runner=runner,
+    )
+    assert result["ok"] and result["error"] is None
+    assert seen["cmd"] == [
+        "codex", "exec", "-i", str(tmp_path / "input.jpg"),
+        "-c", "model_provider=openai",
+        "-C", str(tmp_path), "-s", "read-only",
+        "--skip-git-repo-check", "--ephemeral", "--json", "-m", "gpt-5.4",
+    ]
+    assert seen["prompt"] == "$imagegen do it" and seen["cwd"] == tmp_path
+
+
+def test_run_image_job_refuses_on_a_metered_login_without_spawning(tmp_path: Path):
+    def runner(cmd, *, input_text, cwd):
+        raise AssertionError("the job must not run")
+
+    result = headless.run_image_job(
+        "x", job_dir=tmp_path, runner=runner,
+        prober=_codex_probe("Logged in using an API key - sk-***"),
+    )
+    assert not result["ok"] and result["preflight_failed"] is True
+    assert "API key" in result["error"]
+
+
+def test_run_image_job_reports_the_last_stream_error(tmp_path: Path):
+    stdout = "\n".join([
+        json.dumps({"type": "error", "message": "Reconnecting... 1/5"}),
+        json.dumps({"type": "turn.failed", "error": {"message": "usage_limit_reached"}}),
+    ])
+    result = headless.run_image_job(
+        "x", job_dir=tmp_path, runner=lambda cmd, **k: (1, stdout, "noise")
+    )
+    assert result["error"] == "usage_limit_reached" and result["preflight_failed"] is False
+
+
+def test_image_preflight_error_names_a_missing_binary():
+    err = headless.image_preflight_error("codex-not-installed-xyz")
+    assert err and "codex not found" in err
+
+
 def test_subscription_auth_probe_uses_neutral_cwd_and_scrubbed_env(tmp_path: Path):
     """The probe must see what the workers see.
 

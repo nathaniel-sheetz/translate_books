@@ -47,7 +47,7 @@ _KNOWN_SPAWNS: frozenset[tuple[str, str]] = frozenset({
 })
 
 # argv[0] stems that mean "this is a headless CLI launch".
-_HEADLESS_CLI_STEMS = frozenset({"claude", "cursor-agent", "cursor"})
+_HEADLESS_CLI_STEMS = frozenset({"claude", "cursor-agent", "cursor", "codex"})
 _EXE_SUFFIXES = (".cmd", ".exe", ".bat", ".ps1", ".sh")
 
 
@@ -211,3 +211,7 @@ def test_sanctioned_launcher_scrubs_and_preflights():
     env = headless.subscription_env("claude", base={"ANTHROPIC_API_KEY": "sk-x", "PATH": "/x"})
     assert env == {"PATH": "/x"}
     assert callable(headless.subscription_auth_error)
+    # The image family (Codex) rides the same two layers.
+    env = headless.subscription_env("codex", base={"OPENAI_API_KEY": "sk-x", "PATH": "/x"})
+    assert env == {"PATH": "/x"}
+    assert "codex" in headless._AUTH_PROBE_ARGV

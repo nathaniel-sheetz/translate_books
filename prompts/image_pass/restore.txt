@@ -1,0 +1,14 @@
+$imagegen
+
+Edit the attached image, `{{input_name}}`, a scanned illustration from the book "{{title}}".
+
+Task: clean up the scan, and change nothing about the picture itself.
+
+- Remove scan damage only: specks, stains, foxing, show-through from the reverse page, creases, skew, uneven exposure and JPEG blocking.
+- Keep the artwork faithful to the original: the same composition, line work, hatching, tonal range and proportions. Do not restyle it, sharpen it into a different drawing, add detail that is not there, or colourise it.
+- Any lettering in the image stays exactly as printed — same words, same spelling, same position.
+{{labels_block}}
+Additional instruction from the editor:
+{{instruction}}
+
+{{contract}}

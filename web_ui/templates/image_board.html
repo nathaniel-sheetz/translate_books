@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t.imgboard_title }} — {{ project_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='image_board.css') }}?v=2">
+</head>
+<body>
+<script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
+
+{#- The shell only. Every card is drawn by image_board.js from
+    /api/project/<id>/image-pass, because the page is re-fetched each time you
+    come back to it from the run: candidates appear, a job gets prepared, a pick
+    is applied, and the cards have to follow without a reload. The words the
+    script writes are stamped into one data attribute here rather than built in
+    the script, so the page stays translatable server-side like the others. -#}
+<div class="nav-page ib-page">
+    <div class="nav-header">
+        <h1>{{ t.imgboard_title }}</h1>
+        <div class="nav-header-actions">
+            <button type="button" class="ib-refresh" id="ib-refresh">{{ t.imgboard_refresh }}</button>
+            <a class="btn-new-project" href="/read/{{ project_id }}">{{ project_title }}</a>
+        </div>
+    </div>
+
+    <p class="ib-subtitle">{{ t.imgboard_subtitle }}</p>
+
+    <div class="ib-filters" id="ib-filters">
+        <div class="ib-chips" id="ib-stage-chips" role="group"></div>
+        <div class="ib-chips" id="ib-toggle-chips" role="group"></div>
+        <input type="search" class="ib-search" id="ib-search"
+               placeholder="{{ t.imgboard_search }}" aria-label="{{ t.imgboard_search }}">
+    </div>
+
+    {#- Single-quoted, because `tojson` escapes `'` but not `"`. -#}
+    <div class="ib-board" id="ib-board"
+         data-project="{{ project_id }}"
+         data-strings='{{ t.imgboard_js | tojson }}'>
+        <p class="ib-status" id="ib-status">{{ t.imgboard_loading }}</p>
+    </div>
+</div>
+
+<div class="ib-lightbox" id="ib-lightbox" hidden>
+    <div class="ib-lightbox-bar">
+        <span class="ib-lightbox-caption" id="ib-lightbox-caption"></span>
+        <span class="ib-lightbox-hint">{{ t.imgboard_js.lightbox_hint }}</span>
+        <button type="button" class="ib-lightbox-close" id="ib-lightbox-close"
+                aria-label="{{ t.imgboard_js.close }}">&times;</button>
+    </div>
+    <div class="ib-lightbox-stage" id="ib-lightbox-stage">
+        <span class="ib-lightbox-pic" id="ib-lightbox-pic"><img id="ib-lightbox-img" alt=""></span>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='image_board.js') }}?v=3"></script>
+</body>
+</html>

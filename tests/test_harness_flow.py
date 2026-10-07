@@ -75,6 +75,25 @@ def test_setup_runs_ingest_split_and_persists_config(tmp_path: Path):
     assert (proj / ".harness" / "config.json").exists()
 
 
+def test_setup_again_keeps_the_image_ledger(tmp_path: Path):
+    """A re-run wipes drafts and prompts, not the only record of which files in
+    images/ are replacements."""
+    proj = tmp_path / "newbook"
+    proj.mkdir()
+    (proj / "source.txt").write_text(FIXTURE_SOURCE, encoding="utf-8")
+    flow.setup(str(proj), url="", target_language="Spanish", title="The Book")
+    hdir = proj / ".harness"
+    (hdir / "images").mkdir()
+    (hdir / "images" / "images.jsonl").write_text('{"action": "apply"}\n', encoding="utf-8")
+    (hdir / "drafts").mkdir()
+    (hdir / "drafts" / "chunk_001.draft.txt").write_text("viejo", encoding="utf-8")
+
+    flow.setup(str(proj), url="", target_language="Spanish", title="The Book")
+
+    assert (hdir / "images" / "images.jsonl").read_text(encoding="utf-8") == '{"action": "apply"}\n'
+    assert not (hdir / "drafts").exists()
+
+
 def test_setup_derives_heading_hints_on_no_url_path(tmp_path: Path):
     """On the local source.txt path the hints are now derived from the text
     (friction #1/#2): suggested_pattern + a per-chapter report + pattern_used,

@@ -1,0 +1,19 @@
+$imagegen
+
+Edit the attached image, `{{input_name}}`, an illustration from the book "{{title}}".
+
+Task: replace the English lettering in this image with {{target_language}}, and change nothing else.
+
+Replace each label exactly as mapped (English → {{target_language}}):
+{{labels}}
+
+Rules:
+- Spell every replacement exactly as given: every accent, ñ, ¿ and ¡, and the same capitalisation.
+- Set each replacement where the original label sits, in the same lettering style, weight, size and colour. Redraw the background behind it cleanly, so no trace of the English shows through.
+- Lettering that is not in the list stays exactly as it is.
+- Do not redraw, recolour, crop, re-frame or "improve" the artwork. Line work, shading, paper tone and proportions stay as they are in the original.
+
+Additional instruction from the editor:
+{{instruction}}
+
+{{contract}}

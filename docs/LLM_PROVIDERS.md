@@ -10,6 +10,12 @@ The translate-harness / judge-review **headless** backend can drive either:
 |---|---|---|---|---|
 | Claude Code | `claude` | `claude` login session | `headless_cli=claude` | env scrub + auth preflight |
 | Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` | env scrub + auth preflight |
+| Codex (images only) | `codex` | `codex login` with ChatGPT | none — `scripts/image_pass.py generate` only | env scrub + auth preflight |
+
+Codex is an **image family**, not a translate worker: it is absent from
+`headless_cli`, and `run_headless_wave(cli="codex")` is refused. It exists for
+the `image-pass` skill (`.claude/skills/image-pass/SKILL.md`), which drives
+`codex exec` with the built-in image tool on a ChatGPT plan.
 
 ### Which CLI a wave picks (`headless_cli=auto`, the default)
 
@@ -478,8 +484,11 @@ headless CLI (pinned by `tests/test_spawn_boundary.py`), and it applies two
 layers. Neither subsumes the other:
 
 1. **Env scrub** (`subscription_env`) — the child gets `os.environ` minus the
-   entire `ANTHROPIC_*` namespace, `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY}`,
-   `CLAUDE_CODE_SKIP_{BEDROCK,VERTEX,FOUNDRY}_AUTH`, and `CURSOR_API_KEY`.
+   entire `ANTHROPIC_*` and `OPENAI_*` namespaces,
+   `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY}`,
+   `CLAUDE_CODE_SKIP_{BEDROCK,VERTEX,FOUNDRY}_AUTH`, `CURSOR_API_KEY`,
+   `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN`. (`CODEX_HOME` survives: that is
+   where the ChatGPT login lives.)
    `CLAUDE_CODE_OAUTH_TOKEN` is deliberately **kept** — that *is* subscription
    auth (`claude setup-token`). This is a denylist, so `PATH`, `PATHEXT` and the
    rest of the ordinary runtime survive.
@@ -489,7 +498,13 @@ layers. Neither subsumes the other:
    --json` (a *routing* probe — which credential would be billed). Cursor:
    `cursor-agent status --format json` (a *liveness* probe — login session
    present; billing safety is the `CURSOR_API_KEY` scrub, since there is no
-   metered Cursor path). Both **fail closed**: an `apiKeySource`, a third-party
+   metered Cursor path). Codex: `codex login status`, which prints one line of
+   prose **to stderr** — only `Logged in using ChatGPT` passes; an API key, an
+   access token, workload identity, Bedrock, and anything unrecognised are
+   refused, and the line itself is never echoed (the API-key form ends in a
+   masked key). That line names the login on file, not where `config.toml`
+   routes requests, so every image job also pins `-c model_provider=openai`.
+   All **fail closed**: an `apiKeySource`, a third-party
    `apiProvider`, a logged-out CLI, a non-zero exit or an output shape it does
    not recognise all block the wave with a top-level `error` and zero jobs run.
    There is no override flag — metered spend goes through `--backend api`, which

@@ -39,6 +39,11 @@ drift, not a false alarm.)
 
 ## Step 5 — EPUB (translated chapters only)
 
+> **Images first.** If the book's images need work — lettering on a map still in English, a
+> dirty scan, no cover — run the **`image-pass`** skill before building. It replaces files in
+> `images/` under their original names, so the EPUB picks them up with no other change; an EPUB
+> built earlier keeps the old pictures until it is rebuilt.
+
 The API `translate` run chains through combine, epub, and align, building the EPUB from translated
 chunks only and reporting exactly which chapters shipped. On the **workers** path you already
 aligned each set in translate-workers 4B-e (the reader reads `alignments/`, not the EPUB), so here

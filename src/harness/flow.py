@@ -316,7 +316,10 @@ def setup(
         if value is not None and not cfg.get(key):
             cfg[key] = value
 
-    state.ensure_harness_dir(project_dir, clean=True)  # fresh drafts/prompts
+    # Fresh drafts/prompts. The image ledger is not a draft: it is the only
+    # record of which files in images/ are replacements, and without it they
+    # can no longer be reverted.
+    state.ensure_harness_dir(project_dir, clean=True, keep=("images",))
     cfg["run_id"] = state.new_run_id(project_dir)  # a clean run starts a new run id
     state.save_config(project_dir, cfg)
 
@@ -3115,7 +3118,7 @@ def _write_retranslate_archive(project_dir: Path, *, chunk_paths: list[Path],
     """Snapshot everything describing the current translation. Raises OSError on failure.
 
     Lives at ``projects/<slug>/archive/<stamp>/`` — deliberately NOT under
-    ``.harness/``, which ``setup`` wipes wholesale (``ensure_harness_dir(clean=True)``),
+    ``.harness/``, which ``setup`` wipes all but ``images/`` of (``ensure_harness_dir(clean=True)``),
     and deliberately two levels deep so no existing single-level glob can see it (the
     project-root ``*.epub`` glob in ``status`` being the one that matters).
     """
@@ -4343,6 +4346,10 @@ _CONFIG_SET_KEYS = {
     "triage_headless_cli": frozenset(state.CLI_VALUES),
     "triage_worker_model": FREE_TEXT,
     "triage_after_coded": frozenset({"on", "off"}),
+    # The Codex model `image_pass.py generate` runs a job on when neither the
+    # job nor `--model` names one; several comma-separated give each candidate
+    # of a job a different one. Read by `src/image_pass/jobs.py`.
+    "image_model": FREE_TEXT,
     # Prompt-prefix opt-ins. Read at render time by ``translate_prepare`` (never
     # baked into chunks/*.json), so these stay adjustable mid-book: change one and
     # re-run ``translate-prepare`` and only the chunks that still need a

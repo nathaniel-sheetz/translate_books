@@ -895,7 +895,10 @@ class EpubConverter(Converter):
 
     def __init__(self, pkg: EpubPackage, images_dir: Path | None, extract_images: bool,
                  italic_classes: dict[str, set], image_names: dict[str, str]):
-        super().__init__(base_url="", images_dir=images_dir, download_images=extract_images)
+        # An EPUB's images come out of the package, so a link to a larger one
+        # elsewhere is not something this converter can fetch.
+        super().__init__(base_url="", images_dir=images_dir, download_images=extract_images,
+                         prefer_linked_images=False)
         self.pkg = pkg
         self.italic_classes = italic_classes
         self.image_names = image_names
