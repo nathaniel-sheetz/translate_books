@@ -448,6 +448,21 @@ cover or replace an illustration. `apply` keeps the original filename and format
 `[IMAGE:…]` token changes, and backs the original up to `images_original/` first.
 `revert` restores from there.
 
+`generate` runs one Codex process per missing candidate, ten at a time
+(`--concurrency`, never more workers than candidates). The usage spent is the same at
+any number; `--estimate` reports the minutes at that many (`estimated_minutes`) and
+one at a time (`sequential_minutes`). `--limit N` runs only the first N missing
+candidates, as a first wave to look at, and the next run takes the rest. A candidate
+runs on the first of: its job's `model` (an id, or a list to give each candidate of
+the job a different one), `--model` (an id, or several comma-separated), the book's
+`image_model` (`harness.py config-set --key image_model --value <id>`), Codex's own
+default. A model the plan rejects stops only the candidates on it. Each run's model is
+recorded in `.harness/images/usage.jsonl`, shown under the candidate on the board and
+written to the ledger at `apply`. One `generate` runs per book at a time: a second is
+refused while the first holds `.harness/images/.generate.lock`, and so is a `prepare`,
+which would archive the folders the run is reading from. Progress goes to
+stderr, one line per finished candidate.
+
 `backfill` is for a Gutenberg book ingested with the page's thumbnails: it reads the
 source page again (`--source`, default the URL recorded in `project.json`), fetches the
 larger scan each thumbnail links to, and puts it behind the same filename. No Codex, no

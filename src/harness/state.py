@@ -369,11 +369,22 @@ def harness_dir(project_dir: Path) -> Path:
     return project_dir / ".harness"
 
 
-def ensure_harness_dir(project_dir: Path, *, clean: bool = False) -> Path:
-    """Create (optionally wiping first) the per-project ``.harness/`` directory."""
+def ensure_harness_dir(
+    project_dir: Path, *, clean: bool = False, keep: tuple[str, ...] = ()
+) -> Path:
+    """Create (optionally wiping first) the per-project ``.harness/`` directory.
+
+    ``keep`` names the top-level entries a wipe leaves where they are.
+    """
     d = harness_dir(project_dir)
     if clean and d.exists():
-        shutil.rmtree(d)
+        for child in d.iterdir():
+            if child.name in keep:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -37,9 +38,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Sequence
 
-from src.harness import headless
+from src.harness import headless, locks
 from src.image_pass import (
     COVER_NAMES,
     IMAGE_SUFFIXES,
@@ -60,6 +61,20 @@ PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts" / "image_pass"
 
 DEFAULT_CANDIDATES = 1
 MAX_CANDIDATES = 4
+
+# Ten Codex processes at once ran 40 jobs on the real CLI with none failed and
+# every picture harvested to its own job (kittens-and-cats, 2026-10-06). The
+# plan's window is spent per image, not per minute, so running them one at a
+# time saved no usage and cost 14 minutes of waiting on the run before it.
+DEFAULT_CONCURRENCY = 10
+
+# What `--model` falls back to when a book pins one (`harness.py config-set
+# --key image_model`).
+MODEL_CONFIG_KEY = "image_model"
+DEFAULT_MODEL_LABEL = "(Codex default, from ~/.codex/config.toml)"
+# A model id ends up on a child argv, which on Windows is re-parsed by cmd.exe
+# when `codex` resolves to a .CMD shim.
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
 
 INPUT_ORIGINAL = "original"
 INPUT_CURRENT = "current"
@@ -84,7 +99,8 @@ LIMIT_WARNING = (
 )
 
 _JOB_KEYS = frozenset(
-    {"image", "mode", "instruction", "labels", "candidates", "input", "reference", "note"}
+    {"image", "mode", "instruction", "labels", "candidates", "input", "reference", "note",
+     "model"}
 )
 
 # The first live run (2026-10-05, codex-cli 0.157.0) asked the model to save the
@@ -133,18 +149,29 @@ def job_id_for(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", key)
 
 
-def load_manifest(project_dir: Path) -> dict[str, Any]:
-    path = manifest_path(project_dir)
-    if not path.exists():
-        return {"version": 1, "jobs": []}
+def _read_manifest(path: Path) -> Optional[dict[str, Any]]:
+    """The manifest at ``path``, or ``None`` when what is there is not one."""
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"version": 1, "jobs": []}
+        return None
     if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), list):
-        return {"version": 1, "jobs": []}
+        return None
     doc["jobs"] = [job for job in doc["jobs"] if isinstance(job, dict) and job.get("id")]
     return doc
+
+
+def load_manifest(project_dir: Path) -> dict[str, Any]:
+    path = manifest_path(project_dir)
+    doc = _read_manifest(path) if path.exists() else None
+    return doc if doc is not None else {"version": 1, "jobs": []}
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Whole or not at all: neither a reader nor a kill finds half a file."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _book_meta(project_dir: Path) -> dict[str, str]:
@@ -167,6 +194,38 @@ def _book_meta(project_dir: Path) -> dict[str, str]:
     meta["title"] = meta["title"] or Path(project_dir).name
     meta["target_language"] = meta["target_language"] or "Spanish"
     return meta
+
+
+def split_models(value: Any) -> tuple[Optional[list[str]], Optional[str]]:
+    """``"a,b"`` or ``["a", "b"]`` as ``(model ids, problem)``.
+
+    ``(None, None)`` when no model is named. More than one id is a rotation:
+    candidate 1 runs on the first, candidate 2 on the second, and round again.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        ids = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+        ids = [v.strip() for v in value if v.strip()]
+    else:
+        return None, 'model must be a model id or a list of them: "gpt-6-luna"'
+    bad = [model for model in ids if not _MODEL_ID_RE.fullmatch(model)]
+    if bad:
+        return None, f"model id(s) {bad} are not plain ids (letters, digits, . _ : / -)"
+    return ids or None, None
+
+
+def pinned_models(project_dir: Path) -> tuple[Optional[list[str]], Optional[str]]:
+    """The model(s) this book pins for image jobs, as ``(model ids, problem)``.
+    ``(None, None)`` when it pins none."""
+    try:
+        doc = json.loads(
+            (Path(project_dir) / ".harness" / "config.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    return split_models(doc.get(MODEL_CONFIG_KEY) if isinstance(doc, dict) else None)
 
 
 def _render_labels(labels: dict[str, str]) -> str:
@@ -288,6 +347,10 @@ def _validate_job(
         problems.append(f"candidates must be an integer from 1 to {MAX_CANDIDATES}")
         candidates = DEFAULT_CANDIDATES
 
+    models, model_problem = split_models(raw.get("model"))
+    if model_problem:
+        problems.append(model_problem)
+
     which = raw.get("input", INPUT_ORIGINAL)
     if which not in (INPUT_ORIGINAL, INPUT_CURRENT):
         problems.append(f"input must be {INPUT_ORIGINAL!r} or {INPUT_CURRENT!r}")
@@ -301,7 +364,11 @@ def _validate_job(
     source: Optional[Path] = None
     if which == INPUT_ORIGINAL and backup.is_file():
         source = backup
-    elif current.is_file():
+    elif current.is_file() and not (
+        # A cover image-pass made from nothing has no original either: asked
+        # for the original, a redo starts from nothing again.
+        which == INPUT_ORIGINAL and ledger.made_from_nothing(state.get(key), current)
+    ):
         source = current
 
     reference: Optional[str] = None
@@ -357,8 +424,12 @@ def _validate_job(
         "instruction": instruction.strip(),
         "labels": {k.strip(): v.strip() for k, v in labels.items()},
         "candidates": candidates,
+        # Not part of the prompt, so naming another model archives nothing: the
+        # candidates already made stay, and only a missing one runs on it.
+        "model": models,
         "note": raw.get("note") if isinstance(raw.get("note"), str) else None,
         "input": str(source) if source is not None else None,
+        "input_asked": which,
         "input_from": (
             None if source is None
             else INPUT_REFERENCE if reference
@@ -374,6 +445,22 @@ def _validate_job(
         "height": height,
         "status_at_prepare": ledger.status_of(state.get(key)),
     }, []
+
+
+def _input_path(project_dir: Path, job: dict[str, Any]) -> Path:
+    """Where a job's input is read from now. The path recorded at prepare time
+    goes stale: once a candidate is applied, ``images/<key>`` is the replacement
+    and the publisher's file is the backup that apply made."""
+    recorded = Path(job["input"])
+    # Jobs prepared before ``input_asked`` was recorded: only a plain original
+    # is known to have asked for one.
+    asked = job.get("input_asked") or (
+        INPUT_ORIGINAL if job.get("input_from") == INPUT_ORIGINAL else INPUT_CURRENT
+    )
+    if asked != INPUT_ORIGINAL:
+        return recorded
+    backup = originals_dir(project_dir) / (job.get("reference") or job["image"])
+    return backup if backup.is_file() else recorded
 
 
 def candidate_path(job_dir: Path, index: int) -> Path:
@@ -446,6 +533,43 @@ def prepare(project_dir: Path, jobs: list[Any], *, replace: bool = False) -> dic
     project_dir = Path(project_dir)
     if not jobs:
         return {"status": "error", "error": "no jobs given"}
+    try:
+        # A `generate` in flight reads from the run_NN/ this archives, and saves
+        # what it started under whatever prompt.txt is there when it ends.
+        with locks.image_lock(project_dir, kind="image-prepare"):
+            return _prepare(project_dir, jobs, replace=replace)
+    except locks.LockBusy as busy:
+        return {
+            "status": "error",
+            "error": f"an image run holds this book; nothing was prepared. {busy}",
+            "counts": {"requested": len(jobs), "invalid": 0, "prepared": 0},
+            "instructions": (
+                "Wait for `generate` to finish, then re-run prepare with the same batch."
+            ),
+        }
+
+
+def _prepare(project_dir: Path, jobs: list[Any], *, replace: bool) -> dict[str, Any]:
+    path = manifest_path(project_dir)
+    manifest = _read_manifest(path) if path.exists() else {"version": 1, "jobs": []}
+    if replace:
+        manifest = {"version": 1, "jobs": []}
+    elif manifest is None:
+        return {
+            "status": "error",
+            "error": (
+                f"{path} is there but cannot be read; nothing was prepared. Merged "
+                "onto it, this batch would be the whole manifest and every other "
+                "job's candidates would leave the board."
+            ),
+            "counts": {"requested": len(jobs), "invalid": 0, "prepared": 0},
+            "instructions": (
+                "Restore the file, or re-run prepare with --replace and every job "
+                "the book should keep: each job's last form is in "
+                "jobs/<id>/job.json beside it."
+            ),
+        }
+    owners = {job["id"]: job.get("image") for job in manifest["jobs"]}
 
     state = ledger.current_state(project_dir)
     cover = find_cover(project_dir)
@@ -456,6 +580,14 @@ def prepare(project_dir: Path, jobs: list[Any], *, replace: bool = False) -> dic
         job, problems = _validate_job(project_dir, raw, state, cover)
         if job is not None and job["id"] in seen:
             problems = [f"{job['image']}: named twice in this batch (also job #{seen[job['id']]})"]
+            job = None
+        elif job is not None and owners.get(job["id"], job["image"]) != job["image"]:
+            # job_id_for folds every character a folder name cannot hold into
+            # "_", so a/b.jpg and a_b.jpg would share one folder and one entry.
+            problems = [
+                f"{job['image']}: its job id {job['id']!r} already belongs to "
+                f"{owners[job['id']]}; the two cannot both be prepared"
+            ]
             job = None
         if job is None:
             invalid.append({
@@ -495,33 +627,30 @@ def prepare(project_dir: Path, jobs: list[Any], *, replace: bool = False) -> dic
         ) or _input_changed(job_dir, job):
             archived = _archive_candidates(job_dir)
             archived_total += archived
-        prompt_file.write_text(prompt, encoding="utf-8")
+        _write_atomic(prompt_file, prompt)
         job["job_dir"] = str(job_dir)
         job["prompt_path"] = str(prompt_file)
         job["prompt_sha"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         job["prepared_at"] = ledger.now_stamp()
-        (job_dir / "job.json").write_text(
-            json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _write_atomic(job_dir / "job.json", json.dumps(job, ensure_ascii=False, indent=2))
         have = existing_candidates(job_dir)
         prepared.append({
             "id": job["id"],
             "image": job["image"],
             "mode": job["mode"],
             "candidates": job["candidates"],
+            "model": job["model"],
             "have": len([n for n in have if n <= job["candidates"]]),
             "archived": archived,
             "input_from": job["input_from"],
             "prompt_path": job["prompt_path"],
         })
 
-    manifest = {"version": 1, "jobs": []} if replace else load_manifest(project_dir)
     merged = {job["id"]: job for job in manifest["jobs"]}
     merged.update({job["id"]: job for job in valid})
     manifest = {"version": 1, "updated": ledger.now_stamp(), "jobs": list(merged.values())}
-    path = manifest_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_atomic(path, json.dumps(manifest, ensure_ascii=False, indent=2))
 
     to_generate = sum(max(0, row["candidates"] - row["have"]) for row in prepared)
     return {
@@ -547,23 +676,56 @@ def prepare(project_dir: Path, jobs: list[Any], *, replace: bool = False) -> dic
 # generate
 # ---------------------------------------------------------------------------
 
-def _measured_minutes(project_dir: Path) -> Optional[float]:
-    """Median wall minutes of this project's successful runs, if any."""
+def _usage_rows(project_dir: Path) -> list[dict[str, Any]]:
     path = usage_path(project_dir)
     if not path.exists():
-        return None
-    walls: list[float] = []
+        return []
+    rows: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(row, dict) and row.get("ok") and isinstance(row.get("wall_s"), (int, float)):
-            if row["wall_s"] > 0:
-                walls.append(float(row["wall_s"]))
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _measured_minutes(project_dir: Path) -> tuple[Optional[float], Optional[float]]:
+    """``(median, slow)`` wall minutes of this project's successful runs, if any.
+
+    ``slow`` is the ninth decile: what a batch run in parallel waits for is its
+    slowest image, and a map with thirty labels takes three times the median.
+    The very slowest is left out because one run in thirteen took 481 s for no
+    visible reason (stormy-misty-s-foal, 2026-10-06).
+    """
+    walls = sorted(
+        float(row["wall_s"])
+        for row in _usage_rows(project_dir)
+        if row.get("ok") and isinstance(row.get("wall_s"), (int, float)) and row["wall_s"] > 0
+    )
     if not walls:
-        return None
-    return round(statistics.median(walls) / 60.0, 1)
+        return None, None
+    slow = walls[math.ceil(0.9 * len(walls)) - 1]
+    return round(statistics.median(walls) / 60.0, 1), round(slow / 60.0, 1)
+
+
+def candidate_models(project_dir: Path) -> dict[tuple[str, int], str]:
+    """Which model made each candidate, by ``(job id, candidate number)``.
+
+    Read from the usage log: the newest successful run of a slot is the file
+    in it. Runs logged before the model was recorded are simply absent.
+    """
+    made: dict[tuple[str, int], str] = {}
+    for row in _usage_rows(project_dir):
+        if not row.get("ok") or not isinstance(row.get("candidate"), int):
+            continue
+        slot = (str(row.get("id")), row["candidate"])
+        if isinstance(row.get("model"), str) and row["model"]:
+            made[slot] = row["model"]
+        else:
+            made.pop(slot, None)
+    return made
 
 
 def _select_jobs(
@@ -596,13 +758,6 @@ def _todo(jobs: list[dict[str, Any]]) -> list[tuple[dict[str, Any], int]]:
 
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-
-
-def _generated_images_snapshot() -> set[str]:
-    root = codex_home() / "generated_images"
-    if not root.is_dir():
-        return set()
-    return {str(p) for p in root.rglob("*") if p.is_file()}
 
 
 def _is_image_path(value: str) -> bool:
@@ -665,8 +820,6 @@ def harvest(
     *,
     stdout: str,
     input_copy: Optional[Path],
-    home_before: Optional[set[str]],
-    started: float,
 ) -> tuple[Optional[Path], Optional[str], int]:
     """Find the image a Codex run produced. Returns ``(path, where, generated)``.
 
@@ -684,9 +837,13 @@ def harvest(
     3. a ``saved_path`` or any other image path the event stream named. Not
        seen on 0.157.0, whose ``--json`` stream carries no image events at all;
        kept for a CLI that starts reporting them.
-    4. a file that appeared anywhere under ``$CODEX_HOME/generated_images``
-       during the run — only when ``home_before`` is given, i.e. when no other
-       Codex job was running that could have written it.
+
+    A file that merely appeared under ``$CODEX_HOME/generated_images`` during
+    the run is not taken. It used to be, when one job ran at a time; but any
+    other Codex on the machine writes there too (a second book's ``generate``,
+    the user's own session), and another session's picture in this job's slot
+    is worse than a run reported as having left no image. The thread folder
+    held on all 71 live runs to 2026-10-06.
     """
     skip = {input_copy.resolve()} if input_copy is not None else set()
 
@@ -723,17 +880,6 @@ def harvest(
         for path in reversed(paths):
             if usable(path):
                 return path, where, 0
-
-    if home_before is not None:
-        fresh = [
-            p for p in (root.rglob("*") if root.is_dir() else [])
-            if p.is_file()
-            and p.suffix.lower() in IMAGE_SUFFIXES
-            and str(p) not in home_before
-            and p.stat().st_mtime >= started - 2
-        ]
-        if fresh:
-            return newest(fresh), "codex_home:new_file", len(fresh)
     return None, None, 0
 
 
@@ -771,13 +917,15 @@ def generate(
     project_dir: Path,
     *,
     estimate: bool = False,
-    concurrency: int = 1,
+    concurrency: int = DEFAULT_CONCURRENCY,
     target_ids: Optional[list[str]] = None,
+    limit: Optional[int] = None,
     cli_bin: Optional[str] = None,
-    model: Optional[str] = None,
+    model: str | Sequence[str] | None = None,
     timeout_s: Optional[float] = None,
     runner: Optional[headless.Runner] = None,
     prober: Optional[headless.AuthProber] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
     """Run Codex once per missing candidate and harvest each image.
 
@@ -785,10 +933,39 @@ def generate(
     is reported and again before every job, and a refusal stops the batch with
     nothing spent. A stub ``runner`` with no ``prober`` skips the probe, which
     is what lets the tests run without a Codex install.
+
+    Each candidate runs on the first of: its job's ``model``, ``model`` here,
+    the book's pinned ``image_model``, Codex's own default. Where that names
+    several, candidate ``n`` takes the ``n``-th, round again — so two models on
+    one job are two candidates of it, in this one process. ``limit`` runs only
+    the first so many missing candidates; ``progress`` is told as each finishes.
     """
     project_dir = Path(project_dir)
     if concurrency < 1:
         return {"status": "error", "error": f"invalid concurrency {concurrency!r}; must be >= 1"}
+    if limit is not None and limit < 1:
+        return {"status": "error", "error": f"invalid limit {limit!r}; must be >= 1"}
+    asked_models, model_problem = split_models(model)
+    if model_problem:
+        return {"status": "error", "error": f"--model: {model_problem}"}
+    pinned, pinned_problem = pinned_models(project_dir)
+    if pinned_problem and not asked_models:
+        # Run on Codex's default instead, the batch would be spent on a model
+        # nobody chose.
+        return {
+            "status": "error",
+            "error": (
+                f"this book's pinned {MODEL_CONFIG_KEY}: {pinned_problem}. Set it "
+                f"again with `harness.py config-set --key {MODEL_CONFIG_KEY} "
+                "--value <id>`, or name a model with --model."
+            ),
+        }
+    fallback_models = asked_models or pinned or [None]
+
+    def model_of(job: dict[str, Any], index: int) -> Optional[str]:
+        models = job.get("model") or fallback_models
+        return models[(index - 1) % len(models)]
+
     manifest = load_manifest(project_dir)
     if not manifest["jobs"]:
         return {"status": "error", "error": "no prepared jobs — run `prepare` first"}
@@ -800,24 +977,44 @@ def generate(
             "prepared_ids": [job["id"] for job in manifest["jobs"]],
         }
 
-    todo = _todo(jobs)
-    minutes = _measured_minutes(project_dir)
+    owed = _todo(jobs)
+    todo = owed[:limit] if limit else owed
+    minutes, slow = _measured_minutes(project_dir)
     per_image = minutes if minutes is not None else ASSUMED_MINUTES_PER_IMAGE
+    slowest = slow if slow is not None else ASSUMED_MINUTES_PER_IMAGE
+    # More workers than candidates are workers with nothing to do.
+    workers = max(1, min(concurrency, len(todo)))
+    models: dict[str, int] = {}
+    for job, n in todo:
+        label = model_of(job, n) or DEFAULT_MODEL_LABEL
+        models[label] = models.get(label, 0) + 1
     plan = {
         "cli": headless.IMAGE_CLI,
-        "model": model or "(Codex default, from ~/.codex/config.toml)",
+        "models": models,
         "images": len({job["id"] for job, _n in todo}),
         "candidates": len(todo),
-        "already_have": sum(job["candidates"] for job in jobs) - len(todo),
+        "already_have": sum(job["candidates"] for job in jobs) - len(owed),
+        "held_back": len(owed) - len(todo),
         "concurrency": concurrency,
+        "workers": workers,
         "minutes_per_image": per_image,
+        "minutes_slowest": slowest,
         "minutes_measured": minutes is not None,
-        "estimated_minutes": round(len(todo) * per_image / concurrency, 1),
+        "sequential_minutes": round(len(todo) * per_image, 1),
+        # In parallel a batch lasts as long as its slowest image, however few
+        # there are: two candidates across ten workers still take one image's
+        # minutes, not a fifth of them.
+        "estimated_minutes": (
+            round(max(len(todo) * per_image / workers, slowest), 1) if todo else 0.0
+        ),
         "jobs": [
             {
                 "id": job["id"],
                 "mode": job["mode"],
                 "missing": [n for j, n in todo if j is job],
+                "models": [
+                    model_of(job, n) or DEFAULT_MODEL_LABEL for j, n in todo if j is job
+                ],
             }
             for job in jobs
             if any(j is job for j, _n in todo)
@@ -831,7 +1028,7 @@ def generate(
             "plan": plan,
             "wrote": [],
             "failed": [],
-            "counts": {"wrote": 0, "failed": 0, "todo": 0},
+            "counts": {"wrote": 0, "failed": 0, "not_run": 0, "todo": 0},
             "instructions": (
                 "Every prepared candidate already exists. To roll another, raise "
                 "`candidates` on the job and re-run prepare; to change the "
@@ -852,7 +1049,7 @@ def generate(
                 "plan": plan,
                 "wrote": [],
                 "failed": [],
-                "counts": {"wrote": 0, "failed": 0, "todo": len(todo)},
+                "counts": {"wrote": 0, "failed": 0, "not_run": len(todo), "todo": len(todo)},
                 "instructions": (
                     "Nothing ran and nothing was spent. Image jobs are "
                     "subscription-only; there is no flag to override this."
@@ -867,7 +1064,10 @@ def generate(
             "limit_warning": LIMIT_WARNING,
             "instructions": (
                 "Quote plan and limit_warning to the user verbatim and get "
-                "consent in a separate turn before running `generate`."
+                "consent in a separate turn before running `generate`. "
+                "estimated_minutes is with plan.workers running at once; "
+                "sequential_minutes is the same work one at a time. The usage "
+                "spent is the same either way."
                 + (
                     ""
                     if minutes is not None
@@ -877,24 +1077,36 @@ def generate(
             ),
         }
 
-    # A file under $CODEX_HOME can only be attributed to a job when no other
-    # job could have written it.
-    attribute_home = concurrency == 1
     abort = threading.Event()
     abort_reason: list[str] = []
-    log_lock = threading.Lock()
+    # Models the plan turned down, by id ("" for Codex's default). Only their
+    # own candidates stop: in a batch on two models the other one's still land.
+    rejected: set[str] = set()
+    state_lock = threading.Lock()
 
     def log(row: dict[str, Any]) -> None:
-        with log_lock:
+        with state_lock:
             path = usage_path(project_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def run_one(job: dict[str, Any], index: int) -> dict[str, Any]:
-        base = {"id": job["id"], "image": job["image"], "candidate": index}
+        run_model = model_of(job, index)
+        base = {
+            "id": job["id"],
+            "image": job["image"],
+            "candidate": index,
+            "mode": job["mode"],
+            "model": run_model,
+        }
         if abort.is_set():
             return {**base, "ok": False, "skipped": True, "error": "not run: batch stopped"}
+        if (run_model or "") in rejected:
+            return {
+                **base, "ok": False, "skipped": True,
+                "error": "not run: this model was rejected",
+            }
         job_dir = Path(job["job_dir"])
         run_dir = job_dir / f"run_{index:02d}"
         if run_dir.exists():
@@ -902,20 +1114,18 @@ def generate(
         run_dir.mkdir(parents=True)
         input_copy: Optional[Path] = None
         if job.get("input"):
-            source = Path(job["input"])
+            source = _input_path(project_dir, job)
             if not source.is_file():
                 return {**base, "ok": False, "error": f"input image is gone: {source}"}
             input_copy = run_dir / job["input_name"]
             shutil.copyfile(source, input_copy)
         prompt = Path(job["prompt_path"]).read_text(encoding="utf-8")
-        home_before = _generated_images_snapshot() if attribute_home else None
-        started = time.time()
         result = headless.run_image_job(
             prompt,
             job_dir=run_dir,
             images=[input_copy] if input_copy is not None else [],
             cli_bin=cli_bin,
-            model=model,
+            model=run_model,
             timeout=timeout_s,
             runner=runner,
             prober=prober,
@@ -933,25 +1143,30 @@ def generate(
                 abort_reason.append(result["error"])
                 abort.set()
             elif _MODEL_REJECTED_RE.search(result["error"] or ""):
-                abort_reason.append(
-                    f"{result['error']} Pass `--model <id>` with a model this "
-                    "ChatGPT plan offers (the ids are in "
-                    "~/.codex/models_cache.json); nothing was generated."
-                )
-                abort.set()
+                with state_lock:
+                    # Said once per model: at ten workers, ten runs on it are
+                    # already in flight and each comes back with the same line.
+                    if (run_model or "") not in rejected:
+                        rejected.add(run_model or "")
+                        abort_reason.append(
+                            f"{result['error']} Pass `--model <id>` with a model "
+                            "this ChatGPT plan offers (the ids are in "
+                            "~/.codex/models_cache.json); nothing was generated "
+                            "on it."
+                        )
             elif _USAGE_LIMIT_RE.search(result["error"] or ""):
-                abort_reason.append(
-                    "Codex reported a usage limit; stopped so the rest of the "
-                    f"batch is not burned against it ({result['error']})"
-                )
-                abort.set()
+                with state_lock:
+                    if not abort.is_set():
+                        abort_reason.append(
+                            "Codex reported a usage limit; stopped so the rest of "
+                            f"the batch is not burned against it ({result['error']})"
+                        )
+                    abort.set()
             return row
         found, where, generated = harvest(
             run_dir,
             stdout=result["stdout"],
             input_copy=input_copy,
-            home_before=home_before,
-            started=started,
         )
         if found is None:
             row["error"] = (
@@ -972,28 +1187,83 @@ def generate(
             row["images_generated"] = generated
         return row
 
+    def attempt(job: dict[str, Any], index: int) -> dict[str, Any]:
+        try:
+            return run_one(job, index)
+        except Exception as exc:  # noqa: BLE001 - one candidate's failure, not the batch's
+            # Raised out of the pool it would end the run with a traceback while
+            # the other workers went on unlogged.
+            return {
+                "id": job["id"],
+                "image": job["image"],
+                "candidate": index,
+                "mode": job["mode"],
+                "model": model_of(job, index),
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
     rows: list[dict[str, Any]] = []
-    if concurrency == 1:
-        for job, index in todo:
-            row = run_one(job, index)
-            rows.append(row)
-            if not row.get("skipped"):
-                log({"ts": ledger.now_stamp(), **row})
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(run_one, job, index) for job, index in todo]
+
+    def finished(row: dict[str, Any]) -> None:
+        rows.append(row)
+        if not row.get("skipped"):
+            log({"ts": ledger.now_stamp(), **row, "concurrency": workers})
+        if progress is not None:
+            outcome = (
+                "not run" if row.get("skipped")
+                else f"ok {row['wall_s']:.0f}s" if row.get("ok")
+                else f"failed: {str(row.get('error') or '')[:120]}"
+            )
+            progress(
+                f"[{len(rows)}/{len(todo)}] {row['image']} #{row['candidate']} "
+                f"{outcome} ({row.get('model') or 'default model'})"
+            )
+
+    def run_batch() -> None:
+        if workers == 1:
+            for job, index in todo:
+                finished(attempt(job, index))
+            return
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(attempt, job, index) for job, index in todo]
             try:
                 for future in as_completed(futures):
-                    row = future.result()
-                    rows.append(row)
-                    if not row.get("skipped"):
-                        log({"ts": ledger.now_stamp(), **row})
+                    finished(future.result())
             except KeyboardInterrupt:
                 # Ctrl-C reaches only this thread; the workers are blocked in
                 # communicate() and have to be killed from here.
                 abort.set()
                 headless.kill_live_processes()
                 raise
+
+    began = time.monotonic()
+    try:
+        # Two `generate` processes on one book would each run every missing
+        # candidate, spend double, and clear each other's run_NN/ as scratch.
+        with locks.image_lock(project_dir):
+            # Counted before the lock was ours: a run that ended in between has
+            # made some of these, and running them again would spend twice.
+            still = {(job["id"], n) for job, n in _todo(jobs)}
+            todo = [(job, n) for job, n in todo if (job["id"], n) in still]
+            run_batch()
+    except locks.LockBusy as busy:
+        return {
+            "status": "error",
+            "error": (
+                "another image run (`generate` or `prepare`) is already running "
+                f"on this book. {busy}"
+            ),
+            "estimate": False,
+            "plan": plan,
+            "wrote": [],
+            "failed": [],
+            "counts": {"wrote": 0, "failed": 0, "not_run": len(todo), "todo": len(todo)},
+            "instructions": (
+                "Nothing ran and nothing was spent. Wait for that run to finish, "
+                "then run `generate` again: it fills only what is still missing."
+            ),
+        }
 
     wrote = [row for row in rows if row.get("ok")]
     skipped = [row for row in rows if row.get("skipped")]
@@ -1010,14 +1280,24 @@ def generate(
             "not_run": len(skipped),
             "todo": len(todo),
         },
+        # Side by side these say what running in parallel bought: the batch
+        # took elapsed_s, and would have taken wall_s_summed one at a time.
+        "elapsed_s": round(time.monotonic() - began, 1),
+        "wall_s_summed": round(
+            sum(row.get("wall_s") or 0.0 for row in rows if not row.get("skipped")), 1
+        ),
         "usage_log": str(usage_path(project_dir)),
     }
     if abort_reason:
-        out["error"] = abort_reason[0]
+        # A refused login comes back from every run already in flight.
+        out["error"] = " ".join(dict.fromkeys(abort_reason))
     out["instructions"] = (
         "Run `board`, Read each candidate beside its original, and record what "
         "you find with `check` before the pick gate."
         if wrote
+        else "Another run made every candidate this one set out to; nothing ran "
+        "and nothing was spent."
+        if not rows
         else "No candidate was produced. Relay the error(s) verbatim."
     ) + (
         " Re-running `generate` retries only what is still missing — never "

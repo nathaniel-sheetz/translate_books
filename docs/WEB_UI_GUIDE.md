@@ -858,6 +858,9 @@ candidate was let in, over what, and how much of the picture differs from that b
 Full size, a dashed outline marks where the patch sits; `O` hides and shows it, so
 the join can be looked at with and without the line over it.
 
+A candidate Codex drew names the model that made it beside its size, when the run
+recorded one, since two models can fill the candidates of one job.
+
 The page re-fetches itself when you come back to its tab, unless you are in the
 middle of typing, so candidates and applied picks appear without a reload.
 

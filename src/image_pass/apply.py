@@ -38,7 +38,12 @@ from src.image_pass import (
 from src.image_pass import ledger
 from src.image_pass.composite import load_sidecar
 from src.image_pass.inventory import probe_image, referenced_images
-from src.image_pass.jobs import candidate_path, existing_candidates, load_manifest
+from src.image_pass.jobs import (
+    candidate_models,
+    candidate_path,
+    existing_candidates,
+    load_manifest,
+)
 
 VERDICT_ACCEPT = "accept"
 VERDICT_SKIP = "skip"
@@ -95,33 +100,42 @@ def convert_candidate(
 
     fmt = FORMATS[target.suffix.lower()]
     tmp = target.with_name(f".{target.name}.image-pass.tmp")
-    with Image.open(candidate) as image:
-        image.load()
-        if max(image.size) > max_side:
-            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-        if fmt == "JPEG":
-            # JPEG has no alpha: flatten onto white, the colour of the page.
-            if image.mode in ("RGBA", "LA", "P"):
-                rgba = image.convert("RGBA")
-                flat = Image.new("RGB", rgba.size, (255, 255, 255))
-                flat.paste(rgba, mask=rgba.split()[-1])
-                image = flat
-            elif image.mode != "RGB":
-                image = image.convert("RGB")
-            image.save(tmp, format=fmt, quality=_JPEG_QUALITY, optimize=True)
-        elif fmt == "GIF":
-            image.convert("P", palette=Image.Palette.ADAPTIVE).save(tmp, format=fmt)
-        else:
-            image.save(tmp, format=fmt)
-        width, height = image.size
-    os.replace(tmp, target)
+    try:
+        with Image.open(candidate) as image:
+            image.load()
+            if max(image.size) > max_side:
+                image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            if fmt == "JPEG":
+                # JPEG has no alpha: flatten onto white, the colour of the page.
+                if image.mode in ("RGBA", "LA", "P"):
+                    rgba = image.convert("RGBA")
+                    flat = Image.new("RGB", rgba.size, (255, 255, 255))
+                    flat.paste(rgba, mask=rgba.split()[-1])
+                    image = flat
+                elif image.mode != "RGB":
+                    image = image.convert("RGB")
+                image.save(tmp, format=fmt, quality=_JPEG_QUALITY, optimize=True)
+            elif fmt == "GIF":
+                image.convert("P", palette=Image.Palette.ADAPTIVE).save(tmp, format=fmt)
+            else:
+                image.save(tmp, format=fmt)
+            width, height = image.size
+        os.replace(tmp, target)
+    except BaseException:
+        # A half-written temp beside the book's images would ship in the EPUB.
+        tmp.unlink(missing_ok=True)
+        raise
     return {"width": width, "height": height}
 
 
 def copy_atomic(source: Path, target: Path) -> None:
     tmp = target.with_name(f".{target.name}.image-pass.tmp")
-    shutil.copyfile(source, tmp)
-    os.replace(tmp, target)
+    try:
+        shutil.copyfile(source, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _split_decisions(decisions: list[Any]) -> tuple[list[dict], list[dict]]:
@@ -180,6 +194,8 @@ def apply(
     project_dir = Path(project_dir)
     rows, invalid = _split_decisions(decisions)
     jobs = {job["image"]: job for job in load_manifest(project_dir)["jobs"]}
+    made_by = candidate_models(project_dir)
+    state = ledger.current_state(project_dir)
 
     applied: list[dict[str, Any]] = []
     planned: list[dict[str, Any]] = []
@@ -229,9 +245,14 @@ def apply(
         assert job is not None and candidate is not None
 
         existed = target.is_file()
+        # A cover an earlier apply made from nothing is not an original: backed
+        # up, a generated picture would be what `revert` restores for ever after.
+        had_original = existed and (
+            backup.is_file() or not ledger.made_from_nothing(state.get(key), target)
+        )
         # The reference for proportions is the publisher's file, which is the
         # backup once one exists — not whatever replacement currently sits there.
-        reference = backup if backup.is_file() else target if existed else None
+        reference = backup if backup.is_file() else target if had_original else None
         ref_info = probe_image(reference) if reference else {}
         cap = max_side or _long_side_cap(job.get("mode"), ref_info)
         drift = (
@@ -245,9 +266,11 @@ def apply(
             "candidate": row["candidate"],
             "mode": job.get("mode"),
             "target": str(target),
-            "backup": str(backup) if existed else None,
+            "backup": str(backup) if had_original else None,
             "backup_action": (
                 "none (new file)" if not existed
+                else "none (image-pass made this file; it has no original)"
+                if not had_original
                 else "kept (already backed up)" if backup.is_file()
                 else "created"
             ),
@@ -276,7 +299,7 @@ def apply(
 
         sha_before = ledger.sha256_file(target) if existed else None
         try:
-            if existed and not backup.is_file():
+            if had_original and not backup.is_file():
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 copy_atomic(target, backup)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -300,11 +323,13 @@ def apply(
             "note": row["note"],
             "job_id": job["id"],
             "mode": job.get("mode"),
+            # Null for a composite, and for a run on Codex's own default.
+            "model": None if made_from else made_by.get((job["id"], row["candidate"])),
             "instruction": job.get("instruction"),
             "labels": job.get("labels") or {},
             "prompt_sha": job.get("prompt_sha"),
-            "created": not existed,
-            "backup": f"images_original/{key}" if existed else None,
+            "created": not had_original,
+            "backup": f"images_original/{key}" if had_original else None,
             "sha256_before": sha_before,
             "sha256_original": ledger.sha256_file(backup) if backup.is_file() else None,
             "sha256_after": ledger.sha256_file(target),

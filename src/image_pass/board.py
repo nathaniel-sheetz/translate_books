@@ -41,7 +41,12 @@ from src.image_pass.apply import (
 )
 from src.image_pass.composite import load_sidecar
 from src.image_pass.inventory import build_rows, probe_image
-from src.image_pass.jobs import candidate_path, existing_candidates, load_manifest
+from src.image_pass.jobs import (
+    candidate_models,
+    candidate_path,
+    existing_candidates,
+    load_manifest,
+)
 
 STAGE_MISSING = "missing"
 STAGE_REVIEW = "review"
@@ -381,6 +386,13 @@ def _pick_state(
     return {**pick, "pending": pending, "stale": pending and stale}
 
 
+def _owed(job: dict[str, Any], candidates: list[dict[str, Any]]) -> int:
+    """How many of the job's candidates have no file yet, as ``generate`` counts
+    them. A composite is numbered past the job's own and fills none of them."""
+    have = {c["candidate"] for c in candidates}
+    return sum(1 for n in range(1, (job.get("candidates") or 1) + 1) if n not in have)
+
+
 def _stage(
     row: dict[str, Any],
     verdict: Optional[str],
@@ -395,7 +407,7 @@ def _stage(
         return STAGE_REVIEW
     if row["status"] == ledger.STATUS_REPLACED:
         return STAGE_REPLACED
-    if job is not None and len(candidates) < job.get("candidates", 1):
+    if job is not None and _owed(job, candidates):
         return STAGE_QUEUED
     action = (decision or {}).get("action")
     if job is not None and action == ledger.ACTION_REDO:
@@ -418,6 +430,7 @@ def build(project_dir: Path) -> dict[str, Any]:
     feedback = fb.load(project_dir)
     decisions = _last_decisions(project_dir)
     jobs = {job["image"]: job for job in load_manifest(project_dir)["jobs"]}
+    made_by = candidate_models(project_dir)
 
     images: list[dict[str, Any]] = []
     counts = {stage: 0 for stage in STAGES}
@@ -477,6 +490,9 @@ def build(project_dir: Path) -> dict[str, Any]:
                 "regions": made_from.get("regions") or [],
                 "changed_share": made_from.get("changed_share"),
             } if made_from else None
+            # Two models can fill the candidates of one job; which made this one
+            # is otherwise only in the usage log.
+            picture["model"] = None if made_from else made_by.get((job["id"], number))
             picture["flags"] = flags
             picture["check"] = (
                 {"ok": check.get("ok"), "finding": check.get("finding") or ""} if check else None
@@ -524,7 +540,7 @@ def build(project_dir: Path) -> dict[str, Any]:
             "job": {
                 field: job.get(field)
                 for field in ("id", "mode", "instruction", "labels", "candidates",
-                              "reference", "input_from", "prepared_at")
+                              "model", "reference", "input_from", "prepared_at")
             } if job else None,
             "pictures": pictures,
             "candidates": candidates,
@@ -624,10 +640,11 @@ def summary(project_dir: Path) -> dict[str, Any]:
                         "flags": c["flags"],
                         "checked": c["check"] is not None,
                         "composite": c["composite"],
+                        "model": c["model"],
                     }
                     for c in image["candidates"]
                 ],
-                "missing": max(0, (job.get("candidates") or 1) - len(image["candidates"])),
+                "missing": _owed(job, image["candidates"]),
             })
         if image["drift"]:
             request = image["request"]

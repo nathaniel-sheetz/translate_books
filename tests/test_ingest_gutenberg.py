@@ -2,11 +2,13 @@
 
 import json
 
+import pytest
 from bs4 import BeautifulSoup
 
 from scripts.ingest_gutenberg import (
     Converter,
     decode_html_bytes,
+    fetch_bytes,
     fetch_html,
     linked_images,
     write_heading_outline,
@@ -421,3 +423,13 @@ class TestLinkedLargerScans:
             ("029_l.gif", ["029.1.jpg", "029.2.jpg"]),
         ]
         assert links[0]["url"] == "https://pg.example/book/images/042_l.gif"
+
+    def test_a_local_file_is_read_only_for_a_page_read_from_disk(self, tmp_path):
+        scan = tmp_path / "images" / "042_l.gif"
+        scan.parent.mkdir()
+        scan.write_bytes(b"GIF89a")
+        assert fetch_bytes(scan.as_uri(), base_url=tmp_path.as_uri() + "/") == b"GIF89a"
+        # A page fetched over the network that names a local file gets none of it.
+        for base in ("https://pg.example/book/", ""):
+            with pytest.raises(ValueError, match="local file"):
+                fetch_bytes(scan.as_uri(), base_url=base)

@@ -95,11 +95,15 @@ python scripts/image_pass.py board --project home-geography [--base-url http://1
 python scripts/image_pass.py prepare --project home-geography \
     --json-file projects/home-geography/.harness/images/jobs.json [--replace]
 
-# 5. Estimate, then run. One Codex process per candidate.
+# 5. Estimate, then run. One Codex process per candidate, ten at a time.
 python scripts/image_pass.py generate --project home-geography --estimate
 python scripts/image_pass.py generate --project home-geography \
-    [--concurrency 3] [--target-ids 006.jpg,cover.jpg] [--model <id>] \
-    [--cli-bin <path>] [--timeout-minutes 20]
+    [--limit 10] [--target-ids 006.jpg,cover.jpg] [--model <id>[,<id>]] \
+    [--concurrency 10] [--cli-bin <path>] [--timeout-minutes 20]
+
+# 5b. Once per book, so --model need not be retyped (plain id, or a,b to rotate).
+python scripts/harness.py config-set --project home-geography \
+    --key image_model --value gpt-6-luna
 
 # 6. Record what you found in each candidate. It shows under it on the board.
 python scripts/image_pass.py check --project home-geography \
@@ -221,6 +225,7 @@ tried).
 | `instruction` | required. What *this* image needs, from having looked at it |
 | `labels` | source → replacement map. **Required for `translate`.** Optional elsewhere: lettering to put on a cover, or to keep legible in a replacement |
 | `candidates` | 1–4, default 1. Each one is a separate Codex run |
+| `model` | the Codex model for this job: `"gpt-6-sol"`, or a list to give each candidate a different one (`["gpt-6-luna", "gpt-6-sol"]` with `"candidates": 2` is one of each; candidate N takes the Nth, round again). Outranks `--model`, which outranks the book's `image_model`. It is not part of the prompt, so changing it archives nothing: candidates already made stay, and to see another model's take you raise `candidates` |
 | `input` | `original` (default) or `current`. A redo of an already-replaced image starts from the publisher's file again unless you say `current` |
 | `reference` | `cover` only: another of the book's images to draw the cover from (`"reference": "052.jpg"`). It is attached as source material, so the cover is a new portrait picture, not that image's proportions |
 
@@ -396,24 +401,31 @@ python scripts/image_pass.py generate --project home-geography --estimate
 No dollars, but real plan usage and real minutes. Quote `plan` and `limit_warning`
 **verbatim** and get consent in a separate turn:
 
-- `plan.candidates` Codex runs, `plan.estimated_minutes` in all.
+- `plan.candidates` Codex runs, `plan.workers` at a time: `plan.estimated_minutes`
+  in all, against `plan.sequential_minutes` one at a time. Quote both. The usage
+  spent is the same either way; only the wait changes.
 - `plan.minutes_measured: false` means `minutes_per_image` is an assumption (2 min),
   not a measurement — say so. After the first run on a project it is that project's
-  own median.
-- `plan.model`. If it reads "(Codex default…)" the job runs whatever
-  `~/.codex/config.toml` pins, which a ChatGPT login may not be allowed to use. A
-  rejected model fails in seconds and spends nothing; re-run with `--model <id>`.
+  own median, and `minutes_slowest` its ninth decile. A batch in parallel lasts as
+  long as its slowest image, so `estimated_minutes` is never below that.
+- `plan.models`: how many runs go to each model, and `plan.jobs[].models` which
+  candidate goes to which. A key reading "(Codex default…)" means those runs take
+  whatever `~/.codex/config.toml` pins, which a ChatGPT login may not be allowed to
+  use. A rejected model fails in seconds and spends nothing; name one on the job,
+  with `--model <id>`, or once for the book with `config-set --key image_model`.
 - The limit burn: an image costs roughly 3–5x an ordinary Codex turn against the
   ChatGPT plan's window. A big batch can run out part-way.
 
-An honest line reads: *"12 images × 2 candidates = 24 Codex runs, about 48 minutes at
-an assumed 2 min each (not yet measured here). Images burn the ChatGPT plan's limits
-3–5x faster than text, so this may hit the window before it finishes — what is
-already generated is kept. Run it?"*
+An honest line reads: *"12 images × 2 candidates = 24 Codex runs on gpt-6-luna, ten at
+a time: about 5 minutes, at an assumed 2 min each (not yet measured here; 48 minutes
+one at a time). Images burn the ChatGPT plan's limits 3–5x faster than text, so this
+may hit the window before it finishes — what is already generated is kept. Run it?"*
 
-For a first run on a book, propose **one or two images** before the batch. It
-measures the minutes and proves the harvest on this machine for the price of two
-runs.
+For a first run on a book, propose **a first wave** before the batch: `--limit 2`
+when nothing here has been measured, up to `--limit 10` on a long run of images of
+one kind. It measures the minutes, proves the harvest on this machine and shows what
+the prompt gets wrong while the rest can still be changed. `plan.held_back` is what it
+leaves; the next `generate` takes those.
 
 Then:
 
@@ -421,16 +433,26 @@ Then:
 python scripts/image_pass.py generate --project home-geography
 ```
 
-- **Propose `--concurrency` at G2**, as many as there are candidates up to 3, and
-  quote the minutes that gives (`plan.estimated_minutes` already divides by it). The
-  flag defaults to 1; the user of this repo asked for parallel runs (2026-10-06)
-  after thirteen sequential ones took 29 minutes of generation and 1-2% of a 5-hour
-  window. More than one has **not yet been run against the real CLI**: the harvest
-  is by thread id, which is exact at any concurrency, but the first parallel batch
-  is the test. Say so at the gate, and afterwards check that every candidate is the
-  right picture for its job before anything else.
+- **Ten run at once unless you say otherwise.** `--concurrency` defaults to 10 and
+  never uses more workers than there are candidates. Ten at once has been run against
+  the real CLI (see the kittens-and-cats notes below): the harvest is by thread id and
+  every candidate was the right picture for its job. Pass `--concurrency 1` only when
+  the user asks for it or the plan's window is nearly spent: no limit has been hit
+  yet, but the runs in flight when one is are presumably all lost to it, so ten at
+  once can lose ten. Above 10 is untried.
+- **Two models on one job are two candidates of it**, in one `generate`:
+  `"candidates": 2, "model": ["gpt-6-luna", "gpt-6-sol"]`. Never start a second
+  `generate` on the same book to get there: it is refused while the first holds
+  `.harness/images/.generate.lock` ("another image run … is already running").
+  `prepare` is refused under the same lock: fold a board request into a job
+  after the run ends, not during it.
+- stderr carries one line per finished candidate (`[7/29] illus12.jpg #1 ok 78s
+  (gpt-6-luna)`); the result's `elapsed_s` beside `wall_s_summed` says what running
+  in parallel bought. Run a long batch in the background and read `last_output.json`
+  when it ends.
 - A usage-limit error **stops the batch** (`counts.not_run`) instead of failing every
-  remaining candidate against it. Relay the `error`.
+  remaining candidate against it. Relay the `error`. A rejected model stops only the
+  candidates on that model; the others still land (`status: partial`).
 - **Re-running `generate` is the recovery.** It fills only the candidates still
   missing. Never re-`prepare` to recover.
 - `status: partial` means some landed. Each `failed` row carries its own error;
@@ -628,6 +650,10 @@ mostly lettering scores low (0.86) for the right reasons.
 - **A cover from one of the book's own pictures** takes `"reference": "052.jpg"`. The
   result is a recomposed picture of the same scene, not a crop: islands and houses
   were added to fill the taller shape.
+- **A cover from two models** is one job: `"candidates": 2, "model": ["gpt-6-luna",
+  "gpt-6-sol"]`. Both run at once and the board says under each candidate which model
+  made it. (horses-of-destiny, 2026-10-06, did this through a wrapper before the job
+  took a `model`; one of the two missed the title band.)
 - **Name the medium by its mechanics.** "Colourised but keeping the pencil style"
   produced a coloured-pencil drawing. "A hand-coloured wood engraving: all the drawing
   and shading in black engraved line, thin flat transparent tints over it, shading
@@ -694,9 +720,36 @@ Six images, thirteen runs on `gpt-6-luna` (one on `gpt-6-sol`), each one image,
 - It changed the triage. At 216 px half the map's labels could not be read, by the
   agent or by Codex; at 614 px all sixteen could. Run it before reading the images.
 
+### Captioned photographs, ten at a time (kittens-and-cats, 2026-10-06)
+
+Thirty-eight halftone plates, each with its caption set inside the picture, 39 runs on
+`gpt-6-luna` at `--concurrency 10` in two waves (10, then 29).
+
+- **Ten in parallel works.** None failed, each run made one image, every candidate was
+  the right picture for its job, and no usage limit was hit. A run took 65-107 s
+  (median 78 s) whether ten ran or one; the wave of 29 was done in about 3.5 minutes.
+- **A caption in a plain cartouche is a composite job from the start.** One candidate
+  per image, then `composite` with `base: original`, `scale: 2`, `feather: 1` and one
+  region: the cartouche's paper, measured per image (the frames sit a few pixels
+  apart from plate to plate). Every patch aligned within 1 px with no warning. The
+  redrawn photographs scored 0.998-1.0 and were the same pictures, a little smoothed.
+- **Make the region the full height of the paper.** Inset by a pixel, the top of an old
+  apostrophe and the feet of old letters showed through at the rim on three plates.
+  One apostrophe overlapped the cartouche's outline and needed a small second region.
+- **Marks at the ends of a line are dropped.** `«LA TRAMPA PARA RATONES»` came back
+  without either angle quote; saying what they look like and that a previous attempt
+  left them out fixed it in one run. `¿…?` and `¡…!` were right first time.
+- **Size and weight drift from plate to plate.** Told only "the same type, may be
+  slightly larger", captions came back from light to heavy and from the original's
+  size to half as large again, and one line had a word riding 2 px high. Give a cap
+  height in pixels when a set of plates should match.
+- **Lettering inside a halftone can be patched.** A word on a paper cap and a line
+  over newsprint both composited without a visible join at 5-6x.
+
 Not yet seen: a usage-limit error (so the usage-limit stop is tested only against a
-fake), a `replace` job, a cover with lettering on it, a lower-case `ñ` or an inverted
-`¿` / `¡`, and `--concurrency` above 1 against the real CLI (asked for; see G2).
+fake), a `replace` job, a cover with lettering on it, and a lower-case `ñ`. Also
+tested only against a fake: two models inside one `generate` (the live two-model run
+was two processes), a rejected model in a batch that mixes them, and `--limit`.
 
 ## Notes
 
@@ -706,8 +759,10 @@ fake), a `replace` job, a cover with lettering on it, a lower-case `ñ` or an in
   which mangles every accent in a label map.
 - `.harness/images/` layout: `inventory.json`, `triage.json`, `manifest.json`,
   `checks.json`, `feedback.json` (the user's requests and picks — written only by the
-  board, never by you), `usage.jsonl`, `images.jsonl` (the ledger), `backfill/` (the
-  fetched scans), and `jobs/<id>/` holding `job.json`, `prompt.txt`, `cand_NN.png`
+  board, never by you), `usage.jsonl` (one row per Codex run: wall time, outcome,
+  `model`, `mode`, `concurrency`), `images.jsonl` (the ledger), `.generate.lock`
+  (while a `generate` runs; one left by a killed run is broken by the next), `backfill/`
+  (the fetched scans), and `jobs/<id>/` holding `job.json`, `prompt.txt`, `cand_NN.png`
   (with a `cand_NN.composite.json` beside a composite), `run_NN/` and `previous/`.
 - **A note typed on a card with no pick is not saved.** The board attaches a note to
   a verdict, so "send both back with my notes" reaches `board` only after the user
@@ -723,7 +778,9 @@ fake), a `replace` job, a cover with lettering on it, a lower-case `ñ` or an in
   The output contract appended to each (built-in tool only, one call, save nothing) is
   in `src/image_pass/jobs.py`, because the harvest depends on it.
 - `generate` copies each result out of `$CODEX_HOME/generated_images/<thread id>/` and
-  leaves the source there (about 1.8 MB an image). Nothing in this skill deletes from
+  leaves the source there (about 1.8 MB an image). It takes a picture only from its
+  own run's thread folder, so other Codex sessions on the machine, and a `generate`
+  on another book, can run at the same time. Nothing in this skill deletes from
   Codex's own folder; clearing it is the user's call.
 - `images.jsonl` is append-only. "Durable" means *survives the next run*, not
   *survives a re-clone* — the same is true of `images_original/`. A book whose

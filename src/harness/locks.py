@@ -49,6 +49,12 @@ _log = logging.getLogger(__name__)
 # below the gap between two nightly runs.
 DEFAULT_STALE_AFTER_S = 3 * 60 * 60
 
+# An image batch has no such ceiling: ninety candidates one at a time is a
+# working run past three hours, and a second ``generate`` that broke its lock
+# would clear the directories it is writing into. A holder that died is still
+# retired at once, by its pid; age is only what retires another machine's.
+IMAGE_STALE_AFTER_S = 24 * 60 * 60
+
 # How often a waiting caller re-checks. Waves last minutes; sub-second polling
 # would only burn CPU.
 _POLL_INTERVAL_S = 0.5
@@ -120,6 +126,16 @@ def lock_path(project_dir: Path | str) -> Path:
 def repo_lock_path() -> Path:
     """``logs/.nightly.lock`` — the whole-driver lock."""
     return hstate.REPO_ROOT / "logs" / ".nightly.lock"
+
+
+def image_lock_path(project_dir: Path | str) -> Path:
+    """``projects/<slug>/.harness/images/.generate.lock`` — one image run per book.
+
+    Not the book's own lock: an image run writes only under ``.harness/images/``
+    and lasts minutes, and must neither wait on nor hold up a judge or nightly
+    wave working on the same book's prose.
+    """
+    return hstate.harness_dir(Path(project_dir)) / "images" / ".generate.lock"
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +491,34 @@ def repo_lock(
     done and its in-flight one as busy.
     """
     path = repo_lock_path()
+    token = _acquire(
+        path, kind=kind, run_id=run_id, timeout=timeout, stale_after=stale_after
+    )
+    try:
+        yield path
+    finally:
+        _release(path, token)
+
+
+@contextlib.contextmanager
+def image_lock(
+    project_dir: Path | str,
+    *,
+    kind: str = "image-generate",
+    run_id: Optional[str] = None,
+    timeout: float = 0.0,
+    stale_after: float = IMAGE_STALE_AFTER_S,
+) -> Iterator[Path]:
+    """Hold one book's image generation, so two runs cannot spend twice.
+
+    ``image_pass.py generate`` fills whichever candidates have no file yet. Two
+    of them started on one book each see the same ones missing, run them all,
+    and clear each other's working directories as leftover scratch. ``prepare``
+    takes it too (``kind="image-prepare"``): it archives the working
+    directories a run in flight is reading from.
+    """
+    path = image_lock_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
     token = _acquire(
         path, kind=kind, run_id=run_id, timeout=timeout, stale_after=stale_after
     )

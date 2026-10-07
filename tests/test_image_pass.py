@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,7 @@ from src.image_pass import image_key, is_safe_key, jobs as ip_jobs, ledger
 from src.image_pass import inventory as ip_inventory
 from src.image_pass import board as ip_board
 from src.image_pass import composite as ip_composite
+from src.harness import locks
 from src.image_pass import feedback as ip_feedback
 
 SOURCE = """THE POINTS OF THE COMPASS
@@ -96,14 +98,20 @@ class FakeCodex:
         self.size, self.color, self.rc, self.stdout = size, color, rc, stdout
         self.where, self.count = where, count
         self.calls: list[dict] = []
+        self._lock = threading.Lock()
 
     def __call__(self, cmd, *, input_text, cwd):
-        self.calls.append({"cmd": list(cmd), "prompt": input_text, "cwd": Path(cwd)})
-        if self.rc != 0:
-            return self.rc, self.stdout, "boom"
+        # Ten of these run at once now: number the call under a lock, or two
+        # workers read the same length and share a thread folder.
+        with self._lock:
+            self.calls.append({"cmd": list(cmd), "prompt": input_text, "cwd": Path(cwd)})
+            number = len(self.calls)
+        rc = self.rc(cmd) if callable(self.rc) else self.rc
+        if rc != 0:
+            return rc, self.stdout, "boom"
         generated = Path(os.environ["CODEX_HOME"]) / "generated_images"
         if self.where == "thread":
-            thread_id = f"thread-{len(self.calls):02d}"
+            thread_id = f"thread-{number:02d}"
             for n in range(self.count):
                 # Earlier attempts get a different colour and an older mtime, so
                 # a harvest that takes the wrong one is visible.
@@ -263,6 +271,33 @@ def test_prepare_merges_by_image_unless_told_to_replace(project: Path):
     assert out["counts"]["jobs_in_manifest"] == 1
 
 
+def test_prepare_will_not_merge_onto_a_manifest_it_cannot_read(project: Path):
+    _prepared(
+        project,
+        TRANSLATE_JOB,
+        {"image": "compass.png", "mode": "restore", "instruction": "Remove the foxing."},
+    )
+    manifest = ip_jobs.manifest_path(project)
+    torn = manifest.read_text("utf-8")[:40]  # what a kill mid-write used to leave
+    manifest.write_text(torn, encoding="utf-8")
+    out = ip_jobs.prepare(project, [TRANSLATE_JOB])
+    assert out["status"] == "error" and "cannot be read" in out["error"]
+    assert manifest.read_text("utf-8") == torn
+    # Told the batch is the whole manifest, there is nothing to lose by writing it.
+    out = ip_jobs.prepare(project, [TRANSLATE_JOB], replace=True)
+    assert out["status"] == "ok" and out["counts"]["jobs_in_manifest"] == 1
+
+
+def test_two_images_cannot_share_a_job_folder(project: Path):
+    _image(project / "images" / "a" / "b.jpg")
+    _image(project / "images" / "a_b.jpg")
+    _prepared(project, {**TRANSLATE_JOB, "image": "a/b.jpg"})
+    out = ip_jobs.prepare(project, [{**TRANSLATE_JOB, "image": "a_b.jpg"}])
+    assert out["status"] == "error"
+    assert "already belongs to a/b.jpg" in out["invalid"][0]["problems"][0]
+    assert [job["image"] for job in ip_jobs.load_manifest(project)["jobs"]] == ["a/b.jpg"]
+
+
 def test_a_cover_job_needs_no_existing_image(project: Path):
     out = ip_jobs.prepare(
         project,
@@ -356,7 +391,7 @@ def test_reprepare_with_a_new_prompt_archives_candidates_instead_of_deleting(pro
 def test_estimate_runs_nothing(project: Path):
     _prepared(project, {**TRANSLATE_JOB, "candidates": 3})
     codex = FakeCodex()
-    out = ip_jobs.generate(project, estimate=True, runner=codex)
+    out = ip_jobs.generate(project, estimate=True, concurrency=1, runner=codex)
     assert codex.calls == []
     assert out["estimate"] is True
     assert out["plan"]["candidates"] == 3 and out["plan"]["images"] == 1
@@ -477,7 +512,7 @@ def test_a_usage_limit_stops_the_batch_instead_of_burning_it(project: Path):
         rc=1,
         stdout=json.dumps({"type": "turn.failed", "error": {"message": "usage_limit_reached"}}),
     )
-    out = ip_jobs.generate(project, runner=codex)
+    out = ip_jobs.generate(project, concurrency=1, runner=codex)
     assert len(codex.calls) == 1
     assert out["status"] == "error"
     assert out["counts"]["failed"] == 1 and out["counts"]["not_run"] == 2
@@ -491,7 +526,7 @@ def test_a_rejected_model_stops_the_batch_and_says_how_to_fix_it(project: Path):
         "message": "The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.",
     }})
     codex = FakeCodex(rc=1, stdout=json.dumps({"type": "turn.failed", "error": {"message": inner}}))
-    out = ip_jobs.generate(project, runner=codex)
+    out = ip_jobs.generate(project, concurrency=1, runner=codex)
     assert len(codex.calls) == 1 and out["counts"]["not_run"] == 2
     assert out["failed"][0]["error"].startswith("The 'gpt-5.4' model is not supported")
     assert "--model" in out["error"]
@@ -505,9 +540,280 @@ def test_generate_rejects_an_unprepared_target(project: Path):
 
 def test_generate_measures_its_own_minutes_for_the_next_estimate(project: Path):
     _prepared(project, {**TRANSLATE_JOB, "candidates": 2})
-    ip_jobs.generate(project, target_ids=["map.jpg"], runner=FakeCodex())
+    ip_jobs.generate(project, target_ids=["map.jpg"], concurrency=1, runner=FakeCodex())
     rows = [json.loads(line) for line in ip_jobs.usage_path(project).read_text("utf-8").splitlines()]
     assert [row["candidate"] for row in rows] == [1, 2] and all(row["ok"] for row in rows)
+
+# --- generate: several at once, on more than one model ----------------------
+
+RESTORE_JOB = {"image": "compass.png", "mode": "restore", "instruction": "Clean it."}
+
+_MODEL_REJECTED = json.dumps({"type": "turn.failed", "error": {"message": json.dumps({
+    "type": "error", "status": 400, "error": {
+        "type": "invalid_request_error",
+        "message": "The 'gpt-old' model is not supported when using Codex with a ChatGPT account.",
+    },
+})}})
+
+
+def _model_of(call: dict) -> str | None:
+    cmd = call["cmd"]
+    return cmd[cmd.index("-m") + 1] if "-m" in cmd else None
+
+
+def _usage(project: Path) -> list[dict]:
+    lines = ip_jobs.usage_path(project).read_text("utf-8").splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def _planned_models(project: Path, **kwargs) -> dict:
+    out = ip_jobs.generate(project, estimate=True, runner=FakeCodex(), **kwargs)
+    return {job["id"]: job["models"] for job in out["plan"]["jobs"]}
+
+
+def test_two_models_on_one_job_are_two_candidates_of_one_run(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 2, "model": ["gpt-6-luna", "gpt-6-sol"]})
+    codex = FakeCodex()
+    said: list[str] = []
+    out = ip_jobs.generate(project, runner=codex, progress=said.append)
+    assert out["status"] == "ok" and len(codex.calls) == 2
+    assert sorted(_model_of(call) for call in codex.calls) == ["gpt-6-luna", "gpt-6-sol"]
+    assert out["plan"]["models"] == {"gpt-6-luna": 1, "gpt-6-sol": 1}
+    assert {row["candidate"]: row["model"] for row in out["wrote"]} == {
+        1: "gpt-6-luna", 2: "gpt-6-sol",
+    }
+    assert len(said) == 2 and said[-1].startswith("[2/2] map.jpg #")
+
+    # Which model made which is on disk, not only in this run's output.
+    for row in _usage(project):
+        assert row["mode"] == "translate" and row["concurrency"] == 2
+        assert row["model"] == {1: "gpt-6-luna", 2: "gpt-6-sol"}[row["candidate"]]
+    shown = {c["candidate"]: c["model"] for c in _board_row(project, "map.jpg")["candidates"]}
+    assert shown == {1: "gpt-6-luna", 2: "gpt-6-sol"}
+    ip_apply.apply(project, [{"image": "map.jpg", "candidate": 2}])
+    assert ledger.read_rows(project)[-1]["model"] == "gpt-6-sol"
+
+
+def test_a_jobs_model_beats_the_flag_and_the_flag_beats_the_books_pin(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "model": "job-model"}, {**RESTORE_JOB, "candidates": 2})
+    assert _planned_models(project) == {
+        "map.jpg": ["job-model"],
+        "compass.png": [ip_jobs.DEFAULT_MODEL_LABEL] * 2,
+    }
+    (project / ".harness" / "config.json").write_text(
+        json.dumps({ip_jobs.MODEL_CONFIG_KEY: "pin-model"}), encoding="utf-8"
+    )
+    assert _planned_models(project)["compass.png"] == ["pin-model", "pin-model"]
+    assert _planned_models(project, model="flag-model") == {
+        "map.jpg": ["job-model"],
+        "compass.png": ["flag-model", "flag-model"],
+    }
+    # Several on the flag: one each, in order, for a job's candidates.
+    assert _planned_models(project, model="a, b")["compass.png"] == ["a", "b"]
+
+
+def test_a_pinned_model_that_is_not_a_plain_id_stops_the_run(project: Path):
+    _prepared(project)
+    (project / ".harness" / "config.json").write_text(
+        json.dumps({ip_jobs.MODEL_CONFIG_KEY: "gpt 6 luna"}), encoding="utf-8"
+    )
+    codex = FakeCodex()
+    out = ip_jobs.generate(project, runner=codex)
+    assert out["status"] == "error" and ip_jobs.MODEL_CONFIG_KEY in out["error"]
+    assert codex.calls == []
+    # Named on the flag, a model is what the run uses: the pin is not consulted.
+    assert ip_jobs.generate(project, model="gpt-6-luna", runner=codex)["counts"]["wrote"] == 1
+
+
+def test_one_candidates_crash_is_one_failed_row(project: Path):
+    _prepared(project, TRANSLATE_JOB, RESTORE_JOB)
+    (ip_jobs.jobs_dir(project) / "compass.png" / "prompt.txt").unlink()
+    out = ip_jobs.generate(project, runner=FakeCodex())
+    assert out["status"] == "partial"
+    assert [row["image"] for row in out["wrote"]] == ["map.jpg"]
+    assert out["failed"][0]["image"] == "compass.png"
+    assert "FileNotFoundError" in out["failed"][0]["error"]
+    # Both are in the usage log: the crash did not take the batch's record with it.
+    assert len(ip_jobs._usage_rows(project)) == 2
+
+
+@pytest.mark.parametrize("model", [7, ["ok", 7], "two words", "a&b", ["--flag"]])
+def test_a_model_that_is_not_a_plain_id_is_refused(project: Path, model):
+    out = ip_jobs.prepare(project, [{**TRANSLATE_JOB, "model": model}])
+    assert out["status"] == "error" and "model" in json.dumps(out["invalid"])
+    if isinstance(model, str):
+        _prepared(project)
+        codex = FakeCodex()
+        out = ip_jobs.generate(project, model=model, runner=codex)
+        assert out["status"] == "error" and codex.calls == []
+
+
+def test_naming_another_model_keeps_the_candidates_already_made(project: Path):
+    _prepared(project)
+    codex = FakeCodex()
+    ip_jobs.generate(project, runner=codex)
+    out = ip_jobs.prepare(project, [{**TRANSLATE_JOB, "candidates": 2, "model": ["a", "b"]}])
+    assert out["prepared"][0]["archived"] == 0 and out["prepared"][0]["have"] == 1
+    assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
+    # Candidate 2 takes the second model whether or not candidate 1 ran on the first.
+    assert [_model_of(call) for call in codex.calls] == [None, "b"]
+
+
+def test_a_rejected_model_stops_only_its_own_candidates(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 4, "model": ["gpt-old", "gpt-6-luna"]})
+    codex = FakeCodex(
+        rc=lambda cmd: 1 if "gpt-old" in cmd else 0,
+        stdout=_MODEL_REJECTED,
+    )
+    out = ip_jobs.generate(project, concurrency=1, runner=codex)
+    assert out["status"] == "partial"
+    assert [_model_of(call) for call in codex.calls] == ["gpt-old", "gpt-6-luna", "gpt-6-luna"]
+    assert [row["candidate"] for row in out["wrote"]] == [2, 4]
+    assert out["counts"] == {"wrote": 2, "failed": 1, "not_run": 1, "todo": 4}
+    assert out["error"].count("is not supported") == 1 and "--model" in out["error"]
+
+
+def test_a_rejected_model_is_reported_once_however_many_runs_were_on_it(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 4, "model": "gpt-old"})
+    out = ip_jobs.generate(project, runner=FakeCodex(rc=1, stdout=_MODEL_REJECTED))
+    assert out["status"] == "error" and out["error"].count("is not supported") == 1
+
+
+def test_an_estimate_in_parallel_is_never_less_than_one_image(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 2})
+    plan = ip_jobs.generate(project, estimate=True, runner=FakeCodex())["plan"]
+    assert plan["concurrency"] == ip_jobs.DEFAULT_CONCURRENCY and plan["workers"] == 2
+    # Two candidates across ten workers take one image's minutes, not a fifth.
+    assert plan["estimated_minutes"] == ip_jobs.ASSUMED_MINUTES_PER_IMAGE
+    assert plan["sequential_minutes"] == 2 * ip_jobs.ASSUMED_MINUTES_PER_IMAGE
+
+
+def test_an_estimate_in_parallel_waits_for_the_slow_image(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 2}, {**RESTORE_JOB, "candidates": 2})
+    walls = [60.0] * 8 + [180.0, 180.0]
+    ip_jobs.usage_path(project).write_text(
+        "".join(json.dumps({"ok": True, "wall_s": wall}) + chr(10) for wall in walls),
+        encoding="utf-8",
+    )
+    plan = ip_jobs.generate(project, estimate=True, runner=FakeCodex())["plan"]
+    assert plan["minutes_measured"] is True
+    assert plan["minutes_per_image"] == 1.0 and plan["minutes_slowest"] == 3.0
+    assert plan["workers"] == 4 and plan["sequential_minutes"] == 4.0
+    # Four at once are done when the slowest is, not after a median's worth.
+    assert plan["estimated_minutes"] == 3.0
+    one_at_a_time = ip_jobs.generate(project, estimate=True, concurrency=1, runner=FakeCodex())
+    assert one_at_a_time["plan"]["estimated_minutes"] == 4.0
+
+
+def test_a_limit_runs_a_first_wave_and_the_next_run_takes_the_rest(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 3})
+    codex = FakeCodex()
+    out = ip_jobs.generate(project, limit=1, runner=codex)
+    assert out["counts"] == {"wrote": 1, "failed": 0, "not_run": 0, "todo": 1}
+    assert out["plan"]["candidates"] == 1 and out["plan"]["held_back"] == 2
+    out = ip_jobs.generate(project, runner=codex)
+    assert out["counts"]["wrote"] == 2 and out["plan"]["already_have"] == 1
+    assert len(codex.calls) == 3
+    assert ip_jobs.generate(project, limit=0, runner=codex)["status"] == "error"
+
+
+def test_a_second_generate_on_the_same_book_runs_nothing(project: Path):
+    _prepared(project)
+    codex = FakeCodex()
+    with locks.image_lock(project):
+        out = ip_jobs.generate(project, runner=codex)
+    assert out["status"] == "error" and "already running" in out["error"]
+    assert codex.calls == [] and out["wrote"] == []
+    assert not ip_jobs.usage_path(project).exists()
+    # The lock goes with the run that held it.
+    assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
+    assert not locks.image_lock_path(project).exists()
+
+
+def test_an_estimate_does_not_wait_on_a_running_generate(project: Path):
+    _prepared(project)
+    with locks.image_lock(project):
+        out = ip_jobs.generate(project, estimate=True, runner=FakeCodex())
+    assert out["status"] == "ok" and out["estimate"] is True
+
+
+def test_prepare_is_refused_while_a_run_holds_the_book(project: Path):
+    _prepared(project)
+    assert ip_jobs.generate(project, runner=FakeCodex())["counts"]["wrote"] == 1
+    job_dir = ip_jobs.jobs_dir(project) / "map.jpg"
+    before = (job_dir / "prompt.txt").read_text("utf-8")
+    bolder = {**TRANSLATE_JOB, "instruction": "Bolder."}
+    with locks.image_lock(project):
+        out = ip_jobs.prepare(project, [bolder])
+    assert out["status"] == "error" and "holds this book" in out["error"]
+    # Nothing moved under the run: not its prompt, not the candidate it has made.
+    assert (job_dir / "prompt.txt").read_text("utf-8") == before
+    assert ip_jobs.existing_candidates(job_dir) == [1]
+    assert ip_jobs.prepare(project, [bolder])["counts"]["archived_candidates"] == 1
+
+
+def test_a_candidate_made_while_this_run_waited_is_not_made_again(project: Path):
+    _prepared(project)
+    candidate = ip_jobs.candidate_path(ip_jobs.jobs_dir(project) / "map.jpg", 1)
+
+    # Another run ends between this one's count and its lock; the login probe
+    # is what happens in between.
+    def probe(argv, *, env, cwd, timeout):
+        _image(candidate, fmt="PNG")
+        return 0, "", "Logged in using ChatGPT"
+
+    codex = FakeCodex()
+    out = ip_jobs.generate(project, runner=codex, cli_bin="python", prober=probe)
+    assert out["status"] == "ok" and codex.calls == []
+    assert out["counts"] == {"wrote": 0, "failed": 0, "not_run": 0, "todo": 0}
+    assert "nothing was spent" in out["instructions"]
+
+
+def test_a_run_that_starts_nothing_still_reports_every_count(project: Path):
+    _prepared(project)
+    with locks.image_lock(project):
+        busy = ip_jobs.generate(project, runner=FakeCodex())
+    assert busy["counts"] == {"wrote": 0, "failed": 0, "not_run": 1, "todo": 1}
+    ip_jobs.generate(project, runner=FakeCodex())
+    done = ip_jobs.generate(project, runner=FakeCodex())
+    assert done["counts"] == {"wrote": 0, "failed": 0, "not_run": 0, "todo": 0}
+
+
+def test_another_sessions_picture_is_never_taken_for_this_jobs(project: Path):
+    def someone_else(cmd, *, input_text, cwd):
+        # Another Codex on the machine made a picture while this job ran, and
+        # this job made none.
+        _image(
+            Path(os.environ["CODEX_HOME"]) / "generated_images" / "their-thread" / "exec-1.png",
+            fmt="PNG",
+        )
+        return 0, json.dumps({"type": "thread.started", "thread_id": "this-thread"}), ""
+
+    _prepared(project)
+    out = ip_jobs.generate(project, concurrency=1, runner=someone_else)
+    assert out["counts"]["failed"] == 1 and "left no image" in out["failed"][0]["error"]
+    assert not (ip_jobs.jobs_dir(project) / "map.jpg" / "cand_01.png").exists()
+
+
+def test_cli_generate_passes_the_wave_and_the_models_through(project: Path, capsys, monkeypatch):
+    seen: dict = {}
+
+    def fake_generate(project_dir, **kwargs):
+        seen.update(kwargs)
+        kwargs["progress"]("[1/1] map.jpg #1 ok 70s (a)")
+        return {"status": "ok", "wrote": [], "failed": []}
+
+    monkeypatch.setattr(ip_jobs, "generate", fake_generate)
+    assert cli.main(["generate", "--project", str(project)]) == 0
+    assert seen["concurrency"] == ip_jobs.DEFAULT_CONCURRENCY and seen["limit"] is None
+    assert cli.main(
+        ["generate", "--project", str(project), "--limit", "10", "--model", "a,b"]
+    ) == 0
+    assert seen["limit"] == 10 and seen["model"] == "a,b"
+    captured = capsys.readouterr()
+    # Progress is for whoever is watching; stdout stays the one JSON object.
+    assert "[1/1] map.jpg #1 ok 70s (a)" in captured.err
+    assert "[1/1]" not in captured.out
 
 
 # --- the board: triage, checks, and what the user said ----------------------
@@ -828,6 +1134,36 @@ def test_a_redo_works_from_the_original_not_the_replacement(project: Path):
     assert Path(codex.calls[0]["cmd"][3]).read_bytes() == original
 
 
+def test_a_candidate_retried_after_an_apply_is_still_drawn_from_the_original(project: Path):
+    _prepared(project, {**TRANSLATE_JOB, "candidates": 2})
+    original = (project / "images" / "map.jpg").read_bytes()
+    # Candidate 2 fails the first time round, and candidate 1 is applied.
+    flaky = FakeCodex(rc=lambda cmd: 1 if "run_02" in " ".join(cmd) else 0)
+    out = ip_jobs.generate(project, concurrency=1, runner=flaky)
+    assert out["counts"] == {"wrote": 1, "failed": 1, "not_run": 0, "todo": 2}
+    ip_apply.apply(project, [{"image": "map.jpg", "candidate": 1}])
+    assert (project / "images" / "map.jpg").read_bytes() != original
+    # No re-prepare in between: the job still names images/map.jpg as its input.
+    codex = FakeCodex()
+    assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
+    assert Path(codex.calls[0]["cmd"][3]).read_bytes() == original
+
+
+def test_a_save_that_fails_leaves_no_temp_file_in_the_book(project: Path, monkeypatch):
+    _with_candidate(project)
+    before = (project / "images" / "map.jpg").read_bytes()
+
+    def full_disk(src, dst):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(ip_apply.os, "replace", full_disk)
+    out = ip_apply.apply(project, [{"image": "map.jpg", "candidate": 1}])
+    assert out["status"] == "error" and "could not write" in out["refused"][0]["problems"][0]
+    assert (project / "images" / "map.jpg").read_bytes() == before
+    # A leftover would sit beside the book's images and ship in the EPUB.
+    assert [p.name for p in project.rglob("*") if p.name.endswith(".image-pass.tmp")] == []
+
+
 def test_apply_lands_the_good_rows_and_names_the_bad_one(project: Path):
     _with_candidate(project)
     out = ip_apply.apply(
@@ -920,6 +1256,42 @@ def test_revert_will_not_delete_a_created_file_that_changed(project: Path):
     _image(project / "images" / "cover.jpg", (10, 15))
     out = ip_apply.revert(project, ["cover.jpg"])
     assert out["status"] == "error" and (project / "images" / "cover.jpg").exists()
+
+
+COVER_JOB = {"image": "cover.jpg", "mode": "cover", "instruction": "A globe.", "candidates": 2}
+
+
+def test_a_cover_made_from_nothing_is_never_backed_up_as_the_original(project: Path):
+    (project / "source.txt").write_text(SOURCE.replace("[IMAGE:images/gone.jpg:NOT ON DISK]", ""), "utf-8")
+    ip_jobs.prepare(project, [COVER_JOB])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1024, 1536)))
+    ip_apply.apply(project, [{"image": "cover.jpg", "candidate": 1}])
+
+    out = ip_apply.apply(project, [{"image": "cover.jpg", "candidate": 2}])
+    assert out["applied"][0]["backup"] is None
+    assert out["applied"][0]["backup_action"].startswith("none (image-pass made this file")
+    assert not (project / "images_original" / "cover.jpg").exists()
+    assert ledger.read_rows(project)[-1]["created"] is True
+
+    # So the original is still its absence, and revert still gets back to it.
+    assert ip_apply.revert(project, ["cover.jpg"])["reverted"][0]["action"].startswith("removed")
+    assert not (project / "images" / "cover.jpg").exists()
+    assert ip_apply.verify(project)["status"] == "ok"
+
+
+def test_a_redo_of_a_cover_made_from_nothing_starts_from_nothing_again(project: Path):
+    ip_jobs.prepare(project, [COVER_JOB])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1024, 1536)))
+    ip_apply.apply(project, [{"image": "cover.jpg", "candidate": 1}])
+
+    out = ip_jobs.prepare(project, [{**COVER_JOB, "instruction": "A globe on a desk."}])
+    assert out["prepared"][0]["input_from"] is None
+    codex = FakeCodex(size=(1024, 1536))
+    ip_jobs.generate(project, runner=codex)
+    assert all("-i" not in call["cmd"] for call in codex.calls)
+    # Asked for by name, the cover that is there is what the redo is drawn from.
+    out = ip_jobs.prepare(project, [{**COVER_JOB, "input": "current"}])
+    assert out["prepared"][0]["input_from"] == "original"
 
 
 def test_verify_names_what_a_reader_would_see(project: Path):
@@ -1385,6 +1757,18 @@ def test_a_composite_never_stands_in_for_a_candidate_generate_owes(project: Path
     assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
     assert len(codex.calls) == 1
     assert ip_jobs.existing_candidates(_job_dir(project)) == [1, 2, ip_jobs.MAX_CANDIDATES + 1]
+
+
+def test_the_board_still_counts_a_candidate_owed_beside_a_composite(project: Path):
+    _with_candidate(project)
+    ip_composite.composite(project, [{"image": "map.jpg", "from": 1, "regions": [[0, 0, 50, 50]]}])
+    ip_jobs.prepare(project, [{**TRANSLATE_JOB, "candidates": 2}])
+    # Two pictures on the card, and the job's second candidate is not one of them.
+    assert ip_board.summary(project)["jobs"][0]["missing"] == 1
+    # Once both have been looked at and passed over, the card is still waiting
+    # on `generate`, not left alone.
+    ip_apply.apply(project, [{"image": "map.jpg", "verdict": "skip", "note": "neither"}])
+    assert _board_row(project, "map.jpg")["stage"] == ip_board.STAGE_QUEUED
 
 
 def test_a_composite_can_be_made_again_in_place_but_never_over_a_generated_candidate(project: Path):

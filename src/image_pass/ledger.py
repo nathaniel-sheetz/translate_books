@@ -119,6 +119,19 @@ def expected_originals(project_dir: Path) -> dict[str, str]:
     return expected
 
 
+def made_from_nothing(row: Optional[dict[str, Any]], target: Path) -> bool:
+    """Whether ``target`` is still the file an ``apply`` created where the book
+    had none (a new cover). Such a file has no original: it is neither backed
+    up nor a picture to draw the next one from."""
+    return bool(
+        row
+        and row.get("action") == ACTION_APPLY
+        and row.get("created")
+        and target.is_file()
+        and sha256_file(target) == row.get("sha256_after")
+    )
+
+
 def status_of(row: Optional[dict[str, Any]]) -> Optional[str]:
     """``replaced`` | ``reverted`` | ``None`` (never touched)."""
     if not row:

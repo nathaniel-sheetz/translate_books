@@ -133,14 +133,17 @@ def fetch_html(source: str) -> tuple[str, str]:
     return decode_html_bytes(resp.content), base_url
 
 
-def fetch_bytes(url: str, timeout: int = 20) -> bytes:
+def fetch_bytes(url: str, timeout: int = 20, *, base_url: str = "") -> bytes:
     """Return the bytes at ``url``. Raises on any failure.
 
     ``file://`` is read from disk, so a book ingested from a saved page (whose
-    base URL is its folder) finds the images saved beside it.
+    base URL is its folder) finds the images saved beside it. Only for such a
+    page: one fetched over the network that names a local file is refused.
     """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme == "file":
+        if urllib.parse.urlparse(base_url).scheme != "file":
+            raise ValueError("a page fetched over the network may not name a local file")
         return Path(urllib.request.url2pathname(parsed.path)).read_bytes()
     resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
     resp.raise_for_status()
@@ -491,7 +494,7 @@ class Converter:
             dest = self.images_dir / filename
             if not dest.exists():
                 try:
-                    dest.write_bytes(fetch_bytes(abs_url))
+                    dest.write_bytes(fetch_bytes(abs_url, base_url=self.base_url))
                     self._images_downloaded += 1
                 except Exception as exc:
                     print(f"  Warning: could not download {abs_url}: {exc}", file=sys.stderr)
@@ -511,7 +514,7 @@ class Converter:
             dest = self.images_dir / link["name"]
             if not dest.exists():
                 try:
-                    data = fetch_bytes(link["url"])
+                    data = fetch_bytes(link["url"], base_url=self.base_url)
                 except Exception as exc:
                     print(
                         f"  Warning: larger scan {link['url']} unavailable ({exc}); "
@@ -540,7 +543,7 @@ class Converter:
         if len(link["inline"]) != 1:
             return True  # split halves: there is no one file to measure against
         try:
-            thumbnail = fetch_bytes(link["inline"][0])
+            thumbnail = fetch_bytes(link["inline"][0], base_url=self.base_url)
         except Exception:  # noqa: BLE001 - a thumbnail we cannot fetch loses
             return True
         small = _pixel_size(thumbnail)

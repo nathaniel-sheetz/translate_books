@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.65.0.0] - 2026-10-07
+
+### Added
+- **Image pass: redo a book's images without leaving the subscription.** `scripts/image_pass.py` (skill: `/image-pass`) translates the lettering on maps and diagrams, cleans scans, makes a cover and replaces an illustration. Its sub-verbs are `inventory`, `backfill`, `triage`, `board`, `prepare`, `generate`, `check`, `composite`, `apply`, `revert` and `verify`. `apply` keeps the original filename and format, so no `[IMAGE:…]` token changes, and backs the original up to `images_original/` first. `revert` restores from there, and `verify` says what a reader would see. See `docs/CLI_REFERENCE.md`.
+- **Codex as an image family, subscription only.** `generate` runs `codex exec` on a ChatGPT login, one process per missing candidate. The child's environment drops the `OPENAI_*` namespace, `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN`. `codex login status` is checked before the estimate and before every job, and only `Logged in using ChatGPT` passes. Every job pins `-c model_provider=openai`. There is no fallback and no override flag. Codex is not a translate worker: `run_headless_wave(cli="codex")` is refused. See `docs/LLM_PROVIDERS.md`.
+- **Parallel runs, ten at a time.** `--concurrency` sets the number of workers and `--limit N` runs a first wave. `--estimate` quotes the minutes in parallel and one at a time, from this book's own measured runs once it has some. A usage limit stops the batch instead of failing every remaining candidate against it. One image run holds a book at a time (`.harness/images/.generate.lock`).
+- **A model per candidate.** A candidate runs on the first of: its job's `model`, `--model`, the book's `image_model` (`harness.py config-set --key image_model`), Codex's default. Several ids rotate across a job's candidates. A model the plan rejects stops only its own candidates. The model is recorded in `usage.jsonl`, shown on the board and written to the ledger at `apply`.
+- **The image board, `/image-pass/<id>`.** Every image the book references, grouped by the stage the pass has it in. A card takes a request (what to do, a note, the number of candidates, the lettering table) and a pick (accept, redo, skip). Both are saved to `.harness/images/feedback.json` and change nothing in the book until `apply --from-board`. A pick made on a candidate that has since been regenerated is refused. Full size, ← and → swap between the original, the current file and the candidates in place. Linked from the chapter list and the Export stage's cover field. See `docs/WEB_UI_GUIDE.md`.
+- **`composite`: one candidate's patch over trusted pixels.** For a candidate that is right where it was meant to change and wrong elsewhere. What lies inside the named regions comes from the candidate and the rest from the original, the current file, another candidate or an archived one. The patch is slid to where its surroundings line up, and `surroundings_differ` warns when they do not. No Codex and no spend.
+- **A cover can be drawn from one of the book's own images** (`reference` on a cover job).
+- **Gutenberg's larger scans are imported at ingest.** Where a thumbnail links to a full-size scan of the same picture, the scan is the one imported, under its own name. Two displayed images under one link become one placeholder. A link is taken only when the target downloads, is larger and looks like its thumbnail. `--inline-images` turns this off. `image_pass.py backfill` brings the larger scans into a book ingested before this, behind the filenames the translation was built on, and finds the right scan when the page crosses its links. See `docs/INGEST_GUTENBERG.md`.
+
+### Changed
+- **`harness.py setup` on an existing project keeps `.harness/images/`.** The rest of `.harness/` is still wiped. The image ledger is the only record of which files in `images/` are replacements.
+- `ingest_gutenberg.fetch_bytes` reads a `file://` URL only for a page that was itself read from disk.
+
+### Fixed (found in pre-ship review)
+- **`prepare` could re-prepare a job that `generate` was running.** The candidate started on the old prompt was saved under the new one and could be applied. `prepare` is now refused while an image run holds the book.
+- **A cover made from nothing, applied a second time, became "the original".** The first generated cover was backed up to `images_original/`, so `revert` restored a generated picture. Such a file is no longer backed up, and a redo of it starts from nothing again unless the job asks for `input: current`.
+- **A candidate retried after an `apply` was drawn from the replacement.** The input is now found again at run time, so a job that asked for the original gets the backup.
+- **One worker's exception ended `generate` with a traceback.** The other candidates still ran, with no usage rows and no result. It is now one failed row.
+- **A torn `manifest.json` was read as empty**, so preparing one image dropped every other job. The manifest, `prompt.txt` and `job.json` are written atomically, and `prepare` refuses to merge onto a manifest it cannot read.
+- **An invalid `image_model` pin was ignored** and the batch ran on Codex's default. `generate` now stops and names the key.
+- **A second `generate` could repeat candidates the first had just made.** What is missing is counted again once the lock is held.
+- **Two image names could share one job folder** (`a/b.jpg` and `a_b.jpg`). The second is refused.
+- **The image lock could be broken after three hours while its owner was alive.** An image run's lock now lasts a day. A holder that died is still retired at once.
+- The board's `missing` count and its waiting stage no longer treat a composite as one of the candidates `generate` owes.
+- A save that fails no longer leaves a temp file beside the book's images.
+- `generate`'s early returns carry `not_run` in `counts`.
+- A malformed filter in the board's URL no longer leaves the page on "loading".
+
 ## [0.64.0.0] - 2026-10-04
 
 ### Added

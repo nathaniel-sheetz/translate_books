@@ -68,7 +68,9 @@
         var filter = { stage: 'all', lettering: false, input: false, flagged: false, q: '' };
         location.hash.replace(/^#/, '').split('&').forEach(function (part) {
             var pair = part.split('=');
-            var value = decodeURIComponent(pair[1] || '');
+            var value;
+            // A hand-edited or truncated link (`#q=100%`) must not stop the board loading.
+            try { value = decodeURIComponent(pair[1] || ''); } catch (e) { return; }
             if (pair[0] === 'stage' && value) filter.stage = value;
             else if (pair[0] === 'q') filter.q = value;
             else if (pair[0] in filter && pair[0] !== 'stage') filter[pair[0]] = value === '1';
@@ -190,6 +192,8 @@
         var cap = el('figcaption');
         cap.appendChild(el('span', 'ib-fig-name', caption));
         if (pic.width) cap.appendChild(el('span', 'ib-fig-size', pic.width + '×' + pic.height));
+        /* Two models can fill one job's candidates: say which made this one. */
+        if (pic.model) cap.appendChild(el('span', 'ib-fig-model', pic.model));
         (pic.flags || []).forEach(function (flag) {
             cap.appendChild(el('span', 'ib-warn', flag));
         });

@@ -318,8 +318,7 @@ def compose(
     everything = Image.new("L", (width, height), 0)
     for polygon in polygons:
         ImageDraw.Draw(everything).polygon(polygon, fill=255)
-    if grow:
-        everything = everything.filter(ImageFilter.MaxFilter(2 * grow + 1))
+    everything = everything.filter(ImageFilter.MaxFilter(2 * grow + 1))
     reports: list[dict[str, Any]] = []
     for polygon in polygons:
         xs, ys = [x for x, _ in polygon], [y for _, y in polygon]

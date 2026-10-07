@@ -45,6 +45,7 @@ Typical flow (the skill drives it, with a STOP gate before each spend or write):
     python scripts/image_pass.py prepare   --project home-geography \
         --json-file projects/home-geography/.harness/images/jobs.json
     python scripts/image_pass.py generate  --project home-geography --estimate
+    python scripts/image_pass.py generate  --project home-geography --limit 10
     python scripts/image_pass.py generate  --project home-geography
     python scripts/image_pass.py check     --project home-geography \
         --json-file projects/home-geography/.harness/images/check_rows.json
@@ -58,6 +59,7 @@ Typical flow (the skill drives it, with a STOP gate before each spend or write):
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 import urllib.error
@@ -227,7 +229,7 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     out = ip_backfill.backfill(
         project_dir,
         links,
-        fetch=gutenberg.fetch_bytes,
+        fetch=functools.partial(gutenberg.fetch_bytes, base_url=base_url),
         only=_split_ids(args.images),
         accept=_split_ids(args.accept),
         dry_run=args.dry_run,
@@ -250,9 +252,13 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         estimate=args.estimate,
         concurrency=args.concurrency,
         target_ids=_split_ids(args.target_ids),
+        limit=args.limit,
         cli_bin=args.cli_bin,
         model=args.model,
         timeout_s=args.timeout_minutes * 60 if args.timeout_minutes else None,
+        # stdout is the one JSON object; a batch that runs for minutes says how
+        # far it has got on stderr.
+        progress=lambda line: print(line, file=sys.stderr, flush=True),
     )
     _emit(out, _GENERATE_SCHEMA)
     # Exit 1 when nothing was produced, so the flow cannot walk on to `board`
@@ -364,15 +370,23 @@ _GENERATE_SCHEMA = {
     "error": "top-level reason the batch refused or stopped — relay it verbatim. "
     "With empty wrote/failed nothing ran and nothing was spent",
     "estimate": "true for --estimate: nothing ran",
-    "plan": "{cli, model, images, candidates, already_have, concurrency, "
-    "minutes_per_image, minutes_measured, estimated_minutes, jobs}",
+    "plan": "{cli, models, images, candidates, already_have, held_back, "
+    "concurrency, workers, minutes_per_image, minutes_slowest, minutes_measured, "
+    "sequential_minutes, estimated_minutes, jobs}. models is {model id: runs on "
+    "it}. workers is how many run at once (never more than there are "
+    "candidates); estimated_minutes is at that many, sequential_minutes one at a "
+    "time. held_back is what --limit left for the next run. jobs names each "
+    "missing candidate and the model it will run on",
     "limit_warning": "--estimate only: the plan-limit burn, to quote at the consent gate",
-    "wrote": "candidates harvested: {id, candidate, path, width, height, wall_s, "
-    "harvested_from, images_generated?}. images_generated appears only when the "
-    "model called the image tool more than once — that candidate cost that many "
-    "images of plan usage",
+    "wrote": "candidates harvested: {id, candidate, mode, model, path, width, "
+    "height, wall_s, harvested_from, images_generated?}. model is null on "
+    "Codex's default. images_generated appears only when the model called the "
+    "image tool more than once — that candidate cost that many images of plan "
+    "usage",
     "failed": "candidates that ran and produced nothing, each with its error",
     "counts": "{wrote, failed, not_run, todo}",
+    "elapsed_s": "how long the batch took",
+    "wall_s_summed": "what the same runs would have taken one at a time",
     "instructions": "what to run next",
 }
 
@@ -434,9 +448,10 @@ _BOARD_SCHEMA = {
     "place of it. An image they set to leave alone is simply not here",
     "jobs": "every prepared job: {id, image, mode, stage, original, original_size, "
     "reference, labels, candidates: [{candidate, path, size, flags, checked, "
-    "composite}], missing}. flags names a candidate whose proportions are off "
-    "the original's; composite is {from, base, regions, changed_share} for a "
-    "candidate `composite` made, else null",
+    "composite, model}], missing}. flags names a candidate whose proportions are "
+    "off the original's; composite is {from, base, regions, changed_share} for a "
+    "candidate `composite` made, else null; model is the Codex model that made "
+    "it, null for a composite or a run on Codex's default",
     "requests": "what the user asked for on the page that the prepared job does "
     "not say: {image, reasons, verdict, note, labels, candidates, triage_verdict, "
     "job_mode}. reasons: needs_job | mode_differs | labels_differ | "
@@ -528,7 +543,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--json-file",
         required=True,
         help="a list of {image, mode, instruction, labels?, candidates?, input?, "
-        "reference?}. "
+        "reference?, model?}. model is the Codex model for this job, or a list "
+        "to give each candidate a different one. "
         "mode is translate | restore | cover | replace; labels is the approved "
         'source → target map ({"NORTH": "NORTE"}), required for translate; '
         f"candidates is 1-{ip_jobs.MAX_CANDIDATES} (default {ip_jobs.DEFAULT_CANDIDATES}); "
@@ -553,16 +569,31 @@ def build_parser() -> argparse.ArgumentParser:
         "warning; run nothing. Still checks the Codex login",
     )
     p_generate.add_argument(
-        "--concurrency", type=int, default=1, help="parallel Codex processes (default: 1)"
+        "--concurrency",
+        type=int,
+        default=ip_jobs.DEFAULT_CONCURRENCY,
+        help="parallel Codex processes, at most one per candidate (default: "
+        f"{ip_jobs.DEFAULT_CONCURRENCY}). The usage spent is the same at any number",
     )
     p_generate.add_argument(
         "--target-ids",
         help="comma-separated job ids or image names to run (default: every job "
         "with a candidate still missing)",
     )
+    p_generate.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="run only the first N missing candidates: a first wave to look at "
+        "before the rest. Running `generate` again takes up where it stopped",
+    )
     p_generate.add_argument("--cli-bin", default=None, help="path to codex if not on PATH")
     p_generate.add_argument(
-        "--model", default=None, help="Codex model override (default: ~/.codex/config.toml)"
+        "--model",
+        default=None,
+        help="Codex model for jobs that name none, or several comma-separated to "
+        "give each candidate of a job a different one (default: the book's "
+        f"`{ip_jobs.MODEL_CONFIG_KEY}` config key, else ~/.codex/config.toml)",
     )
     p_generate.add_argument(
         "--timeout-minutes",

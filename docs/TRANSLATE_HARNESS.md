@@ -258,8 +258,8 @@ makes it idempotent.
 `config-set --key` accepts exactly: `backend`, `footnotes_decision`, `headless_cli`,
 `always_include_dialogue`, `always_include_image_instructions`, `headless_extra_flags`,
 `headless_prompt_cache`, `triage_headless_cli`, `triage_worker_model`,
-`triage_after_coded`, and the six `headless_effort_*` keys (`translate`, `judges`,
-`annotations`, `footnotes`, `footnote_scan`, `triage`).
+`triage_after_coded`, `image_model`, and the six `headless_effort_*` keys (`translate`,
+`judges`, `annotations`, `footnotes`, `footnote_scan`, `triage`).
 
 The three `triage_*` keys belong to the coded-checker triage pass rather than to a
 harness stage. `triage_headless_cli` and `triage_worker_model` pin the CLI family
@@ -267,6 +267,10 @@ and the model it judges on — the confidence floor was calibrated on one of eac
 so the pass runs there whatever `headless_cli` says, and `auto` un-pins it back to
 that key (see [`TRIAGE.md`](TRIAGE.md)). `triage_after_coded` is whether the
 dashboard chains a triage wave onto a deterministic rerun.
+
+`image_model` belongs to the image pass: the Codex model `image_pass.py generate` runs
+a job on when neither the job nor `--model` names one (see
+[`CLI_REFERENCE.md`](CLI_REFERENCE.md)).
 
 ---
 
