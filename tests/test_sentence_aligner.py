@@ -283,6 +283,80 @@ class TestAlignSentences:
         assert result[0]["es_indices"] == [0, 1]
         assert result[1]["en_idx"] == 1
 
+    def test_one_spanish_sentence_takes_both_english_sentences(self, model):
+        """A translator's merge: the second English sentence must not be left
+        unclaimed, or the row shows half its source."""
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "They got along perfectly together.",
+            "They would sit side by side gossiping.",
+            "Then the winter came and the snow fell.",
+        ]
+        es = [
+            "Se llevaban perfectamente bien y se sentaban una junto a la otra a chismorrear.",
+            "Luego llegó el invierno y cayó la nieve.",
+        ]
+        result = align_sentences(
+            en, es, model, es_para_indices=[0, 0], en_para_indices=[0, 0, 0]
+        )
+
+        assert result[0]["en_idx"] == 0
+        assert result[0]["en_indices"] == [0, 1]
+        assert result[0]["en"] == f"{en[0]} {en[1]}"
+        assert result[1]["en_idx"] == 2
+        assert "en_indices" not in result[1]
+        assert _coverage_gaps(en, result) == []
+
+    def test_speech_tag_unit_takes_quote_and_attribution(self, model):
+        """English writes the attribution as its own sentence; the glued
+        Spanish unit needs both."""
+        from src.sentence_aligner import align_sentences
+
+        en = ['"The blacksnakes!"', "Frank exclaimed.", "The boys ran to the boat."]
+        es = ["—¡Las culebras negras!", "—exclamó Frank.", "Los muchachos corrieron al bote."]
+        result = align_sentences(
+            en, es, model, es_para_indices=[0, 0, 1], en_para_indices=[0, 0, 1]
+        )
+
+        assert result[0]["es_indices"] == [0, 1]
+        assert result[0]["en_indices"] == [0, 1]
+        assert result[1]["en_idx"] == 2
+
+    def test_orphan_in_another_paragraph_is_not_absorbed(self, model):
+        """An untranslated heading sits in its own paragraph; it must not be
+        folded into the sentence next door."""
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "The Hold-Up",
+            "Chief Collig was a burly, red-faced man.",
+            "He was fond of telling long stories.",
+        ]
+        es = [
+            "El jefe Collig era un hombre corpulento y colorado.",
+            "Le gustaba contar historias largas.",
+        ]
+        result = align_sentences(
+            en, es, model, es_para_indices=[0, 0], en_para_indices=[0, 1, 1]
+        )
+
+        assert [r["en_idx"] for r in result] == [1, 2]
+        assert all("en_indices" not in r for r in result)
+
+    def test_nothing_is_absorbed_without_source_paragraphs(self, model):
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "They got along perfectly together.",
+            "They would sit side by side gossiping.",
+        ]
+        es = ["Se llevaban perfectamente bien y se sentaban una junto a la otra a chismorrear."]
+        result = align_sentences(en, es, model)
+
+        assert len(result) == 1
+        assert "en_indices" not in result[0]
+
     def test_empty_input(self, model):
         from src.sentence_aligner import align_sentences
 
@@ -526,6 +600,26 @@ class TestCoverageGaps:
         alignments = [{"en_idx": 0}, {"en_idx": 0}, {"en_idx": 1}, {"en_idx": 2}]
         assert _coverage_gaps(en, alignments) == []
 
+    def test_sentences_a_row_absorbed_count_as_claimed(self):
+        # A 1:N row lists every source sentence it covers in en_indices.
+        en = [_sent(200) for _ in range(4)]
+        alignments = [{"en_idx": 0, "en_indices": [0, 1, 2]}, {"en_idx": 3}]
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_a_reportable_run_is_never_absorbable(self):
+        from src.sentence_aligner import MAX_ABSORB_SENTENCES, _absorbable
+
+        # Two sentences that together clear MIN_GAP_CHARS: a real drop.
+        heavy = [_sent(MIN_GAP_CHARS // 2 + 10) for _ in range(2)]
+        assert not _absorbable(heavy, [0, 1])
+        # Light enough, but too many sentences.
+        light = [_sent(40) for _ in range(MAX_ABSORB_SENTENCES + 1)]
+        assert not _absorbable(light, list(range(len(light))))
+        assert _absorbable(light, [0, 1])
+        # Rules and stray punctuation are nobody's source.
+        assert not _absorbable(["---"], [0])
+        assert not _absorbable(light, [])
+
     def test_dropped_tail_is_reported(self):
         en = [_sent(150) for _ in range(5)]
         alignments = [{"en_idx": i} for i in range(3)]  # 3 and 4 unclaimed
@@ -761,6 +855,42 @@ class TestCoverageGapsIntegration:
         assert result["gaps"] == []
         assert result["coverage"]["gap_count"] == 0
         assert result["coverage"]["en_orphan_chars"] == 0
+
+    def test_align_chapter_chunks_offsets_absorbed_indices(
+        self, tmp_path, monkeypatch, model
+    ):
+        """en_indices on a 1:N row must be shifted into chapter-global indices
+        along with en_idx, or a later chunk's row points into the first chunk."""
+        from src import sentence_aligner
+        from src.sentence_aligner import align_chapter_chunks
+
+        monkeypatch.setattr(sentence_aligner, "_get_model", lambda: model)
+
+        merged_source = (
+            "They got along perfectly together. They would sit side by side gossiping."
+        )
+        merged_translation = (
+            "Se llevaban perfectamente bien y se sentaban una junto a la otra a chismorrear."
+        )
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, 0, self.SOURCE, self.TRANSLATION_FULL)
+        self._write_chunk(chunks_dir, 1, merged_source, merged_translation)
+
+        result = align_chapter_chunks(
+            chunk_paths=sorted(str(p) for p in chunks_dir.glob("*.json")),
+            project_id="test_project",
+            chapter_id="chapter_test",
+        )
+
+        row = next(
+            a for a in result["alignments"] if a["chunk_id"] == "chapter_test_chunk_001"
+        )
+        last = result["en_count"] - 1
+        assert row["en_indices"] == [last - 1, last]
+        assert row["en_idx"] == last - 1
+        assert result["coverage"]["en_aligned"] == result["en_count"]
+        assert result["gaps"] == []
 
     def test_align_chapter_chunks_offsets_gap_indices_and_stamps_chunk_id(
         self, tmp_path, monkeypatch, model

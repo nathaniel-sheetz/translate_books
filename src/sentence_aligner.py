@@ -42,6 +42,10 @@ MIN_SENTENCE_CHARS = 25
 # splits them per line — so one translated Spanish sentence can face seven
 # English line *fragments*, whose combined mass would otherwise clear
 # MIN_GAP_CHARS even though nothing was dropped.
+# 1:N absorption (see _absorb_orphans). A longer run is left unclaimed, and so is
+# any run heavy enough for _coverage_gaps to report — a dropped paragraph must
+# never be folded into a neighbour and disappear.
+MAX_ABSORB_SENTENCES = 2
 SENTENCE_TERMINALS = ".!?…"
 SENTENCE_CLOSERS = "\"'”’»)]"
 
@@ -314,6 +318,7 @@ def align_sentences(
     es_sentences: list[str],
     model=None,
     es_para_indices: list[int] | None = None,
+    en_para_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Align Spanish sentences to English sentences using embedding
@@ -331,6 +336,10 @@ def align_sentences(
 
     es_para_indices: optional list of paragraph numbers per ES sentence.
         When provided, N:1 grouping is blocked across paragraph boundaries.
+    en_para_indices: optional list of paragraph numbers per EN sentence.
+        When provided, a row absorbs short unclaimed runs of EN sentences
+        from its own source paragraph (see _absorb_orphans); without it
+        every row keeps exactly one EN sentence.
     """
     if not en_sentences or not es_sentences:
         return []
@@ -357,16 +366,20 @@ def align_sentences(
         for es_idx in units[unit_idx]
     ]
 
-    alignments = _group_nto1(
+    unit_of = [unit_idx for unit_idx, unit in enumerate(units) for _ in unit]
+    alignments, row_vectors = _group_nto1(
         raw_alignment,
         en_sentences,
         es_sentences,
         en_embeddings,
         model,
         es_para_indices=es_para_indices,
+        es_vectors=es_embeddings[unit_of],
     )
 
-    return alignments
+    return _absorb_orphans(
+        alignments, row_vectors, en_sentences, model, en_para_indices=en_para_indices
+    )
 
 
 def _group_nto1(
@@ -376,7 +389,8 @@ def _group_nto1(
     en_embeddings: np.ndarray,
     model,
     es_para_indices: list[int] | None = None,
-) -> list[dict]:
+    es_vectors: np.ndarray | None = None,
+) -> tuple[list[dict], list]:
     """
     Collapse consecutive alignment rows that share the same en_idx into a
     single output row. This happens naturally when Spanish renders one
@@ -396,9 +410,14 @@ def _group_nto1(
 
     When es_para_indices is provided, sentences from different paragraphs
     are never merged even if they map to the same en_idx.
+
+    Returns the rows and, parallel to them, the embedding each row was scored
+    with (``es_vectors`` holds one per Spanish sentence; a merged group uses
+    the vector of its joined text), so _absorb_orphans need not encode the
+    Spanish again.
     """
     if not raw_alignment:
-        return []
+        return [], []
 
     # Partition consecutive same-en_idx rows into groups.
     # Break a group when the next row crosses a paragraph boundary.
@@ -427,14 +446,17 @@ def _group_nto1(
             merged_group_idx.append(gi)
 
     merged_sims: dict[int, float] = {}
+    merged_vectors: dict[int, np.ndarray] = {}
     if merged_texts:
         merged_embeds = model.encode(merged_texts, normalize_embeddings=True)
         for local_i, gi in enumerate(merged_group_idx):
             en_idx = groups[gi][0][1]
             sim = float(np.dot(merged_embeds[local_i], en_embeddings[en_idx]))
             merged_sims[gi] = sim
+            merged_vectors[gi] = merged_embeds[local_i]
 
     alignments: list[dict] = []
+    row_vectors: list = []
     for gi, grp in enumerate(groups):
         es_indices = [int(r[0]) for r in grp]
         en_idx = int(grp[0][1])
@@ -473,6 +495,129 @@ def _group_nto1(
                 record["para_start"] = True
 
         alignments.append(record)
+        if len(grp) > 1:
+            row_vectors.append(merged_vectors[gi])
+        else:
+            row_vectors.append(None if es_vectors is None else es_vectors[es_indices[0]])
+
+    return alignments, row_vectors
+
+
+def _substantive_chars(en_sentences: list[str], run: list[int]) -> tuple[int, list[int]]:
+    """Character mass of a run that counts toward a coverage gap, and its members."""
+    substantive = [
+        i for i in run
+        if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
+        and _is_complete_sentence(en_sentences[i])
+    ]
+    return sum(len(en_sentences[i].strip()) for i in substantive), substantive
+
+
+def _covered_en(alignments: list[dict]) -> set[int]:
+    """Every source sentence index some row claims."""
+    covered: set[int] = set()
+    for a in alignments:
+        covered.update(a.get("en_indices", [a["en_idx"]]))
+    return covered
+
+
+def _absorbable(en_sentences: list[str], run: list[int]) -> bool:
+    """Whether an unclaimed run is small enough for a neighbouring row to take in."""
+    if not run or len(run) > MAX_ABSORB_SENTENCES:
+        return False
+    if not any(ch.isalpha() for i in run for ch in en_sentences[i]):
+        return False
+    return _substantive_chars(en_sentences, run)[0] < MIN_GAP_CHARS
+
+
+def _absorb_orphans(
+    alignments: list[dict],
+    row_vectors: list,
+    en_sentences: list[str],
+    model,
+    en_para_indices: list[int] | None = None,
+) -> list[dict]:
+    """
+    Let a row take in a short run of source sentences nothing else claimed.
+
+    _monotonic_alignment gives each Spanish unit exactly one English sentence,
+    so when Spanish says in one sentence what English says in two — or when a
+    glued speech tag faces an English attribution written as its own sentence —
+    the second English sentence is left unclaimed and the row shows only half
+    its source. For each unclaimed run between two rows, the row before may
+    extend forward over it or the row after may extend back, but only a row
+    whose own source sentence sits in the same paragraph as the whole run. If
+    both qualify, the one whose similarity against the joined English changes
+    for the better takes it.
+
+    The paragraph is the test, not the score. It is what tells a translator's
+    merge, or a quotation and its attribution, from an untranslated caption or
+    heading next door; similarity does not — on short dialogue it falls as
+    often for a right attachment as for a wrong one (bench, 2026-10-07: of 40
+    sampled absorptions 34 were right, and right and wrong ones fell alike).
+    So nothing is absorbed without ``en_para_indices``.
+
+    A row that absorbs gains ``en_indices`` (``en_idx`` stays its first), its
+    ``en`` becomes the joined text, and its similarity is rescored. A row
+    absorbs at most one run per pass. Runs longer than MAX_ABSORB_SENTENCES, or
+    with enough substantive mass to be a reportable coverage gap, are never
+    absorbed.
+    """
+    if not alignments or en_para_indices is None:
+        return alignments
+
+    def same_paragraph(run: list[int], en_idx: int) -> bool:
+        return all(en_para_indices[i] == en_para_indices[en_idx] for i in run)
+
+    # Per run, the (row index, first en, last en) spans that could take it.
+    runs: list[list[tuple[int, int, int]]] = []
+    prev_last = -1
+    for r, row in enumerate(alignments):
+        run = list(range(prev_last + 1, row["en_idx"]))
+        if _absorbable(en_sentences, run):
+            options = []
+            if same_paragraph(run, row["en_idx"]):
+                options.append((r, run[0], row["en_idx"]))
+            if r > 0 and same_paragraph(run, alignments[r - 1]["en_idx"]):
+                options.append((r - 1, alignments[r - 1]["en_idx"], run[-1]))
+            runs.append(options)
+        prev_last = max(prev_last, row["en_idx"])
+    tail = list(range(prev_last + 1, len(en_sentences)))
+    if _absorbable(en_sentences, tail) and same_paragraph(tail, alignments[-1]["en_idx"]):
+        runs.append([(len(alignments) - 1, alignments[-1]["en_idx"], tail[-1])])
+
+    runs = [[c for c in options if row_vectors[c[0]] is not None] for options in runs]
+    flat = [c for options in runs for c in options]
+    if not flat:
+        return alignments
+
+    texts = [
+        _normalize_for_embedding(" ".join(en_sentences[first : last + 1]))
+        for _, first, last in flat
+    ]
+    vectors = model.encode(texts, normalize_embeddings=True)
+    scored = {c: float(np.dot(row_vectors[c[0]], vectors[k])) for k, c in enumerate(flat)}
+
+    taken: set[int] = set()
+    for options in runs:
+        best = None
+        for c in options:
+            if c[0] in taken:
+                continue
+            gain = scored[c] - alignments[c[0]]["similarity"]
+            if best is None or gain > best[0]:
+                best = (gain, c)
+        if best is None:
+            continue
+        r, first, last = best[1]
+        taken.add(r)
+        row = alignments[r]
+        score = scored[best[1]]
+        row["en_idx"] = first
+        row["en_indices"] = list(range(first, last + 1))
+        row["en"] = " ".join(en_sentences[first : last + 1])
+        row["similarity"] = round(score, 3)
+        row["confidence"] = "high" if score > HIGH_CONFIDENCE_THRESHOLD else "low"
 
     return alignments
 
@@ -529,19 +674,14 @@ def _coverage_gaps(
     if not en_sentences:
         return []
 
-    covered = {a["en_idx"] for a in alignments}
+    covered = _covered_en(alignments)
     last_idx = len(en_sentences) - 1
     gaps: list[dict] = []
 
     def flush(run: list[int]) -> None:
         if not run:
             return
-        substantive = [
-            i for i in run
-            if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
-            and _is_complete_sentence(en_sentences[i])
-        ]
-        chars = sum(len(en_sentences[i].strip()) for i in substantive)
+        chars, substantive = _substantive_chars(en_sentences, run)
         if chars < MIN_GAP_CHARS:
             return
         if run[0] == 0 and run[-1] == last_idx:
@@ -601,13 +741,19 @@ def align_texts(
     alongside the rows and gaps:
         {"en_sentences": [...], "es_sentences": [...], "alignments": [...], "gaps": [...]}
     """
-    en_sentences, _ = _split_sentences_with_para_indices(source_text, source_lang)
+    en_sentences, en_para_indices = _split_sentences_with_para_indices(source_text, source_lang)
     es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
 
     if model is None:
         model = _get_model()
 
-    alignments = align_sentences(en_sentences, es_sentences, model, es_para_indices=es_para_indices)
+    alignments = align_sentences(
+        en_sentences,
+        es_sentences,
+        model,
+        es_para_indices=es_para_indices,
+        en_para_indices=en_para_indices,
+    )
 
     return {
         "en_sentences": en_sentences,
@@ -678,7 +824,7 @@ def align_chunk(
         if similarities
         else 0,
         "coverage": _coverage_summary(
-            len(en_sentences), len({a["en_idx"] for a in alignments}), gaps
+            len(en_sentences), len(_covered_en(alignments)), gaps
         ),
         "gaps": gaps,
         "alignments": alignments,
@@ -732,6 +878,8 @@ def align_chapter_chunks(
             a["en_idx"] += total_en
             if "es_indices" in a:
                 a["es_indices"] = [i + total_es for i in a["es_indices"]]
+            if "en_indices" in a:
+                a["en_indices"] = [i + total_en for i in a["en_indices"]]
             a["chunk_id"] = result["chunk_id"]
 
         # Same offset treatment for coverage gaps. `position` stays chunk-relative
