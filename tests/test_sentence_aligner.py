@@ -68,6 +68,23 @@ class TestSplitLongSentence:
         # The important thing is it doesn't crash
         assert len(result) >= 1
 
+    def test_english_title_abbreviation_is_not_a_boundary(self):
+        text = '"For nothing, Mr. Harum-scarum? You are mistaken."'
+        result = _split_long_sentence(text, "en")
+        assert result == ['"For nothing, Mr. Harum-scarum?', 'You are mistaken."']
+
+    def test_english_guard_covers_each_title_in_a_run(self):
+        text = "She met Mrs. Dorking and Dr. Hardy there. They talked."
+        result = _split_long_sentence(text, "en")
+        assert result == ["She met Mrs. Dorking and Dr. Hardy there.", "They talked."]
+
+    def test_abbreviation_guard_is_english_only(self):
+        # The Spanish split is load-bearing (es_idx anchors annotations), so the
+        # guard must leave it exactly as it was.
+        text = "Vio al Sr. Hardy en la calle. Luego se fue."
+        assert _split_long_sentence(text, "es") == _split_long_sentence(text)
+        assert _split_long_sentence(text, "es") == ["Vio al Sr.", "Hardy en la calle.", "Luego se fue."]
+
     def test_handles_quotes(self):
         text = '"Hello," said he. "Goodbye," she replied.'
         result = _split_long_sentence(text)

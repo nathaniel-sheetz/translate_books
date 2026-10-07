@@ -95,7 +95,16 @@ _RUN_ON_RE = re.compile(
 )
 
 
-def _split_long_sentence(text: str) -> list[str]:
+# English titles that end in a period without ending a sentence. pysbd knows
+# them, but _SPLIT_LONG_RE does not, and it cut "Mrs. | Dorking" 158 times across
+# the corpus. English only: the Spanish split is load-bearing (es_idx anchors
+# annotations and corrections) and must stay byte-identical.
+_EN_TITLE_ABBREV_RE = re.compile(
+    r"\b(?:Mr|Mrs|Ms|Dr|St|Messrs|Capt|Col|Gen|Rev|Prof|Jr|Sr)\.$"
+)
+
+
+def _split_long_sentence(text: str, language: Optional[str] = None) -> list[str]:
     """
     Split a long sentence on sentence-ending punctuation (optionally
     followed by a closing quote/bracket) and whitespace, before an
@@ -103,8 +112,18 @@ def _split_long_sentence(text: str) -> list[str]:
     to treat entire quoted dialogue passages as single sentences,
     including the common case `."  "Next…` where the closing quote
     sits between the period and the whitespace.
+
+    With ``language="en"`` a boundary straight after a title abbreviation
+    ("Mr. Hardy") is not a boundary.
     """
-    parts = _SPLIT_LONG_RE.split(text)
+    parts = []
+    start = 0
+    for m in _SPLIT_LONG_RE.finditer(text):
+        if language == "en" and _EN_TITLE_ABBREV_RE.search(text[: m.start()]):
+            continue
+        parts.append(text[start : m.start()])
+        start = m.end()
+    parts.append(text[start:])
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -128,7 +147,7 @@ def split_sentences(text: str, language: str) -> list[str]:
             or _RUN_ON_RE.search(sent) is not None
         )
         if needs_split:
-            sub_sents = _split_long_sentence(sent)
+            sub_sents = _split_long_sentence(sent, language)
             if len(sub_sents) > 1:
                 result.extend(sub_sents)
             else:
@@ -519,6 +538,37 @@ def _coverage_summary(en_count: int, covered_count: int, gaps: list[dict]) -> di
     }
 
 
+def align_texts(
+    source_text: str,
+    translated_text: str,
+    source_lang: str = "en",
+    target_lang: str = "es",
+    model=None,
+) -> dict:
+    """
+    Split and align one source/translation pair.
+
+    The core of :func:`align_chunk`, separated from the chunk file so the same
+    path can be measured over cached embeddings. Returns the sentence lists
+    alongside the rows and gaps:
+        {"en_sentences": [...], "es_sentences": [...], "alignments": [...], "gaps": [...]}
+    """
+    en_sentences, _ = _split_sentences_with_para_indices(source_text, source_lang)
+    es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
+
+    if model is None:
+        model = _get_model()
+
+    alignments = align_sentences(en_sentences, es_sentences, model, es_para_indices=es_para_indices)
+
+    return {
+        "en_sentences": en_sentences,
+        "es_sentences": es_sentences,
+        "alignments": alignments,
+        "gaps": _coverage_gaps(en_sentences, alignments),
+    }
+
+
 def align_chunk(
     chunk_path: str,
     source_lang: str = "en",
@@ -555,13 +605,9 @@ def align_chunk(
     if not source_text or not translated_text:
         raise ValueError(f"Missing source or translated text in {chunk_path}")
 
-    en_sentences, _ = _split_sentences_with_para_indices(source_text, source_lang)
-    es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
-
-    if model is None:
-        model = _get_model()
-
-    alignments = align_sentences(en_sentences, es_sentences, model, es_para_indices=es_para_indices)
+    aligned = align_texts(source_text, translated_text, source_lang, target_lang, model)
+    en_sentences, es_sentences = aligned["en_sentences"], aligned["es_sentences"]
+    alignments, gaps = aligned["alignments"], aligned["gaps"]
 
     high_conf_sentences = sum(
         len(a.get("es_indices", [a["es_idx"]]))
@@ -569,8 +615,6 @@ def align_chunk(
         if a["confidence"] == "high"
     )
     similarities = [a["similarity"] for a in alignments]
-
-    gaps = _coverage_gaps(en_sentences, alignments)
 
     return {
         "chapter_id": chunk.get("chapter_id", "unknown"),
