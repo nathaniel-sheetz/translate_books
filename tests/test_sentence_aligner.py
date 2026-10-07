@@ -7,6 +7,7 @@ from src.sentence_aligner import (
     split_sentences,
     _coverage_gaps,
     _glue_units,
+    _split_inside_quotes,
     _split_long_sentence,
     _normalize_for_embedding,
     _split_sentences_with_para_indices,
@@ -174,6 +175,69 @@ class TestSplitSentencesWithParaIndices:
         sentences, indices = _split_sentences_with_para_indices(text, "en")
         assert indices[0] == 0
         assert indices[-1] == 1
+
+
+class TestSplitInsideQuotes:
+    """The aligner's source side splits sentences inside a quotation, so a
+    short Spanish reply has a sentence of its own to match."""
+
+    def _split(self, text):
+        return _split_sentences_with_para_indices(text, "en", split_quotes=True)[0]
+
+    def test_quoted_speech_splits_into_its_sentences(self):
+        text = '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps."'
+        assert self._split(text) == [
+            '"Yeah.',
+            "Three fellers.",
+            "Sort of onpleasant lookin' chaps.\"",
+        ]
+
+    def test_curly_quotes(self):
+        text = "“I knew it! It is all his fault.”"
+        assert self._split(text) == ["“I knew it!", "It is all his fault.”"]
+
+    def test_quote_and_attribution_stay_whole(self):
+        # The boundary sits at the closing quote, which is pysbd's business.
+        text = '"Grandpa!" he cried.'
+        assert self._split(text) == ['"Grandpa!" he cried.']
+
+    def test_title_and_initial_inside_a_quote_are_not_boundaries(self):
+        text = '"I saw Mr. Hardy and J. B. Smith there. They had left."'
+        assert self._split(text) == [
+            '"I saw Mr. Hardy and J. B. Smith there.',
+            'They had left."',
+        ]
+
+    def test_quote_state_carries_across_a_paragraphs_sentences(self):
+        # pysbd sometimes cuts mid-quotation; the second record is still inside it.
+        assert _split_inside_quotes(['"He ran.', 'He hid. He waited."']) == [
+            '"He ran.',
+            "He hid.",
+            'He waited."',
+        ]
+
+    def test_outside_a_quotation_nothing_is_split(self):
+        # Each paragraph starts closed, so an unclosed quote in the paragraph
+        # before cannot leak into this one.
+        assert _split_inside_quotes(["He hid. He waited."]) == ["He hid. He waited."]
+
+    def test_pieces_are_substrings_of_the_text(self):
+        text = '“Did you? Well, I am glad of it, then,” laughed Pollyanna. She sat down.'
+        cursor = 0
+        for piece in self._split(text):
+            found = text.find(piece, cursor)
+            assert found >= 0, piece
+            cursor = found + len(piece)
+
+    def test_default_split_is_unchanged(self):
+        # The target side and every other caller must see the old behaviour.
+        text = '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps."'
+        assert _split_sentences_with_para_indices(text, "en")[0] == [text]
+        es = "—Sí. Tres fulanos. Medio antipáticos, la verdad."
+        assert (
+            _split_sentences_with_para_indices(es, "es", split_quotes=False)[0]
+            == _split_sentences_with_para_indices(es, "es")[0]
+        )
 
 
 class TestGlueUnits:

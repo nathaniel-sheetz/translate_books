@@ -162,10 +162,61 @@ def split_sentences(text: str, language: str) -> list[str]:
     return result
 
 
-def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[str], list[int]]:
+# A sentence boundary with nothing but whitespace between the terminal
+# punctuation and the next capital. Where a closing quote intervenes pysbd has
+# already split, so this only ever matches *inside* a quotation.
+_INNER_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+(?=[A-Z])")
+# "J. B. Smith", "U. S." — an initial is not the end of a sentence.
+_INITIAL_RE = re.compile(r"\b[A-Z]\.$")
+
+
+def _split_inside_quotes(sentences: list[str]) -> list[str]:
+    """
+    Split the sentences of one paragraph at boundaries inside a quotation.
+
+    pysbd protects quoted text, so '"Yeah. Three fellers. Sort of onpleasant
+    lookin\\' chaps."' comes back as one record, while the Spanish — raya
+    dialogue with no closing mark — splits into three. A short '—Sí.' then
+    faces a whole speech and lands on whichever neighbour scores a hair higher.
+
+    Quote state is carried across the paragraph's sentences (pysbd sometimes
+    cuts mid-quotation) and reset at the paragraph, which is where the
+    continued-quotation convention reopens it. Only double quotes are tracked;
+    a single quote cannot be told from an apostrophe.
+    """
+    out: list[str] = []
+    straight_open = False
+    curly_depth = 0
+    for sent in sentences:
+        boundaries = {m.start(): m.end() for m in _INNER_BOUNDARY_RE.finditer(sent)}
+        start = 0
+        for pos, ch in enumerate(sent):
+            if pos in boundaries and (straight_open or curly_depth > 0):
+                before = sent[:pos]
+                if not (_EN_TITLE_ABBREV_RE.search(before) or _INITIAL_RE.search(before)):
+                    out.append(sent[start:pos])
+                    start = boundaries[pos]
+            if ch == '"':
+                straight_open = not straight_open
+            elif ch == "“":
+                curly_depth += 1
+            elif ch == "”":
+                curly_depth = max(0, curly_depth - 1)
+        out.append(sent[start:])
+    return [s.strip() for s in out if s.strip()]
+
+
+def _split_sentences_with_para_indices(
+    text: str, language: str, split_quotes: bool = False
+) -> tuple[list[str], list[int]]:
     """
     Split multi-paragraph text into sentences, tracking which paragraph
     each sentence came from.
+
+    ``split_quotes`` also splits prose sentences inside quotations (see
+    _split_inside_quotes). It is for the aligner's source side only: the
+    target split is load-bearing — the reader re-splits a chunk with this
+    function and maps alignment rows onto the result by position.
 
     Verse paragraphs (per is_verse_block) are split on '\\n' BEFORE
     pysbd so each verse line becomes its own sentence record. Without
@@ -193,6 +244,8 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
                 para_indices.append(para_idx)
         else:
             para_sents = split_sentences(para, language)
+            if split_quotes:
+                para_sents = _split_inside_quotes(para_sents)
             sentences.extend(para_sents)
             para_indices.extend([para_idx] * len(para_sents))
     return sentences, para_indices
@@ -750,7 +803,9 @@ def align_texts(
     alongside the rows and gaps:
         {"en_sentences": [...], "es_sentences": [...], "alignments": [...], "gaps": [...]}
     """
-    en_sentences, en_para_indices = _split_sentences_with_para_indices(source_text, source_lang)
+    en_sentences, en_para_indices = _split_sentences_with_para_indices(
+        source_text, source_lang, split_quotes=True
+    )
     es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
 
     if model is None:
