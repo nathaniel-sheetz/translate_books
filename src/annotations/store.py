@@ -174,3 +174,13 @@ def target_key(record: dict) -> str:
     """
     chapter_id, es_idx, sub = record_key(record)
     return f"{chapter_id}__{es_idx}__{sub or 'legacy'}"
+
+
+def favorite_id(record: dict) -> str:
+    """The id a heart on this annotation is stored under in ``favorites.jsonl``.
+
+    Same string as ``web_ui/favorites.py:annotation_id(target_key(record))``,
+    composed here for callers that cannot import ``web_ui``. It embeds
+    ``es_idx``, so it changes when the note is re-anchored.
+    """
+    return f"annotation:{target_key(record)}"

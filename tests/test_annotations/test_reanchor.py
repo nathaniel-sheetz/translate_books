@@ -330,6 +330,104 @@ class TestWhatIsWritten:
         assert [r["es_idx"] for r in store.load_active(project, chapter_id="chapter_02")] == [0]
 
 
+def _hearts(project):
+    """The standing favorites, read the way the web app reads them."""
+    from web_ui import favorites
+
+    return favorites.load_favorites(project)
+
+
+def _heart(project, record, **snapshot):
+    from web_ui import favorites
+
+    favorites.append_favorite(
+        project, favorites.annotation_id(store.target_key(record)), True,
+        {"kind": "annotation", **snapshot} if snapshot else None,
+    )
+
+
+class TestHearts:
+    def test_the_id_matches_the_one_the_web_app_composes(self):
+        from web_ui import favorites
+
+        for record in (_note(7), _note(7, sub_id=None), _note("7", sub_id="gb2")):
+            assert store.favorite_id(record) == favorites.annotation_id(store.target_key(record))
+
+    def test_a_heart_moves_with_its_note_and_keeps_its_snapshot(self, project):
+        _align(project, ["Nueva.", "El perro."])
+        note = _note(0, "El perro.")
+        write_annotations(project, [note])
+        _heart(project, note, chapter_id=CH, text="nota", es_text="El perro.")
+
+        result = reanchor.reanchor_chapter(project, CH)
+
+        assert result.hearts_moved == 1
+        assert _hearts(project) == {f"annotation:{CH}__1__u1"}
+        rows = [json.loads(line) for line in
+                (project / "favorites.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert rows[-1]["snapshot"] == {
+            "kind": "annotation", "chapter_id": CH, "text": "nota", "es_text": "El perro.",
+        }
+
+    def test_hearted_notes_that_trade_rows_both_keep_their_hearts(self, project):
+        _align(project, ["x.", "y.", "Primera.", "z.", "Segunda."])
+        first = _note(0, "Primera.", sub_id=None, content="a")
+        second = _note(2, "Segunda.", sub_id=None, content="b")
+        write_annotations(project, [first, second])
+        _heart(project, first)
+        _heart(project, second)
+
+        reanchor.reanchor_chapter(project, CH)
+
+        assert _hearts(project) == {
+            f"annotation:{CH}__2__legacy", f"annotation:{CH}__4__legacy",
+        }
+
+    def test_a_heart_follows_a_note_that_was_given_a_new_sub_id(self, project):
+        _write_rows(project, [
+            {"es_idx": 0, "es_indices": [0, 1], "es": "—Ven —dijo. Y se fue."},
+        ])
+        stays = _note(0, "—Ven —dijo.", sub_id=None, content="a")
+        arrives = _note(1, "Y se fue.", sub_id=None, content="b")
+        write_annotations(project, [stays, arrives])
+        _heart(project, arrives)
+
+        reanchor.reanchor_chapter(project, CH)
+
+        moved = next(r for r in store.load_active(project, chapter_id=CH) if r["content"] == "b")
+        assert _hearts(project) == {store.favorite_id(moved)}
+
+    def test_an_unhearted_or_unfavorited_note_writes_no_heart(self, project):
+        from web_ui import favorites
+
+        _align(project, ["Nueva.", "El perro.", "El gato."])
+        plain = _note(0, "El perro.", sub_id="u1")
+        dropped = _note(1, "El gato.", sub_id="u2")
+        write_annotations(project, [plain, dropped])
+        _heart(project, dropped)
+        favorites.append_favorite(project, store.favorite_id(dropped), False)
+        before = (project / "favorites.jsonl").read_text(encoding="utf-8")
+
+        result = reanchor.reanchor_chapter(project, CH)
+
+        assert len(result.moved) == 2 and result.hearts_moved == 0
+        assert (project / "favorites.jsonl").read_text(encoding="utf-8") == before
+
+    def test_no_favorites_file_is_created(self, project):
+        _align(project, ["Nueva.", "El perro."])
+        write_annotations(project, [_note(0, "El perro.")])
+        reanchor.reanchor_chapter(project, CH)
+        assert not (project / "favorites.jsonl").exists()
+
+    def test_a_dry_run_leaves_hearts_alone(self, project):
+        _align(project, ["Nueva.", "El perro."])
+        note = _note(0, "El perro.")
+        write_annotations(project, [note])
+        _heart(project, note)
+        reanchor.reanchor_chapter(project, CH, dry_run=True)
+        assert _hearts(project) == {f"annotation:{CH}__0__u1"}
+
+
 class TestRealignChapter:
     def test_realign_chapter_reanchors(self, project, monkeypatch):
         """The realign the judges and the reader's apply-corrections share."""

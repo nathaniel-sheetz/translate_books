@@ -65,6 +65,7 @@ def main() -> int:
     )
     totals = {"kept": 0, "moved": 0, "orphaned": 0, "refreshed": 0, "no_snapshot": 0, "suspect": 0}
     rows_written = 0
+    hearts_moved = 0
 
     for chapter_id in chapters:
         es_map = reanchor.load_es_map(project_dir, chapter_id)
@@ -110,6 +111,7 @@ def main() -> int:
         totals["suspect"] += len(plan.suspect)
         if args.apply:
             rows_written += reanchor.apply_plan(project_dir, chapter_id, plan)
+            hearts_moved += plan.hearts_moved
 
     print(
         f"\n{project_dir.name}: {totals['moved']} to move, {totals['orphaned']} orphaned, "
@@ -124,6 +126,8 @@ def main() -> int:
         )
     if args.apply:
         print(f"  Wrote {rows_written} row(s) to {store.annotations_path(project_dir)}")
+        if hearts_moved:
+            print(f"  {hearts_moved} heart(s) moved with their notes.")
     else:
         print("  Dry run: nothing written. Re-run with --apply to write.")
     return 0

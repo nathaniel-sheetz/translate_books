@@ -55,6 +55,9 @@ FUZZY_MIN_CHARS = 25
 FUZZY_MIN_RATIO = 0.75
 FUZZY_MIN_LEAD = 0.05
 
+# Hearts on notes (web_ui/favorites.py) are stored beside annotations.jsonl.
+FAVORITES_FILENAME = "favorites.jsonl"
+
 
 @dataclass
 class Move:
@@ -85,6 +88,8 @@ class ReanchorResult:
     # they sit on. Left alone, and not given a snapshot that would hide the doubt.
     suspect: list[dict] = field(default_factory=list)
     kept: int = 0
+    # Moved notes whose heart was taken along; set once the plan is written.
+    hearts_moved: int = 0
 
 
 def as_es_idx(value: Any) -> Optional[int]:
@@ -309,9 +314,10 @@ def plan_chapter(
 
 
 def _rows_to_append(
-    project_dir: Path, chapter_id: str, result: ReanchorResult,
-) -> list[dict]:
-    """The jsonl rows that carry out a plan: every tombstone, then every note.
+    project_dir: Path, chapter_id: str, result: ReanchorResult, ts: str,
+) -> tuple[list[dict], list[dict]]:
+    """The jsonl rows that carry out a plan's moves: ``(tombstones, notes)``,
+    one of each per move and in the same order, to be written in that order.
 
     Tombstones go first because two notes can trade places in one pass (73 → 79
     while 79 → 85). Written pair by pair, the second note's tombstone would land
@@ -325,7 +331,6 @@ def _rows_to_append(
     for move in result.moved:
         taken.discard((move.old_idx, store.storage_sub_id(move.record.get("sub_id"))))
 
-    ts = datetime.now().isoformat()
     tombstones: list[dict] = []
     recreated: list[dict] = []
     for move in result.moved:
@@ -360,7 +365,51 @@ def _rows_to_append(
         if move.new_text:
             row["es_text"] = move.new_text
         recreated.append(row)
-    return tombstones + recreated + result.backfilled + result.refreshed
+    return tombstones, recreated
+
+
+def _heart_rows(
+    project_dir: Path, moves: list[tuple[dict, dict]], ts: str,
+) -> list[dict]:
+    """The ``favorites.jsonl`` rows that take a heart along with its note.
+
+    A favorite is stored under an id that includes the note's ``es_idx``
+    (:func:`store.favorite_id`), so a moved note would leave its heart behind
+    on the old number. ``moves`` pairs each note as it was with the row that
+    replaces it. Every unfavorite comes before every favorite, for the reason
+    tombstones come first: two hearted notes can trade rows in one pass.
+
+    The file belongs to ``web_ui/favorites.py``; its format is repeated here
+    (append-only, last record for an id wins) because ``src`` does not import
+    ``web_ui``.
+    """
+    path = Path(project_dir) / FAVORITES_FILENAME
+    if not moves or not path.exists():
+        return []
+    standing: dict[str, dict] = {}
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get("id"), str):
+            standing[record["id"]] = record
+
+    off: list[dict] = []
+    on: list[dict] = []
+    for old, new in moves:
+        old_id = store.favorite_id(old)
+        heart = standing.get(old_id)
+        if not heart or not heart.get("favorite"):
+            continue
+        off.append({"ts": ts, "id": old_id, "favorite": False})
+        row = {"ts": ts, "id": store.favorite_id(new), "favorite": True}
+        if isinstance(heart.get("snapshot"), dict):
+            row["snapshot"] = heart["snapshot"]
+        on.append(row)
+    return off + on
 
 
 def reanchor_chapter(
@@ -374,8 +423,9 @@ def reanchor_chapter(
 
     Call it after every write of ``alignments/<chapter_id>.json``. Appends
     tombstone + recreate rows to ``annotations.jsonl`` for notes that moved, and
-    a replacement row for notes whose snapshot was added or updated. Never
-    rewrites the file, so the prior state stays on disk.
+    a replacement row for notes whose snapshot was added or updated. A moved
+    note's heart in ``favorites.jsonl`` moves with it. Never rewrites either
+    file, so the prior state stays on disk.
 
     Returns:
         The plan that was carried out. ``orphaned`` lists the notes whose
@@ -395,12 +445,22 @@ def apply_plan(project_dir: Path, chapter_id: str, result: ReanchorResult) -> in
     """
     if not (result.moved or result.backfilled or result.refreshed):
         return 0
-    rows = _rows_to_append(project_dir, chapter_id, result)
+    ts = datetime.now().isoformat()
+    tombstones, recreated = _rows_to_append(project_dir, chapter_id, result, ts)
+    # Worked out before the notes move, written after: a heart must not leave
+    # for a row its note never reached.
+    records = [move.record for move in result.moved]
+    hearts = _heart_rows(project_dir, list(zip(records, recreated)), ts)
+    rows = tombstones + recreated + result.backfilled + result.refreshed
     store.append_records(project_dir, rows)
+    if hearts:
+        with open(Path(project_dir) / FAVORITES_FILENAME, "a", encoding="utf-8") as f:
+            f.write("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in hearts))
+    result.hearts_moved = len(hearts) // 2
     logger.info(
-        "re-anchored %s/%s: %d moved, %d orphaned, %d given a snapshot",
-        Path(project_dir).name, chapter_id,
-        len(result.moved), len(result.orphaned), len(result.backfilled),
+        "re-anchored %s/%s: %d moved (%d hearted), %d orphaned, %d given a snapshot",
+        Path(project_dir).name, chapter_id, len(result.moved), result.hearts_moved,
+        len(result.orphaned), len(result.backfilled),
     )
     return len(rows)
 
