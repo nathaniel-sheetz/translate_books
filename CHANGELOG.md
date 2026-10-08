@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.65.1.0] - 2026-10-07
+
+### Changed
+- **The aligner pairs dialogue with its source more closely.** Three repairs sit around the matching step in `src/sentence_aligner.py`. A stored alignment changes only when its chapter is realigned.
+  - A Spanish speech tag (`—exclamó—.`), a sentence cut after `Sr.`, and a fragment that opens with `...`, `,`, `;` or `:` are matched as one unit with the sentence before them and share its row. The Spanish split is unchanged, so every `es_idx` still names the same sentence.
+  - On the source side, the aligner splits a quotation into its sentences, so a short Spanish reply has a sentence of its own to match. `en_count` and a gap's `en_start`, `en_end` and `sentences` count those pieces.
+  - A row may take in one unclaimed run of up to two source sentences from its own paragraph. Such a row lists them in `en_indices`; `en_idx` is the first.
+- **English sentences are no longer cut after a title or an initial** (`Mrs. | Dorking`, `J. | B. | Smith`). `split_sentences(text, "en")` is shared with the difficulty scorer, so a recomputed `difficulty.json` can differ from a stored one.
+
+### Fixed (found in pre-ship review)
+- **A dashboard realign orphaned a note whose sentence had joined the row before it.** The note now moves to that row when the row still contains the sentence. The other paths that realign a chapter (after a translate wave, after the reader applies corrections, `harness.py align`) do not re-anchor notes at all, so realign a chapter that carries notes from the dashboard.
+- **A dropped passage of quick dialogue went unreported.** Each piece of a split quotation was too short to count toward a coverage gap. The pieces of one sentence are now weighed, tested for absorption and previewed as that sentence.
+- **The title guard inside a quotation missed `Lieut.`, `Mt.`, `Ft.` and upper-case `MR.`**, and the long-sentence split still cut initials. Both English splits now share one guard.
+- Three new tests could not fail; they now assert the split they describe.
+
 ## [0.65.0.0] - 2026-10-07
 
 ### Added
