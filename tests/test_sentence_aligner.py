@@ -1,16 +1,20 @@
 """Tests for sentence alignment module."""
 
+import numpy as np
 import pytest
 from src.sentence_aligner import (
     MIN_GAP_CHARS,
     MIN_SENTENCE_CHARS,
     split_sentences,
+    _absorb_orphans,
     _coverage_gaps,
+    _covered_en,
     _glue_units,
     _split_inside_quotes,
     _split_long_sentence,
     _normalize_for_embedding,
     _split_sentences_with_para_indices,
+    _split_sentences_with_whole_indices,
 )
 
 
@@ -86,6 +90,16 @@ class TestSplitLongSentence:
         text = "Vio al Sr. Hardy en la calle. Luego se fue."
         assert _split_long_sentence(text, "es") == _split_long_sentence(text)
         assert _split_long_sentence(text, "es") == ["Vio al Sr.", "Hardy en la calle.", "Luego se fue."]
+
+    def test_english_initials_are_not_boundaries(self):
+        text = "We met J. B. Smith and Maj. Hardy at the dock. Then we left."
+        assert _split_long_sentence(text, "en") == [
+            "We met J. B. Smith and Maj. Hardy at the dock.",
+            "Then we left.",
+        ]
+        # Without the language the same text is still cut at each of them.
+        assert _split_long_sentence(text, "es") == _split_long_sentence(text)
+        assert len(_split_long_sentence(text)) == 5
 
     def test_handles_quotes(self):
         text = '"Hello," said he. "Goodbye," she replied.'
@@ -208,6 +222,54 @@ class TestSplitInsideQuotes:
             'They had left."',
         ]
 
+    @pytest.mark.parametrize("text", [
+        '"I saw Lieut. Hardy there," he said.',
+        '"We sailed past Mt. Vernon and Ft. Worth," he said.',
+    ])
+    def test_titles_before_a_name_are_not_boundaries(self, text):
+        assert self._split(text) == [text]
+
+    def test_upper_case_title_is_not_a_boundary(self):
+        text = '"I saw MR. HARDY there. He waved."'
+        assert self._split(text) == ['"I saw MR. HARDY there.', 'He waved."']
+
+    def test_ordinary_words_that_are_also_abbreviations_still_split(self):
+        # pysbd lists "no" and "me" as abbreviations; a guard on its whole list
+        # would leave a one-word reply stuck to the speech that follows it.
+        assert self._split('"No. I will not. Go away, Tom."') == [
+            '"No.',
+            "I will not.",
+            'Go away, Tom."',
+        ]
+        assert self._split('"It was me. Then he ran."') == ['"It was me.', 'Then he ran."']
+
+    def test_pieces_of_one_sentence_share_a_whole_index(self):
+        stanza = (
+            "Drops of rain and bits of sunshine\n"
+            "Falling here and gleaming there,\n"
+            "Tiny blades of grass appearing.\n"
+            "Tell of springtime bright and fair."
+        )
+        text = (
+            '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps." He nodded.'
+            "\n\n" + stanza
+        )
+        sentences, paras, wholes = _split_sentences_with_whole_indices(
+            text, "en", split_quotes=True
+        )
+        assert sentences[:4] == [
+            '"Yeah.',
+            "Three fellers.",
+            "Sort of onpleasant lookin' chaps.\"",
+            "He nodded.",
+        ]
+        # The quotation's three pieces are one sentence; each verse line is its own.
+        assert wholes == [0, 0, 0, 1, 2, 3, 4, 5]
+        assert paras == [0, 0, 0, 0, 1, 1, 1, 1]
+
+        unsplit, _, unsplit_wholes = _split_sentences_with_whole_indices(text, "en")
+        assert unsplit_wholes == list(range(len(unsplit)))
+
     def test_quote_state_carries_across_a_paragraphs_sentences(self):
         # pysbd sometimes cuts mid-quotation; the second record is still inside it.
         assert _split_inside_quotes(['"He ran.', 'He hid. He waited."']) == [
@@ -220,24 +282,35 @@ class TestSplitInsideQuotes:
         # Each paragraph starts closed, so an unclosed quote in the paragraph
         # before cannot leak into this one.
         assert _split_inside_quotes(["He hid. He waited."]) == ["He hid. He waited."]
+        assert _split_sentences_with_para_indices(
+            '"He never came back. Nobody knew why.\n\nThey passed Mt. Vernon at noon.',
+            "en",
+            split_quotes=True,
+        ) == (
+            ['"He never came back.', "Nobody knew why.", "They passed Mt. Vernon at noon."],
+            [0, 0, 1],
+        )
 
     def test_pieces_are_substrings_of_the_text(self):
         text = '“Did you? Well, I am glad of it, then,” laughed Pollyanna. She sat down.'
-        cursor = 0
-        for piece in self._split(text):
-            found = text.find(piece, cursor)
-            assert found >= 0, piece
-            cursor = found + len(piece)
+        pieces = self._split(text)
+        assert pieces == [
+            "“Did you?",
+            "Well, I am glad of it, then,” laughed Pollyanna.",
+            "She sat down.",
+        ]
+        assert " ".join(pieces) == text
 
     def test_default_split_is_unchanged(self):
         # The target side and every other caller must see the old behaviour.
         text = '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps."'
         assert _split_sentences_with_para_indices(text, "en")[0] == [text]
         es = "—Sí. Tres fulanos. Medio antipáticos, la verdad."
-        assert (
-            _split_sentences_with_para_indices(es, "es", split_quotes=False)[0]
-            == _split_sentences_with_para_indices(es, "es")[0]
-        )
+        assert _split_sentences_with_para_indices(es, "es")[0] == [
+            "—Sí.",
+            "Tres fulanos.",
+            "Medio antipáticos, la verdad.",
+        ]
 
 
 class TestGlueUnits:
@@ -695,6 +768,35 @@ class TestCoverageGaps:
         assert not _absorbable(["---"], [0])
         assert not _absorbable(light, [])
 
+    def test_pieces_of_one_sentence_are_weighed_together_for_absorption(self):
+        from src.sentence_aligner import _absorbable
+
+        # One quotation cut in two: neither piece clears MIN_GAP_CHARS alone, but
+        # the sentence they were would have been a reportable gap.
+        pieces = [_sent(MIN_GAP_CHARS - 10), "Go away, Tom.\""]
+        assert _absorbable(pieces, [0, 1])
+        assert not _absorbable(pieces, [0, 1], [0, 0])
+        # Two separate sentences are still weighed one by one.
+        assert _absorbable(pieces, [0, 1], [0, 1])
+
+    def test_dropped_quick_dialogue_is_reported(self):
+        # Fifteen dropped lines, each cut into pieces too short to count alone.
+        line = '"No. I will not. Go away, Tom."'
+        source = "He stayed at home that day.\n\n" + "\n\n".join([line] * 15)
+        en, _, wholes = _split_sentences_with_whole_indices(source, "en", split_quotes=True)
+        assert len(en) == 46
+        alignments = [{"en_idx": 0}]
+
+        assert _coverage_gaps(en, alignments) == []
+
+        gaps = _coverage_gaps(en, alignments, wholes)
+        assert len(gaps) == 1
+        gap = gaps[0]
+        assert gap["position"] == "tail"
+        assert (gap["en_start"], gap["en_end"]) == (1, 45)
+        assert gap["chars"] == 15 * len(line)
+        assert gap["preview"] == line
+
     def test_dropped_tail_is_reported(self):
         en = [_sent(150) for _ in range(5)]
         alignments = [{"en_idx": i} for i in range(3)]  # 3 and 4 unclaimed
@@ -847,6 +949,102 @@ class TestCoverageGaps:
 
         assert len(preview) == 101  # 100 chars + ellipsis
         assert preview.endswith("…")
+
+
+class _StubModel:
+    """encode() gives each text the similarity the test names for it.
+
+    Every row vector in TestAbsorbOrphans is [1, 0], so a text's score against
+    its row is exactly the first component returned here.
+    """
+
+    def __init__(self, scores: dict[str, float]):
+        self.scores = scores
+
+    def encode(self, texts, normalize_embeddings=True):
+        return np.array([
+            [s, (1 - s * s) ** 0.5] for s in (self.scores.get(t, 0.0) for t in texts)
+        ])
+
+
+class TestAbsorbOrphans:
+    """_absorb_orphans' bookkeeping, with scores fixed by a stub encoder."""
+
+    EN = ["He ran.", "He hid.", "He waited.", "She called.", "Nobody came."]
+
+    @staticmethod
+    def _rows(*en_indices: int) -> tuple[list[dict], list]:
+        rows = [
+            {
+                "es_idx": i,
+                "en_idx": en_idx,
+                "en": TestAbsorbOrphans.EN[en_idx],
+                "similarity": 0.5,
+                "confidence": "low",
+            }
+            for i, en_idx in enumerate(en_indices)
+        ]
+        return rows, [np.array([1.0, 0.0]) for _ in rows]
+
+    def test_run_before_the_first_row_extends_it_back(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(1, 2)
+        model = _StubModel({"He ran. He hid.": 0.9})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 0, 0])
+
+        assert out[0]["en_idx"] == 0
+        assert out[0]["en_indices"] == [0, 1]
+        assert out[0]["en"] == "He ran. He hid."
+        assert out[0]["similarity"] == 0.9
+        assert out[0]["confidence"] == "high"
+        assert "en_indices" not in out[1]
+
+    def test_run_after_the_last_row_extends_it_forward(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(0, 1)
+        model = _StubModel({"He hid. He waited.": 0.8})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 0, 0])
+
+        assert "en_indices" not in out[0]
+        assert out[1]["en_idx"] == 1
+        assert out[1]["en_indices"] == [1, 2]
+        assert out[1]["en"] == "He hid. He waited."
+
+    def test_between_two_rows_the_better_gain_takes_the_run(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(0, 2)
+        model = _StubModel({"He ran. He hid.": 0.2, "He hid. He waited.": 0.7})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 0, 0])
+
+        assert "en_indices" not in out[0]
+        assert out[1]["en_idx"] == 1
+        assert out[1]["en_indices"] == [1, 2]
+
+    def test_a_row_takes_at_most_one_run(self):
+        # Sentences 1-3 share a paragraph with the middle row and with no other,
+        # so it is the only candidate for the run on each side of it. It takes
+        # the first and the second stays unclaimed.
+        rows, vectors = self._rows(0, 2, 4)
+        model = _StubModel({"He hid. He waited.": 0.9, "He waited. She called.": 0.9})
+
+        out = _absorb_orphans(
+            rows, vectors, self.EN, model, en_para_indices=[0, 1, 1, 1, 2]
+        )
+
+        assert out[1]["en_indices"] == [1, 2]
+        assert _covered_en(out) == {0, 1, 2, 4}
+
+    def test_nothing_is_absorbed_across_a_paragraph(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(0, 2)
+        model = _StubModel({})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 1, 2])
+
+        assert all("en_indices" not in row for row in out)
 
 
 class TestCoverageGapsIntegration:

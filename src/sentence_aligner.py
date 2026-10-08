@@ -10,7 +10,8 @@ Around the DP sit three repairs for the ways the two languages split
 differently: Spanish fragments are glued into units (_glue_units), the
 source side is split inside quotations (_split_inside_quotes), and a row
 may take in an unclaimed source sentence from its own paragraph
-(_absorb_orphans).
+(_absorb_orphans). Both English splits also refuse a boundary straight
+after a title abbreviation or an initial (_ends_with_abbreviation).
 """
 
 import json
@@ -20,6 +21,7 @@ from typing import Optional
 
 import numpy as np
 import pysbd
+from pysbd.lang.english import English
 
 from src.utils.verse import is_verse_block
 
@@ -45,12 +47,12 @@ MIN_SENTENCE_CHARS = 25
 # splits them per line — so one translated Spanish sentence can face seven
 # English line *fragments*, whose combined mass would otherwise clear
 # MIN_GAP_CHARS even though nothing was dropped.
+SENTENCE_TERMINALS = ".!?…"
+SENTENCE_CLOSERS = "\"'”’»)]"
 # 1:N absorption (see _absorb_orphans). A longer run is left unclaimed, and so is
 # any run heavy enough for _coverage_gaps to report — a dropped paragraph must
 # never be folded into a neighbour and disappear.
 MAX_ABSORB_SENTENCES = 2
-SENTENCE_TERMINALS = ".!?…"
-SENTENCE_CLOSERS = "\"'”’»)]"
 
 
 def _get_model():
@@ -106,9 +108,25 @@ _RUN_ON_RE = re.compile(
 # them, but _SPLIT_LONG_RE does not, and it cut "Mrs. | Dorking" 158 times across
 # the corpus. English only: the Spanish split is load-bearing (es_idx anchors
 # annotations and corrections) and must stay byte-identical.
-_EN_TITLE_ABBREV_RE = re.compile(
-    r"\b(?:Mr|Mrs|Ms|Dr|St|Messrs|Capt|Col|Gen|Rev|Prof|Jr|Sr)\.$"
+#
+# The list is pysbd's own set of titles that stand before a name, plus a few it
+# files elsewhere. Its full abbreviation list is no use here: it holds "no",
+# "is", "me" and "miss", and a guard on those would refuse '"No. I will not."'.
+# Capitalised and upper-case forms only ("Mr.", "MR."), for the same reason.
+_EN_TITLES = sorted(
+    set(English.Abbreviation.PREPOSITIVE_ABBREVIATIONS)
+    | {"jr", "sr", "lieut", "mme", "mlle", "ft"}
 )
+_EN_TITLE_ABBREV_RE = re.compile(
+    r"\b(?:%s)\.$" % "|".join(f"{t.capitalize()}|{t.upper()}" for t in _EN_TITLES)
+)
+# "J. B. Smith", "U. S." — an initial is not the end of a sentence.
+_INITIAL_RE = re.compile(r"\b[A-Z]\.$")
+
+
+def _ends_with_abbreviation(text: str) -> bool:
+    """Whether English text ends in a title or an initial, not a sentence."""
+    return bool(_EN_TITLE_ABBREV_RE.search(text) or _INITIAL_RE.search(text))
 
 
 def _split_long_sentence(text: str, language: Optional[str] = None) -> list[str]:
@@ -121,12 +139,12 @@ def _split_long_sentence(text: str, language: Optional[str] = None) -> list[str]
     sits between the period and the whitespace.
 
     With ``language="en"`` a boundary straight after a title abbreviation
-    ("Mr. Hardy") is not a boundary.
+    ("Mr. Hardy") or an initial ("J. B. Smith") is not a boundary.
     """
     parts = []
     start = 0
     for m in _SPLIT_LONG_RE.finditer(text):
-        if language == "en" and _EN_TITLE_ABBREV_RE.search(text[: m.start()]):
+        if language == "en" and _ends_with_abbreviation(text[: m.start()]):
             continue
         parts.append(text[start : m.start()])
         start = m.end()
@@ -166,11 +184,10 @@ def split_sentences(text: str, language: str) -> list[str]:
 
 
 # A sentence boundary with nothing but whitespace between the terminal
-# punctuation and the next capital. Where a closing quote intervenes pysbd has
-# already split, so this only ever matches *inside* a quotation.
+# punctuation and the next capital. It also matches outside quotations (after
+# an abbreviation pysbd declined to split at), so _split_inside_quotes acts on
+# a match only while a double quote is open.
 _INNER_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+(?=[A-Z])")
-# "J. B. Smith", "U. S." — an initial is not the end of a sentence.
-_INITIAL_RE = re.compile(r"\b[A-Z]\.$")
 
 
 def _split_inside_quotes(sentences: list[str]) -> list[str]:
@@ -187,16 +204,21 @@ def _split_inside_quotes(sentences: list[str]) -> list[str]:
     continued-quotation convention reopens it. Only double quotes are tracked;
     a single quote cannot be told from an apostrophe.
     """
-    out: list[str] = []
+    return [piece for pieces in _quote_pieces(sentences) for piece in pieces]
+
+
+def _quote_pieces(sentences: list[str]) -> list[list[str]]:
+    """_split_inside_quotes, keeping each input sentence's pieces together."""
+    groups: list[list[str]] = []
     straight_open = False
     curly_depth = 0
     for sent in sentences:
         boundaries = {m.start(): m.end() for m in _INNER_BOUNDARY_RE.finditer(sent)}
+        out: list[str] = []
         start = 0
         for pos, ch in enumerate(sent):
             if pos in boundaries and (straight_open or curly_depth > 0):
-                before = sent[:pos]
-                if not (_EN_TITLE_ABBREV_RE.search(before) or _INITIAL_RE.search(before)):
+                if not _ends_with_abbreviation(sent[:pos]):
                     out.append(sent[start:pos])
                     start = boundaries[pos]
             if ch == '"':
@@ -206,7 +228,8 @@ def _split_inside_quotes(sentences: list[str]) -> list[str]:
             elif ch == "”":
                 curly_depth = max(0, curly_depth - 1)
         out.append(sent[start:])
-    return [s.strip() for s in out if s.strip()]
+        groups.append([s.strip() for s in out if s.strip()])
+    return groups
 
 
 def _split_sentences_with_para_indices(
@@ -231,27 +254,40 @@ def _split_sentences_with_para_indices(
     Returns (sentences, para_indices) where para_indices[i] is the
     zero-based paragraph number for sentence i.
     """
+    sentences, para_indices, _ = _split_sentences_with_whole_indices(
+        text, language, split_quotes
+    )
+    return sentences, para_indices
+
+
+def _split_sentences_with_whole_indices(
+    text: str, language: str, split_quotes: bool = False
+) -> tuple[list[str], list[int], list[int]]:
+    """
+    _split_sentences_with_para_indices, plus whole_indices: whole_indices[i]
+    numbers the sentence that record i was part of before the split inside
+    quotations. Without ``split_quotes`` every record is its own whole.
+    """
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     sentences: list[str] = []
     para_indices: list[int] = []
+    whole_indices: list[int] = []
+    wholes = 0
     for para_idx, para in enumerate(paragraphs):
         if is_verse_block(para):
-            for line in para.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                # Use the verse line as-is — pysbd on a single line could split
-                # "He sang. Softly." into two records, breaking the
-                # 1-record-per-line invariant that downstream alignment depends on.
-                sentences.append(line)
-                para_indices.append(para_idx)
+            # Use each verse line as-is — pysbd on a single line could split
+            # "He sang. Softly." into two records, breaking the
+            # 1-record-per-line invariant that downstream alignment depends on.
+            groups = [[line.strip()] for line in para.split("\n") if line.strip()]
         else:
             para_sents = split_sentences(para, language)
-            if split_quotes:
-                para_sents = _split_inside_quotes(para_sents)
-            sentences.extend(para_sents)
-            para_indices.extend([para_idx] * len(para_sents))
-    return sentences, para_indices
+            groups = _quote_pieces(para_sents) if split_quotes else [[s] for s in para_sents]
+        for pieces in groups:
+            sentences.extend(pieces)
+            para_indices.extend([para_idx] * len(pieces))
+            whole_indices.extend([wholes] * len(pieces))
+            wholes += 1
+    return sentences, para_indices, whole_indices
 
 
 # A target sentence that opens with a raya and a lowercase letter is a narrator's
@@ -384,6 +420,7 @@ def align_sentences(
     model=None,
     es_para_indices: list[int] | None = None,
     en_para_indices: list[int] | None = None,
+    en_whole_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Align Spanish sentences to English sentences using embedding
@@ -405,6 +442,9 @@ def align_sentences(
         When provided, a row absorbs short unclaimed runs of EN sentences
         from its own source paragraph (see _absorb_orphans); without it
         every row keeps exactly one EN sentence.
+    en_whole_indices: optional list numbering, per EN sentence, the sentence
+        it was part of before the split inside quotations. When provided, a
+        run is weighed for absorption the way _coverage_gaps weighs it.
     """
     if not en_sentences or not es_sentences:
         return []
@@ -443,7 +483,12 @@ def align_sentences(
     )
 
     return _absorb_orphans(
-        alignments, row_vectors, en_sentences, model, en_para_indices=en_para_indices
+        alignments,
+        row_vectors,
+        en_sentences,
+        model,
+        en_para_indices=en_para_indices,
+        en_whole_indices=en_whole_indices,
     )
 
 
@@ -568,14 +613,38 @@ def _group_nto1(
     return alignments, row_vectors
 
 
-def _substantive_chars(en_sentences: list[str], run: list[int]) -> tuple[int, list[int]]:
-    """Character mass of a run that counts toward a coverage gap, and its members."""
-    substantive = [
-        i for i in run
-        if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
-        and _is_complete_sentence(en_sentences[i])
-    ]
-    return sum(len(en_sentences[i].strip()) for i in substantive), substantive
+def _substantive_chars(
+    en_sentences: list[str],
+    run: list[int],
+    en_whole_indices: list[int] | None = None,
+) -> tuple[int, list[int]]:
+    """
+    Character mass of a run that counts toward a coverage gap, and its members.
+
+    The split inside quotations cuts '"No. I will not. Go away, Tom."' into
+    pieces that are each too short to count, so a dropped passage of quick
+    dialogue would weigh nothing. With ``en_whole_indices`` the run's pieces of
+    one original sentence are judged, and measured, as the sentence they were.
+    """
+    groups: list[list[int]] = []
+    for i in run:
+        if (
+            groups
+            and en_whole_indices is not None
+            and en_whole_indices[groups[-1][-1]] == en_whole_indices[i]
+        ):
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+
+    chars = 0
+    substantive: list[int] = []
+    for group in groups:
+        text = " ".join(en_sentences[i].strip() for i in group)
+        if len(text) >= MIN_SENTENCE_CHARS and _is_complete_sentence(text):
+            chars += len(text)
+            substantive.extend(group)
+    return chars, substantive
 
 
 def _covered_en(alignments: list[dict]) -> set[int]:
@@ -586,13 +655,17 @@ def _covered_en(alignments: list[dict]) -> set[int]:
     return covered
 
 
-def _absorbable(en_sentences: list[str], run: list[int]) -> bool:
+def _absorbable(
+    en_sentences: list[str],
+    run: list[int],
+    en_whole_indices: list[int] | None = None,
+) -> bool:
     """Whether an unclaimed run is small enough for a neighbouring row to take in."""
     if not run or len(run) > MAX_ABSORB_SENTENCES:
         return False
     if not any(ch.isalpha() for i in run for ch in en_sentences[i]):
         return False
-    return _substantive_chars(en_sentences, run)[0] < MIN_GAP_CHARS
+    return _substantive_chars(en_sentences, run, en_whole_indices)[0] < MIN_GAP_CHARS
 
 
 def _absorb_orphans(
@@ -601,6 +674,7 @@ def _absorb_orphans(
     en_sentences: list[str],
     model,
     en_para_indices: list[int] | None = None,
+    en_whole_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Let a row take in a short run of source sentences nothing else claimed.
@@ -639,7 +713,7 @@ def _absorb_orphans(
     prev_last = -1
     for r, row in enumerate(alignments):
         run = list(range(prev_last + 1, row["en_idx"]))
-        if _absorbable(en_sentences, run):
+        if _absorbable(en_sentences, run, en_whole_indices):
             options = []
             if same_paragraph(run, row["en_idx"]):
                 options.append((r, run[0], row["en_idx"]))
@@ -648,7 +722,9 @@ def _absorb_orphans(
             runs.append(options)
         prev_last = max(prev_last, row["en_idx"])
     tail = list(range(prev_last + 1, len(en_sentences)))
-    if _absorbable(en_sentences, tail) and same_paragraph(tail, alignments[-1]["en_idx"]):
+    if _absorbable(en_sentences, tail, en_whole_indices) and same_paragraph(
+        tail, alignments[-1]["en_idx"]
+    ):
         runs.append([(len(alignments) - 1, alignments[-1]["en_idx"], tail[-1])])
 
     runs = [[c for c in options if row_vectors[c[0]] is not None] for options in runs]
@@ -696,6 +772,7 @@ def _is_complete_sentence(text: str) -> bool:
 def _coverage_gaps(
     en_sentences: list[str],
     alignments: list[dict],
+    en_whole_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Find runs of source sentences that no target sentence claims.
@@ -720,7 +797,9 @@ def _coverage_gaps(
     second condition is what keeps hard-wrapped sources from reading as omissions:
     their line fragments never terminate, so a merged run of them contributes
     nothing. The known cost is unpunctuated verse — a dropped poem whose lines
-    carry no terminal punctuation would not be reported.
+    carry no terminal punctuation would not be reported. ``en_whole_indices``
+    (see _substantive_chars) keeps both tests on the sentence as it stood before
+    the split inside quotations.
 
     Returns one record per reported run:
         {
@@ -746,7 +825,7 @@ def _coverage_gaps(
     def flush(run: list[int]) -> None:
         if not run:
             return
-        chars, substantive = _substantive_chars(en_sentences, run)
+        chars, substantive = _substantive_chars(en_sentences, run, en_whole_indices)
         if chars < MIN_GAP_CHARS:
             return
         if run[0] == 0 and run[-1] == last_idx:
@@ -758,7 +837,13 @@ def _coverage_gaps(
             position = "tail"
         else:
             position = "interior"
-        preview = en_sentences[substantive[0]].strip()
+        head = substantive[:1]
+        if en_whole_indices is not None:
+            head = [
+                i for i in substantive
+                if en_whole_indices[i] == en_whole_indices[substantive[0]]
+            ]
+        preview = " ".join(en_sentences[i].strip() for i in head)
         gaps.append({
             "position": position,
             "en_start": run[0],
@@ -806,7 +891,7 @@ def align_texts(
     alongside the rows and gaps:
         {"en_sentences": [...], "es_sentences": [...], "alignments": [...], "gaps": [...]}
     """
-    en_sentences, en_para_indices = _split_sentences_with_para_indices(
+    en_sentences, en_para_indices, en_whole_indices = _split_sentences_with_whole_indices(
         source_text, source_lang, split_quotes=True
     )
     es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
@@ -820,13 +905,14 @@ def align_texts(
         model,
         es_para_indices=es_para_indices,
         en_para_indices=en_para_indices,
+        en_whole_indices=en_whole_indices,
     )
 
     return {
         "en_sentences": en_sentences,
         "es_sentences": es_sentences,
         "alignments": alignments,
-        "gaps": _coverage_gaps(en_sentences, alignments),
+        "gaps": _coverage_gaps(en_sentences, alignments, en_whole_indices),
     }
 
 
