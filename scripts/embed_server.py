@@ -69,6 +69,10 @@ def build_handler(model, model_name, device, key, batch_size):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:
+                # Say so: a client left to think the connection is kept sends
+                # its next request into the close.
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
 

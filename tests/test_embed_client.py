@@ -71,7 +71,7 @@ def _count_posts(embedder, monkeypatch):
     return posts
 
 
-def _post(url, content_length, body=None, key=KEY):
+def _post_with_headers(url, content_length, body=None, key=KEY):
     """POST /embed with the Content-Length as given, whatever the body holds."""
     host, port = url.removeprefix("http://").split(":")
     conn = http.client.HTTPConnection(host, int(port), timeout=5)
@@ -81,9 +81,13 @@ def _post(url, content_length, body=None, key=KEY):
         conn.putheader("Content-Length", str(content_length))
         conn.endheaders(body)
         resp = conn.getresponse()
-        return resp.status, json.loads(resp.read())
+        return resp.status, json.loads(resp.read()), resp.headers
     finally:
         conn.close()
+
+
+def _post(url, content_length, body=None, key=KEY):
+    return _post_with_headers(url, content_length, body, key)[:2]
 
 
 def test_encodes_on_the_server(server):
@@ -230,6 +234,34 @@ def test_body_over_the_cap_is_refused(server, monkeypatch):
     monkeypatch.setattr(embed_server, "MAX_BODY_BYTES", 10)
 
     assert _post(url, 11) == (413, {"error": "body too large"})
+
+
+@pytest.mark.parametrize(
+    "content_length, key, status",
+    [(1000, "wrong-key", 401), ("abc", KEY, 400), (embed_server.MAX_BODY_BYTES + 1, KEY, 413)],
+    ids=["wrong key", "bad Content-Length", "body over the cap"],
+)
+def test_refusal_that_leaves_the_body_unread_announces_the_close(
+    server, content_length, key, status
+):
+    url, remote_model = server
+
+    # Without the header a client keeps the connection and sends its next
+    # request into the server's close of it.
+    got, _, headers = _post_with_headers(url, content_length, key=key)
+
+    assert got == status
+    assert headers["Connection"] == "close"
+
+
+def test_refusal_with_the_body_read_keeps_the_connection(server):
+    url, remote_model = server
+    raw = json.dumps({"texts": "a"}).encode("utf-8")
+
+    status, _, headers = _post_with_headers(url, len(raw), raw)
+
+    assert status == 400
+    assert headers["Connection"] is None
 
 
 @pytest.mark.parametrize(
