@@ -114,16 +114,24 @@ def load_active(
         for rec in by_key.values()
         if wanted is None or rec.get("type") in wanted
     ]
-    # Stable, deterministic order. str() keeps None (legacy rows) comparable.
+    # Stable, deterministic order. str() keeps None (legacy rows) comparable,
+    # and _sort_idx does the same for an es_idx stored as "12" beside a 12.
     records.sort(
         key=lambda r: (
             str(r.get("chapter_id") or ""),
-            r.get("es_idx") or 0,
+            _sort_idx(r.get("es_idx")),
             str(r.get("timestamp") or ""),
             str(storage_sub_id(r.get("sub_id"))),
         )
     )
     return records
+
+
+def _sort_idx(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def append_record(project_dir: Path, record: dict) -> Path:
@@ -137,6 +145,22 @@ def append_record(project_dir: Path, record: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def append_records(project_dir: Path, records: Iterable[dict]) -> Path:
+    """Append several records in one write and return the file path.
+
+    For changes that only make sense together (a tombstone and the row that
+    replaces it): one write call, so the window in which a crash could leave
+    only some of them on disk is as small as an append can make it.
+    """
+    path = annotations_path(project_dir)
+    lines = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+    if lines:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(lines)
     return path
 
 
@@ -159,3 +183,13 @@ def target_key(record: dict) -> str:
     """
     chapter_id, es_idx, sub = record_key(record)
     return f"{chapter_id}__{es_idx}__{sub or 'legacy'}"
+
+
+def favorite_id(record: dict) -> str:
+    """The id a heart on this annotation is stored under in ``favorites.jsonl``.
+
+    Same string as ``web_ui/favorites.py:annotation_id(target_key(record))``,
+    composed here for callers that cannot import ``web_ui``. It embeds
+    ``es_idx``, so it changes when the note is re-anchored.
+    """
+    return f"annotation:{target_key(record)}"

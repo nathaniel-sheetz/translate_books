@@ -3337,6 +3337,7 @@ def remove_text():
         "chunk_mtime": result["mtimes"].get(chunk_id, 0.0),
         "alignment_mtime": new_align_mtime,
         "orphaned_annotations": result["orphaned_annotations"],
+        "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
         "edited_chunks": [e["chunk_id"] for e in edits],
     })
@@ -3620,6 +3621,7 @@ def sentence_replace():
         "chunk_mtime": result["mtimes"].get(chunk_id, 0.0),
         "alignment_mtime": new_align_mtime,
         "orphaned_annotations": result["orphaned_annotations"],
+        "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
     })
 
@@ -4927,10 +4929,12 @@ def project_translate_batch(project_id):
         # post-batch behavior of the async Batch API endpoint above.
         for chapter_id in affected_chapters:
             try:
+                from src.annotations.reanchor import reanchor_chapter_quietly
                 from src.combiner import combine_chunks
                 from src.sentence_aligner import align_chapter_chunks
 
                 chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+                old_es_map = _load_alignment_es_map(project_dir, chapter_id)
                 ch_chunks = [load_chunk(cf) for cf in chunk_files]
                 combined_text = combine_chunks(ch_chunks)
                 chapters_dir = project_dir / "chapters"
@@ -4947,6 +4951,7 @@ def project_translate_batch(project_id):
                     target_lang="es",
                     output_path=str(align_dir / f"{chapter_id}.json"),
                 )
+                reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
                 job_queue.put(json.dumps({
                     "event": "chapter_aligned",
                     "chapter_id": chapter_id,
@@ -5295,10 +5300,12 @@ def batch_api_retrieve_job(project_id, job_id):
         # Recombine + realign affected chapters
         for chapter_id in affected_chapters:
             try:
+                from src.annotations.reanchor import reanchor_chapter_quietly
                 from src.combiner import combine_chunks
                 from src.sentence_aligner import align_chapter_chunks
 
                 chunk_files = sorted(chunks_dir.glob(f"{chapter_id}_chunk_*.json"))
+                old_es_map = _load_alignment_es_map(project_dir, chapter_id)
                 ch_chunks = [load_chunk(cf) for cf in chunk_files]
                 combined_text = combine_chunks(ch_chunks)
                 chapters_dir = project_dir / "chapters"
@@ -5315,6 +5322,7 @@ def batch_api_retrieve_job(project_id, job_id):
                     target_lang="es",
                     output_path=str(align_dir / f"{chapter_id}.json"),
                 )
+                reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
             except Exception:
                 pass  # Non-fatal: alignment can be re-run from Review stage
 
@@ -5436,18 +5444,21 @@ def project_align(project_id, chapter_id):
             output_path=str(output_path),
         )
 
+        # Runs with or without a prior alignment: a note's own sentence
+        # snapshot is enough to place it.
         orphaned: list = []
-        if old_es_map:
-            try:
-                orphaned = _reanchor_annotations_after_realign(
-                    project_dir, chapter_id, old_es_map,
-                )
-            except Exception as e:
-                app.logger.warning(
-                    "Annotation re-anchor failed for %s/%s: %s",
-                    project_id, chapter_id, e,
-                )
-                orphaned = []
+        reanchor_failed = False
+        try:
+            orphaned = _reanchor_annotations_after_realign(
+                project_dir, chapter_id, old_es_map,
+            )
+        except Exception as e:
+            app.logger.warning(
+                "Annotation re-anchor failed for %s/%s: %s",
+                project_id, chapter_id, e, exc_info=True,
+            )
+            orphaned = []
+            reanchor_failed = True
 
         return jsonify({
             "ok": True,
@@ -5457,6 +5468,7 @@ def project_align(project_id, chapter_id):
             "coverage": result.get("coverage"),
             "gaps": result.get("gaps", []),
             "orphaned_annotations": len(orphaned),
+            "reanchor_failed": reanchor_failed,
             "corrections_applied": corrections_applied,
         })
     except Exception as e:
@@ -5718,45 +5730,9 @@ def _chapter_has_pending_corrections(project_dir: Path, chapter_id: str) -> bool
 
 def _load_alignment_es_map(project_dir: Path, chapter_id: str) -> dict[int, str]:
     """Load {es_idx: es_text} for a chapter's current alignment, or {} if none."""
-    align_path = project_dir / "alignments" / f"{chapter_id}.json"
-    if not align_path.exists():
-        return {}
-    try:
-        with open(align_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    result: dict[int, str] = {}
-    for a in data.get("alignments", []):
-        idx = a.get("es_idx")
-        es_text = a.get("es")
-        if idx is not None and isinstance(es_text, str):
-            result[int(idx)] = es_text
-    return result
+    from src.annotations import reanchor
 
-
-def _load_alignment_es_heads(project_dir: Path, chapter_id: str) -> dict[int, int]:
-    """Load {es_idx: its row's es_idx} for every sentence that is a later
-    member of a multi-sentence row in the current alignment, or {} if none."""
-    align_path = project_dir / "alignments" / f"{chapter_id}.json"
-    if not align_path.exists():
-        return {}
-    try:
-        with open(align_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    result: dict[int, int] = {}
-    for a in data.get("alignments", []):
-        head = _as_es_idx(a.get("es_idx"))
-        members = a.get("es_indices")
-        if head is None or not isinstance(members, list):
-            continue
-        for member in members:
-            member = _as_es_idx(member)
-            if member is not None and member != head:
-                result[member] = head
-    return result
+    return reanchor.load_es_map(project_dir, chapter_id)
 
 
 def _reanchor_annotations_after_realign(
@@ -5767,97 +5743,15 @@ def _reanchor_annotations_after_realign(
     """Re-anchor chapter annotations whose es_idx shifted after realign.
 
     Appends remove+recreate rows to annotations.jsonl for shifted annotations
-    and returns a list of orphaned annotation records that couldn't be matched.
+    and returns the annotation records this realign orphaned. A note that was
+    already adrift before it is not returned again, or the reader would
+    announce the same orphan on every realign.
+    The matching lives in :mod:`src.annotations.reanchor`, which the judges,
+    the harness and the scripts call after their own realigns.
     """
-    active = _load_annotations(project_dir, chapter_id)
-    if not active:
-        return []
+    from src.annotations import reanchor
 
-    new_es_map = _load_alignment_es_map(project_dir, chapter_id)
-    new_es_heads = _load_alignment_es_heads(project_dir, chapter_id)
-    # Build reverse lookup from exact es text → new es_idx (first match wins)
-    text_to_new_idx: dict[str, int] = {}
-    for new_idx, es_text in new_es_map.items():
-        text_to_new_idx.setdefault(es_text, new_idx)
-
-    annotations_path = project_dir / "annotations.jsonl"
-    orphaned: list[dict] = []
-    appended: list[dict] = []
-
-    for old_idx, records in active.items():
-        old_es_text = old_es_map.get(old_idx)
-        if old_es_text is None:
-            # Annotation references a sentence we don't know about — leave it.
-            # TODO: fall back to record["es_text"] so an already-orphaned note
-            # can still re-anchor on a later realign.
-            orphaned.extend(records)
-            continue
-
-        # The sentence kept its number but its row did not: the aligner now
-        # shows it as a later part of the row before it (a speech tag glued to
-        # its line). The note follows it there. Checked before the text
-        # tiers, which would send "—dijo—." to the first row that reads the
-        # same, and required to hold on both the number and the text.
-        new_idx = None
-        head = new_es_heads.get(old_idx)
-        if head is not None and old_es_text in new_es_map.get(head, ""):
-            new_idx = head
-        if new_idx is None:
-            new_idx = text_to_new_idx.get(old_es_text)
-        if new_idx is None:
-            # Try prefix match (first 30 chars) as a fallback
-            prefix = old_es_text[:30]
-            for candidate_idx, candidate_text in new_es_map.items():
-                if candidate_text.startswith(prefix):
-                    new_idx = candidate_idx
-                    break
-        if new_idx is None:
-            orphaned.extend(records)
-            continue
-        if new_idx == old_idx:
-            continue
-
-        ts = datetime.now().isoformat()
-        # Re-anchor every annotation on this sentence, preserving each one's
-        # identity (sub_id), any imported-footnote provenance, and its
-        # verified_by stamp.
-        for record in records:
-            remove_row = {
-                "project_id": record.get("project_id"),
-                "chapter_id": chapter_id,
-                "es_idx": old_idx,
-                "removed": True,
-                "timestamp": ts,
-            }
-            recreate_row = {
-                "project_id": record.get("project_id"),
-                "chapter_id": chapter_id,
-                "es_idx": new_idx,
-                "type": record.get("type", "flag"),
-                "content": record.get("content", ""),
-                "timestamp": ts,
-            }
-            if record.get("sub_id") is not None:
-                remove_row["sub_id"] = record["sub_id"]
-                recreate_row["sub_id"] = record["sub_id"]
-            for extra in ("origin", "fn_number", "verified_by"):
-                if record.get(extra) is not None:
-                    recreate_row[extra] = record[extra]
-            # Carry the sentence snapshot forward, refreshed to the row we just
-            # landed on (the prefix-match tier can move a note onto a sentence
-            # whose text is not byte-identical to the old one).
-            es_text = new_es_map.get(new_idx) or record.get("es_text")
-            if es_text:
-                recreate_row["es_text"] = es_text
-            appended.append(remove_row)
-            appended.append(recreate_row)
-
-    if appended:
-        with open(annotations_path, "a", encoding="utf-8") as f:
-            for row in appended:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    return orphaned
+    return reanchor.reanchor_chapter(project_dir, chapter_id, old_es_map).newly_orphaned
 
 
 def _purge_chunk_corrections(project_dir: Path, chunk_id: str) -> int:
@@ -5980,12 +5874,18 @@ def _apply_chunk_edits(
     )
 
     # 6. Re-anchor existing annotations by text match
+    reanchor_failed = False
     try:
         orphaned = _reanchor_annotations_after_realign(
             project_dir, chapter_id, old_es_map,
         )
-    except Exception:
+    except Exception as e:
+        app.logger.warning(
+            "Annotation re-anchor failed for %s/%s: %s",
+            project_id, chapter_id, e, exc_info=True,
+        )
         orphaned = []
+        reanchor_failed = True
 
     # 7. Re-evaluate each edited chunk; reload from disk so the evaluator
     # sees the saved bytes rather than the in-memory object.
@@ -6013,6 +5913,7 @@ def _apply_chunk_edits(
         "ok": True,
         "mtimes": mtimes,
         "orphaned_annotations": len(orphaned),
+        "reanchor_failed": reanchor_failed,
         "corrections_purged": corrections_purged_total,
         "evaluations": evaluations,
     }
@@ -6045,6 +5946,7 @@ def _replace_chunk_translation(
         "ok": True,
         "mtime": result["mtimes"].get(chunk_id, 0.0),
         "orphaned_annotations": result["orphaned_annotations"],
+        "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
         "evaluation": result["evaluations"].get(chunk_id),
     }

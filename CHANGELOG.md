@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.66.1.0] - 2026-10-08
+
+### Fixed
+- **A reader note stays on its sentence whichever path realigns the chapter.** A note is now matched on the sentence saved with it (`es_text`), not on a comparison of the alignment before and after. The realign after a translate wave, after the reader applies corrections, after a judge apply, `harness.py align`, `scripts/translate_book.py` and `scripts/align_sentences.py` all move a chapter's notes now. Before, only the dashboard realign did, and a note left behind by any other path stayed on the wrong sentence.
+- **A note stranded by an earlier realign is put back by the next one.** Its saved sentence still says where it belongs, so the realign does not have to be the one that moved the numbers.
+- **A moved note keeps everything it carried**: the annotation-review sidecar, its provenance and `verified_by`. Two notes that trade rows in one pass both survive, and two legacy notes that land on one row get ids of their own.
+- **A note's heart moves with it.** `favorites.jsonl` gets an unfavorite on the old id and a favorite on the new one, with the heart's snapshot. A reviewed note that moves loses its heart on the /recommendations card, which still looks the note up under its old number; the heart shows in the reader.
+
+### Added
+- **`scripts/reanchor_annotations.py` puts notes back without realigning anything.** It prints what it would move and writes nothing without `--apply`. `--backfill` stamps a note that has no saved sentence with the row it sits on, and `--chapter` limits the run.
+- The matching lives in `src/annotations/reanchor.py`. A test fails when a function calls `align_chapter_chunks` and does not re-anchor the chapter's notes.
+
+### Fixed (found in pre-ship review)
+- **A note on a sentence corrected in the reader was left behind at the next realign.** A correction rewrites the row and not the note, so the note's saved sentence matched nothing. The note now follows the row it sat on before the realign, and takes the corrected wording when the row reads like an edit of it.
+- **A short line such as `—Sí.` was moved into the only row that contained it**, and a short line matched far away set how far the notes beside it were taken to have moved. Neither happens now.
+- **A note already orphaned was counted again on every realign**, so the reader raised its orphan alert on each sentence removal in that chapter. A realign reports only the notes that lost their row in it.
+- **A re-anchor that failed was reported as a success.** The traceback is logged, `align_sentences.py` and `translate_book.py` print that notes were not moved, `harness.py align` marks the chapter `reanchor_failed`, and the realign routes return `reanchor_failed`. The reader does not show that field yet.
+- **One `es_idx` stored as text beside the others as numbers stopped re-anchoring for the whole chapter.** `load_active` sorts the two together.
+- An alignment file cut in the middle of a character crashed the realign that would have rewritten it. A failed write to `favorites.jsonl` raised after the notes had already moved; it is now logged with the ids of the hearts left behind.
+
 ## [0.66.0.0] - 2026-10-08
 
 ### Added

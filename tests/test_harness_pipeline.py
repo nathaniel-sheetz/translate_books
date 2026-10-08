@@ -2358,6 +2358,35 @@ def test_align_command_aligns_ready_chapters_and_links(tmp_path: Path, monkeypat
     # An aligner result without coverage keys (older payload) must not warn.
     assert res["coverage_warnings"] == []
     assert "COVERAGE WARNING" not in res["instructions"]
+    assert "reanchor_failed" not in res["aligned"][0]
+
+
+def test_align_command_says_when_reader_notes_were_not_moved(tmp_path: Path, monkeypatch):
+    """A re-anchor that raises does not fail the align, and does not pass for one
+    that worked: the chapter is listed as aligned and carries reanchor_failed."""
+    import src.annotations.reanchor as reanchor
+    import src.sentence_aligner as aligner
+    from src.harness import flow
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["A."], translations=["es A."])
+
+    def fake_align(chunk_paths, project_id, chapter_id, source_lang="en",
+                   target_lang="es", output_path=None):
+        Path(output_path).write_text(
+            json.dumps({"chapter_id": chapter_id, "alignments": []}), encoding="utf-8")
+        return {"chapter_id": chapter_id, "es_count": 1, "high_confidence_pct": 100.0}
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr(aligner, "align_chapter_chunks", fake_align)
+    monkeypatch.setattr(reanchor, "reanchor_chapter", boom)
+
+    res = flow.align(str(tmp_path))
+    assert [a["chapter_id"] for a in res["aligned"]] == ["chapter_01"]
+    assert res["aligned"][0]["reanchor_failed"] is True
 
 
 def test_align_command_surfaces_coverage_warnings(tmp_path: Path, monkeypatch):

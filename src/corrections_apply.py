@@ -323,7 +323,12 @@ def recombine_chapter(project_dir: Path, chapter_id: str) -> Path:
 
 
 def realign_chapter(project_dir: Path, chapter_id: str, source_lang: str = "en", target_lang: str = "es"):
-    """Realign a single chapter."""
+    """Realign a single chapter, and move its reader annotations with it.
+
+    Returns the re-anchor result (``None`` if that pass failed; the alignment
+    is written either way).
+    """
+    from src.annotations.reanchor import load_es_map, reanchor_chapter_quietly
     from src.sentence_aligner import align_chapter_chunks
 
     chunks_dir = project_dir / "chunks"
@@ -331,6 +336,7 @@ def realign_chapter(project_dir: Path, chapter_id: str, source_lang: str = "en",
     align_dir = project_dir / "alignments"
     align_dir.mkdir(exist_ok=True)
 
+    old_es_map = load_es_map(project_dir, chapter_id)
     align_chapter_chunks(
         chunk_paths=[str(p) for p in chunk_paths],
         project_id=project_dir.name,
@@ -339,6 +345,7 @@ def realign_chapter(project_dir: Path, chapter_id: str, source_lang: str = "en",
         target_lang=target_lang,
         output_path=str(align_dir / f"{chapter_id}.json"),
     )
+    return reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
 
 
 def rebuild_epub(project_dir: Path):
