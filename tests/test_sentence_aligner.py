@@ -1,14 +1,20 @@
 """Tests for sentence alignment module."""
 
+import numpy as np
 import pytest
 from src.sentence_aligner import (
     MIN_GAP_CHARS,
     MIN_SENTENCE_CHARS,
     split_sentences,
+    _absorb_orphans,
     _coverage_gaps,
+    _covered_en,
+    _glue_units,
+    _split_inside_quotes,
     _split_long_sentence,
     _normalize_for_embedding,
     _split_sentences_with_para_indices,
+    _split_sentences_with_whole_indices,
 )
 
 
@@ -67,6 +73,33 @@ class TestSplitLongSentence:
         # "Dr." followed by uppercase should split, but this is a known edge case
         # The important thing is it doesn't crash
         assert len(result) >= 1
+
+    def test_english_title_abbreviation_is_not_a_boundary(self):
+        text = '"For nothing, Mr. Harum-scarum? You are mistaken."'
+        result = _split_long_sentence(text, "en")
+        assert result == ['"For nothing, Mr. Harum-scarum?', 'You are mistaken."']
+
+    def test_english_guard_covers_each_title_in_a_run(self):
+        text = "She met Mrs. Dorking and Dr. Hardy there. They talked."
+        result = _split_long_sentence(text, "en")
+        assert result == ["She met Mrs. Dorking and Dr. Hardy there.", "They talked."]
+
+    def test_abbreviation_guard_is_english_only(self):
+        # The Spanish split is load-bearing (es_idx anchors annotations), so the
+        # guard must leave it exactly as it was.
+        text = "Vio al Sr. Hardy en la calle. Luego se fue."
+        assert _split_long_sentence(text, "es") == _split_long_sentence(text)
+        assert _split_long_sentence(text, "es") == ["Vio al Sr.", "Hardy en la calle.", "Luego se fue."]
+
+    def test_english_initials_are_not_boundaries(self):
+        text = "We met J. B. Smith and Maj. Hardy at the dock. Then we left."
+        assert _split_long_sentence(text, "en") == [
+            "We met J. B. Smith and Maj. Hardy at the dock.",
+            "Then we left.",
+        ]
+        # Without the language the same text is still cut at each of them.
+        assert _split_long_sentence(text, "es") == _split_long_sentence(text)
+        assert len(_split_long_sentence(text)) == 5
 
     def test_handles_quotes(self):
         text = '"Hello," said he. "Goodbye," she replied.'
@@ -158,6 +191,174 @@ class TestSplitSentencesWithParaIndices:
         assert indices[-1] == 1
 
 
+class TestSplitInsideQuotes:
+    """The aligner's source side splits sentences inside a quotation, so a
+    short Spanish reply has a sentence of its own to match."""
+
+    def _split(self, text):
+        return _split_sentences_with_para_indices(text, "en", split_quotes=True)[0]
+
+    def test_quoted_speech_splits_into_its_sentences(self):
+        text = '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps."'
+        assert self._split(text) == [
+            '"Yeah.',
+            "Three fellers.",
+            "Sort of onpleasant lookin' chaps.\"",
+        ]
+
+    def test_curly_quotes(self):
+        text = "“I knew it! It is all his fault.”"
+        assert self._split(text) == ["“I knew it!", "It is all his fault.”"]
+
+    def test_quote_and_attribution_stay_whole(self):
+        # The boundary sits at the closing quote, which is pysbd's business.
+        text = '"Grandpa!" he cried.'
+        assert self._split(text) == ['"Grandpa!" he cried.']
+
+    def test_title_and_initial_inside_a_quote_are_not_boundaries(self):
+        text = '"I saw Mr. Hardy and J. B. Smith there. They had left."'
+        assert self._split(text) == [
+            '"I saw Mr. Hardy and J. B. Smith there.',
+            'They had left."',
+        ]
+
+    @pytest.mark.parametrize("text", [
+        '"I saw Lieut. Hardy there," he said.',
+        '"We sailed past Mt. Vernon and Ft. Worth," he said.',
+    ])
+    def test_titles_before_a_name_are_not_boundaries(self, text):
+        assert self._split(text) == [text]
+
+    def test_upper_case_title_is_not_a_boundary(self):
+        text = '"I saw MR. HARDY there. He waved."'
+        assert self._split(text) == ['"I saw MR. HARDY there.', 'He waved."']
+
+    def test_ordinary_words_that_are_also_abbreviations_still_split(self):
+        # pysbd lists "no" and "me" as abbreviations; a guard on its whole list
+        # would leave a one-word reply stuck to the speech that follows it.
+        assert self._split('"No. I will not. Go away, Tom."') == [
+            '"No.',
+            "I will not.",
+            'Go away, Tom."',
+        ]
+        assert self._split('"It was me. Then he ran."') == ['"It was me.', 'Then he ran."']
+
+    def test_pieces_of_one_sentence_share_a_whole_index(self):
+        stanza = (
+            "Drops of rain and bits of sunshine\n"
+            "Falling here and gleaming there,\n"
+            "Tiny blades of grass appearing.\n"
+            "Tell of springtime bright and fair."
+        )
+        text = (
+            '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps." He nodded.'
+            "\n\n" + stanza
+        )
+        sentences, paras, wholes = _split_sentences_with_whole_indices(
+            text, "en", split_quotes=True
+        )
+        assert sentences[:4] == [
+            '"Yeah.',
+            "Three fellers.",
+            "Sort of onpleasant lookin' chaps.\"",
+            "He nodded.",
+        ]
+        # The quotation's three pieces are one sentence; each verse line is its own.
+        assert wholes == [0, 0, 0, 1, 2, 3, 4, 5]
+        assert paras == [0, 0, 0, 0, 1, 1, 1, 1]
+
+        unsplit, _, unsplit_wholes = _split_sentences_with_whole_indices(text, "en")
+        assert unsplit_wholes == list(range(len(unsplit)))
+
+    def test_quote_state_carries_across_a_paragraphs_sentences(self):
+        # pysbd sometimes cuts mid-quotation; the second record is still inside it.
+        assert _split_inside_quotes(['"He ran.', 'He hid. He waited."']) == [
+            '"He ran.',
+            "He hid.",
+            'He waited."',
+        ]
+
+    def test_outside_a_quotation_nothing_is_split(self):
+        # Each paragraph starts closed, so an unclosed quote in the paragraph
+        # before cannot leak into this one.
+        assert _split_inside_quotes(["He hid. He waited."]) == ["He hid. He waited."]
+        assert _split_sentences_with_para_indices(
+            '"He never came back. Nobody knew why.\n\nThey passed Mt. Vernon at noon.',
+            "en",
+            split_quotes=True,
+        ) == (
+            ['"He never came back.', "Nobody knew why.", "They passed Mt. Vernon at noon."],
+            [0, 0, 1],
+        )
+
+    def test_pieces_are_substrings_of_the_text(self):
+        text = '“Did you? Well, I am glad of it, then,” laughed Pollyanna. She sat down.'
+        pieces = self._split(text)
+        assert pieces == [
+            "“Did you?",
+            "Well, I am glad of it, then,” laughed Pollyanna.",
+            "She sat down.",
+        ]
+        assert " ".join(pieces) == text
+
+    def test_default_split_is_unchanged(self):
+        # The target side and every other caller must see the old behaviour.
+        text = '"Yeah. Three fellers. Sort of onpleasant lookin\' chaps."'
+        assert _split_sentences_with_para_indices(text, "en")[0] == [text]
+        es = "—Sí. Tres fulanos. Medio antipáticos, la verdad."
+        assert _split_sentences_with_para_indices(es, "es")[0] == [
+            "—Sí.",
+            "Tres fulanos.",
+            "Medio antipáticos, la verdad.",
+        ]
+
+
+class TestGlueUnits:
+    def test_inciso_fragment_joins_the_line_before_it(self):
+        es = ["—¡Abuelo!", "—exclamó—.", "¡Misty está parada en el agua!"]
+        assert _glue_units(es, [0, 0, 0]) == [[0, 1], [2]]
+
+    def test_raya_followed_by_a_capital_starts_a_new_unit(self):
+        # A new speaker's line, not a narrator's inciso.
+        es = ["—¿Y ahora hacia dónde?", "—Hacia tierra firme."]
+        assert _glue_units(es, [0, 1]) == [[0], [1]]
+
+    def test_sentence_after_a_title_abbreviation_joins_it(self):
+        es = ["El Sr.", "Hardy seguía en la biblioteca.", "Los chicos volvieron."]
+        assert _glue_units(es, [0, 0, 0]) == [[0, 1], [2]]
+
+    def test_a_run_of_fragments_forms_one_unit(self):
+        es = ["—Sí, buen día —concedió el Sr.", "Stummer.", "—dijo otra vez—."]
+        assert _glue_units(es, [0, 0, 0]) == [[0, 1, 2]]
+
+    def test_continuation_punctuation_joins_the_sentence_before(self):
+        es = ["—¡Juuu!", "... ¡Ja!", "... ¡ah!", "—gritaba.", "Sonaba distinto."]
+        assert _glue_units(es, [0, 0, 0, 0, 0]) == [[0, 1, 2, 3], [4]]
+        es = ["—Sí, sí, ¡qué membrana tan buena!", ", ¡qué patas tan grandes!"]
+        assert _glue_units(es, [0, 0]) == [[0, 1]]
+
+    def test_lowercase_start_alone_does_not_glue(self):
+        # A verse line starts lowercase; lines must stay one unit each.
+        es = ["Llega el viento del norte trayendo copos de nieve:", "viste los campos del blanco más puro,"]
+        assert _glue_units(es, [0, 0]) == [[0], [1]]
+
+    def test_never_glues_across_a_paragraph_break(self):
+        es = ["—¡Abuelo!", "—exclamó—."]
+        assert _glue_units(es, [0, 1]) == [[0], [1]]
+
+    def test_without_paragraph_indices_everything_is_one_paragraph(self):
+        es = ["—¡Abuelo!", "—exclamó—."]
+        assert _glue_units(es) == [[0, 1]]
+
+    def test_every_sentence_appears_exactly_once(self):
+        es = ["Uno.", "—dijo—.", "Dos.", "El Dr.", "Tres."]
+        units = _glue_units(es, [0, 0, 0, 1, 1])
+        assert [i for unit in units for i in unit] == list(range(len(es)))
+
+    def test_empty(self):
+        assert _glue_units([]) == []
+
+
 class TestAlignSentences:
     """Integration tests that require sentence-transformers model.
 
@@ -197,6 +398,112 @@ class TestAlignSentences:
         assert len(result) == 1
         assert result[0]["en_idx"] == 0
         assert result[0]["es_indices"] == [0, 1]
+
+    def test_speech_tag_fragment_shares_its_lines_source(self, model):
+        """pysbd cuts '—exclamó—.' off the line it follows. On its own the tag
+        matches nothing; glued, it lands on the sentence that holds 'he cried'."""
+        from src.sentence_aligner import align_sentences
+
+        en = ['"Grandpa!" he cried.', '"Misty\'s standing in water!"']
+        es = ["—¡Abuelo!", "—exclamó—.", "¡Misty está parada en el agua!"]
+        result = align_sentences(en, es, model, es_para_indices=[0, 0, 0])
+
+        assert [r["en_idx"] for r in result] == [0, 1]
+        assert result[0]["es_indices"] == [0, 1]
+        assert result[0]["es_sentences"] == es[:2]
+        assert result[1]["es_idx"] == 2
+
+    def test_title_abbreviation_fragment_stays_with_its_sentence(self, model):
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "Mr. Hardy was still in the library when the boys returned home.",
+            "He looked up from his papers.",
+        ]
+        es = [
+            "El Sr.",
+            "Hardy seguía en la biblioteca cuando los chicos volvieron a casa.",
+            "Levantó la vista de sus papeles.",
+        ]
+        result = align_sentences(en, es, model, es_para_indices=[0, 0, 0])
+
+        assert result[0]["en_idx"] == 0
+        assert result[0]["es_indices"] == [0, 1]
+        assert result[1]["en_idx"] == 1
+
+    def test_one_spanish_sentence_takes_both_english_sentences(self, model):
+        """A translator's merge: the second English sentence must not be left
+        unclaimed, or the row shows half its source."""
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "They got along perfectly together.",
+            "They would sit side by side gossiping.",
+            "Then the winter came and the snow fell.",
+        ]
+        es = [
+            "Se llevaban perfectamente bien y se sentaban una junto a la otra a chismorrear.",
+            "Luego llegó el invierno y cayó la nieve.",
+        ]
+        result = align_sentences(
+            en, es, model, es_para_indices=[0, 0], en_para_indices=[0, 0, 0]
+        )
+
+        assert result[0]["en_idx"] == 0
+        assert result[0]["en_indices"] == [0, 1]
+        assert result[0]["en"] == f"{en[0]} {en[1]}"
+        assert result[1]["en_idx"] == 2
+        assert "en_indices" not in result[1]
+        assert _coverage_gaps(en, result) == []
+
+    def test_speech_tag_unit_takes_quote_and_attribution(self, model):
+        """English writes the attribution as its own sentence; the glued
+        Spanish unit needs both."""
+        from src.sentence_aligner import align_sentences
+
+        en = ['"The blacksnakes!"', "Frank exclaimed.", "The boys ran to the boat."]
+        es = ["—¡Las culebras negras!", "—exclamó Frank.", "Los muchachos corrieron al bote."]
+        result = align_sentences(
+            en, es, model, es_para_indices=[0, 0, 1], en_para_indices=[0, 0, 1]
+        )
+
+        assert result[0]["es_indices"] == [0, 1]
+        assert result[0]["en_indices"] == [0, 1]
+        assert result[1]["en_idx"] == 2
+
+    def test_orphan_in_another_paragraph_is_not_absorbed(self, model):
+        """An untranslated heading sits in its own paragraph; it must not be
+        folded into the sentence next door."""
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "The Hold-Up",
+            "Chief Collig was a burly, red-faced man.",
+            "He was fond of telling long stories.",
+        ]
+        es = [
+            "El jefe Collig era un hombre corpulento y colorado.",
+            "Le gustaba contar historias largas.",
+        ]
+        result = align_sentences(
+            en, es, model, es_para_indices=[0, 0], en_para_indices=[0, 1, 1]
+        )
+
+        assert [r["en_idx"] for r in result] == [1, 2]
+        assert all("en_indices" not in r for r in result)
+
+    def test_nothing_is_absorbed_without_source_paragraphs(self, model):
+        from src.sentence_aligner import align_sentences
+
+        en = [
+            "They got along perfectly together.",
+            "They would sit side by side gossiping.",
+        ]
+        es = ["Se llevaban perfectamente bien y se sentaban una junto a la otra a chismorrear."]
+        result = align_sentences(en, es, model)
+
+        assert len(result) == 1
+        assert "en_indices" not in result[0]
 
     def test_empty_input(self, model):
         from src.sentence_aligner import align_sentences
@@ -441,6 +748,55 @@ class TestCoverageGaps:
         alignments = [{"en_idx": 0}, {"en_idx": 0}, {"en_idx": 1}, {"en_idx": 2}]
         assert _coverage_gaps(en, alignments) == []
 
+    def test_sentences_a_row_absorbed_count_as_claimed(self):
+        # A 1:N row lists every source sentence it covers in en_indices.
+        en = [_sent(200) for _ in range(4)]
+        alignments = [{"en_idx": 0, "en_indices": [0, 1, 2]}, {"en_idx": 3}]
+        assert _coverage_gaps(en, alignments) == []
+
+    def test_a_reportable_run_is_never_absorbable(self):
+        from src.sentence_aligner import MAX_ABSORB_SENTENCES, _absorbable
+
+        # Two sentences that together clear MIN_GAP_CHARS: a real drop.
+        heavy = [_sent(MIN_GAP_CHARS // 2 + 10) for _ in range(2)]
+        assert not _absorbable(heavy, [0, 1])
+        # Light enough, but too many sentences.
+        light = [_sent(40) for _ in range(MAX_ABSORB_SENTENCES + 1)]
+        assert not _absorbable(light, list(range(len(light))))
+        assert _absorbable(light, [0, 1])
+        # Rules and stray punctuation are nobody's source.
+        assert not _absorbable(["---"], [0])
+        assert not _absorbable(light, [])
+
+    def test_pieces_of_one_sentence_are_weighed_together_for_absorption(self):
+        from src.sentence_aligner import _absorbable
+
+        # One quotation cut in two: neither piece clears MIN_GAP_CHARS alone, but
+        # the sentence they were would have been a reportable gap.
+        pieces = [_sent(MIN_GAP_CHARS - 10), "Go away, Tom.\""]
+        assert _absorbable(pieces, [0, 1])
+        assert not _absorbable(pieces, [0, 1], [0, 0])
+        # Two separate sentences are still weighed one by one.
+        assert _absorbable(pieces, [0, 1], [0, 1])
+
+    def test_dropped_quick_dialogue_is_reported(self):
+        # Fifteen dropped lines, each cut into pieces too short to count alone.
+        line = '"No. I will not. Go away, Tom."'
+        source = "He stayed at home that day.\n\n" + "\n\n".join([line] * 15)
+        en, _, wholes = _split_sentences_with_whole_indices(source, "en", split_quotes=True)
+        assert len(en) == 46
+        alignments = [{"en_idx": 0}]
+
+        assert _coverage_gaps(en, alignments) == []
+
+        gaps = _coverage_gaps(en, alignments, wholes)
+        assert len(gaps) == 1
+        gap = gaps[0]
+        assert gap["position"] == "tail"
+        assert (gap["en_start"], gap["en_end"]) == (1, 45)
+        assert gap["chars"] == 15 * len(line)
+        assert gap["preview"] == line
+
     def test_dropped_tail_is_reported(self):
         en = [_sent(150) for _ in range(5)]
         alignments = [{"en_idx": i} for i in range(3)]  # 3 and 4 unclaimed
@@ -595,6 +951,102 @@ class TestCoverageGaps:
         assert preview.endswith("…")
 
 
+class _StubModel:
+    """encode() gives each text the similarity the test names for it.
+
+    Every row vector in TestAbsorbOrphans is [1, 0], so a text's score against
+    its row is exactly the first component returned here.
+    """
+
+    def __init__(self, scores: dict[str, float]):
+        self.scores = scores
+
+    def encode(self, texts, normalize_embeddings=True):
+        return np.array([
+            [s, (1 - s * s) ** 0.5] for s in (self.scores.get(t, 0.0) for t in texts)
+        ])
+
+
+class TestAbsorbOrphans:
+    """_absorb_orphans' bookkeeping, with scores fixed by a stub encoder."""
+
+    EN = ["He ran.", "He hid.", "He waited.", "She called.", "Nobody came."]
+
+    @staticmethod
+    def _rows(*en_indices: int) -> tuple[list[dict], list]:
+        rows = [
+            {
+                "es_idx": i,
+                "en_idx": en_idx,
+                "en": TestAbsorbOrphans.EN[en_idx],
+                "similarity": 0.5,
+                "confidence": "low",
+            }
+            for i, en_idx in enumerate(en_indices)
+        ]
+        return rows, [np.array([1.0, 0.0]) for _ in rows]
+
+    def test_run_before_the_first_row_extends_it_back(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(1, 2)
+        model = _StubModel({"He ran. He hid.": 0.9})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 0, 0])
+
+        assert out[0]["en_idx"] == 0
+        assert out[0]["en_indices"] == [0, 1]
+        assert out[0]["en"] == "He ran. He hid."
+        assert out[0]["similarity"] == 0.9
+        assert out[0]["confidence"] == "high"
+        assert "en_indices" not in out[1]
+
+    def test_run_after_the_last_row_extends_it_forward(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(0, 1)
+        model = _StubModel({"He hid. He waited.": 0.8})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 0, 0])
+
+        assert "en_indices" not in out[0]
+        assert out[1]["en_idx"] == 1
+        assert out[1]["en_indices"] == [1, 2]
+        assert out[1]["en"] == "He hid. He waited."
+
+    def test_between_two_rows_the_better_gain_takes_the_run(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(0, 2)
+        model = _StubModel({"He ran. He hid.": 0.2, "He hid. He waited.": 0.7})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 0, 0])
+
+        assert "en_indices" not in out[0]
+        assert out[1]["en_idx"] == 1
+        assert out[1]["en_indices"] == [1, 2]
+
+    def test_a_row_takes_at_most_one_run(self):
+        # Sentences 1-3 share a paragraph with the middle row and with no other,
+        # so it is the only candidate for the run on each side of it. It takes
+        # the first and the second stays unclaimed.
+        rows, vectors = self._rows(0, 2, 4)
+        model = _StubModel({"He hid. He waited.": 0.9, "He waited. She called.": 0.9})
+
+        out = _absorb_orphans(
+            rows, vectors, self.EN, model, en_para_indices=[0, 1, 1, 1, 2]
+        )
+
+        assert out[1]["en_indices"] == [1, 2]
+        assert _covered_en(out) == {0, 1, 2, 4}
+
+    def test_nothing_is_absorbed_across_a_paragraph(self):
+        en = self.EN[:3]
+        rows, vectors = self._rows(0, 2)
+        model = _StubModel({})
+
+        out = _absorb_orphans(rows, vectors, en, model, en_para_indices=[0, 1, 2])
+
+        assert all("en_indices" not in row for row in out)
+
+
 class TestCoverageGapsIntegration:
     """End-to-end: a chunk whose translation drops a paragraph."""
 
@@ -676,6 +1128,42 @@ class TestCoverageGapsIntegration:
         assert result["gaps"] == []
         assert result["coverage"]["gap_count"] == 0
         assert result["coverage"]["en_orphan_chars"] == 0
+
+    def test_align_chapter_chunks_offsets_absorbed_indices(
+        self, tmp_path, monkeypatch, model
+    ):
+        """en_indices on a 1:N row must be shifted into chapter-global indices
+        along with en_idx, or a later chunk's row points into the first chunk."""
+        from src import sentence_aligner
+        from src.sentence_aligner import align_chapter_chunks
+
+        monkeypatch.setattr(sentence_aligner, "_get_model", lambda: model)
+
+        merged_source = (
+            "They got along perfectly together. They would sit side by side gossiping."
+        )
+        merged_translation = (
+            "Se llevaban perfectamente bien y se sentaban una junto a la otra a chismorrear."
+        )
+        chunks_dir = tmp_path / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, 0, self.SOURCE, self.TRANSLATION_FULL)
+        self._write_chunk(chunks_dir, 1, merged_source, merged_translation)
+
+        result = align_chapter_chunks(
+            chunk_paths=sorted(str(p) for p in chunks_dir.glob("*.json")),
+            project_id="test_project",
+            chapter_id="chapter_test",
+        )
+
+        row = next(
+            a for a in result["alignments"] if a["chunk_id"] == "chapter_test_chunk_001"
+        )
+        last = result["en_count"] - 1
+        assert row["en_indices"] == [last - 1, last]
+        assert row["en_idx"] == last - 1
+        assert result["coverage"]["en_aligned"] == result["en_count"]
+        assert result["gaps"] == []
 
     def test_align_chapter_chunks_offsets_gap_indices_and_stamps_chunk_id(
         self, tmp_path, monkeypatch, model

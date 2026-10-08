@@ -6,8 +6,12 @@ oversized sentences (common in English literary dialogue), and
 sentence-transformers embeddings with monotonic dynamic programming
 to find the best alignment.
 
-Validated at 95.5% high-confidence alignment across dialogue-heavy
-chapters (fabre2 ch06/24/25, lang-faerie ch01).
+Around the DP sit three repairs for the ways the two languages split
+differently: Spanish fragments are glued into units (_glue_units), the
+source side is split inside quotations (_split_inside_quotes), and a row
+may take in an unclaimed source sentence from its own paragraph
+(_absorb_orphans). Both English splits also refuse a boundary straight
+after a title abbreviation or an initial (_ends_with_abbreviation).
 """
 
 import json
@@ -17,6 +21,7 @@ from typing import Optional
 
 import numpy as np
 import pysbd
+from pysbd.lang.english import English
 
 from src.utils.verse import is_verse_block
 
@@ -44,6 +49,10 @@ MIN_SENTENCE_CHARS = 25
 # MIN_GAP_CHARS even though nothing was dropped.
 SENTENCE_TERMINALS = ".!?…"
 SENTENCE_CLOSERS = "\"'”’»)]"
+# 1:N absorption (see _absorb_orphans). A longer run is left unclaimed, and so is
+# any run heavy enough for _coverage_gaps to report — a dropped paragraph must
+# never be folded into a neighbour and disappear.
+MAX_ABSORB_SENTENCES = 2
 
 
 def _get_model():
@@ -95,7 +104,32 @@ _RUN_ON_RE = re.compile(
 )
 
 
-def _split_long_sentence(text: str) -> list[str]:
+# English titles that end in a period without ending a sentence. pysbd knows
+# them, but _SPLIT_LONG_RE does not, and it cut "Mrs. | Dorking" 158 times across
+# the corpus. English only: the Spanish split is load-bearing (es_idx anchors
+# annotations and corrections) and must stay byte-identical.
+#
+# The list is pysbd's own set of titles that stand before a name, plus a few it
+# files elsewhere. Its full abbreviation list is no use here: it holds "no",
+# "is", "me" and "miss", and a guard on those would refuse '"No. I will not."'.
+# Capitalised and upper-case forms only ("Mr.", "MR."), for the same reason.
+_EN_TITLES = sorted(
+    set(English.Abbreviation.PREPOSITIVE_ABBREVIATIONS)
+    | {"jr", "sr", "lieut", "mme", "mlle", "ft"}
+)
+_EN_TITLE_ABBREV_RE = re.compile(
+    r"\b(?:%s)\.$" % "|".join(f"{t.capitalize()}|{t.upper()}" for t in _EN_TITLES)
+)
+# "J. B. Smith", "U. S." — an initial is not the end of a sentence.
+_INITIAL_RE = re.compile(r"\b[A-Z]\.$")
+
+
+def _ends_with_abbreviation(text: str) -> bool:
+    """Whether English text ends in a title or an initial, not a sentence."""
+    return bool(_EN_TITLE_ABBREV_RE.search(text) or _INITIAL_RE.search(text))
+
+
+def _split_long_sentence(text: str, language: Optional[str] = None) -> list[str]:
     """
     Split a long sentence on sentence-ending punctuation (optionally
     followed by a closing quote/bracket) and whitespace, before an
@@ -103,8 +137,18 @@ def _split_long_sentence(text: str) -> list[str]:
     to treat entire quoted dialogue passages as single sentences,
     including the common case `."  "Next…` where the closing quote
     sits between the period and the whitespace.
+
+    With ``language="en"`` a boundary straight after a title abbreviation
+    ("Mr. Hardy") or an initial ("J. B. Smith") is not a boundary.
     """
-    parts = _SPLIT_LONG_RE.split(text)
+    parts = []
+    start = 0
+    for m in _SPLIT_LONG_RE.finditer(text):
+        if language == "en" and _ends_with_abbreviation(text[: m.start()]):
+            continue
+        parts.append(text[start : m.start()])
+        start = m.end()
+    parts.append(text[start:])
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -128,7 +172,7 @@ def split_sentences(text: str, language: str) -> list[str]:
             or _RUN_ON_RE.search(sent) is not None
         )
         if needs_split:
-            sub_sents = _split_long_sentence(sent)
+            sub_sents = _split_long_sentence(sent, language)
             if len(sub_sents) > 1:
                 result.extend(sub_sents)
             else:
@@ -139,10 +183,66 @@ def split_sentences(text: str, language: str) -> list[str]:
     return result
 
 
-def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[str], list[int]]:
+# A sentence boundary with nothing but whitespace between the terminal
+# punctuation and the next capital. It also matches outside quotations (after
+# an abbreviation pysbd declined to split at), so _split_inside_quotes acts on
+# a match only while a double quote is open.
+_INNER_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+(?=[A-Z])")
+
+
+def _split_inside_quotes(sentences: list[str]) -> list[str]:
+    """
+    Split the sentences of one paragraph at boundaries inside a quotation.
+
+    pysbd protects quoted text, so '"Yeah. Three fellers. Sort of onpleasant
+    lookin\\' chaps."' comes back as one record, while the Spanish — raya
+    dialogue with no closing mark — splits into three. A short '—Sí.' then
+    faces a whole speech and lands on whichever neighbour scores a hair higher.
+
+    Quote state is carried across the paragraph's sentences (pysbd sometimes
+    cuts mid-quotation) and reset at the paragraph, which is where the
+    continued-quotation convention reopens it. Only double quotes are tracked;
+    a single quote cannot be told from an apostrophe.
+    """
+    return [piece for pieces in _quote_pieces(sentences) for piece in pieces]
+
+
+def _quote_pieces(sentences: list[str]) -> list[list[str]]:
+    """_split_inside_quotes, keeping each input sentence's pieces together."""
+    groups: list[list[str]] = []
+    straight_open = False
+    curly_depth = 0
+    for sent in sentences:
+        boundaries = {m.start(): m.end() for m in _INNER_BOUNDARY_RE.finditer(sent)}
+        out: list[str] = []
+        start = 0
+        for pos, ch in enumerate(sent):
+            if pos in boundaries and (straight_open or curly_depth > 0):
+                if not _ends_with_abbreviation(sent[:pos]):
+                    out.append(sent[start:pos])
+                    start = boundaries[pos]
+            if ch == '"':
+                straight_open = not straight_open
+            elif ch == "“":
+                curly_depth += 1
+            elif ch == "”":
+                curly_depth = max(0, curly_depth - 1)
+        out.append(sent[start:])
+        groups.append([s.strip() for s in out if s.strip()])
+    return groups
+
+
+def _split_sentences_with_para_indices(
+    text: str, language: str, split_quotes: bool = False
+) -> tuple[list[str], list[int]]:
     """
     Split multi-paragraph text into sentences, tracking which paragraph
     each sentence came from.
+
+    ``split_quotes`` also splits prose sentences inside quotations (see
+    _split_inside_quotes). It is for the aligner's source side only: the
+    target split is load-bearing — the reader re-splits a chunk with this
+    function and maps alignment rows onto the result by position.
 
     Verse paragraphs (per is_verse_block) are split on '\\n' BEFORE
     pysbd so each verse line becomes its own sentence record. Without
@@ -154,25 +254,87 @@ def _split_sentences_with_para_indices(text: str, language: str) -> tuple[list[s
     Returns (sentences, para_indices) where para_indices[i] is the
     zero-based paragraph number for sentence i.
     """
+    sentences, para_indices, _ = _split_sentences_with_whole_indices(
+        text, language, split_quotes
+    )
+    return sentences, para_indices
+
+
+def _split_sentences_with_whole_indices(
+    text: str, language: str, split_quotes: bool = False
+) -> tuple[list[str], list[int], list[int]]:
+    """
+    _split_sentences_with_para_indices, plus whole_indices: whole_indices[i]
+    numbers the sentence that record i was part of before the split inside
+    quotations. Without ``split_quotes`` every record is its own whole.
+    """
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     sentences: list[str] = []
     para_indices: list[int] = []
+    whole_indices: list[int] = []
+    wholes = 0
     for para_idx, para in enumerate(paragraphs):
         if is_verse_block(para):
-            for line in para.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                # Use the verse line as-is — pysbd on a single line could split
-                # "He sang. Softly." into two records, breaking the
-                # 1-record-per-line invariant that downstream alignment depends on.
-                sentences.append(line)
-                para_indices.append(para_idx)
+            # Use each verse line as-is — pysbd on a single line could split
+            # "He sang. Softly." into two records, breaking the
+            # 1-record-per-line invariant that downstream alignment depends on.
+            groups = [[line.strip()] for line in para.split("\n") if line.strip()]
         else:
             para_sents = split_sentences(para, language)
-            sentences.extend(para_sents)
-            para_indices.extend([para_idx] * len(para_sents))
-    return sentences, para_indices
+            groups = _quote_pieces(para_sents) if split_quotes else [[s] for s in para_sents]
+        for pieces in groups:
+            sentences.extend(pieces)
+            para_indices.extend([para_idx] * len(pieces))
+            whole_indices.extend([wholes] * len(pieces))
+            wholes += 1
+    return sentences, para_indices, whole_indices
+
+
+# A target sentence that opens with a raya and a lowercase letter is a narrator's
+# inciso ("—exclamó—.") that pysbd cut off the line it belongs to. English keeps
+# the pair whole ('"Grandpa!" he cried.'), so on its own the fragment has nothing
+# to match and lands on whichever neighbour scores a hair higher.
+_ES_INCISO_RE = re.compile(r"^[—–]\s*[a-záéíóúüñ]")
+# Spanish titles pysbd splits after ("El Sr." | "Hardy seguía…").
+_ES_TITLE_ABBREV_RE = re.compile(r"\b(?:Sr|Sra|Srta|Sres|Dr|Dra|Mr|Mrs)\.$")
+# No sentence opens with an ellipsis, comma, semicolon or colon: pysbd cut after a
+# mid-sentence "!" or "?" ("—¡Juuu!" | "... ¡Ja!" | "... ¡Ja!"). Left apart, each
+# crumb adds its own term to the DP's sum and a run of them can outvote the real
+# sentences around it. (A lowercase start is deliberately not a signal here: that
+# is what a verse line looks like.)
+_ES_CONTINUATION_RE = re.compile(r"^(?:\.\.\.|…|[,;:])")
+
+
+def _glue_units(
+    sentences: list[str],
+    para_indices: list[int] | None = None,
+) -> list[list[int]]:
+    """
+    Group target sentences that must be aligned as one unit.
+
+    Returns runs of consecutive sentence indices covering every sentence once.
+    A sentence joins the unit before it when it is a narrator's inciso, when it
+    opens with continuation punctuation, or when the previous sentence stops at
+    a title abbreviation — all artefacts of the Spanish split, which cannot
+    itself change (es_idx anchors annotations
+    and corrections, and the reader re-splits the chunk live). Gluing here
+    leaves every index where it was and only makes the pieces share a source
+    sentence. Never glues across a paragraph boundary.
+    """
+    units: list[list[int]] = []
+    for i, sent in enumerate(sentences):
+        same_para = i > 0 and (
+            para_indices is None or para_indices[i] == para_indices[i - 1]
+        )
+        if same_para and (
+            _ES_INCISO_RE.match(sent)
+            or _ES_CONTINUATION_RE.match(sent)
+            or _ES_TITLE_ABBREV_RE.search(sentences[i - 1])
+        ):
+            units[-1].append(i)
+        else:
+            units.append([i])
+    return units
 
 
 def _monotonic_alignment(
@@ -257,6 +419,8 @@ def align_sentences(
     es_sentences: list[str],
     model=None,
     es_para_indices: list[int] | None = None,
+    en_para_indices: list[int] | None = None,
+    en_whole_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Align Spanish sentences to English sentences using embedding
@@ -274,6 +438,13 @@ def align_sentences(
 
     es_para_indices: optional list of paragraph numbers per ES sentence.
         When provided, N:1 grouping is blocked across paragraph boundaries.
+    en_para_indices: optional list of paragraph numbers per EN sentence.
+        When provided, a row absorbs short unclaimed runs of EN sentences
+        from its own source paragraph (see _absorb_orphans); without it
+        every row keeps exactly one EN sentence.
+    en_whole_indices: optional list numbering, per EN sentence, the sentence
+        it was part of before the split inside quotations. When provided, a
+        run is weighed for absorption the way _coverage_gaps weighs it.
     """
     if not en_sentences or not es_sentences:
         return []
@@ -281,25 +452,44 @@ def align_sentences(
     if model is None:
         model = _get_model()
 
+    # The DP runs over glued units, then every sentence in a unit takes the
+    # unit's source sentence; _group_nto1 folds them back into one row.
+    units = _glue_units(es_sentences, es_para_indices)
     en_for_embed = [_normalize_for_embedding(s) for s in en_sentences]
-    es_for_embed = [_normalize_for_embedding(s) for s in es_sentences]
+    es_for_embed = [
+        _normalize_for_embedding(" ".join(es_sentences[i] for i in unit))
+        for unit in units
+    ]
 
     en_embeddings = model.encode(en_for_embed, normalize_embeddings=True)
     es_embeddings = model.encode(es_for_embed, normalize_embeddings=True)
 
     similarity = np.dot(es_embeddings, en_embeddings.T)
-    raw_alignment = _monotonic_alignment(similarity)
+    raw_alignment = [
+        (es_idx, en_idx, score)
+        for unit_idx, en_idx, score in _monotonic_alignment(similarity)
+        for es_idx in units[unit_idx]
+    ]
 
-    alignments = _group_nto1(
+    unit_of = [unit_idx for unit_idx, unit in enumerate(units) for _ in unit]
+    alignments, row_vectors = _group_nto1(
         raw_alignment,
         en_sentences,
         es_sentences,
         en_embeddings,
         model,
         es_para_indices=es_para_indices,
+        es_vectors=es_embeddings[unit_of],
     )
 
-    return alignments
+    return _absorb_orphans(
+        alignments,
+        row_vectors,
+        en_sentences,
+        model,
+        en_para_indices=en_para_indices,
+        en_whole_indices=en_whole_indices,
+    )
 
 
 def _group_nto1(
@@ -309,7 +499,8 @@ def _group_nto1(
     en_embeddings: np.ndarray,
     model,
     es_para_indices: list[int] | None = None,
-) -> list[dict]:
+    es_vectors: np.ndarray | None = None,
+) -> tuple[list[dict], list]:
     """
     Collapse consecutive alignment rows that share the same en_idx into a
     single output row. This happens naturally when Spanish renders one
@@ -329,9 +520,14 @@ def _group_nto1(
 
     When es_para_indices is provided, sentences from different paragraphs
     are never merged even if they map to the same en_idx.
+
+    Returns the rows and, parallel to them, the embedding each row was scored
+    with (``es_vectors`` holds one per Spanish sentence; a merged group uses
+    the vector of its joined text), so _absorb_orphans need not encode the
+    Spanish again.
     """
     if not raw_alignment:
-        return []
+        return [], []
 
     # Partition consecutive same-en_idx rows into groups.
     # Break a group when the next row crosses a paragraph boundary.
@@ -360,14 +556,17 @@ def _group_nto1(
             merged_group_idx.append(gi)
 
     merged_sims: dict[int, float] = {}
+    merged_vectors: dict[int, np.ndarray] = {}
     if merged_texts:
         merged_embeds = model.encode(merged_texts, normalize_embeddings=True)
         for local_i, gi in enumerate(merged_group_idx):
             en_idx = groups[gi][0][1]
             sim = float(np.dot(merged_embeds[local_i], en_embeddings[en_idx]))
             merged_sims[gi] = sim
+            merged_vectors[gi] = merged_embeds[local_i]
 
     alignments: list[dict] = []
+    row_vectors: list = []
     for gi, grp in enumerate(groups):
         es_indices = [int(r[0]) for r in grp]
         en_idx = int(grp[0][1])
@@ -406,6 +605,160 @@ def _group_nto1(
                 record["para_start"] = True
 
         alignments.append(record)
+        if len(grp) > 1:
+            row_vectors.append(merged_vectors[gi])
+        else:
+            row_vectors.append(None if es_vectors is None else es_vectors[es_indices[0]])
+
+    return alignments, row_vectors
+
+
+def _substantive_chars(
+    en_sentences: list[str],
+    run: list[int],
+    en_whole_indices: list[int] | None = None,
+) -> tuple[int, list[int]]:
+    """
+    Character mass of a run that counts toward a coverage gap, and its members.
+
+    The split inside quotations cuts '"No. I will not. Go away, Tom."' into
+    pieces that are each too short to count, so a dropped passage of quick
+    dialogue would weigh nothing. With ``en_whole_indices`` the run's pieces of
+    one original sentence are judged, and measured, as the sentence they were.
+    """
+    groups: list[list[int]] = []
+    for i in run:
+        if (
+            groups
+            and en_whole_indices is not None
+            and en_whole_indices[groups[-1][-1]] == en_whole_indices[i]
+        ):
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+
+    chars = 0
+    substantive: list[int] = []
+    for group in groups:
+        text = " ".join(en_sentences[i].strip() for i in group)
+        if len(text) >= MIN_SENTENCE_CHARS and _is_complete_sentence(text):
+            chars += len(text)
+            substantive.extend(group)
+    return chars, substantive
+
+
+def _covered_en(alignments: list[dict]) -> set[int]:
+    """Every source sentence index some row claims."""
+    covered: set[int] = set()
+    for a in alignments:
+        covered.update(a.get("en_indices", [a["en_idx"]]))
+    return covered
+
+
+def _absorbable(
+    en_sentences: list[str],
+    run: list[int],
+    en_whole_indices: list[int] | None = None,
+) -> bool:
+    """Whether an unclaimed run is small enough for a neighbouring row to take in."""
+    if not run or len(run) > MAX_ABSORB_SENTENCES:
+        return False
+    if not any(ch.isalpha() for i in run for ch in en_sentences[i]):
+        return False
+    return _substantive_chars(en_sentences, run, en_whole_indices)[0] < MIN_GAP_CHARS
+
+
+def _absorb_orphans(
+    alignments: list[dict],
+    row_vectors: list,
+    en_sentences: list[str],
+    model,
+    en_para_indices: list[int] | None = None,
+    en_whole_indices: list[int] | None = None,
+) -> list[dict]:
+    """
+    Let a row take in a short run of source sentences nothing else claimed.
+
+    _monotonic_alignment gives each Spanish unit exactly one English sentence,
+    so when Spanish says in one sentence what English says in two — or when a
+    glued speech tag faces an English attribution written as its own sentence —
+    the second English sentence is left unclaimed and the row shows only half
+    its source. For each unclaimed run between two rows, the row before may
+    extend forward over it or the row after may extend back, but only a row
+    whose own source sentence sits in the same paragraph as the whole run. If
+    both qualify, the one whose similarity against the joined English changes
+    for the better takes it.
+
+    The paragraph is the test, not the score. It is what tells a translator's
+    merge, or a quotation and its attribution, from an untranslated caption or
+    heading next door; similarity does not — on short dialogue it falls as
+    often for a right attachment as for a wrong one (bench, 2026-10-07: of 40
+    sampled absorptions 34 were right, and right and wrong ones fell alike).
+    So nothing is absorbed without ``en_para_indices``.
+
+    A row that absorbs gains ``en_indices`` (``en_idx`` stays its first), its
+    ``en`` becomes the joined text, and its similarity is rescored. A row
+    absorbs at most one run per pass. Runs longer than MAX_ABSORB_SENTENCES, or
+    with enough substantive mass to be a reportable coverage gap, are never
+    absorbed.
+    """
+    if not alignments or en_para_indices is None:
+        return alignments
+
+    def same_paragraph(run: list[int], en_idx: int) -> bool:
+        return all(en_para_indices[i] == en_para_indices[en_idx] for i in run)
+
+    # Per run, the (row index, first en, last en) spans that could take it.
+    runs: list[list[tuple[int, int, int]]] = []
+    prev_last = -1
+    for r, row in enumerate(alignments):
+        run = list(range(prev_last + 1, row["en_idx"]))
+        if _absorbable(en_sentences, run, en_whole_indices):
+            options = []
+            if same_paragraph(run, row["en_idx"]):
+                options.append((r, run[0], row["en_idx"]))
+            if r > 0 and same_paragraph(run, alignments[r - 1]["en_idx"]):
+                options.append((r - 1, alignments[r - 1]["en_idx"], run[-1]))
+            runs.append(options)
+        prev_last = max(prev_last, row["en_idx"])
+    tail = list(range(prev_last + 1, len(en_sentences)))
+    if _absorbable(en_sentences, tail, en_whole_indices) and same_paragraph(
+        tail, alignments[-1]["en_idx"]
+    ):
+        runs.append([(len(alignments) - 1, alignments[-1]["en_idx"], tail[-1])])
+
+    runs = [[c for c in options if row_vectors[c[0]] is not None] for options in runs]
+    flat = [c for options in runs for c in options]
+    if not flat:
+        return alignments
+
+    texts = [
+        _normalize_for_embedding(" ".join(en_sentences[first : last + 1]))
+        for _, first, last in flat
+    ]
+    vectors = model.encode(texts, normalize_embeddings=True)
+    scored = {c: float(np.dot(row_vectors[c[0]], vectors[k])) for k, c in enumerate(flat)}
+
+    taken: set[int] = set()
+    for options in runs:
+        best = None
+        for c in options:
+            if c[0] in taken:
+                continue
+            gain = scored[c] - alignments[c[0]]["similarity"]
+            if best is None or gain > best[0]:
+                best = (gain, c)
+        if best is None:
+            continue
+        r, first, last = best[1]
+        taken.add(r)
+        row = alignments[r]
+        score = scored[best[1]]
+        row["en_idx"] = first
+        row["en_indices"] = list(range(first, last + 1))
+        row["en"] = " ".join(en_sentences[first : last + 1])
+        row["similarity"] = round(score, 3)
+        row["confidence"] = "high" if score > HIGH_CONFIDENCE_THRESHOLD else "low"
 
     return alignments
 
@@ -419,6 +772,7 @@ def _is_complete_sentence(text: str) -> bool:
 def _coverage_gaps(
     en_sentences: list[str],
     alignments: list[dict],
+    en_whole_indices: list[int] | None = None,
 ) -> list[dict]:
     """
     Find runs of source sentences that no target sentence claims.
@@ -443,7 +797,9 @@ def _coverage_gaps(
     second condition is what keeps hard-wrapped sources from reading as omissions:
     their line fragments never terminate, so a merged run of them contributes
     nothing. The known cost is unpunctuated verse — a dropped poem whose lines
-    carry no terminal punctuation would not be reported.
+    carry no terminal punctuation would not be reported. ``en_whole_indices``
+    (see _substantive_chars) keeps both tests on the sentence as it stood before
+    the split inside quotations.
 
     Returns one record per reported run:
         {
@@ -462,19 +818,14 @@ def _coverage_gaps(
     if not en_sentences:
         return []
 
-    covered = {a["en_idx"] for a in alignments}
+    covered = _covered_en(alignments)
     last_idx = len(en_sentences) - 1
     gaps: list[dict] = []
 
     def flush(run: list[int]) -> None:
         if not run:
             return
-        substantive = [
-            i for i in run
-            if len(en_sentences[i].strip()) >= MIN_SENTENCE_CHARS
-            and _is_complete_sentence(en_sentences[i])
-        ]
-        chars = sum(len(en_sentences[i].strip()) for i in substantive)
+        chars, substantive = _substantive_chars(en_sentences, run, en_whole_indices)
         if chars < MIN_GAP_CHARS:
             return
         if run[0] == 0 and run[-1] == last_idx:
@@ -486,7 +837,13 @@ def _coverage_gaps(
             position = "tail"
         else:
             position = "interior"
-        preview = en_sentences[substantive[0]].strip()
+        head = substantive[:1]
+        if en_whole_indices is not None:
+            head = [
+                i for i in substantive
+                if en_whole_indices[i] == en_whole_indices[substantive[0]]
+            ]
+        preview = " ".join(en_sentences[i].strip() for i in head)
         gaps.append({
             "position": position,
             "en_start": run[0],
@@ -516,6 +873,46 @@ def _coverage_summary(en_count: int, covered_count: int, gaps: list[dict]) -> di
         "gap_count": len(gaps),
         "en_orphan_chars": sum(g["chars"] for g in gaps),
         "max_gap_chars": max((g["chars"] for g in gaps), default=0),
+    }
+
+
+def align_texts(
+    source_text: str,
+    translated_text: str,
+    source_lang: str = "en",
+    target_lang: str = "es",
+    model=None,
+) -> dict:
+    """
+    Split and align one source/translation pair.
+
+    The core of :func:`align_chunk`, separated from the chunk file so the same
+    path can be measured over cached embeddings. Returns the sentence lists
+    alongside the rows and gaps:
+        {"en_sentences": [...], "es_sentences": [...], "alignments": [...], "gaps": [...]}
+    """
+    en_sentences, en_para_indices, en_whole_indices = _split_sentences_with_whole_indices(
+        source_text, source_lang, split_quotes=True
+    )
+    es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
+
+    if model is None:
+        model = _get_model()
+
+    alignments = align_sentences(
+        en_sentences,
+        es_sentences,
+        model,
+        es_para_indices=es_para_indices,
+        en_para_indices=en_para_indices,
+        en_whole_indices=en_whole_indices,
+    )
+
+    return {
+        "en_sentences": en_sentences,
+        "es_sentences": es_sentences,
+        "alignments": alignments,
+        "gaps": _coverage_gaps(en_sentences, alignments, en_whole_indices),
     }
 
 
@@ -555,13 +952,9 @@ def align_chunk(
     if not source_text or not translated_text:
         raise ValueError(f"Missing source or translated text in {chunk_path}")
 
-    en_sentences, _ = _split_sentences_with_para_indices(source_text, source_lang)
-    es_sentences, es_para_indices = _split_sentences_with_para_indices(translated_text, target_lang)
-
-    if model is None:
-        model = _get_model()
-
-    alignments = align_sentences(en_sentences, es_sentences, model, es_para_indices=es_para_indices)
+    aligned = align_texts(source_text, translated_text, source_lang, target_lang, model)
+    en_sentences, es_sentences = aligned["en_sentences"], aligned["es_sentences"]
+    alignments, gaps = aligned["alignments"], aligned["gaps"]
 
     high_conf_sentences = sum(
         len(a.get("es_indices", [a["es_idx"]]))
@@ -569,8 +962,6 @@ def align_chunk(
         if a["confidence"] == "high"
     )
     similarities = [a["similarity"] for a in alignments]
-
-    gaps = _coverage_gaps(en_sentences, alignments)
 
     return {
         "chapter_id": chunk.get("chapter_id", "unknown"),
@@ -586,7 +977,7 @@ def align_chunk(
         if similarities
         else 0,
         "coverage": _coverage_summary(
-            len(en_sentences), len({a["en_idx"] for a in alignments}), gaps
+            len(en_sentences), len(_covered_en(alignments)), gaps
         ),
         "gaps": gaps,
         "alignments": alignments,
@@ -640,6 +1031,8 @@ def align_chapter_chunks(
             a["en_idx"] += total_en
             if "es_indices" in a:
                 a["es_indices"] = [i + total_es for i in a["es_indices"]]
+            if "en_indices" in a:
+                a["en_indices"] = [i + total_en for i in a["en_indices"]]
             a["chunk_id"] = result["chunk_id"]
 
         # Same offset treatment for coverage gaps. `position` stays chunk-relative
