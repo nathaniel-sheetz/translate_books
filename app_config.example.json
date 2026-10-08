@@ -36,5 +36,8 @@
     "max_targets_per_run": 400,
     "deadline_minutes": 120,
     "concurrency": 5
+  },
+  "alignment": {
+    "embed_url": ""
   }
 }

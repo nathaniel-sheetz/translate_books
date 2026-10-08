@@ -89,6 +89,19 @@ def get_judge_suites() -> dict[str, list[str]]:
     return suites
 
 
+def get_alignment_config() -> dict:
+    """Return the ``alignment`` section from app_config, or ``{}``.
+
+    ``embed_url`` names an embedding server (``scripts/embed_server.py``) the
+    aligner encodes on instead of loading the model in this process.
+    """
+    cfg = load_app_config()
+    val = cfg.get("alignment")
+    if isinstance(val, dict):
+        return val
+    return {}
+
+
 def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
     """Return raw forced-term entries from ``forced_glossary_terms.json``.
 
