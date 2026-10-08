@@ -1201,3 +1201,35 @@ class TestCoverageGapsIntegration:
         assert gap["en_start"] > max(a["en_idx"] for a in chunk_0_rows)
         assert gap["en_end"] < result["en_count"]
         assert result["coverage"]["gap_count"] == 1
+
+
+class TestGetModel:
+    """_get_model() hands the aligner the embedding server when one is configured."""
+
+    def test_remote_embedder_when_one_is_configured(self, monkeypatch):
+        from src import embed_client, sentence_aligner
+
+        remote = object()
+        asked = []
+        monkeypatch.setattr(sentence_aligner, "_model", None)
+        monkeypatch.setattr(
+            embed_client, "remote_embedder", lambda name, load: asked.append(name) or remote
+        )
+        monkeypatch.setattr(
+            sentence_aligner, "_load_local_model", lambda: pytest.fail("loaded the local model")
+        )
+
+        assert sentence_aligner._get_model() is remote
+        assert sentence_aligner._get_model() is remote
+        # Built once, for the model the aligner names.
+        assert asked == [sentence_aligner.MODEL_NAME]
+
+    def test_local_model_when_none_is(self, monkeypatch):
+        from src import embed_client, sentence_aligner
+
+        local = object()
+        monkeypatch.setattr(sentence_aligner, "_model", None)
+        monkeypatch.setattr(embed_client, "remote_embedder", lambda name, load: None)
+        monkeypatch.setattr(sentence_aligner, "_load_local_model", lambda: local)
+
+        assert sentence_aligner._get_model() is local

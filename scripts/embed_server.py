@@ -6,8 +6,9 @@ Run this on a faster machine on the LAN and point ``alignment.embed_url`` in
 ``app_config.json`` at it; ``src/embed_client.py`` is the other end.
 
 Standalone on purpose: the serving machine has no checkout of the repo. It
-needs only sentence-transformers (pin torch and sentence-transformers to the
-versions the laptop has, so the vectors stay interchangeable).
+needs only sentence-transformers. Pin torch and sentence-transformers to the
+versions the laptop has: the vectors then agree with the laptop's to float
+tolerance (about 1e-7 an element across devices), not bit for bit.
 
     python embed_server.py --key-file ~/embed/api-key.txt
 
@@ -24,14 +25,18 @@ import argparse
 import hmac
 import io
 import json
+import re
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 DEFAULT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 MAX_BODY_BYTES = 32 * 1024 * 1024
+SOCKET_TIMEOUT_S = 30
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _pick_device(torch):
@@ -49,9 +54,14 @@ def build_handler(model, model_name, device, key, batch_size):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # On socket reads and writes only, never on the encode: a caller that
+        # announces a body and stops sending cannot hold its thread for good.
+        timeout = SOCKET_TIMEOUT_S
 
         def log_message(self, fmt, *args):
-            sys.stderr.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), fmt % args))
+            # A request line is the caller's text; keep its control characters out of the log.
+            message = _CONTROL_CHARS.sub(lambda m: "\\x%02x" % ord(m.group()), fmt % args)
+            sys.stderr.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
 
         def _send(self, status, body, content_type="application/json"):
             if isinstance(body, dict):
@@ -74,14 +84,21 @@ def build_handler(model, model_name, device, key, batch_size):
             self._send(200, {"model": model_name, "device": device})
 
         def do_POST(self):
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_BODY_BYTES:
-                # The body is left unread, so the connection cannot be reused.
+            # The key comes first: a caller without it does not get its body read.
+            # Wherever the body is left unread, the connection cannot be reused.
+            if not self._authorized():
                 self.close_connection = True
+                return self._send(401, {"error": "unauthorized"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > MAX_BODY_BYTES:
+                self.close_connection = True
+                if length < 0:
+                    return self._send(400, {"error": "bad Content-Length"})
                 return self._send(413, {"error": "body too large"})
             raw = self.rfile.read(length)
-            if not self._authorized():
-                return self._send(401, {"error": "unauthorized"})
             if self.path != "/embed":
                 return self._send(404, {"error": "not found"})
             try:
@@ -89,6 +106,9 @@ def build_handler(model, model_name, device, key, batch_size):
                 texts = body["texts"]
                 if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
                     raise ValueError("texts must be a list of strings")
+                normalize = body.get("normalize", True)
+                if not isinstance(normalize, bool):
+                    raise ValueError("normalize must be a boolean")
             except (ValueError, KeyError, TypeError) as e:
                 return self._send(400, {"error": str(e)})
             wanted = body.get("model")
@@ -98,16 +118,21 @@ def build_handler(model, model_name, device, key, batch_size):
             import numpy as np
 
             t0 = time.perf_counter()
-            with lock:
-                vectors = model.encode(
-                    texts,
-                    batch_size=batch_size,
-                    normalize_embeddings=bool(body.get("normalize", True)),
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                )
-            buf = io.BytesIO()
-            np.save(buf, np.asarray(vectors, dtype=np.float32), allow_pickle=False)
+            try:
+                with lock:
+                    vectors = model.encode(
+                        texts,
+                        batch_size=batch_size,
+                        normalize_embeddings=normalize,
+                        show_progress_bar=False,
+                        convert_to_numpy=True,
+                    )
+                buf = io.BytesIO()
+                np.save(buf, np.asarray(vectors, dtype=np.float32), allow_pickle=False)
+            except Exception:
+                # Answer, so the client can tell a failed encode from a dead server.
+                traceback.print_exc()
+                return self._send(500, {"error": "encode failed"})
             self._send(200, buf.getvalue(), "application/octet-stream")
             self.log_message("encoded %d texts in %.2fs", len(texts), time.perf_counter() - t0)
 
@@ -125,7 +150,7 @@ def main():
     ap.add_argument("--threads", type=int, default=0, help="torch CPU threads; 0 keeps the default")
     args = ap.parse_args()
 
-    key = Path(args.key_file).expanduser().read_text(encoding="utf-8").strip()
+    key = Path(args.key_file).expanduser().read_text(encoding="utf-8-sig").strip()
     if not key:
         sys.exit(f"{args.key_file} is empty")
 
@@ -143,7 +168,6 @@ def main():
     server = ThreadingHTTPServer(
         (args.host, args.port), build_handler(model, args.model, device, key, args.batch_size)
     )
-    server.daemon_threads = True
     print(f"serving {args.model} on {device} at {args.host}:{args.port}", file=sys.stderr, flush=True)
     try:
         server.serve_forever()
