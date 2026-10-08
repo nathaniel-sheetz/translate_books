@@ -55,13 +55,20 @@ SENTENCE_CLOSERS = "\"'”’»)]"
 MAX_ABSORB_SENTENCES = 2
 
 
+def _load_local_model():
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(MODEL_NAME)
+
+
 def _get_model():
-    """Lazy-load the sentence-transformers model."""
+    """Lazy-load the embedder: the embedding server when one is configured
+    (see src/embed_client.py), else the sentence-transformers model."""
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
+        from src.embed_client import remote_embedder
 
-        _model = SentenceTransformer(MODEL_NAME)
+        _model = remote_embedder(MODEL_NAME, _load_local_model) or _load_local_model()
     return _model
 
 

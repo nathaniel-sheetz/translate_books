@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.66.0.0] - 2026-10-08
+
+### Added
+- **The aligner can encode on an embedding server.** Set `alignment.embed_url` in `app_config.json` and `ALIGN_EMBED_KEY` in `.env`, and `src/sentence_aligner.py` sends its sentences to that server instead of loading the model in the app's own process. With no `embed_url` nothing changes. A change to either setting takes effect on restart.
+- **`scripts/embed_server.py`, the server.** One standalone file that needs only sentence-transformers. It keeps the model loaded and serves `GET /health` and `POST /embed` behind a bearer key read from `--key-file`. A request naming a model other than the one loaded gets 409.
+- **An alignment never fails for want of the server.** When the server is unreachable, refuses the key, holds another model or answers badly, the local model encodes the call. The server is then left alone for 60 seconds, and twice as long each time it fails in a row, up to 10 minutes. A call with any argument beyond the texts and `normalize_embeddings` is encoded locally, so a result does not depend on whether the server was reachable.
+- Vectors from the server agree with the local model's to float tolerance, not bit for bit. A stored `similarity` can differ in the third decimal between a chapter aligned on the server and one aligned locally.
+
+### Fixed (found in pre-ship review)
+- **The server read a request's body before checking its key.** A caller without the key could make it buffer up to 32 MB a connection, or hold a thread open by announcing a body and never sending it. The key is now checked first, and socket reads and writes time out after 30 seconds.
+- **A negative `Content-Length` got past the 32 MB cap**, and one that was not a number ended the request with no response. Both are refused with 400.
+- **A failed encode sent no response**, so the client could not tell it from a dead server. The server now answers 500 and logs the traceback.
+- **On a machine with no local model, one refused request made every alignment fail for the next minute.** The next call now tries the server again.
+- An empty batch forced a fallback to the local model, a single string was encoded one character at a time, and an `embed_url` with no `http://` warned every minute. An empty batch and a single string now come back as they do from the local model, and such a URL is reported once.
+- A key file saved with a byte-order mark never matched a request. The server's log escapes control characters in a request line, and a `normalize` that is not a boolean is refused.
+- Two tests were fragile: one froze the clock for the whole process, and one relied on nothing listening on port 9.
+
 ## [0.65.1.0] - 2026-10-07
 
 ### Changed
