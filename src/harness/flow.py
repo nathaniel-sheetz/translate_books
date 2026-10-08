@@ -4104,6 +4104,7 @@ def align(
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
     from scripts.translate_book import discover_chapters, parse_chapter_range
+    from src.annotations.reanchor import load_es_map, reanchor_chapter_quietly
     from src.sentence_aligner import align_chapter_chunks
     from src.utils.file_io import load_chunk
 
@@ -4153,6 +4154,7 @@ def align(
             if not all(c.has_translation for c in chunks):
                 skipped.append({"chapter_id": chapter_id, "reason": "not fully translated"})
                 continue
+            old_es_map = load_es_map(project_dir, chapter_id)
             try:
                 result = align_chapter_chunks(
                     chunk_paths=[str(p) for p in chunk_paths],
@@ -4166,6 +4168,8 @@ def align(
                 align_error = f"align failed at {chapter_id}: {exc}"
                 skipped.append({"chapter_id": chapter_id, "reason": f"align error: {exc}"})
                 break
+            # A redo renumbers the chapter's sentences; reader notes follow.
+            reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
             gaps = result.get("gaps") or []
             aligned.append({
                 "chapter_id": chapter_id,

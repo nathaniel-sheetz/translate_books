@@ -40,6 +40,7 @@ from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
 from src.harness.state import emit_harness_result
+from src.annotations.reanchor import load_es_map, reanchor_chapter_quietly
 from src.api_translator import DEFAULT_MODEL, default_provider_arg, provider_arg
 from src.models import Chunk, ChunkStatus, ChunkingConfig
 from src.sentence_aligner import align_chapter_chunks
@@ -796,6 +797,7 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
             continue
 
         t0 = time.time()
+        old_es_map = load_es_map(project_dir, chapter_id)
         result = align_chapter_chunks(
             chunk_paths=[str(p) for p in chunk_paths],
             project_id=project_name,
@@ -804,6 +806,7 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
             target_lang=target_lang,
             output_path=str(align_dir / f"{chapter_id}.json"),
         )
+        reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
         elapsed = time.time() - t0
 
         print(

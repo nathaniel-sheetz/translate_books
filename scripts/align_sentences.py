@@ -26,6 +26,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.annotations.reanchor import load_es_map, reanchor_chapter_quietly
 from src.sentence_aligner import align_chunk, align_chapter_chunks
 
 
@@ -159,6 +160,14 @@ def main():
             align_dir = parent / "alignments"
             output = str(align_dir / f"{chapter_id}.json")
 
+        # Reader notes follow their sentences, but only when this run rewrites
+        # the project's own alignment (not a copy written somewhere else).
+        out_path = Path(output)
+        notes_dir = None
+        if out_path.parent.name == "alignments" and out_path.stem == chapter_id:
+            notes_dir = out_path.parent.parent
+        old_es_map = load_es_map(notes_dir, chapter_id) if notes_dir else {}
+
         result = align_chapter_chunks(
             chunk_paths,
             project_id=project_id,
@@ -168,6 +177,7 @@ def main():
             output_path=output,
         )
         elapsed = time.time() - t0
+        moved = reanchor_chapter_quietly(notes_dir, chapter_id, old_es_map) if notes_dir else None
 
         print(f"\n  EN sentences: {result['en_count']}")
         print(f"  ES sentences: {result['es_count']}")
@@ -175,6 +185,8 @@ def main():
         print(f"  Avg similarity: {result['avg_similarity']}")
         print(f"  Time: {elapsed:.1f}s")
         print(f"  Written to: {output}")
+        if moved and (moved.moved or moved.orphaned):
+            print(f"  Annotations: {len(moved.moved)} moved, {len(moved.orphaned)} orphaned")
         _print_coverage_gaps(result)
 
         if args.verbose:

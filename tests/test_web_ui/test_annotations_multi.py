@@ -377,7 +377,9 @@ class TestAnchoring:
         rec = moved[0][0]
         assert rec["content"] == "nota"
         assert rec["sub_id"] == "gb1"
-        assert rec["es_text"] == "El gato. El perro."
+        # The snapshot stays the note's own sentence rather than the wider row:
+        # it is what the next realign matches on if the row is cut apart again.
+        assert rec["es_text"] == "El perro."
         assert _get(client)[0]["anchored"] is True
 
     def test_realign_does_not_move_a_note_onto_a_row_without_its_sentence(self, client, project):

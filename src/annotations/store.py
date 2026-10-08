@@ -140,6 +140,21 @@ def append_record(project_dir: Path, record: dict) -> Path:
     return path
 
 
+def append_records(project_dir: Path, records: Iterable[dict]) -> Path:
+    """Append several records in one write and return the file path.
+
+    For changes that only make sense together (a tombstone and the row that
+    replaces it): one write, so a crash cannot leave half of them on disk.
+    """
+    path = annotations_path(project_dir)
+    lines = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+    if lines:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(lines)
+    return path
+
+
 def record_key(record: dict) -> tuple:
     """The identity of an annotation: ``(chapter_id, es_idx, storage sub_id)``."""
     return (

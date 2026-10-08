@@ -255,6 +255,7 @@ class TestRealignHappyPath:
             "type": "flag",
             "content": "needs review",
             "timestamp": "2026-04-30T12:00:00",
+            "es_text": "El perro ladró.",
         }
         (project / "annotations.jsonl").write_text(
             json.dumps(annotation, ensure_ascii=False) + "\n",
@@ -278,6 +279,43 @@ class TestRealignHappyPath:
         assert len(rows) == 1, "no new rows should be appended when idx is stable"
         assert rows[0]["es_idx"] == 1
         assert rows[0]["content"] == "needs review"
+
+    def test_realign_gives_an_older_note_its_sentence_snapshot_once(
+        self, client, project, monkeypatch,
+    ):
+        """A note saved before snapshots existed is stamped with its sentence
+        the first time a realign confirms it in place, and not again."""
+        pairs = [
+            {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó.",
+             "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
+             "chunk_id": "chapter_01_chunk_000"},
+            {"es_idx": 1, "en_idx": 1, "es": "El perro ladró.",
+             "en": "The dog barked.", "similarity": 0.95, "confidence": "high",
+             "chunk_id": "chapter_01_chunk_000"},
+        ]
+        _write_alignment(project / "alignments", "chapter_01", pairs)
+        annotation = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 1,
+            "type": "flag",
+            "content": "needs review",
+            "timestamp": "2026-04-30T12:00:00",
+        }
+        (project / "annotations.jsonl").write_text(
+            json.dumps(annotation, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        _patch_aligner(monkeypatch, pairs)
+
+        for _ in range(2):
+            rv = client.post("/api/project/test-project/align/chapter_01")
+            assert rv.status_code == 200
+            assert rv.get_json()["orphaned_annotations"] == 0
+
+        rows = _read_annotations(project)
+        assert len(rows) == 2
+        assert rows[1] == {**annotation, "es_text": "El perro ladró."}
 
 
 # ---------- re-anchor / orphan paths ----------
