@@ -1153,6 +1153,55 @@ body {
     border-bottom: 1px dashed var(--low-confidence-border);
 }
 
+/* A Save the save-time check flagged: marked until edited or dismissed. */
+.sentence.save-warn {
+    text-decoration: underline wavy var(--badge-warn-color);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+}
+
+.save-warn-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin: 8px 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--banner-warn-bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.save-warn-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    flex: 1 1 auto;
+}
+
+.save-warn-msg {
+    color: var(--badge-warn-color);
+    font-weight: 600;
+}
+
+.save-warn-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-card);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.save-warn-btn:hover {
+    background: var(--bg-hover);
+}
+
 /* Annotated sentences — subtle background tints */
 
 .sentence.ann-word_choice {

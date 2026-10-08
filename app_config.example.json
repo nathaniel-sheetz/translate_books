@@ -39,5 +39,9 @@
   },
   "alignment": {
     "embed_url": ""
+  },
+  "save_check": {
+    "enabled": true,
+    "disabled_rules": []
   }
 }

@@ -408,6 +408,25 @@ STRINGS = {
             "review_ignore_done": "Ignored in this book.",
             "review_ignore_failed": "Could not add to the ignore list.",
 
+            # Save-time check: what a Save left behind, one line per rule id
+            # in src.save_check.RULES. {text} is the word or the mark.
+            "save_check_rules": {
+                "spelling": "“{text}” is not a known word",
+                "unbalanced": "{text} left unbalanced",
+                "comma_before_paren": "comma before an opening parenthesis",
+                "period_before_raya": "period before a raya",
+                "raya_closes_guillemet": "opens with a raya, closes with »",
+                "closing_mark_dropped": "the closing “{text}” was dropped",
+                "doubled_mark": "doubled mark “{text}”",
+                "space_before_mark": "space before a punctuation mark",
+                "no_space_after_period": "no space after a period",
+                "repeated_word": "repeated word “{text}”",
+            },
+            "save_check_generic": "check “{text}”",
+            "save_check_toast": "Saved. Check: {what}",
+            "save_check_dismiss": "Dismiss",
+            "save_check_failed": "Could not update the warning.",
+
             # End-of-chapter overflow bin: findings and notes that belong to the
             # chapter but anchor to no sentence in it.
             "overflow": {
@@ -903,6 +922,23 @@ STRINGS = {
             "review_ignore_title": "Dejar de señalarlo en todo el libro. Se puede quitar desde la etapa Revisión del panel.",
             "review_ignore_done": "Ignorado en este libro.",
             "review_ignore_failed": "No se pudo añadir a la lista de ignorados.",
+
+            "save_check_rules": {
+                "spelling": "«{text}» no es una palabra conocida",
+                "unbalanced": "{text} sin cerrar",
+                "comma_before_paren": "coma antes de un paréntesis de apertura",
+                "period_before_raya": "punto antes de una raya",
+                "raya_closes_guillemet": "abre con raya y cierra con »",
+                "closing_mark_dropped": "se perdió el «{text}» final",
+                "doubled_mark": "signo duplicado «{text}»",
+                "space_before_mark": "espacio antes de un signo de puntuación",
+                "no_space_after_period": "falta un espacio después del punto",
+                "repeated_word": "palabra repetida «{text}»",
+            },
+            "save_check_generic": "revisar «{text}»",
+            "save_check_toast": "Guardado. Revisar: {what}",
+            "save_check_dismiss": "Descartar",
+            "save_check_failed": "No se pudo actualizar el aviso.",
 
             "overflow": {
                 "title": "No mostrado en el texto",
