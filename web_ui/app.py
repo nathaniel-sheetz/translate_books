@@ -5735,6 +5735,30 @@ def _load_alignment_es_map(project_dir: Path, chapter_id: str) -> dict[int, str]
     return result
 
 
+def _load_alignment_es_heads(project_dir: Path, chapter_id: str) -> dict[int, int]:
+    """Load {es_idx: its row's es_idx} for every sentence that is a later
+    member of a multi-sentence row in the current alignment, or {} if none."""
+    align_path = project_dir / "alignments" / f"{chapter_id}.json"
+    if not align_path.exists():
+        return {}
+    try:
+        with open(align_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    result: dict[int, int] = {}
+    for a in data.get("alignments", []):
+        head = _as_es_idx(a.get("es_idx"))
+        members = a.get("es_indices")
+        if head is None or not isinstance(members, list):
+            continue
+        for member in members:
+            member = _as_es_idx(member)
+            if member is not None and member != head:
+                result[member] = head
+    return result
+
+
 def _reanchor_annotations_after_realign(
     project_dir: Path,
     chapter_id: str,
@@ -5750,6 +5774,7 @@ def _reanchor_annotations_after_realign(
         return []
 
     new_es_map = _load_alignment_es_map(project_dir, chapter_id)
+    new_es_heads = _load_alignment_es_heads(project_dir, chapter_id)
     # Build reverse lookup from exact es text → new es_idx (first match wins)
     text_to_new_idx: dict[str, int] = {}
     for new_idx, es_text in new_es_map.items():
@@ -5768,7 +5793,17 @@ def _reanchor_annotations_after_realign(
             orphaned.extend(records)
             continue
 
-        new_idx = text_to_new_idx.get(old_es_text)
+        # The sentence kept its number but its row did not: the aligner now
+        # shows it as a later part of the row before it (a speech tag glued to
+        # its line). The note follows it there. Checked before the text
+        # tiers, which would send "—dijo—." to the first row that reads the
+        # same, and required to hold on both the number and the text.
+        new_idx = None
+        head = new_es_heads.get(old_idx)
+        if head is not None and old_es_text in new_es_map.get(head, ""):
+            new_idx = head
+        if new_idx is None:
+            new_idx = text_to_new_idx.get(old_es_text)
         if new_idx is None:
             # Try prefix match (first 30 chars) as a fallback
             prefix = old_es_text[:30]

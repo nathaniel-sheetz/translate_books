@@ -351,3 +351,52 @@ class TestAnchoring:
         )
 
         assert _load_annotations(project, "chapter_01")[2][0]["verified_by"] == "native"
+
+    def test_realign_moves_a_note_to_the_row_its_sentence_joined(self, client, project):
+        from web_ui.app import _reanchor_annotations_after_realign
+
+        _post(client, es_idx=1, type="flag", content="nota", sub_id="gb1")
+
+        # Realign keeps the numbering but folds sentence 1 into the row before it.
+        align_path = project / "alignments" / "chapter_01.json"
+        data = json.loads(align_path.read_text(encoding="utf-8"))
+        data["alignments"] = [
+            {"es_idx": 0, "es_indices": [0, 1], "en_idx": 0,
+             "es": "El gato. El perro.", "en": "The cat. The dog.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+        ]
+        align_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        orphaned = _reanchor_annotations_after_realign(
+            project, "chapter_01", {0: "El gato.", 1: "El perro."}
+        )
+        assert orphaned == []
+
+        moved = _load_annotations(project, "chapter_01")
+        assert 1 not in moved
+        rec = moved[0][0]
+        assert rec["content"] == "nota"
+        assert rec["sub_id"] == "gb1"
+        assert rec["es_text"] == "El gato. El perro."
+        assert _get(client)[0]["anchored"] is True
+
+    def test_realign_does_not_move_a_note_onto_a_row_without_its_sentence(self, client, project):
+        from web_ui.app import _reanchor_annotations_after_realign
+
+        _post(client, es_idx=1, type="flag", content="nota", sub_id="gb1")
+
+        # Number 1 is inside row 0 now, but the sentence the note was on is gone.
+        align_path = project / "alignments" / "chapter_01.json"
+        data = json.loads(align_path.read_text(encoding="utf-8"))
+        data["alignments"] = [
+            {"es_idx": 0, "es_indices": [0, 1], "en_idx": 0,
+             "es": "El gato. Un pajaro.", "en": "The cat. A bird.",
+             "confidence": "high", "chunk_id": "chapter_01_chunk_000"},
+        ]
+        align_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        orphaned = _reanchor_annotations_after_realign(
+            project, "chapter_01", {0: "El gato.", 1: "El perro."}
+        )
+        assert [rec["sub_id"] for rec in orphaned] == ["gb1"]
+        assert 1 in _load_annotations(project, "chapter_01")
