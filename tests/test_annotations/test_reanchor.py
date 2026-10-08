@@ -215,6 +215,102 @@ class TestMatchingTiers:
         result = reanchor.reanchor_chapter(project, CH)
         assert not result.moved and len(result.orphaned) == 1
 
+    def test_a_short_line_is_not_moved_into_a_row_that_merely_contains_it(self, project):
+        # The only row with "—Sí." in it, and not the sentence the note was on.
+        _align(project, ["Algo.", "Otra cosa.", "—Sí... bueno, quizá mañana."])
+        write_annotations(project, [_note(7, "—Sí.")])
+
+        result = reanchor.reanchor_chapter(project, CH)
+
+        assert not result.moved
+        assert [r["sub_id"] for r in result.orphaned] == ["u1"]
+        assert len(_raw_rows(project)) == 1
+
+    def test_a_short_line_does_not_say_how_far_its_neighbours_moved(self, project):
+        repeated = "Una línea larga que aparece dos veces."
+        sentences = [f"Relleno número {i}." for i in range(32)]
+        sentences[4] = sentences[31] = repeated
+        sentences[30] = "—Sí."
+        _align(project, sentences)
+        write_annotations(project, [
+            _note(2, "—Sí.", sub_id="u1"),
+            _note(3, repeated, sub_id="u2"),
+        ])
+
+        reanchor.reanchor_chapter(project, CH)
+
+        # The one "—Sí." is 28 rows off. Taken as the shift, it would send the
+        # note beside it to row 31; on its own number that note belongs on row 4.
+        assert (4, "u2") in _live(project)
+
+
+class TestCorrectedSentences:
+    """A correction made in the reader rewrites the row and not the note, so the
+    snapshot describes wording that is no longer anywhere in the chapter."""
+
+    def test_a_note_follows_its_corrected_sentence(self, project):
+        _align(project, ["Nueva.", "Uno.", "—Sí, mi señor."])
+        write_annotations(project, [_note(1, "—Sí, señor.")])
+        old_es_map = {0: "Uno.", 1: "—Sí, mi señor."}
+
+        result = reanchor.reanchor_chapter(project, CH, old_es_map)
+
+        assert [(m.old_idx, m.new_idx, m.tier) for m in result.moved] == [(1, 2, "corrected_row")]
+        assert result.orphaned == []
+        # The note takes the corrected wording, so the next realign matches on it.
+        assert _live(project)[(2, "u1")]["es_text"] == "—Sí, mi señor."
+
+    def test_a_note_whose_sentence_is_gone_stays_with_the_row_it_was_shown_on(self, project):
+        gone = "Una oración que ya nadie recuerda."
+        _align(project, ["Nueva.", "El gato duerme en la cocina.", "El perro."])
+        write_annotations(project, [_note(1, gone)])
+        old_es_map = {0: "El gato duerme en la cocina.", 1: "El perro."}
+
+        result = reanchor.reanchor_chapter(project, CH, old_es_map)
+
+        assert [(m.old_idx, m.new_idx, m.tier) for m in result.moved] == [(1, 2, "old_row")]
+        assert result.orphaned == []
+        # "El perro." is nothing like the snapshot, so the snapshot is kept: it
+        # is the only record of the sentence the note was written on.
+        assert _live(project)[(2, "u1")]["es_text"] == gone
+
+    def test_that_row_standing_where_it_was_writes_nothing(self, project):
+        _align(project, ["El gato.", "El perro."])
+        write_annotations(project, [_note(1, "Una oración que ya nadie recuerda.")])
+
+        result = reanchor.reanchor_chapter(project, CH, {0: "El gato.", 1: "El perro."})
+
+        assert result.kept == 1 and not result.moved and not result.orphaned
+        assert not result.refreshed
+        assert len(_raw_rows(project)) == 1
+
+    def test_only_a_note_that_lost_its_row_at_this_realign_is_newly_orphaned(self, project):
+        _align(project, ["El gato."])
+        write_annotations(project, [
+            # Its row was there before this realign and is gone after it.
+            _note(1, "El perro.", sub_id="u1"),
+            # Adrift already: there was no row 40 before this realign either.
+            _note(40, "El caballo.", sub_id="u2"),
+        ])
+
+        result = reanchor.reanchor_chapter(project, CH, {0: "El gato.", 1: "El perro."})
+
+        assert sorted(r["sub_id"] for r in result.orphaned) == ["u1", "u2"]
+        assert [r["sub_id"] for r in result.newly_orphaned] == ["u1"]
+
+
+@pytest.mark.parametrize("content", [
+    b"{not json",
+    b"[1, 2]",
+    b'{"alignments": 3}',
+    # Cut in the middle of the two bytes of an accented letter.
+    b'{"alignments": [{"es_idx": 0, "es": "caf\xc3',
+])
+def test_an_unreadable_alignment_reads_as_no_alignment(project, content):
+    (project / "alignments" / f"{CH}.json").write_bytes(content)
+    assert reanchor.load_alignment_rows(project, CH) is None
+    assert reanchor.load_es_map(project, CH) == {}
+
 
 class TestNotesWithoutASnapshot:
     def test_old_alignment_supplies_the_sentence_and_the_note_gains_a_snapshot(self, project):
@@ -426,6 +522,29 @@ class TestHearts:
         _heart(project, note)
         reanchor.reanchor_chapter(project, CH, dry_run=True)
         assert _hearts(project) == {f"annotation:{CH}__0__u1"}
+
+    def test_a_heart_that_cannot_be_written_does_not_fail_the_move(
+        self, project, monkeypatch, caplog,
+    ):
+        _align(project, ["Nueva.", "El perro."])
+        note = _note(0, "El perro.")
+        write_annotations(project, [note])
+        _heart(project, note)
+
+        def no_appending(path, mode="r", *args, **kwargs):
+            if Path(path).name == "favorites.jsonl" and "a" in mode:
+                raise PermissionError("synthetic")
+            return open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(reanchor, "open", no_appending, raising=False)
+        with caplog.at_level("WARNING", logger=reanchor.logger.name):
+            result = reanchor.reanchor_chapter(project, CH)
+
+        assert list(_live(project)) == [(1, "u1")]
+        assert result.hearts_moved == 0
+        # The heart is still on the old id, and the log says which one.
+        assert _hearts(project) == {f"annotation:{CH}__0__u1"}
+        assert f"annotation:{CH}__0__u1" in caplog.text
 
 
 class TestRealignChapter:

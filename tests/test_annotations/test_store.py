@@ -105,6 +105,20 @@ def test_missing_file_is_empty_not_an_error(project):
     assert store.load_active(project) == []
 
 
+def test_a_number_stored_as_text_sorts_beside_the_ints(project):
+    # save_annotation stores es_idx as it arrives; "12" beside a 3 used to raise
+    # TypeError in the sort and take the whole chapter's notes with it.
+    write_annotations(
+        project,
+        [
+            _ann(es_idx="12", sub_id="u1"),
+            _ann(es_idx=3, sub_id="u2"),
+            _ann(es_idx=20, sub_id="u3"),
+        ],
+    )
+    assert [a["es_idx"] for a in store.load_active(project)] == [3, "12", 20]
+
+
 def test_append_record_never_rewrites(project):
     write_annotations(project, [_ann(content="one", sub_id="u1")])
     before = (project / "annotations.jsonl").read_text(encoding="utf-8")

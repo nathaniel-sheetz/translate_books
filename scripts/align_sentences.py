@@ -187,6 +187,8 @@ def main():
         print(f"  Written to: {output}")
         if moved and (moved.moved or moved.orphaned):
             print(f"  Annotations: {len(moved.moved)} moved, {len(moved.orphaned)} orphaned")
+        elif notes_dir and moved is None:
+            print("  Annotations: re-anchor FAILED (see the warning above); notes were not moved")
         _print_coverage_gaps(result)
 
         if args.verbose:

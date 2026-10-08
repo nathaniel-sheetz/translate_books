@@ -17,6 +17,11 @@ Notes saved before snapshots existed have no ``es_text``; for those the caller's
 ``old_es_map`` (the alignment as it stood before this realign) supplies the text,
 and the note is given a snapshot once its row is confirmed.
 
+``old_es_map`` is also the second witness for a note whose snapshot is nowhere
+in the chapter. A correction made in the reader rewrites the row and not the
+note, so the snapshot can describe wording that no longer exists; the row the
+note sat on before this realign is then followed instead.
+
 Deliberately free of any ``web_ui`` import, like :mod:`src.annotations.store`, so
 the judges, the harness and the CLI scripts can all call it.
 """
@@ -77,6 +82,10 @@ class ReanchorResult:
     moved: list[Move] = field(default_factory=list)
     # Notes whose sentence is nowhere in the new alignment.
     orphaned: list[dict] = field(default_factory=list)
+    # The orphans that lost their row at this realign: their number named a row
+    # in the alignment before it. A subset of ``orphaned``; the rest were
+    # already adrift and are not news.
+    newly_orphaned: list[dict] = field(default_factory=list)
     # Notes confirmed in place that had no snapshot and were given one.
     backfilled: list[dict] = field(default_factory=list)
     # Notes confirmed in place whose sentence was reworded; snapshot updated.
@@ -110,7 +119,8 @@ def load_alignment_rows(project_dir: Path, chapter_id: str) -> Optional[list[dic
     try:
         with open(align_path, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError covers both bad JSON and a file cut mid-character.
         return None
     rows = data.get("alignments") if isinstance(data, dict) else None
     if not isinstance(rows, list):
@@ -179,7 +189,7 @@ def _locate_loose(
         return _nearest(exact, expected), "exact_nearest"
 
     inside = [idx for idx, row_text in es_map.items() if text in row_text]
-    if inside and (len(inside) == 1 or len(text) >= LOOSE_MIN_CHARS):
+    if inside and len(text) >= LOOSE_MIN_CHARS:
         return _nearest(inside, expected), "merged_row"
 
     if len(text) >= PREFIX_CHARS:
@@ -221,6 +231,27 @@ def _shift_near(old_idx: int, anchors: list[tuple[int, int]]) -> int:
     return near_new - near_old
 
 
+def _locate_by_old_row(
+    snapshot: str, was: str, old_idx: int, expected: int,
+    es_map: dict[int, str], heads: dict[int, int],
+) -> Optional[tuple[int, str, str]]:
+    """Where the row a note sat on before the realign is now: ``(row, tier,
+    text to match the row against)``, or ``None``.
+
+    Tier ``corrected_row`` when that row reads like an edit of the snapshot, so
+    the note takes its wording. Otherwise ``old_row``: the note stays with the
+    sentence it is shown on, and keeps its own snapshot as the only record of
+    the one it was written on.
+    """
+    hit = _locate_certain(was, old_idx, es_map, heads) or _locate_loose(was, expected, es_map)
+    if hit is None:
+        return None
+    ratio = difflib.SequenceMatcher(None, snapshot, was, autojunk=False).ratio()
+    if ratio >= FUZZY_MIN_RATIO:
+        return hit[0], "corrected_row", was
+    return hit[0], "old_row", snapshot
+
+
 def plan_chapter(
     project_dir: Path,
     chapter_id: str,
@@ -232,7 +263,8 @@ def plan_chapter(
         project_dir: ``projects/<slug>/``.
         chapter_id: The chapter whose alignment was just rewritten.
         old_es_map: ``{es_idx: es_text}`` of the alignment before the realign.
-            Only read for notes that carry no ``es_text`` snapshot of their own.
+            Read for notes that carry no ``es_text`` snapshot of their own, and
+            for notes whose snapshot is no longer anywhere in the chapter.
     """
     result = ReanchorResult()
     records = store.load_active(project_dir, chapter_id=chapter_id)
@@ -275,13 +307,25 @@ def plan_chapter(
         if hit is None:
             pending.append((record, old_idx, text))
             continue
-        anchors.append((old_idx, hit[0]))
+        # A short line ("—Sí.") can be the only one of its kind and still be
+        # the wrong one, so it does not get to say how far its neighbours moved.
+        if len(text) >= LOOSE_MIN_CHARS:
+            anchors.append((old_idx, hit[0]))
         placed.append((record, old_idx, text, hit))
 
     for record, old_idx, text in pending:
-        hit = _locate_loose(text, old_idx + _shift_near(old_idx, anchors), es_map)
+        expected = old_idx + _shift_near(old_idx, anchors)
+        hit = _locate_loose(text, expected, es_map)
         if hit is None:
+            was = old_es_map.get(old_idx)
+            if was and was != text:
+                by_row = _locate_by_old_row(text, was, old_idx, expected, es_map, heads)
+                if by_row is not None:
+                    placed.append((record, old_idx, by_row[2], by_row[:2]))
+                    continue
             result.orphaned.append(record)
+            if old_idx in old_es_map:
+                result.newly_orphaned.append(record)
             continue
         placed.append((record, old_idx, text, hit))
 
@@ -292,6 +336,8 @@ def plan_chapter(
         # apart again). Take the row's text only when the sentence itself changed.
         new_text = text if text in new_row else new_row
         has_snapshot = bool(record.get("es_text"))
+        if tier == "old_row":
+            new_text = record["es_text"]
         if not has_snapshot:
             words = parse_anchors(record.get("content") or "")
             row_folded = new_row.casefold()
@@ -429,8 +475,9 @@ def reanchor_chapter(
 
     Returns:
         The plan that was carried out. ``orphaned`` lists the notes whose
-        sentence is no longer in the chapter; they are left untouched and the
-        reader's overflow bin shows them.
+        sentence is no longer in the chapter. They are left untouched, on a
+        number that may now name another sentence: the reader's overflow bin
+        shows an orphan only while its number names no row at all.
     """
     result = plan_chapter(project_dir, chapter_id, old_es_map)
     if not dry_run:
@@ -454,8 +501,19 @@ def apply_plan(project_dir: Path, chapter_id: str, result: ReanchorResult) -> in
     rows = tombstones + recreated + result.backfilled + result.refreshed
     store.append_records(project_dir, rows)
     if hearts:
-        with open(Path(project_dir) / FAVORITES_FILENAME, "a", encoding="utf-8") as f:
-            f.write("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in hearts))
+        try:
+            with open(Path(project_dir) / FAVORITES_FILENAME, "a", encoding="utf-8") as f:
+                f.write("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in hearts))
+        except OSError:
+            # The notes have moved and an append-only file cannot take that
+            # back. Name the hearts left behind; no later pass finds them.
+            logger.warning(
+                "re-anchored %s/%s but could not move %d heart(s); left on: %s",
+                Path(project_dir).name, chapter_id, len(hearts) // 2,
+                ", ".join(row["id"] for row in hearts if not row["favorite"]),
+                exc_info=True,
+            )
+            hearts = []
     result.hearts_moved = len(hearts) // 2
     logger.info(
         "re-anchored %s/%s: %d moved (%d hearted), %d orphaned, %d given a snapshot",
@@ -473,7 +531,8 @@ def reanchor_chapter_quietly(
     """:func:`reanchor_chapter` for callers whose realign must not fail on it.
 
     The alignment is already written by the time this runs; a failure here
-    leaves the notes where they were, which the next realign repairs.
+    leaves the notes where they were. Returns ``None`` then, and the caller
+    should say so: a failure that recurs is not repaired by the next realign.
     """
     try:
         return reanchor_chapter(project_dir, chapter_id, old_es_map)
@@ -481,5 +540,6 @@ def reanchor_chapter_quietly(
         logger.warning(
             "annotation re-anchor failed for %s/%s: %s",
             Path(project_dir).name, chapter_id, exc,
+            exc_info=True,
         )
         return None

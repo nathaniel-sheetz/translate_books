@@ -3337,6 +3337,7 @@ def remove_text():
         "chunk_mtime": result["mtimes"].get(chunk_id, 0.0),
         "alignment_mtime": new_align_mtime,
         "orphaned_annotations": result["orphaned_annotations"],
+        "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
         "edited_chunks": [e["chunk_id"] for e in edits],
     })
@@ -3620,6 +3621,7 @@ def sentence_replace():
         "chunk_mtime": result["mtimes"].get(chunk_id, 0.0),
         "alignment_mtime": new_align_mtime,
         "orphaned_annotations": result["orphaned_annotations"],
+        "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
     })
 
@@ -5445,6 +5447,7 @@ def project_align(project_id, chapter_id):
         # Runs with or without a prior alignment: a note's own sentence
         # snapshot is enough to place it.
         orphaned: list = []
+        reanchor_failed = False
         try:
             orphaned = _reanchor_annotations_after_realign(
                 project_dir, chapter_id, old_es_map,
@@ -5452,9 +5455,10 @@ def project_align(project_id, chapter_id):
         except Exception as e:
             app.logger.warning(
                 "Annotation re-anchor failed for %s/%s: %s",
-                project_id, chapter_id, e,
+                project_id, chapter_id, e, exc_info=True,
             )
             orphaned = []
+            reanchor_failed = True
 
         return jsonify({
             "ok": True,
@@ -5464,6 +5468,7 @@ def project_align(project_id, chapter_id):
             "coverage": result.get("coverage"),
             "gaps": result.get("gaps", []),
             "orphaned_annotations": len(orphaned),
+            "reanchor_failed": reanchor_failed,
             "corrections_applied": corrections_applied,
         })
     except Exception as e:
@@ -5738,13 +5743,15 @@ def _reanchor_annotations_after_realign(
     """Re-anchor chapter annotations whose es_idx shifted after realign.
 
     Appends remove+recreate rows to annotations.jsonl for shifted annotations
-    and returns a list of orphaned annotation records that couldn't be matched.
+    and returns the annotation records this realign orphaned. A note that was
+    already adrift before it is not returned again, or the reader would
+    announce the same orphan on every realign.
     The matching lives in :mod:`src.annotations.reanchor`, which the judges,
     the harness and the scripts call after their own realigns.
     """
     from src.annotations import reanchor
 
-    return reanchor.reanchor_chapter(project_dir, chapter_id, old_es_map).orphaned
+    return reanchor.reanchor_chapter(project_dir, chapter_id, old_es_map).newly_orphaned
 
 
 def _purge_chunk_corrections(project_dir: Path, chunk_id: str) -> int:
@@ -5867,12 +5874,18 @@ def _apply_chunk_edits(
     )
 
     # 6. Re-anchor existing annotations by text match
+    reanchor_failed = False
     try:
         orphaned = _reanchor_annotations_after_realign(
             project_dir, chapter_id, old_es_map,
         )
-    except Exception:
+    except Exception as e:
+        app.logger.warning(
+            "Annotation re-anchor failed for %s/%s: %s",
+            project_id, chapter_id, e, exc_info=True,
+        )
         orphaned = []
+        reanchor_failed = True
 
     # 7. Re-evaluate each edited chunk; reload from disk so the evaluator
     # sees the saved bytes rather than the in-memory object.
@@ -5900,6 +5913,7 @@ def _apply_chunk_edits(
         "ok": True,
         "mtimes": mtimes,
         "orphaned_annotations": len(orphaned),
+        "reanchor_failed": reanchor_failed,
         "corrections_purged": corrections_purged_total,
         "evaluations": evaluations,
     }
@@ -5932,6 +5946,7 @@ def _replace_chunk_translation(
         "ok": True,
         "mtime": result["mtimes"].get(chunk_id, 0.0),
         "orphaned_annotations": result["orphaned_annotations"],
+        "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
         "evaluation": result["evaluations"].get(chunk_id),
     }

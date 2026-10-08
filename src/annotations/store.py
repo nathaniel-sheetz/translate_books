@@ -114,16 +114,24 @@ def load_active(
         for rec in by_key.values()
         if wanted is None or rec.get("type") in wanted
     ]
-    # Stable, deterministic order. str() keeps None (legacy rows) comparable.
+    # Stable, deterministic order. str() keeps None (legacy rows) comparable,
+    # and _sort_idx does the same for an es_idx stored as "12" beside a 12.
     records.sort(
         key=lambda r: (
             str(r.get("chapter_id") or ""),
-            r.get("es_idx") or 0,
+            _sort_idx(r.get("es_idx")),
             str(r.get("timestamp") or ""),
             str(storage_sub_id(r.get("sub_id"))),
         )
     )
     return records
+
+
+def _sort_idx(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def append_record(project_dir: Path, record: dict) -> Path:
@@ -144,7 +152,8 @@ def append_records(project_dir: Path, records: Iterable[dict]) -> Path:
     """Append several records in one write and return the file path.
 
     For changes that only make sense together (a tombstone and the row that
-    replaces it): one write, so a crash cannot leave half of them on disk.
+    replaces it): one write call, so the window in which a crash could leave
+    only some of them on disk is as small as an append can make it.
     """
     path = annotations_path(project_dir)
     lines = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)

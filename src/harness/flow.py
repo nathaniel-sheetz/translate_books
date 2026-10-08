@@ -4169,7 +4169,7 @@ def align(
                 skipped.append({"chapter_id": chapter_id, "reason": f"align error: {exc}"})
                 break
             # A redo renumbers the chapter's sentences; reader notes follow.
-            reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
+            moved = reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
             gaps = result.get("gaps") or []
             aligned.append({
                 "chapter_id": chapter_id,
@@ -4178,6 +4178,10 @@ def align(
                 "coverage": result.get("coverage"),
                 "gaps": gaps,
             })
+            if moved is None:
+                # Only present when it happened: the chapter is aligned, its
+                # reader notes were not moved.
+                aligned[-1]["reanchor_failed"] = True
             for gap in gaps:
                 coverage_warnings.append({"chapter_id": chapter_id, **gap})
 

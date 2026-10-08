@@ -481,11 +481,55 @@ class TestRealignReanchor:
         assert len(rows) == 1
         assert rows[0]["content"] == "this will be orphaned"
 
+    def test_a_standing_orphan_is_reported_once(self, client, project, monkeypatch):
+        """The realign that removes a note's sentence reports the orphan. A
+        later realign of the same chapter does not report it again, or the
+        reader would raise the same alert on every sentence removal."""
+        gato = {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó.",
+                "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
+                "chunk_id": "chapter_01_chunk_000"}
+        unica = {"es_idx": 1, "en_idx": 1,
+                 "es": "Una oración completamente única que ya no existe.",
+                 "en": "A completely unique sentence that no longer exists.",
+                 "similarity": 0.95, "confidence": "high",
+                 "chunk_id": "chapter_01_chunk_000"}
+        perro = {"es_idx": 2, "en_idx": 2, "es": "El perro ladró.",
+                 "en": "The dog barked.", "similarity": 0.95, "confidence": "high",
+                 "chunk_id": "chapter_01_chunk_000"}
+        _write_alignment(project / "alignments", "chapter_01", [gato, unica, perro])
+        annotation = {
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "es_idx": 1,
+            "sub_id": "u1",
+            "type": "flag",
+            "content": "this will be orphaned",
+            "es_text": unica["es"],
+            "timestamp": "2026-04-30T12:00:00",
+        }
+        (project / "annotations.jsonl").write_text(
+            json.dumps(annotation, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        # The sentence is dropped, so number 1 now names "El perro ladró.".
+        _patch_aligner(monkeypatch, [gato, {**perro, "es_idx": 1, "en_idx": 1}])
+
+        first = client.post("/api/project/test-project/align/chapter_01").get_json()
+        second = client.post("/api/project/test-project/align/chapter_01").get_json()
+
+        assert first["orphaned_annotations"] == 1
+        assert second["orphaned_annotations"] == 0
+        assert first["reanchor_failed"] is False
+        # The note was never rewritten: its snapshot still names its sentence.
+        rows = _read_annotations(project)
+        assert len(rows) == 1 and rows[0]["es_text"] == unica["es"]
+
     def test_reanchor_failure_swallowed_returns_zero_orphans(
         self, client, project, monkeypatch,
     ):
         """If the re-anchor helper raises, the endpoint logs a warning,
-        reports orphaned_annotations=0, and still returns 200."""
+        reports orphaned_annotations=0 with reanchor_failed set, and still
+        returns 200."""
         _write_alignment(project / "alignments", "chapter_01", [
             {"es_idx": 0, "en_idx": 0, "es": "El gato se sentó.",
              "en": "The cat sat.", "similarity": 0.95, "confidence": "high",
@@ -509,6 +553,7 @@ class TestRealignReanchor:
         rv = client.post("/api/project/test-project/align/chapter_01")
         assert rv.status_code == 200
         assert rv.get_json()["orphaned_annotations"] == 0
+        assert rv.get_json()["reanchor_failed"] is True
 
 
 # ---------- pending corrections ----------

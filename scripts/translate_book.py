@@ -806,8 +806,10 @@ def stage_align(args, project_dir: Path, state: dict) -> dict:
             target_lang=target_lang,
             output_path=str(align_dir / f"{chapter_id}.json"),
         )
-        reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
+        moved = reanchor_chapter_quietly(project_dir, chapter_id, old_es_map)
         elapsed = time.time() - t0
+        if moved is None:
+            print(f"    {chapter_id}: annotation re-anchor FAILED (see the warning above); notes were not moved")
 
         print(
             f"    {chapter_id}: {result['es_count']} sentences, "
