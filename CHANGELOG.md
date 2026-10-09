@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.68.0.0] - 2026-10-09
+
+### Added
+- **A Save can also be read by a language model.** With an inference server set under `save_check.model` in `app_config.json`, each reader Save and retranslate-modal replace is put to the model the server has loaded, which catches what the rules cannot: agreement left half-changed, tú and usted mixed, a real word in place of the intended one. The answer comes a second or two behind the Save, as its own toast and the same underline. An edit that changed only punctuation is not sent.
+- **The warning says what the slip is.** Its row carries one line from the model, asked for when the row is first shown and kept.
+- **The check uses whichever model is loaded and never starts or swaps one.** A model is asked only if it has a profile: the prompt it does best with and the score above which it warns. Four ship (Gemma 4 31B, Qwen 3.8 27B, Gemma 4 26B MoE, Qwen 3.6 35B MoE), and `profiles` refits one or adds a model of your own. On the labelled saves, rules and model together caught 39 of 46 slips with Gemma 4 31B against 18 with the rules alone, each while flagging at most one clean save in forty.
+- **A server that does not answer costs the Save nothing.** The Save gets the rules only, and the server is left alone for a minute, longer each time it fails in a row, up to ten.
+- **Every score is logged** in `save_check_readouts.jsonl`, flagged or not, and `scripts/save_check_report.py` lists each model with how many saves it scored and flagged.
+- **`scripts/save_check_probe.py`** prints what is loaded, the profile it matches and the verdict on two canned edits.
+- **`scripts/mini/`** holds the launchd agent and the scripts that keep a model served on the inference box.
+- `LOCAL_LLM_KEY` in `.env` is the server's bearer key. `"model"` in `disabled_rules` silences the model like any rule.
+
+### Fixed (found in pre-ship review)
+- **The test suite sent its Saves to the real inference server** when the developer's `app_config.json` had one configured. No test reads that section now.
+- **With the server away, fixing a model-flagged word raised the warning again**, naming a word no longer in the sentence. The hit is carried only when the edit left the words it names as they were.
+- **A model that answered with nothing was recorded as having named no slip** and was never asked again. An empty answer is not kept.
+- **A second flag on a warned sentence did not continue the first**, so the report counted the first as `fixed`.
+- **An edit of marks alone on a warned sentence showed the marks as the slip** (“¡ … !”). It keeps the word the warning named.
+- **The report showed nothing for a model that had flagged nothing.** It printed "No save-check warnings" and stopped before the model table.
+- **`start-server.sh` accepted a gguf that was not there**, and the server then stayed down. It is refused.
+- A profile whose `prompt` was a list raised on every Save; it is dropped like any other malformed profile.
+
 ## [0.67.0.0] - 2026-10-09
 
 ### Added
