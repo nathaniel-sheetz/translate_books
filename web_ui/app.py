@@ -2365,6 +2365,14 @@ def _alignment_rows(project_dir: Path, chapter_id: str) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def _save_check_settings() -> tuple[bool, frozenset]:
+    """``(enabled, disabled rule ids)`` as ``app_config.json`` has them now."""
+    from src import save_check
+    from src.app_config import get_save_check_config
+
+    return save_check.read_config(get_save_check_config())
+
+
 def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> list[dict]:
     """Check a sentence about to be saved for an obvious slip.
 
@@ -2374,10 +2382,9 @@ def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> lis
     """
     try:
         from src import save_check
-        from src.app_config import get_save_check_config
 
-        config = get_save_check_config()
-        if config.get("enabled") is False:
+        enabled, disabled_rules = _save_check_settings()
+        if not enabled:
             return []
         glossary_path = project_dir / "glossary.json"
         glossary = load_glossary(glossary_path) if glossary_path.exists() else None
@@ -2386,7 +2393,7 @@ def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> lis
             vocabulary=save_check.book_vocabulary.counts(project_dir),
             glossary=save_check.glossary_words(glossary),
             ignored=load_project_ignored_terms(project_dir),
-            disabled_rules=config.get("disabled_rules") or (),
+            disabled_rules=disabled_rules,
             speller=save_check.default_speller(),
         )
     except Exception:
@@ -2404,15 +2411,30 @@ def _log_save_check(
     after: str,
     hits: list[dict],
 ) -> Optional[dict]:
-    """Record the hits of a write that has landed; ``{"id", "hits"}`` or ``None``."""
-    if not hits:
-        return None
+    """Record the hits of a write that has landed; ``{"id", "hits"}`` or ``None``.
+
+    ``hits`` are what this edit introduced. What an open warning on the same
+    sentence flagged, and the edit left in place, is added to them.
+    """
     try:
         from src import save_check
 
+        enabled, disabled_rules = _save_check_settings()
+        if not enabled:
+            return None
+        carried, carried_from = save_check.carried_hits(
+            project_dir, chapter_id, before, after,
+            ignored=load_project_ignored_terms(project_dir), disabled_rules=disabled_rules,
+        )
+        found = {(h["rule"], h["text"]) for h in hits}
+        carried = [h for h in carried if (h["rule"], h["text"]) not in found]
+        hits = hits + carried
+        if not hits:
+            return None
+        lineage = {"carried_from": carried_from} if carried else {}
         warning_id = save_check.append_warning(
             project_dir, chapter_id=chapter_id, es_idx=es_idx, path=path,
-            en=en, es_before=before, es_after=after, hits=hits,
+            en=en, es_before=before, es_after=after, hits=hits, **lineage,
         )
         return {"id": warning_id, "hits": hits}
     except Exception:
@@ -2425,7 +2447,8 @@ def get_save_checks(project_id, chapter):
     """Return the save-check warnings a chapter should still show.
 
     A warning is matched to its sentence by text, not by the ``es_idx`` it was
-    saved under, so it follows a realign and closes once the sentence is edited.
+    saved under, so it follows a realign and closes once the slip is edited out.
+    None are shown while the check is switched off, nor a hit of a disabled rule.
     """
     from src import save_check
 
@@ -2434,9 +2457,12 @@ def get_save_checks(project_id, chapter):
     project_dir = _resolve_project_dir(project_id)
     if not project_dir.exists():
         return jsonify({"error": f"Project not found: {project_id}"}), 404
+    enabled, disabled_rules = _save_check_settings()
+    if not enabled:
+        return jsonify({"warnings": []})
     warnings = save_check.open_warnings(
         project_dir, chapter, _alignment_rows(project_dir, chapter),
-        load_project_ignored_terms(project_dir),
+        load_project_ignored_terms(project_dir), disabled_rules,
     )
     # The reader asks for this on every chapter load, which is the moment to
     # pay for the dictionaries and the book's vocabulary (about 0.6 s cold),
@@ -2448,10 +2474,7 @@ def get_save_checks(project_id, chapter):
 def _warm_save_check(project_dir: Path) -> None:
     try:
         from src import save_check
-        from src.app_config import get_save_check_config
 
-        if get_save_check_config().get("enabled") is False:
-            return
         save_check.default_speller()
         save_check.book_vocabulary.counts(project_dir)
     except Exception:
@@ -2469,6 +2492,11 @@ def dismiss_save_check():
     from src import save_check
 
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or any(
+        data.get(key) is not None and not isinstance(data.get(key), str)
+        for key in ("project_id", "id", "action", "term")
+    ):
+        return jsonify({"error": "Invalid request"}), 400
     project_id = (data.get("project_id") or "").strip()
     warning_id = (data.get("id") or "").strip()
     action = (data.get("action") or "dismiss").strip()

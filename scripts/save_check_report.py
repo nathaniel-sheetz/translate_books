@@ -1,15 +1,19 @@
 """Report what the save-time check has warned about and what became of each warning.
 
 The check (``src/save_check.py``) was sized on 1,759 labelled saves, where it
-flagged under 1% of clean ones. This is the same question asked of live use:
+flagged about 1% of clean ones. This is the same question asked of live use:
 per rule, how many warnings were acted on and how many were waved away.
 
 A warning ends up in one of four states:
 
-- ``fixed``      its sentence was edited again and no longer stands
+- ``fixed``      its sentence was edited again and what it flagged went with it
 - ``ignored``    its word went on the book's ignore list
 - ``dismissed``  the translator dismissed it
-- ``open``       still showing
+- ``open``       still showing, or its sentence was rewritten by a path the
+                 check does not see and the flagged word is still in the chapter
+
+A warning that a later one stands in for is not counted: the later one carries
+what was still wrong, and its state is the state of both.
 
 ``fixed`` is the only state that says the warning was right. A rule whose
 warnings are mostly ``dismissed`` or ``ignored`` is noise: switch it off under
@@ -67,7 +71,8 @@ def warning_state(warning: dict, outcomes: dict, rows: list[dict], ignored) -> s
     outcome = outcomes.get(warning.get("id"))
     if outcome:
         return outcome.get("outcome", "dismissed")
-    if save_check.standing_row(warning, rows) is None:
+    if (save_check.standing_row(warning, rows) is None
+            and not save_check.flagged_text_stands(warning, rows)):
         return "fixed"
     left = [
         h for h in warning.get("hits", [])
@@ -122,8 +127,9 @@ def main() -> int:
     for project_dir, (warnings, outcomes) in books.items():
         ignored = load_project_ignored_terms(project_dir)
         cache: dict = {}
+        stood_in_for = save_check.superseded(warnings, outcomes)
         for w in warnings:
-            if w.get("timestamp", "") < since:
+            if w.get("timestamp", "") < since or w.get("id") in stood_in_for:
                 continue
             state = warning_state(
                 w, outcomes, alignment_rows(project_dir, w.get("chapter_id", ""), cache), ignored
@@ -136,7 +142,7 @@ def main() -> int:
                 print(f"{state:9} {project_dir.name[:24]:24} {w.get('chapter_id', ''):12} {what}")
 
     warned = sum(total.values())
-    print(f"Since {since}: {saves} saves across all books, {warned} warnings in {len(books)} book(s)"
+    print(f"Since {since}: {saves} saves across {len(saved_to)} book(s), {warned} warnings in {len(books)} book(s)"
           + (f" (1 in {saves / warned:.0f} saves)" if warned and saves else ""))
     print(f"\n{'rule':24}" + "".join(f"{s:>10}" for s in ("warned",) + STATES))
     for rule in sorted(per_rule, key=lambda r: -sum(per_rule[r].values())):

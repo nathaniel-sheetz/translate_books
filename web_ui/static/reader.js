@@ -541,7 +541,8 @@
                 } else {
                     setSaveWarn(esIdx, null);
                 }
-                renderSaveWarn(esIdx);
+                // The row belongs to the open sheet, which may have moved on.
+                if (activeIdx === esIdx) renderSaveWarn(esIdx);
             })
             .catch(() => showToast(i.save_check_failed || 'Could not update the warning.'));
     }
@@ -1715,7 +1716,10 @@
     btnSave.addEventListener('click', () => {
         if (activeIdx === null || !alignmentData) return;
 
-        const alignment = alignmentData.alignments.find(a => a.es_idx === activeIdx);
+        // The sheet can close or move to another sentence before the response
+        // comes back, so the handlers below use the sentence that was saved.
+        const savedIdx = activeIdx;
+        const alignment = alignmentData.alignments.find(a => a.es_idx === savedIdx);
         if (!alignment) return;
 
         const correctedEs = sheetTextarea.value.trim();
@@ -1730,7 +1734,7 @@
         const payload = {
             project_id: projectId,
             chapter_id: chapter,
-            es_idx: activeIdx,
+            es_idx: savedIdx,
             original_es: alignment.es,
             corrected_es: correctedEs,
             en_reference: alignment.en,
@@ -1749,7 +1753,7 @@
                     alignment.es = correctedEs;
                     alignment.corrected = true;
 
-                    const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
+                    const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                     if (el) {
                         el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                         el.classList.add('corrected');
@@ -1757,7 +1761,7 @@
 
                     // A clean Save also clears the warning the sentence carried:
                     // the text it was raised on no longer stands.
-                    setSaveWarn(activeIdx, result.check || null);
+                    setSaveWarn(savedIdx, result.check || null);
                     toastSaveCheck(result.check);
                     showRealignButton();
                     closeSheet();
@@ -1770,14 +1774,14 @@
                 // Optimistic UI update
                 alignment.es = correctedEs;
                 alignment.corrected = true;
-                const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
+                const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                 if (el) {
                     el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                     el.classList.add('corrected');
                 }
                 // The queued Save is checked when it is replayed; its warning,
                 // if any, arrives with the next load of the chapter.
-                setSaveWarn(activeIdx, null);
+                setSaveWarn(savedIdx, null);
                 showRealignButton();
                 closeSheet();
             })
