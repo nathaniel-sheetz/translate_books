@@ -2273,6 +2273,10 @@ def save_correction():
         if not project_dir.exists():
             return jsonify({"error": f"Project not found: {project_id}"}), 404
 
+        # Before the alignment is patched, so the book's vocabulary does not
+        # yet hold the sentence being saved.
+        hits = _save_check_hits(project_dir, en_reference or "", original_es, corrected_es)
+
         # 1. Append to corrections.jsonl
         corrections_path = project_dir / "corrections.jsonl"
         correction_record = {
@@ -2336,10 +2340,202 @@ def save_correction():
         with open(corrections_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(correction_record, ensure_ascii=False) + "\n")
 
-        return jsonify({"saved": True, "chunk_id": chunk_id})
+        response = {"saved": True, "chunk_id": chunk_id}
+        check = _log_save_check(
+            project_dir, chapter_id, es_idx, "reader",
+            en_reference or "", original_es, corrected_es, hits,
+        )
+        if check:
+            response["check"] = check
+        return jsonify(response)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Save-time check ──────────────────────────────────────────────────────────
+
+def _alignment_rows(project_dir: Path, chapter_id: str) -> list[dict]:
+    """A chapter's alignment rows, or ``[]`` when it has no readable alignment."""
+    try:
+        with open(project_dir / "alignments" / f"{chapter_id}.json", encoding="utf-8") as f:
+            rows = json.load(f).get("alignments", [])
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _save_check_settings() -> tuple[bool, frozenset]:
+    """``(enabled, disabled rule ids)`` as ``app_config.json`` has them now."""
+    from src import save_check
+    from src.app_config import get_save_check_config
+
+    return save_check.read_config(get_save_check_config())
+
+
+def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> list[dict]:
+    """Check a sentence about to be saved for an obvious slip.
+
+    Call it before the write lands, while the book's vocabulary does not yet
+    hold the new sentence. It never raises: a check that fails must not cost
+    the translator a Save.
+    """
+    try:
+        from src import save_check
+
+        enabled, disabled_rules = _save_check_settings()
+        if not enabled:
+            return []
+        glossary_path = project_dir / "glossary.json"
+        glossary = load_glossary(glossary_path) if glossary_path.exists() else None
+        return save_check.check_write(
+            en, before, after,
+            vocabulary=save_check.book_vocabulary.counts(project_dir),
+            glossary=save_check.glossary_words(glossary),
+            ignored=load_project_ignored_terms(project_dir),
+            disabled_rules=disabled_rules,
+            speller=save_check.default_speller(),
+        )
+    except Exception:
+        app.logger.exception("save check failed")
+        return []
+
+
+def _log_save_check(
+    project_dir: Path,
+    chapter_id: str,
+    es_idx,
+    path: str,
+    en: str,
+    before: str,
+    after: str,
+    hits: list[dict],
+) -> Optional[dict]:
+    """Record the hits of a write that has landed; ``{"id", "hits"}`` or ``None``.
+
+    ``hits`` are what this edit introduced. What an open warning on the same
+    sentence flagged, and the edit left in place, is added to them.
+    """
+    try:
+        from src import save_check
+
+        enabled, disabled_rules = _save_check_settings()
+        if not enabled:
+            return None
+        carried, carried_from = save_check.carried_hits(
+            project_dir, chapter_id, before, after,
+            ignored=load_project_ignored_terms(project_dir), disabled_rules=disabled_rules,
+        )
+        found = {(h["rule"], h["text"]) for h in hits}
+        carried = [h for h in carried if (h["rule"], h["text"]) not in found]
+        hits = hits + carried
+        if not hits:
+            return None
+        lineage = {"carried_from": carried_from} if carried else {}
+        warning_id = save_check.append_warning(
+            project_dir, chapter_id=chapter_id, es_idx=es_idx, path=path,
+            en=en, es_before=before, es_after=after, hits=hits, **lineage,
+        )
+        return {"id": warning_id, "hits": hits}
+    except Exception:
+        app.logger.exception("save check log failed")
+        return None
+
+
+@app.route("/api/save-checks/<project_id>/<chapter>")
+def get_save_checks(project_id, chapter):
+    """Return the save-check warnings a chapter should still show.
+
+    A warning is matched to its sentence by text, not by the ``es_idx`` it was
+    saved under, so it follows a realign and closes once the slip is edited out.
+    None are shown while the check is switched off, nor a hit of a disabled rule.
+    """
+    from src import save_check
+
+    if not _safe_id(project_id) or not _safe_id(chapter):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": f"Project not found: {project_id}"}), 404
+    enabled, disabled_rules = _save_check_settings()
+    if not enabled:
+        return jsonify({"warnings": []})
+    warnings = save_check.open_warnings(
+        project_dir, chapter, _alignment_rows(project_dir, chapter),
+        load_project_ignored_terms(project_dir), disabled_rules,
+    )
+    # The reader asks for this on every chapter load, which is the moment to
+    # pay for the dictionaries and the book's vocabulary (about 0.6 s cold),
+    # so that the first Save does not.
+    threading.Thread(target=_warm_save_check, args=(project_dir,), daemon=True).start()
+    return jsonify({"warnings": warnings})
+
+
+def _warm_save_check(project_dir: Path) -> None:
+    try:
+        from src import save_check
+
+        save_check.default_speller()
+        save_check.book_vocabulary.counts(project_dir)
+    except Exception:
+        app.logger.exception("save check warm-up failed")
+
+
+@app.route("/api/save-check/dismiss", methods=["POST"])
+def dismiss_save_check():
+    """Close a save-check warning: dismiss it, or put its word on the ignore list.
+
+    ``ignore_term`` writes the same ``ignored_terms.json`` the Review stage
+    reads, so the word stops warning on later Saves and its chunk-level
+    dictionary finding goes with it.
+    """
+    from src import save_check
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or any(
+        data.get(key) is not None and not isinstance(data.get(key), str)
+        for key in ("project_id", "id", "action", "term")
+    ):
+        return jsonify({"error": "Invalid request"}), 400
+    project_id = (data.get("project_id") or "").strip()
+    warning_id = (data.get("id") or "").strip()
+    action = (data.get("action") or "dismiss").strip()
+    term = (data.get("term") or "").strip()
+
+    if not _safe_id(project_id) or not _safe_id(warning_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    if action not in ("dismiss", "ignore_term"):
+        return jsonify({"error": "action must be dismiss or ignore_term"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": f"Project not found: {project_id}"}), 404
+
+    warnings, _ = save_check.load_log(project_dir)
+    warning = next((w for w in warnings if w.get("id") == warning_id), None)
+    if warning is None:
+        return jsonify({"error": "Unknown warning"}), 404
+
+    if action == "dismiss":
+        save_check.append_outcome(project_dir, warning_id, "dismissed")
+        return jsonify({"ok": True})
+
+    spelt = [h.get("text") for h in warning.get("hits", []) if h.get("rule") == "spelling"]
+    if term not in spelt:
+        return jsonify({"error": "term is not a spelling hit of this warning"}), 400
+    _, err = _add_ignored_term(project_dir, term, "dictionary", added_from="save-check")
+    if err:
+        return err
+    # The ignore list is what hides the word. The warning itself is closed
+    # only once nothing else it flagged is left standing.
+    ignored = load_project_ignored_terms(project_dir)
+    left = [
+        h for h in warning.get("hits", [])
+        if not (h.get("rule") == "spelling" and ignored is not None
+                and ignored.matches("dictionary", h.get("text")))
+    ]
+    if not left:
+        save_check.append_outcome(project_dir, warning_id, "ignored", term=term)
+    return jsonify({"ok": True})
 
 
 # Wire-protocol sentinel for pre-multi records that have no sub_id on disk.
@@ -3585,11 +3781,26 @@ def sentence_replace():
         "new_source_text": None,
     }]
 
+    # Read against the alignment as it stands, before the realign renumbers it.
+    es_idx = data.get("es_idx")
+    en_reference = next(
+        (r.get("en") or "" for r in _alignment_rows(project_dir, chapter_id)
+         if r.get("es_idx") == es_idx),
+        "",
+    )
+
+    hits = _save_check_hits(project_dir, en_reference, current_translation, new_translation)
+
     try:
         result = _apply_chunk_edits(project_dir, project_id, chapter_id, edits)
     except Exception as e:
         app.logger.exception("sentence replace pipeline failed")
         return jsonify({"error": str(e)}), 500
+
+    check = _log_save_check(
+        project_dir, chapter_id, es_idx, "replace",
+        en_reference, current_translation, new_translation, hits,
+    )
 
     # Audit log
     try:
@@ -3623,6 +3834,7 @@ def sentence_replace():
         "orphaned_annotations": result["orphaned_annotations"],
         "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
+        "check": check,
     })
 
 
@@ -6757,16 +6969,38 @@ def project_ignored_terms_add(project_id):
     if eval_name != "grammar":
         rule_id = None
 
-    ignored, err = _ignored_terms_for_write(project_dir)
+    result, err = _add_ignored_term(
+        project_dir, term, eval_name, rule_id=rule_id,
+        added_from=(data.get("added_from") or "").strip() or None,
+        note=(data.get("note") or "").strip() or None,
+    )
     if err:
         return err
+    return jsonify({"ok": True, **result})
+
+
+def _add_ignored_term(
+    project_dir: Path,
+    term: str,
+    eval_name: str,
+    rule_id: Optional[str] = None,
+    added_from: Optional[str] = None,
+    note: Optional[str] = None,
+):
+    """Put one validated entry on the book's ignore list.
+
+    Returns ``({"added", "total"}, None)`` or ``(None, response)`` to return.
+    """
+    ignored, err = _ignored_terms_for_write(project_dir)
+    if err:
+        return None, err
     entry = IgnoredTerm(
         term=term,
         eval_name=eval_name,
         rule_id=rule_id,
         added_at=datetime.now(),
-        added_from=(data.get("added_from") or "").strip() or None,
-        note=(data.get("note") or "").strip() or None,
+        added_from=added_from,
+        note=note,
     )
     existing = {e.identity() for e in ignored.terms}
     added = entry.identity() not in existing
@@ -6778,10 +7012,10 @@ def project_ignored_terms_add(project_id):
             # Same shape as project_chunk_evaluation_feedback: every route on
             # this blueprint answers in JSON, and a bare raise would hand the
             # reader Werkzeug's HTML 500.
-            app.logger.exception("Failed to save ignored terms for %s", project_id)
-            return jsonify({"error": f"Could not save the ignore list: {e}"}), 500
+            app.logger.exception("Failed to save ignored terms for %s", project_dir.name)
+            return None, (jsonify({"error": f"Could not save the ignore list: {e}"}), 500)
 
-    return jsonify({"ok": True, "added": added, "total": len(ignored.terms)})
+    return {"added": added, "total": len(ignored.terms)}, None
 
 
 @app.route("/api/project/<project_id>/ignored-terms", methods=["DELETE"])

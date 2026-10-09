@@ -145,6 +145,7 @@
     const reviewConfig = loadReviewConfig();
     let reviewMap = {};   // es_idx (string) -> [finding, ...] filtered to enabled types
     let unanchoredList = [];  // findings the server could not place on any sentence
+    let saveWarnMap = {};   // es_idx -> { id, hits }: save-check warnings still open
 
     // Load alignment data and annotations in parallel.
     // Exposed as a function so the removal flow can re-bootstrap after a
@@ -156,9 +157,12 @@
                 return r.json();
             }),
             fetch(`/api/annotations/${projectId}/${chapter}`).then(r => r.json()),
+            // Never fails the load: a chapter without its warnings still reads.
+            fetch(`/api/save-checks/${projectId}/${chapter}`)
+                .then(r => (r.ok ? r.json() : { warnings: [] }))
+                .catch(() => ({ warnings: [] })),
         ];
-        // Only pay for the review fetch when review mode is enabled — when off,
-        // the reader load is byte-for-byte identical to before.
+        // Only pay for the review fetch when review mode is enabled.
         if (reviewConfig.on) {
             fetches.push(
                 fetch(`/api/project/${projectId}/review/${chapter}`)
@@ -186,7 +190,10 @@
                         String(a.sub_id || '').localeCompare(String(b.sub_id || '')));
                 }
 
-                const reviewData = reviewConfig.on ? results[2] : null;
+                saveWarnMap = {};
+                for (const w of (results[2].warnings || [])) saveWarnMap[w.es_idx] = w;
+
+                const reviewData = reviewConfig.on ? results[3] : null;
                 if (reviewData && reviewData._reviewFailed) {
                     showToast(i.review_load_failed || 'Could not load review findings.');
                     buildReviewMap(null);
@@ -316,6 +323,9 @@
             if (a.corrected) {
                 span.classList.add('corrected');
             }
+            if (saveWarnMap[a.es_idx]) {
+                span.classList.add('save-warn');
+            }
 
             // Apply annotation highlight (ranked when several share a sentence)
             const hlType = annHighlightType(annotationsMap[a.es_idx]);
@@ -402,14 +412,16 @@
         }
 
         // Review mode: populate the Errors tab and default to it when this
-        // sentence carries findings (otherwise land on Annotate/Edit).
+        // sentence carries findings (otherwise land on Annotate/Edit). An open
+        // save-check warning wins: its sentence opens where it can be edited.
+        const saveWarned = !!saveWarnMap[alignment.es_idx];
         let defaultErrors = false;
         if (reviewConfig.on) {
             const findings = reviewMap[alignment.es_idx] || [];
             renderErrorsList(alignment.es_idx, findings);
             updateErrorsTabCount(findings.length);
             sheetTabs.style.display = 'flex';
-            defaultErrors = findings.length > 0;
+            defaultErrors = findings.length > 0 && !saveWarned;
             setSheetTab(defaultErrors ? 'errors' : 'annotate');
         } else {
             sheetTabs.style.display = 'none';
@@ -440,9 +452,102 @@
                 findings: reviewConfig.on ? (reviewMap[alignment.es_idx] || []) : [],
                 reviewOn: reviewConfig.on,
                 defaultErrors: defaultErrors,
+                saveWarned: saveWarned,
                 tappedWord: tappedWord,
             });
         }
+
+        renderSaveWarn(alignment.es_idx);
+    }
+
+    // --- Save-check warnings ---
+    // A Save that left an obvious slip comes back with `check`; the sentence is
+    // marked and its sheet carries one row saying what was flagged. The row is
+    // built here and placed in whichever sheet is showing, so both skins get it.
+    function saveCheckText(hit) {
+        const tpl = (i.save_check_rules || {})[hit.rule] || i.save_check_generic || 'Check “{text}”';
+        return tpl.replace('{text}', hit.text);
+    }
+
+    function setSaveWarn(esIdx, check) {
+        if (check && check.hits && check.hits.length) saveWarnMap[esIdx] = check;
+        else delete saveWarnMap[esIdx];
+        const el = content.querySelector(`[data-es-idx="${esIdx}"]`);
+        if (el) el.classList.toggle('save-warn', !!saveWarnMap[esIdx]);
+    }
+
+    function toastSaveCheck(check) {
+        if (!check || !check.hits || !check.hits.length) return;
+        const what = check.hits.slice(0, 2).map(saveCheckText).join('; ');
+        showToast((i.save_check_toast || 'Saved. Check: {what}').replace('{what}', what), 5000);
+    }
+
+    function renderSaveWarn(esIdx) {
+        const old = document.getElementById('save-warn-row');
+        if (old) old.remove();
+        const warn = saveWarnMap[esIdx];
+        if (!warn) return;
+
+        const row = document.createElement('div');
+        row.id = 'save-warn-row';
+        row.className = 'save-warn-row';
+        for (const hit of warn.hits) {
+            const line = document.createElement('div');
+            line.className = 'save-warn-line';
+            const msg = document.createElement('span');
+            msg.className = 'save-warn-msg';
+            msg.textContent = saveCheckText(hit);
+            line.appendChild(msg);
+            if (hit.rule === 'spelling') {
+                const ignore = document.createElement('button');
+                ignore.type = 'button';
+                ignore.className = 'save-warn-btn';
+                ignore.textContent = (i.review_ignore_word || 'Ignore “{term}” in this book').replace('{term}', hit.text);
+                ignore.title = i.review_ignore_title || '';
+                ignore.addEventListener('click', () => closeSaveWarn(esIdx, 'ignore_term', hit.text));
+                line.appendChild(ignore);
+            }
+            row.appendChild(line);
+        }
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'save-warn-btn';
+        dismiss.textContent = i.save_check_dismiss || 'Dismiss';
+        dismiss.addEventListener('click', () => closeSaveWarn(esIdx, 'dismiss'));
+        row.appendChild(dismiss);
+
+        const v2Top = V2 ? document.querySelector('#reader-sheet-v2 .rv2-top') : null;
+        if (v2Top) v2Top.appendChild(row);
+        else sheetEditArea.parentNode.insertBefore(row, sheetEditArea);
+    }
+
+    function closeSaveWarn(esIdx, action, term) {
+        const warn = saveWarnMap[esIdx];
+        if (!warn) return;
+        fetch('/api/save-check/dismiss', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: projectId, id: warn.id, action: action, term: term }),
+        })
+            .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+            .then(() => {
+                if (action === 'ignore_term') {
+                    // The word is now fine everywhere in the book, so every
+                    // open warning in this chapter drops it.
+                    const folded = term.toLowerCase();
+                    for (const idx of Object.keys(saveWarnMap)) {
+                        const w = saveWarnMap[idx];
+                        const hits = w.hits.filter(h => !(h.rule === 'spelling' && h.text.toLowerCase() === folded));
+                        setSaveWarn(idx, { id: w.id, hits: hits });
+                    }
+                    showToast(i.review_ignore_done || 'Ignored in this book.');
+                } else {
+                    setSaveWarn(esIdx, null);
+                }
+                // The row belongs to the open sheet, which may have moved on.
+                if (activeIdx === esIdx) renderSaveWarn(esIdx);
+            })
+            .catch(() => showToast(i.save_check_failed || 'Could not update the warning.'));
     }
 
     function resetAnnotationUI() {
@@ -474,6 +579,8 @@
         activeIdx = null;
         resetAnnotationUI();
         resetReviewSheet();
+        const warnRow = document.getElementById('save-warn-row');
+        if (warnRow) warnRow.remove();
 
         // Scroll the sentence to the top of the viewport so the reader
         // can continue from where they left off.
@@ -1612,7 +1719,10 @@
     btnSave.addEventListener('click', () => {
         if (activeIdx === null || !alignmentData) return;
 
-        const alignment = alignmentData.alignments.find(a => a.es_idx === activeIdx);
+        // The sheet can close or move to another sentence before the response
+        // comes back, so the handlers below use the sentence that was saved.
+        const savedIdx = activeIdx;
+        const alignment = alignmentData.alignments.find(a => a.es_idx === savedIdx);
         if (!alignment) return;
 
         const correctedEs = sheetTextarea.value.trim();
@@ -1627,7 +1737,7 @@
         const payload = {
             project_id: projectId,
             chapter_id: chapter,
-            es_idx: activeIdx,
+            es_idx: savedIdx,
             original_es: alignment.es,
             corrected_es: correctedEs,
             en_reference: alignment.en,
@@ -1646,12 +1756,16 @@
                     alignment.es = correctedEs;
                     alignment.corrected = true;
 
-                    const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
+                    const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                     if (el) {
                         el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                         el.classList.add('corrected');
                     }
 
+                    // A clean Save also clears the warning the sentence carried:
+                    // the text it was raised on no longer stands.
+                    setSaveWarn(savedIdx, result.check || null);
+                    toastSaveCheck(result.check);
                     showRealignButton();
                     closeSheet();
                 } else {
@@ -1663,11 +1777,14 @@
                 // Optimistic UI update
                 alignment.es = correctedEs;
                 alignment.corrected = true;
-                const el = content.querySelector(`[data-es-idx="${activeIdx}"]`);
+                const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                 if (el) {
                     el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                     el.classList.add('corrected');
                 }
+                // The queued Save is checked when it is replayed; its warning,
+                // if any, arrives with the next load of the chapter.
+                setSaveWarn(savedIdx, null);
                 showRealignButton();
                 closeSheet();
             })
@@ -2651,7 +2768,10 @@
                 }
                 closeRetransModal();
                 closeSheet();
+                // The reload brings the warning back on whichever sentence the
+                // realign left the flagged text in.
                 loadAndRender(scrollAnchor);
+                toastSaveCheck(body.check);
             })
             .catch(err => {
                 showRetransError((i.network_error || 'Network error: ') + err.message);

@@ -102,6 +102,19 @@ def get_alignment_config() -> dict:
     return {}
 
 
+def get_save_check_config() -> dict:
+    """Return the ``save_check`` section from app_config, or ``{}``.
+
+    ``enabled`` (default true) turns the save-time check off altogether;
+    ``disabled_rules`` lists rule ids from ``src.save_check.RULES`` to silence.
+    """
+    cfg = load_app_config()
+    val = cfg.get("save_check")
+    if isinstance(val, dict):
+        return val
+    return {}
+
+
 def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
     """Return raw forced-term entries from ``forced_glossary_terms.json``.
 
