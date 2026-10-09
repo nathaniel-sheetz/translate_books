@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.67.0.0] - 2026-10-09
+
+### Added
+- **A Save is checked for an obvious slip as it lands.** A reader Save or a retranslate-modal replace is read for a word the edit typed that no dictionary knows, and for punctuation the edit left broken: an unbalanced pair, a dropped closing mark, a doubled mark, a space before a mark, no space after a period, a repeated word, a comma before a parenthesis, a period before a raya, a raya closed with ». The save always goes through. A hit comes back as a toast and a mark on the sentence, and opening the sentence shows what was flagged, with Dismiss and, for a word, "Ignore in this book".
+- **It reads only what the edit introduced.** A word is let through when the book already uses it in any letter case, when the English sentence or the glossary has it, or when it is on the book's ignore list. A capitalised word in mid-sentence is taken for a name unless it is one accent or one swapped pair of letters from a known word. On 1,759 labelled saves it flags 9 of 1,203 clean ones on the books the rules were written against and 7 of 493 on the held-out books, and catches 20 slips.
+- **Ignoring a word writes `ignored_terms.json`**, so it stops warning and its chunk-level dictionary finding goes too.
+- **A warning follows its sentence.** It is matched on text, so a realign moves it. It closes when the slip is edited out, when it is dismissed, or when its word is ignored.
+- **`scripts/save_check_report.py` reads what became of each warning**, per rule: fixed, ignored, dismissed or open. Warnings and their outcomes are logged per book in `save_checks.jsonl`.
+- **`save_check` in `app_config.json`** switches the check off (`enabled`) or silences single rules (`disabled_rules`). Where Enchant is missing the spelling rule is off and the punctuation rules still run. The chunk editor is not checked.
+
+### Fixed (found in pre-ship review)
+- **A warning closed at the next edit of its sentence, whether or not the edit removed the slip.** Adding a word to a warned sentence took the mark off and left the typo in the book. A Save of a warned sentence now keeps whatever it left standing, as a new warning that names the one it continues. One case is still open: a retranslate-modal replace of another part of the sentence.
+- **The report counted every such warning as `fixed`**, the one state that says a warning was right. It now says `fixed` only when the flagged word is gone from the chapter, and counts a continued warning once.
+- **A span replaced inside a sentence lost its warning** as soon as the realign ran, because the span was never a whole row. It is now found in the row that holds it.
+- **Switching the check or a rule off left the warnings already logged on the page.** The chapter's list now honours both switches.
+- **A `save_check` section of the wrong type was accepted in silence.** `"enabled": "false"` left the check on, `"disabled_rules": "spelling"` disabled nothing, a misspelt rule id disabled nothing, and a nested list stopped the whole check. Each is now read for what it plainly means and reported once in the log.
+- **`1 000 000` warned as a repeated word, and a new `[IMAGE:...]` tag as a missing space after a period.**
+- **Dismissing a warning brought back an older one on the same text**, when the same slip had been saved twice.
+- **A Save answered after the sheet had closed or moved on put its warning, and the corrected text, on the wrong sentence.** The reader now uses the sentence that was saved.
+- A dismiss request with a field of the wrong type returned a 500; it is a 400. Two tests that could not fail on what they named now do, and the route tests no longer read the developer's own `app_config.json`.
+
 ## [0.66.1.0] - 2026-10-08
 
 ### Fixed
