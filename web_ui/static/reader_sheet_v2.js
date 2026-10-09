@@ -412,7 +412,7 @@
     }
 
     // ── State ──────────────────────────────────────────────────────────────────
-    let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors, tappedWord }
+    let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors, saveWarned, tappedWord }
 
     // ── Open / close ───────────────────────────────────────────────────────────
     function onOpen(data) {
@@ -422,7 +422,9 @@
         renderEdit(data.es);
         renderIssues();
         updateCounts();
-        setTab(data.defaultErrors ? 'issues' : 'annotate');
+        // A save-check warning opens on Edit, so the fix sits beside the
+        // warning row's Dismiss / Ignore buttons.
+        setTab(data.saveWarned ? 'edit' : data.defaultErrors ? 'issues' : 'annotate');
         show();
     }
     function onClose() { hide(); }

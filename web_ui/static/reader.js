@@ -412,14 +412,16 @@
         }
 
         // Review mode: populate the Errors tab and default to it when this
-        // sentence carries findings (otherwise land on Annotate/Edit).
+        // sentence carries findings (otherwise land on Annotate/Edit). An open
+        // save-check warning wins: its sentence opens where it can be edited.
+        const saveWarned = !!saveWarnMap[alignment.es_idx];
         let defaultErrors = false;
         if (reviewConfig.on) {
             const findings = reviewMap[alignment.es_idx] || [];
             renderErrorsList(alignment.es_idx, findings);
             updateErrorsTabCount(findings.length);
             sheetTabs.style.display = 'flex';
-            defaultErrors = findings.length > 0;
+            defaultErrors = findings.length > 0 && !saveWarned;
             setSheetTab(defaultErrors ? 'errors' : 'annotate');
         } else {
             sheetTabs.style.display = 'none';
@@ -450,6 +452,7 @@
                 findings: reviewConfig.on ? (reviewMap[alignment.es_idx] || []) : [],
                 reviewOn: reviewConfig.on,
                 defaultErrors: defaultErrors,
+                saveWarned: saveWarned,
                 tappedWord: tappedWord,
             });
         }
