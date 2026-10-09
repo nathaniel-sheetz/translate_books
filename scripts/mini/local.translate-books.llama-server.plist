@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.translate-books.llama-server</string>
+  <!-- Which model is served is not set here: llama-serve.sh reads
+       ~/models/serve.conf. Change it with start-server.sh. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/nathaniel/models/llama-serve.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/nathaniel/models</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>/Users/nathaniel/models/server.out</string>
+  <key>StandardErrorPath</key><string>/Users/nathaniel/models/server.out</string>
+</dict>
+</plist>
