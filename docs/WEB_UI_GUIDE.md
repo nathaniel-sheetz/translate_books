@@ -960,13 +960,47 @@ When corrections are saved from the reader, a banner appears on the chapter list
 
 The reader also shows a **Realign** button (topbar icon, right of chapter navigation) whenever the current chapter has unsaved pending corrections. After saving a correction via the bottom sheet the button appears automatically. Clicking it applies all queued corrections to the underlying chunk files, then regenerates the sentence alignment for the chapter in place, preserving scroll position and showing a toast on completion. Applied correction records are archived to `corrections_applied.jsonl` with a `status` field (`applied` or `skipped`); rows that could not be matched (missing chunk file, stale source text, empty `chunk_id`, load error) are archived as `skipped` rather than silently dropped. Corrections targeting other chapters are left in `corrections.jsonl`.
 
+### Save check
+
+A Save from the bottom sheet, or a replace from the retranslate modal, is read as it lands for an obvious slip. **The save always goes through**; a hit only warns. The chunk editor is not checked.
+
+The check reads only what the edit introduced, which is what keeps it quiet:
+
+- **`spelling`** — a word the edit typed that no dictionary knows. A word is let through when the book already uses it in any letter case, when the English sentence or the glossary has it, or when it is on the book's ignore list. A capitalised word in mid-sentence is taken for a name unless it is one accent or one swapped pair of letters from a known word.
+- **Punctuation the edit left broken** — `unbalanced`, `closing_mark_dropped`, `doubled_mark`, `space_before_mark`, `no_space_after_period`, `repeated_word`, `comma_before_paren`, `period_before_raya`, `raya_closes_guillemet`.
+
+A hit comes back as a toast and a wavy underline on the sentence. Tapping the sentence shows a warning row at the top of the sheet, one line per hit, with **Dismiss** and, for a word, **Ignore in this book**. A sentence with an open warning **opens on the Edit tab**, ahead of Issues when Review Mode is on and the sentence also has findings, so the text to fix sits beside the row. The classic sheet has no Edit tab; there the sentence opens on Annotate, which holds the editor.
+
+A warning closes in one of three ways:
+
+- **The slip is edited out.** A Save of a warned sentence that leaves the slip standing keeps the warning.
+- **Dismiss** closes that one warning.
+- **Ignore in this book** writes the word to `ignored_terms.json`, the same list the Review stage reads (see [Ignored terms](#ignored-terms)). The word stops warning on later Saves, every open warning in the book drops it, and its chunk-level dictionary finding goes too.
+
+A warning is matched to its sentence on text, not on the row number it was saved under, so it follows a realign.
+
+Warnings and what became of them are logged per book in `save_checks.jsonl`. `python scripts/save_check_report.py` reads the log per rule — fixed, ignored, dismissed, open — with `--project`, `--since` and `--list`. A rule whose warnings are mostly dismissed or ignored is noise.
+
+The `save_check` block of `app_config.json` (global, not per-project) switches the whole check off or silences single rules:
+
+```json
+"save_check": {
+  "enabled": true,
+  "disabled_rules": []
+}
+```
+
+Both switches also hide warnings already logged. Where Enchant is missing the spelling rule is off and the punctuation rules still run.
+
 ### Reader APIs
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/alignment/<id>/<chapter>` | GET | Alignment data with enrichments |
 | `/api/project/<id>/reference/<kind>` | GET | One reference document (`style-guide`, `glossary`, `address-map`) for the sheet's ⋮ menu. Optional `chapter`/`es_idx` lead the payload with the part relevant to that sentence and enable the staleness check |
-| `/api/correction` | POST | Save a sentence correction |
+| `/api/correction` | POST | Save a sentence correction. The response carries `check` (`{id, hits}`) when the [save check](#save-check) flagged the edit |
+| `/api/save-checks/<id>/<chapter>` | GET | The chapter's open save-check warnings, each `{id, es_idx, hits}` |
+| `/api/save-check/dismiss` | POST | Close a warning (`{project_id, id, action, term?}`): `dismiss`, or `ignore_term` to put a flagged word on the book's ignore list |
 | `/api/annotations/<id>/<chapter>` | GET | Get chapter annotations |
 | `/api/annotation` | POST | Save annotation |
 | `/api/annotation` | DELETE | Remove annotation |
@@ -1029,6 +1063,7 @@ projects/<id>/
 │   ├── <chunk_id>.json     # Aggregated coded-evaluator + optional LLM-judge result
 │   └── _feedback.jsonl     # Append-only user feedback on individual issues
 ├── ignored_terms.json      # Per-book ignore list (spelling/grammar findings the reader silenced; rewritten in place, not append-only)
+├── save_checks.jsonl       # Save-check warnings and their outcomes (append-only)
 ├── images/                 # Downloaded images (Gutenberg)
 ├── translator_note.json    # Optional "Note from the Translator" (heading + body, Stage 8)
 ├── reports/                # Generated edit-review HTML reports (review_edits.py output)

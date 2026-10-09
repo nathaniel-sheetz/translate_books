@@ -673,3 +673,33 @@ class TestReplaceRoute:
         (row,) = save_check.load_log(project)[0]
         assert row["path"] == "replace" and row["en"] == "The cat sat."
         assert [w["es_idx"] for w in _open(client)] == [0]
+
+
+# -------- the reader sheet --------
+
+STATIC = Path(__file__).resolve().parent.parent / "web_ui" / "static"
+
+
+class TestReaderSheet:
+    """Which tab a warned sentence opens on lives in JS, asserted by reading the source."""
+
+    def test_the_v2_sheet_opens_a_warned_sentence_on_edit_ahead_of_issues(self):
+        js = (STATIC / "reader_sheet_v2.js").read_text(encoding="utf-8")
+        on_open = js.split("function onOpen(data) {")[1].split("function onClose()")[0]
+        assert "setTab(data.saveWarned ? 'edit' : data.defaultErrors ? 'issues' : 'annotate')" in on_open
+
+    def test_the_core_withholds_the_errors_tab_and_tells_the_v2_sheet(self):
+        js = (STATIC / "reader.js").read_text(encoding="utf-8")
+        assert "const saveWarned = !!saveWarnMap[alignment.es_idx];" in js
+        # The classic sheet has no Edit tab: not landing on Errors is what shows the editor.
+        assert "defaultErrors = findings.length > 0 && !saveWarned;" in js
+        handed = js.split("window.ReaderSheetV2.onOpen({")[1].split("});")[0]
+        assert "saveWarned: saveWarned," in handed
+
+    def test_the_reader_assets_are_cache_busted_past_the_build_without_it(self, client, project):
+        # The ?v= is hand-maintained; a stale one serves the sheet that opens on Issues.
+        html = client.get("/read/test-project/chapter_01").get_data(as_text=True)
+        assert "reader_sheet_v2.js" in html
+        assert "reader.js?v=33" not in html
+        assert "reader_sheet_v2.js?v=12" not in html
+        assert "reader.css?v=7" not in html
