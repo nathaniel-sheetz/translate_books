@@ -44,3 +44,15 @@ def _isolate_prompt_history(tmp_path, monkeypatch):
 def _isolate_run_log(tmp_path, monkeypatch):
     """Redirect run_logger writes to a per-test tmp file."""
     monkeypatch.setattr(run_logger, "_RUNS_PATH", tmp_path / "logs" / "harness_runs.jsonl")
+
+
+@pytest.fixture(autouse=True)
+def _no_save_check_config(monkeypatch):
+    """Keep the developer's ``save_check`` section out of every test.
+
+    A ``save_check.model`` in app_config.json would send each test Save to a
+    real model server. Tests that want a section set their own.
+    """
+    import src.app_config as app_config
+
+    monkeypatch.setattr(app_config, "get_save_check_config", lambda: {})

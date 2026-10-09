@@ -969,6 +969,8 @@ The check reads only what the edit introduced, which is what keeps it quiet:
 - **`spelling`** — a word the edit typed that no dictionary knows. A word is let through when the book already uses it in any letter case, when the English sentence or the glossary has it, or when it is on the book's ignore list. A capitalised word in mid-sentence is taken for a name unless it is one accent or one swapped pair of letters from a known word.
 - **Punctuation the edit left broken** — `unbalanced`, `closing_mark_dropped`, `doubled_mark`, `space_before_mark`, `no_space_after_period`, `repeated_word`, `comma_before_paren`, `period_before_raya`, `raya_closes_guillemet`.
 
+**The model's verdict.** With an inference server configured (below), each Save is also put to a language model, which catches what the rules cannot: agreement left half-changed, tú and usted mixed, a real word in place of the intended one. It answers a second or two behind the Save, so its warning arrives after the sheet has closed, as its own toast and the same underline. The warning row then carries a line saying what the slip is, asked for when the row is first shown. An edit that changed only punctuation is not sent. The hit is `model`; it has **Dismiss** and no ignore button.
+
 A hit comes back as a toast and a wavy underline on the sentence. Tapping the sentence shows a warning row at the top of the sheet, one line per hit, with **Dismiss** and, for a word, **Ignore in this book**. A sentence with an open warning **opens on the Edit tab**, ahead of Issues when Review Mode is on and the sentence also has findings, so the text to fix sits beside the row. The classic sheet has no Edit tab; there the sentence opens on Annotate, which holds the editor.
 
 A warning closes in one of three ways:
@@ -979,18 +981,40 @@ A warning closes in one of three ways:
 
 A warning is matched to its sentence on text, not on the row number it was saved under, so it follows a realign.
 
-Warnings and what became of them are logged per book in `save_checks.jsonl`. `python scripts/save_check_report.py` reads the log per rule — fixed, ignored, dismissed, open — with `--project`, `--since` and `--list`. A rule whose warnings are mostly dismissed or ignored is noise.
+Warnings and what became of them are logged per book in `save_checks.jsonl`. `python scripts/save_check_report.py` reads the log per rule — fixed, ignored, dismissed, open — with `--project`, `--since` and `--list`. A rule whose warnings are mostly dismissed or ignored is noise. Every answer the model gives, warning or not, is logged with its score in `save_check_readouts.jsonl`, and the report lists each model with how many saves it scored and flagged.
 
 The `save_check` block of `app_config.json` (global, not per-project) switches the whole check off or silences single rules:
 
 ```json
 "save_check": {
   "enabled": true,
-  "disabled_rules": []
+  "disabled_rules": [],
+  "model": {
+    "backend": "llama-server",
+    "url": "http://192.168.1.22:8080",
+    "profiles": []
+  }
 }
 ```
 
 Both switches also hide warnings already logged. Where Enchant is missing the spelling rule is off and the punctuation rules still run.
+
+`model` is optional; without a `backend` only the rules run. `llama-server` is the one backend so far, and its bearer key goes in `.env` as `LOCAL_LLM_KEY`. `"model"` in `disabled_rules` silences the model like any rule.
+
+**The check uses whichever model the server has loaded. It never starts or swaps one.** A model is asked only if it has a profile: the prompt it does best with, and the score above which it warns. Scores are on a different scale for each model, so a model without a profile is left alone and the Save gets the rules only. The same happens when the server does not answer; it is then left alone for a minute, longer each time it fails in a row.
+
+| profile | served as (`--alias`) | prompt | warns above |
+|---|---|---|---|
+| Gemma 4 31B | `gemma-4-31b` | v1 | 7.5 |
+| Qwen 3.8 27B | `qwen3.8-27b` | v2 | 0.9999 |
+| Gemma 4 26B MoE | `gemma-4-26b` | v1 | 0.5006 |
+| Qwen 3.6 35B MoE | `qwen3.6-35b` | v1 | 6.1043 |
+
+Listed best first. On the labelled saves the check was built against, rules and model together caught 39 of 46 slips with Gemma 4 31B, 36 with Qwen 3.8 27B, 30 and 28 with the two faster models, and 18 with the rules alone, each while flagging at most one clean save in forty.
+
+`profiles` in `app_config.json` refits or adds one, for example `{"name": "gemma-4-31b", "threshold": 6.0}`, or `{"name": "my-model", "aliases": ["mine"], "prompt": "v1", "threshold": 5.0}` for a model of your own. A profile is matched on the name the server serves the model under, so give the model that alias when it is started (`scripts/mini/README.md`).
+
+`python scripts/save_check_probe.py` prints what is loaded, the profile it matches, and the verdict on two canned edits.
 
 ### Reader APIs
 
@@ -998,8 +1022,10 @@ Both switches also hide warnings already logged. Where Enchant is missing the sp
 |---|---|---|
 | `/api/alignment/<id>/<chapter>` | GET | Alignment data with enrichments |
 | `/api/project/<id>/reference/<kind>` | GET | One reference document (`style-guide`, `glossary`, `address-map`) for the sheet's ⋮ menu. Optional `chapter`/`es_idx` lead the payload with the part relevant to that sentence and enable the staleness check |
-| `/api/correction` | POST | Save a sentence correction. The response carries `check` (`{id, hits}`) when the [save check](#save-check) flagged the edit |
-| `/api/save-checks/<id>/<chapter>` | GET | The chapter's open save-check warnings, each `{id, es_idx, hits}` |
+| `/api/correction` | POST | Save a sentence correction. The response carries `check` (`{id, hits}`) when the [save check](#save-check) flagged the edit, and `check_job` when the edit was also put to the model |
+| `/api/save-checks/<id>/<chapter>` | GET | The chapter's open save-check warnings, each `{id, es_idx, hits}`. A `model` hit carries `reason` once it has been asked for |
+| `/api/save-check/job/<job_id>` | GET | Wait up to 10 s for the model's verdict on one Save: `{done, flagged}`. `flagged` means a warning was logged |
+| `/api/save-check/reason/<id>/<warning_id>` | GET | The model's one-line reason for a warning it raised (`{reason}`), asked for once and kept |
 | `/api/save-check/dismiss` | POST | Close a warning (`{project_id, id, action, term?}`): `dismiss`, or `ignore_term` to put a flagged word on the book's ignore list |
 | `/api/annotations/<id>/<chapter>` | GET | Get chapter annotations |
 | `/api/annotation` | POST | Save annotation |
@@ -1064,6 +1090,7 @@ projects/<id>/
 │   └── _feedback.jsonl     # Append-only user feedback on individual issues
 ├── ignored_terms.json      # Per-book ignore list (spelling/grammar findings the reader silenced; rewritten in place, not append-only)
 ├── save_checks.jsonl       # Save-check warnings and their outcomes (append-only)
+├── save_check_readouts.jsonl # Every score the save check's model gave, flagged or not (append-only)
 ├── images/                 # Downloaded images (Gutenberg)
 ├── translator_note.json    # Optional "Note from the Translator" (heading + body, Stage 8)
 ├── reports/                # Generated edit-review HTML reports (review_edits.py output)

@@ -482,6 +482,66 @@
         showToast((i.save_check_toast || 'Saved. Check: {what}').replace('{what}', what), 5000);
     }
 
+    // The language model's verdict on a Save comes a second or two behind it.
+    // `after` is the reload a replace has under way, which must finish first or
+    // it would put back the warnings it fetched before the verdict was logged.
+    function watchSaveCheckJob(jobId, check, after, tries, known) {
+        if (!jobId) return;
+        if (!known) {
+            // What the translator has already been told about, this Save's own
+            // rule warning included: the toast is for what the model adds.
+            known = new Set(Object.values(saveWarnMap).map(w => w.id));
+            if (check) known.add(check.id);
+        }
+        fetch(`/api/save-check/job/${jobId}`)
+            .then(r => (r.ok ? r.json() : null))
+            .then(body => {
+                if (!body) return;
+                if (!body.done) {
+                    if ((tries || 0) < 2) watchSaveCheckJob(jobId, check, after, (tries || 0) + 1, known);
+                    return;
+                }
+                const refresh = () => refreshSaveWarns(known);
+                if (body.flagged) Promise.resolve(after).then(refresh, refresh);
+            })
+            .catch(() => {});
+    }
+
+    function refreshSaveWarns(known) {
+        fetch(`/api/save-checks/${projectId}/${chapter}`)
+            .then(r => (r.ok ? r.json() : null))
+            .then(body => {
+                if (!body) return;
+                saveWarnMap = {};
+                for (const w of (body.warnings || [])) saveWarnMap[w.es_idx] = w;
+                content.querySelectorAll('[data-es-idx]').forEach(el => {
+                    el.classList.toggle('save-warn', !!saveWarnMap[el.dataset.esIdx]);
+                });
+                const fresh = Object.values(saveWarnMap).find(w => !known.has(w.id));
+                if (fresh) {
+                    const hits = fresh.hits.filter(h => h.rule === 'model');
+                    toastSaveCheck({ hits: hits.length ? hits : fresh.hits });
+                }
+                if (activeIdx !== null && activeIdx !== undefined) renderSaveWarn(activeIdx);
+            })
+            .catch(() => {});
+    }
+
+    // Asked for when the row is first shown, and kept by the server after that.
+    function loadSaveWarnReason(warn, hit, el) {
+        const show = () => {
+            el.textContent = hit.reason || '';
+            el.hidden = !hit.reason;
+        };
+        if (typeof hit.reason === 'string') { show(); return; }
+        el.textContent = i.save_check_reason_loading || 'Asking what the slip is…';
+        el.hidden = false;
+        fetch(`/api/save-check/reason/${projectId}/${warn.id}`)
+            .then(r => (r.ok ? r.json() : { reason: '' }))
+            .then(body => { hit.reason = body.reason || ''; show(); })
+            .catch(() => { el.hidden = true; });
+    }
+
     function renderSaveWarn(esIdx) {
         const old = document.getElementById('save-warn-row');
         if (old) old.remove();
@@ -508,6 +568,12 @@
                 line.appendChild(ignore);
             }
             row.appendChild(line);
+            if (hit.rule === 'model') {
+                const reason = document.createElement('div');
+                reason.className = 'save-warn-reason';
+                row.appendChild(reason);
+                loadSaveWarnReason(warn, hit, reason);
+            }
         }
         const dismiss = document.createElement('button');
         dismiss.type = 'button';
@@ -1766,6 +1832,7 @@
                     // the text it was raised on no longer stands.
                     setSaveWarn(savedIdx, result.check || null);
                     toastSaveCheck(result.check);
+                    watchSaveCheckJob(result.check_job, result.check);
                     showRealignButton();
                     closeSheet();
                 } else {
@@ -2770,8 +2837,9 @@
                 closeSheet();
                 // The reload brings the warning back on whichever sentence the
                 // realign left the flagged text in.
-                loadAndRender(scrollAnchor);
+                const reloaded = loadAndRender(scrollAnchor);
                 toastSaveCheck(body.check);
+                watchSaveCheckJob(body.check_job, body.check, reloaded);
             })
             .catch(err => {
                 showRetransError((i.network_error || 'Network error: ') + err.message);
