@@ -15,7 +15,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from flask import Flask, jsonify, make_response, redirect, render_template, request, send_from_directory
 
@@ -1276,11 +1276,23 @@ def reader_chapters(project_id):
         except (json.JSONDecodeError, OSError):
             continue
 
+    # The reader's own deep link, the one search results use. `near=1` asks it
+    # to fall back on the sentence number when the text is found nowhere.
+    bookmark = _load_bookmark(project_dir)
+    bookmark_href = None
+    if bookmark:
+        bookmark_href = f"/read/{project_id}/{bookmark['chapter_id']}?" + urlencode({
+            "anchor": bookmark["anchor"],
+            "esi": bookmark["es_idx"],
+            "hl": 1,
+            "near": 1,
+        })
+
     return render_template(
         "reader.html", mode="chapters",
         project_id=project_id, project_title=_project_title(project_id),
         project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
-        chapters=chapters,
+        chapters=chapters, bookmark_href=bookmark_href,
         has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
         review_types=list(REVIEW_TYPES),
         review_types_selected=_get_review_types(),
@@ -3009,6 +3021,104 @@ def unmark_reviewed(project_id, chapter):
         json.dumps(reviewed, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return jsonify({"unmarked": True})
+
+
+# How much of the sentence a bookmark keeps. The same 60 characters the
+# recommendations deep link carries in `?anchor=` (search carries 80).
+_BOOKMARK_ANCHOR_CHARS = 60
+
+
+def _load_bookmark(project_dir: Path) -> Optional[dict]:
+    """Load bookmark.json → the book's one bookmark, or ``None``.
+
+    ``{"chapter_id", "es_idx", "anchor", "timestamp"}``. ``es_idx`` is a
+    position and a realign renumbers it, so ``anchor`` — the sentence's opening
+    text — is what finds the sentence again; the number is the fallback when
+    the text is gone too.
+
+    ``None`` as well when the chapter it names has no alignment any more: a
+    re-split can retire a chapter id, and a bookmark into one is a dead link.
+    """
+    p = project_dir / "bookmark.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    chapter_id = data.get("chapter_id")
+    es_idx = data.get("es_idx")
+    if not isinstance(chapter_id, str) or not _safe_id(chapter_id):
+        return None
+    if isinstance(es_idx, bool) or not isinstance(es_idx, int):
+        return None
+    if not (project_dir / "alignments" / f"{chapter_id}.json").exists():
+        return None
+    anchor = data.get("anchor")
+    return {
+        "chapter_id": chapter_id,
+        "es_idx": es_idx,
+        "anchor": anchor if isinstance(anchor, str) else "",
+        "timestamp": data.get("timestamp"),
+    }
+
+
+@app.route("/api/bookmark/<project_id>", methods=["GET"])
+def get_bookmark(project_id):
+    """The book's bookmark, or null."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    return jsonify({"bookmark": _load_bookmark(_resolve_project_dir(project_id))})
+
+
+@app.route("/api/bookmark/<project_id>", methods=["POST"])
+def set_bookmark(project_id):
+    """Bookmark one sentence. A book has one bookmark, so this replaces it.
+
+    Body: ``{"chapter_id": ..., "es_idx": ..., "anchor": "<sentence opening>"}``.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.is_dir():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        data = {}
+    chapter_id = data.get("chapter_id")
+    es_idx = data.get("es_idx")
+    anchor = data.get("anchor", "")
+    if not isinstance(chapter_id, str) or not _safe_id(chapter_id):
+        return jsonify({"error": "Invalid chapter_id"}), 400
+    if isinstance(es_idx, bool) or not isinstance(es_idx, int) or es_idx < 0:
+        return jsonify({"error": "es_idx must be a non-negative integer"}), 400
+    if not isinstance(anchor, str):
+        return jsonify({"error": "anchor must be a string"}), 400
+    if not (project_dir / "alignments" / f"{chapter_id}.json").exists():
+        return jsonify({"error": "Chapter not found"}), 404
+
+    bookmark = {
+        "chapter_id": chapter_id,
+        "es_idx": es_idx,
+        "anchor": anchor[:_BOOKMARK_ANCHOR_CHARS],
+        "timestamp": datetime.now().isoformat(),
+    }
+    (project_dir / "bookmark.json").write_text(
+        json.dumps(bookmark, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return jsonify({"ok": True, "bookmark": bookmark})
+
+
+@app.route("/api/bookmark/<project_id>", methods=["DELETE"])
+def clear_bookmark(project_id):
+    """Clear the book's bookmark. Clearing one that is not there is fine."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    (_resolve_project_dir(project_id) / "bookmark.json").unlink(missing_ok=True)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/apply-corrections/<project_id>", methods=["POST"])

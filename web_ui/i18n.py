@@ -30,6 +30,9 @@ STRINGS = {
         "filter_categories_label": "Flag types",
         # Project card overflow menu
         "card_menu_label": "More actions",
+        # Chapter list: jump to the book's bookmark. Screen readers only — the
+        # button is an icon with no visible text.
+        "bookmark_goto": "Go to bookmark",
         "archive_action": "Archive",
         "unarchive_action": "Unarchive",
         "archive_error": "Could not update archive status.",
@@ -546,6 +549,9 @@ STRINGS = {
                 "aria_fav_add": "Add to favorites",
                 "aria_fav_remove": "Remove from favorites",
                 "fav_failed": "Could not save",
+                # The book's one bookmark, set or cleared on the open sentence.
+                "aria_bookmark_add": "Bookmark this sentence",
+                "aria_bookmark_remove": "Remove bookmark",
 
                 # Reference documents (⋮ menu): the style guide, glossary and
                 # address map a line was translated under, readable without
@@ -600,6 +606,7 @@ STRINGS = {
         "filter_categories_label": "Tipos de marcas",
         # Project card overflow menu
         "card_menu_label": "Más acciones",
+        "bookmark_goto": "Ir al marcador",
         "archive_action": "Archivar",
         "unarchive_action": "Desarchivar",
         "archive_error": "No se pudo actualizar el estado de archivo.",
@@ -1060,6 +1067,8 @@ STRINGS = {
                 "aria_fav_add": "Añadir a favoritos",
                 "aria_fav_remove": "Quitar de favoritos",
                 "fav_failed": "No se pudo guardar",
+                "aria_bookmark_add": "Marcar esta oración",
+                "aria_bookmark_remove": "Quitar el marcador",
 
                 # Documentos de referencia (menú ⋮).
                 "aria_ref_menu": "Documentos de referencia",

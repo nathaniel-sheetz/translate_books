@@ -1612,6 +1612,20 @@ body {
     gap: 6px;
 }
 
+/* Bookmark + ⋮ beside the book title. Pushed to the row's far end so the menu's
+   right-anchored popup opens inward however short the title is. */
+.chapter-title-actions {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: 2px;
+    margin-left: auto;
+}
+
+.bookmark-goto {
+    color: var(--accent);
+}
+
 .review-topbar-group {
     position: relative;
     display: flex;

@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.70.0.0] - 2026-10-10
+
+### Added
+- **A book can be bookmarked in the reader.** Left of the `⋮` in the sentence sheet sits a bookmark button: tapping it makes the open sentence the book's bookmark, tapping it again clears it. A book has one bookmark, so setting it on another sentence moves it.
+- **The chapter list opens the book at its bookmark.** While one exists, `/read/<id>` shows a go-to-bookmark icon beside the title that opens the chapter on that sentence and highlights it.
+- **The bookmark finds its sentence again after a realign.** It keeps the sentence's first 60 characters as well as its number, and the text decides. When the text is found nowhere the reader lands on the stored number, or the closest row before it, rather than at the top of the chapter. A correction saved on the bookmarked sentence re-sends it so the stored text follows the new wording.
+- **`/api/bookmark/<id>`** reads (GET), sets (POST `{chapter_id, es_idx, anchor}`) and clears (DELETE) it. It is stored in `projects/<id>/bookmark.json`, rewritten whole on a set and deleted on a clear. A bookmark into a chapter that no longer has an alignment reads as none.
+- A set or clear made offline goes to the reader's retry queue, like its other writes.
+
+### Changed
+- **The chapter list's title row has a `⋮` menu.** Recommendations, Images and the Dashboard were loose icons beside the title; they are labelled links in a menu now, the same one the home page hangs on each card.
+
+### Fixed (found in pre-ship review)
+- **A bookmark on a sentence that opens like others could land on the wrong one.** After a realign renumbered it, a bookmark on a short line such as "—No." went to the first sentence in the chapter opening that way. It takes the one closest to the stored number. Search and recommendations links are unchanged.
+- **Retranslate → Replace on the bookmarked sentence left the old wording in the bookmark.** It is re-sent after the reload, as a Save does.
+- **Two bookmark writes made offline replayed in no order.** A new one replaces the one still queued.
+- **A bookmark request whose body was JSON but not an object answered 500.** It is a 400.
+- **The reader could cut the stored text through the middle of a character** outside the basic plane, which the server could not save. It cuts by whole characters.
+
 ## [0.69.0.0] - 2026-10-09
 
 ### Added

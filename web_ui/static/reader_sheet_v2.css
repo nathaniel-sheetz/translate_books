@@ -164,6 +164,30 @@
 }
 .rv2-close:hover { color: var(--rv2-text); }
 
+/* ── Bookmark ────────────────────────────────────────────────────────────── */
+
+/* Mirrors .rv2-refmenu-btn's box, so the three header controls sit level. One
+   path, `fill` switched here, so the outline and the filled mark cannot drift
+   apart -- the same trick .rv2-fav uses for the heart. */
+.rv2-bookmark {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--rv2-muted2);
+  cursor: pointer;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -11px -4px -11px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+.rv2-bookmark svg { width: 18px; height: 18px; }
+.rv2-bookmark:hover { color: var(--rv2-text); }
+.rv2-bookmark[aria-pressed="true"] { color: var(--rv2-accent); }
+.rv2-bookmark[aria-pressed="true"] svg { fill: currentColor; }
+
 /* ── Reference documents: ⋮ menu + document viewer ───────────────────────── */
 
 .rv2-refmenu { position: relative; flex: none; }

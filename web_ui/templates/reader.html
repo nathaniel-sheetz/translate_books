@@ -16,10 +16,10 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=9">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=10">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=22">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=23">
     {% endif %}
 </head>
 <body>
@@ -316,37 +316,69 @@
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
         <h1 style="margin:0;">{% if lang == 'es' and project_spanish_title %}{{ project_spanish_title }}{% else %}{{ project_title or project_id }}{% endif %}</h1>
-        {#- Sits with the dashboard cog rather than in the Review-mode group:
-            Review mode paints findings onto the prose you are reading, and this
-            is the opposite reading — every model opinion about the book at once,
-            with none of it actionable. -#}
-        <a href="/recommendations/{{ project_id }}" class="topbar-icon-btn"
-           title="{{ t.rec_link }}" aria-label="{{ t.rec_link }}">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-                <path d="M9 7h7"/>
-                <path d="M9 11h5"/>
-            </svg>
-        </a>
-        {#- The book's pictures, on the board the image pass works from. -#}
-        <a href="/image-pass/{{ project_id }}" class="topbar-icon-btn"
-           title="{{ t.imgboard_link }}" aria-label="{{ t.imgboard_link }}">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="3" y="4" width="18" height="16" rx="2"/>
-                <circle cx="8.5" cy="9.5" r="1.5"/>
-                <path d="M21 16l-5-5L5 20"/>
-            </svg>
-        </a>
-        <a href="/project/{{ project_id }}" class="topbar-icon-btn" title="{{ t.dashboard_btn }}" aria-label="{{ t.dashboard_btn }}">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-        </a>
+        <div class="chapter-title-actions">
+            {#- Icon only, by request: the arrow is what tells it apart from the
+                sentence drawer's bookmark, which sets the mark rather than
+                following it. -#}
+            {% if bookmark_href %}
+            <a href="{{ bookmark_href }}" class="topbar-icon-btn bookmark-goto"
+               aria-label="{{ t.bookmark_goto }}">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                    <path d="M9 9.5h6"/>
+                    <path d="M12.5 7l2.5 2.5-2.5 2.5"/>
+                </svg>
+            </a>
+            {% endif %}
+            {#- Everywhere else this book can be looked at, in the same ⋮ menu
+                the home page hangs on each card. -#}
+            <div class="card-menu" id="chapter-menu">
+                <button class="topbar-icon-btn card-menu-btn" id="chapter-menu-btn" type="button"
+                        title="{{ t.card_menu_label }}" aria-label="{{ t.card_menu_label }}"
+                        aria-haspopup="true" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                        <circle cx="12" cy="5" r="2"/>
+                        <circle cx="12" cy="12" r="2"/>
+                        <circle cx="12" cy="19" r="2"/>
+                    </svg>
+                </button>
+                <div class="card-menu-popup" id="chapter-menu-popup" hidden>
+                    {#- Not in the Review-mode group: Review mode paints findings
+                        onto the prose you are reading, and this is the opposite
+                        reading — every model opinion about the book at once,
+                        with none of it actionable. -#}
+                    <a class="card-menu-item" href="/recommendations/{{ project_id }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                            <path d="M9 7h7"/>
+                            <path d="M9 11h5"/>
+                        </svg>
+                        <span>{{ t.rec_link }}</span>
+                    </a>
+                    {#- The book's pictures, on the board the image pass works from. -#}
+                    <a class="card-menu-item" href="/image-pass/{{ project_id }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <rect x="3" y="4" width="18" height="16" rx="2"/>
+                            <circle cx="8.5" cy="9.5" r="1.5"/>
+                            <path d="M21 16l-5-5L5 20"/>
+                        </svg>
+                        <span>{{ t.imgboard_link }}</span>
+                    </a>
+                    <a class="card-menu-item" href="/project/{{ project_id }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                        </svg>
+                        <span>{{ t.dashboard_btn }}</span>
+                    </a>
+                </div>
+            </div>
+        </div>
     </div>
     {% if has_corrections %}
     <div class="chapter-banner banner-warn" id="corrections-banner">
@@ -434,7 +466,7 @@
     flag_one: {{ t.chip_flag_one | tojson }},
     flag_many: {{ t.chip_flags | tojson }}
 };</script>
-<script src="{{ url_for('static', filename='reader_chapters.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='reader_chapters.js') }}?v=2"></script>
 
 {% elif mode == "read" %}
 <!-- Reader view -->
@@ -602,6 +634,12 @@
           <div class="rv2-src-row">
             <span class="rv2-kicker" id="rv2-src-kicker">{{ t.js.v2.source_label }}</span>
             <span class="rv2-spacer"></span>
+            <!-- The book's one bookmark. Pressed when this sentence holds it;
+                 the label and aria-pressed are painted by reader_sheet_v2.js. -->
+            <button class="rv2-bookmark" id="rv2-bookmark" type="button"
+                    aria-label="{{ t.js.v2.aria_bookmark_add }}" aria-pressed="false">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5h9a1 1 0 0 1 1 1v12.5L10 13.5 4.5 17V4.5a1 1 0 0 1 1-1z"/></svg>
+            </button>
             <!-- Reference documents. A VERTICAL ellipsis on purpose: the
                  "Other" annotation type already uses a horizontal one, and two
                  horizontal ellipses in one sheet read as the same control. -->
@@ -861,10 +899,10 @@
 <script>window.REVIEW_TYPES = {{ review_types | tojson }};
 window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};
 window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=36"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=37"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
-<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=13"></script>
+<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=14"></script>
 {% endif %}
 
 {% elif mode == "not_found" %}

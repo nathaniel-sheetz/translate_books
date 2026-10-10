@@ -24,6 +24,42 @@
         });
     })();
 
+    /* ── Book ⋮ menu (recommendations, images, dashboard) ──
+     *
+     * The home page's card menu, one per page here. reader_projects.js's
+     * bindPopup is not loaded on this page, so the open/close is spelled out
+     * the same way the review picker below does it.
+     */
+    (function () {
+        var menu = document.getElementById('chapter-menu');
+        var btn = document.getElementById('chapter-menu-btn');
+        var popup = document.getElementById('chapter-menu-popup');
+        if (!menu || !btn || !popup) return;
+
+        var open = false;
+
+        function setOpen(next) {
+            open = next;
+            popup.hidden = !next;
+            btn.setAttribute('aria-expanded', next ? 'true' : 'false');
+            btn.classList.toggle('popup-open', next);
+        }
+
+        btn.addEventListener('click', function () {
+            setOpen(!open);
+        });
+
+        // Capture: the review buttons stop propagation, and a click on one of
+        // them should still close this menu.
+        document.addEventListener('click', function (e) {
+            if (open && !menu.contains(e.target)) setOpen(false);
+        }, true);
+
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && open) setOpen(false);
+        });
+    })();
+
     /* ── Review mode selection ──
      *
      * The on/off switch is a per-book reading preference and stays in localStorage;
