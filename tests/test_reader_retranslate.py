@@ -196,6 +196,34 @@ def project_with_triple_translation(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture
+def mixed_catalog(monkeypatch):
+    """An API, a headless and a local provider, with only Gemma loaded."""
+    from src import api_translator, llm_mechanisms, local_llm
+
+    monkeypatch.setattr(api_translator, "_LLM_CONFIG_CACHE", {
+        "default_provider": "anthropic",
+        "default_model": "claude-sonnet-5",
+        "providers": [
+            {"id": "anthropic", "name": "Anthropic", "type": "anthropic",
+             "api_key_env_var": "ANTHROPIC_API_KEY",
+             "models": [{"id": "claude-sonnet-5", "name": "Claude Sonnet 5",
+                         "pricing": {"input": 2.0, "output": 10.0}}]},
+            {"id": "claude-headless", "name": "Claude Code", "type": "headless", "cli": "claude",
+             "models": [{"id": "claude-sonnet-5-5", "name": "Sonnet 5.5 (headless)",
+                         "effort": "medium"}]},
+            {"id": "local", "name": "Local", "type": "local",
+             "base_url": "http://box:8080/v1", "api_key_env_var": "LOCAL_LLM_KEY",
+             "models": [{"id": "gemma-4-31b", "name": "Gemma 4 31B (local)"},
+                        {"id": "qwen3.8-27b", "name": "Qwen 3.8 27B (local)"}]},
+        ],
+    })
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("LOCAL_LLM_KEY", "k")
+    monkeypatch.setattr(llm_mechanisms, "cli_binary_present", lambda cli: True)
+    monkeypatch.setattr(local_llm, "loaded_models", lambda provider, **k: ["gemma-4-31b"])
+
+
 # -------- /api/sentence/retranslate --------
 
 class TestRetranslateEndpoint:
@@ -347,6 +375,166 @@ class TestRetranslateEndpoint:
         assert data["ok"] is True
         assert data["new_translation"] == "El felino se sentó."
         assert data["provider"] == "anthropic"
+        assert data["mechanism"] == "api"
+
+    def test_provider_and_book_reach_the_retranslator(
+        self, client, project_with_style_guide, mixed_catalog, monkeypatch
+    ):
+        """The picker names the provider: one model id can sit under two of them."""
+        from src import retranslator
+        from src.models import RetranslationResult
+
+        seen = {}
+
+        def fake(source_text, **kw):
+            seen.update(kw)
+            return RetranslationResult(
+                new_translation="El felino se sentó.",
+                model="claude-sonnet-5-5",
+                provider="claude-headless",
+                prompt_tokens=4100,
+                completion_tokens=8,
+                cost_usd=0.0,
+                raw_response="El felino se sentó.",
+                mechanism="headless",
+            )
+
+        monkeypatch.setattr(retranslator, "retranslate_sentence", fake)
+
+        rv = client.post("/api/sentence/retranslate", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "source_text": "The cat sat.",
+            "model": "claude-sonnet-5-5",
+            "provider": "claude-headless",
+        })
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["mechanism"] == "headless"
+        assert data["provider"] == "claude-headless"
+        assert data["cost_usd"] == 0
+        assert seen["provider"] == "claude-headless"
+        assert seen["model"] == "claude-sonnet-5-5"
+        assert seen["project_dir"].name == "test-project"
+
+    def test_a_local_model_that_is_not_loaded_returns_409(
+        self, client, project_with_style_guide, mixed_catalog, monkeypatch
+    ):
+        from src import retranslator
+        from src.llm_mechanisms import MechanismUnavailable
+
+        def boom(*a, **kw):
+            raise MechanismUnavailable(
+                "qwen3.8-27b is not loaded on the local server (loaded: gemma-4-31b)"
+            )
+
+        monkeypatch.setattr(retranslator, "retranslate_sentence", boom)
+
+        rv = client.post("/api/sentence/retranslate", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "source_text": "The cat sat.",
+            "model": "qwen3.8-27b",
+            "provider": "local",
+        })
+        assert rv.status_code == 409
+        assert rv.get_json()["error"] == (
+            "qwen3.8-27b is not loaded on the local server (loaded: gemma-4-31b)"
+        )
+
+    def test_a_failed_headless_call_returns_502_with_the_clis_message(
+        self, client, project_with_style_guide, mixed_catalog, monkeypatch
+    ):
+        from src import retranslator
+        from src.llm_mechanisms import MechanismError
+
+        def boom(*a, **kw):
+            raise MechanismError("subscription preflight failed: claude is not logged in")
+
+        monkeypatch.setattr(retranslator, "retranslate_sentence", boom)
+
+        rv = client.post("/api/sentence/retranslate", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "source_text": "The cat sat.",
+            "model": "claude-sonnet-5-5",
+            "provider": "claude-headless",
+        })
+        assert rv.status_code == 502
+        assert "claude is not logged in" in rv.get_json()["error"]
+
+    @pytest.mark.parametrize("provider", ["claude-headless", "local"])
+    def test_a_model_the_provider_does_not_list_never_reaches_a_cli_or_the_server(
+        self, client, project_with_style_guide, mixed_catalog, monkeypatch, provider
+    ):
+        """The id in a request would become `--model` argv."""
+        from src import retranslator
+
+        called = []
+        monkeypatch.setattr(retranslator, "retranslate_sentence", lambda *a, **kw: called.append(kw))
+
+        rv = client.post("/api/sentence/retranslate", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "source_text": "The cat sat.",
+            "model": 'claude-opus-9"&calc&"',
+            "provider": provider,
+        })
+        assert rv.status_code == 400
+        assert f"not listed under provider '{provider}'" in rv.get_json()["error"]
+        assert called == []
+
+    def test_an_api_provider_still_takes_a_model_the_catalog_does_not_list(
+        self, client, project_with_style_guide, mixed_catalog, monkeypatch
+    ):
+        from src import retranslator
+        from src.models import RetranslationResult
+
+        seen = {}
+
+        def fake(source_text, **kw):
+            seen.update(kw)
+            return RetranslationResult(
+                new_translation="El felino se sentó.",
+                model="claude-opus-9",
+                provider="anthropic",
+                prompt_tokens=120,
+                completion_tokens=8,
+                cost_usd=0.001,
+                raw_response="El felino se sentó.",
+            )
+
+        monkeypatch.setattr(retranslator, "retranslate_sentence", fake)
+
+        rv = client.post("/api/sentence/retranslate", json={
+            "project_id": "test-project",
+            "chapter_id": "chapter_01",
+            "chunk_id": "chapter_01_chunk_000",
+            "source_text": "The cat sat.",
+            "model": "claude-opus-9",
+            "provider": "anthropic",
+        })
+        assert rv.status_code == 200
+        assert seen["model"] == "claude-opus-9"
+
+
+class TestRetranslateStrings:
+    def test_the_picker_and_cost_lines_exist_in_both_languages(self):
+        """A string missing from one language shows its raw key in the picker."""
+        from web_ui.i18n import STRINGS
+
+        keys = {lang: {k for k in STRINGS[lang]["js"] if k.startswith("retranslate_")}
+                for lang in ("en", "es")}
+        assert keys["en"] == keys["es"]
+        assert {"retranslate_cost_headless", "retranslate_cost_local",
+                "retranslate_unavail_no_key", "retranslate_unavail_cli_missing",
+                "retranslate_unavail_server_down", "retranslate_unavail_not_loaded"} <= keys["es"]
+        assert STRINGS["es"]["js"]["retranslate_unavail_not_loaded"] != \
+            STRINGS["en"]["js"]["retranslate_unavail_not_loaded"]
 
 
 # -------- /api/sentence/replace --------
@@ -652,6 +840,26 @@ class TestLLMModelsEndpoint:
         assert "models" in data
         assert "default_model" in data
         assert isinstance(data["models"], list)
+
+    def test_lists_every_mechanism_with_what_can_be_chosen_now(self, client, mixed_catalog):
+        data = client.get("/api/llm/models").get_json()
+        assert data["default_model"] == "claude-sonnet-5"
+        rows = {(m["provider"], m["id"]): m for m in data["models"]}
+        assert {k: (m["mechanism"], m["available"], m["unavailable_reason"]) for k, m in rows.items()} == {
+            ("anthropic", "claude-sonnet-5"): ("api", True, None),
+            ("claude-headless", "claude-sonnet-5-5"): ("headless", True, None),
+            ("local", "gemma-4-31b"): ("local", True, None),
+            ("local", "qwen3.8-27b"): ("local", False, "not_loaded"),
+        }
+        assert rows[("anthropic", "claude-sonnet-5")]["is_default"] is True
+        assert rows[("local", "gemma-4-31b")]["name"] == "Gemma 4 31B (local)"
+
+    def test_the_dashboard_config_lists_api_providers_only(self, client, mixed_catalog):
+        """Its dropdowns call ``call_llm``, which cannot reach a CLI or the local server."""
+        data = client.get("/api/llm-config").get_json()
+        assert [p["id"] for p in data["providers"]] == ["anthropic"]
+        assert data["providers"][0]["available"] is True
+        assert "api_key_env_var" not in data["providers"][0]
 
 
 # -------- _attach_text_in_chunk enricher --------

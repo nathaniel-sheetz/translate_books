@@ -604,12 +604,15 @@ def api_llm_config():
     """Return the LLM provider/model config for the frontend.
 
     Strips ``api_key_env_var`` for security and adds an ``available``
-    flag per provider indicating whether the API key is set.
+    flag per provider indicating whether the API key is set. API providers
+    only: the screens fed from here call ``call_llm``, which does not reach a
+    headless or local entry (``/api/llm/models`` lists those).
     """
     import os, copy
-    from src.api_translator import load_llm_config, model_supports_thinking
+    from src.api_translator import is_api_provider, load_llm_config, model_supports_thinking
 
     config = copy.deepcopy(load_llm_config())
+    config["providers"] = [p for p in config.get("providers", []) if is_api_provider(p)]
     for provider in config.get("providers", []):
         env_var = provider.pop("api_key_env_var", None)
         provider["available"] = bool(os.getenv(env_var)) if env_var else False
@@ -3655,21 +3658,17 @@ def remove_text():
 
 @app.route("/api/llm/models")
 def llm_models():
-    """Return the model picker payload for the reader's retranslate UI."""
+    """Return the model picker payload for the reader's retranslate UI.
+
+    Every mechanism: API, headless CLI and the local server. Each row carries
+    ``available`` and, when it cannot be chosen now, ``unavailable_reason``.
+    """
     from src.api_translator import load_llm_config
-    config = load_llm_config()
-    default_model = config.get("default_model")
-    models: list[dict] = []
-    for provider in config.get("providers", []):
-        for m in provider.get("models", []):
-            models.append({
-                "id": m["id"],
-                "name": m.get("name", m["id"]),
-                "provider": provider["id"],
-                "pricing": m.get("pricing", {}),
-                "is_default": m["id"] == default_model,
-            })
-    return jsonify({"models": models, "default_model": default_model})
+    from src.llm_mechanisms import list_models
+    return jsonify({
+        "models": list_models(),
+        "default_model": load_llm_config().get("default_model"),
+    })
 
 
 def _validate_chunk_request(project_id: str, chapter_id: str, chunk_id: str):
@@ -3719,6 +3718,7 @@ def _check_chunk_mtime(chunk_path: Path, expected_mtime) -> Optional[tuple]:
 @app.route("/api/sentence/retranslate", methods=["POST"])
 def sentence_retranslate():
     """Generate a fresh translation for a user-confirmed source span."""
+    from src.llm_mechanisms import MechanismError, MechanismUnavailable, check_request_model
     from src.retranslator import retranslate_sentence, RetranslationError
 
     data = request.json or {}
@@ -3763,6 +3763,8 @@ def sentence_retranslate():
     style_arg = style_path if style_path.exists() else None
 
     try:
+        if provider is not None:
+            check_request_model(provider, model)
         result = retranslate_sentence(
             source_text,
             style_json_path=style_arg,
@@ -3770,8 +3772,15 @@ def sentence_retranslate():
             model=model,
             provider=provider,
             context_text=context_text,
+            project_dir=project_dir,
         )
     except RetranslationError as e:
+        return jsonify({"error": f"Retranslation failed: {e}"}), 502
+    except MechanismUnavailable as e:
+        # Nothing was sent: the local server is down or has another model loaded.
+        # A connection lost after the prompt went out is a MechanismError.
+        return jsonify({"error": str(e)}), 409
+    except MechanismError as e:
         return jsonify({"error": f"Retranslation failed: {e}"}), 502
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -3784,6 +3793,7 @@ def sentence_retranslate():
         "new_translation": result.new_translation,
         "model": result.model,
         "provider": result.provider,
+        "mechanism": result.mechanism,
         "prompt_tokens": result.prompt_tokens,
         "completion_tokens": result.completion_tokens,
         "cost_usd": result.cost_usd,

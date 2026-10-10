@@ -2081,6 +2081,7 @@ def run_headless_wave(
     warm_first: bool = True,
     cache: str = "auto",
     on_job_done: Callable[[dict[str, Any]], None] | None = None,
+    job_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave for the given jobs.
 
@@ -2139,6 +2140,11 @@ def run_headless_wave(
     the log and the callback can never disagree about what finished. A callback
     that raises is logged and swallowed: progress reporting must not be able to
     kill a wave that is spending real tokens.
+
+    ``job_timeout`` (seconds) replaces the per-CLI ceiling in
+    ``_CLI_JOB_TIMEOUT_S`` for every job of this wave. The ceilings are sized for
+    a chunk of prose; a caller with a person waiting on one short answer passes
+    something it can afford to wait out.
     """
     try:
         cli_name = _normalize_cli(cli)
@@ -2164,8 +2170,12 @@ def run_headless_wave(
             f"invalid cache mode {cache!r}; expected one of {sorted(CACHE_MODES)}"
         )
 
+    if job_timeout is not None and job_timeout <= 0:
+        return _error_result(f"invalid job_timeout {job_timeout!r}; must be > 0")
+
     cwd = neutral_claude_cwd()
-    job_timeout = _CLI_JOB_TIMEOUT_S.get(cli_name)
+    if job_timeout is None:
+        job_timeout = _CLI_JOB_TIMEOUT_S.get(cli_name)
     # Computed once, so the preflight probes the exact env the workers get.
     # Cache TTL knobs are applied after the spf_tokens pass below — auth does
     # not read them, and the run() closure looks up wave_env by name at call

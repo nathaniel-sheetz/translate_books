@@ -988,6 +988,7 @@ class RetranslationResult(BaseModel):
     completion_tokens: int = Field(ge=0, description="Estimated output tokens")
     cost_usd: float = Field(ge=0.0, description="Estimated cost in USD")
     raw_response: str = Field(description="Unprocessed LLM response for replay/debugging")
+    mechanism: str = Field(default="api", description="How the model was reached: api, headless or local")
 
 
 class PipelineStage(str, Enum):

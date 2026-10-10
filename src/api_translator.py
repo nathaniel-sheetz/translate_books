@@ -163,8 +163,18 @@ def load_llm_config(*, force_reload: bool = False) -> dict:
     return _LLM_CONFIG_CACHE
 
 
+# Provider ``type``s that are not a metered API. ``call_llm`` does not reach
+# them; ``src/llm_mechanisms.py`` does.
+NON_API_PROVIDER_TYPES = ("headless", "local")
+
+
+def is_api_provider(pconfig: dict) -> bool:
+    """Whether ``call_llm`` can dispatch to this provider entry."""
+    return pconfig.get("type") not in NON_API_PROVIDER_TYPES
+
+
 def provider_arg(value: str) -> str:
-    """argparse ``type=`` for ``--provider``: any provider id the config defines.
+    """argparse ``type=`` for ``--provider``: any API provider id the config defines.
 
     Replaces ``choices=["anthropic", "openai"]``, which rejected a provider that
     was perfectly valid in ``llm_config.json`` (DeepInfra, or any other
@@ -179,7 +189,9 @@ def provider_arg(value: str) -> str:
         providers = load_llm_config().get("providers", [])
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
-    known = [p["id"] for p in providers]
+    # A headless or local entry is not something `--provider` can run on: it
+    # would pass here and fail at the first call.
+    known = [p["id"] for p in providers if is_api_provider(p)]
     if value not in known:
         raise argparse.ArgumentTypeError(
             f"unknown provider {value!r}; llm_config.json defines: {', '.join(known)}"
@@ -292,10 +304,16 @@ def get_model_pricing(provider_id: str, model_id: str) -> dict:
     return _placeholder_pricing(provider_id, model_id)
 
 
-def resolve_provider_for_model(model_id: str) -> str:
-    """Return the provider ID that owns *model_id*, or raise ValueError."""
+def resolve_provider_for_model(model_id: str, *, api_only: bool = True) -> str:
+    """Return the provider ID that owns *model_id*, or raise ValueError.
+
+    API providers only unless ``api_only`` is false: most callers hand the
+    answer to ``call_llm``, which refuses a headless or local provider.
+    """
     config = load_llm_config()
     for p in config["providers"]:
+        if api_only and not is_api_provider(p):
+            continue
         for m in p.get("models", []):
             if m["id"] == model_id:
                 return p["id"]
@@ -305,10 +323,12 @@ def resolve_provider_for_model(model_id: str) -> str:
 
 
 def get_pricing_table() -> dict:
-    """Build and return a ``PRICING_TABLE``-shaped dict from config."""
+    """Build and return a ``PRICING_TABLE``-shaped dict from config, API providers only."""
     config = load_llm_config()
     table: dict = {}
     for p in config["providers"]:
+        if not is_api_provider(p):
+            continue
         table[p["id"]] = {}
         for m in p.get("models", []):
             table[p["id"]][m["id"]] = m.get("pricing") or dict(_PLACEHOLDER_PRICING)
@@ -1084,6 +1104,11 @@ def _dispatch_llm_call(
     """Low-level dispatcher — routes a single LLM call to the right SDK."""
     pconfig = get_provider_config(provider)
     ptype = pconfig.get("type", provider)
+    if not is_api_provider(pconfig):
+        raise ValueError(
+            f"Provider '{provider}' is a {ptype} mechanism, not an API; "
+            f"call it through src.llm_mechanisms.complete"
+        )
     api_key = get_api_key(provider)
 
     t0 = time.time()

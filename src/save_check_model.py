@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Optional, Protocol
 
 from src import save_check
+from src.local_llm import loaded_ids
 from src.models import IgnoredTerms
 
 logger = logging.getLogger(__name__)
@@ -403,16 +404,7 @@ class LlamaServerBackend:
         )
         if resp.status_code != 200:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        ids = []
-        for entry in resp.json().get("data") or []:
-            # A router-mode server lists every model it could load. Naming one
-            # that is not in memory would load it and push out the one that is.
-            status = entry.get("status")
-            state = status.get("value") if isinstance(status, Mapping) else status
-            if state is not None and state != "loaded":
-                continue
-            if isinstance(entry.get("id"), str):
-                ids.append(entry["id"])
+        ids = loaded_ids(resp.json())
         with self._lock:
             self._loaded, self._loaded_at = ids, time.monotonic()
         return ids

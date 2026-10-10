@@ -511,6 +511,68 @@ def test_provider_arg_accepts_any_configured_provider(catalog):
         provider_arg("nonesuch")
 
 
+def test_provider_arg_rejects_a_headless_or_local_provider(catalog):
+    """They are in the catalog, but `--provider` runs on `call_llm`, which cannot reach them."""
+    import argparse
+
+    from src.api_translator import provider_arg
+
+    catalog["providers"] += [
+        {"id": "claude-headless", "type": "headless", "cli": "claude", "models": []},
+        {"id": "local", "type": "local", "base_url": "http://box:8080/v1", "models": []},
+    ]
+    for provider in ("claude-headless", "local"):
+        with pytest.raises(argparse.ArgumentTypeError, match="anthropic, deepinfra$"):
+            provider_arg(provider)
+    assert provider_arg("deepinfra") == "deepinfra"
+
+
+@pytest.mark.parametrize("provider, kind", [("claude-headless", "headless"), ("local", "local")])
+def test_call_llm_names_the_way_to_reach_a_non_api_provider(catalog, provider, kind):
+    """Not "Unknown provider type", and not a complaint about a missing API key."""
+    from src.api_translator import call_llm
+
+    catalog["providers"] += [
+        {"id": "claude-headless", "type": "headless", "cli": "claude", "models": []},
+        {"id": "local", "type": "local", "base_url": "http://box:8080/v1", "models": []},
+    ]
+    with pytest.raises(ValueError, match=f"is a {kind} mechanism.*llm_mechanisms.complete"):
+        call_llm("p", provider=provider, model="m")
+
+
+def test_resolve_provider_for_model_answers_with_an_api_provider(catalog):
+    """Its callers hand the answer to `call_llm`, which refuses the other two."""
+    from src.api_translator import resolve_provider_for_model
+
+    catalog["providers"] = [
+        {"id": "claude-headless", "type": "headless", "cli": "claude",
+         "models": [{"id": "claude-sonnet-5"}, {"id": "claude-sonnet-5-5"}]},
+        *catalog["providers"],
+    ]
+    # Listed under both, and the headless provider comes first in the file.
+    assert resolve_provider_for_model("claude-sonnet-5") == "anthropic"
+    # Listed under the headless provider only: the caller's own fallback applies.
+    with pytest.raises(ValueError, match="not found in any provider"):
+        resolve_provider_for_model("claude-sonnet-5-5")
+    assert resolve_provider_for_model("claude-sonnet-5-5", api_only=False) == "claude-headless"
+
+
+def test_the_pricing_table_lists_api_providers_only(catalog):
+    """A subscription CLI and the local server have no rate to quote."""
+    from src.api_translator import get_pricing_table
+
+    catalog["providers"] += [
+        {"id": "claude-headless", "type": "headless", "cli": "claude",
+         "models": [{"id": "claude-sonnet-5-5"}]},
+        {"id": "local", "type": "local", "base_url": "http://box:8080/v1",
+         "models": [{"id": "gemma-4-31b"}]},
+    ]
+    assert get_pricing_table() == {
+        "anthropic": {"claude-sonnet-5": {"input": 2.0, "output": 10.0}},
+        "deepinfra": {},
+    }
+
+
 def test_no_provider_flag_parses_on_a_catalog_without_anthropic(monkeypatch):
     """argparse runs `type` over a string default, so `"anthropic"` failed every run."""
     import argparse
@@ -649,6 +711,32 @@ def test_the_tracked_example_config_is_loadable():
     provider_ids = {p["id"] for p in config["providers"]}
     assert config["default_provider"] in provider_ids
     assert all({"id", "type", "models"} <= set(p) for p in config["providers"])
+
+
+def test_the_tracked_example_config_describes_each_mechanism_fully():
+    """What `llm_mechanisms` reads off a provider entry has to be there."""
+    from src.api_translator import LLM_CONFIG_EXAMPLE_FILE, is_api_provider
+    from src.harness.headless import cli_binary
+
+    config = json.loads(LLM_CONFIG_EXAMPLE_FILE.read_text(encoding="utf-8"))
+    by_type: dict = {}
+    for provider in config["providers"]:
+        by_type.setdefault(provider["type"], []).append(provider)
+
+    assert {"headless", "local"} <= set(by_type)
+    for provider in by_type["headless"]:
+        assert cli_binary(provider["cli"]), provider["id"]
+        assert provider["models"]
+    for provider in by_type["local"]:
+        assert provider["base_url"].startswith("http")
+        assert provider["api_key_env_var"]
+    # The default has to be something `call_llm` can run.
+    default = next(p for p in config["providers"] if p["id"] == config["default_provider"])
+    assert is_api_provider(default)
+    assert config["default_model"] in {m["id"] for m in default["models"]}
+    for provider in config["providers"]:
+        if is_api_provider(provider):
+            assert all({"input", "output"} <= set(m["pricing"]) for m in provider["models"])
 
 
 def test_call_anthropic_api_omits_temperature_for_sonnet_5():

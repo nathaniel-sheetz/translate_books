@@ -548,7 +548,7 @@ scrub is invariant to import order, shell exports and CI injection.
    DEEPINFRA_API_KEY=...
    ```
 
-3. Start the server. The dashboard dropdowns will show all configured providers, with unavailable ones (missing API key) grayed out.
+3. Start the server. The dashboard dropdowns will show all configured API providers, with unavailable ones (missing API key) grayed out. The shipped catalog lists Anthropic and DeepInfra; add an `openai` entry (see *Adding a New Provider*) to use that key.
 
 ---
 
@@ -572,9 +572,9 @@ The file lives at the project root. It defines which providers and models are av
       "api_key_env_var": "ANTHROPIC_API_KEY",
       "models": [
         {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
-          "pricing": { "input": 3.00, "output": 15.00 }
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5",
+          "pricing": { "input": 2.00, "output": 10.00 }
         }
       ]
     }
@@ -590,12 +590,16 @@ The file lives at the project root. It defines which providers and models are av
 | `default_model` | Model ID pre-selected when the default provider is active |
 | `providers[].id` | Unique identifier (used in API calls and internally) |
 | `providers[].name` | Display name shown in the UI dropdown |
-| `providers[].type` | SDK routing: `"anthropic"` or `"openai-compatible"` |
+| `providers[].type` | How the provider is reached: `"anthropic"` or `"openai-compatible"` (APIs), `"headless"` or `"local"` (see *Provider Types*) |
+| `providers[].cli` | `headless` providers only: `"claude"` or `"cursor"` |
+| `providers[].timeout_seconds` | Optional. Seconds to wait on one request before calling it stuck |
 | `providers[].api_key_env_var` | Name of the environment variable holding the API key |
 | `providers[].base_url` | API endpoint URL. `null` for native OpenAI; a URL string for third-party endpoints |
 | `providers[].models[].id` | Model identifier passed to the API |
 | `providers[].models[].name` | Display name in the model dropdown |
-| `providers[].models[].pricing` | `{ "input": X, "output": Y }` per 1M tokens, used for cost estimates |
+| `providers[].models[].pricing` | `{ "input": X, "output": Y }` per 1M tokens, used for cost estimates. API providers only |
+| `providers[].models[].effort` | Optional, `headless` Claude models only: the `--effort` level |
+| `providers[].models[].aliases` | Optional, `local` models only: other names the server may serve the model under |
 | `providers[].models[].sampling_params` | Optional, `anthropic` providers only. `true` / `false`: whether the model accepts `temperature`. Overrides the guess the code makes from the id |
 | `providers[].models[].thinking` | Optional, `anthropic` providers only. `"always"` (cannot be turned off), `"optional"` (can be toggled) or `"none"` (takes no `thinking` param). Overrides the guess |
 
@@ -608,12 +612,37 @@ submitted, so declare the fields before batching a model the log warned about.
 
 ### Provider Types
 
-There are only two `type` values:
+Two `type` values are metered APIs, reached through `call_llm()`:
 
 - **`"anthropic"`** -- Uses the `anthropic` Python SDK (`client.messages.create`). Only Anthropic's own API uses this type.
 - **`"openai-compatible"`** -- Uses the `openai` Python SDK (`client.chat.completions.create`) with an optional `base_url`. This covers native OpenAI, DeepInfra, Together, Groq, Ollama, and any other service that implements the OpenAI chat completions protocol.
 
 When `base_url` is `null`, the OpenAI SDK uses its default endpoint (`https://api.openai.com/v1`). For third-party providers, set `base_url` to their API endpoint.
+
+Two more are not APIs. `call_llm()` refuses them, `--provider` does not accept them, and the dashboard dropdowns do not list them; a screen reaches them through `src/llm_mechanisms.py`. Today that is the reader's Retranslate ([`READER_RETRANSLATE.md`](READER_RETRANSLATE.md#model-flexibility)).
+
+- **`"headless"`** -- One subscription CLI process per call, through the same launcher as the harness waves (env scrub, login preflight). `cli` is `"claude"` or `"cursor"`. A model `id` is passed to the CLI's `--model` as written, so a Cursor id carries its effort (`grok-4.7-medium`); a Claude model may add `"effort"` (`low` | `medium` | `high` | `xhigh`), sent as `--effort`. Without it the CLI runs its own default, which is the high band. No pricing: the call bills the subscription.
+- **`"local"`** -- A `llama-server` on the LAN, at `base_url` (ending in `/v1`), with the bearer key in `api_key_env_var` (`LOCAL_LLM_KEY`). Only a model the server already has loaded is used; nothing here loads or swaps one. A model's `id` is the name it is served under, and `"aliases"` lists other names the same model may be served as. `timeout_seconds` bounds one answer (default 120).
+
+```json
+{ "id": "claude-headless", "name": "Claude Code (subscription)", "type": "headless", "cli": "claude",
+  "models": [ { "id": "claude-sonnet-5-5", "name": "Sonnet 5.5 (headless)", "effort": "medium" } ] },
+{ "id": "local", "name": "Local (llama-server)", "type": "local",
+  "base_url": "http://localhost:8080/v1", "api_key_env_var": "LOCAL_LLM_KEY", "timeout_seconds": 120,
+  "models": [ { "id": "gemma-4-31b", "name": "Gemma 4 31B (local)", "aliases": ["gemma31"] } ] }
+```
+
+#### Offering all three on another screen
+
+`src/llm_mechanisms.py` is the one place that knows there are three ways to reach a model:
+
+| Function | Purpose |
+|---|---|
+| `complete(prompt, provider=, model=, call_type=, usage_log=, headless_timeout_s=, ...)` | Sends the prompt by whichever mechanism the provider is and returns a `Completion` (`text`, `mechanism`, `model`, token counts, `cost_usd`). Raises `MechanismUnavailable` when a local model cannot be asked and `MechanismError` when a headless or local call fails. |
+| `list_models(mechanisms=("api", "headless", "local"))` | Picker rows for the catalog, each with `available` and `unavailable_reason`. Pass a subset to offer only some mechanisms. |
+| `mechanism_of(provider_config)` | `"api"`, `"headless"` or `"local"`. |
+
+A screen opts in by calling `complete` where it called `call_llm` and filling its picker from `list_models`. `usage_log` is where a headless call appends its usage row (`projects/<id>/.harness/<wave>/usage.jsonl`); `headless_timeout_s` replaces the launcher's 15- and 30-minute per-job ceilings, which are sized for a chunk of prose.
 
 ---
 
