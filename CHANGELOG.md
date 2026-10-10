@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.69.0.0] - 2026-10-09
+
+### Added
+- **Retranslate can run on a subscription CLI or on the local model server.** The reader's model picker lists every model in `llm_config.json`, whichever way it is reached: a metered API as before, one `claude -p` or `cursor-agent -p` process (provider `type` `headless`), or a `llama-server` on the LAN (`type` `local`). The cost line under the new translation reads `subscription` or `local` where there is no price.
+- **A model that cannot be chosen right now is listed greyed, with the reason:** no API key, CLI not installed, server not reachable, or not loaded. The list is fetched on every open, because which local model is loaded changes between opens.
+- **A local model is asked only if it is the one in memory.** The server is asked what it has loaded before every prompt. Anything else is refused with a 409 and nothing is sent, so the server is never made to load or swap a model. A catalog entry matches on its `id` or one of its `aliases`.
+- **A headless call goes through the same launcher as the harness waves,** so it keeps the credential scrub and the fail-closed login check. The job is stopped after 180 seconds and its usage row goes to `projects/<id>/.harness/retranslate/usage.jsonl`. A Claude entry may name an `effort`.
+- **`src/llm_mechanisms.py`** is the dispatch, and it is not specific to the reader: `complete()` sends one prompt by whichever mechanism the provider is, and `list_models()` builds the picker rows. `run_headless_wave` takes a `job_timeout`.
+- `scripts/_smoke_retranslate.py` takes `--provider` to try a headless or local entry.
+
+### Changed
+- **`llm_config.example.json` is shorter and shows all three mechanisms.** It lists Claude Sonnet 5, two DeepInfra models, a Claude and a Cursor headless provider and a local one. The `openai` entry is gone; add one to use that key.
+- **A headless or local provider is not offered where only an API works.** `call_llm` refuses one by name, `--provider` does not accept one, and the dashboard dropdowns and the cost table leave them out.
+- The save check and the retranslate path share one rule for which models a server has loaded.
+
+### Fixed (found in pre-ship review)
+- **A model id in a retranslate request went to the CLI's `--model` unchecked.** A request naming a headless or local provider is refused with a 400 unless the model is listed under it. An API provider still runs an unlisted id.
+- **An answer could land in another sentence's modal.** A call that outlived its modal filled in whichever one was open when it returned, with Replace enabled. It is dropped now.
+- **Retranslate could be clicked before the picker had loaded,** and then ran the metered default whatever the saved choice was. The button waits for the picker.
+- **A local answer that was all reasoning, or was cut off at `max_tokens`, was taken as a reply.** The first was asked for twice and then reported only as empty; the second came back as a whole translation. Both are errors that say what happened.
+- **A local server that dropped the connection mid-answer was reported as never having been asked.** It is a 502 now, not a 409.
+- **Looking up a model's provider could answer with a headless one,** which `compare_models.py` and the judges then could not call. They get API providers only.
+- **Something other than a model server answering on the local port emptied the whole picker.** It reads as the server being down.
+- **A headless provider with no `cli` ran Claude** while the picker called it missing. It is refused.
+- **The new picker and cost strings were missing in Spanish,** which showed their raw codes.
+- **Browsers kept the previous `reader.js`.** Its cache-buster is bumped.
+
 ## [0.68.0.0] - 2026-10-09
 
 ### Added
