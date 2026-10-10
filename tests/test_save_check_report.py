@@ -97,3 +97,60 @@ def test_a_warning_carried_forward_is_counted_once(tmp_path, monkeypatch, capsys
     assert "2 saves across 1 book(s), 1 warnings in 1 book(s)" in out
     listed = [line for line in out.splitlines() if "spelling:gatto" in line]
     assert [line.split()[0] for line in listed] == ["open"]
+
+
+def test_the_model_s_answers_are_counted_per_model(tmp_path, monkeypatch, capsys):
+    from src import save_check_model
+
+    project_dir = tmp_path / "a-book"
+    (project_dir / "alignments").mkdir(parents=True)
+    (project_dir / "alignments" / "chapter_01.json").write_text(
+        json.dumps({"alignments": _rows("El gato se sentaron.")}, ensure_ascii=False), encoding="utf-8",
+    )
+
+    def verdict(flagged, model="gemma-4-31b", threshold=7.5):
+        return save_check_model.Verdict(
+            flagged=flagged, model=model, profile=model, prompt="v1", backend="llama-server",
+            seconds=1.0, score=9.1 if flagged else -3.0, threshold=threshold)
+
+    for answer in (verdict(True), verdict(False), verdict(False), verdict(False, "qwen3.8-27b", 4.0)):
+        save_check_model.append_readout(project_dir, answer, chapter_id="chapter_01", es_idx=0)
+    save_check.append_warning(
+        project_dir, chapter_id="chapter_01", es_idx=0, path="reader", en="",
+        es_before="El gato se sentó.", es_after="El gato se sentaron.",
+        hits=[{"rule": "model", "text": "sentaron"}], model={"model": "gemma-4-31b", "score": 9.1},
+    )
+
+    monkeypatch.setattr(sys, "argv", ["save_check_report.py", "--projects-dir", str(tmp_path), "--list"])
+    assert report.main() == 0
+    out = capsys.readouterr().out
+    assert "model:sentaron  (gemma-4-31b +9.1)" in out
+    counted = {line.split()[0]: line.split()[1:] for line in out.splitlines()
+               if line.startswith(("gemma-4-31b", "qwen3.8-27b"))}
+    assert counted == {"gemma-4-31b": ["7.5", "3", "1", "33.3%", "1.00"],
+                       "qwen3.8-27b": ["4", "1", "0", "0.0%", "1.00"]}
+
+
+def test_a_model_that_has_flagged_nothing_is_still_reported(tmp_path, monkeypatch, capsys):
+    from src import save_check_model
+
+    monkeypatch.setattr(sys, "argv", ["save_check_report.py", "--projects-dir", str(tmp_path)])
+    assert report.main() == 0
+    assert "No save-check warnings have been logged." in capsys.readouterr().out
+
+    project_dir = tmp_path / "a-book"
+    project_dir.mkdir()
+    answer = save_check_model.Verdict(
+        flagged=False, model="gemma-4-31b", profile="gemma-4-31b", prompt="v1", backend="llama-server",
+        seconds=1.0, score=-3.0, threshold=7.5)
+    for _ in range(2):
+        save_check_model.append_readout(project_dir, answer, chapter_id="chapter_01", es_idx=0)
+    now = datetime.now().isoformat()
+    _write_rows(project_dir / "corrections.jsonl", [{"timestamp": now}, {"timestamp": now}])
+
+    assert report.main() == 0
+    out = capsys.readouterr().out
+    assert "No save-check warnings" not in out
+    assert "2 saves across 1 book(s), 0 warnings in 0 book(s)" in out
+    (row,) = [line.split()[1:] for line in out.splitlines() if line.startswith("gemma-4-31b")]
+    assert row == ["7.5", "2", "0", "0.0%", "1.00"]

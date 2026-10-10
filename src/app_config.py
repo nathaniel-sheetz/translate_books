@@ -107,6 +107,8 @@ def get_save_check_config() -> dict:
 
     ``enabled`` (default true) turns the save-time check off altogether;
     ``disabled_rules`` lists rule ids from ``src.save_check.RULES`` to silence.
+    ``model`` names the inference server the check's model layer asks
+    (``src.save_check_model.read_model_config``); absent, only the rules run.
     """
     cfg = load_app_config()
     val = cfg.get("save_check")

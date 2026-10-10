@@ -1188,6 +1188,11 @@ body {
     font-weight: 600;
 }
 
+.save-warn-reason {
+    flex: 1 1 100%;
+    color: var(--text);
+}
+
 .save-warn-btn {
     padding: 4px 10px;
     border: 1px solid var(--border-light);

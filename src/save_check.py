@@ -15,6 +15,9 @@ Nothing here blocks a save. :func:`check_write` returns hits, the caller logs
 them with :func:`append_warning`, and the reader shows them on the sentence
 until the slip is edited out, the warning is dismissed, or the word goes on the
 book's ignore list.
+
+The language model's verdict on the same Save arrives a moment later and is
+logged here as one more hit, ``model`` (``src/save_check_model.py``).
 """
 
 from __future__ import annotations
@@ -46,6 +49,9 @@ RULES = (
     "space_before_mark",
     "no_space_after_period",
     "repeated_word",
+    # Not a rule: the language model's verdict (src/save_check_model.py). It is
+    # listed so that disabled_rules can silence it like the rest.
+    "model",
 )
 
 _LETTERS = "A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
@@ -372,6 +378,12 @@ def append_outcome(project_dir: Path, warning_id: str, outcome: str, **fields) -
                           "timestamp": datetime.now().isoformat(), **fields})
 
 
+def append_reason(project_dir: Path, warning_id: str, reason: str) -> None:
+    """Record the model's one-line reason for a warning it raised."""
+    _append(project_dir, {"kind": "reason", "id": warning_id, "reason": reason,
+                          "timestamp": datetime.now().isoformat()})
+
+
 def _append(project_dir: Path, record: dict) -> None:
     with open(Path(project_dir) / LOG_NAME, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -379,11 +391,17 @@ def _append(project_dir: Path, record: dict) -> None:
 
 def load_log(project_dir: Path) -> tuple[list[dict], dict[str, dict]]:
     """``(warnings, outcome by warning id)`` from a book's log, oldest first."""
+    return load_records(project_dir)[:2]
+
+
+def load_records(project_dir: Path) -> tuple[list[dict], dict[str, dict], dict[str, str]]:
+    """:func:`load_log`, and the model's reason by warning id."""
     warnings: list[dict] = []
     outcomes: dict[str, dict] = {}
+    reasons: dict[str, str] = {}
     path = Path(project_dir) / LOG_NAME
     if not path.exists():
-        return warnings, outcomes
+        return warnings, outcomes, reasons
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -395,7 +413,9 @@ def load_log(project_dir: Path) -> tuple[list[dict], dict[str, dict]]:
             warnings.append(record)
         elif record.get("kind") == "outcome":
             outcomes[record.get("id")] = record
-    return warnings, outcomes
+        elif record.get("kind") == "reason":
+            reasons[record.get("id")] = record.get("reason") or ""
+    return warnings, outcomes, reasons
 
 
 def _has_word(word: str, text: str) -> bool:
@@ -456,6 +476,19 @@ def flagged_text_stands(warning: dict, rows: list[dict]) -> bool:
     return any(_has_word(w, r.get("es") or "") for w in _spelt(warning) for r in rows)
 
 
+def open_warning_on(project_dir: Path, chapter_id: str, text: str) -> Optional[dict]:
+    """The latest unanswered warning whose sentence is, or holds, ``text``."""
+    warnings, outcomes = load_log(project_dir)
+    gone = superseded(warnings, outcomes)
+    edited = [{"es": text}]
+    return next(
+        (w for w in reversed(warnings)
+         if w.get("chapter_id") == chapter_id and w.get("id") not in outcomes
+         and w.get("id") not in gone and standing_row(w, edited) is not None),
+        None,
+    )
+
+
 def carried_hits(
     project_dir: Path,
     chapter_id: str,
@@ -471,15 +504,7 @@ def carried_hits(
     the warning would close with the slip still in the book. Returns the hits
     and the id of the warning they come from, or ``([], None)``.
     """
-    warnings, outcomes = load_log(project_dir)
-    gone = superseded(warnings, outcomes)
-    edited = [{"es": before}]
-    prior = next(
-        (w for w in reversed(warnings)
-         if w.get("chapter_id") == chapter_id and w.get("id") not in outcomes
-         and w.get("id") not in gone and standing_row(w, edited) is not None),
-        None,
-    )
+    prior = open_warning_on(project_dir, chapter_id, before)
     if prior is None:
         return [], None
     off = set(disabled_rules)
@@ -513,9 +538,10 @@ def open_warnings(
     hits is neither on the ignore list nor of a rule since switched off. It is
     matched on text, so a realign moves it. An edit of the sentence closes it,
     and the Save that made the edit logs a new one for whatever the edit left
-    standing (:func:`carried_hits`). One per sentence, the latest.
+    standing (:func:`carried_hits`). One per sentence, the latest. A model hit
+    carries its ``reason`` once that has been asked for.
     """
-    warnings, outcomes = load_log(project_dir)
+    warnings, outcomes, reasons = load_records(project_dir)
     gone = superseded(warnings, outcomes)
     off = set(disabled_rules)
     by_idx: dict = {}
@@ -533,6 +559,9 @@ def open_warnings(
             and not (h.get("rule") == "spelling" and ignored is not None
                      and ignored.matches("dictionary", h.get("text")))
         ]
+        if warning["id"] in reasons:
+            hits = [{**h, "reason": reasons[warning["id"]]} if h.get("rule") == "model" else h
+                    for h in hits]
         if hits:
             by_idx[row.get("es_idx")] = {"id": warning["id"], "es_idx": row.get("es_idx"), "hits": hits}
     return list(by_idx.values())

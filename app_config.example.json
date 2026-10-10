@@ -42,6 +42,11 @@
   },
   "save_check": {
     "enabled": true,
-    "disabled_rules": []
+    "disabled_rules": [],
+    "model": {
+      "backend": "",
+      "url": "",
+      "profiles": []
+    }
   }
 }

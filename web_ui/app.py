@@ -2276,6 +2276,7 @@ def save_correction():
         # Before the alignment is patched, so the book's vocabulary does not
         # yet hold the sentence being saved.
         hits = _save_check_hits(project_dir, en_reference or "", original_es, corrected_es)
+        model_prior = _save_check_model_prior(project_dir, chapter_id, original_es)
 
         # 1. Append to corrections.jsonl
         corrections_path = project_dir / "corrections.jsonl"
@@ -2347,6 +2348,12 @@ def save_correction():
         )
         if check:
             response["check"] = check
+        check_job = _queue_model_check(
+            project_dir, chapter_id, es_idx, "reader",
+            en_reference or "", original_es, corrected_es, check, model_prior,
+        )
+        if check_job:
+            response["check_job"] = check_job
         return jsonify(response)
 
     except Exception as e:
@@ -2440,6 +2447,109 @@ def _log_save_check(
     except Exception:
         app.logger.exception("save check log failed")
         return None
+
+
+def _save_check_model():
+    """``(backend, disabled rule ids)`` for the model layer, or ``(None, ...)`` when it is off."""
+    from src import save_check_model
+    from src.app_config import get_save_check_config
+
+    enabled, disabled_rules = _save_check_settings()
+    if not enabled or save_check_model.RULE in disabled_rules:
+        return None, disabled_rules
+    config = save_check_model.read_model_config(get_save_check_config().get("model"))
+    return save_check_model.backend_for(config), disabled_rules
+
+
+def _save_check_model_prior(project_dir: Path, chapter_id: str, before: str) -> Optional[dict]:
+    """The open warning on the text about to be edited, if the model raised it.
+
+    Read before the write is logged: the rule layer's own warning for this Save
+    stands in for the earlier one from then on.
+    """
+    try:
+        from src import save_check, save_check_model
+
+        if _save_check_model()[0] is None:
+            return None
+        prior = save_check.open_warning_on(project_dir, chapter_id, before)
+        if prior and any(h.get("rule") == save_check_model.RULE for h in prior.get("hits", [])):
+            return prior
+    except Exception:
+        app.logger.exception("save check model lookup failed")
+    return None
+
+
+def _queue_model_check(
+    project_dir: Path,
+    chapter_id: str,
+    es_idx,
+    path: str,
+    en: str,
+    before: str,
+    after: str,
+    check: Optional[dict],
+    prior: Optional[dict],
+) -> Optional[str]:
+    """Hand a write that has landed to the model layer; the job's id, or ``None``.
+
+    The model answers behind the Save and the reader asks for the outcome with
+    the id. An edit that changed only punctuation is not sent, unless the
+    sentence carried a model warning that would otherwise close unread.
+    """
+    try:
+        from src import save_check_model
+
+        backend, disabled_rules = _save_check_model()
+        if backend is None or before == after:
+            return None
+        if save_check_model.punctuation_only(before, after) and prior is None:
+            return None
+        return save_check_model.jobs.submit(lambda: save_check_model.check_saved_write(
+            backend, project_dir,
+            chapter_id=chapter_id, es_idx=es_idx, path=path, en=en, before=before, after=after,
+            rule_warning_id=(check or {}).get("id"), prior=prior,
+            load_rows=lambda: _alignment_rows(project_dir, chapter_id),
+            ignored=load_project_ignored_terms(project_dir), disabled_rules=disabled_rules,
+        ))
+    except Exception:
+        app.logger.exception("save check model queue failed")
+        return None
+
+
+@app.route("/api/save-check/job/<job_id>")
+def get_save_check_job(job_id):
+    """Wait a few seconds for the model's verdict on one Save.
+
+    ``flagged`` means a warning was logged; the reader then re-reads the
+    chapter's warnings. ``done`` false means the model has not answered yet.
+    """
+    from src import save_check_model
+
+    if not _safe_id(job_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    done, result = save_check_model.jobs.wait(job_id, timeout=10)
+    return jsonify({"done": done, "flagged": bool(result)})
+
+
+@app.route("/api/save-check/reason/<project_id>/<warning_id>")
+def get_save_check_reason(project_id, warning_id):
+    """The model's one-line reason for a warning it raised, asked for once and kept."""
+    from src import save_check_model
+
+    if not _safe_id(project_id) or not _safe_id(warning_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": f"Project not found: {project_id}"}), 404
+    try:
+        reason = save_check_model.reason_for(_save_check_model()[0], project_dir, warning_id)
+    except Exception:
+        app.logger.exception("save check reason failed")
+        reason = ""
+    if reason is None:
+        return jsonify({"error": "Unknown warning"}), 404
+    return jsonify({"reason": reason})
 
 
 @app.route("/api/save-checks/<project_id>/<chapter>")
@@ -3790,6 +3900,7 @@ def sentence_replace():
     )
 
     hits = _save_check_hits(project_dir, en_reference, current_translation, new_translation)
+    model_prior = _save_check_model_prior(project_dir, chapter_id, current_translation)
 
     try:
         result = _apply_chunk_edits(project_dir, project_id, chapter_id, edits)
@@ -3800,6 +3911,10 @@ def sentence_replace():
     check = _log_save_check(
         project_dir, chapter_id, es_idx, "replace",
         en_reference, current_translation, new_translation, hits,
+    )
+    check_job = _queue_model_check(
+        project_dir, chapter_id, es_idx, "replace",
+        en_reference, current_translation, new_translation, check, model_prior,
     )
 
     # Audit log
@@ -3835,6 +3950,7 @@ def sentence_replace():
         "reanchor_failed": result.get("reanchor_failed", False),
         "corrections_purged": result["corrections_purged"],
         "check": check,
+        "check_job": check_job,
     })
 
 
