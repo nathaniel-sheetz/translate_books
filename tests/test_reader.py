@@ -405,6 +405,154 @@ class TestReaderChapterList:
         assert "<h1" in html and "English Title" not in html
 
 
+class TestBookmark:
+    """One bookmark per book: set from the sentence drawer, followed from the chapter list."""
+
+    MARK = {"chapter_id": "chapter_01", "es_idx": 1, "anchor": "El perro."}
+
+    def _goto_link(self, html):
+        """The chapter list's go-to-bookmark anchor tag, or None when there is none."""
+        if "bookmark-goto" not in html:
+            return None
+        return html.split('bookmark-goto"')[0].rsplit("<a ", 1)[1]
+
+    def test_no_bookmark_reads_as_null(self, client, project_with_alignment):
+        rv = client.get("/api/bookmark/test-project")
+        assert rv.status_code == 200
+        assert rv.get_json() == {"bookmark": None}
+
+    def test_set_then_read_back(self, client, project_with_alignment):
+        rv = client.post("/api/bookmark/test-project", json=self.MARK)
+        assert rv.status_code == 200
+
+        saved = client.get("/api/bookmark/test-project").get_json()["bookmark"]
+        assert {k: saved[k] for k in self.MARK} == self.MARK
+        on_disk = json.loads(
+            (project_with_alignment / "bookmark.json").read_text(encoding="utf-8"))
+        assert on_disk["es_idx"] == 1
+
+    def test_a_second_bookmark_replaces_the_first(self, client, project_with_alignment):
+        client.post("/api/bookmark/test-project", json=self.MARK)
+        client.post("/api/bookmark/test-project",
+                    json={"chapter_id": "chapter_01", "es_idx": 2, "anchor": "El pajaro."})
+
+        saved = client.get("/api/bookmark/test-project").get_json()["bookmark"]
+        assert saved["es_idx"] == 2
+        assert saved["anchor"] == "El pajaro."
+
+    def test_clear_removes_it_and_can_be_repeated(self, client, project_with_alignment):
+        client.post("/api/bookmark/test-project", json=self.MARK)
+
+        assert client.delete("/api/bookmark/test-project").status_code == 200
+        assert not (project_with_alignment / "bookmark.json").exists()
+        assert client.get("/api/bookmark/test-project").get_json() == {"bookmark": None}
+        # The reader's offline queue can replay a clear that already landed.
+        assert client.delete("/api/bookmark/test-project").status_code == 200
+
+    def test_anchor_is_cut_to_the_deep_link_length(self, client, project_with_alignment):
+        client.post("/api/bookmark/test-project",
+                    json={"chapter_id": "chapter_01", "es_idx": 0, "anchor": "x" * 200})
+        saved = client.get("/api/bookmark/test-project").get_json()["bookmark"]
+        assert saved["anchor"] == "x" * 60
+
+    @pytest.mark.parametrize("body", [
+        {"chapter_id": "../secrets", "es_idx": 1, "anchor": "El perro."},
+        {"chapter_id": "chapter_01", "es_idx": "1", "anchor": "El perro."},
+        {"chapter_id": "chapter_01", "es_idx": True, "anchor": "El perro."},
+        {"chapter_id": "chapter_01", "es_idx": -1, "anchor": "El perro."},
+        {"chapter_id": "chapter_01", "es_idx": 1, "anchor": 7},
+        {"es_idx": 1, "anchor": "El perro."},
+        # JSON, but not an object.
+        [1, 2],
+        "abc",
+    ])
+    def test_malformed_bookmark_is_refused(self, client, project_with_alignment, body):
+        assert client.post("/api/bookmark/test-project", json=body).status_code == 400
+        assert not (project_with_alignment / "bookmark.json").exists()
+
+    def test_unknown_chapter_or_project_is_refused(self, client, project_with_alignment):
+        rv = client.post("/api/bookmark/test-project",
+                         json={"chapter_id": "chapter_99", "es_idx": 1, "anchor": "x"})
+        assert rv.status_code == 404
+        rv = client.post("/api/bookmark/no-such-book", json=self.MARK)
+        assert rv.status_code == 404
+
+    def test_chapter_list_has_no_goto_icon_without_a_bookmark(self, client, project_with_alignment):
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert self._goto_link(html) is None
+
+    def test_chapter_list_links_to_the_bookmarked_sentence(self, client, project_with_alignment):
+        client.post("/api/bookmark/test-project", json=self.MARK)
+
+        html = client.get("/read/test-project").data.decode("utf-8")
+        link = self._goto_link(html)
+        assert link is not None
+        assert "/read/test-project/chapter_01?" in link
+        # Text first, then the sentence number as the backup the reader falls
+        # back on (`near=1`) when a realign has moved or reworded the sentence.
+        assert "anchor=El+perro." in link
+        assert "esi=1" in link
+        assert "hl=1" in link
+        assert "near=1" in link
+
+    def test_goto_icon_carries_no_visible_text(self, client, project_with_alignment):
+        client.post("/api/bookmark/test-project", json=self.MARK)
+
+        html = client.get("/read/test-project").data.decode("utf-8")
+        tail = html.split('bookmark-goto"', 1)[1]
+        tag, inner = tail.split(">", 1)
+        inner = inner.split("</a>", 1)[0]
+        assert 'aria-label="Go to bookmark"' in tag
+        assert "title=" not in tag
+        assert inner.split("</svg>", 1)[1].strip() == ""
+
+    def test_goto_icon_disappears_when_the_bookmark_is_cleared(self, client, project_with_alignment):
+        client.post("/api/bookmark/test-project", json=self.MARK)
+        client.delete("/api/bookmark/test-project")
+
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert self._goto_link(html) is None
+
+    def test_bookmark_into_a_chapter_that_no_longer_exists_is_ignored(
+            self, client, project_with_alignment):
+        """A re-split can retire a chapter id; a bookmark into it is a dead link."""
+        (project_with_alignment / "bookmark.json").write_text(
+            json.dumps({"chapter_id": "chapter_07", "es_idx": 4, "anchor": "Gone."}),
+            encoding="utf-8")
+
+        assert client.get("/api/bookmark/test-project").get_json() == {"bookmark": None}
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert self._goto_link(html) is None
+
+    def test_unreadable_bookmark_file_does_not_break_the_chapter_list(
+            self, client, project_with_alignment):
+        (project_with_alignment / "bookmark.json").write_text("{not json", encoding="utf-8")
+
+        rv = client.get("/read/test-project")
+        assert rv.status_code == 200
+        assert self._goto_link(rv.data.decode("utf-8")) is None
+
+    def test_chapter_list_menu_holds_the_three_labelled_links(self, client, project_with_alignment):
+        """The loose icons beside the title became the home page's ⋮ menu."""
+        html = client.get("/read/test-project").data.decode("utf-8")
+        menu = html.split('id="chapter-menu-popup"', 1)[1].split("</div>", 1)[0]
+        for href, label in (
+            ("/recommendations/test-project", "Recommendations"),
+            ("/image-pass/test-project", "Images"),
+            ("/project/test-project", "Dashboard"),
+        ):
+            item = menu.split(f'href="{href}"', 1)[1].split("</a>", 1)[0]
+            assert f"<span>{label}</span>" in item
+        # ...and nowhere else on the title row.
+        assert html.count('href="/recommendations/test-project"') == 1
+
+    def test_reader_view_ships_the_bookmark_button(self, client, project_with_alignment):
+        html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
+        assert 'id="rv2-bookmark"' in html
+        # Left of the ⋮, as asked.
+        assert html.index('id="rv2-bookmark"') < html.index('id="rv2-refmenu"')
+
+
 class TestReaderView:
     def test_reader_view_renders(self, client, project_with_alignment):
         rv = client.get("/read/test-project/chapter_01")

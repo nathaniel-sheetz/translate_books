@@ -11,6 +11,7 @@
 
     const projectId = app.dataset.project;
     const chapter = app.dataset.chapter;
+    const BOOKMARK_URL = `/api/bookmark/${projectId}`;
 
     // i18n strings injected by the template
     const i = window.__i18n || {};
@@ -92,6 +93,11 @@
 
     let alignmentData = null;
     let annotationsMap = {};   // es_idx -> [annotation records] (oldest→newest)
+    // The book's one bookmark as the server holds it ({chapter_id, es_idx,
+    // anchor}, or null), and the row of *this* chapter it lands on -- null when
+    // there is none or it sits in another chapter.
+    let bookmark = null;
+    let bookmarkIdx = null;
     let activeIdx = null;
     let activeRepSubId = null; // sub_id of the annotation the classic single-slot UI targets
     let selectedAnnType = null;
@@ -161,6 +167,10 @@
             fetch(`/api/save-checks/${projectId}/${chapter}`)
                 .then(r => (r.ok ? r.json() : { warnings: [] }))
                 .catch(() => ({ warnings: [] })),
+            // Nor does this: a chapter reads the same without its bookmark.
+            fetch(BOOKMARK_URL)
+                .then(r => (r.ok ? r.json() : { bookmark: null }))
+                .catch(() => ({ bookmark: null })),
         ];
         // Only pay for the review fetch when review mode is enabled.
         if (reviewConfig.on) {
@@ -193,7 +203,9 @@
                 saveWarnMap = {};
                 for (const w of (results[2].warnings || [])) saveWarnMap[w.es_idx] = w;
 
-                const reviewData = reviewConfig.on ? results[3] : null;
+                bookmark = results[3].bookmark || null;
+
+                const reviewData = reviewConfig.on ? results[4] : null;
                 if (reviewData && reviewData._reviewFailed) {
                     showToast(i.review_load_failed || 'Could not load review findings.');
                     buildReviewMap(null);
@@ -206,6 +218,9 @@
                 }
 
                 renderSentences(data.alignments);
+                // After the render: the fallback on the sentence number only
+                // counts rows that are on the page.
+                resolveBookmark();
                 // Must sit inside this sequence: renderSentences() clears
                 // #reader-content and addReviewButton() appends the end band on
                 // every re-bootstrap, so a bin rendered anywhere else is wiped
@@ -239,6 +254,112 @@
                 return;
             }
         }
+    }
+
+    // Which row a deep link, or the bookmark, names. `es_idx` is a position and
+    // a realign renumbers it, so the text decides: the row with that number if
+    // it still opens with `prefix`, else the first row that does. With `near`,
+    // the number keeps its say: of several rows that open alike ("—No.") the
+    // one closest to it wins, and a text found nowhere falls back on the number
+    // -- that row, or the closest one before it -- which lands a few sentences
+    // off at worst instead of at the top of the chapter.
+    function findByAnchor(prefix, esi, near) {
+        if (!alignmentData) return null;
+        const rows = alignmentData.alignments;
+        const want = (esi === null || esi === undefined || esi === '') ? null : String(esi);
+        const target = (near && want !== null) ? Number(want) : NaN;
+        if (prefix) {
+            if (want !== null) {
+                for (const a of rows) {
+                    if (a && String(a.es_idx) === want &&
+                        typeof a.es === 'string' && a.es.startsWith(prefix)) {
+                        return a;
+                    }
+                }
+            }
+            let best = null;
+            let bestGap = Infinity;
+            for (const a of rows) {
+                if (!a || typeof a.es !== 'string' || !a.es.startsWith(prefix)) continue;
+                if (!Number.isFinite(target)) return a;
+                const n = Number(a.es_idx);
+                const gap = Number.isFinite(n) ? Math.abs(n - target) : Infinity;
+                if (best === null || gap < bestGap) {
+                    best = a;
+                    bestGap = gap;
+                }
+            }
+            if (best) return best;
+        }
+        if (!near || want === null) return null;
+        if (!Number.isFinite(target)) return null;
+        // Only rows on the page: an image-only row renders no sentence to land on.
+        let below = null;
+        let first = null;
+        content.querySelectorAll('[data-es-idx]').forEach(el => {
+            const n = Number(el.dataset.esIdx);
+            if (!Number.isFinite(n)) return;
+            if (first === null || n < first) first = n;
+            if (n <= target && (below === null || n > below)) below = n;
+        });
+        const idx = below !== null ? below : first;
+        if (idx === null) return null;
+        return rows.find(a => a && Number(a.es_idx) === idx) || null;
+    }
+
+    function resolveBookmark() {
+        bookmarkIdx = null;
+        if (!bookmark || bookmark.chapter_id !== chapter) return;
+        const match = findByAnchor(String(bookmark.anchor || '').trim(), bookmark.es_idx, true);
+        if (match) bookmarkIdx = match.es_idx;
+    }
+
+    // Put the book's bookmark on a sentence of this chapter, or clear it. A
+    // book has one, so setting it here takes it off wherever it was. Optimistic,
+    // like every other write in this file: offline it goes to the queue, and
+    // only a refusal puts the old mark back.
+    function setBookmark(alignment, on) {
+        const prev = bookmark;
+        const prevIdx = bookmarkIdx;
+        if (on) {
+            bookmark = {
+                chapter_id: chapter,
+                es_idx: alignment.es_idx,
+                // By code point: a UTF-16 slice can end on half a surrogate
+                // pair, which the server cannot encode.
+                anchor: Array.from(String(alignment.es || '')).slice(0, 60).join(''),
+            };
+            bookmarkIdx = alignment.es_idx;
+        } else {
+            bookmark = null;
+            bookmarkIdx = null;
+        }
+        const method = on ? 'POST' : 'DELETE';
+        const payload = on ? bookmark : {};
+        fetch(BOOKMARK_URL, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then(r => {
+                if (r.ok) return;
+                bookmark = prev;
+                bookmarkIdx = prevIdx;
+                if (V2 && window.ReaderSheetV2 && activeIdx !== null) {
+                    window.ReaderSheetV2.setBookmarked(activeIdx === bookmarkIdx);
+                }
+                showToast((i.v2 || {}).fav_failed || 'Could not save');
+            })
+            .catch(() => {
+                try {
+                    // A book has one bookmark, so only the last word counts:
+                    // an earlier queued set or clear would replay beside this
+                    // one, in no order.
+                    const kept = getQueue().filter(item => item.url !== BOOKMARK_URL);
+                    localStorage.setItem(QUEUE_KEY, JSON.stringify(kept));
+                    enqueue(BOOKMARK_URL, method, payload);
+                } catch (e) { /* localStorage full — queue unavailable */ }
+            });
     }
 
     loadAndRender();
@@ -454,6 +575,7 @@
                 defaultErrors: defaultErrors,
                 saveWarned: saveWarned,
                 tappedWord: tappedWord,
+                bookmarked: alignment.es_idx === bookmarkIdx,
             });
         }
 
@@ -1358,9 +1480,13 @@
     function scrollToAnchorParam() {
         const params = new URLSearchParams(window.location.search);
         const anchor = params.get('anchor');
-        if (!anchor || !alignmentData) return;
+        // The bookmark link passes &near=1: when the text is found nowhere,
+        // land on the sentence number instead. Everything else that links
+        // here leaves it off and would rather not jump than jump wrong.
+        const near = params.get('near') === '1';
+        if (anchor === null || !alignmentData) return;
         const prefix = anchor.trim();
-        if (!prefix) return;
+        if (!prefix && !near) return;
         // Search result deep-links pass &hl=1 to request a transient flash on
         // landing. Other ?anchor= landings (remove-text, chunk-edit) omit it
         // and are unaffected — they scroll but never flash. (D3)
@@ -1370,32 +1496,16 @@
         // first-prefix-match if the idx is absent or was renumbered by realign.
         const esi = params.get('esi');
 
-        let match = null;
-        if (esi !== null && esi !== '') {
-            for (const a of alignmentData.alignments) {
-                if (a && String(a.es_idx) === esi &&
-                    typeof a.es === 'string' && a.es.startsWith(prefix)) {
-                    match = a;
-                    break;
-                }
-            }
-        }
-        if (!match) {
-            for (const a of alignmentData.alignments) {
-                if (a && typeof a.es === 'string' && a.es.startsWith(prefix)) {
-                    match = a;
-                    break;
-                }
-            }
-        }
+        const match = findByAnchor(prefix, esi, near);
         if (!match) return;
         const el = content.querySelector(`[data-es-idx="${match.es_idx}"]`);
         if (!el) return;
-        // Strip the anchor/hl/esi params from the URL so refreshes don't keep
-        // jumping or re-flashing.
+        // Strip the anchor/hl/esi/near params from the URL so refreshes don't
+        // keep jumping or re-flashing.
         params.delete('anchor');
         params.delete('hl');
         params.delete('esi');
+        params.delete('near');
         const newSearch = params.toString();
         const newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '');
         window.history.replaceState({}, '', newUrl);
@@ -1821,6 +1931,8 @@
                 if (result.saved) {
                     alignment.es = correctedEs;
                     alignment.corrected = true;
+                    // The bookmark finds its sentence by its opening words.
+                    if (savedIdx === bookmarkIdx) setBookmark(alignment, true);
 
                     const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                     if (el) {
@@ -1844,6 +1956,7 @@
                 // Optimistic UI update
                 alignment.es = correctedEs;
                 alignment.corrected = true;
+                if (savedIdx === bookmarkIdx) setBookmark(alignment, true);
                 const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                 if (el) {
                     el.textContent = displayEsOf(alignment, correctedEs) + ' ';
@@ -2873,11 +2986,24 @@
                     retransReplace.disabled = false;
                     return;
                 }
+                const wasBookmarked = !!(retransCtx && retransCtx.row) &&
+                    retransCtx.row.es_idx === bookmarkIdx;
                 closeRetransModal();
                 closeSheet();
                 // The reload brings the warning back on whichever sentence the
                 // realign left the flagged text in.
                 const reloaded = loadAndRender(scrollAnchor);
+                // The bookmark finds its sentence by its opening words, and
+                // those are new. Nothing before the sentence moved, so its
+                // number still names it: the reload lands on it, and the new
+                // wording is sent from there.
+                if (wasBookmarked) {
+                    reloaded.then(() => {
+                        if (bookmarkIdx === null || !alignmentData) return;
+                        const row = alignmentData.alignments.find(a => a && a.es_idx === bookmarkIdx);
+                        if (row) setBookmark(row, true);
+                    });
+                }
                 toastSaveCheck(body.check);
                 watchSaveCheckJob(body.check_job, body.check, reloaded);
             })
@@ -2982,6 +3108,13 @@
                             enqueue(url, 'POST', payload);
                         } catch (e) { /* localStorage full — queue unavailable */ }
                     });
+            },
+            // Put the book's bookmark on the active sentence, or take it off.
+            // A refusal is reported back through ReaderSheetV2.setBookmarked.
+            toggleBookmark(on) {
+                if (activeIdx === null || !alignmentData) return;
+                const alignment = alignmentData.alignments.find(a => a.es_idx === activeIdx);
+                if (alignment) setBookmark(alignment, !!on);
             },
             // Chunk-level actions open the shared modals via the hidden classic
             // controls, so the whole retranslate / remove / boundary flow is reused.

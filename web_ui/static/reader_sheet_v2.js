@@ -36,6 +36,7 @@
         srcToggle: el('rv2-src-toggle'),
         srcKicker: el('rv2-src-kicker'),
         close: el('rv2-close'),
+        bookmark: el('rv2-bookmark'),
         grip: el('rv2-grip'),
         tabs: sheet.querySelectorAll('.rv2-tab'),
         cardList: el('rv2-card-list'),
@@ -417,6 +418,7 @@
     // ── Open / close ───────────────────────────────────────────────────────────
     function onOpen(data) {
         cur = data;
+        paintBookmark(!!data.bookmarked);
         renderSource(data.en);
         renderAnnotate();
         renderEdit(data.es);
@@ -428,6 +430,29 @@
         show();
     }
     function onClose() { hide(); }
+
+    // ── Bookmark ───────────────────────────────────────────────────────────────
+    // One per book, so there is nothing to list: the button only says whether
+    // the open sentence holds it. reader.js owns the mark and calls
+    // setBookmarked when the server refuses a change.
+    function paintBookmark(on) {
+        if (!els.bookmark) return;
+        els.bookmark.setAttribute('aria-pressed', on ? 'true' : 'false');
+        els.bookmark.setAttribute('aria-label', on
+            ? T('aria_bookmark_remove', 'Remove bookmark')
+            : T('aria_bookmark_add', 'Bookmark this sentence'));
+    }
+    function setBookmarked(on) {
+        if (cur) cur.bookmarked = !!on;
+        paintBookmark(!!on);
+    }
+    if (els.bookmark) {
+        els.bookmark.addEventListener('click', function () {
+            if (!cur || !core().toggleBookmark) return;
+            setBookmarked(!cur.bookmarked);
+            core().toggleBookmark(cur.bookmarked);
+        });
+    }
 
     function show() {
         overlay.hidden = false;
@@ -1039,5 +1064,5 @@
     // Paint the static Add-row icons once.
     paintTps(els.addIcons);
 
-    window.ReaderSheetV2 = { onOpen, onClose, setAnnotations };
+    window.ReaderSheetV2 = { onOpen, onClose, setAnnotations, setBookmarked };
 })();

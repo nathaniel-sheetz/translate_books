@@ -882,7 +882,7 @@ Served at `/read/<project_id>/<chapter>`. Separate from the dashboard — uses s
 ### Navigation
 
 - `/read/` — project cards with style guide, glossary, and translation status
-- `/read/<id>` — chapter list with badges (annotation counts, confidence, reviewed status)
+- `/read/<id>` — chapter list with badges (annotation counts, confidence, reviewed status); beside the title, a go-to-bookmark icon when the book has one and a `⋮` menu to Recommendations, Images and the Dashboard
 - `/read/<id>/<chapter>` — reading view with prev/next chapter navigation
 
 ### Reading View
@@ -909,6 +909,10 @@ Annotated sentences get a subtle colored background tint. Each annotation has an
 Each dialog stamps when the document was last edited, and warns when it was **edited after the judge that reads it last ran on this chapter** — the case where a finding on screen quotes a rule that has since been rewritten. This is a different question from `evaluator_freshness`, which asks whether a chunk's *text* changed since an evaluator ran. Documents map to judges as style guide → `editorial`, glossary → `dictionary`, address map → `address`. A chapter with no recorded run is never called stale.
 
 The menu is v2-only (classic is reachable only via the `reader_ui_version` cookie or `?ui=classic`).
+
+**Bookmark.** Left of the `⋮` sits a bookmark button. Tapping it makes the open sentence the book's bookmark and fills the icon; tapping it again clears it. A book has **one** bookmark, so setting it on another sentence moves it. While one exists, the chapter list (`/read/<id>`) shows a bookmark-with-arrow icon beside the title that opens the chapter on that sentence; the other three places a book can be looked at — Recommendations, Images, Dashboard — sit behind the `⋮` next to it, in the same labelled menu the home page hangs on each card.
+
+The bookmark is `projects/<id>/bookmark.json` (`{chapter_id, es_idx, anchor, timestamp}`), rewritten whole on every set and deleted on clear. `es_idx` is a position and a realign renumbers it, so `anchor` — the sentence's first 60 characters — is what finds the sentence again, exactly as the search and recommendations deep links do. The bookmark link adds `near=1`, which the other links do not: when several sentences open with the same words, the one closest to the stored sentence number is taken rather than the first in the chapter, and when the text is found nowhere, the reader lands on the stored sentence number (or the closest rendered row before it) rather than at the top of the chapter. A correction saved on the bookmarked sentence, or a Retranslate → Replace of it, re-sends the bookmark so the anchor follows the new wording; a sentence reworded outside the reader *and* renumbered lands a few sentences off at worst. A bookmark into a chapter that no longer has an alignment is treated as absent. Like the `⋮`, the button is v2-only.
 
 When Review Mode is on, the sheet's Issues tab lists that sentence's findings with the four
 feedback labels (resolved / false positive / bad message / missing context), each of which
@@ -1031,6 +1035,7 @@ Listed best first. On the labelled saves the check was built against, rules and 
 | `/api/annotation` | POST | Save annotation |
 | `/api/annotation` | DELETE | Remove annotation |
 | `/api/reviewed/<id>/<chapter>` | GET/POST/DELETE | Reviewed status |
+| `/api/bookmark/<id>` | GET/POST/DELETE | The book's one bookmark: read it (`{bookmark}` or null), set it (`{chapter_id, es_idx, anchor}`, replacing any other), clear it |
 | `/api/apply-corrections/<id>` | POST | Batch apply corrections |
 | `/api/chunk/<id>/<chunk_id>/edit` | POST | Save a full-chunk text edit (recombines + realigns the chapter) |
 | `/api/project/<id>/align/<chapter>` | POST | Apply pending corrections to chunks, then recombine + realign (used by the reader Realign button) |
@@ -1081,6 +1086,7 @@ projects/<id>/
 ├── alignments/             # Sentence alignment JSON
 ├── annotations.jsonl       # Reader annotations (append-only)
 ├── reviewed.json           # Chapter reviewed status
+├── bookmark.json           # The book's one reader bookmark (absent when there is none)
 ├── difficulty.json         # Cached difficulty scores (per-chapter + book level; invalidated by source mtime)
 ├── corrections.jsonl       # Pending corrections (purged automatically when a chunk's translation is replaced)
 ├── corrections_applied.jsonl # Archive of applied corrections
