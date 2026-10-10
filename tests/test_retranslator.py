@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import retranslator
+from src.llm_mechanisms import Completion
 from src.retranslator import (
     RetranslationError,
     _build_prompt,
@@ -157,6 +158,22 @@ class TestBuildPrompt:
         assert "Earlier sentence." in prompt
 
 
+def _answering(*texts, mechanism="api", seen=None):
+    """A stand-in for ``complete`` that hands back ``texts`` in turn."""
+    replies = iter(texts)
+
+    def fake(prompt, *, provider, model, **kw):
+        if seen is not None:
+            seen.append({"prompt": prompt, "provider": provider, "model": model, **kw})
+        text = next(replies)
+        return Completion(
+            text=text, mechanism=mechanism, provider=provider, model=model or "the-default",
+            prompt_tokens=100, completion_tokens=10, cost_usd=0.002 if mechanism == "api" else 0.0,
+        )
+
+    return fake
+
+
 class TestRetranslateSentence:
     def test_empty_source_raises(self):
         with pytest.raises(ValueError):
@@ -167,100 +184,85 @@ class TestRetranslateSentence:
             retranslate_sentence("   \n  ")
 
     def test_success_path(self, monkeypatch):
-        monkeypatch.setattr(
-            retranslator, "call_llm",
-            lambda *a, **kw: "El gato.",
-        )
-        monkeypatch.setattr(
-            retranslator, "get_default_provider",
-            lambda: "anthropic",
-        )
-        monkeypatch.setattr(
-            retranslator, "get_model_pricing",
-            lambda provider, model: {"input": 3.0, "output": 15.0},
-        )
-        result = retranslate_sentence("The cat.", model="claude-sonnet-4-6")
+        monkeypatch.setattr(retranslator, "complete", _answering("El gato."))
+        monkeypatch.setattr(retranslator, "get_default_provider", lambda: "anthropic")
+        result = retranslate_sentence("The cat.", model="claude-sonnet-5")
         assert result.new_translation == "El gato."
         assert result.provider == "anthropic"
-        assert result.prompt_tokens > 0
-        assert result.completion_tokens >= 1
-        assert result.cost_usd > 0
+        assert result.model == "claude-sonnet-5"
+        assert result.mechanism == "api"
+        assert result.prompt_tokens == 100
+        assert result.completion_tokens == 10
+        assert result.cost_usd == 0.002
         assert result.raw_response == "El gato."
 
     def test_strips_fences_from_llm_output(self, monkeypatch):
-        monkeypatch.setattr(
-            retranslator, "call_llm",
-            lambda *a, **kw: "```\nEl gato.\n```",
-        )
+        monkeypatch.setattr(retranslator, "complete", _answering("```" + chr(10) + "El gato." + chr(10) + "```"))
         monkeypatch.setattr(retranslator, "get_default_provider", lambda: "anthropic")
-        monkeypatch.setattr(
-            retranslator, "get_model_pricing",
-            lambda provider, model: {"input": 1.0, "output": 1.0},
-        )
         result = retranslate_sentence("The cat.")
         assert result.new_translation == "El gato."
         assert result.raw_response.startswith("```")
 
     def test_retry_on_empty_recovers(self, monkeypatch):
-        responses = iter(["", "El gato."])
-        monkeypatch.setattr(
-            retranslator, "call_llm",
-            lambda *a, **kw: next(responses),
-        )
+        seen = []
+        monkeypatch.setattr(retranslator, "complete", _answering("", "El gato.", seen=seen))
         monkeypatch.setattr(retranslator, "get_default_provider", lambda: "anthropic")
-        monkeypatch.setattr(
-            retranslator, "get_model_pricing",
-            lambda provider, model: {"input": 1.0, "output": 1.0},
-        )
         result = retranslate_sentence("The cat.")
         assert result.new_translation == "El gato."
+        assert "previous response was empty" in seen[1]["prompt"]
+        # Both calls were made, so both are counted.
+        assert result.prompt_tokens == 200
+        assert result.cost_usd == 0.004
 
     def test_retry_on_empty_then_raises(self, monkeypatch):
-        monkeypatch.setattr(
-            retranslator, "call_llm",
-            lambda *a, **kw: "",
-        )
+        monkeypatch.setattr(retranslator, "complete", _answering("", ""))
         monkeypatch.setattr(retranslator, "get_default_provider", lambda: "anthropic")
-        monkeypatch.setattr(
-            retranslator, "get_model_pricing",
-            lambda provider, model: {"input": 1.0, "output": 1.0},
-        )
         with pytest.raises(RetranslationError):
             retranslate_sentence("The cat.")
 
     def test_resolves_provider_when_not_given(self, monkeypatch):
-        captured = {}
-
-        def fake_call_llm(prompt, *, provider, model, **kw):
-            captured["provider"] = provider
-            return "El gato."
-
-        monkeypatch.setattr(retranslator, "call_llm", fake_call_llm)
-        monkeypatch.setattr(retranslator, "resolve_provider_for_model", lambda m: "openai")
+        seen = []
+        monkeypatch.setattr(retranslator, "complete", _answering("El gato.", seen=seen))
+        monkeypatch.setattr(retranslator, "resolve_provider_for_model", lambda m, **kw: "deepinfra")
         monkeypatch.setattr(retranslator, "get_default_provider", lambda: "anthropic")
-        monkeypatch.setattr(
-            retranslator, "get_model_pricing",
-            lambda provider, model: {"input": 1.0, "output": 1.0},
-        )
-        retranslate_sentence("The cat.", model="gpt-5")
-        assert captured["provider"] == "openai"
+        retranslate_sentence("The cat.", model="some/model")
+        assert seen[0]["provider"] == "deepinfra"
 
     def test_falls_back_to_default_provider_when_resolve_fails(self, monkeypatch):
-        captured = {}
+        seen = []
 
-        def fake_call_llm(prompt, *, provider, model, **kw):
-            captured["provider"] = provider
-            return "El gato."
-
-        def boom(_):
+        def boom(_, **kw):
             raise ValueError("unknown model")
 
-        monkeypatch.setattr(retranslator, "call_llm", fake_call_llm)
+        monkeypatch.setattr(retranslator, "complete", _answering("El gato.", seen=seen))
         monkeypatch.setattr(retranslator, "resolve_provider_for_model", boom)
         monkeypatch.setattr(retranslator, "get_default_provider", lambda: "anthropic")
-        monkeypatch.setattr(
-            retranslator, "get_model_pricing",
-            lambda provider, model: {"input": 1.0, "output": 1.0},
-        )
         retranslate_sentence("The cat.", model="mystery-model")
-        assert captured["provider"] == "anthropic"
+        assert seen[0]["provider"] == "anthropic"
+
+    def test_a_given_provider_is_not_second_guessed(self, monkeypatch):
+        """The same model id can sit under an API and a headless provider."""
+        seen = []
+        monkeypatch.setattr(retranslator, "complete", _answering("El gato.", mechanism="headless", seen=seen))
+        monkeypatch.setattr(retranslator, "resolve_provider_for_model", lambda m, **kw: "anthropic")
+        result = retranslate_sentence("The cat.", model="claude-sonnet-5-5", provider="claude-headless")
+        assert seen[0]["provider"] == "claude-headless"
+        assert result.provider == "claude-headless"
+        assert result.mechanism == "headless"
+        assert result.cost_usd == 0
+
+    def test_a_headless_call_logs_usage_under_the_book(self, monkeypatch, tmp_path):
+        seen = []
+        monkeypatch.setattr(retranslator, "complete", _answering("El gato.", mechanism="headless", seen=seen))
+        book = tmp_path / "my-book"
+        retranslate_sentence("The cat.", model="m", provider="claude-headless", project_dir=book)
+        assert seen[0]["usage_log"] == book / ".harness" / "retranslate" / "usage.jsonl"
+        assert seen[0]["project_slug"] == "my-book"
+        # One sentence, with a person waiting: not the launcher's 30 minutes.
+        assert seen[0]["headless_timeout_s"] == 180
+
+    def test_without_a_book_no_usage_log_is_named(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(retranslator, "complete", _answering("El gato.", seen=seen))
+        retranslate_sentence("The cat.", model="m", provider="anthropic")
+        assert seen[0]["usage_log"] is None

@@ -6,10 +6,12 @@ Usage:
     python scripts/_smoke_retranslate.py \
         --project fabre2 \
         --source "The cake was burnt and the king was scolded." \
-        --model claude-haiku-4-5-20251001
+        --model claude-sonnet-5
 
-Defaults to the Anthropic default model from llm_config.json. Reads style.json
-from the named project if present (passes empty style guide otherwise).
+Defaults to the default model from llm_config.json. Pass --provider with
+--model to pick a headless or local entry (--provider claude-headless --model
+claude-sonnet-5-5). Reads style.json from the named project if present
+(passes empty style guide otherwise).
 """
 
 from __future__ import annotations
@@ -80,11 +82,12 @@ def main() -> int:
         source_language=args.source_language,
         target_language=args.target_language,
         context_text=args.context,
+        project_dir=project_dir,
     )
 
     print(f"new translation: {result.new_translation}")
     print()
-    print(f"model used     : {result.model} ({result.provider})")
+    print(f"model used     : {result.model} ({result.provider}, {result.mechanism})")
     print(f"tokens         : {result.prompt_tokens} in / {result.completion_tokens} out")
     print(f"cost           : ${result.cost_usd:.6f}")
     return 0

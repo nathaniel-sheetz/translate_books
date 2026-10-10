@@ -4,7 +4,8 @@ In-reader gesture for getting a fresh LLM translation of a single sentence
 (or N:1 alignment group) and replacing the existing translation. The user
 confirms the source span before paying for the call (alignment is not
 always perfect), can hand-edit the LLM output before accepting it, and
-picks a model per request. The replace step mutates `chunk.translated_text`
+picks a model per request: a metered API, a subscription CLI, or the
+local inference server (see *Model Flexibility*). The replace step mutates `chunk.translated_text`
 and re-aligns the chapter — same durability path as `/api/remove-text`.
 
 Sentence scoring with `judge_absolute` is **not** wired into v1; the same
@@ -22,19 +23,23 @@ modal can host `[Score]` buttons in a future phase.
      row's English text.
    - A **Current translation** textarea, pre-populated from the literal
      chunk substring (`text_in_chunk`) — see *Source-span confirmation*.
-   - A **Model** dropdown populated from `llm_config.json`.
+   - A **Model** dropdown populated from `llm_config.json`. An entry that
+     cannot be used right now is greyed out with the reason (`not loaded`,
+     `no API key`, `CLI not installed`, `server not reachable`).
    - A **Retranslate** button.
 4. Adjust either textarea if alignment looked off — add or trim
    sentences, fix typos, etc. Whatever's in **Source (English)** at click
    time is what the LLM sees.
 5. Pick a model. The dropdown defaults to the system default on first
    load and the last-used model afterwards (persisted in `localStorage`
-   under `retranslate.preferred_model`).
+   under `retranslate.preferred_model` as `provider::model`). If the
+   last-used model is not available now, the default is selected.
 6. Tap **Retranslate**. While the LLM call runs, the status line shows
    `Calling LLM…`. On return, a **New translation** textarea appears,
    pre-filled with the LLM's output, plus a `Reset to LLM output`
    button and a cost label
-   (`claude-sonnet-5 · 234→48 tokens · $0.0014`).
+   (`claude-sonnet-5 · 234→48 tokens · $0.0014`; a CLI shows
+   `subscription` and the local server `local` in place of a price).
 7. Hand-edit the new translation if desired. Click **Reset to LLM
    output** to restore the unedited model response (the front-end keeps
    it in JS state).
@@ -156,15 +161,45 @@ Not wired in v1.
 ## Model Flexibility
 
 `/api/llm/models` returns the picker payload from `llm_config.json`,
-flagging the default. The front-end fetches it once on first modal
-open. Per-call:
+flagging the default. The front-end fetches it on every modal open,
+because which local model is loaded changes between opens. Per-call:
 
 - The user picks any model in the dropdown.
-- Backend resolves the provider via `resolve_provider_for_model()` if
-  the request omits `provider`.
-- Cost is computed from the model's pricing block in `llm_config.json`
-  using the `len // 4` token estimator that the rest of the codebase
-  uses.
+- The request carries `provider` as well as `model`: one model id can
+  sit under an API provider and a headless one, and they are different
+  calls. If `provider` is omitted the backend resolves it via
+  `resolve_provider_for_model()`.
+
+The same prompt goes out by one of three mechanisms, chosen by the
+provider's `type` in `llm_config.json`
+([`LLM_PROVIDERS.md`](LLM_PROVIDERS.md#provider-types)). The dispatch is
+`src/llm_mechanisms.py`, which is not specific to this screen:
+
+| Mechanism | Provider `type` | How it is reached | Cost label |
+|---|---|---|---|
+| API | `anthropic`, `openai-compatible` | `call_llm()` | `$`, from the model's pricing and the `len // 4` estimator |
+| Headless | `headless` | one `claude -p` or `cursor-agent -p` process, through `run_headless_wave` | `subscription`; tokens are the CLI's own count |
+| Local | `local` | `llama-server` on the LAN | `local`; tokens are the server's own count |
+
+**Headless.** The call goes through the same launcher as every wave, so
+it keeps the credential scrub and the fail-closed login preflight; a
+logged-out CLI comes back as a 502 carrying the CLI's own message. A
+Claude model runs at the `effort` its catalog entry names; a Cursor
+model carries its effort in the id (`grok-4.7-medium`). The job is
+killed after 180 seconds. Each call appends a row to
+`projects/<id>/.harness/retranslate/usage.jsonl`. Two things to expect:
+the preflight probes run before every call (a few seconds), and the
+token count includes the CLI's fixed prefix. On a prompt of about 700
+tokens, Sonnet 5.5 billed about 7,500 and returned in 7 seconds; Grok
+4.7 billed about 16,000 and took 34 (2026-10-09, one call each).
+
+**Local.** Only a model the server already has loaded can be used.
+The server is asked what is in memory before every prompt; a model that
+is not loaded is refused with a 409 and nothing is sent, so the server
+is never made to load or swap a model. Thinking is switched off in the
+request. A catalog model matches the loaded one on its `id` or one of
+its `aliases`. Gemma 4 31B on the Mac mini answered a one-sentence
+prompt in about 9 seconds.
 
 ## API
 
@@ -178,26 +213,40 @@ open. Per-call:
       "id": "claude-sonnet-5",
       "name": "Claude Sonnet 5",
       "provider": "anthropic",
+      "mechanism": "api",
       "pricing": {"input": 2.00, "output": 10.00},
-      "is_default": true
+      "is_default": true,
+      "available": true,
+      "unavailable_reason": null
     },
     {
-      "id": "claude-sonnet-4-6",
-      "name": "Claude Sonnet 4.6",
-      "provider": "anthropic",
-      "pricing": {"input": 3.00, "output": 15.00},
-      "is_default": false
+      "id": "claude-sonnet-5-5",
+      "name": "Sonnet 5.5 (headless)",
+      "provider": "claude-headless",
+      "mechanism": "headless",
+      "pricing": {},
+      "is_default": false,
+      "available": true,
+      "unavailable_reason": null
     },
     {
-      "id": "claude-haiku-4-5-20251001",
-      "name": "Claude Haiku 4.5",
-      "provider": "anthropic",
-      "pricing": {"input": 1.00, "output": 5.00},
-      "is_default": false
+      "id": "qwen3.8-27b",
+      "name": "Qwen 3.8 27B (local)",
+      "provider": "local",
+      "mechanism": "local",
+      "pricing": {},
+      "is_default": false,
+      "available": false,
+      "unavailable_reason": "not_loaded"
     }
   ]
 }
 ```
+
+`unavailable_reason` is one of `no_key` (the provider's key env var is
+not set), `cli_missing` (the CLI is not on PATH; its login is checked
+when it is called), `server_down` (the local server did not answer) or
+`not_loaded` (the local server has a different model in memory).
 
 ### `POST /api/sentence/retranslate`
 
@@ -226,6 +275,7 @@ Response on success:
   "new_translation": "La torta se quemó y la campesina regañó al rey.",
   "model": "claude-sonnet-5",
   "provider": "anthropic",
+  "mechanism": "api",
   "prompt_tokens": 234,
   "completion_tokens": 48,
   "cost_usd": 0.001422
@@ -239,7 +289,19 @@ Response on success:
   mismatch.
 - `400` if `source_text` is empty.
 - `502` if the LLM produces unusable output after one retry
-  (`RetranslationError`).
+  (`RetranslationError`), or a headless or local call fails
+  (`MechanismError`: the CLI is not logged in, the job timed out, the
+  local server returned an error, dropped the connection after the
+  prompt went out, or gave an answer that was cut off at `max_tokens` or
+  was all reasoning).
+- `409` also when a local model cannot be asked (`MechanismUnavailable`):
+  it is not the model loaded, or the server did not answer. The body
+  says which model is loaded.
+- `400` when `provider` is a headless or local one and `model` is not
+  listed under it in `llm_config.json`. An API provider still runs an
+  unlisted id.
+- `mechanism` is `api`, `headless` or `local`. `cost_usd` is 0 for the
+  last two.
 
 ### `POST /api/sentence/replace`
 
@@ -412,7 +474,10 @@ reconstructing the chunk state. Mirrors `removals.jsonl` and
 
 | Path | Purpose |
 |---|---|
-| `src/retranslator.py` — `retranslate_sentence()` | Core primitive: prompt build, LLM call via `call_llm()`, fence strip, retry, cost calc |
+| `src/retranslator.py` — `retranslate_sentence()` | Core primitive: prompt build, call via `llm_mechanisms.complete()`, fence strip, retry |
+| `src/llm_mechanisms.py` — `complete()`, `list_models()` | One call for API, headless and local; the picker rows and their availability |
+| `src/local_llm.py` | The local server client: what is loaded, and a completion on it |
+| `projects/<id>/.harness/retranslate/usage.jsonl` | One row per headless retranslate call |
 | `prompts/retranslate_sentence.txt` | Compact prompt template |
 | `src/models.py` — `RetranslationResult` | Response Pydantic model |
 | `web_ui/app.py` — `_attach_text_in_chunk` | Alignment-row enrichment with `text_in_chunk`, offsets, `chunk_mtime` |

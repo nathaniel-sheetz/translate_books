@@ -3,8 +3,10 @@ Single-sentence retranslation primitive for the reader UI.
 
 The reader exposes a "Retranslate" action on a tapped sentence. This module
 takes the user-confirmed source text, the project style guide, and a
-filtered glossary slice, calls the chosen LLM via ``call_llm()``, and returns
-a cleaned-up replacement translation along with token/cost metadata.
+filtered glossary slice, sends the prompt to the chosen model via
+``llm_mechanisms.complete()`` (a metered API, a subscription CLI or the local
+server, whichever the model's provider is), and returns a cleaned-up
+replacement translation along with token/cost metadata.
 
 Stays intentionally narrow: no judging, no batch mode, no chunk-level work.
 That is all reachable from the same web endpoints if/when needed.
@@ -22,11 +24,10 @@ from pathlib import Path
 from typing import Optional
 
 from src.api_translator import (
-    call_llm,
     get_default_provider,
-    get_model_pricing,
     resolve_provider_for_model,
 )
+from src.llm_mechanisms import complete
 from src.models import Glossary, RetranslationResult
 from src.utils.file_io import (
     filter_glossary_for_chunk,
@@ -44,8 +45,9 @@ _TEMPLATE_NAME = "retranslate_sentence.txt"
 _STYLE_TOKEN_LIMIT = 4000
 _STYLE_CHAR_LIMIT = _STYLE_TOKEN_LIMIT * 4
 
-# Token estimator used across the codebase: ~4 chars/token.
-_CHARS_PER_TOKEN = 4
+# A person is waiting on one sentence. The launcher's own ceilings (15 and 30
+# minutes) are sized for a chunk of prose.
+_HEADLESS_TIMEOUT_S = 180.0
 
 
 class RetranslationError(Exception):
@@ -106,10 +108,6 @@ def _strip_markdown_fences(text: str) -> str:
     return s
 
 
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // _CHARS_PER_TOKEN)
-
-
 def _build_prompt(
     *,
     source_text: str,
@@ -150,6 +148,7 @@ def retranslate_sentence(
     max_retries: int = 3,
     temperature: float = 0.3,
     context_text: Optional[str] = None,
+    project_dir: Optional[Path] = None,
 ) -> RetranslationResult:
     """Produce a fresh translation for a single user-confirmed source span.
 
@@ -164,12 +163,15 @@ def retranslate_sentence(
         provider: Provider id. If omitted, resolved from ``model``.
         source_language: Display name only (used in the prompt template).
         target_language: Display name only.
-        max_retries: Forwarded to ``call_llm()``.
-        temperature: Sampling temperature for the LLM.
+        max_retries: Forwarded to ``call_llm()`` on the API path.
+        temperature: Sampling temperature, where the mechanism takes one.
         context_text: Optional surrounding sentences (before + after the
             source span). Rendered into a ``<context>`` block the LLM is
             instructed to read but not translate. ``None`` or whitespace-only
             yields a sentinel placeholder.
+        project_dir: The book's directory. A headless call logs its usage
+            row under ``.harness/retranslate/`` there; without it the row is
+            not kept.
 
     Returns:
         RetranslationResult with the cleaned translation plus token/cost
@@ -177,6 +179,8 @@ def retranslate_sentence(
 
     Raises:
         RetranslationError: If the LLM returns empty output after a retry.
+        MechanismError: If a headless or local call fails
+            (``MechanismUnavailable`` when a local model cannot be asked).
     """
     if not source_text or not source_text.strip():
         raise ValueError("source_text must be non-empty")
@@ -194,22 +198,31 @@ def retranslate_sentence(
     if provider is None:
         if model is not None:
             try:
-                provider = resolve_provider_for_model(model)
+                provider = resolve_provider_for_model(model, api_only=False)
             except ValueError:
                 provider = get_default_provider()
         else:
             provider = get_default_provider()
 
-    raw = call_llm(
-        prompt,
-        provider=provider,
-        model=model,
-        temperature=temperature,
-        max_retries=max_retries,
-        call_type="retranslate_sentence",
-    )
+    usage_log = None
+    if project_dir is not None:
+        usage_log = Path(project_dir) / ".harness" / "retranslate" / "usage.jsonl"
 
-    cleaned = _strip_markdown_fences(raw)
+    def ask(text: str, retries: int):
+        return complete(
+            text,
+            provider=provider,
+            model=model,
+            temperature=temperature,
+            max_retries=retries,
+            call_type="retranslate_sentence",
+            usage_log=usage_log,
+            project_slug=Path(project_dir).name if project_dir is not None else None,
+            headless_timeout_s=_HEADLESS_TIMEOUT_S,
+        )
+
+    answers = [ask(prompt, max_retries)]
+    cleaned = _strip_markdown_fences(answers[-1].text)
     if not cleaned:
         logger.warning("Retranslate produced empty output; retrying with stricter suffix.")
         retry_prompt = prompt + (
@@ -217,35 +230,22 @@ def retranslate_sentence(
             f"Respond with ONLY the revised {target_language} translation as "
             "plain text."
         )
-        raw = call_llm(
-            retry_prompt,
-            provider=provider,
-            model=model,
-            temperature=temperature,
-            max_retries=1,
-            call_type="retranslate_sentence",
-        )
-        cleaned = _strip_markdown_fences(raw)
+        answers.append(ask(retry_prompt, 1))
+        cleaned = _strip_markdown_fences(answers[-1].text)
         if not cleaned:
             raise RetranslationError(
                 "LLM returned empty output for retranslation after retry."
             )
 
-    resolved_model = model or "default"
-    prompt_tokens = _estimate_tokens(prompt)
-    completion_tokens = _estimate_tokens(raw)
-    pricing = get_model_pricing(provider, resolved_model)
-    cost_usd = (
-        (prompt_tokens / 1_000_000) * pricing.get("input", 0.0)
-        + (completion_tokens / 1_000_000) * pricing.get("output", 0.0)
-    )
-
+    last = answers[-1]
     return RetranslationResult(
         new_translation=cleaned,
-        model=resolved_model,
+        model=last.model,
         provider=provider,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cost_usd=round(cost_usd, 6),
-        raw_response=raw,
+        # Both calls were paid for when the first came back unusable.
+        prompt_tokens=sum(a.prompt_tokens for a in answers),
+        completion_tokens=sum(a.completion_tokens for a in answers),
+        cost_usd=round(sum(a.cost_usd for a in answers), 6),
+        raw_response=last.text,
+        mechanism=last.mechanism,
     )

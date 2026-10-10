@@ -56,3 +56,23 @@ def _no_save_check_config(monkeypatch):
     import src.app_config as app_config
 
     monkeypatch.setattr(app_config, "get_save_check_config", lambda: {})
+
+
+@pytest.fixture(autouse=True)
+def _no_local_llm_server(monkeypatch):
+    """Keep the developer's local model server out of every test.
+
+    A ``local`` provider in llm_config.json would have the model picker ask a
+    real ``llama-server`` what it has loaded. Tests that want a server pass
+    their own ``session``.
+    """
+    import src.local_llm as local_llm
+
+    class _Offline:
+        def get(self, *args, **kwargs):
+            raise ConnectionError("no model server in tests")
+
+        post = get
+
+    monkeypatch.setattr(local_llm, "_default_session", lambda: _Offline())
+    monkeypatch.setattr(local_llm, "_loaded_cache", {})

@@ -2659,3 +2659,42 @@ def test_wave_model_preflight_is_cursor_only(tmp_path: Path):
     )
     assert result["counts"]["wrote"] == 1
     assert [a[1:] for a in seen] == [["auth", "status", "--json"]]
+
+
+def _claude_wave_capturing_timeouts(monkeypatch, tmp_path: Path, **kwargs) -> list:
+    """Run a one-job Claude wave on the real-runner path; return the timeouts it used."""
+    seen: list = []
+
+    def runner(cmd, **kw):
+        seen.append(kw.get("timeout"))
+        return 0, _envelope("ok"), ""
+
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "subscription_auth_error", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "default_claude_runner", runner)
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1), model="sonnet", concurrency=1, cli="claude", **kwargs
+    )
+    assert result["counts"]["wrote"] == 1
+    return seen
+
+
+def test_a_wave_runs_under_the_per_cli_ceiling_by_default(tmp_path: Path, monkeypatch):
+    seen = _claude_wave_capturing_timeouts(monkeypatch, tmp_path)
+    assert seen == [headless._CLI_JOB_TIMEOUT_S["claude"]]
+
+
+def test_job_timeout_replaces_the_per_cli_ceiling(tmp_path: Path, monkeypatch):
+    """One short answer with a person waiting is not a 30-minute job."""
+    seen = _claude_wave_capturing_timeouts(monkeypatch, tmp_path, job_timeout=180)
+    assert seen == [180]
+
+
+def test_a_job_timeout_that_is_not_positive_runs_nothing(tmp_path: Path):
+    ran = []
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 1), model="sonnet", concurrency=1, cli="claude", job_timeout=0,
+        runner=lambda *a, **k: ran.append(1) or (0, "prose", ""),
+    )
+    assert "job_timeout" in result["error"]
+    assert ran == [] and result["counts"]["todo"] == 0

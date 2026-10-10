@@ -2424,30 +2424,51 @@
     let retransCtx = null;     // {row, llmOutput, originalCurrent, originalSource,
                                //  beforeRow, afterRow, beforeIncluded, afterIncluded,
                                //  panelOpen, userEditedSource}
-    let modelsLoaded = false;
+    // An option's value is "provider::model": the same model id can sit under
+    // two providers (an API and a headless CLI), and they are not the same call.
+    const MODEL_KEY_SEP = '::';
+    const modelKey = m => m.provider + MODEL_KEY_SEP + m.id;
 
-    function loadModelsOnce() {
-        if (modelsLoaded || !retransModelSel) return Promise.resolve();
+    function selectedModel() {
+        const key = (retransModelSel && retransModelSel.value) || '';
+        const at = key.indexOf(MODEL_KEY_SEP);
+        if (at < 0) return { provider: null, model: key || null };
+        return { provider: key.slice(0, at), model: key.slice(at + MODEL_KEY_SEP.length) };
+    }
+
+    // Reloaded on every open: which local model is loaded changes between opens.
+    function loadModels() {
+        if (!retransModelSel) return Promise.resolve();
         return fetch('/api/llm/models')
             .then(r => r.json())
             .then(data => {
-                retransModelSel.innerHTML = '';
+                const models = data.models || [];
+                const current = retransModelSel.value;
                 const stored = (window.localStorage && localStorage.getItem('retranslate.preferred_model')) || '';
-                const seenStored = (data.models || []).some(m => m.id === stored);
-                (data.models || []).forEach(m => {
+                retransModelSel.innerHTML = '';
+                models.forEach(m => {
                     const opt = document.createElement('option');
-                    opt.value = m.id;
-                    opt.textContent = m.name + (m.is_default ? ' (default)' : '');
+                    opt.value = modelKey(m);
+                    let label = m.name + (m.is_default ? ' (default)' : '');
+                    if (m.available === false) {
+                        const why = i['retranslate_unavail_' + m.unavailable_reason] || m.unavailable_reason;
+                        if (why) label += ' — ' + why;
+                        opt.disabled = true;
+                    }
+                    opt.textContent = label;
                     retransModelSel.appendChild(opt);
                 });
-                if (stored && seenStored) {
-                    retransModelSel.value = stored;
-                } else if (data.default_model) {
-                    retransModelSel.value = data.default_model;
-                }
-                modelsLoaded = true;
+                const usable = models.filter(m => m.available !== false);
+                // What this modal already had, then the stored preference (a
+                // bare model id from before providers were part of the key
+                // still matches), then the default, then anything usable.
+                const pick = usable.find(m => modelKey(m) === current)
+                    || usable.find(m => modelKey(m) === stored || m.id === stored)
+                    || usable.find(m => m.is_default)
+                    || usable[0];
+                if (pick) retransModelSel.value = modelKey(pick);
             })
-            .catch(() => { /* leave empty; user will see no options */ });
+            .catch(() => { /* leave as is; user will see no options */ });
     }
 
     function findRowByEsIdx(idx) {
@@ -2626,7 +2647,14 @@
         }
 
         retransModal.style.display = 'flex';
-        loadModelsOnce();
+        // Run waits for the picker: with no option selected the request names
+        // no model, and the server would answer with the metered API default.
+        const ctx = retransCtx;
+        if (retransRun) retransRun.disabled = true;
+        loadModels().then(() => {
+            if (retransCtx !== ctx || !retransRun) return;
+            retransRun.disabled = !!retransModelSel && !retransModelSel.value;
+        });
     }
 
     function closeRetransModal() {
@@ -2711,13 +2739,16 @@
             showRetransError(i.retranslate_empty_source || 'Source text cannot be empty.');
             return;
         }
-        const model = retransModelSel.value || null;
+        const { provider, model } = selectedModel();
+        // A slow call can outlive its modal. Its answer belongs to this
+        // sentence only, so it is dropped once another one (or none) is open.
+        const ctx = retransCtx;
         showRetransError('');
         setRetransStatus(i.retranslate_working || 'Calling LLM…');
         retransRun.disabled = true;
 
         if (model && window.localStorage) {
-            try { localStorage.setItem('retranslate.preferred_model', model); } catch (e) { /* ignore */ }
+            try { localStorage.setItem('retranslate.preferred_model', retransModelSel.value); } catch (e) { /* ignore */ }
         }
 
         fetch('/api/sentence/retranslate', {
@@ -2730,12 +2761,14 @@
                 es_idx: retransCtx.row.es_idx,
                 source_text: source,
                 model: model,
+                provider: provider,
                 context_text: buildContextText(),
                 expected_chunk_mtime: retransCtx.row.chunk_mtime,
             }),
         })
             .then(r => r.json().then(d => ({ status: r.status, body: d })))
             .then(({ status, body }) => {
+                if (retransCtx !== ctx) return;
                 retransRun.disabled = false;
                 setRetransStatus('');
                 if (status !== 200 || !body.ok) {
@@ -2744,8 +2777,14 @@
                 }
                 retransCtx.llmOutput = body.new_translation;
                 retransNew.value = body.new_translation;
-                retransNewRow.style.display = 'block';
-                const tmpl = i.retranslate_cost || '{model} · {pin}→{pout} tokens · ${cost}';
+                // The row is a flex column; 'block' put the textarea beside its label.
+                retransNewRow.style.display = 'flex';
+                // A subscription CLI and the local server have no price to show.
+                const tmpl = body.mechanism === 'headless'
+                    ? (i.retranslate_cost_headless || '{model} · {pin}→{pout} tokens · subscription')
+                    : body.mechanism === 'local'
+                        ? (i.retranslate_cost_local || '{model} · {pin}→{pout} tokens · local')
+                        : (i.retranslate_cost || '{model} · {pin}→{pout} tokens · ${cost}');
                 retransCost.textContent = tmpl
                     .replace('{model}', body.model)
                     .replace('{pin}', body.prompt_tokens)
@@ -2754,6 +2793,7 @@
                 retransReplace.disabled = false;
             })
             .catch(err => {
+                if (retransCtx !== ctx) return;
                 retransRun.disabled = false;
                 setRetransStatus('');
                 showRetransError((i.network_error || 'Network error: ') + err.message);
