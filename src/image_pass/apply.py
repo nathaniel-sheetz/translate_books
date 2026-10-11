@@ -1,5 +1,6 @@
 """
 ``apply``, ``revert`` and ``verify`` — the only code that writes into ``images/``.
+(``cover_compose`` puts a finished cover there, through :func:`install_image`.)
 
 ``apply`` is where a generated picture becomes part of a published book, so it
 is built around what cannot be undone by accident:
@@ -60,7 +61,7 @@ ASPECT_TOLERANCE = 0.05
 # tenfold for detail no reader's screen shows.
 _SCALE_OVER_ORIGINAL = 2
 _MIN_LONG_SIDE = 1024
-_COVER_LONG_SIDE = 2560
+COVER_LONG_SIDE = 2560
 
 _JPEG_QUALITY = 90
 
@@ -83,7 +84,7 @@ def aspect_drift(width: int, height: int, ref_width: int, ref_height: int) -> fl
 
 def _long_side_cap(mode: Optional[str], original: Optional[dict[str, Any]]) -> int:
     if mode == MODE_COVER:
-        return _COVER_LONG_SIDE
+        return COVER_LONG_SIDE
     if original and original.get("width"):
         return max(
             _MIN_LONG_SIDE,
@@ -136,6 +137,60 @@ def copy_atomic(source: Path, target: Path) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def has_original(project_dir: Path, key: str, last_row: Optional[dict[str, Any]]) -> bool:
+    """Whether ``images/<key>`` holds, or once held, a picture to keep a copy of.
+
+    A cover an earlier apply made from nothing is not an original: backed up, a
+    generated picture would be what ``revert`` restores for ever after.
+    """
+    target = images_dir(project_dir) / key
+    backup = originals_dir(project_dir) / key
+    return target.is_file() and (
+        backup.is_file() or not ledger.made_from_nothing(last_row, target)
+    )
+
+
+def install_image(
+    project_dir: Path,
+    key: str,
+    source: Path,
+    *,
+    had_original: bool,
+    max_side: int,
+    size_before: Optional[list[int]],
+    made: dict[str, Any],
+) -> tuple[dict[str, Any], Path]:
+    """Put ``source`` at ``images/<key>`` behind the write-once backup, and
+    record it. ``made`` is what the ledger row says about where the picture
+    came from. Returns the size written and the ledger's path.
+
+    Raises whatever the copy or the encoder raises, before any row is written.
+    """
+    target = images_dir(project_dir) / key
+    backup = originals_dir(project_dir) / key
+    sha_before = ledger.sha256_file(target) if target.is_file() else None
+    if had_original and not backup.is_file():
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        copy_atomic(target, backup)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    written = convert_candidate(source, target, max_side=max_side)
+    ledger_file = ledger.append_row(project_dir, {
+        "ts": ledger.now_stamp(),
+        "action": ledger.ACTION_APPLY,
+        "image": key,
+        **made,
+        "created": not had_original,
+        "backup": f"images_original/{key}" if had_original else None,
+        "sha256_before": sha_before,
+        "sha256_original": ledger.sha256_file(backup) if backup.is_file() else None,
+        "sha256_after": ledger.sha256_file(target),
+        "sha256_candidate": ledger.sha256_file(source),
+        "size_before": size_before,
+        "size_after": [written["width"], written["height"]],
+    })
+    return written, ledger_file
 
 
 def _split_decisions(decisions: list[Any]) -> tuple[list[dict], list[dict]]:
@@ -245,11 +300,7 @@ def apply(
         assert job is not None and candidate is not None
 
         existed = target.is_file()
-        # A cover an earlier apply made from nothing is not an original: backed
-        # up, a generated picture would be what `revert` restores for ever after.
-        had_original = existed and (
-            backup.is_file() or not ledger.made_from_nothing(state.get(key), target)
-        )
+        had_original = has_original(project_dir, key, state.get(key))
         # The reference for proportions is the publisher's file, which is the
         # backup once one exists — not whatever replacement currently sits there.
         reference = backup if backup.is_file() else target if had_original else None
@@ -297,13 +348,30 @@ def apply(
             planned.append(summary)
             continue
 
-        sha_before = ledger.sha256_file(target) if existed else None
+        made_from = load_sidecar(candidate)
         try:
-            if had_original and not backup.is_file():
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                copy_atomic(target, backup)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            written = convert_candidate(candidate, target, max_side=cap)
+            written, ledger_file = install_image(
+                project_dir, key, candidate,
+                had_original=had_original,
+                max_side=cap,
+                size_before=summary["original_size"],
+                made={
+                    "candidate": row["candidate"],
+                    "note": row["note"],
+                    "job_id": job["id"],
+                    "mode": job.get("mode"),
+                    # Null for a composite, and for a run on Codex's own default.
+                    "model": None if made_from else made_by.get((job["id"], row["candidate"])),
+                    "instruction": job.get("instruction"),
+                    "labels": job.get("labels") or {},
+                    "prompt_sha": job.get("prompt_sha"),
+                    # A composite is two pictures: which, and where the join runs.
+                    "composite": {
+                        field: made_from.get(field)
+                        for field in ("from", "base", "regions", "scale")
+                    } if made_from else None,
+                },
+            )
         except Exception as exc:  # noqa: BLE001 - report it against this image
             refused.append({
                 "image": key,
@@ -314,33 +382,6 @@ def apply(
         summary["written_size"] = [written["width"], written["height"]]
         summary["bytes"] = target.stat().st_size
         applied.append(summary)
-        made_from = load_sidecar(candidate)
-        ledger_file = ledger.append_row(project_dir, {
-            "ts": ledger.now_stamp(),
-            "action": ledger.ACTION_APPLY,
-            "image": key,
-            "candidate": row["candidate"],
-            "note": row["note"],
-            "job_id": job["id"],
-            "mode": job.get("mode"),
-            # Null for a composite, and for a run on Codex's own default.
-            "model": None if made_from else made_by.get((job["id"], row["candidate"])),
-            "instruction": job.get("instruction"),
-            "labels": job.get("labels") or {},
-            "prompt_sha": job.get("prompt_sha"),
-            "created": not had_original,
-            "backup": f"images_original/{key}" if had_original else None,
-            "sha256_before": sha_before,
-            "sha256_original": ledger.sha256_file(backup) if backup.is_file() else None,
-            "sha256_after": ledger.sha256_file(target),
-            "sha256_candidate": ledger.sha256_file(candidate),
-            # A composite is two pictures: which, and where the join runs.
-            "composite": {
-                field: made_from.get(field) for field in ("from", "base", "regions", "scale")
-            } if made_from else None,
-            "size_before": summary["original_size"],
-            "size_after": summary["written_size"],
-        })
 
     counts = {
         "requested": len(decisions),

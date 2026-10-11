@@ -111,6 +111,11 @@ comparisons/
 # Design scratch/artifacts
 docs/design/
 
+# The house cover design and emblem (per-user; cover-compose falls back to the
+# tracked template.example.json)
+assets/cover_template/template.json
+assets/cover_template/logo.png
+
 # Claude Code project config
 CLAUDE.md
 .claude/*

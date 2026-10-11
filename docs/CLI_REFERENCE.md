@@ -438,11 +438,12 @@ python scripts/image_pass.py generate  --project my-book --estimate
 python scripts/image_pass.py check     --project my-book --json-file check_rows.json
 python scripts/image_pass.py composite --project my-book --json-file composites.json --dry-run
 python scripts/image_pass.py apply     --project my-book --from-board --dry-run
+python scripts/image_pass.py cover-compose --project my-book --title "Mi libro" --swatches
 python scripts/image_pass.py verify    --project my-book
 ```
 
 Sub-verbs: `inventory`, `backfill`, `triage`, `board`, `prepare`, `generate`, `check`,
-`composite`, `apply`, `revert`, `verify`. `generate` runs the Codex CLI on a ChatGPT subscription (never a metered key —
+`composite`, `cover-compose`, `apply`, `revert`, `verify`. `generate` runs the Codex CLI on a ChatGPT subscription (never a metered key —
 see [`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)) to translate lettering, clean scans, make a
 cover or replace an illustration. `apply` keeps the original filename and format, so no
 `[IMAGE:…]` token changes, and backs the original up to `images_original/` first.
@@ -488,6 +489,29 @@ is an ordinary candidate, numbered from 5 so it never fills a slot `generate` ow
 with a `cand_NN.composite.json` beside it. No Codex, no spend; all-or-nothing;
 `--dry-run` measures and writes nothing; `candidate` remakes an existing composite in
 place after an outline has been moved.
+
+`cover-compose` lays the house cover over a cover's art: a colour band across the top
+with the title, author and translator on it, and the emblem in the bottom corner. No
+Codex, no spend. The design is `assets/cover_template/template.json` (per-user and
+gitignored; without one the tracked `template.example.json` is used): an ordered list
+of `polygon`, `ellipse`, `text` and `image` layers in fractions of the cover, so a
+shape is changed or added by editing that file. The book's side is
+`<project>/cover/spec.json`, which every flag is merged into: `--title`,
+`--title-lines "A|B"`, `--author`, `--translator`, `--color band=#rrggbb`,
+`--art-top <fraction>`, `--aspect <W:H|art|template>` (`art`: the cover takes the
+picture's own shape and grows taller by `--art-top`, so sliding the picture down crops
+none of it), `--set <variable>=<value>` or `--set <layer>.<field>=<value>`,
+`--unset <key,...>`. A variable set with `--set` holds: a title size given this way is
+not stepped down. The art is scaled to the cover's full width and never stretched;
+the band deepens to hide the top edge of art too short for the cover, and the title
+steps down a size when it would cross the band's edge. Nothing is written if the text
+cannot fit. It writes `cover/proof.png` (and `cover/swatches.png` with `--swatches`:
+the cover in each band colour suggested from the art); `--apply` puts the proof in
+`images/cover.*` behind the same backup and ledger as `apply`, and refuses until a
+band colour has been picked. The art without lettering is kept at `cover/art.<ext>`
+and reused, so a band is never drawn over a band: `images/cover.*` is taken as art
+only when the ledger says the image pass applied it, or on `--art <file>` /
+`--cover-is-art`.
 
 The user's side is the image board in the web UI, `/image-pass/<id>` (see
 [`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md#image-board)). `triage` records a verdict, a

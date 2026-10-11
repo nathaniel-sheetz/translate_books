@@ -16,6 +16,7 @@ Subcommands, each printing exactly one JSON object:
     generate    run Codex per candidate and harvest the image     (subscription)
     check       record what is wrong with each candidate          (no spend)
     composite   one candidate's patch over another picture's pixels (no spend)
+    cover-compose  the band, title and emblem over the cover's art (no spend)
     board       where the page is, and what the user said on it   (no spend)
     apply       back up, convert to the original's name, replace  (the writer)
     revert      restore originals from images_original/           (no spend)
@@ -80,6 +81,7 @@ from src.image_pass import apply as ip_apply  # noqa: E402
 from src.image_pass import backfill as ip_backfill  # noqa: E402
 from src.image_pass import board as ip_board  # noqa: E402
 from src.image_pass import composite as ip_composite  # noqa: E402
+from src.image_pass import cover_compose as ip_cover  # noqa: E402
 from src.image_pass import inventory as ip_inventory  # noqa: E402
 from src.image_pass import jobs as ip_jobs  # noqa: E402
 
@@ -287,6 +289,78 @@ def _cmd_composite(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+def _json_value(text: str) -> Any:
+    """``0.2`` is a number and ``[0, 0.1]`` a list; anything else is the text."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _pairs(values: list[str] | None, flag: str) -> list[tuple[str, str]]:
+    pairs = []
+    for raw in values or []:
+        name, sep, value = raw.partition("=")
+        if not sep or not name.strip():
+            _die(f"{flag} takes name=value, not {raw!r}")
+        pairs.append((name.strip(), value.strip()))
+    return pairs
+
+
+def _cover_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """What this invocation changes in the book's cover spec."""
+    overrides: dict[str, Any] = {}
+    for field in ("title", "author", "translator"):
+        value = getattr(args, field)
+        if value is not None:
+            # `|` is a line break: "Edmund Spenser|Jeanie Lang" is two lines.
+            overrides[field] = value.replace("|", chr(10)) or None
+    if args.title_lines is not None:
+        lines = [part.strip() for part in args.title_lines.split("|") if part.strip()]
+        overrides["title_lines"] = lines or None
+    if args.aspect is not None:
+        if args.aspect.lower() in ("template", ""):
+            overrides["aspect"] = None
+        elif args.aspect.lower() == ip_cover.ASPECT_ART:
+            overrides["aspect"] = ip_cover.ASPECT_ART
+        else:
+            try:
+                wide, tall = (float(part) for part in args.aspect.split(":"))
+            except ValueError:
+                _die(f"--aspect takes W:H, `art` or `template`, not {args.aspect!r}")
+            overrides["aspect"] = [wide, tall]
+    if args.art_top is not None:
+        overrides["art_top"] = None if args.art_top.lower() == "auto" else _json_value(args.art_top)
+    for name, value in _pairs(args.color, "--color"):
+        overrides.setdefault("colors", {})[name] = value or None
+    for name, value in _pairs(args.set, "--set"):
+        # `band_right=0.2` is a variable; `title.at=[0.03,0.02]` a layer's field.
+        layer, dot, field = name.partition(".")
+        parsed = _json_value(value) if value else None
+        if dot:
+            overrides.setdefault("layers", {}).setdefault(layer, {})[field] = parsed
+        else:
+            overrides.setdefault("vars", {})[name] = parsed
+    for name in _split_ids(args.unset) or []:
+        overrides[name] = None
+    return overrides
+
+
+def _cmd_cover_compose(args: argparse.Namespace) -> int:
+    out = ip_cover.compose(
+        _resolve_project(args.project),
+        _cover_overrides(args),
+        art=Path(args.art) if args.art else None,
+        cover_is_art=args.cover_is_art,
+        swatches=args.swatches,
+        apply=args.apply,
+        dry_run=args.dry_run,
+        template=Path(args.template) if args.template else None,
+    )
+    _emit(out, _COVER_COMPOSE_SCHEMA)
+    return 0 if out.get("status") == "ok" else 1
+
+
 def _board_is_served(url: str) -> bool:
     """Whether the web UI answers for this project's board right now."""
     try:
@@ -412,6 +486,37 @@ _COMPOSITE_SCHEMA = {
     "instructions": "what to run next",
 }
 
+_COVER_COMPOSE_SCHEMA = {
+    "status": "'ok' | 'error' (nothing was written: read error)",
+    "dry_run": "true when no file was written",
+    "applied": "true when images/cover.* is now the composed cover",
+    "proof": "cover/proof.png: the composed cover. Read it before showing it",
+    "swatches": "--swatches only: cover/swatches.png, the cover once per "
+    "suggested_colors entry, numbered left to right",
+    "art": "{from, path, size, kept_at?}: which picture was drawn on and why "
+    "that one. kept_at is where it was copied to for every later compose",
+    "title_from": "'spec' | 'project (translated title)' | 'project' (no title "
+    "was given or recorded; the project's own was used, which may be the English one)",
+    "band_color": "the colour the band was drawn in",
+    "band_color_from": "'spec' (picked for this book) | 'suggested' (the first "
+    "suggestion, not saved: --apply refuses until one is picked) | 'template'",
+    "suggested_colors": "band colours taken from the art that the lettering reads on",
+    "size": "[width, height] of the composed cover",
+    "lines": "per text layer, the lines as they were broken",
+    "vars": "the template's variables as solved for this book",
+    "art_top": "where the art's top edge sits, as a fraction of the cover's height",
+    "side_crop": "share of the art's width cropped (0 unless it was too wide "
+    "to reach the bottom edge under the deepest band)",
+    "reasons": "why a variable is not the template's own value: what the art "
+    "or the title needed",
+    "notes": "what was done to the art's placement that was not asked for",
+    "warnings": "things to tell the user before they look at the proof",
+    "misfits": "on a does-not-fit error: {layer, line, problem} for each line "
+    "that would not stay inside its shape",
+    "spec_path": "cover/spec.json, where this book's overrides are kept",
+    "instructions": "what to run next",
+}
+
 _BACKFILL_SCHEMA = {
     "status": "'ok' | 'partial' (at least one image failed) | 'error'",
     "source": "the page the link map was read from",
@@ -488,6 +593,7 @@ _DISPATCH = {
     "triage": _cmd_triage,
     "check": _cmd_check,
     "composite": _cmd_composite,
+    "cover-compose": _cmd_cover_compose,
     "board": _cmd_board,
     "apply": _cmd_apply,
     "revert": _cmd_revert,
@@ -654,6 +760,82 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="measure and report; write no candidate",
+    )
+
+    p_cover = sub.add_parser(
+        "cover-compose",
+        help="lay the house cover over the art: the band with the title on it and "
+        "the emblem. Writes cover/proof.png; --apply puts it in images/ (no spend)",
+    )
+    p_cover.add_argument("--project", required=True, help="project id or path")
+    p_cover.add_argument(
+        "--art",
+        help="the picture with no lettering on it. Kept as cover/art.<ext> and "
+        "reused from then on; without it, the cover the image pass applied is taken",
+    )
+    p_cover.add_argument(
+        "--cover-is-art",
+        action="store_true",
+        help="images/cover.* has no lettering on it, though the ledger does not "
+        "say the image pass made it: take it as the art",
+    )
+    p_cover.add_argument("--title", help="the title as the cover prints it; `|` breaks a line")
+    p_cover.add_argument(
+        "--title-lines",
+        help="the title's lines, `|` between them, instead of letting it wrap; "
+        "an empty string goes back to wrapping",
+    )
+    p_cover.add_argument("--author", help="the author line; `|` between two authors")
+    p_cover.add_argument("--translator", help="the translator's name")
+    p_cover.add_argument(
+        "--color",
+        action="append",
+        metavar="NAME=#RRGGBB",
+        help="one of the template's colours for this book, e.g. band=#874727 (repeatable)",
+    )
+    p_cover.add_argument(
+        "--aspect",
+        help="this cover's proportions: W:H (5:8); `art` to take the picture's own "
+        "shape, made taller by --art-top so that sliding the picture down crops "
+        "none of it; `template` to go back to the design's",
+    )
+    p_cover.add_argument(
+        "--art-top",
+        help="where the art's top edge sits, as a fraction of the cover's height: "
+        "0 at the top edge, more to start it lower under the band, less than 0 to "
+        "lose its top instead of its bottom; `auto` to let the command place it",
+    )
+    p_cover.add_argument(
+        "--set",
+        action="append",
+        metavar="NAME=VALUE",
+        help="override one of the template's variables (band_right=0.2) or one "
+        "field of a layer (title.at=[0.03,0.02]) for this book; an empty value "
+        "removes the override (repeatable)",
+    )
+    p_cover.add_argument(
+        "--unset",
+        help="comma-separated spec keys to drop, e.g. title_lines,art_top",
+    )
+    p_cover.add_argument(
+        "--swatches",
+        action="store_true",
+        help="also write cover/swatches.png: the cover in each band colour "
+        "suggested from the art, to choose between",
+    )
+    p_cover.add_argument(
+        "--apply",
+        action="store_true",
+        help="put the composed cover in images/, behind the backup and the ledger",
+    )
+    p_cover.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="solve and report the layout; write nothing",
+    )
+    p_cover.add_argument(
+        "--template",
+        help="a cover template other than assets/cover_template/template.json",
     )
 
     p_board = sub.add_parser(

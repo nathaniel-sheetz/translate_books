@@ -174,7 +174,7 @@ def _write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _book_meta(project_dir: Path) -> dict[str, str]:
+def book_meta(project_dir: Path) -> dict[str, str]:
     """Title, author and target language, from wherever the project keeps them."""
     meta = {"title": "", "author": "", "target_language": ""}
     for name in (Path(".harness") / "config.json", Path("project.json")):
@@ -608,7 +608,7 @@ def _prepare(project_dir: Path, jobs: list[Any], *, replace: bool) -> dict[str, 
             "instructions": "Fix the named problems and re-run prepare with the whole batch.",
         }
 
-    meta = _book_meta(project_dir)
+    meta = book_meta(project_dir)
     try:
         prompts = {job["id"]: render_prompt(job, meta) for job in valid}
     except (OSError, ValueError) as exc:
