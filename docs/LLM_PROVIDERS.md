@@ -154,6 +154,25 @@ Its `inputTokens` excludes cache reads, exactly as Claude's does, so the shared
 estimated** — one `usage.jsonl` holds every family's rows, and an unfiltered
 median over a 4.4× gap describes neither.
 
+**Both constants predate two cuts made on 2026-10-10**, and real waves have not
+been re-measured since. On a probe prompt of 87 tokens (three jobs an arm,
+billed input identical within each arm):
+
+| Job | Before | After | What changed |
+|---|---:|---:|---|
+| `claude` wave job, Sonnet 5.5 | 4,378 | 701 | `--strict-mcp-config` on every job |
+| `claude` retranslate call (707-token prompt) | 7,481 | 1,707 | the same, plus a short system prompt in place of the CLI's default |
+| `cursor` wave job, Grok 4.7 medium | 15,671 | 11,026 | a neutral home per worker |
+| `cursor` retranslate call (707-token prompt) | 16,011 | 11,613 | the same |
+
+Logged overhead on real waves runs higher than these, because `prompt_sent` is
+a characters-over-four estimate that undercounts a long Spanish prompt, and that
+shortfall lands in `overhead`. Expect a real wave to fall by about the same
+number of tokens (3.7k on Claude, 4.6k on Cursor), not to the same total. The
+gate medians the last 40 rows per model, so its quote runs high until new rows
+outnumber old ones. `scripts/prefix_probe.py` re-runs any of these arms and
+reads the prefix's make-up back off disk.
+
 **On Cursor the prefix also depends on the model.** Measured by the 2026-09-14
 panel probe (cursor-agent 2026.09.10, the same audit prompt on every model,
 medium effort):
@@ -222,7 +241,10 @@ the preamble into a `.cursor/rules` always-apply file via `--workspace` was
 probed on 2026-08-11 (3 runs per arm, same model and body) and moved cache reads
 not at all — median 5,312 in both arms — so `_fold_system_prompt` stays as it is.
 
-The only client-side levers on the fixed prefix are **fewer processes** or
+One part of the fixed prefix is built from this machine's disk, and so can be
+cut: the skill list (see **Each Cursor worker gets its own home** below). The
+rest is rendered by Cursor's server. Past that, the only client-side levers are
+**fewer processes** or
 **a smaller prompt**. That is a description of the CLI, not a recommendation to
 group: grouping trades per-target reasoning depth for fewer prefixes, and with
 `usage` reported per wave that trade is now the operator's to make per wave.
@@ -324,6 +346,47 @@ file that actually failed (the source, or the destination slot) and its errno, a
 usage rollup carries `slots_seeded: "n/N"`, the count of workers that actually got a
 slot. That tally is attached even when no job reported tokens, so an all-failed or
 all-timed-out wave — the shape where isolation is most worth checking — still reports it.
+
+#### Each Cursor worker gets its own home
+
+`cursor-agent` puts an `<agent_skills>` list in every job's prefix, built by
+scanning `.claude/skills`, `.codex/skills`, `.grok/skills` and `.agents/skills`
+under the home directory, recursively. On this machine that was 184 entries, 170
+of them from `~/.claude/skills` (gstack, the synced Anthropic skills, this
+repo's own), none of which a translation job can use. The scan follows `os.homedir()` and nothing else: not
+`CURSOR_CONFIG_DIR`, not the workspace, and no flag or config key turns it off.
+
+So each worker's slot now also holds an empty `home/`, and the child runs with
+`USERPROFILE` (and `HOME`, if the launching shell set one) pointing at it. The
+list falls to the CLI's own 14 built-in skills and billed input from 15,671 to
+11,026 per job (Grok 4.7 medium, 2026-10-10, cursor-agent 2026.10.01). Eight
+jobs four at a time ran 8 of 8 on four homes, three of them new.
+
+- **The login is unaffected.** It is read from `%APPDATA%`, a separate
+  variable. The auth and `--model` preflights run under the same kind of home
+  as the workers, so if a future CLI moved the login the wave would be refused
+  before any job ran.
+- **Windows only.** On macOS and Linux the login lives under the home directory
+  itself, so the switch does nothing there.
+- **What lands in it.** The CLI re-syncs its built-in skills into
+  `home/.cursor/skills-cursor` once per slot and writes one transcript per job
+  under `home/.cursor/projects/`, which is where they went under the real home
+  before. About 200 KB per slot to start.
+- **Path length.** Those transcripts sit 116 characters plus the worker cwd's
+  length below the home (174 here, against 118 for the chat store). A home that
+  would cross 260 characters is skipped, and that worker keeps the operator's
+  home.
+- **Trimming the skills folder instead does not work.** The list has a fixed
+  size, about 20,400 characters, and descriptions are cut to fit it. Moving a
+  backup folder out of `~/.claude/skills` took the list from 184 entries to
+  143 and the block from 20,420 characters to 20,452: 247 tokens
+  saved per job, against 4,645 for the neutral home.
+
+`HEADLESS_NEUTRAL_HOME=0` turns it off. A worker that could not have one (no
+seeded slot, the directory could not be made, the path is too long) runs as
+before, with one warning per wave. Each usage row carries `neutral_home: true`
+when it applied and the rollup carries `neutral_home: "n/N"`, since rows with
+and without it are about 4.6k apart and must not be read as one population.
 
 #### Effort has two channels — one per CLI
 
@@ -465,7 +528,8 @@ python scripts/harness.py config-set --project projects/<slug> \
 
 | flags | effect |
 |---|---|
-| `--strict-mcp-config`, `--safe-mode` | **no measurable effect.** `--tools ""` already keeps MCP definitions out of the job's system prompt. |
+| `--strict-mcp-config` | **on every Claude job already; setting it here changes nothing.** It measured no effect in July on CLI 2.1.220, when `--tools ""` was enough. Since CLI 2.1.283 the account's claude.ai connectors ride on every job regardless: eight Claude Docs tool definitions and their instructions, about 3.7k tokens. With the flag and no `--mcp-config`, none load (4,378 → 701 billed on an 87-token prompt, 2026-10-10, CLI 2.1.296). `ENABLE_CLAUDEAI_MCP_SERVERS=false` measured the same; the flag is used because it shows in the row's `flags`. |
+| `--safe-mode` | no measurable effect in July on CLI 2.1.220; not re-tested. |
 | `--bare` | **never** — `config-set` rejects it. Auth becomes strictly `ANTHROPIC_API_KEY`/`apiKeyHelper` — "OAuth and keychain are never read" — defeating the subscription preflight. |
 | `--max-turns` | does not exist in CLI 2.1.220. |
 
