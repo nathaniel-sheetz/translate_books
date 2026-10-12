@@ -40,6 +40,15 @@ the user answers you:
   they want an image done, correct or add to the label map, ask for more candidates.
 - **Once candidates exist:** accept one, send the image back with a note, or skip it.
 
+The page has two tabs. **Existing images** is everything above: the pictures the
+book came with, to be translated, restored or replaced. **New images** is for a
+picture that is made, which today is the cover. It is not a card but a workspace of
+four steps — art, band colour, layout drafts, in the book — with every candidate,
+swatch, proof and variant drawn for it kept and shown, the latest proof large beside
+them. There the user chooses a draft ("Use this"), approves one for the book, and
+leaves a note on the layout. `board` reports all of that under `cover` (step 5b).
+A link straight to it is the `url` with `#type=new` on the end.
+
 Everything typed there is saved to `.harness/images/feedback.json`, and you read it
 back with `board`. So at each gate you **give the user the board's `url` and end the
 turn**; when they come back, `board` tells you what they asked for. The chat is for
@@ -123,9 +132,11 @@ python scripts/image_pass.py apply --project home-geography --from-board [--max-
 #     it and the emblem. No Codex, no spend. Writes cover/proof.png; --apply swaps
 #     it in for images/cover.* behind the same backup and ledger.
 python scripts/image_pass.py cover-compose --project home-geography \
-    [--title "Geografía del hogar"] [--title-lines "Geografía|del hogar"] \
+    [--title "Geografía del hogar"] [--title-lines "Geografía|del hogar"]     [--subtitle "Una vida en el bosque"] \
     [--author "C. C. Long"] [--color band=#874727] [--art-top 0.05] \
-    [--set band_right=0.2] [--swatches] [--art <file>] [--dry-run] [--apply]
+    [--set band_right=0.2] [--swatches] [--art <file>] [--dry-run] [--apply] \
+    [--try "art_top=0.05" --try "band_right=0.2,title_size=0.06"] \
+    [--from-draft 7] [--from-board]
 
 # 8. Undo, and audit.
 python scripts/image_pass.py revert --project home-geography --images 006.jpg   # or: all
@@ -561,9 +572,48 @@ book's `cover/spec.json`. No Codex, no usage, so no G2; `--apply` writes into
 4. **STOP — show the proof.** Apply only on the user's word:
    `cover-compose --project <id> --apply`, then `verify`.
 
+**Every cover drawn is kept as a draft**, numbered, in `cover/drafts/` with the
+settings it was drawn with (`cover/drafts.json`); the same cover composed twice
+keeps its number. `proof.png` is still the latest and what `--apply` lands. The
+drafts are what the board's New images tab shows, so with the proof give the user
+the board `url` (`#type=new`): the chat shows them one picture, the page shows them
+all of them side by side, and the lightbox flips between two in place.
+
+- **The swatches are drafts too**, one per colour (`swatch_drafts`). The user can
+  type a number in the chat or press "Use this" under one on the page.
+- **To compare layouts, use `--try`, never a sheet of your own.** Each `--try` draws
+  the cover once with those settings laid over the book's and keeps it as a draft;
+  the spec is not changed. `--try "art_top=0.05" --try "art_top=0.1"` is two covers
+  to choose between. A value starting `#` is a colour (`band=#874727`); everything
+  else is named as its own flag names it. One that does not fit is reported in
+  `tried` and is not a draft. Read each `path` before pointing the user at them.
+- **`--from-draft N`** starts from draft N's settings instead of the spec as it
+  stands; other flags are laid over them. That is how "go back to the one before"
+  and "that swatch, but the title bigger" are done in one command.
+- **`--from-board`** takes what the user chose on the page. `board` says what is
+  waiting, under `cover.design.waiting`:
+
+  | `waiting` | Do |
+  |---|---|
+  | `draft_not_adopted` | `cover-compose --from-board`: the draft they chose becomes the proof. Read it |
+  | `note_unread` | Read `cover.design.note` and act on it with the flags above. No flag carries a note for you |
+  | `not_applied` | They approved a draft: `cover-compose --from-board --apply`, then `verify` |
+
+  `--from-board --apply` lands a cover only if it is the very draft they approved:
+  the same settings on the same art in the same design. Anything else is refused,
+  the new proof is left for them to look at, and they approve that. A choice made on
+  art the book no longer has comes back `stale`: give them the url and have them
+  choose again. Without `--from-board`, `--apply` is on their word in the chat, as
+  it always was.
+
+A hand-made picture you do leave in `cover/` (any image that is not `art.*`) shows
+on the page under "Other sheets", so nothing put there is invisible; but it cannot
+be chosen, which is why `--try` is the way.
+
 | The user says | Flag |
 |---|---|
 | break the title differently | `--title-lines "A|B"` (empty string: wrap again) |
+| the name big and the rest of the title smaller under it | `--title "Bambi" --subtitle "Una vida en el bosque"`, then a size for each: `--set title_size=0.0815 --set subtitle_size=0.0444` (44 pt over 24). `--subtitle ""` takes it off |
 | two authors, one per line | `--author "Edmund Spenser|Jeanie Lang"` |
 | another band colour | `--color band=#792706` |
 | move the art down / up | `--art-top 0.09` / `--art-top -0.05` (`auto` to reset) |
@@ -749,6 +799,14 @@ mostly lettering scores low (0.86) for the right reasons.
   is about 0.445, and at 44 pt about 0.475. The steeper edge then runs through
   whatever is high in the middle of the picture (a rider's hat), so slide the art
   down with it. Show the user a sheet of variants rather than one proof.
+- **A title with a subtitle is two layers, each with its own size.** (bambi,
+  2026-10-11.) "Bambi: Una vida en el bosque" as one title is two lines of one
+  size, and the second is too wide at 32 pt, so both step down to 28. As
+  `--title "Bambi" --subtitle "Una vida en el bosque"`, 44 pt over 24 pt fit the
+  design's band with nothing else moved. The colon goes: the line break does its
+  work. A house `template.json` made before 2026-10-11 has no `subtitle` layer;
+  `warnings` says so and the subtitle is left off until the layer is copied in
+  from `template.example.json`.
 
 ### Shaded drawings, wide strips and many labels (stormy-misty-s-foal, 2026-10-06)
 

@@ -495,6 +495,241 @@
     color: var(--text-muted);
 }
 
+/* ---- tabs: images the book came with, and images that are made ---- */
+
+.ib-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.ib-tab {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: -1px;
+    padding: 8px 14px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.ib-tab:hover {
+    color: var(--text);
+}
+
+.ib-tab[aria-selected="true"] {
+    border-bottom-color: var(--text-heading);
+    color: var(--text-heading);
+    font-weight: 600;
+}
+
+.ib-tab .ib-dot {
+    align-self: center;
+    margin-left: 0;
+}
+
+/* `display: flex` above would otherwise outrank the attribute. */
+.ib-filters[hidden] {
+    display: none;
+}
+
+/* ---- a workspace: one made image, step by step ---- */
+
+.ib-workspace {
+    margin-top: 16px;
+}
+
+.ib-ws-status {
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-light);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--text-muted);
+}
+
+.ib-ws-status-colour,
+.ib-ws-status-approve {
+    border-color: transparent;
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-color);
+}
+
+.ib-ws-status-done {
+    color: var(--ib-cover);
+}
+
+.ib-ws {
+    display: grid;
+    grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+    gap: 24px;
+    margin-top: 12px;
+}
+
+/* The proof stays in view while the drafts beside it scroll past. */
+.ib-ws-side {
+    position: sticky;
+    top: 12px;
+    align-self: start;
+}
+
+.ib-ws-side .ib-fig {
+    max-width: none;
+}
+
+.ib-ws-side .ib-fig-btn img {
+    max-height: 78vh;
+}
+
+.ib-step {
+    padding: 12px 0;
+    border-top: 1px solid var(--border-divider);
+}
+
+.ib-step:first-child {
+    padding-top: 0;
+    border-top: 0;
+}
+
+.ib-step-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-heading);
+}
+
+.ib-step-n {
+    flex: none;
+    align-self: center;
+    width: 20px;
+    height: 20px;
+    border: 1px solid var(--border-light);
+    border-radius: 50%;
+    font-size: 12px;
+    line-height: 18px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.ib-step-done .ib-step-n {
+    border-color: var(--ib-cover);
+    background: var(--ib-cover);
+    color: var(--bg-card);
+}
+
+.ib-step-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-muted);
+}
+
+.ib-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 14px;
+    margin-top: 10px;
+}
+
+/* Three classes, to outrank the room a card under review gives its pictures. */
+.ib-card .ib-strip .ib-fig {
+    flex: 0 0 150px;
+    max-width: 150px;
+}
+
+.ib-card .ib-strip .ib-fig-btn img {
+    max-height: 225px;
+}
+
+.ib-card .ib-strip .ib-fig-sheet {
+    flex-basis: 300px;
+    max-width: 300px;
+}
+
+.ib-color {
+    flex: none;
+    align-self: center;
+    width: 12px;
+    height: 12px;
+    border: 1px solid var(--border-light);
+    border-radius: 3px;
+}
+
+.ib-draft-line {
+    margin: 3px 0 0;
+    font-size: 12px;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.ib-tag-current,
+.ib-tag-in_book,
+.ib-tag-picked {
+    color: var(--ib-cover);
+}
+
+.ib-tag-old_art {
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
+.ib-more {
+    margin-top: 10px;
+    font-size: 13px;
+}
+
+.ib-more > summary {
+    cursor: pointer;
+    color: var(--text-link);
+}
+
+.ib-more > .ib-form {
+    margin-top: 8px;
+}
+
+.ib-step > .ib-pick,
+.ib-step > .ib-form {
+    margin-top: 10px;
+}
+
+.ib-hint {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+@media (max-width: 760px) {
+    .ib-ws {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    .ib-ws-side {
+        position: static;
+    }
+
+    .ib-ws-side .ib-fig-btn img {
+        max-height: 60vh;
+    }
+
+    .ib-card .ib-strip .ib-fig {
+        flex-basis: 120px;
+        max-width: 120px;
+    }
+}
+
 /* ---- lightbox ---- */
 
 .ib-lightbox {

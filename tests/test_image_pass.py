@@ -29,6 +29,7 @@ from src.image_pass import inventory as ip_inventory
 from src.image_pass import board as ip_board
 from src.image_pass import composite as ip_composite
 from src.image_pass import cover_compose as ip_cover
+from src.image_pass import cover_drafts as ip_drafts
 from src.harness import locks
 from src.image_pass import feedback as ip_feedback
 
@@ -1830,14 +1831,19 @@ COVER_FONT = str(ip_cover.TEMPLATE_DIR / "fonts" / "LibreBaskerville[wght].ttf")
 ART_GREEN = (20, 160, 60)
 
 
-def _cover_template(tmp_path: Path, extra_layers=(), **changes) -> Path:
+def _cover_template(tmp_path: Path, extra_layers=(), subtitle=False, **changes) -> Path:
     """A small design of its own, so no test depends on the house one."""
     text = {"type": "text", "font": COVER_FONT, "weight": 600, "anchor": "top-left",
             "fill": "$ink", "fit_inside": "band", "margin": 0.01}
+    under_title = [
+        {**text, "id": "subtitle", "field": "subtitle", "at": [0.03, 0.1],
+         "below": "title", "size": "$subtitle_size", "wrap": True, "margin_right": 0.02},
+    ] if subtitle else []
     doc = {
         "aspect": [2, 3],
         "colors": {"band": "#703010", "ink": "#FFF000"},
-        "vars": {"band_left": 0.38, "band_right": 0.16, "title_size": 0.06},
+        "vars": {"band_left": 0.38, "band_right": 0.16, "title_size": 0.06,
+                 "subtitle_size": 0.035},
         "fit": {
             "try": [{"title_size": 0.06}, {"title_size": 0.045}],
             "grow": {"var": "band_right", "max": 0.24, "step": 0.02},
@@ -1848,8 +1854,9 @@ def _cover_template(tmp_path: Path, extra_layers=(), **changes) -> Path:
              "points": [[0, 0], [1, 0], [1, "$band_right"], [0, "$band_left"]]},
             {**text, "id": "title", "field": "title", "at": [0.03, 0.02],
              "size": "$title_size", "wrap": True, "margin_right": 0.02},
+            *under_title,
             {**text, "id": "author", "field": "author", "at": [0.03, 0.2],
-             "below": "title", "gap": 0.02, "size": 0.026},
+             "below": "subtitle" if subtitle else "title", "gap": 0.02, "size": 0.026},
             *extra_layers,
         ],
         **changes,
@@ -2109,6 +2116,81 @@ def test_cli_cover_compose_remembers_what_it_was_told(project: Path, capsys, tmp
     assert "vars" not in spec and "title_lines" not in spec and "art_top" not in spec
 
 
+def _placed(solved: dict, layer: str) -> dict:
+    return next(item for item in solved["layers"] if item["id"] == layer)
+
+
+def test_a_subtitle_sits_under_the_title_in_its_own_size(tmp_path: Path):
+    template = _cover_template(tmp_path, subtitle=True)
+    _design, solved = _solved(template, (400, 600), title="Bambi",
+                              subtitle="Una vida en el bosque", vars={"title_size": 0.08})
+    assert solved["status"] == "ok", solved
+    assert solved["lines"]["title"] == ["Bambi"]
+    assert solved["lines"]["subtitle"] == ["Una vida en el bosque"]
+    title, under, author = (_placed(solved, name) for name in ("title", "subtitle", "author"))
+    assert title["px"] == pytest.approx(0.08 * 1200) and under["px"] == pytest.approx(0.035 * 1200)
+    assert under["lines"][0]["box"][1] == pytest.approx(title["bottom"])
+    assert author["lines"][0]["box"][1] == pytest.approx(under["bottom"] + 0.02 * 1200)
+    # Its size is the book's to change, apart from the title's.
+    _design, smaller = _solved(template, (400, 600), title="Bambi",
+                               subtitle="Una vida en el bosque",
+                               vars={"title_size": 0.08, "subtitle_size": 0.03})
+    assert _placed(smaller, "subtitle")["px"] == pytest.approx(0.03 * 1200)
+    assert _placed(smaller, "title")["px"] == title["px"]
+
+
+def test_a_book_with_no_subtitle_is_laid_out_as_if_the_layer_were_not_there(tmp_path: Path):
+    _design, without = _solved(_cover_template(tmp_path / "a"), (400, 600))
+    _design, unused = _solved(_cover_template(tmp_path / "b", subtitle=True), (400, 600))
+    assert "subtitle" not in unused["lines"]
+    assert _placed(unused, "author")["lines"] == _placed(without, "author")["lines"]
+
+
+def test_cli_cover_compose_takes_a_subtitle_and_takes_it_off_again(
+    project: Path, capsys, tmp_path: Path
+):
+    template = _cover_template(tmp_path, subtitle=True)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    common = ["cover-compose", "--project", str(project), "--template", str(template)]
+    code, out, _ = _run(capsys, common + [
+        "--art", str(art), "--title", "Bambi", "--subtitle", "Una vida en el bosque",
+        "--color", "band=#703010", "--set", "subtitle_size=0.03",
+    ])
+    assert code == 0 and out["warnings"] == [], out
+    assert out["lines"]["subtitle"] == ["Una vida en el bosque"]
+    assert out["vars"]["subtitle_size"] == 0.03
+    # Remembered, like everything else the command is told.
+    code, out, _ = _run(capsys, common)
+    assert code == 0 and out["lines"]["subtitle"] == ["Una vida en el bosque"], out
+    code, out, _ = _run(capsys, common + ["--subtitle", ""])
+    assert code == 0 and "subtitle" not in out["lines"], out
+    assert "subtitle" not in json.loads((project / "cover" / "spec.json").read_text("utf-8"))
+
+
+def test_a_subtitle_the_design_has_no_layer_for_is_said_not_dropped_silently(
+    project: Path, tmp_path: Path
+):
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    out = ip_cover.compose(
+        project, {"title": "Bambi", "subtitle": "Una vida en el bosque",
+                  "colors": {"band": "#703010"}},
+        art=art, template=_cover_template(tmp_path),
+    )
+    assert out["status"] == "ok" and "subtitle" not in out["lines"], out
+    assert any("subtitle is not on this cover" in warning for warning in out["warnings"])
+
+
+def test_the_tracked_design_has_a_place_for_a_subtitle():
+    design = ip_cover.load_template(ip_cover.TEMPLATE_DIR / ip_cover.EXAMPLE_TEMPLATE)
+    spec = {"title": "Bambi", "subtitle": "Una vida en el bosque", "author": "Felix Salten",
+            "vars": {"title_size": 0.0815}}
+    solved = ip_cover.solve(design, spec, (1122, 1402))
+    assert solved["status"] == "ok", solved
+    assert solved["lines"]["subtitle"] == ["Una vida en el bosque"]
+    title, under, author = (_placed(solved, name) for name in ("title", "subtitle", "author"))
+    assert title["bottom"] <= under["lines"][0]["box"][1] < under["bottom"] < author["lines"][0]["box"][1]
+
+
 def test_a_cover_that_follows_the_art_grows_taller_instead_of_cropping_it(tmp_path: Path):
     template = _cover_template(tmp_path)
     _design, plain = _solved(template, (400, 600), aspect="art")
@@ -2150,3 +2232,264 @@ def test_cli_cover_compose_takes_an_aspect(project: Path, capsys, tmp_path: Path
     assert code == 0 and out["size"][0] / out["size"][1] == pytest.approx(0.625, abs=1e-3)
     code, out, _ = _run(capsys, common + ["--aspect", "template"])
     assert code == 0 and out["size"] == [800, 1200]
+
+
+# --- cover drafts: every cover drawn is kept, and can be gone back to ---------
+
+BAND = {"colors": {"band": "#703010"}}
+DEEPER = {"label": "band_right=0.2", "overrides": {"vars": {"band_right": 0.2}}}
+# Later than any compose in a test: stamps are whole seconds.
+LATER = "2099-01-01T00:00:00+00:00"
+
+
+def _spec(project: Path) -> dict:
+    return json.loads((project / "cover" / "spec.json").read_text("utf-8"))
+
+
+def _workspace(project: Path) -> dict:
+    return _board_row(project, "cover.jpg")["workspace"]
+
+
+def test_every_compose_keeps_a_draft_and_the_same_cover_is_not_kept_twice(
+    project: Path, tmp_path: Path
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    first = ip_cover.compose(project, {"title": "Geografía", **BAND}, art=art, template=template)
+    assert first["status"] == "ok" and first["draft"] == 1
+    again = ip_cover.compose(project, template=template)
+    assert again["draft"] == 1 and len(ip_drafts.load(project)) == 1
+
+    changed = ip_cover.compose(project, {"vars": {"band_right": 0.2}}, template=template)
+    assert changed["draft"] == 2 and _spec(project)["state"]["proof_draft"] == 2
+    one, two = ip_drafts.load(project)
+    # The first proof has nothing to be a change from; the second says what moved.
+    assert one["kind"] == "proof" and one["changes"] is None
+    assert two["changes"] == [{"key": "band_right", "from": None, "to": 0.2}]
+    with Image.open(project / "cover" / two["file"]) as preview:
+        assert preview.format == "JPEG" and max(preview.size) <= ip_drafts.PREVIEW_SIDE
+
+    # A dry run draws nothing, so it keeps nothing.
+    ip_cover.compose(project, {"vars": {"band_right": 0.22}}, dry_run=True, template=template)
+    assert len(ip_drafts.load(project)) == 2
+
+
+def test_swatches_and_tries_are_drafts_to_compare_and_leave_the_spec_alone(
+    project: Path, tmp_path: Path
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), (150, 90, 40), fmt="PNG")
+    out = ip_cover.compose(
+        project, {"title": "Geografía", **BAND}, art=art, template=template, swatches=True,
+        tries=[DEEPER, {"label": "title_size=0.5", "overrides": {"vars": {"title_size": 0.5}}}],
+    )
+    assert out["status"] == "ok", out
+    swatches = [row for row in ip_drafts.load(project) if row["kind"] == "swatch"]
+    assert [row["color"] for row in swatches] == out["suggested_colors"]
+    assert [made["draft"] for made in out["swatch_drafts"]] == [row["n"] for row in swatches]
+
+    fits, too_big = out["tried"]
+    assert fits["status"] == "ok" and Path(fits["path"]).is_file()
+    # One that cannot be drawn is reported and is not a draft.
+    assert too_big["status"] == "does_not_fit" and "draft" not in too_big
+    variant = ip_drafts.find(project, fits["draft"])
+    assert variant["kind"] == "variant" and variant["set"] == swatches[0]["set"]
+    assert variant["changes"] == [{"key": "band_right", "from": None, "to": 0.2}]
+
+    spec = _spec(project)
+    assert "vars" not in spec and spec["colors"] == BAND["colors"]
+
+
+def test_from_draft_goes_back_to_the_settings_a_draft_was_drawn_with(
+    project: Path, tmp_path: Path
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    out = ip_cover.compose(project, {"title": "Geografía", **BAND}, art=art, template=template,
+                           tries=[DEEPER])
+    variant = out["tried"][0]["draft"]
+    ip_cover.compose(project, {"title": "Otro"}, template=template)
+
+    back = ip_cover.compose(project, from_draft=variant, template=template)
+    assert back["status"] == "ok" and back["vars"]["band_right"] == 0.2
+    assert back["lines"]["title"] == ["Geografía"]
+    spec = _spec(project)
+    assert spec["vars"] == {"band_right": 0.2} and spec["title"] == "Geografía"
+    # The proof it makes is that draft: the same settings on the same art.
+    assert ip_drafts.find(project, back["draft"])["id"] == ip_drafts.find(project, variant)["id"]
+
+    gone = ip_cover.compose(project, from_draft=99, template=template)
+    assert gone["status"] == "error" and "no draft 99" in gone["error"]
+
+    # On other art its settings carry over, and the command says so.
+    other = _image(tmp_path / "other.png", (400, 600), (150, 90, 40), fmt="PNG")
+    moved = ip_cover.compose(project, from_draft=variant, art=other, template=template)
+    assert moved["status"] == "ok" and "no longer has" in moved["warnings"][0]
+
+
+def test_the_cover_is_a_workspace_of_steps_that_follow_the_files(project: Path, tmp_path: Path):
+    template = _cover_template(tmp_path)
+    row = _board_row(project, "cover.jpg")
+    assert row["track"] == "new" and _board_row(project, "map.jpg")["track"] == "existing"
+    empty = row["workspace"]
+    assert [step["id"] for step in empty["steps"]] == ["art", "colour", "layout", "book"]
+    assert {step["state"] for step in empty["steps"]} == {"none"}
+    assert empty["status"] == "art" and not empty["waiting"] and empty["hero"] is None
+
+    ip_jobs.prepare(project, [{"image": "cover.jpg", "mode": "cover", "instruction": "A globe."}])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1024, 1536), color=(150, 90, 40)))
+    waiting = _workspace(project)
+    assert waiting["steps"][0]["state"] == "review" and waiting["waiting"]
+    ip_apply.apply(project, [{"image": "cover.jpg", "candidate": 1}])
+
+    out = ip_cover.compose(project, {"title": "Geografía"}, template=template, swatches=True)
+    ws = _workspace(project)
+    art, colour, layout, book = ws["steps"]
+    assert art["state"] == "kept_candidate" and art["values"]["n"] == 1
+    assert [picture["kind"] for picture in art["pictures"]] == ["art", "candidate"]
+    # The colour is the user's: until it is picked, that is what the page waits on.
+    assert colour["state"] == "suggested" and ws["status"] == "colour" and ws["waiting"]
+    assert [picture["color"] for picture in colour["pictures"]] == out["suggested_colors"]
+    assert layout["state"] == "drafts" and layout["pictures"][0]["tags"] == ["current"]
+    assert book["state"] == "art" and not book["done"]
+
+    second = out["swatch_drafts"][1]
+    landed = ip_cover.compose(project, from_draft=second["draft"], apply=True, template=template)
+    assert landed["applied"], landed
+    ws = _workspace(project)
+    art, colour, layout, book = ws["steps"]
+    assert ws["status"] == "done" and not ws["waiting"]
+    assert colour["values"]["color"] == second["color"]
+    assert "picked" in colour["pictures"][1]["tags"]
+    assert book["state"] == "applied" and book["values"]["n"] == landed["draft"]
+    assert ws["hero"]["draft"] == landed["draft"]
+    assert set(layout["pictures"][0]["tags"]) == {"current", "in_book"}
+    assert ledger.read_rows(project)[-1]["compose"]["draft"] == landed["draft"]
+
+    # A later proof that is not applied is one to approve.
+    ip_cover.compose(project, {"vars": {"band_right": 0.2}}, template=template)
+    ws = _workspace(project)
+    assert ws["status"] == "approve" and ws["waiting"] and ws["steps"][3]["state"] == "behind"
+
+    # The chips of each tab count that tab's images.
+    board = ip_board.build(project)
+    tracks = board["counts"]["tracks"]
+    assert tracks["new"]["images"] == 1 and tracks["new"]["waiting"] == 1
+    assert tracks["existing"]["images"] == len(board["images"]) - 1
+    summary = ip_board.summary(project)
+    assert summary["cover"]["status"] == "approve" and summary["cover"]["drafts"] == ws["drafts"]
+    assert Path(summary["cover"]["proof"]).is_file() and "tracks" not in summary["counts"]
+
+
+def test_a_proof_from_before_drafts_were_kept_and_loose_sheets_still_show(
+    project: Path, tmp_path: Path
+):
+    folder = project / "cover"
+    _image(folder / "art.jpg", (400, 600), ART_GREEN)
+    _image(folder / "proof.png", (800, 1200), fmt="PNG")
+    _image(folder / "swatches.png", (1600, 600), fmt="PNG")
+    _image(folder / "variants.png", (1600, 600), fmt="PNG")
+    (folder / "spec.json").write_text(json.dumps({"title": "Geografía", **BAND}), "utf-8")
+    ws = _workspace(project)
+    _art, colour, layout, _book = ws["steps"]
+    assert ws["hero"]["name"] == "proof.png"
+    assert [picture["name"] for picture in colour["pictures"]] == ["swatches.png"]
+    assert layout["state"] == "proof" and layout["pictures"][0]["kind"] == "proof"
+    assert [p["name"] for group in layout["more"] for p in group["pictures"]] == ["variants.png"]
+
+
+def test_candidates_an_earlier_prompt_drew_stay_on_the_row(project: Path):
+    ip_jobs.prepare(project, [TRANSLATE_JOB])
+    ip_jobs.generate(project, runner=FakeCodex())
+    ip_jobs.prepare(project, [{**TRANSLATE_JOB, "instruction": "Thinner strokes."}])
+    row = _board_row(project, "map.jpg")
+    assert row["candidates"] == []
+    (earlier,) = row["earlier"]
+    assert earlier["kind"] == "earlier" and earlier["candidate"] == 1
+    assert ip_board.ARCHIVE_STAMP.fullmatch(earlier["stamp"]) and Path(earlier["path"]).is_file()
+
+
+def test_what_was_chosen_on_the_board_is_outstanding_until_it_is_done(
+    project: Path, tmp_path: Path
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    out = ip_cover.compose(project, {"title": "Geografía", **BAND}, art=art, template=template,
+                           tries=[DEEPER])
+    variant = out["tried"][0]["draft"]
+    assert ip_board.cover_design(project) is None
+
+    # Only the cover has drafts, an approval names one, and it has to exist.
+    for image, design in (("cover.jpg", {"draft": 99}), ("cover.jpg", {"approve": True}),
+                          ("map.jpg", {"draft": variant})):
+        assert ip_feedback.save_image(project, image, design=design)["status"] == "error"
+    assert not ip_feedback.feedback_path(project).exists()
+
+    saved = ip_feedback.save_image(
+        project, "cover.jpg", design={"draft": variant, "note": "más aire"}, now=LATER
+    )
+    assert saved["status"] == "ok", saved
+    design = ip_board.cover_design(project)
+    assert design["waiting"] == ["draft_not_adopted", "note_unread"] and not design["stale"]
+    assert _board_row(project, "cover.jpg")["workspace"]["waiting"] is False
+
+    ip_cover.compose(project, from_draft=variant, template=template)
+    assert "draft_not_adopted" not in ip_board.cover_design(project)["waiting"]
+
+    ip_feedback.save_image(project, "cover.jpg", design={"draft": variant, "approve": True})
+    design = ip_board.cover_design(project)
+    assert design["approve"] and design["waiting"] == ["not_applied"]
+    # A setting changed since: this is not the cover that was approved.
+    refused = ip_cover.compose(project, {"vars": {"band_right": 0.22}}, apply=True,
+                               approved_id=design["id"], template=template)
+    assert refused["status"] == "error" and "approved" in refused["error"]
+    assert not (project / "images" / "cover.jpg").exists()
+    landed = ip_cover.compose(project, from_draft=variant, apply=True,
+                              approved_id=design["id"], template=template)
+    assert landed["applied"], landed
+    assert ip_board.cover_design(project)["waiting"] == []
+
+    # New art under it: the approval was of a picture the book no longer has.
+    other = _image(tmp_path / "other.png", (400, 600), (150, 90, 40), fmt="PNG")
+    ip_cover.compose(project, art=other, template=template)
+    design = ip_board.cover_design(project)
+    assert design["stale"] and design["problems"] == ["art_changed"]
+    assert "stale_design" in _board_row(project, "cover.jpg")["flagged"]
+
+
+def test_cli_cover_compose_tries_goes_back_and_reads_the_board(
+    project: Path, capsys, tmp_path: Path
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    common = ["cover-compose", "--project", str(project), "--template", str(template)]
+    code, out, _ = _run(capsys, common + [
+        "--art", str(art), "--title", "Geografía", "--color", "band=#703010",
+        "--try", "band_right=0.2,art_top=0.02", "--try", "band=#104070",
+        "--try", "title.at=[0.05,0.03]",
+    ])
+    assert code == 0 and [tried["status"] for tried in out["tried"]] == ["ok"] * 3, out
+    deeper, blue, moved = (ip_drafts.find(project, tried["draft"])["spec"] for tried in out["tried"])
+    assert deeper["vars"] == {"band_right": 0.2} and deeper["art_top"] == 0.02
+    assert blue["colors"] == {"band": "#104070"}
+    assert moved["layers"] == {"title": {"at": [0.05, 0.03]}}
+    blue_draft = out["tried"][1]["draft"]
+
+    with pytest.raises(SystemExit, match="nothing is waiting"):
+        cli.main(common + ["--from-board"])
+    ip_feedback.save_image(project, "cover.jpg", design={"draft": blue_draft})
+    code, adopted, _ = _run(capsys, common + ["--from-board"])
+    assert code == 0 and adopted["band_color"] == "#104070"
+    assert adopted["from_board"]["draft"] == blue_draft and not adopted["applied"]
+
+    # Chosen is not approved.
+    with pytest.raises(SystemExit, match="has not approved"):
+        cli.main(common + ["--from-board", "--apply"])
+    ip_feedback.save_image(project, "cover.jpg", design={"draft": blue_draft, "approve": True})
+    code, landed, _ = _run(capsys, common + ["--from-board", "--apply"])
+    assert code == 0 and landed["applied"], landed
+
+    code, back, _ = _run(capsys, common + ["--from-draft", str(out["draft"])])
+    assert code == 0 and back["band_color"] == "#703010"
+    code, board, _ = _run(capsys, ["board", "--project", str(project)])
+    assert board["cover"]["proof_draft"] == back["draft"]

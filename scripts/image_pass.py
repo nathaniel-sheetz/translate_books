@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -307,10 +308,35 @@ def _pairs(values: list[str] | None, flag: str) -> list[tuple[str, str]]:
     return pairs
 
 
+_COVER_TEXT_FIELDS = ("title", "subtitle", "author", "translator")
+
+
+def _aspect_override(text: str, flag: str) -> Any:
+    if text.lower() in ("template", ""):
+        return None
+    if text.lower() == ip_cover.ASPECT_ART:
+        return ip_cover.ASPECT_ART
+    try:
+        wide, tall = (float(part) for part in text.split(":"))
+    except ValueError:
+        _die(f"{flag} takes W:H, `art` or `template`, not {text!r}")
+    return [wide, tall]
+
+
+def _set_override(overrides: dict[str, Any], name: str, value: str) -> None:
+    # `band_right=0.2` is a variable; `title.at=[0.03,0.02]` a layer's field.
+    layer, dot, field = name.partition(".")
+    parsed = _json_value(value) if value else None
+    if dot:
+        overrides.setdefault("layers", {}).setdefault(layer, {})[field] = parsed
+    else:
+        overrides.setdefault("vars", {})[name] = parsed
+
+
 def _cover_overrides(args: argparse.Namespace) -> dict[str, Any]:
     """What this invocation changes in the book's cover spec."""
     overrides: dict[str, Any] = {}
-    for field in ("title", "author", "translator"):
+    for field in _COVER_TEXT_FIELDS:
         value = getattr(args, field)
         if value is not None:
             # `|` is a line break: "Edmund Spenser|Jeanie Lang" is two lines.
@@ -319,44 +345,96 @@ def _cover_overrides(args: argparse.Namespace) -> dict[str, Any]:
         lines = [part.strip() for part in args.title_lines.split("|") if part.strip()]
         overrides["title_lines"] = lines or None
     if args.aspect is not None:
-        if args.aspect.lower() in ("template", ""):
-            overrides["aspect"] = None
-        elif args.aspect.lower() == ip_cover.ASPECT_ART:
-            overrides["aspect"] = ip_cover.ASPECT_ART
-        else:
-            try:
-                wide, tall = (float(part) for part in args.aspect.split(":"))
-            except ValueError:
-                _die(f"--aspect takes W:H, `art` or `template`, not {args.aspect!r}")
-            overrides["aspect"] = [wide, tall]
+        overrides["aspect"] = _aspect_override(args.aspect, "--aspect")
     if args.art_top is not None:
         overrides["art_top"] = None if args.art_top.lower() == "auto" else _json_value(args.art_top)
     for name, value in _pairs(args.color, "--color"):
         overrides.setdefault("colors", {})[name] = value or None
     for name, value in _pairs(args.set, "--set"):
-        # `band_right=0.2` is a variable; `title.at=[0.03,0.02]` a layer's field.
-        layer, dot, field = name.partition(".")
-        parsed = _json_value(value) if value else None
-        if dot:
-            overrides.setdefault("layers", {}).setdefault(layer, {})[field] = parsed
-        else:
-            overrides.setdefault("vars", {})[name] = parsed
+        _set_override(overrides, name, value)
     for name in _split_ids(args.unset) or []:
         overrides[name] = None
     return overrides
 
 
+def _cover_try(text: str) -> dict[str, Any]:
+    """One ``--try``: the settings to lay over the spec for one draft.
+
+    ``art_top=0.05,band_right=0.2`` is two settings of one cover. Each is named
+    as its own flag names it: ``art_top``, ``aspect``, ``title_lines`` and the
+    text fields are the spec's, a ``#rrggbb`` value is one of the template's
+    colours, and anything else is what ``--set`` takes.
+    """
+    overrides: dict[str, Any] = {}
+    # A comma inside brackets belongs to the value: `title.at=[0.03,0.02]`.
+    for part in re.split(r",(?![^\[]*\])", text):
+        if not part.strip():
+            continue
+        name, sep, value = part.partition("=")
+        name, value = name.strip(), value.strip()
+        if not sep or not name:
+            _die(f"--try takes name=value[,name=value], not {part.strip()!r}")
+        if name == "art_top":
+            overrides[name] = None if value.lower() == "auto" else _json_value(value)
+        elif name == "aspect":
+            overrides[name] = _aspect_override(value, "--try aspect=")
+        elif name == "title_lines":
+            lines = [line.strip() for line in value.split("|") if line.strip()]
+            overrides[name] = lines or None
+        elif name in _COVER_TEXT_FIELDS:
+            overrides[name] = value.replace("|", chr(10)) or None
+        elif value.startswith("#"):
+            overrides.setdefault("colors", {})[name] = value
+        else:
+            _set_override(overrides, name, value)
+    if not overrides:
+        _die("--try needs at least one name=value")
+    return {"label": text.strip(), "overrides": overrides}
+
+
 def _cmd_cover_compose(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    from_draft, approved_id, design = args.from_draft, None, None
+    if args.from_board:
+        design = ip_board.cover_design(project_dir)
+        if design is None:
+            _die(
+                "nothing is waiting on the board for the cover: the user chooses a "
+                "draft or approves one on the New images tab first"
+            )
+        if design["stale"]:
+            _die(
+                "what the user chose on the board is out of date ("
+                + "; ".join(design["problems"]) + "): give them the board url and "
+                "have them choose again"
+            )
+        if args.apply and not design["approve"]:
+            _die(
+                "the user has not approved a draft on the board: --from-board --apply "
+                "lands only a cover they approved there. Without --from-board, --apply "
+                "is on their word in the conversation, as before."
+            )
+        if from_draft is None:
+            from_draft = design["draft"]
+        if args.apply:
+            approved_id = design["id"]
     out = ip_cover.compose(
-        _resolve_project(args.project),
+        project_dir,
         _cover_overrides(args),
         art=Path(args.art) if args.art else None,
         cover_is_art=args.cover_is_art,
         swatches=args.swatches,
+        tries=[_cover_try(text) for text in args.tries or []] or None,
+        from_draft=from_draft,
+        approved_id=approved_id,
         apply=args.apply,
         dry_run=args.dry_run,
         template=Path(args.template) if args.template else None,
     )
+    if design is not None:
+        out["from_board"] = {
+            field: design[field] for field in ("draft", "approve", "note", "waiting")
+        }
     _emit(out, _COVER_COMPOSE_SCHEMA)
     return 0 if out.get("status") == "ok" else 1
 
@@ -382,7 +460,9 @@ def _cmd_board(args: argparse.Namespace) -> int:
         "picks. proposed is every image that wants a job and has none. requests is "
         "what the user asked for on the page that no prepared job reflects yet: "
         "fold each into its job (labels verbatim) and re-run `prepare`. picks is "
-        "what `apply --from-board` would apply."
+        "what `apply --from-board` would apply. cover is where the cover stands "
+        "and what the user chose among its drafts: `cover-compose --from-board` "
+        "takes it."
     )
     if not out["server_running"]:
         out["instructions"] = (
@@ -491,8 +571,17 @@ _COVER_COMPOSE_SCHEMA = {
     "dry_run": "true when no file was written",
     "applied": "true when images/cover.* is now the composed cover",
     "proof": "cover/proof.png: the composed cover. Read it before showing it",
+    "draft": "the number this proof is kept under in cover/drafts/. The same "
+    "cover composed twice keeps its number",
     "swatches": "--swatches only: cover/swatches.png, the cover once per "
     "suggested_colors entry, numbered left to right",
+    "swatch_drafts": "--swatches only: [{draft, color}], the same covers one by "
+    "one, as the board shows them. `--from-draft N` takes that colour",
+    "tried": "--try only: per attempt {label, status: 'ok' | 'does_not_fit' | "
+    "'error', draft, path, reasons, notes, error}. Read each path; the spec was "
+    "not changed by any of them",
+    "from_board": "--from-board only: {draft, approve, note, waiting} as the user "
+    "left them on the board. Act on note yourself: no flag carries it",
     "art": "{from, path, size, kept_at?}: which picture was drawn on and why "
     "that one. kept_at is where it was copied to for every later compose",
     "title_from": "'spec' | 'project (translated title)' | 'project' (no title "
@@ -545,8 +634,17 @@ _BOARD_SCHEMA = {
     "url": "the page to give the user",
     "server_running": "false when the web UI did not answer at --base-url",
     "counts": "{images, review, proposed, queued, replaced, missing, untriaged, "
-    "leave, lettering, with_input, flagged, requests, picks, stale_picks, "
-    "candidates, unchecked_candidates}",
+    "leave, lettering, with_input, flagged, design_waiting, requests, picks, "
+    "stale_picks, candidates, unchecked_candidates}",
+    "cover": "the cover as the page's New images tab shows it: {image, status: "
+    "'art' | 'colour' | 'layout' | 'approve' | 'done' (the step it is at), steps: "
+    "{art, colour, layout, book} with each one's state, proof (cover/proof.png, "
+    "or null), proof_draft, book_draft, drafts (how many are kept), design}. "
+    "design is what the user chose there, or null: {draft, approve, note, "
+    "waiting, stale, problems}. waiting: draft_not_adopted (run `cover-compose "
+    "--from-board`) | not_applied (they approved it: add --apply) | note_unread "
+    "(read note and act on it; the next proof clears it). stale: the draft is "
+    "gone or was approved on other art, and they have to choose again",
     "untriaged": "images nobody has recorded a verdict for",
     "proposed": "images that want a job and have none: {image, verdict, by}. by is "
     "'user' when the verdict is one they set on the page, over the triage or in "
@@ -785,6 +883,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="the title's lines, `|` between them, instead of letting it wrap; "
         "an empty string goes back to wrapping",
     )
+    p_cover.add_argument(
+        "--subtitle",
+        help="a line under the title in its own, smaller size (--set "
+        "subtitle_size=0.04); an empty string takes it off again",
+    )
     p_cover.add_argument("--author", help="the author line; `|` between two authors")
     p_cover.add_argument("--translator", help="the translator's name")
     p_cover.add_argument(
@@ -822,6 +925,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also write cover/swatches.png: the cover in each band colour "
         "suggested from the art, to choose between",
+    )
+    p_cover.add_argument(
+        "--try",
+        dest="tries",
+        action="append",
+        metavar="NAME=VALUE[,NAME=VALUE]",
+        help="also draw the cover with these settings laid over the book's, as a "
+        "draft to compare on the board, and leave the spec as it was: "
+        "art_top=0.05, band_right=0.2,title_size=0.06, band=#874727 (repeatable: "
+        "one draft each)",
+    )
+    p_cover.add_argument(
+        "--from-draft",
+        type=int,
+        metavar="N",
+        help="start from the settings draft N was drawn with, instead of the spec "
+        "as it stands; other flags are laid over them",
+    )
+    p_cover.add_argument(
+        "--from-board",
+        action="store_true",
+        help="take the draft the user chose on the image board; with --apply, "
+        "land the cover only if it is the draft they approved there",
     )
     p_cover.add_argument(
         "--apply",

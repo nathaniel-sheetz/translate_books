@@ -497,7 +497,8 @@ gitignored; without one the tracked `template.example.json` is used): an ordered
 of `polygon`, `ellipse`, `text` and `image` layers in fractions of the cover, so a
 shape is changed or added by editing that file. The book's side is
 `<project>/cover/spec.json`, which every flag is merged into: `--title`,
-`--title-lines "A|B"`, `--author`, `--translator`, `--color band=#rrggbb`,
+`--title-lines "A|B"`, `--subtitle` (a line under the title in its own, smaller
+size: `--set subtitle_size=0.04`), `--author`, `--translator`, `--color band=#rrggbb`,
 `--art-top <fraction>`, `--aspect <W:H|art|template>` (`art`: the cover takes the
 picture's own shape and grows taller by `--art-top`, so sliding the picture down crops
 none of it), `--set <variable>=<value>` or `--set <layer>.<field>=<value>`,
@@ -513,6 +514,18 @@ and reused, so a band is never drawn over a band: `images/cover.*` is taken as a
 only when the ledger says the image pass applied it, or on `--art <file>` /
 `--cover-is-art`.
 
+Every cover it draws is also kept as a numbered draft: a preview in
+`cover/drafts/NNN.jpg` and, in `cover/drafts.json`, the settings it was drawn with.
+The same cover composed twice keeps its number. `--swatches` keeps each colour as a
+draft of its own beside the sheet. `--try "<name>=<value>[,<name>=<value>]"`
+(repeatable) draws the cover once more with those settings laid over the book's and
+keeps it as a draft to compare, leaving the spec as it was: `--try "art_top=0.05"
+--try "band_right=0.2,title_size=0.06" --try "band=#874727"`. `--from-draft N` starts
+from the settings draft N was drawn with instead of the spec as it stands.
+`--from-board` takes the draft the user chose on the image board; with `--apply` it
+lands the cover only if it is the draft they approved there, and refuses when the
+art, the design or a setting has changed since.
+
 The user's side is the image board in the web UI, `/image-pass/<id>` (see
 [`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md#image-board)). `triage` records a verdict, a
 finding and a label map for each image looked at, and `check` a finding for each
@@ -522,7 +535,10 @@ note, a corrected label map, a pick — is saved to `.harness/images/feedback.js
 default `http://127.0.0.1:5000`), the images that want a job, what the user asked for
 that no prepared job reflects yet, and their picks. `apply --from-board` applies those
 picks; `apply --json-file` still takes a hand-written list. A pick made on a candidate
-that has since been regenerated is refused, not applied.
+that has since been regenerated is refused, not applied. `board` also reports the
+cover (`cover`): which step it is at, how many drafts are kept, and the draft the
+user chose or approved on the page's New images tab, which `cover-compose
+--from-board` takes.
 
 *Skill equivalent:* `/image-pass`
 

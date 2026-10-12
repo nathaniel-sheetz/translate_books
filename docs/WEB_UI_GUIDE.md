@@ -814,7 +814,15 @@ the cover field of the Export stage. It is the user's side of an image pass (the
 `/image-pass` skill, `scripts/image_pass.py`): every image the book references, at
 whatever stage the pass has it in.
 
-Images are grouped by stage, in the order they need you:
+The page has two tabs, for the two kinds of work. **Existing images** are the
+pictures the book came with, to be translated, restored or replaced. **New images**
+are pictures that are made, which today is the cover (see
+[The cover's workspace](#the-covers-workspace) below). A dot on a tab means
+something on it is waiting for you, and the tab is part of the URL hash
+(`#type=new`), so either can be linked. Until you choose one, the page opens on
+the tab that has something waiting.
+
+On the Existing images tab, images are grouped by stage, in the order they need you:
 
 | Stage | Means | Shown as |
 |---|---|---|
@@ -862,17 +870,51 @@ the join can be looked at with and without the line over it.
 A candidate Codex drew names the model that made it beside its size, when the run
 recorded one, since two models can fill the candidates of one job.
 
+A card whose job was re-prepared with a different prompt keeps what the earlier
+prompt drew under *Earlier attempts*: to look at, not to pick.
+
 The page re-fetches itself when you come back to its tab, unless you are in the
 middle of typing, so candidates and applied picks appear without a reload.
 
-**API.** `GET /api/project/<id>/image-pass` returns the whole board;
-`POST /api/project/<id>/image-pass/feedback` takes `{image, request?, pick?}` — a
-section left out is untouched and one sent as `null` is cleared — and answers with
-that image's row as rebuilt from disk. Label maps travel as `[source, target]` pairs
-in both directions, because their order is the order you check them in.
-`/projects/<id>/image-pass/original/<file>` and
-`/projects/<id>/image-pass/candidate/<job>/<n>` serve the two kinds of picture the
-ordinary image route does not reach.
+### The cover's workspace
+
+A cover is made in steps rather than picked from candidates, so on the New images
+tab it is one wide workspace: the latest proof large on the left, staying in view,
+and the steps on the right, each with every picture made at it.
+
+| Step | Shows | You can |
+|---|---|---|
+| 1. Art | the picture it was drawn from, the art with no lettering, the candidates, and earlier prompts' candidates folded away | accept a candidate, send it back or skip, and ask for new art with a note |
+| 2. Band colour | the cover once per colour taken from the art | press *Use this* under one |
+| 3. Layout drafts | every proof and every variant tried, newest first, each with what changed from the one before; any other picture in `cover/` under *Other sheets* | press *Use this* to go back to one, and leave a note on the layout |
+| 4. In the book | the cover the book has now | *Approve for the book* |
+
+Every cover `cover-compose` draws is kept as a numbered draft, so nothing shown in
+the conversation is lost to the next one. Clicking any picture opens the lightbox
+over all of the workspace's pictures: ← and → flip between two drafts in place.
+
+Choosing a draft is not approving it. *Approve for the book* approves the draft you
+chose, or the latest proof if you chose none. Like a pick, neither changes the
+book: both go to `feedback.json`, and `image_pass.py cover-compose --from-board`
+makes the chosen draft the proof and, once approved, applies it. An approval is
+tied to that draft's settings and art; if either has changed since, nothing is
+applied and the line under the title asks you to choose again.
+
+A proof made before drafts were kept shows as one picture with nothing to choose
+between; composing the cover once more gives it a number.
+
+**API.** `GET /api/project/<id>/image-pass` returns the whole board: each image
+carries its `track` (`existing` or `new`), and a made image a `workspace` with its
+steps. `POST /api/project/<id>/image-pass/feedback` takes
+`{image, request?, pick?, design?}` — a section left out is untouched and one sent
+as `null` is cleared — and answers with that image's row as rebuilt from disk.
+`design` is the cover's: `{draft, approve, note}`. Label maps travel as
+`[source, target]` pairs in both directions, because their order is the order you
+check them in. Four routes serve the pictures the ordinary image route does not
+reach: `/projects/<id>/image-pass/original/<file>`,
+`/projects/<id>/image-pass/candidate/<job>/<n>`,
+`/projects/<id>/image-pass/earlier/<job>/<stamp>/<n>` and
+`/projects/<id>/image-pass/cover/<file>` (pictures only).
 
 ---
 

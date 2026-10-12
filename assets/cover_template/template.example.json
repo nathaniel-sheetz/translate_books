@@ -8,6 +8,7 @@
     "band_right": 0.1619,
     "veil_bottom": 0.2722,
     "title_size": 0.05926,
+    "subtitle_size": 0.04444,
     "text_left": 0.0302,
     "emblem_margin": 0.0225,
     "emblem_size": 0.1387
@@ -33,9 +34,17 @@
      "glow": {"radius": 0.0037, "color": "$band"},
      "shadow": {"blur": 0.0056, "offset": 0.0028, "alpha": 0.4}},
 
+    {"id": "subtitle", "type": "text", "field": "subtitle",
+     "font": "fonts/LibreBaskerville[wght].ttf", "weight": 600,
+     "anchor": "top-left", "at": ["$text_left", 0.09], "below": "title", "gap": 0,
+     "size": "$subtitle_size", "line_spacing": 1.072, "wrap": true, "margin_right": 0.0133,
+     "fill": "$ink", "fit_inside": "band", "margin": 0.012,
+     "glow": {"radius": 0.0037, "color": "$band"},
+     "shadow": {"blur": 0.0056, "offset": 0.0028, "alpha": 0.4}},
+
     {"id": "author", "type": "text", "field": "author",
      "font": "fonts/LibreBaskerville-Italic[wght].ttf", "weight": 600,
-     "anchor": "top-left", "at": ["$text_left", 0.16], "below": "title", "gap": 0.0285,
+     "anchor": "top-left", "at": ["$text_left", 0.16], "below": "subtitle", "gap": 0.0285,
      "size": 0.02593, "wrap": true, "margin_right": 0.0133,
      "fill": "$ink", "fit_inside": "band", "margin": 0.012,
      "glow": {"radius": 0.0037, "color": "$band"},

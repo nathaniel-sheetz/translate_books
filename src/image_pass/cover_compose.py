@@ -10,8 +10,8 @@ two files:
   ``template.example.json`` when a checkout has no house one) is the design: an
   ordered list of layers — ``polygon``, ``ellipse``, ``text``, ``image`` — in
   fractions of the cover, so it does not care how many pixels the art has.
-- **the spec** (``<project>/cover/spec.json``) is the book: its title, author,
-  band colour, and any value of the template it overrides.
+- **the spec** (``<project>/cover/spec.json``) is the book: its title, subtitle,
+  author, band colour, and any value of the template it overrides.
 
 Three things are solved rather than read, because they depend on the picture
 and on how long the title is:
@@ -28,7 +28,9 @@ Nothing is written unless all of it fits, and no row of the cover is ever left
 without art or band over it.
 
 The art without lettering is kept at ``<project>/cover/art.<ext>`` and every
-later compose starts from that file, so a band is never drawn over a band. The
+later compose starts from that file, so a band is never drawn over a band. Every
+cover drawn is also kept as a draft (:mod:`src.image_pass.cover_drafts`), which
+is what the image board shows and what ``--from-draft`` goes back to. The
 finished cover reaches ``images/`` through :func:`src.image_pass.apply.install_image`:
 same write-once backup, same ledger, and ``revert`` puts back what was there.
 """
@@ -40,10 +42,12 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 from src.image_pass import COVER_NAMES, MODE_COVER, cover_dir, images_dir
+from src.image_pass import cover_drafts as drafts
 from src.image_pass import ledger
 from src.image_pass.apply import COVER_LONG_SIDE, has_original, install_image
 from src.image_pass.inventory import probe_image
@@ -603,6 +607,16 @@ def _text_fields(template: dict[str, Any], spec: dict[str, Any]) -> dict[str, st
     return fields
 
 
+def _says(template: dict[str, Any], field: str) -> bool:
+    """Whether some text layer of the template prints this field."""
+    for layer in template["layers"]:
+        if layer.get("type") != "text":
+            continue
+        if layer.get("field") == field or f"{{{field}}}" in str(layer.get("text") or ""):
+            return True
+    return False
+
+
 def _forced_lines(spec: dict[str, Any]) -> dict[str, list[str]]:
     forced: dict[str, list[str]] = {}
     for key, value in spec.items():
@@ -1046,19 +1060,24 @@ def suggest_band_colors(art: Any, ink: tuple[int, int, int], count: int = 4) -> 
     return [to_hex(rgb) for rgb in picked]
 
 
-def render_swatches(
+def swatch_covers(
     art: Any, template: dict[str, Any], spec: dict[str, Any], colors: list[str], name: str
-) -> Any:
-    """One sheet: the cover in each of ``colors``, side by side, hex underneath."""
-    from PIL import Image, ImageDraw, ImageFont
-
+) -> list[tuple[dict[str, Any], Any]]:
+    """The cover once per colour, as ``(the spec it was drawn with, the picture)``."""
     covers = []
     for color in colors:
         trial = merge_spec(spec, {"colors": {name: color}})
         solved = solve(template, trial, art.size, height=_SWATCH_HEIGHT)
         if solved["status"] != "ok":
             raise TemplateError(solved["error"])
-        covers.append(render(art, solved, template))
+        covers.append((trial, render(art, solved, template)))
+    return covers
+
+
+def swatch_sheet(covers: list[Any], colors: list[str]) -> Any:
+    """One sheet: the covers side by side, numbered, hex underneath."""
+    from PIL import Image, ImageDraw, ImageFont
+
     gap, label = 24, 56
     width = sum(c.width for c in covers) + gap * (len(covers) + 1)
     sheet = Image.new("RGB", (width, _SWATCH_HEIGHT + gap + label), (245, 245, 245))
@@ -1070,6 +1089,14 @@ def render_swatches(
         draw.text((x, gap + _SWATCH_HEIGHT + 10), f"{number}  {color}", font=font, fill=(30, 30, 30))
         x += cover.width + gap
     return sheet
+
+
+def render_swatches(
+    art: Any, template: dict[str, Any], spec: dict[str, Any], colors: list[str], name: str
+) -> Any:
+    """One sheet: the cover in each of ``colors``, side by side, hex underneath."""
+    covers = swatch_covers(art, template, spec, colors, name)
+    return swatch_sheet([cover for _spec, cover in covers], colors)
 
 
 # ---------------------------------------------------------------------------
@@ -1084,7 +1111,7 @@ def _current_cover(project_dir: Path) -> tuple[str, Optional[Path]]:
     return COVER_NAMES[0], None
 
 
-def _kept_art(project_dir: Path) -> Optional[Path]:
+def kept_art(project_dir: Path) -> Optional[Path]:
     folder = cover_dir(project_dir)
     if not folder.is_dir():
         return None
@@ -1104,7 +1131,7 @@ def _find_art(
     the art, so ``images/cover.*`` is only ever taken on evidence: the ledger
     says the image pass put that very file there, or the caller says so.
     """
-    kept = _kept_art(project_dir)
+    kept = kept_art(project_dir)
     key, cover = _current_cover(project_dir)
     state = spec.get("state") or {}
     if given is not None:
@@ -1178,6 +1205,9 @@ def compose(
     art: Optional[Path] = None,
     cover_is_art: bool = False,
     swatches: bool = False,
+    tries: Optional[list[dict[str, Any]]] = None,
+    from_draft: Optional[int] = None,
+    approved_id: Optional[str] = None,
     apply: bool = False,
     dry_run: bool = False,
     template: Optional[Path] = None,
@@ -1185,6 +1215,13 @@ def compose(
     """Compose this book's cover into ``cover/proof.png``; with ``apply``, put
     it in ``images/``. ``overrides`` are merged into ``cover/spec.json`` and
     kept, so a change asked for once stays asked for.
+
+    ``from_draft`` starts from the settings an earlier draft was drawn with
+    instead of the spec as it stands. ``tries`` are ``{label, overrides}``: the
+    cover is drawn once with each laid over the spec and kept as a draft to
+    compare, and the spec is left as it was. ``approved_id`` is the draft the
+    user approved on the board: ``apply`` then lands this cover only if it is
+    that one.
     """
     from PIL import Image
 
@@ -1192,9 +1229,18 @@ def compose(
     folder = cover_dir(project_dir)
     try:
         design = load_template(template)
-        spec = merge_spec(load_spec(project_dir), overrides or {})
+        spec = load_spec(project_dir)
     except TemplateError as exc:
         return {"status": "error", "error": str(exc)}
+    went_back: Optional[dict[str, Any]] = None
+    if from_draft is not None:
+        went_back = drafts.find(project_dir, from_draft)
+        if went_back is None or not isinstance(went_back.get("spec"), dict):
+            on_file = [row["n"] for row in drafts.load(project_dir)]
+            return {"status": "error",
+                    "error": f"there is no draft {from_draft} of this cover (on file: {on_file})"}
+        spec = {**went_back["spec"], **({"state": spec["state"]} if spec.get("state") else {})}
+    spec = merge_spec(spec, overrides or {})
 
     found = _find_art(project_dir, spec, art, cover_is_art)
     if found.get("error"):
@@ -1204,6 +1250,13 @@ def compose(
     if info.get("error"):
         return {"status": "error", "error": f"the art {source} cannot be read: {info['error']}"}
     warnings: list[str] = [found["warning"]] if found.get("warning") else []
+    art_sha = ledger.sha256_file(source)
+    design_sha = ledger.sha256_file(Path(design["_path"]))
+    if went_back is not None and went_back.get("art_sha") != art_sha:
+        warnings.append(
+            f"draft {from_draft} was drawn on art this book no longer has: its "
+            "settings are carried over to the art it has now"
+        )
 
     meta = book_meta(project_dir)
     title_from = "spec"
@@ -1220,6 +1273,14 @@ def compose(
             )
     if "author" not in spec and meta["author"]:
         spec["author"] = meta["author"]
+    # A house design from before the subtitle had a layer has nowhere to put
+    # one, and would leave it off without a word.
+    if (spec.get("subtitle") or "").strip() and not _says(design, "subtitle"):
+        warnings.append(
+            f"the subtitle is not on this cover: {Path(design['_path']).name} has no "
+            f"text layer for it. Copy the `subtitle` layer and `subtitle_size` from "
+            f"{EXAMPLE_TEMPLATE}, and hang the author `below` it."
+        )
 
     with Image.open(source) as opened:
         opened.load()
@@ -1305,17 +1366,77 @@ def compose(
             state["art_sha"] = ledger.sha256_file(kept)
             out["art"]["kept_at"] = str(kept)
 
+        # One stamp for everything this invocation draws to compare: its set.
+        set_id = time.strftime("%Y%m%d_%H%M%S")
+        kept_as = {"art_sha": art_sha, "template": Path(design["_path"]).name,
+                   "template_sha": design_sha}
+
         if swatches:
             if not suggestions:
                 return {**out, "status": "error",
                         "error": "the picture has no colour to take a band from; give one with --color"}
             sheet = folder / "swatches.png"
-            render_swatches(picture, design, drawn, suggestions, band_name).save(sheet)
+            covers = swatch_covers(picture, design, drawn, suggestions, band_name)
+            swatch_sheet([cover for _trial, cover in covers], suggestions).save(sheet)
             out["swatches"] = str(sheet)
+            out["swatch_drafts"] = []
+            for color, (trial, cover) in zip(suggestions, covers):
+                row, _new = drafts.record(
+                    project_dir, cover, kind=drafts.KIND_SWATCH, spec=trial, base=spec,
+                    set_id=set_id, label=color, color=color, **kept_as,
+                )
+                out["swatch_drafts"].append({"draft": row["n"], "color": color})
+
+        if tries:
+            out["tried"] = []
+            for attempt in tries:
+                said: dict[str, Any] = {"label": attempt.get("label")}
+                try:
+                    trial = merge_spec(drawn, attempt.get("overrides") or {})
+                    trial_solved = solve(design, trial, picture.size, height=drafts.PREVIEW_SIDE)
+                    if trial_solved["status"] != "ok":
+                        said.update({"status": trial_solved["status"], "error": trial_solved["error"]})
+                    else:
+                        row, _new = drafts.record(
+                            project_dir, render(picture, trial_solved, design),
+                            kind=drafts.KIND_VARIANT, spec=trial, base=spec,
+                            set_id=set_id, label=attempt.get("label"), **kept_as,
+                        )
+                        said.update({
+                            "status": "ok",
+                            "draft": row["n"],
+                            "path": str(drafts.preview_path(project_dir, row)),
+                            "reasons": trial_solved["reasons"],
+                            "notes": trial_solved["notes"],
+                        })
+                except TemplateError as exc:
+                    said.update({"status": "error", "error": str(exc)})
+                out["tried"].append(said)
 
         proof = folder / "proof.png"
-        render(picture, solved, design).save(proof)
+        composed = render(picture, solved, design)
+        composed.save(proof)
         out["proof"] = str(proof)
+        proof_row, _new = drafts.record(
+            project_dir, composed, kind=drafts.KIND_PROOF, spec=drawn, **kept_as,
+        )
+        out["draft"] = proof_row["n"]
+        state["proof_draft"] = proof_row["n"]
+        state["band"] = band_name
+
+        if apply and approved_id is not None and proof_row["id"] != approved_id:
+            spec["state"] = state
+            _write_atomic(spec_path(project_dir), _spec_for_disk(spec))
+            return {
+                **out,
+                "status": "error",
+                "error": (
+                    f"the cover as composed now (draft {proof_row['n']}) is not the "
+                    "draft that was approved on the board: the art, the design or a "
+                    "setting has changed since. Nothing was applied. Show the user "
+                    "this proof and have them approve it."
+                ),
+            }
 
         if apply:
             last = ledger.current_state(project_dir).get(key)
@@ -1344,11 +1465,13 @@ def compose(
                         "colors": solved["colors"],
                         "vars": solved["vars"],
                         "art_top": out["art_top"],
-                        "art_sha256": ledger.sha256_file(source),
+                        "art_sha256": art_sha,
+                        "draft": proof_row["n"],
                     },
                 },
             )
             state["composed_sha"] = ledger.sha256_file(target)
+            state["applied_draft"] = proof_row["n"]
             out.update({
                 "applied": True,
                 "target": str(target),
@@ -1367,6 +1490,8 @@ def compose(
         "Run `verify`, then hand back to translate-harness for `epub`."
         if apply
         else "Read the proof. Change what is wrong with one flag and re-run; when it "
-        "is right, show it to the user, and re-run with --apply on their word."
+        "is right, show it to the user, and re-run with --apply on their word. "
+        "Every draft is on the image board's New images tab: give them its url "
+        "(`board`) with the proof."
     )
     return out
