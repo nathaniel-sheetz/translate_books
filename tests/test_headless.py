@@ -1257,7 +1257,11 @@ def slot_source(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(headless, "_slot_high", 0)
     monkeypatch.setattr(headless, "_slot_poisoned", set())
     monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
-    monkeypatch.setattr(headless, "_slot_first_error", None)
+    monkeypatch.setattr(headless, "_slot_first_errors", {})
+    # Off unless a test asks for one (the ``neutral_home`` fixture below):
+    # otherwise whether a slot grows a ``home`` would depend on the platform and
+    # on how deep pytest's temp directory happens to be.
+    monkeypatch.setenv("HEADLESS_NEUTRAL_HOME", "0")
     source = tmp_path / "cursor-home"
     source.mkdir()
     (source / "cli-config.json").write_text('{"selectedModel": {}}', encoding="utf-8")
@@ -1613,7 +1617,7 @@ def test_slots_seeded_reaches_the_usage_rollup(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(headless, "_slot_high", 0)
     monkeypatch.setattr(headless, "_slot_poisoned", set())
     monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
-    monkeypatch.setattr(headless, "_slot_first_error", None)
+    monkeypatch.setattr(headless, "_slot_first_errors", {})
 
     source = tmp_path / "cursor-home"
     source.mkdir()
@@ -1653,7 +1657,7 @@ def test_slots_seeded_survives_a_wave_where_every_job_failed(
     monkeypatch.setattr(headless, "_slot_high", 0)
     monkeypatch.setattr(headless, "_slot_poisoned", set())
     monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
-    monkeypatch.setattr(headless, "_slot_first_error", None)
+    monkeypatch.setattr(headless, "_slot_first_errors", {})
 
     source = tmp_path / "cursor-home"
     source.mkdir()
@@ -1690,6 +1694,373 @@ def test_slot_env_preserves_the_credential_scrub(slot_source: Path):
         env = headless._slot_env("cursor", scrubbed)
     assert "ANTHROPIC_API_KEY" not in env and "CURSOR_API_KEY" not in env
     assert env["PATH"] == "/x" and env["CURSOR_CONFIG_DIR"]
+
+
+# ---------------------------------------------------------------------------
+# A neutral home per Cursor worker
+#
+# cursor-agent lists every skill under ~/.claude/skills in each job's prefix.
+# The scan follows os.homedir(), so a worker given its own USERPROFILE sees
+# none of them: 15,671 -> 11,026 billed input per job, measured 2026-10-10.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def neutral_home(monkeypatch):
+    """Neutral homes on, whatever the platform or the depth of ``tmp_path``."""
+    monkeypatch.setattr(headless, "_neutral_home_enabled", lambda: True)
+    monkeypatch.setattr(headless, "_WINDOWS_MAX_PATH", 10_000)
+
+
+def test_a_cursor_worker_gets_a_home_of_its_own(slot_source: Path, neutral_home):
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"PATH": "/x", "USERPROFILE": "C:/Users/op"})
+    home = Path(env["USERPROFILE"])
+    assert home == Path(env["CURSOR_CONFIG_DIR"]) / "home"
+    assert home.is_dir()
+    # Nothing is copied in: an empty home is the whole point.
+    assert list(home.iterdir()) == []
+    assert "HOME" not in env and env["PATH"] == "/x"
+
+
+def test_home_follows_userprofile_only_when_the_env_has_one(slot_source: Path, neutral_home):
+    """A wave launched from Git Bash carries HOME; one from PowerShell does not."""
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"HOME": "/c/Users/op", "USERPROFILE": "C:/Users/op"})
+    assert env["HOME"] == env["USERPROFILE"] != "C:/Users/op"
+
+
+def test_a_differently_spelled_userprofile_is_replaced_not_doubled(
+    slot_source: Path, neutral_home
+):
+    """Two spellings of one variable would hand CreateProcess two values."""
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"UserProfile": "C:/Users/op", "Home": "C:/Users/op"})
+    assert sorted(key for key in env if key.upper() in {"USERPROFILE", "HOME"}) == [
+        "HOME", "USERPROFILE",
+    ]
+    assert "op" not in env["USERPROFILE"] + env["HOME"]
+
+
+def test_claude_never_gets_a_neutral_home(slot_source: Path, neutral_home):
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("claude", {"USERPROFILE": "C:/Users/op"})
+    assert env == {"USERPROFILE": "C:/Users/op"}
+
+
+def test_the_switch_off_leaves_the_home_alone(slot_source: Path):
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"USERPROFILE": "C:/Users/op"})
+        slot = Path(env["CURSOR_CONFIG_DIR"])
+    assert env["USERPROFILE"] == "C:/Users/op"
+    assert not (slot / "home").exists()
+    assert "APPDATA" not in env
+
+
+def test_a_worker_without_appdata_keeps_the_login_where_the_real_home_put_it(
+    slot_source: Path, neutral_home
+):
+    """The CLI reads its login from ``%APPDATA%``, and from the home otherwise.
+
+    Launched from a stripped environment, a worker under a neutral home would
+    look for the login inside it, and the wave would be refused as logged out
+    with advice (log in again) that cannot help.
+    """
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"USERPROFILE": "C:/Users/op"})
+    assert Path(env["APPDATA"]) == Path("C:/Users/op") / "AppData" / "Roaming"
+    assert Path(env["USERPROFILE"]) == Path(env["CURSOR_CONFIG_DIR"]) / "home"
+
+
+def test_an_appdata_the_env_already_has_is_left_alone(slot_source: Path, neutral_home):
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env(
+            "cursor", {"USERPROFILE": "C:/Users/op", "AppData": "D:/roaming"}
+        )
+    assert {key: value for key, value in env.items() if key.upper() == "APPDATA"} == {
+        "AppData": "D:/roaming"
+    }
+
+
+def test_an_empty_appdata_counts_as_missing(slot_source: Path, neutral_home):
+    """The CLI falls through an empty one, and two spellings would be two values."""
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"UserProfile": "C:/Users/op", "AppData": ""})
+    assert [key for key in env if key.upper() == "APPDATA"] == ["APPDATA"]
+    assert Path(env["APPDATA"]) == Path("C:/Users/op") / "AppData" / "Roaming"
+
+
+def test_neutral_home_is_windows_only_and_follows_the_switch(monkeypatch):
+    """On macOS and Linux the login lives under the home directory itself."""
+    monkeypatch.setattr(headless.os, "name", "nt")
+    monkeypatch.delenv("HEADLESS_NEUTRAL_HOME", raising=False)
+    assert headless._neutral_home_enabled() is headless._NEUTRAL_HOME_DEFAULT
+    monkeypatch.setenv("HEADLESS_NEUTRAL_HOME", "0")
+    assert headless._neutral_home_enabled() is False
+    monkeypatch.setenv("HEADLESS_NEUTRAL_HOME", "1")
+    assert headless._neutral_home_enabled() is True
+    monkeypatch.setattr(headless.os, "name", "posix")
+    assert headless._neutral_home_enabled() is False
+
+
+def test_a_home_that_cannot_be_made_leaves_userprofile_alone(
+    slot_source: Path, tmp_path: Path, neutral_home
+):
+    """Fail open: the worker runs with a longer prefix, and nothing breaks."""
+    slot = tmp_path / "slots" / "slot-0"
+    slot.mkdir(parents=True)
+    (slot / "home").write_text("in the way", encoding="utf-8")
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"USERPROFILE": "C:/Users/op"})
+    assert env["USERPROFILE"] == "C:/Users/op"
+    assert env["CURSOR_CONFIG_DIR"] == str(slot)
+
+
+def test_a_home_too_deep_for_its_transcripts_is_not_used(
+    slot_source: Path, tmp_path: Path, monkeypatch
+):
+    """The CLI writes a transcript 116 characters and a cwd slug below the home.
+
+    Past the Windows path limit that write is the same failure the slot budget
+    exists to prevent, so a home that would cross it is skipped up front.
+    """
+    monkeypatch.setattr(headless, "_neutral_home_enabled", lambda: True)
+    monkeypatch.setattr(headless, "_WINDOWS_MAX_PATH", 60)
+    with headless._cursor_slot(slot_source):
+        env = headless._slot_env("cursor", {"USERPROFILE": "C:/Users/op"})
+    assert env["USERPROFILE"] == "C:/Users/op"
+    assert not (tmp_path / "slots" / "slot-0" / "home").exists()
+
+
+def test_a_home_failure_and_a_seed_failure_each_get_their_warning(
+    slot_source: Path, tmp_path: Path, neutral_home, caplog
+):
+    """They are different problems, and one latch let the first silence the other.
+
+    A wave whose workers all kept the operator's home then never printed the
+    seed warning naming the file that failed, which is the quiet fail-open the
+    warning exists to prevent.
+    """
+    slot = tmp_path / "slots" / "slot-0"
+    slot.mkdir(parents=True)
+    (slot / "home").write_text("in the way", encoding="utf-8")
+
+    def both_twice() -> list[str]:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.harness.headless"):
+            for _ in range(2):
+                with headless._cursor_slot(slot_source):
+                    pass
+                with headless._cursor_slot(tmp_path / "no-such-config-dir"):
+                    pass
+        return [record.getMessage() for record in caplog.records]
+
+    messages = both_twice()
+    assert sum("keeps the operator's home" in m for m in messages) == 1
+    assert sum("could not be seeded" in m for m in messages) == 1
+
+    # Once per wave: the next wave warns again, for both.
+    headless._reset_slot_stats()
+    assert len(both_twice()) == 2
+
+
+def _neutral_home_wave(
+    tmp_path: Path, monkeypatch, *, enabled: bool, concurrency: int = 2, spawn=None
+):
+    """A three-job Cursor wave on the real runner path, with the spawn stubbed."""
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_slot_root", lambda: tmp_path / "slots")
+    monkeypatch.setattr(headless, "_slot_free", [])
+    monkeypatch.setattr(headless, "_slot_high", 0)
+    monkeypatch.setattr(headless, "_slot_poisoned", set())
+    monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
+    monkeypatch.setattr(headless, "_slot_first_errors", {})
+    monkeypatch.setattr(headless, "_neutral_home_enabled", lambda: enabled)
+    monkeypatch.setattr(headless, "_WINDOWS_MAX_PATH", 10_000)
+    source = tmp_path / "cursor-home"
+    source.mkdir()
+    (source / "cli-config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(headless, "_cursor_config_dir", lambda env: source)
+
+    seen: dict[str, list] = {"probe": [], "worker": []}
+
+    def auth(cli, cli_bin, env, **kwargs):
+        seen["probe"].append(dict(env))
+        return None
+
+    def runner(cmd, **kwargs):
+        seen["worker"].append(dict(kwargs["env"]))
+        return spawn() if spawn else (0, _envelope("ok"), "")
+
+    monkeypatch.setattr(headless, "subscription_auth_error", auth)
+    monkeypatch.setattr(headless, "cursor_model_error", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "default_claude_runner", runner)
+    log = tmp_path / "usage.jsonl"
+    result = headless.run_headless_wave(
+        _jobs(tmp_path, 3), model="grok-4.7-medium", concurrency=concurrency,
+        cli="cursor", usage_log=log,
+    )
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    return result, rows, seen
+
+
+def test_a_neutral_home_wave_says_so_in_every_row_and_in_the_rollup(
+    tmp_path: Path, monkeypatch
+):
+    """Rows with and without it are thousands of tokens apart on overhead."""
+    result, rows, seen = _neutral_home_wave(tmp_path, monkeypatch, enabled=True)
+
+    assert result["counts"]["wrote"] == 3
+    assert [row.get("neutral_home") for row in rows] == [True, True, True]
+    assert result["usage"]["neutral_home"] == "3/3"
+    slots = tmp_path / "slots"
+    for env in seen["worker"]:
+        assert Path(env["USERPROFILE"]).parent.parent == slots
+        assert Path(env["USERPROFILE"]) == Path(env["CURSOR_CONFIG_DIR"]) / "home"
+
+
+def test_the_preflight_runs_under_a_neutral_home_too(tmp_path: Path, monkeypatch):
+    """If the login did not survive the move, the wave must stop before any job.
+
+    The auth probe is what would notice, so it has to see the same kind of home
+    the workers get rather than the operator's own.
+    """
+    _result, _rows, seen = _neutral_home_wave(tmp_path, monkeypatch, enabled=True)
+
+    (probe,) = seen["probe"]
+    assert Path(probe["USERPROFILE"]) == Path(probe["CURSOR_CONFIG_DIR"]) / "home"
+
+
+def test_a_wave_without_a_neutral_home_keeps_its_old_row_shape(
+    tmp_path: Path, monkeypatch
+):
+    result, rows, _seen = _neutral_home_wave(tmp_path, monkeypatch, enabled=False)
+
+    assert all("neutral_home" not in row for row in rows)
+    assert "neutral_home" not in result["usage"]
+    assert result["usage"]["slots_seeded"] == "3/3"
+
+
+def _fail_the_nth(monkeypatch, name: str, nth: int, outcome):
+    """Wrap ``headless.<name>`` so its ``nth`` call (from 1) gives ``outcome``."""
+    real = getattr(headless, name)
+    calls: list[int] = []
+
+    def wrapped(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == nth:
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(headless, name, wrapped)
+
+
+def test_a_worker_that_kept_the_operators_home_is_not_labelled(
+    tmp_path: Path, monkeypatch
+):
+    """One at a time, so the order is fixed: the preflight, then the three jobs."""
+    _fail_the_nth(monkeypatch, "_neutral_home", 3, None)
+    result, rows, seen = _neutral_home_wave(
+        tmp_path, monkeypatch, enabled=True, concurrency=1
+    )
+
+    assert result["counts"]["wrote"] == 3
+    assert [row.get("neutral_home") for row in rows] == [True, None, True]
+    assert result["usage"]["neutral_home"] == "2/3"
+    assert result["usage"]["slots_seeded"] == "3/3"
+    assert ["home" in Path(env.get("USERPROFILE", "")).parts[-1:] for env in seen["worker"]] == [
+        True, False, True,
+    ]
+
+
+def test_a_wave_where_no_worker_got_a_home_says_zero(tmp_path: Path, monkeypatch):
+    """Asked for and not had is ``0/N``; never asked for is no key at all."""
+    monkeypatch.setattr(headless, "_neutral_home", lambda slot_dir: None)
+    result, rows, _seen = _neutral_home_wave(tmp_path, monkeypatch, enabled=True)
+
+    assert all("neutral_home" not in row for row in rows)
+    assert result["usage"]["neutral_home"] == "0/3"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [(1, "", "boom"), (124, "", "timeout after 900s")],
+    ids=["non-zero exit", "timeout"],
+)
+def test_a_failed_job_still_says_which_home_it_ran_under(
+    tmp_path: Path, monkeypatch, outcome
+):
+    result, rows, _seen = _neutral_home_wave(
+        tmp_path, monkeypatch, enabled=True, spawn=lambda: outcome
+    )
+
+    assert result["counts"]["failed"] == 3
+    assert [row["rc"] for row in rows] == [outcome[0]] * 3
+    assert [row.get("neutral_home") for row in rows] == [True, True, True]
+    assert result["usage"]["neutral_home"] == "3/3"
+
+
+def test_a_job_that_never_spawned_does_not_inherit_the_last_jobs_home(
+    tmp_path: Path, monkeypatch
+):
+    """Pool threads are reused, and the marker outlives the slot that set it."""
+    _fail_the_nth(monkeypatch, "_build_cmd", 3, RuntimeError("no argv"))
+    result, rows, _seen = _neutral_home_wave(
+        tmp_path, monkeypatch, enabled=True, concurrency=1
+    )
+
+    assert result["counts"]["failed"] == 1
+    assert [row.get("neutral_home") for row in rows] == [True, True, None]
+    assert rows[2]["rc"] == -1
+
+
+def test_neutral_home_is_recorded_only_when_true():
+    base = dict(job_id="j", cli="cursor", model="m", prompt_sent=1, wall_s=1.0, rc=0)
+    assert "neutral_home" not in usage.job_record(**base)
+    assert usage.job_record(**base, neutral_home=True)["neutral_home"] is True
+
+
+# ---------------------------------------------------------------------------
+# Claude: no MCP servers on a headless job
+#
+# ``--tools ""`` stopped being enough at CLI 2.1.283, when claude.ai connectors
+# began riding on every job: 4,378 -> 701 billed input, measured 2026-10-10.
+# ---------------------------------------------------------------------------
+
+
+def _claude_wave(tmp_path: Path, extra_flags: list[str], cli: str = "claude"):
+    log = tmp_path / "usage.jsonl"
+    seen: list[list[str]] = []
+
+    def runner(cmd, *, input_text, cwd):
+        seen.append(list(cmd))
+        return 0, _envelope("ok"), ""
+
+    headless.run_headless_wave(
+        _jobs(tmp_path, 1), model="sonnet", concurrency=1, cli=cli,
+        runner=runner, usage_log=log, extra_flags=extra_flags,
+    )
+    return seen[0], json.loads(log.read_text(encoding="utf-8"))
+
+
+def test_every_claude_wave_drops_mcp_servers_and_the_row_says_so(tmp_path: Path):
+    cmd, row = _claude_wave(tmp_path, ["--effort", "low"])
+    assert cmd.count("--strict-mcp-config") == 1
+    assert row["flags"] == ["--effort", "low", "--strict-mcp-config"]
+
+
+def test_a_flag_the_book_already_sets_is_not_repeated(tmp_path: Path):
+    cmd, row = _claude_wave(tmp_path, ["--strict-mcp-config", "--effort", "low"])
+    assert cmd.count("--strict-mcp-config") == 1
+    assert row["flags"] == ["--strict-mcp-config", "--effort", "low"]
+
+
+def test_a_cursor_wave_gets_no_claude_trim(tmp_path: Path):
+    cmd, row = _claude_wave(tmp_path, [], cli="cursor")
+    assert "--strict-mcp-config" not in cmd
+    assert row["flags"] == []
 
 
 def test_a_newer_operator_config_is_re_seeded(slot_source: Path):
@@ -2545,7 +2916,7 @@ def test_the_model_probes_never_touch_the_operators_cursor_config(
     monkeypatch.setattr(headless, "_slot_high", 0)
     monkeypatch.setattr(headless, "_slot_poisoned", set())
     monkeypatch.setattr(headless, "_slot_stats", {"seeded": 0, "unseeded": 0})
-    monkeypatch.setattr(headless, "_slot_first_error", None)
+    monkeypatch.setattr(headless, "_slot_first_errors", {})
 
     source = tmp_path / "cursor-home"
     source.mkdir()
@@ -2573,6 +2944,52 @@ def test_the_model_probes_never_touch_the_operators_cursor_config(
     for env in model_envs:
         assert env.get("CURSOR_CONFIG_DIR", "").startswith(slot_root)
         assert str(source) != env.get("CURSOR_CONFIG_DIR")
+
+
+def test_the_hoisted_preflight_probes_under_a_workers_home(
+    slot_source: Path, neutral_home, monkeypatch
+):
+    """A login that does not survive a neutral home has to fail here.
+
+    Probed under the operator's own home, the estimate went green, the
+    destructive ``prepare`` ran, and only then did the wave's preflight refuse.
+    """
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_cursor_config_dir", lambda env: slot_source)
+    calls: list[tuple[list[str], dict]] = []
+
+    def probe(argv, *, env, cwd, timeout):
+        calls.append((list(argv), dict(env)))
+        if "models" in argv:
+            return 0, "Available models\n\nauto - Auto\n", ""
+        if "status" in argv:
+            return 0, json.dumps(_CURSOR_AUTHENTICATED), ""
+        return 1, "", "Error: No prompt provided for print mode"
+
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    assert headless.preflight_error("cursor", model="grok-4.5") is None
+
+    assert any("status" in argv for argv, _env in calls), "the auth gate must have probed"
+    assert any("--model" in argv for argv, _env in calls), "and the model gate"
+    for _argv, env in calls:
+        assert Path(env["USERPROFILE"]) == Path(env["CURSOR_CONFIG_DIR"]) / "home"
+
+
+def test_the_hoisted_preflight_refuses_a_long_slot_root_before_it_probes(
+    tmp_path: Path, monkeypatch
+):
+    """Same order as the wave: the probes take a slot, so the root is checked first."""
+    root = tmp_path / ("p" * (headless._SLOT_PATH_BUDGET + 1))
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_slot_root", lambda: root)
+
+    def probe(argv, *, env, cwd, timeout):
+        raise AssertionError("must not probe under a root that long")
+
+    monkeypatch.setattr(headless, "_default_auth_prober", probe)
+    err = headless.preflight_error("cursor", model="grok-4.5")
+    assert err and "slot root is" in err
+    assert not root.exists()
 
 
 def test_an_interrupt_still_books_the_jobs_that_finished(tmp_path: Path):

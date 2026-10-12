@@ -55,6 +55,18 @@ CLI_MISSING = "cli_missing"
 SERVER_DOWN = "server_down"
 NOT_LOADED = "not_loaded"
 
+# What a `claude -p` job is given as its system prompt. A caller here sends one
+# complete prompt and has no preamble to split off, and a job with no
+# ``--system-prompt-file`` gets the CLI's default instead: about 6.5k characters
+# of coding-assistant instructions, a third of them describing a memory
+# directory, on a call whose own prompt is often under 700 tokens. Empty turns
+# this off. Claude only: Cursor has no such flag, so there it would be folded
+# into the prompt and add tokens rather than replace any.
+HEADLESS_SYSTEM_PROMPT = (
+    "You complete one self-contained text task. Follow the instructions in the "
+    "user message exactly and reply with only what they ask for."
+)
+
 
 class MechanismError(Exception):
     """A headless or local call ran and failed."""
@@ -226,12 +238,17 @@ def _complete_headless(
     flags = ["--effort", str(effort)] if effort and cli == "claude" else []
     with tempfile.TemporaryDirectory(prefix="llm-headless-") as tmp:
         out = Path(tmp) / "reply.txt"
+        job = {
+            "id": f"{call_type}-{uuid.uuid4().hex[:8]}",
+            "input_text": prompt,
+            "output_path": str(out),
+        }
+        if cli == "claude" and HEADLESS_SYSTEM_PROMPT:
+            system_prompt = Path(tmp) / "system.txt"
+            system_prompt.write_text(HEADLESS_SYSTEM_PROMPT, encoding="utf-8")
+            job["system_prompt_file"] = str(system_prompt)
         result = run_headless_wave(
-            [{
-                "id": f"{call_type}-{uuid.uuid4().hex[:8]}",
-                "input_text": prompt,
-                "output_path": str(out),
-            }],
+            [job],
             model=model,
             concurrency=1,
             cli=cli,

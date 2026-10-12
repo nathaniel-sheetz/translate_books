@@ -1092,6 +1092,30 @@ def test_fanout_estimate_on_cursor_reports_the_bracket_effort(tmp_path):
     # No --effort in the argv, and that is now consistent with what is reported.
     assert "--effort" not in est["argv"]
     assert "grok-4.5[effort=high,fast=false]" in est["argv"]
+    # Nor the trim the wave adds to a Claude job: cursor-agent has no such flag.
+    assert "--strict-mcp-config" not in est["argv"]
+
+
+def test_fanout_estimate_quotes_the_argv_the_wave_will_run(tmp_path):
+    """The wave adds ``--strict-mcp-config`` to every Claude job itself, so an
+    estimate built from the book's flags alone quoted an argv that never ran."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+
+    def exploding_runner(*args, **kwargs):
+        raise AssertionError("--estimate must not spawn")
+
+    quoted = subagent.fanout(project, estimate=True, runner=exploding_runner)["estimate"]["argv"]
+    assert quoted.count("--strict-mcp-config") == 1
+
+    ran: list[list[str]] = []
+
+    def runner(cmd, *, input_text, cwd):
+        ran.append(list(cmd))
+        return 1, "", "stop here"
+
+    subagent.fanout(project, runner=runner)
+    assert ran and ran[0] == quoted
 
 
 def test_prepare_survives_an_unreadable_cursor_cli_config(tmp_path, monkeypatch):

@@ -164,6 +164,34 @@ class TestCompleteHeadless:
         assert call["job_timeout"] == 180
         assert call["cache"] == "off"
 
+    def test_a_claude_job_replaces_the_clis_default_system_prompt(self, monkeypatch):
+        """With no system prompt file the CLI sends its own, about 1,600 tokens."""
+        seen = {}
+
+        def wave(jobs, **kwargs):
+            # Read inside the call: the file lives in a directory that is gone
+            # by the time ``complete`` returns.
+            seen["text"] = Path(jobs[0]["system_prompt_file"]).read_text(encoding="utf-8")
+            return _Wave()(jobs, **kwargs)
+
+        monkeypatch.setattr(llm_mechanisms, "run_headless_wave", wave)
+        complete("p", provider="claude-headless", model="claude-sonnet-5-5")
+        assert seen["text"] == llm_mechanisms.HEADLESS_SYSTEM_PROMPT
+
+    def test_a_cursor_job_gets_no_system_prompt_file(self, monkeypatch):
+        """Cursor has no such flag: it would be folded into the prompt and add tokens."""
+        wave = _Wave()
+        monkeypatch.setattr(llm_mechanisms, "run_headless_wave", wave)
+        complete("p", provider="cursor-headless", model="grok-4.7-medium")
+        assert "system_prompt_file" not in wave.calls[0]["jobs"][0]
+
+    def test_an_empty_system_prompt_leaves_the_clis_default(self, monkeypatch):
+        wave = _Wave()
+        monkeypatch.setattr(llm_mechanisms, "run_headless_wave", wave)
+        monkeypatch.setattr(llm_mechanisms, "HEADLESS_SYSTEM_PROMPT", "")
+        complete("p", provider="claude-headless", model="claude-sonnet-5-5")
+        assert "system_prompt_file" not in wave.calls[0]["jobs"][0]
+
     def test_a_cursor_model_carries_its_effort_in_the_id(self, monkeypatch):
         wave = _Wave()
         monkeypatch.setattr(llm_mechanisms, "run_headless_wave", wave)

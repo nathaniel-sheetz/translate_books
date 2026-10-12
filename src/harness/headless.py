@@ -46,6 +46,7 @@ a convention that decays.
 from __future__ import annotations
 
 import difflib
+import errno
 import json
 import logging
 import os
@@ -729,8 +730,10 @@ def neutral_claude_cwd() -> Path:
 #   whole feature rests on: had auth lived here, the preflight would pass on the
 #   operator's real directory and then *every* worker would run logged out,
 #   burning the 15-minute Cursor ceiling each.
-# - **Chats and projects.** Those follow ``CURSOR_DATA_DIR``, a different
-#   variable, and stay where the operator expects them.
+# - **Projects** (job transcripts). Those follow ``CURSOR_DATA_DIR`` and then the
+#   home directory, never the config dir -- so they stay in the operator's
+#   ``~/.cursor`` unless the worker has a neutral home (below), which takes
+#   them with it.
 #
 # Slots are reused across waves so the ~800 KB statsig cache is refetched once
 # per slot rather than once per wave. ``statsig-cache.json`` is never seeded:
@@ -741,6 +744,42 @@ def neutral_claude_cwd() -> Path:
 _SLOT_ROOT_NAME = ".cursor-slots"
 _CURSOR_CONFIG_DIR_VAR = "CURSOR_CONFIG_DIR"
 _SLOT_ROOT_VAR = "HEADLESS_SLOT_ROOT"
+
+# A home directory of the worker's own, inside its slot. ``cursor-agent`` builds
+# the ``<agent_skills>`` list in every job's prefix by scanning ``.claude/skills``
+# (and ``.codex``, ``.grok``, ``.agents``) under ``os.homedir()``: 167 of the 181
+# entries on the 2026-10-09 job, about 4.5k of a 16k prefix, none of which a
+# translation job can use. Those roots follow the home directory and nothing
+# else -- not ``CURSOR_CONFIG_DIR``, not the workspace -- so the only way to keep
+# them out is to hand the child a home that does not hold them. See
+# docs/LLM_PROVIDERS.md.
+#
+# Windows only. There the login sits in ``%APPDATA%\Cursor\auth.json``, which a
+# changed ``USERPROFILE`` does not move; on macOS and Linux it lives under the
+# home directory itself, so the same trick would log every worker out.
+#
+# Per slot rather than one shared directory: the CLI re-syncs its built-in
+# skills and writes ``.cursor/projects/`` under whatever home it is given, which
+# is the same concurrent-rename hazard the slots exist to remove.
+#
+# Measured 2026-10-10 (cursor-agent 2026.10.01, Grok 4.7 medium, three jobs an
+# arm, billed input identical within each): 15,671 per job with the operator's
+# home and 11,026 with a neutral one, the skill list falling from 184 entries to
+# the CLI's own 14. The login survived and the preflight passed unchanged.
+_NEUTRAL_HOME_VAR = "HEADLESS_NEUTRAL_HOME"
+_NEUTRAL_HOME_NAME = "home"
+_NEUTRAL_HOME_DEFAULT = True
+_HOME_ENV_NAMES = frozenset({"USERPROFILE", "HOME"})
+
+# Under its home the CLI writes one transcript per job, at
+# ``.cursor/projects/<cwd slug>/agent-transcripts/<uuid>/<uuid>.jsonl``: 116
+# characters plus the slug, which is the worker's cwd with its separators
+# replaced. That is deeper than the chat store the slot budget was sized for
+# (174 below the home on this machine against 118 below the slot), so a root
+# that is fine for a slot can still be too long for a home.
+_HOME_CHILD_FIXED = 116
+_WINDOWS_MAX_PATH = 260
+_NO_HOME = "cursor worker keeps the operator's home and its skill folders"
 
 # ``cursor-agent`` writes its chat state *inside* CURSOR_CONFIG_DIR, at
 # ``chats/<32-hex>/<uuid>/store.db`` (plus ``-wal``, ``-shm``) -- 118 characters
@@ -769,7 +808,10 @@ _slot_high = 0
 _slot_poisoned: set[int] = set()
 # Per-wave isolation tally, so a wave that quietly lost isolation says so.
 _slot_stats = {"seeded": 0, "unseeded": 0}
-_slot_first_error: str | None = None
+# The first failure of each kind this wave, keyed on the warning's own wording.
+# A slot that could not be seeded and a worker that could not have a home are
+# different problems, and one must not use up the other's warning.
+_slot_first_errors: dict[str, str] = {}
 # The slot the calling thread currently holds. A thread-local rather than an
 # argument because the runner seam is ``(cmd, *, input_text, cwd)`` and a job's
 # env must not become part of it -- every test stub implements that signature.
@@ -833,15 +875,17 @@ def _slot_path_error(root: Path) -> str | None:
 
 def _reset_slot_stats() -> None:
     """Clear the per-wave isolation tally. Called once, just before the pool."""
-    global _slot_first_error
     with _slot_lock:
         _slot_stats["seeded"] = 0
         _slot_stats["unseeded"] = 0
-        _slot_first_error = None
+        _slot_stats["homed"] = 0
+        _slot_first_errors.clear()
 
 
-def _note_slot_error(path: Path, exc: OSError) -> None:
-    """Record why a slot could not be seeded, and warn once per wave.
+def _note_slot_error(
+    path: Path, exc: OSError, *, what: str = "cursor slot could not be seeded"
+) -> None:
+    """Record why a slot could not be seeded, and warn once per wave and kind.
 
     Failing open is right; failing open *quietly* is what turned a one-line
     problem into a two-hour investigation, because a wave with isolation working
@@ -851,19 +895,20 @@ def _note_slot_error(path: Path, exc: OSError) -> None:
     operator's source ``cli-config.json``. Naming the slot for a missing *source*
     sent the reader looking at a directory that was never the problem.
     """
-    global _slot_first_error
     detail = f"{path}: [{exc.errno}] {exc.strerror or exc}"
     with _slot_lock:
-        first = _slot_first_error is None
+        first = what not in _slot_first_errors
         if first:
-            _slot_first_error = detail
+            _slot_first_errors[what] = detail
     if first:
-        logger.warning("cursor slot could not be seeded (%s); failing open", detail)
+        logger.warning("%s (%s); failing open", what, detail)
 
 
-def _count_slot(seeded: bool) -> None:
+def _count_slot(seeded: bool, homed: bool = False) -> None:
     with _slot_lock:
         _slot_stats["seeded" if seeded else "unseeded"] += 1
+        if homed:
+            _slot_stats["homed"] = _slot_stats.get("homed", 0) + 1
 
 
 def _slot_tally() -> str | None:
@@ -872,6 +917,68 @@ def _slot_tally() -> str | None:
         seeded, unseeded = _slot_stats["seeded"], _slot_stats["unseeded"]
     total = seeded + unseeded
     return f"{seeded}/{total}" if total else None
+
+
+def _home_tally() -> str | None:
+    """``"n/N"`` workers that ran under a neutral home, or ``None`` when it is off.
+
+    ``None`` rather than ``"0/N"`` for a wave that never asked for one, so the
+    rollup of every wave run before this existed keeps its shape.
+    """
+    if not _neutral_home_enabled():
+        return None
+    with _slot_lock:
+        homed = _slot_stats.get("homed", 0)
+        total = _slot_stats["seeded"] + _slot_stats["unseeded"]
+    return f"{homed}/{total}" if total else None
+
+
+def _neutral_home_enabled() -> bool:
+    """Whether Cursor workers are given a home directory of their own.
+
+    ``HEADLESS_NEUTRAL_HOME`` (``1`` / ``0``) decides, and is read at call time
+    so one process can run both arms of a comparison. Never on POSIX, whatever
+    the variable says -- see :data:`_NEUTRAL_HOME_VAR`.
+    """
+    if os.name != "nt":
+        return False
+    raw = (os.environ.get(_NEUTRAL_HOME_VAR) or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return _NEUTRAL_HOME_DEFAULT
+
+
+def _neutral_home(slot_dir: Path) -> Path | None:
+    """The slot's own home directory, created; ``None`` when off or unusable.
+
+    Fails open like the slot itself: a worker that cannot have one runs with the
+    operator's home and a longer prefix, which costs tokens and breaks nothing.
+    """
+    if not _neutral_home_enabled():
+        return None
+    home = slot_dir / _NEUTRAL_HOME_NAME
+    # Resolved, because the CLI builds the slug from the long form of the path
+    # (``Nathaniel``, not ``NATHAN~1``).
+    slug = len(str(neutral_claude_cwd().resolve()))
+    deepest = len(str(home)) + _HOME_CHILD_FIXED + slug
+    if deepest >= _WINDOWS_MAX_PATH:
+        _note_slot_error(
+            home,
+            OSError(
+                errno.ENAMETOOLONG,
+                f"transcripts under a neutral home would reach {deepest} characters",
+            ),
+            what=_NO_HOME,
+        )
+        return None
+    try:
+        home.mkdir(parents=True, exist_ok=True, mode=_slot_dir_mode())
+    except OSError as exc:
+        _note_slot_error(home, exc, what=_NO_HOME)
+        return None
+    return home
 
 
 def _take_slot() -> int:
@@ -1045,11 +1152,17 @@ def _cursor_slot(source_dir: Path) -> Iterator[None]:
                 break
             _retire_slot(candidate)
     try:
+        home = _neutral_home(slot_dir) if slot_dir is not None else None
         _slot_current.dir = slot_dir
-        _count_slot(slot_dir is not None)
+        _slot_current.home = home
+        # Outlives the slot on purpose: the usage row is written after the
+        # spawn returns, and it has to say which home that spawn ran under.
+        _slot_current.homed = home is not None
+        _count_slot(slot_dir is not None, homed=home is not None)
         yield
     finally:
         _slot_current.dir = None
+        _slot_current.home = None
         if index is not None:
             _release_slot(index)
 
@@ -1060,11 +1173,44 @@ def _slot_env(cli: str, env: Mapping[str, str]) -> Mapping[str, str]:
     Derived from the scrubbed wave env, never from ``os.environ``: rebuilding
     the child environment here would reopen the metered-billing hole the scrub
     exists to close.
+
+    When the slot carries a neutral home, ``USERPROFILE`` points at it too, and
+    so does ``HOME`` if the inherited env has one (a wave launched from Git Bash
+    does). Matched whatever the spelling, because a mapping holding both
+    ``USERPROFILE`` and ``UserProfile`` would hand ``CreateProcess`` two values
+    for one variable.
+
+    The login is read from ``%APPDATA%``, and from the home directory only when
+    that is unset. So an env without one gets it pinned to where the real home
+    put it: otherwise the neutral home would move the login, and a wave launched
+    from a stripped environment would be refused as logged out, with advice (log
+    in again) that cannot help.
     """
     slot = getattr(_slot_current, "dir", None)
     if cli != "cursor" or slot is None:
         return env
-    return {**env, _CURSOR_CONFIG_DIR_VAR: str(slot)}
+    out = {**env, _CURSOR_CONFIG_DIR_VAR: str(slot)}
+    home = getattr(_slot_current, "home", None)
+    if home is not None:
+        had_home = any(key.upper() == "HOME" for key in out)
+        if not any(key.upper() == "APPDATA" and value for key, value in out.items()):
+            real = next(
+                (
+                    value
+                    for key, value in out.items()
+                    if key.upper() == "USERPROFILE" and value
+                ),
+                None,
+            ) or str(Path.home())
+            for key in [key for key in out if key.upper() == "APPDATA"]:
+                del out[key]
+            out["APPDATA"] = str(Path(real) / "AppData" / "Roaming")
+        for key in [key for key in out if key.upper() in _HOME_ENV_NAMES]:
+            del out[key]
+        out["USERPROFILE"] = str(home)
+        if had_home:
+            out["HOME"] = str(home)
+    return out
 
 
 def _close_streams(proc: subprocess.Popen) -> None:
@@ -1609,34 +1755,37 @@ def preflight_error(
     resolved = shutil.which(name)
     if not resolved:
         return _bin_missing_error(cli_name, name)
+    probe_env: Mapping[str, str] = subscription_env(cli_name)
+    if cli_name == "cursor":
+        # Same gate the wave applies, hoisted for the same reason as the others:
+        # a slot root over budget kills every long job with a message that reads
+        # as a provider outage, and the dashboard should catch that before it
+        # spends. First, as in the wave, because the probes below take a slot.
+        path_error = _slot_path_error(_slot_root())
+        if path_error is not None:
+            return path_error
+        # Both probes see what a worker sees: its config dir and, where one
+        # applies, its home. A login that did not survive either has to fail
+        # here, not after the destructive ``prepare``. And the model probe
+        # spawns a worker-shaped `-p --model` argv, which the dashboard would
+        # otherwise run against the operator's live Cursor config. The slot is
+        # released before the probes run, as the wave does: its directory stays.
+        with _cursor_slot(_cursor_config_dir(probe_env)):
+            probe_env = dict(_slot_env(cli_name, probe_env))
     auth_error = subscription_auth_error(
         cli_name,
         resolved,
-        subscription_env(cli_name),
+        probe_env,
         cwd=neutral_claude_cwd(),
     )
     if auth_error:
         return auth_error
-    # Same gate the wave applies, hoisted for the same reason as the others: a
-    # slot root over budget kills every long job with a message that reads as a
-    # provider outage, and the dashboard should catch that before it spends.
-    if cli_name == "cursor":
-        path_error = _slot_path_error(_slot_root())
-        if path_error is not None:
-            return path_error
-    # Third gate, same order `run_headless_wave` applies it in (after auth, so a
+    # Last gate, same order `run_headless_wave` applies it in (after auth, so a
     # logged-out CLI is reported as logged out rather than as a model problem).
     # Token-free and fails open in every direction, so hoisting it can only turn
     # "the job died after prepare" into "the estimate never went green".
     if cli_name == "cursor" and model:
-        # Through an isolated config dir, for the reason the wave gives at its
-        # own model gate: this probe spawns a worker-shaped `-p --model` argv,
-        # and the dashboard calls it against the operator's live Cursor config.
-        probe_env = subscription_env(cli_name)
-        with _cursor_slot(_cursor_config_dir(probe_env)):
-            return cursor_model_error(
-                resolved, model, env=dict(_slot_env(cli_name, probe_env))
-            )
+        return cursor_model_error(resolved, model, env=dict(probe_env))
     return None
 
 
@@ -1894,6 +2043,28 @@ def worker_model_suggestions(cli: str, *, timeout: float = 10.0) -> list[str]:
     return sorted(ids)
 
 
+# Claude argv every wave carries, whatever ``headless_extra_flags`` says. Merged
+# into the wave's ``extra_flags`` rather than written into ``_build_cmd``, so the
+# usage row records it like any other flag: a prefix that shrank with nothing in
+# the row to say why would be a silent break in the A/B corpus.
+#
+# ``--strict-mcp-config`` with no ``--mcp-config`` loads no MCP server at all.
+# ``--tools ""`` does not do that: since CLI 2.1.283 the account's claude.ai
+# connectors put eight tool definitions and their instructions on every job
+# regardless. Measured 2026-10-10 (CLI 2.1.296, Sonnet 5.5, three jobs an arm,
+# billed input identical within each): 4,378 per job without the flag and 701
+# with it, on an 87-token prompt. ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` measured
+# the same 701; the flag is used because a flag shows up in the usage row.
+_CLAUDE_TRIM_FLAGS: tuple[str, ...] = ("--strict-mcp-config",)
+
+
+def _with_claude_trim(flags: Sequence[str]) -> list[str]:
+    """``flags`` plus any of :data:`_CLAUDE_TRIM_FLAGS` not already among them."""
+    out = [str(flag) for flag in flags]
+    out.extend(flag for flag in _CLAUDE_TRIM_FLAGS if flag not in out)
+    return out
+
+
 def _build_cmd(
     cli: str,
     cli_bin: str,
@@ -1905,8 +2076,9 @@ def _build_cmd(
     """Build argv for one headless job (prompt still goes on stdin).
 
     ``extra_flags`` is the Claude-profile experiment seam: argv that trims what
-    the child loads into its system prompt (``--strict-mcp-config``,
-    ``--setting-sources ""``, ``--safe-mode`` …). It is recorded per job in the
+    the child loads into its system prompt (``--setting-sources ""``,
+    ``--safe-mode`` …; ``--strict-mcp-config`` is already merged in by
+    :func:`_with_claude_trim`). It is recorded per job in the
     usage log, so which flags a wave ran under is a property of the measurement
     rather than something to remember. Claude-only on purpose — a Cursor wave
     would reject Claude argv, and silently ignoring it beats failing the wave.
@@ -2173,6 +2345,9 @@ def run_headless_wave(
     if job_timeout is not None and job_timeout <= 0:
         return _error_result(f"invalid job_timeout {job_timeout!r}; must be > 0")
 
+    if cli_name == "claude":
+        extra_flags = _with_claude_trim(extra_flags)
+
     cwd = neutral_claude_cwd()
     if job_timeout is None:
         job_timeout = _CLI_JOB_TIMEOUT_S.get(cli_name)
@@ -2321,6 +2496,8 @@ def run_headless_wave(
         prompt_sent = 0
         usage: dict[str, Any] | None = None
         rc = -1
+        # Pool threads are reused, so clear what the last job's slot left here.
+        _slot_current.homed = False
 
         def _record(detail: str | None) -> dict[str, Any]:
             return job_record(
@@ -2337,6 +2514,7 @@ def run_headless_wave(
                 effort=effort_label,
                 cache=cache_label,
                 timed_out=rc == 124,
+                neutral_home=bool(getattr(_slot_current, "homed", False)),
             )
 
         try:
@@ -2523,5 +2701,9 @@ def run_headless_wave(
         # it is indistinguishable from one that kept it.
         if tally is not None:
             usage_summary["slots_seeded"] = tally
+            # And how many of them saw none of the operator's skill folders.
+            home_tally = _home_tally()
+            if home_tally is not None:
+                usage_summary["neutral_home"] = home_tally
         out["usage"] = usage_summary
     return out

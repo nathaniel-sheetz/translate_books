@@ -51,13 +51,19 @@ _CHARS_PER_TOKEN = 4
 #
 # cursor — from the 2026-08-10 probe (cursor-agent 2026.08.04-aaa8809): a no-op
 # job billed ~18.2k input, and a 4.5k-token prompt billed 21.8k total, putting
-# the fixed per-process prefix at ~17.2k. There is no client-side lever on it:
-# `cursor-agent` has no `--system-prompt-file` and no cache-TTL knob.
+# the fixed per-process prefix at ~17.2k. `cursor-agent` has no
+# `--system-prompt-file` and no cache-TTL knob.
 #
 # The prefix depends on the *model*, not only the CLI. The 2026-09-14 panel probe
 # (cursor-agent 2026.09.10) measured Grok 4.6 ~17.9k, Gemini 3.8 Flash ~16.3k,
 # GPT-5.6 Terra ~16.3k and Claude Sonnet 5 ~30.6k. So this constant fits the
 # non-Claude models and would quote a Claude-on-Cursor wave ~13k low per job.
+#
+# Both constants predate the 2026-10-10 cuts (`--strict-mcp-config` on every
+# Claude job, a neutral home per Cursor worker), which took about 3.7k and 4.6k
+# off a job on a short probe prompt. They are left as measured until real waves
+# have logged rows under the new prefix: a constant that overstates only makes
+# the gate quote high.
 #
 # Only load-bearing on a cold machine: three logged jobs of the wave's own
 # model (in this book or another) and baseline_tokens() switches to that
@@ -262,6 +268,7 @@ def job_record(
     effort: str | None = None,
     cache: str | None = None,
     timed_out: bool = False,
+    neutral_home: bool = False,
 ) -> dict[str, Any]:
     """One JSONL row: what we sent, what was billed, and under which argv.
 
@@ -274,6 +281,11 @@ def job_record(
     corpus already holds is unchanged — ``usage.jsonl`` is an A/B corpus and a
     silently re-shaped row is a corrupted one. It makes a killed job queryable
     instead of inferable from ``rc``.
+
+    ``neutral_home`` follows the same rule. It marks a Cursor job whose child
+    ran under a home directory of its own, which takes the operator's skill
+    folders out of the prefix: rows with and without it are about 4.6k apart on
+    overhead and must not be read as one population.
     """
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -292,6 +304,8 @@ def job_record(
         record.update(usage)
     if timed_out:
         record["timed_out"] = True
+    if neutral_home:
+        record["neutral_home"] = True
     if error:
         record["error"] = error[:300]
     return record
