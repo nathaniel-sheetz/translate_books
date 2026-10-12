@@ -133,7 +133,7 @@ _PROFILE_SCHEMA = {
     "command": "wave type the profile was resolved for (judges | annotations | translate | footnotes)",
     "host": "detected hosting agent (claude-code | cursor | unknown)",
     "effective": {
-        "cli": "launcher family that will run (claude | cursor)",
+        "cli": "launcher family that will run (claude | cursor | codex)",
         "cli_source": "cli | config | host:<host> | fallback[:reason]",
         "worker_model": "model each job runs, including any [effort=…] bracket",
         "worker_model_source": "cli | cursor-cli-config | default:claude",
@@ -734,7 +734,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cli-bin",
         dest="cli_bin",
         default=None,
-        help="Headless CLI binary override (default: claude or cursor-agent)",
+        help="Headless CLI binary override (default: claude, cursor-agent or codex)",
     )
     fp.add_argument(
         "--claude-bin",

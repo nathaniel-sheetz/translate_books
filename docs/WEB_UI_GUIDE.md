@@ -470,10 +470,11 @@ worker model, effort and token baseline are resolved once, together, with their 
 - **Remember this CLI for this book** writes `headless_cli` into `.harness/config.json` —
   identical to `harness.py config-set --key headless_cli` — which outranks detection from then
   on. Unticking it restores `auto`.
-- **Effort** is offered on both CLIs, and the line under it names the channel that carries the
-  level: `--effort` on Claude, the model's `[effort=…]` bracket on Cursor, or "nothing on this
-  CLI carries it" (an `auto` Cursor model takes no bracket — pin a concrete model).
-- **Prompt cache** is Claude-only and hidden on Cursor, which has no cache-TTL lever.
+- **Effort** is offered on every CLI, and the line under it names the channel that carries the
+  level: `--effort` on Claude, `-c model_reasoning_effort` on Codex, the model's `[effort=…]`
+  bracket on Cursor, or "nothing on this CLI carries it" (an `auto` Cursor model takes no
+  bracket — pin a concrete model).
+- **Prompt cache** is Claude-only and hidden on Cursor and Codex, which have no cache-TTL lever.
 - Any field left alone is sent as `null`, so the server resolves it. That is deliberate: a GUI
   that echoed the resolved values back would make the provenance read "a flag said so" when
   nothing did.
@@ -504,7 +505,7 @@ Asking for the address judge on a book with no `address_map.json` 409s with the
   or a run finishes.
 - `POST /api/project/<id>/review/run-coded` — `{chapter_ids: [...] | null, evaluators: [...] | null}`.
   No API spend. Returns `{job_id, total}`.
-- `GET /api/project/<id>/judges/profile[?cli=claude|cursor]` — `resolve_profile`'s payload
+- `GET /api/project/<id>/judges/profile[?cli=claude|cursor|codex]` — `resolve_profile`'s payload
   (`cli`, `cli_source`, `worker_model`, `effort`, `effort_channel`, `baseline_tokens`, `host`,
   `warnings`, …) plus render-only extras: `cli_choices`, `worker_model_suggestions`,
   `prompt_cache`, `prompt_cache_supported`, `binaries`, `default_backend`. Read-only; runs no

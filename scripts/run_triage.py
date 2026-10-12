@@ -173,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-model", default=None,
         help="answer as though this model were pinned, instead of the resolved one",
     )
-    p_status.add_argument("--cli", choices=("claude", "cursor"), default=None,
+    p_status.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None,
                           help="headless CLI (default: the family the floor was "
                                "calibrated on, or this book's triage_headless_cli)")
     p_status.add_argument(
@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="pin the triage model, e.g. 'grok-4.6[effort=medium,fast=false]'. "
              "Recorded in the manifest; fanout inherits it. Default: the CLI's own default",
     )
-    p_prepare.add_argument("--cli", choices=("claude", "cursor"), default=None,
+    p_prepare.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None,
                            help="headless CLI (default: the family the floor was "
                                 "calibrated on, or this book's triage_headless_cli)")
     p_prepare.add_argument(
@@ -226,7 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the manifest's model; the manifest is rewritten so commit "
              "records what actually ran",
     )
-    p_fanout.add_argument("--cli", choices=("claude", "cursor"), default=None, help="headless CLI")
+    p_fanout.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None, help="headless CLI")
     p_fanout.add_argument(
         "--effort", choices=("low", "medium", "high", "xhigh", "default"), default=None,
         help="default: inherited from the manifest",

@@ -33,7 +33,7 @@ python scripts/review_annotations.py prepare --project fabre2 \
 
 # Then EITHER a headless wave …
 python scripts/review_annotations.py fanout --project fabre2 \
-    [--cli claude|cursor] [--cli-bin <path>] [--concurrency 5] [--target-ids k1,k2]
+    [--cli claude|cursor|codex] [--cli-bin <path>] [--concurrency 5] [--target-ids k1,k2]
 # … OR spawn annotation-worker Task subagents against the manifest's paths.
 
 # Parse the drafts, write results.json and the dated report.

@@ -7851,8 +7851,8 @@ def _headless_profile_payload(
         "worker_model_suggestions": worker_model_suggestions(prof.cli),
         "prompt_cache": hstate.resolve_prompt_cache(cfg),
         "prompt_cache_choices": list(hstate.CACHE_MODES),
-        # cursor-agent has no cache-TTL lever at all, so the control is hidden
-        # rather than shown-and-ignored.
+        # Neither cursor-agent nor codex has a cache-TTL lever, so the control is
+        # hidden rather than shown-and-ignored.
         "prompt_cache_supported": prof.cli == "claude",
         "effort_choices": [*hstate.EFFORT_LEVELS, "default"],
         "binaries": binaries,

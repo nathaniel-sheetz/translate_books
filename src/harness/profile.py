@@ -81,7 +81,7 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
 }
 
 # How the resolved effort actually reaches the model.
-EFFORT_ARGV = "argv"                  # claude: --effort <level>
+EFFORT_ARGV = "argv"                  # claude: --effort <level>; codex: -c model_reasoning_effort=<level>
 EFFORT_MODEL_BRACKET = "model_bracket"  # cursor: grok-4.5[effort=<level>]
 EFFORT_MODEL_ID = "model_id"          # cursor: grok-4.7-<level>, no bracket
 EFFORT_NONE = "none"                  # nothing carries it; say so out loud
@@ -118,9 +118,9 @@ def _is_guessed_cli(cli_source: str) -> bool:
     return cli_source not in _DECIDED_CLI_SOURCES
 
 
-def _other_cli(cli: str) -> str:
-    """The launcher family that is not ``cli``."""
-    return "claude" if cli == "cursor" else "cursor"
+def _other_clis(cli: str) -> tuple[str, ...]:
+    """The launcher families that are not ``cli``, in the order a guess falls back to."""
+    return tuple(name for name in hstate.HEADLESS_CLIS if name != cli)
 
 
 def usage_log_for(project_dir: Path | str, command: str) -> Path | None:
@@ -345,8 +345,9 @@ def resolve_profile(
     # install the CLI the host implies rather than the one we happened to pick.
     if check_binary and _is_guessed_cli(cli_source) and not cli_binary_present(cli_name):
         missing_bin = cli_binary(cli_name)
-        alternative = _other_cli(cli_name)
-        if cli_binary_present(alternative):
+        others = _other_clis(cli_name)
+        alternative = next((name for name in others if cli_binary_present(name)), None)
+        if alternative:
             reason = (
                 f"the detected {host} host"
                 if cli_source.startswith("host:")
@@ -358,9 +359,10 @@ def resolve_profile(
             )
             cli_name, cli_source = alternative, f"fallback:{missing_bin}-missing"
         else:
+            absent = " or ".join(repr(cli_binary(name)) for name in others)
             warnings.append(
                 f"{missing_bin!r} is not on PATH and neither is "
-                f"{cli_binary(alternative)!r}; a headless wave cannot run until "
+                f"{absent}; a headless wave cannot run until "
                 f"one of them is installed"
             )
 
@@ -371,9 +373,10 @@ def resolve_profile(
         model_source = worker_model_source
     else:
         resolved_model = default_worker_model(cli_name)
-        model_source = (
-            "cursor-cli-config" if cli_name == "cursor" else "default:claude"
-        )
+        model_source = {
+            "cursor": "cursor-cli-config",
+            "codex": "codex-config",
+        }.get(cli_name, "default:claude")
 
     # ── effort: one ladder … ────────────────────────────────────────────────
     resolved_effort: str | None
@@ -449,9 +452,10 @@ def resolve_profile(
 
     # ── … and one channel ───────────────────────────────────────────────────
     if resolved_effort is None:
-        # On Claude "no effort" is still delivered by argv (by omitting the flag),
-        # which is a decision the wave carries out. On Cursor nothing carries it.
-        effort_channel = EFFORT_ARGV if cli_name == "claude" else EFFORT_NONE
+        # On Claude and Codex "no effort" is still delivered by argv (by omitting
+        # the flag), which is a decision the wave carries out. On Cursor nothing
+        # carries it.
+        effort_channel = EFFORT_NONE if cli_name == "cursor" else EFFORT_ARGV
     elif cli_name == "cursor":
         resolved_model = with_cursor_effort(resolved_model, resolved_effort)
         if cursor_model_effort(resolved_model) == resolved_effort:

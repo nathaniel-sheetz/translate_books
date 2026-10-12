@@ -397,12 +397,12 @@ def _parse_args(argv: list[str] | None):
         help="parallel headless jobs per book (default: automation.concurrency)",
     )
     parser.add_argument(
-        "--cli", choices=["claude", "cursor"],
+        "--cli", choices=list(hstate.HEADLESS_CLIS),
         help="DEBUG ONLY: force a family past every book's pin. The scheduled "
         "task never passes this — use --default-cli to move the un-pinned books.",
     )
     parser.add_argument(
-        "--default-cli", choices=["claude", "cursor"],
+        "--default-cli", choices=list(hstate.HEADLESS_CLIS),
         help="override automation.default_cli for this run",
     )
     parser.add_argument(

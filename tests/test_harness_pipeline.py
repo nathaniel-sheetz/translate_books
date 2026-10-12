@@ -1614,6 +1614,43 @@ def test_translate_fanout_cursor_skips_cache_split(tmp_path: Path):
     assert draft.startswith("es_cursor")
 
 
+def test_translate_fanout_codex_writes_the_draft_from_the_event_stream(tmp_path: Path):
+    """codex profile: full prompt on stdin, effort as a config override, prose out of the stream."""
+    from src.harness import flow, state as hstate
+
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    _save_chunks(chunks_dir, "chapter_01", sources=["One short sentence for a draft."])
+    hstate.save_config(tmp_path, {"always_include_dialogue": True, "batch_size": 2,
+                                  "headless_cli": "codex"})
+
+    prep = flow.translate_prepare(str(tmp_path), worker_model="gpt-5.6-terra")
+    entry = prep["manifest"][0]
+    full_prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
+    stream = "\n".join(json.dumps(event) for event in (
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "item.completed",
+         "item": {"id": "item_0", "type": "agent_message", "text": "es_codex draft prose"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 11000, "cached_input_tokens": 3000,
+                                             "output_tokens": 30}},
+    ))
+    seen: list[tuple[list[str], str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append((list(cmd), input_text))
+        return 0, stream, "Reading prompt from stdin..."
+
+    out = flow.translate_fanout(str(tmp_path), runner=fake_runner)
+    assert out["counts"]["wrote"] == 1 and out["cli"] == "codex"
+    cmd, stdin = seen[0]
+    assert cmd[:2] == ["codex", "exec"] and cmd[-2:] == ["-m", "gpt-5.6-terra"]
+    # Translate's table default, sent the only way `exec` takes it.
+    assert "model_reasoning_effort=high" in cmd
+    assert "--system-prompt-file" not in cmd and "--effort" not in cmd
+    assert stdin == full_prompt
+    assert Path(entry["draft_path"]).read_text(encoding="utf-8").strip() == "es_codex draft prose"
+
+
 def test_translate_fanout_cursor_warns_on_claude_worker_model(tmp_path: Path, capsys):
     """cursor + sonnet worker_model emits a warning but still runs."""
     from src.harness import flow, state as hstate
@@ -2035,7 +2072,10 @@ def test_config_set_persists_backend_and_footnotes_decision(tmp_path: Path):
     with pytest.raises(HarnessValidationError, match="invalid value"):
         flow.config_set(str(tmp_path), key="backend", value="gemini")
     with pytest.raises(HarnessValidationError, match="invalid value"):
-        flow.config_set(str(tmp_path), key="headless_cli", value="codex")
+        flow.config_set(str(tmp_path), key="headless_cli", value="gemini")
+    # Codex is a headless family like the other two.
+    flow.config_set(str(tmp_path), key="headless_cli", value="codex")
+    assert state.resolved_headless_cli(state.load_config(tmp_path)) == "codex"
 
 
 def test_config_set_coerces_the_tristate_prefix_keys(tmp_path: Path):

@@ -711,3 +711,91 @@ def test_sibling_logs_are_not_guessed_outside_the_projects_root(tmp_path):
     log = tmp_path / ".harness" / "judges" / "usage.jsonl"
     assert sibling_usage_logs(tmp_path, log) == []
     assert sibling_usage_logs(tmp_path, None) == []
+
+
+# --- Codex: a third family, reached by a flag, a pin or the fallback ----------
+
+@pytest.fixture
+def codex_model(monkeypatch):
+    """What `~/.codex/config.toml` names, without reading the operator's own."""
+    import src.harness.profile as profile
+
+    monkeypatch.setattr(profile, "default_worker_model",
+                        lambda cli: "gpt-6-sol" if cli == "codex" else "sonnet")
+
+
+def test_codex_resolves_like_claude_with_its_own_model_and_baseline(book, installed, codex_model):
+    installed("claude", "codex")
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", cli="codex", env=_CLAUDE_HOST)
+    assert (prof.cli, prof.cli_source) == ("codex", "cli")
+    assert (prof.worker_model, prof.worker_model_source) == ("gpt-6-sol", "codex-config")
+    # The level goes on argv as a config override, so the table default applies.
+    assert (prof.effort, prof.effort_source, prof.effort_channel) == (
+        "medium", "default:judges", EFFORT_ARGV)
+    assert prof.baseline_tokens == 9800
+    assert "Codex probe" in prof.baseline_source
+
+
+def test_a_book_pinned_to_codex_stays_on_it_whoever_opens_it(book, installed, codex_model):
+    installed("claude", "cursor-agent", "codex")
+    cfg = _write_cfg(book, headless_cli="codex")
+
+    for env in (_CLAUDE_HOST, _CURSOR_HOST, {}):
+        prof = resolve_profile(book, command="translate", cfg=cfg, env=env)
+        assert (prof.cli, prof.cli_source) == ("codex", "config")
+        assert (prof.effort, prof.effort_channel) == ("high", EFFORT_ARGV)
+
+
+def test_no_host_implies_codex():
+    for env in (_CLAUDE_HOST, _CURSOR_HOST, {}):
+        assert resolve_cli({"headless_cli": "auto"}, env=env)[0] != "codex"
+
+
+def test_codex_effort_override_and_the_explicit_none(book, installed, codex_model):
+    installed("codex")
+    _write_cfg(book)
+
+    high = resolve_profile(book, command="judges", cli="codex", effort="high", env={})
+    assert (high.effort, high.effort_source, high.effort_channel) == ("high", "cli", EFFORT_ARGV)
+    # "default" emits no override, which is still a decision argv carries out.
+    none = resolve_profile(book, command="judges", cli="codex", effort="default", env={})
+    assert (none.effort, none.effort_channel) == (None, EFFORT_ARGV)
+    # A pinned model is run as typed: Codex ids carry no effort of their own.
+    pinned = resolve_profile(book, command="judges", cli="codex",
+                             worker_model="gpt-5.6-terra", env={})
+    assert (pinned.worker_model, pinned.effort) == ("gpt-5.6-terra", "medium")
+
+
+def test_a_guess_falls_back_to_codex_when_it_is_the_only_cli_here(book, installed, codex_model):
+    installed("codex")
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", env={})
+    assert (prof.cli, prof.cli_source) == ("codex", "fallback:claude-missing")
+    assert any("falling back to codex" in w for w in prof.warnings)
+
+
+def test_a_guess_prefers_cursor_over_codex_when_both_are_here(book, installed):
+    installed("cursor-agent", "codex")
+    _write_cfg(book)
+
+    assert resolve_profile(book, command="judges", env={}).cli == "cursor"
+
+
+def test_with_no_cli_installed_the_warning_names_all_three(book, installed):
+    installed()
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", env={})
+    assert prof.cli == "claude"
+    assert any("'cursor-agent' or 'codex'" in w for w in prof.warnings)
+
+
+def test_a_claude_alias_typed_for_codex_is_warned_about(book, installed):
+    installed("codex")
+    _write_cfg(book)
+
+    prof = resolve_profile(book, command="judges", cli="codex", worker_model="sonnet", env={})
+    assert any("headless_cli=codex" in w for w in prof.warnings)

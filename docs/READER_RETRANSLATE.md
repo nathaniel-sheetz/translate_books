@@ -178,20 +178,31 @@ provider's `type` in `llm_config.json`
 | Mechanism | Provider `type` | How it is reached | Cost label |
 |---|---|---|---|
 | API | `anthropic`, `openai-compatible` | `call_llm()` | `$`, from the model's pricing and the `len // 4` estimator |
-| Headless | `headless` | one `claude -p` or `cursor-agent -p` process, through `run_headless_wave` | `subscription`; tokens are the CLI's own count |
+| Headless | `headless` | one `claude -p`, `cursor-agent -p` or `codex exec` process, through `run_headless_wave` | `subscription`; tokens are the CLI's own count |
 | Local | `local` | `llama-server` on the LAN | `local`; tokens are the server's own count |
 
 **Headless.** The call goes through the same launcher as every wave, so
 it keeps the credential scrub and the fail-closed login preflight; a
 logged-out CLI comes back as a 502 carrying the CLI's own message. A
-Claude model runs at the `effort` its catalog entry names; a Cursor
-model carries its effort in the id (`grok-4.7-medium`). The job is
+Claude or Codex model runs at the `effort` its catalog entry names; a
+Cursor model carries its effort in the id (`grok-4.7-medium`). A Codex
+job runs read-only on a ChatGPT login with its tools switched off. The job is
 killed after 180 seconds. Each call appends a row to
 `projects/<id>/.harness/retranslate/usage.jsonl`. Two things to expect:
 the preflight probes run before every call (a few seconds), and the
 token count includes the CLI's fixed prefix. On a prompt of about 700
 tokens, Sonnet 5.5 billed about 7,500 and returned in 7 seconds; Grok
-4.7 billed about 16,000 and took 34 (2026-10-09, one call each).
+4.7 billed about 16,000 and took 34 (2026-10-09, one call each). Both
+have since come down (see
+[`LLM_PROVIDERS.md`](LLM_PROVIDERS.md#wave-telemetry-every-profile)).
+GPT-5.6 Terra on a 668-token prompt billed 10,490 through Codex and
+returned in 5 seconds, and billed 9,327 through Cursor and took 9
+(2026-10-11, one call each).
+
+The shipped catalog offers GPT-5.6 Terra by both routes, as
+`gpt-5.6-terra` under `codex-headless` and `gpt-5.6-terra-medium` under
+`cursor-headless`. They are different subscriptions and different
+calls, so the picker names each by its route.
 
 **Local.** Only a model the server already has loaded can be used.
 The server is asked what is in memory before every prompt; a model that
@@ -475,7 +486,7 @@ reconstructing the chunk state. Mirrors `removals.jsonl` and
 | Path | Purpose |
 |---|---|
 | `src/retranslator.py` — `retranslate_sentence()` | Core primitive: prompt build, call via `llm_mechanisms.complete()`, fence strip, retry |
-| `src/llm_mechanisms.py` — `complete()`, `list_models()` | One call for API, headless and local; the picker rows and their availability |
+| `src/llm_mechanisms.py` — `complete()`, `list_models()` | One call for API, headless (Claude, Cursor, Codex) and local; the picker rows and their availability |
 | `src/local_llm.py` | The local server client: what is loaded, and a completion on it |
 | `projects/<id>/.harness/retranslate/usage.jsonl` | One row per headless retranslate call |
 | `prompts/retranslate_sentence.txt` | Compact prompt template |

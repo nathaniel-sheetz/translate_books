@@ -68,7 +68,7 @@ python scripts/footnote_pass.py scan-prepare --project fabre2 --chapters 1-20 \
 
 # 3a. Headless wave (default), or 3b spawn footnote-scan-worker subagents.
 python scripts/footnote_pass.py scan-fanout --project fabre2 \
-    [--cli claude|cursor] [--cli-bin <path>] [--concurrency 5] \
+    [--cli claude|cursor|codex] [--cli-bin <path>] [--concurrency 5] \
     [--target-ids chapter_04,chapter_05] [--effort medium] [--prompt-cache auto]
 
 # 4. Parse drafts, validate every candidate, write candidates.json + the report.
@@ -278,7 +278,9 @@ python scripts/footnote_pass.py scan-fanout --project fabre2
 On 529, re-run with a lower `--concurrency`. Cursor needs a Cursor model id
 (`grok-4.6`, `auto`, or any id copied verbatim from `cursor-agent models`, such as
 the flat `grok-4.7-medium`); `--worker-model sonnet` with `--cli cursor` returns a
-warning.
+warning. Codex likewise needs a Codex model id (the ones in
+`~/.codex/models_cache.json`): a manifest prepared under another family carries a
+model Codex refuses before anything spawns.
 
 On **Cursor + Windows**, a job failing with
 `EPERM: operation not permitted, rename '…\.cursor\cli-config.json…'` is concurrent

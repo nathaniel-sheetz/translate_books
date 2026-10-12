@@ -12,7 +12,7 @@ investigation for ``flag`` ("Other").
 Subcommands, each printing exactly one JSON object with a ``_schema`` block:
 
     prepare   render one prompt per annotation + a manifest    (no spend)
-    fanout    run a headless claude/cursor wave over them      (no API spend)
+    fanout    run a headless claude/cursor/codex wave over them (no API spend)
     commit    parse drafts, write results.json + the report    (no spend)
     run       the API backend, behind a dollar cost gate       (metered)
     apply     write reviewed notes back into annotations.jsonl (the only writer)
@@ -60,6 +60,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 from src.annotations import review  # noqa: E402
 from src.annotations.store import ANNOTATION_TYPES  # noqa: E402
+from src.harness import state as hstate  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -265,11 +266,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not clear existing drafts (use when recovering with work in flight)",
     )
 
-    p_fanout = sub.add_parser("fanout", help="run a headless claude/cursor wave (no API spend)")
+    p_fanout = sub.add_parser("fanout", help="run a headless claude/cursor/codex wave (no API spend)")
     p_fanout.add_argument("--project", required=True, help="project id or path")
     p_fanout.add_argument("--target-ids", help="comma-separated keys to re-run (default: all undrafted)")
     p_fanout.add_argument("--concurrency", type=int, default=None, help="max parallel CLI processes")
-    p_fanout.add_argument("--cli", choices=("claude", "cursor"), default=None,
+    p_fanout.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None,
                           help="headless CLI (default: .harness/config.json headless_cli, else claude)")
     p_fanout.add_argument("--cli-bin", default=None, help="path to the CLI binary if not on PATH")
     p_fanout.add_argument(

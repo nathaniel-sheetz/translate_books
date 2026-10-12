@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     # The same four ``run_judges.py prepare`` carries. This is the consent
     # surface: whichever CLI is going to run the wave has to be known here, or
     # the tokens quoted are for a wave that never happens.
-    p_prepare.add_argument("--cli", default=None, choices=["claude", "cursor"])
+    p_prepare.add_argument("--cli", default=None, choices=list(hstate.HEADLESS_CLIS))
     p_prepare.add_argument("--worker-model", default=None, help="Pin the worker model")
     p_prepare.add_argument("--effort", default=None, help="Per-run effort override")
     p_prepare.add_argument(
@@ -312,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_fanout = sub.add_parser("fanout", help="draft backend: headless wave over the manifest")
     common(p_fanout, scope=False)
-    p_fanout.add_argument("--cli", default=None, choices=["claude", "cursor"])
+    p_fanout.add_argument("--cli", default=None, choices=list(hstate.HEADLESS_CLIS))
     p_fanout.add_argument("--cli-bin", default=None, help="Path to the CLI binary")
     p_fanout.add_argument("--worker-model", default=None, help="Pin the worker model")
     p_fanout.add_argument(

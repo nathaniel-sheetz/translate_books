@@ -12,14 +12,15 @@ Both fan-outs need the same Windows/cwd/absolutize/wave fixes:
 - Refuse to start until the CLI confirms a subscription login
   (``subscription_auth_error``).
 
-A third family, ``codex``, is an **image** family only (:func:`run_image_job`,
-driven by ``src/image_pass``). It is deliberately absent from
-``_CLI_DEFAULT_BINS``: it shares the scrub, the preflight and the bounded spawn,
-but it is not a translate worker and ``headless_cli`` must never resolve to it.
+CLI families are selected with ``cli`` (``claude`` | ``cursor`` | ``codex``). The
+Claude profile preserves today's ``claude -p`` argv. The Cursor profile drives
+``cursor-agent`` and the Codex profile ``codex exec``, each under a subscription
+login (no metered API key).
 
-CLI families are selected with ``cli`` (``claude`` | ``cursor``). The Claude profile
-preserves today's ``claude -p`` argv. The Cursor profile drives ``cursor-agent``
-under a subscription login (no metered API key).
+Codex is also the **image** family (:func:`run_image_job`, driven by
+``src/image_pass``). That is a separate entry point with its own argv: one job
+produces a file rather than prose. It shares the scrub, the preflight and the
+bounded spawn with the wave.
 
 Headless is the subscription backend; ``--backend api`` is the metered one. That
 split used to be a convention and it leaked: the parent process legitimately
@@ -50,12 +51,14 @@ import errno
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -73,6 +76,7 @@ from src.harness.usage import (
     job_record,
     median_wall_s,
     rollup,
+    usage_from_codex_events,
     usage_from_envelope,
 )
 
@@ -83,6 +87,7 @@ Runner = Callable[..., tuple[int, str, str]]
 _CLI_DEFAULT_BINS = {
     "claude": "claude",
     "cursor": "cursor-agent",
+    "codex": "codex",
 }
 _SUPPORTED_CLIS = frozenset(_CLI_DEFAULT_BINS)
 
@@ -91,6 +96,7 @@ _SUPPORTED_CLIS = frozenset(_CLI_DEFAULT_BINS)
 _CLI_JOB_TIMEOUT_S = {
     "claude": 30 * 60,
     "cursor": 15 * 60,
+    "codex": 15 * 60,
 }
 
 # After a timed-out worker's tree is killed, how long to wait for its pipes to
@@ -113,7 +119,7 @@ _CLAUDE_WORKER_ALIASES = frozenset({"sonnet", "opus", "haiku", "fable"})
 # default -- and fan-out always passes --model explicitly, so no ANTHROPIC_* var
 # is load-bearing here.
 #
-# ``OPENAI_`` gets the same treatment for the Codex image family. Codex 0.157.0
+# ``OPENAI_`` gets the same treatment for the Codex family. Codex 0.157.0
 # reads OPENAI_API_KEY (and its bundled imagegen skill's CLI fallback bills it
 # directly), and its binary also names OPENAI_BASE_URL, OPENAI_ORGANIZATION and
 # the workload-identity pair OPENAI_FEDERATION_RULE_ID /
@@ -136,7 +142,7 @@ _SCRUB_NAMES: frozenset[str] = frozenset({
     "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
     # Cursor profile.
     "CURSOR_API_KEY",
-    # Codex image family. Both names sit beside OPENAI_API_KEY in the 0.157.0
+    # Codex profile. Both names sit beside OPENAI_API_KEY in the 0.157.0
     # binary's env-auth list; either one makes `codex exec` skip the ChatGPT
     # session. CODEX_HOME is NOT here: that is where the subscription login lives.
     "CODEX_API_KEY",
@@ -298,29 +304,29 @@ def subscription_env(
     """
     del cli  # reserved: per-family keeps, not per-family scrubs
     source = os.environ if base is None else base
-    out: dict[str, str] = {}
-    for key, value in source.items():
-        upper = key.upper()
-        if upper in _SCRUB_KEEP:
-            out[key] = value
-            continue
-        if upper in _SCRUB_NAMES:
-            continue
-        if any(upper.startswith(prefix) for prefix in _SCRUB_PREFIXES):
-            continue
-        # Emit the original spelling: env keys are case-sensitive on POSIX.
-        out[key] = value
-    return out
+    # Emit the original spelling: env keys are case-sensitive on POSIX.
+    return {key: value for key, value in source.items() if not _scrubbed(key)}
+
+
+def _scrubbed(name: str) -> bool:
+    """Whether :func:`subscription_env` drops an env var of this name."""
+    upper = name.upper()
+    if upper in _SCRUB_KEEP:
+        return False
+    return upper in _SCRUB_NAMES or any(
+        upper.startswith(prefix) for prefix in _SCRUB_PREFIXES
+    )
 
 
 def warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
-    """Return a warning when cursor is paired with a Claude-looking worker_model.
+    """Return a warning when cursor or codex is paired with a Claude-looking worker_model.
 
     Now a check on an *explicit* choice rather than on our own default: an
     un-pinned Cursor wave resolves through :func:`default_worker_model`, which
     never emits a Claude alias.
     """
-    if (cli or "").strip().lower() != "cursor":
+    family = (cli or "").strip().lower()
+    if family not in ("cursor", "codex"):
         return None
     # Strip any ``[effort=…,fast=…]`` suffix before the alias check — same base
     # as ``_cursor_model_base``, so ``sonnet[effort=low]`` still warns.
@@ -328,6 +334,12 @@ def warn_cursor_claude_model(cli: str, worker_model: str) -> str | None:
     if not alias:
         return None
     if alias in _CLAUDE_WORKER_ALIASES or alias.startswith("claude-"):
+        if family == "codex":
+            return (
+                f"worker_model={worker_model!r} looks like a Claude alias/id while "
+                f"headless_cli=codex; set --worker-model to a Codex model "
+                f"(the ids are in ~/.codex/models_cache.json)"
+            )
         return (
             f"worker_model={worker_model!r} looks like a Claude alias/id while "
             f"headless_cli=cursor; set --worker-model to a Cursor model "
@@ -416,10 +428,122 @@ def default_worker_model(cli: str) -> str:
     Claude keeps ``sonnet``. Cursor inherits whatever the operator already
     selected in the Cursor CLI, so an un-pinned Cursor wave runs the model they
     are already using rather than a Claude alias that only produced a warning.
+    Codex inherits the ``model`` in its own ``config.toml`` the same way.
     """
-    if (cli or "").strip().lower() == "cursor":
+    family = (cli or "").strip().lower()
+    if family == "cursor":
         return cursor_default_model()
+    if family == "codex":
+        return codex_default_model()
     return "sonnet"
+
+
+# ---------------------------------------------------------------------------
+# Codex profile: where its settings live, and which models it will take
+# ---------------------------------------------------------------------------
+
+# "Whatever Codex itself would pick": the job is launched with no ``-m``. What
+# an un-pinned wave runs on when ``config.toml`` names no model.
+CODEX_DEFAULT_MODEL = "default"
+
+# A model id and an effort level both end up on a child argv, which on Windows
+# is re-parsed by cmd.exe when ``codex`` resolves to a .CMD shim. Same character
+# set as ``_MODEL_ID_RE`` in ``src/image_pass/jobs.py``.
+_PLAIN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
+
+
+def _is_plain_id(value: str | None) -> bool:
+    return bool(_PLAIN_ID_RE.fullmatch(value or ""))
+
+
+def codex_home(env: Mapping[str, str] | None = None) -> Path:
+    """Codex's own directory: the ChatGPT login, ``config.toml``, the model list.
+
+    ``CODEX_HOME`` survives the scrub (see ``_SCRUB_NAMES``), so a worker reads
+    the same directory this does.
+    """
+    source = os.environ if env is None else env
+    return Path(source.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def codex_default_model(config_path: Path | str | None = None) -> str:
+    """The model Codex is configured to use: top-level ``model`` in ``config.toml``.
+
+    That is the model the operator's own Codex sessions already run on, so an
+    un-pinned wave runs it too. Never raises: a missing, unreadable or
+    unrecognised config returns :data:`CODEX_DEFAULT_MODEL`, and the job then
+    carries no ``-m`` at all.
+    """
+    path = Path(config_path) if config_path is not None else codex_home() / "config.toml"
+    try:
+        doc = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return CODEX_DEFAULT_MODEL
+    model = doc.get("model")
+    if isinstance(model, str) and _is_plain_id(model.strip()):
+        return model.strip()
+    return CODEX_DEFAULT_MODEL
+
+
+def codex_known_models(
+    cache_path: Path | str | None = None, *, listed_only: bool = False
+) -> list[str]:
+    """Model ids Codex last fetched for this login, or ``[]`` if unreadable.
+
+    Read from ``models_cache.json``, which Codex rewrites when it runs.
+    ``listed_only`` drops the ids Codex hides from its own picker.
+    """
+    path = Path(cache_path) if cache_path is not None else codex_home() / "models_cache.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    entries = doc.get("models") if isinstance(doc, dict) else doc
+    ids: list[str] = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        if listed_only and entry.get("visibility") != "list":
+            continue
+        ids.append(slug.strip())
+    return ids
+
+
+def codex_argv_error(model: str | None, effort: str | None = None) -> str | None:
+    """Why ``model`` or ``effort`` cannot go on a Codex argv, or ``None``."""
+    name = (model or "").strip()
+    if name and not _is_plain_id(name):
+        return f"codex model {model!r} is not a plain id (letters, digits, . _ : / -)"
+    if effort and not _is_plain_id(str(effort)):
+        return f"codex effort {effort!r} is not a plain word"
+    return None
+
+
+def codex_model_error(
+    model: str | None, *, cache_path: Path | str | None = None
+) -> str | None:
+    """Why Codex would reject ``model`` for this login, or ``None``.
+
+    Token-free: it reads the model list Codex keeps on disk. A model the plan
+    does not allow otherwise costs one dead process per job. Fails open when the
+    list cannot be read, and :data:`CODEX_DEFAULT_MODEL` always passes.
+    """
+    name = (model or "").strip()
+    if not name or name == CODEX_DEFAULT_MODEL:
+        return None
+    known = codex_known_models(cache_path)
+    if not known or name in known:
+        return None
+    close = difflib.get_close_matches(name, known, n=4, cutoff=0.5)
+    lead = "Did you mean" if close else "Listed"
+    return (
+        f"codex does not list model {name!r} for this login. {lead}: "
+        f"{', '.join(close or known[:8])}. The list is models_cache.json in "
+        f"the Codex home, which Codex rewrites when it runs."
+    )
 
 
 def _cursor_model_base(model: str) -> str:
@@ -1385,8 +1509,10 @@ def default_claude_runner(
     with _tracked(proc):
         rc, stdout, stderr, timed_out = _communicate_bounded(proc, input_text, timeout)
     if timed_out:
+        # The timeout leads: stderr on its own is often a line the CLI prints on
+        # every run, which then stood in for the reason the job died.
         detail = f"timeout after {timeout:g}s"
-        return 124, stdout, (stderr.strip() or detail)
+        return 124, stdout, f"{detail}\n{stderr.strip()}".strip()
     return rc, stdout, stderr
 
 
@@ -1432,6 +1558,8 @@ def _bin_missing_error(cli: str, cli_bin: str) -> str:
             f"cursor-agent not found: {cli_bin!r} — install the Cursor CLI and "
             "run `cursor-agent login`"
         )
+    if cli == "codex":
+        return _image_bin_missing_error(cli_bin)
     return f"claude not found: {cli_bin!r} (not on PATH / PATHEXT)"
 
 
@@ -1458,7 +1586,7 @@ AuthProber = Callable[..., tuple[int, str, str]]
 
 # Argv that makes a CLI report its credential state. ``None`` is still honored --
 # a family registered that way gets the env scrub but no preflight -- but no
-# family uses it any more: both entries below are verified commands.
+# family uses it any more: every entry below is a verified command.
 _AUTH_PROBE_ARGV: dict[str, tuple[str, ...] | None] = {
     "claude": ("auth", "status", "--json"),
     # Verified 2026-08-10 on cursor-agent 2026.08.04-aaa8809:
@@ -1572,7 +1700,7 @@ def _codex_auth_error(cli_bin: str, rc: int, stdout: str, stderr: str) -> str | 
     if "api key" in text:
         return (
             f"{cli_bin} is logged in with an API key, which bills metered API "
-            "credit. Image jobs are subscription-only — run `codex logout`, then "
+            "credit. Codex jobs are subscription-only — run `codex logout`, then "
             "`codex login` and sign in with ChatGPT."
         )
     # Line-anchored: "logged in using chatgpt" must be the whole verdict, so a
@@ -1586,8 +1714,47 @@ def _codex_auth_error(cli_bin: str, rc: int, stdout: str, stderr: str) -> str | 
             break
     return (
         f"could not confirm a ChatGPT subscription login for {cli_bin} "
-        f"(`codex login status` reported {kind}). Image jobs are "
+        f"(`codex login status` reported {kind}). Codex jobs are "
         "subscription-only — run `codex login` and sign in with ChatGPT."
+    )
+
+
+def _codex_dotenv_error(env: Mapping[str, str]) -> str | None:
+    """Why ``.env`` in the Codex home could put a metered credential back, or ``None``.
+
+    Codex is understood to read that file into its own environment at startup,
+    which is after the scrub has run, so a key there would reach the job the
+    scrub was meant to keep it from. That is not confirmed on 0.157.0; the check
+    costs nothing when the file is absent, and unverifiable means unsafe. Any
+    name the scrub drops refuses the wave. Names only, never a value.
+    """
+    path = codex_home(env) / ".env"
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        return (
+            f"could not read {path} to check it for metered credentials "
+            f"({exc.strerror or type(exc).__name__})"
+        )
+    names: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name.lower().startswith("export "):
+            name = name[len("export "):]
+        name = name.strip().strip("'\"")
+        if name and _scrubbed(name) and name not in names:
+            names.append(name)
+    if not names:
+        return None
+    return (
+        f"{path} sets {', '.join(names)}, which Codex would load after the env "
+        "scrub and bill in place of the ChatGPT login. Codex jobs are "
+        "subscription-only — remove it from that file."
     )
 
 
@@ -1615,13 +1782,14 @@ def subscription_auth_error(
       discover a logged-out CLI on their own.
     - ``codex login status`` is a **routing** probe again, in prose: it names the
       kind of login on file, and only ``Logged in using ChatGPT`` passes (see
-      :func:`_codex_auth_error`).
+      :func:`_codex_auth_error`). Before it runs, ``.env`` in the Codex home is
+      read for any name the scrub drops (see :func:`_codex_dotenv_error`).
 
     Must run with the same scrubbed ``env`` *and* the same ``cwd`` as the workers.
     The CLI reads project-local settings, so probing from the repo root can report
     a different auth path than a worker in the neutral cwd actually gets.
 
-    Fails closed for both. An unusable probe (missing subcommand, non-zero exit,
+    Fails closed for all three. An unusable probe (missing subcommand, non-zero exit,
     output shape we do not recognise) blocks the wave -- unverifiable means
     unsafe, and ``--backend api`` is the supported way to spend money.
     """
@@ -1633,6 +1801,11 @@ def subscription_auth_error(
     argv_tail = _AUTH_PROBE_ARGV[cli]
     if argv_tail is None:
         return None  # family explicitly has no probe; the scrub is its only guarantee
+
+    if cli == "codex":
+        dotenv_error = _codex_dotenv_error(env)
+        if dotenv_error:
+            return dotenv_error
 
     argv = [cli_bin, *argv_tail]
     label = " ".join(argv)
@@ -1730,8 +1903,8 @@ def preflight_error(
     """Why a wave on ``cli`` would refuse to start, or ``None`` if it would run.
 
     The same three gates :func:`run_headless_wave` applies before its first job --
-    binary resolution, the subscription probe, and (on Cursor) the ``--model``
-    check -- hoisted so a caller can fail closed *before* it prepares anything.
+    binary resolution, the subscription probe, and (on Cursor and Codex) the
+    model check -- hoisted so a caller can fail closed *before* it prepares anything.
     ``fanout(estimate=True)`` returns before the launcher is reached, so without
     this an estimate on a logged-out or uninstalled CLI reads as a green light
     and the failure only lands after the operator has consented to a run.
@@ -1786,6 +1959,8 @@ def preflight_error(
     # "the job died after prepare" into "the estimate never went green".
     if cli_name == "cursor" and model:
         return cursor_model_error(resolved, model, env=dict(probe_env))
+    if cli_name == "codex" and model:
+        return codex_argv_error(model) or codex_model_error(model)
     return None
 
 
@@ -1876,14 +2051,30 @@ def _build_image_cmd(
     return cmd
 
 
-def _image_failure_detail(stdout: str, stderr: str) -> str:
-    """The last error a ``codex exec --json`` stream reported, in one line.
+# Event types a ``codex exec --json`` stream is made of (codex-cli 0.157.0).
+_CODEX_EVENT_TYPES = frozenset({
+    "thread.started",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+    "item.started",
+    "item.updated",
+    "item.completed",
+    "error",
+})
 
-    Failures arrive as ``{"type":"error","message":…}`` /
-    ``{"type":"turn.failed","error":{"message":…}}`` events among many
-    "Reconnecting…" lines; the final one is the cause.
+
+def _codex_stream_unrecognised(stdout: str) -> bool:
+    """Whether stdout is an event stream none of whose types we know.
+
+    Two or more lines that are each a JSON object with a string ``type``. A
+    Codex release that renames its events would otherwise pass through
+    :func:`_extract_result` whole, and the stream would be written as the draft.
+    One such line is left alone: a verdict may carry a ``type`` of its own.
     """
-    last = ""
+    if _codex_events(stdout):
+        return False
+    typed = 0
     for line in (stdout or "").splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -1892,8 +2083,49 @@ def _image_failure_detail(stdout: str, stderr: str) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(event, dict):
+        if isinstance(event, dict) and isinstance(event.get("type"), str):
+            typed += 1
+    return typed >= 2
+
+
+def _codex_events(stdout: str) -> list[dict[str, Any]]:
+    """The events in a ``codex exec --json`` stream, in order.
+
+    Empty for stdout that is not such a stream. A line counts only when it is a
+    JSON object whose ``type`` is one of :data:`_CODEX_EVENT_TYPES`, so prose and
+    a judge verdict (itself JSON) are never mistaken for one.
+    """
+    events: list[dict[str, Any]] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
             continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") in _CODEX_EVENT_TYPES:
+            events.append(event)
+    return events
+
+
+def _image_failure_detail(stdout: str, stderr: str) -> str:
+    """The last error a ``codex exec --json`` stream reported, in one line.
+
+    Falls back to stderr, then to stdout as it came.
+    """
+    return (_codex_stream_error(stdout) or (stderr or "").strip() or (stdout or "").strip())[:500]
+
+
+def _codex_stream_error(stdout: str) -> str:
+    """The last error event in a ``codex exec --json`` stream, or ``""``.
+
+    Failures arrive as ``{"type":"error","message":…}`` /
+    ``{"type":"turn.failed","error":{"message":…}}`` events among many
+    "Reconnecting…" lines; the final one is the cause.
+    """
+    last = ""
+    for event in _codex_events(stdout):
         kind = event.get("type")
         if kind == "error":
             message = event.get("message")
@@ -1911,7 +2143,7 @@ def _image_failure_detail(stdout: str, stderr: str) -> str:
             message = None
         if isinstance(message, str) and message.strip():
             last = _unwrap_api_error(message.strip())
-    return (last or (stderr or "").strip() or (stdout or "").strip())[:500]
+    return last[:500]
 
 
 def _unwrap_api_error(message: str) -> str:
@@ -2031,7 +2263,15 @@ def worker_model_suggestions(cli: str, *, timeout: float = 10.0) -> list[str]:
     datalist, not a select) — Cursor models take the bracket form
     ``grok-4.5[effort=medium]``, which no fixed list can enumerate.
     """
-    if (cli or "").strip().lower() != "cursor":
+    family = (cli or "").strip().lower()
+    if family == "codex":
+        # The ids Codex shows in its own picker, plus the one it is set to.
+        listed = set(codex_known_models(listed_only=True))
+        configured = codex_default_model()
+        if configured != CODEX_DEFAULT_MODEL:
+            listed.add(configured)
+        return sorted(listed)
+    if family != "cursor":
         return sorted(_CLAUDE_WORKER_ALIASES)
     ids: set[str] = set()
     resolved = shutil.which(_CLI_DEFAULT_BINS["cursor"])
@@ -2065,6 +2305,59 @@ def _with_claude_trim(flags: Sequence[str]) -> list[str]:
     return out
 
 
+# Codex argv every wave carries, kept as a tuple for the reason
+# ``_CLAUDE_TRIM_FLAGS`` is: it goes into each usage row's ``flags``, and
+# ``scripts/prefix_probe.py`` swaps it per arm to measure a candidate.
+#
+# Each pair switches off one tool the model would otherwise be told about. A
+# wave job answers in prose and has no use for any of them, which is what
+# ``--tools ""`` says on Claude and ``--mode ask`` on Cursor. Measured
+# 2026-10-11 (codex-cli 0.157.0, GPT-5.6 Terra, an 87-token prompt, billed
+# input identical within each arm): 13,550 tokens of overhead a job with none
+# of these, 12,700 with the shell tool off, 10,606 with the first eight and
+# 9,844 with all twelve. Five more on top (``unified_exec``, ``code_mode_host``,
+# ``in_app_browser``, ``hooks``, ``worktrees``) measured no change, and
+# ``--ignore-user-config`` measured none on the operator's own config.
+#
+# A name the installed CLI has never heard of is refused ("Unknown feature
+# flag"), so a build that drops one of these fails every job with that message.
+_CODEX_TRIM_FLAGS: tuple[str, ...] = tuple(
+    part
+    for feature in (
+        "shell_tool",
+        "multi_agent",
+        "plugins",
+        "apps",
+        "browser_use",
+        "computer_use",
+        "image_generation",
+        "skill_search",
+        "goals",
+        "sleep_tool",
+        "tool_suggest",
+        "view_image",
+    )
+    for part in ("--disable", feature)
+)
+
+
+def _effort_from_flags(flags: Sequence[str]) -> str | None:
+    """The level of the last ``--effort`` pair in ``flags``, or ``None``.
+
+    Every fan-out composes its effort as Claude argv. Codex takes it as a
+    config override instead, so a caller that passed only the argv still gets
+    the level it resolved.
+    """
+    found: str | None = None
+    items = [str(flag) for flag in flags]
+    for index, flag in enumerate(items):
+        if flag == "--effort" and index + 1 < len(items):
+            found = items[index + 1]
+        elif flag.startswith("--effort="):
+            found = flag.split("=", 1)[1]
+    return found or None
+
+
 def _build_cmd(
     cli: str,
     cli_bin: str,
@@ -2072,6 +2365,7 @@ def _build_cmd(
     spf: Optional[str],
     *,
     extra_flags: Sequence[str] = (),
+    effort: str | None = None,
 ) -> list[str]:
     """Build argv for one headless job (prompt still goes on stdin).
 
@@ -2107,6 +2401,27 @@ def _build_cmd(
             "json",
         ]
 
+    if cli == "codex":
+        # ``exec`` with no positional reads the prompt from stdin. There is no
+        # system-prompt flag; callers fold any preamble into stdin.
+        # ``-c model_provider=openai``: ``codex login status`` reports the login
+        # on file, not where ``config.toml`` routes requests, so this pin is the
+        # non-env half of the subscription guarantee (see ``_build_image_cmd``).
+        # ``read-only`` + ``--ephemeral``: the job writes nothing and leaves no
+        # session in the operator's Codex history.
+        # ``--json``: the answer and the token usage both arrive as events
+        # (``_extract_result``). Effort is a config override, the only channel
+        # ``exec`` has; ``extra_flags`` is Claude argv and is not passed on.
+        level = effort or _effort_from_flags(extra_flags)
+        cmd = [cli_bin, "exec", "-c", "model_provider=openai"]
+        if level:
+            cmd += ["-c", f"model_reasoning_effort={level}"]
+        cmd += ["-s", "read-only", "--skip-git-repo-check", "--ephemeral", "--json"]
+        cmd.extend(_CODEX_TRIM_FLAGS)
+        if model and model != CODEX_DEFAULT_MODEL:
+            cmd += ["-m", model]
+        return cmd
+
     # claude profile. ``--output-format json`` costs nothing and is the only way
     # the parent can see what a job was billed: with ``text`` the CLI computes
     # the whole ``usage`` block and then throws it away. ``_extract_result``
@@ -2133,12 +2448,13 @@ def _fold_system_prompt(
 ) -> tuple[Optional[str], str]:
     """Return (spf_for_cmd, stdin_text).
 
-    Claude keeps the cache split (``spf`` flag + body on stdin). Cursor has no
-    ``--system-prompt-file``, so fold the preamble into stdin and drop the flag.
+    Claude keeps the cache split (``spf`` flag + body on stdin). Cursor and
+    Codex have no ``--system-prompt-file``, so fold the preamble into stdin and
+    drop the flag.
     """
     if not spf:
         return None, input_text
-    if cli != "cursor":
+    if cli == "claude":
         return spf, input_text
     preamble = Path(spf).read_text(encoding="utf-8")
     if preamble and not preamble.endswith("\n") and input_text:
@@ -2173,8 +2489,41 @@ def _extract_result(
     ignores ``--output-format json``, keep working exactly as before — the
     telemetry degrades, the wave does not. A judge verdict is itself JSON but has
     no ``type: "result"`` key, so it is never mistaken for an envelope.
+
+    Codex has no envelope: ``exec --json`` prints one event per line, the answer
+    is the last ``agent_message`` item and the usage rides on ``turn.completed``.
+    The same passthrough holds there, for stdout that carries no such event --
+    unless it is plainly an event stream of types this module does not know,
+    which raises rather than land in the draft as JSONL.
     """
     text = (stdout or "").strip()
+    if cli == "codex":
+        events = _codex_events(text)
+        if not events:
+            if _codex_stream_unrecognised(text):
+                raise ValueError(
+                    "unrecognised codex event stream (no known event type); "
+                    "the Codex CLI may have changed its --json output"
+                )
+            return text, None
+        usage = usage_from_codex_events(events)
+        if any(event.get("type") == "turn.failed" for event in events):
+            raise ValueError(_codex_stream_error(text) or "codex reported turn.failed")
+        answer: str | None = None
+        for event in events:
+            item = event.get("item")
+            if (
+                event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)
+            ):
+                answer = item["text"]
+        if answer is None:
+            raise ValueError(
+                _codex_stream_error(text) or "codex stream carried no agent_message"
+            )
+        return answer.strip(), usage
     if not text.startswith("{"):
         return text, None
     try:
@@ -2199,7 +2548,9 @@ def _extract_output(cli: str, stdout: str) -> str:
     return _extract_result(cli, stdout)[0]
 
 
-def _usage_from_stdout(stdout: str, *, model: str | None = None) -> dict[str, Any] | None:
+def _usage_from_stdout(
+    stdout: str, *, model: str | None = None, cli: str | None = None
+) -> dict[str, Any] | None:
     """The usage block from a job's stdout, or ``None``. Never raises.
 
     A job that failed still consumed tokens, and ``--output-format json`` reports
@@ -2208,6 +2559,8 @@ def _usage_from_stdout(stdout: str, *, model: str | None = None) -> dict[str, An
     all — the failure case is precisely when the operator wants the number.
     """
     text = (stdout or "").strip()
+    if cli == "codex":
+        return usage_from_codex_events(_codex_events(text))
     if not text.startswith("{"):
         return None
     try:
@@ -2224,8 +2577,13 @@ def _failure_detail(cli: str, stdout: str) -> str:
     too low") inside a result envelope. Reporting the envelope verbatim would
     bury the one line the operator needs in a blob of session metadata, so pull
     the message out; non-envelope stdout is returned unchanged.
+
+    A Codex stream is many lines of events. Only the last error among them is
+    the cause, and a stream with none says nothing worth relaying.
     """
     text = (stdout or "").strip()
+    if cli == "codex" and _codex_events(text):
+        return _codex_stream_error(text)
     if not text.startswith("{"):
         return text
     try:
@@ -2235,6 +2593,21 @@ def _failure_detail(cli: str, stdout: str) -> str:
     if isinstance(obj, dict) and obj.get("type") == "result":
         return _envelope_error(cli, obj)
     return text
+
+
+# What ``codex exec`` prints to stderr on every run that reads its prompt from
+# stdin (0.157.0). It is never why a job failed.
+_CODEX_STDIN_BANNER = "Reading prompt from stdin..."
+
+
+def _stderr_detail(cli: str, stderr: str) -> str:
+    """A failed job's stderr, without the line Codex prints on every run."""
+    text = (stderr or "").strip()
+    if cli != "codex":
+        return text
+    return "\n".join(
+        line for line in text.splitlines() if line.strip() != _CODEX_STDIN_BANNER
+    ).strip()
 
 
 def run_headless_wave(
@@ -2279,7 +2652,8 @@ def run_headless_wave(
     (tests pass their own). The auth preflight — and, on Cursor, the token-free
     ``--model`` validation — runs when ``prober`` is given, or when the real
     runner is in use; a stub ``runner`` with no ``prober`` skips both, so unit
-    tests never spawn anything.
+    tests never spawn anything. Codex's model check reads a file in the
+    operator's Codex home and runs with the real runner only.
 
     ``usage_log`` (a JSONL path) receives one row per job — the detail stays on
     disk rather than in the orchestrator's context. ``extra_flags`` is appended
@@ -2288,7 +2662,10 @@ def run_headless_wave(
     :func:`~src.harness.state.resolve_headless_argv`) and applies to the Claude
     profile; on Cursor it is **ignored**, and the level recorded in each row is
     read back from the model's own ``[effort=…]`` bracket instead — the only
-    effort channel that CLI has. ``warm_first`` runs job 1 alone so the rest read
+    effort channel that CLI has. On Codex it is the live channel: the level
+    (``effort``, else the ``--effort`` pair in ``extra_flags``) is sent as
+    ``-c model_reasoning_effort=…``, and ``extra_flags`` itself is not passed
+    on. ``warm_first`` runs job 1 alone so the rest read
     the shared prefix from cache instead of each re-creating it.
 
     ``cache`` (``auto`` | ``5m`` | ``1h`` | ``off``) selects the Claude
@@ -2302,7 +2679,9 @@ def run_headless_wave(
     entry. Cursor waves therefore record
     ``cache=None`` and keep ``warm_first``: with ``cache_read`` now logged beside
     ``warm``, two waves of ``usage.jsonl`` settle empirically whether serializing
-    job 1 raises cache reads. When the resolved Claude mode is ``off``, warm-up is
+    job 1 raises cache reads. Codex waves keep it on the same terms: its cache is
+    the server's too, each row logs ``cache_read``, and whether the warm-up pays
+    there is unmeasured. When the resolved Claude mode is ``off``, warm-up is
     forced off — nothing to warm.
 
     ``on_job_done`` is called from the collecting thread as each job lands, with
@@ -2347,6 +2726,15 @@ def run_headless_wave(
 
     if cli_name == "claude":
         extra_flags = _with_claude_trim(extra_flags)
+
+    # Codex takes its effort as a config override, not as Claude argv. Resolved
+    # once here so the argv and the usage row cannot disagree about the level.
+    codex_effort: str | None = None
+    if cli_name == "codex":
+        codex_effort = (effort or "").strip() or _effort_from_flags(extra_flags)
+        argv_error = codex_argv_error(model, codex_effort)
+        if argv_error:
+            return _error_result(f"model preflight failed: {argv_error}")
 
     cwd = neutral_claude_cwd()
     if job_timeout is None:
@@ -2444,10 +2832,18 @@ def run_headless_wave(
             )
             if model_error:
                 return _error_result(f"model preflight failed: {model_error}", cwd)
+        # Real spawns only: the list is a file in the operator's Codex home, and
+        # a stubbed wave must not depend on what that happens to hold.
+        if cli_name == "codex" and runner is None:
+            model_error = codex_model_error(model)
+            if model_error:
+                return _error_result(f"model preflight failed: {model_error}", cwd)
 
     wrote: list[str] = []
     failed: list[dict[str, str]] = []
-    cli_label = "cursor-agent -p" if cli_name == "cursor" else "claude -p"
+    cli_label = {"cursor": "cursor-agent -p", "codex": "codex exec"}.get(
+        cli_name, "claude -p"
+    )
 
     # Size every distinct preamble once, before anything spawns: the whole point
     # of the cache split is that one file serves the wave, so re-reading it per
@@ -2465,7 +2861,7 @@ def run_headless_wave(
             spf_tokens[spf_path] = 0
 
     # Resolve the prompt-cache mode and (for Claude) apply it to the child env.
-    # Cursor has no equivalent knob — record None so A/Bs stay honest.
+    # Cursor and Codex have no equivalent knob — record None so A/Bs stay honest.
     use_warm_first = warm_first
     if cli_name == "claude":
         if requested_cache == "auto":
@@ -2488,7 +2884,20 @@ def run_headless_wave(
     # argv; on Cursor that flag is dropped by ``_build_cmd`` and the live channel
     # is the model's own ``[effort=…]`` bracket — so read it back from the model
     # rather than logging ``null`` for a wave that plainly ran at some effort.
-    effort_label = effort if cli_name == "claude" else cursor_model_effort(model)
+    # On Codex it is the config override resolved above.
+    if cli_name == "claude":
+        effort_label = effort
+    elif cli_name == "codex":
+        effort_label = codex_effort
+    else:
+        effort_label = cursor_model_effort(model)
+    # The argv a row ran under, for the families whose argv this module varies.
+    if cli_name == "claude":
+        row_flags: Sequence[str] = extra_flags
+    elif cli_name == "codex":
+        row_flags = _CODEX_TRIM_FLAGS
+    else:
+        row_flags = ()
 
     def _run_one(job: dict[str, Any], warm: bool) -> tuple[str, bool, str, dict[str, Any]]:
         job_id = str(job["id"])
@@ -2507,7 +2916,7 @@ def run_headless_wave(
                 prompt_sent=prompt_sent,
                 wall_s=time.monotonic() - started,
                 rc=rc,
-                flags=extra_flags if cli_name == "claude" else (),
+                flags=row_flags,
                 warm=warm,
                 usage=usage,
                 error=detail,
@@ -2527,7 +2936,10 @@ def run_headless_wave(
             prompt_sent = approx_tokens(stdin_text) + (
                 spf_tokens.get(spf, 0) if spf_for_cmd else 0
             )
-            cmd = _build_cmd(cli_name, cli_bin, model, spf_for_cmd, extra_flags=extra_flags)
+            cmd = _build_cmd(
+                cli_name, cli_bin, model, spf_for_cmd,
+                extra_flags=extra_flags, effort=codex_effort,
+            )
             rc, stdout, stderr = run(cmd, input_text=stdin_text, cwd=cwd)
             if rc != 0:
                 # Report BOTH streams. These CLIs put the actual cause on stdout
@@ -2536,14 +2948,14 @@ def run_headless_wave(
                 # stderr reported the warning and hid the reason every job failed.
                 # Under --output-format json that cause arrives wrapped, so unwrap
                 # it rather than reporting a JSON blob as the failure reason.
-                parts = [_failure_detail(cli_name, stdout), (stderr or "").strip()]
+                parts = [_failure_detail(cli_name, stdout), _stderr_detail(cli_name, stderr)]
                 detail = " | ".join(p for p in parts if p) or f"exit {rc}"
-                usage = _usage_from_stdout(stdout, model=model)
+                usage = _usage_from_stdout(stdout, model=model, cli=cli_name)
                 return job_id, False, detail[:500], _record(detail)
             try:
                 prose, usage = _extract_result(cli_name, stdout, model=model)
             except ValueError as exc:
-                usage = _usage_from_stdout(stdout, model=model)
+                usage = _usage_from_stdout(stdout, model=model, cli=cli_name)
                 return job_id, False, str(exc)[:500], _record(str(exc))
             if not prose:
                 detail = f"empty stdout from {cli_label}"

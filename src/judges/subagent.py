@@ -219,7 +219,7 @@ _FANOUT_SCHEMA = {
     "worker_model": "model tier used for the headless CLI",
     "concurrency": "max parallel headless CLI processes per wave",
     "cwd": "neutral empty cwd used for the workers",
-    "cli": "headless CLI used (claude|cursor)",
+    "cli": "headless CLI used (claude|cursor|codex)",
     "warning": "optional non-fatal notice (e.g. Cursor Claude-model alias)",
     "counts": "{wrote, failed, skipped, todo}",
     "usage": "what the wave actually consumed: {jobs, input, output, cache_creation, "
@@ -651,7 +651,7 @@ def prepare(
             "targets) spawn one `judge-worker` subagent pinned to worker_model (Task "
             "tool, subagent_type=judge-worker, model=worker_model) that reads prompt_path "
             "and writes ONLY the JSON verdict to draft_path, in bounded batches of "
-            "batch_size — or run `fanout` for a headless CLI wave (claude|cursor). Then run "
+            "batch_size — or run `fanout` for a headless CLI wave (claude|cursor|codex). Then run "
             "`commit`. Nothing here spends or calls an API."
             if entries
             else "Nothing to judge — scope resolved to no targets."
@@ -701,8 +701,8 @@ def fanout(
     """Run one headless CLI wave for judge-prepare manifest entries.
 
     Opt-in alternative to Task-tool workers. For each selected entry that lacks a
-    non-empty draft, invoke the selected headless CLI (``claude`` or ``cursor``)
-    from a neutral cwd, writing stdout to ``draft_path``.
+    non-empty draft, invoke the selected headless CLI (``claude``, ``cursor`` or
+    ``codex``) from a neutral cwd, writing its answer to ``draft_path``.
 
     Claude profile: when ``preamble_path`` + ``body_path`` are present, the body
     is the user prompt and the preamble is passed via ``--system-prompt-file``.
@@ -872,8 +872,8 @@ def fanout(
             "_schema": _FANOUT_SCHEMA,
         }
 
-    # Cursor cannot use --system-prompt-file — skip the cache split entirely.
-    use_cache_split = cli_name != "cursor"
+    # Only Claude has --system-prompt-file — skip the cache split elsewhere.
+    use_cache_split = cli_name == "claude"
     skipped: list[str] = []
     ready: list[dict[str, Any]] = []
     pre_failed: list[dict[str, str]] = []
@@ -1013,7 +1013,7 @@ def fanout(
                 # With the trim the wave merges in itself, or the argv quoted
                 # here is not the one that runs.
                 "argv": _build_cmd(
-                    cli_name if cli_name in ("claude", "cursor") else "claude",
+                    cli_name if cli_name in hstate.HEADLESS_CLIS else "claude",
                     cli_bin or claude_bin or cli_name,
                     worker_model,
                     ready[0].get("system_prompt_file") if ready else None,
@@ -1022,6 +1022,8 @@ def fanout(
                         if cli_name == "claude"
                         else extra_flags
                     ),
+                    # Codex carries the level on argv as a config override.
+                    effort=resolved_effort,
                 ),
                 "effort": resolved_effort,
                 "effort_source": effort_source,

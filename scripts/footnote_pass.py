@@ -12,7 +12,7 @@ Subcommands, each printing exactly one JSON object with a ``_schema`` block:
 
     style          the style-inference corpus for the profile gate   (no spend)
     scan-prepare   render one scan prompt per chapter + a manifest   (no spend)
-    scan-fanout    run a headless claude/cursor wave over them       (no API spend)
+    scan-fanout    run a headless claude/cursor/codex wave over them (no API spend)
     scan-commit    parse drafts, validate, write candidates + report (no spend)
     add            append validated footnote records                 (the writer)
     verify         audit every active footnote for silent breakage   (no spend)
@@ -66,6 +66,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from src.footnote_pass import corpus as fp_corpus  # noqa: E402
 from src.footnote_pass import scan as fp_scan  # noqa: E402
 from src.footnote_pass import write as fp_write  # noqa: E402
+from src.harness import state as hstate  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -423,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_fanout = sub.add_parser(
-        "scan-fanout", help="run a headless claude/cursor wave (no API spend)"
+        "scan-fanout", help="run a headless claude/cursor/codex wave (no API spend)"
     )
     p_fanout.add_argument("--project", required=True, help="project id or path")
     p_fanout.add_argument(
@@ -434,7 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_fanout.add_argument(
         "--cli",
-        choices=("claude", "cursor"),
+        choices=hstate.HEADLESS_CLIS,
         default=None,
         help="headless CLI (default: .harness/config.json headless_cli, else claude)",
     )

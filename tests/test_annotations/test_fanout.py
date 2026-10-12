@@ -90,6 +90,38 @@ def test_cursor_gets_the_preamble_folded_into_stdin(project):
     assert calls[0]["input_text"].startswith(preamble)
 
 
+def test_codex_gets_the_preamble_folded_in_and_its_answer_unwrapped(project):
+    """Codex has no --system-prompt-file, and its answer arrives inside an event stream."""
+    write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
+    prep = review.prepare(project)
+    verdict = {
+        "key": prep["manifest"][0]["key"],
+        "state": "needs_help",
+        "state_reason": "r",
+        "recommendation": "rec",
+        "note_text": "texto",
+        "confidence": "high",
+        "evidence": [],
+    }
+    stream = "\n".join(json.dumps(event) for event in (
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "item.completed",
+         "item": {"id": "item_0", "type": "agent_message", "text": json.dumps(verdict)}},
+        {"type": "turn.completed", "usage": {"input_tokens": 12000, "output_tokens": 90}},
+    ))
+    calls = []
+    out = review.fanout(project, cli="codex", runner=_recording_runner(calls, stdout=stream))
+
+    assert out["counts"]["wrote"] == 1
+    cmd = calls[0]["cmd"]
+    assert cmd[:2] == ["codex", "exec"] and "--system-prompt-file" not in cmd
+    preamble = (project / ".harness/annotations/preamble.word_choice.txt").read_text(
+        encoding="utf-8"
+    )
+    assert calls[0]["input_text"].startswith(preamble)
+    assert review.commit(project)["counts"]["committed"] == 1
+
+
 def test_fanout_writes_the_draft_that_commit_then_reads(project):
     write_annotations(project, [_ann(es_idx=1, sub_id="u1")])
     prep = review.prepare(project)

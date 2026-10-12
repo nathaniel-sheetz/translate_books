@@ -362,12 +362,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Max parallel headless CLI processes per wave (default: spawn_plan.batch_size)",
     )
     tfp.add_argument(
-        "--cli", dest="cli", default=None, choices=["claude", "cursor"],
+        "--cli", dest="cli", default=None, choices=list(state.HEADLESS_CLIS),
         help="Headless CLI family (default: config headless_cli, else claude)",
     )
     tfp.add_argument(
         "--cli-bin", dest="cli_bin", default=None,
-        help="Headless CLI binary override (default: claude or cursor-agent)",
+        help="Headless CLI binary override (default: claude, cursor-agent or codex)",
     )
     tfp.add_argument(
         "--claude-bin", dest="claude_bin", default=None,
@@ -443,11 +443,11 @@ def _build_parser() -> argparse.ArgumentParser:
                           "backend from the run log). 'api' shells to the metered path; "
                           "'headless' runs a headless CLI wave; 'subagent' prints the "
                           "prepare/commit steps (Task workers are orchestrator-driven).")
-    fnt.add_argument("--cli", dest="cli", default=None, choices=["claude", "cursor"],
+    fnt.add_argument("--cli", dest="cli", default=None, choices=list(state.HEADLESS_CLIS),
                      help="Headless CLI family when backend=headless "
                           "(default: config headless_cli, else claude)")
     fnt.add_argument("--cli-bin", dest="cli_bin", default=None,
-                     help="Headless CLI binary override (default: claude or cursor-agent)")
+                     help="Headless CLI binary override (default: claude, cursor-agent or codex)")
     fnt.add_argument("--claude-bin", dest="claude_bin", default=None,
                      help="Back-compat alias for --cli-bin (Claude profile)")
     fnt.add_argument(
@@ -546,11 +546,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--value", required=True,
         help="Value to persist. Per key: backend=api|subagent|headless; "
              "footnotes_decision=keep|drop|none; "
-             "headless_cli=auto|claude|cursor (auto = follow the detected host); "
+             "headless_cli=auto|claude|cursor|codex (auto = follow the detected host); "
              "headless_effort_{judges,annotations,translate,footnotes}="
              "auto|default|low|medium|high|xhigh; "
              "headless_prompt_cache=auto|5m|1h|off; "
-             "triage_headless_cli=auto|claude|cursor (the family the triage "
+             "triage_headless_cli=auto|claude|cursor|codex (the family the triage "
              "pass runs on, independent of headless_cli; auto = follow "
              "headless_cli instead of the CLI its floor was calibrated on); "
              "triage_worker_model=<model id the triage pass pins, e.g. "

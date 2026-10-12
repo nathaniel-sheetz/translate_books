@@ -39,7 +39,12 @@ CATALOG = {
         },
         {
             "id": "cursor-headless", "type": "headless", "cli": "cursor",
-            "models": [{"id": "grok-4.7-medium", "name": "Grok 4.7 (headless)"}],
+            "models": [{"id": "grok-4.7-medium", "name": "Grok 4.7 (headless)"},
+                       {"id": "gpt-5.6-terra-medium", "name": "GPT-5.6 Terra (Cursor)"}],
+        },
+        {
+            "id": "codex-headless", "type": "headless", "cli": "codex",
+            "models": [{"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra (Codex)", "effort": "medium"}],
         },
         {
             "id": "local", "type": "local", "base_url": "http://box:8080/v1",
@@ -82,14 +87,15 @@ def test_mechanism_of_reads_the_provider_type():
     by_id = {p["id"]: mechanism_of(p) for p in CATALOG["providers"]}
     assert by_id == {
         "anthropic": "api", "deepinfra": "api",
-        "claude-headless": "headless", "cursor-headless": "headless", "local": "local",
+        "claude-headless": "headless", "cursor-headless": "headless",
+        "codex-headless": "headless", "local": "local",
     }
     # An entry with no type is what call_llm has always treated as an API.
     assert mechanism_of({"id": "x"}) == "api"
 
 
 class TestCheckRequestModel:
-    @pytest.mark.parametrize("provider", ["claude-headless", "cursor-headless", "local"])
+    @pytest.mark.parametrize("provider", ["claude-headless", "cursor-headless", "codex-headless", "local"])
     def test_a_model_a_headless_or_local_provider_does_not_list_is_refused(self, provider):
         with pytest.raises(ValueError, match=f"not listed under provider '{provider}'"):
             check_request_model(provider, "claude-opus-9")
@@ -97,6 +103,8 @@ class TestCheckRequestModel:
     @pytest.mark.parametrize("provider, model", [
         ("claude-headless", "claude-sonnet-5-5"),
         ("cursor-headless", "grok-4.7-medium"),
+        ("cursor-headless", "gpt-5.6-terra-medium"),
+        ("codex-headless", "gpt-5.6-terra"),
         ("local", "qwen3.8-27b"),
     ])
     def test_a_listed_model_passes(self, provider, model):
@@ -199,6 +207,25 @@ class TestCompleteHeadless:
         call = wave.calls[0]
         assert call["cli"] == "cursor" and call["model"] == "grok-4.7-medium"
         assert call["extra_flags"] == []
+
+    def test_a_codex_job_is_told_its_effort_and_sends_no_claude_argv(self, monkeypatch):
+        """The launcher turns ``effort`` into Codex's own config override."""
+        wave = _Wave()
+        monkeypatch.setattr(llm_mechanisms, "run_headless_wave", wave)
+        done = complete("p", provider="codex-headless", model="gpt-5.6-terra")
+        call = wave.calls[0]
+        assert call["cli"] == "codex" and call["model"] == "gpt-5.6-terra"
+        assert call["effort"] == "medium"
+        assert call["extra_flags"] == []
+        assert "system_prompt_file" not in call["jobs"][0]
+        assert (done.mechanism, done.provider, done.cost_usd) == ("headless", "codex-headless", 0)
+
+    def test_terra_through_cursor_is_the_catalog_id_and_nothing_else(self, monkeypatch):
+        wave = _Wave()
+        monkeypatch.setattr(llm_mechanisms, "run_headless_wave", wave)
+        complete("p", provider="cursor-headless", model="gpt-5.6-terra-medium")
+        call = wave.calls[0]
+        assert (call["cli"], call["model"], call["extra_flags"]) == ("cursor", "gpt-5.6-terra-medium", [])
 
     def test_an_effort_on_a_cursor_entry_is_not_turned_into_claude_argv(self, monkeypatch):
         cfg = json.loads(json.dumps(CATALOG))
@@ -327,7 +354,7 @@ class TestCompleteLocal:
 class TestListModels:
     @pytest.fixture
     def ready(self, monkeypatch):
-        """Keys set, both CLIs on PATH, Gemma loaded."""
+        """Keys set, every CLI on PATH, Gemma loaded."""
         for name in ("ANTHROPIC_API_KEY", "DEEPINFRA_API_KEY", "LOCAL_LLM_KEY"):
             monkeypatch.setenv(name, "k")
         monkeypatch.setattr(llm_mechanisms, "cli_binary_present", lambda cli: True)
@@ -342,6 +369,8 @@ class TestListModels:
             ("deepinfra", "big/model", "api"),
             ("claude-headless", "claude-sonnet-5-5", "headless"),
             ("cursor-headless", "grok-4.7-medium", "headless"),
+            ("cursor-headless", "gpt-5.6-terra-medium", "headless"),
+            ("codex-headless", "gpt-5.6-terra", "headless"),
             ("local", "gemma-4-31b", "local"),
             ("local", "qwen3.8-27b", "local"),
         ]
@@ -383,6 +412,13 @@ class TestListModels:
         rows = self._rows()
         assert rows[("claude-headless", "claude-sonnet-5-5")]["available"] is True
         assert rows[("cursor-headless", "grok-4.7-medium")]["unavailable_reason"] == "cli_missing"
+        assert rows[("codex-headless", "gpt-5.6-terra")]["unavailable_reason"] == "cli_missing"
+
+    def test_codex_is_offered_when_its_cli_is_here(self, ready, monkeypatch):
+        monkeypatch.setattr(llm_mechanisms, "cli_binary_present", lambda cli: cli == "codex")
+        rows = self._rows()
+        assert rows[("codex-headless", "gpt-5.6-terra")]["available"] is True
+        assert rows[("claude-headless", "claude-sonnet-5-5")]["unavailable_reason"] == "cli_missing"
 
     def test_an_api_provider_needs_its_key(self, ready, monkeypatch):
         monkeypatch.delenv("DEEPINFRA_API_KEY")

@@ -17,14 +17,25 @@ Arms:
     A4  Claude retranslate call, the short system prompt and --strict-mcp-config
     G0  Cursor retranslate call under the operator's home
     G1  Cursor retranslate call under a neutral home
+    X0  Codex wave job with no trimming flag
+    X1  Codex wave job with --ignore-user-config
+    X2  Codex wave job with the shell tool off
+    X3  Codex wave job with every tool feature off
+    X4  Codex wave job with X1 and X3 together
+    X5  Codex retranslate call with no trimming flag
+    X6  Codex retranslate call with X1 and X3 together
 
 Every arm sets its own switches, so an arm means the same thing whatever the
 launcher's defaults are on the day it is run.
+
+The Codex arms print tokens only. A Codex job is ``--ephemeral`` and leaves no
+conversation on disk to read the prefix's make-up from.
 
 Usage:
     python scripts/prefix_probe.py C0 C2
     python scripts/prefix_probe.py A0 --flag=--safe-mode
     python scripts/prefix_probe.py G0 G1 --project projects/pollyanna
+    python scripts/prefix_probe.py X0 --flag=--disable --flag=memories
     python scripts/prefix_probe.py --list
 """
 
@@ -91,6 +102,10 @@ class Arm:
     system_prompt: bool = True
 
 
+# The `--disable` pairs a wave runs with, so these arms measure the argv that ships.
+CODEX_TOOLS_OFF = headless._CODEX_TRIM_FLAGS
+CODEX_NO_CONFIG = ("--ignore-user-config",)
+
 ARMS: dict[str, Arm] = {
     "C0": Arm("cursor", "wave", "Cursor wave job, operator's home", env=OPERATOR_HOME),
     "C1": Arm("cursor", "wave", "Cursor wave job, operator's home, after a skills-folder change on disk",
@@ -105,6 +120,15 @@ ARMS: dict[str, Arm] = {
               flags=("--strict-mcp-config",)),
     "G0": Arm("cursor", "retranslate", "Cursor retranslate, operator's home", env=OPERATOR_HOME),
     "G1": Arm("cursor", "retranslate", "Cursor retranslate, neutral home", env=NEUTRAL_HOME),
+    "X0": Arm("codex", "wave", "Codex wave job, no trim"),
+    "X1": Arm("codex", "wave", "Codex wave job, --ignore-user-config", flags=CODEX_NO_CONFIG),
+    "X2": Arm("codex", "wave", "Codex wave job, shell tool off", flags=("--disable", "shell_tool")),
+    "X3": Arm("codex", "wave", "Codex wave job, every tool feature off", flags=CODEX_TOOLS_OFF),
+    "X4": Arm("codex", "wave", "Codex wave job, --ignore-user-config and every tool feature off",
+              flags=CODEX_NO_CONFIG + CODEX_TOOLS_OFF),
+    "X5": Arm("codex", "retranslate", "Codex retranslate, no trim"),
+    "X6": Arm("codex", "retranslate", "Codex retranslate, --ignore-user-config and every tool feature off",
+              flags=CODEX_NO_CONFIG + CODEX_TOOLS_OFF),
 }
 
 
@@ -267,14 +291,16 @@ def _run_wave(arm: Arm, arm_dir: Path, args: argparse.Namespace) -> str | None:
         for index in range(args.jobs)
     ]
     claude = arm.cli == "claude"
+    # Cursor carries its effort in the model id; the other two are told it.
+    told = arm.cli != "cursor"
     result = headless.run_headless_wave(
         jobs,
-        model=args.claude_model if claude else args.cursor_model,
+        model=getattr(args, f"{arm.cli}_model"),
         concurrency=args.concurrency,
         cli=arm.cli,
         usage_log=arm_dir / "usage.jsonl",
         extra_flags=["--effort", args.effort] if claude else [],
-        effort=args.effort if claude else None,
+        effort=args.effort if told else None,
         warm_first=False,
         cache="off",
     )
@@ -292,7 +318,6 @@ def _run_wave(arm: Arm, arm_dir: Path, args: argparse.Namespace) -> str | None:
 def _run_retranslate(arm: Arm, arm_dir: Path, args: argparse.Namespace) -> str | None:
     project = Path(args.project)
     glossary_path = project / "glossary.json"
-    claude = arm.cli == "claude"
     saved_prompt = llm_mechanisms.HEADLESS_SYSTEM_PROMPT
     if not arm.system_prompt:
         llm_mechanisms.HEADLESS_SYSTEM_PROMPT = ""
@@ -303,8 +328,8 @@ def _run_retranslate(arm: Arm, arm_dir: Path, args: argparse.Namespace) -> str |
                     SOURCE,
                     style_json_path=project / "style.json",
                     glossary=load_glossary(glossary_path) if glossary_path.exists() else None,
-                    provider=args.claude_provider if claude else args.cursor_provider,
-                    model=args.claude_model if claude else args.cursor_model,
+                    provider=getattr(args, f"{arm.cli}_provider"),
+                    model=getattr(args, f"{arm.cli}_model"),
                     context_text=CONTEXT,
                     project_dir=arm_dir,
                 )
@@ -330,8 +355,9 @@ def run_arm(name: str, args: argparse.Namespace, out_root: Path) -> dict[str, An
     # The arm's flags replace the launcher's own list for its length: a
     # retranslate call takes no argv, and a baseline arm must run without the
     # trim the launcher now adds by default.
-    saved_trim = headless._CLAUDE_TRIM_FLAGS
-    headless._CLAUDE_TRIM_FLAGS = tuple(flags)
+    trim_name = "_CODEX_TRIM_FLAGS" if arm.cli == "codex" else "_CLAUDE_TRIM_FLAGS"
+    saved_trim = getattr(headless, trim_name)
+    setattr(headless, trim_name, tuple(flags))
     started = time.time()
     if arm.shape == "wave":
         log = arm_dir / "usage.jsonl"
@@ -346,7 +372,7 @@ def run_arm(name: str, args: argparse.Namespace, out_root: Path) -> dict[str, An
         else:
             error = _run_retranslate(arm, arm_dir, args)
     finally:
-        headless._CLAUDE_TRIM_FLAGS = saved_trim
+        setattr(headless, trim_name, saved_trim)
         for key, value in saved.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -364,6 +390,7 @@ def run_arm(name: str, args: argparse.Namespace, out_root: Path) -> dict[str, An
             f"    billed {_billed(row):6d}  sent {int(row.get('prompt_sent') or 0):5d}  "
             f"overhead {overhead:6d}  output {int(row.get('output') or 0):5d}  "
             f"wall {row.get('wall_s')}s  flags {row.get('flags')}"
+            + (f"  cache_read {row.get('cache_read')}" if arm.cli == "codex" else "")
             + ("  neutral_home" if row.get("neutral_home") else "")
         )
     summary["jobs_ok"] = len(rows)
@@ -385,7 +412,7 @@ def run_arm(name: str, args: argparse.Namespace, out_root: Path) -> dict[str, An
         if env.get("HEADLESS_NEUTRAL_HOME") == "1":
             summary["home"] = _home_readout()
             print(f"    neutral homes: {summary['home']}")
-    else:
+    elif arm.cli == "claude":
         transcripts = _claude_readout(started)
         summary["transcripts"] = transcripts
         for item in transcripts:
@@ -405,17 +432,20 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=3, help="jobs per arm (default 3)")
     parser.add_argument("--concurrency", type=int, default=1,
                         help="workers for the wave arms (default 1; raise it to exercise the slots)")
-    parser.add_argument("--flag", action="append", default=[], help="extra Claude argv for every arm run")
+    parser.add_argument("--flag", action="append", default=[],
+                        help="extra Claude or Codex argv for every arm run")
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
                         help="extra environment for every arm run")
     parser.add_argument("--project", default="projects/pollyanna",
                         help="book whose style guide and glossary the retranslate arms use")
     parser.add_argument("--out", help="output folder (default comparisons/prefix-probe/<date>)")
-    parser.add_argument("--effort", default="medium", help="Claude effort for wave arms")
+    parser.add_argument("--effort", default="medium", help="Claude and Codex effort for wave arms")
     parser.add_argument("--claude-model", default="claude-sonnet-5-5")
     parser.add_argument("--cursor-model", default="grok-4.7-medium")
+    parser.add_argument("--codex-model", default="gpt-5.6-terra")
     parser.add_argument("--claude-provider", default="claude-headless")
     parser.add_argument("--cursor-provider", default="cursor-headless")
+    parser.add_argument("--codex-provider", default="codex-headless")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 

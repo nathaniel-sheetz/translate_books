@@ -1,4 +1,4 @@
-"""Unit tests for the shared headless CLI launcher (claude + cursor profiles)."""
+"""Unit tests for the shared headless CLI launcher (claude, cursor and codex profiles)."""
 
 from __future__ import annotations
 
@@ -860,14 +860,542 @@ def test_subscription_auth_error_codex_probe_argv():
     assert seen["argv"] == ["codex", "login", "status"]
 
 
-def test_codex_is_not_a_translate_worker():
-    """An image family only: `headless_cli` must never resolve to it."""
-    assert headless.cli_binary("codex") is None
-    result = headless.run_headless_wave(
-        [{"id": "c0", "input_text": "x", "output_path": "unused"}],
-        model="gpt", concurrency=1, cli="codex", runner=lambda *a, **k: (0, "", ""),
+# --- Codex wave profile ------------------------------------------------------
+
+def _codex_stream(text: str | None = "Hola.", *, usage: dict | None = None, extra=()) -> str:
+    """A `codex exec --json` stream as codex-cli 0.157.0 prints it."""
+    events: list[dict] = [
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "turn.started"},
+        *extra,
+    ]
+    if text is not None:
+        events.append({"type": "item.completed",
+                       "item": {"id": "item_0", "type": "agent_message", "text": text}})
+    if usage is not None:
+        events.append({"type": "turn.completed", "usage": usage})
+    return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+_CODEX_USAGE = {"input_tokens": 14262, "cached_input_tokens": 6912,
+                "cache_write_input_tokens": 0, "output_tokens": 67,
+                "reasoning_output_tokens": 60}
+
+
+def test_codex_is_a_wave_family():
+    assert headless.cli_binary("codex") == "codex"
+    assert headless._normalize_cli("Codex") == "codex"
+
+
+def test_build_cmd_codex_sends_effort_as_a_config_override(monkeypatch):
+    monkeypatch.setattr(headless, "_CODEX_TRIM_FLAGS", ())
+    cmd = headless._build_cmd("codex", "codex", "gpt-5.6-terra", None, effort="medium")
+    assert cmd == [
+        "codex", "exec",
+        "-c", "model_provider=openai",
+        "-c", "model_reasoning_effort=medium",
+        "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "--json",
+        "-m", "gpt-5.6-terra",
+    ]
+
+
+def test_build_cmd_codex_reads_the_level_out_of_claude_argv(monkeypatch):
+    """Every fan-out composes its effort as `--effort`; none of that argv is passed on."""
+    monkeypatch.setattr(headless, "_CODEX_TRIM_FLAGS", ())
+    cmd = headless._build_cmd(
+        "codex", "codex", "gpt-5.6-terra", "ignored.txt",
+        extra_flags=["--effort", "high", "--strict-mcp-config"],
     )
-    assert "unsupported headless cli" in result["error"]
+    assert cmd[cmd.index("model_provider=openai") + 2] == "model_reasoning_effort=high"
+    assert "--effort" not in cmd and "--strict-mcp-config" not in cmd
+    assert "--system-prompt-file" not in cmd and "ignored.txt" not in cmd
+
+
+def test_build_cmd_codex_without_an_effort_or_a_pinned_model(monkeypatch):
+    monkeypatch.setattr(headless, "_CODEX_TRIM_FLAGS", ())
+    cmd = headless._build_cmd("codex", "codex", headless.CODEX_DEFAULT_MODEL, None)
+    assert "-m" not in cmd
+    assert not [arg for arg in cmd if arg.startswith("model_reasoning_effort")]
+
+
+def test_build_cmd_codex_switches_the_tools_off():
+    cmd = headless._build_cmd("codex", "codex", "gpt-5.6-terra", None)
+    flags = headless._CODEX_TRIM_FLAGS
+    assert flags[:2] == ("--disable", "shell_tool")
+    assert flags[0::2] == ("--disable",) * (len(flags) // 2)
+    start = cmd.index("--json") + 1
+    assert tuple(cmd[start:start + len(flags)]) == flags
+    assert cmd[-2:] == ["-m", "gpt-5.6-terra"]
+
+
+def test_fold_system_prompt_codex_folds_into_stdin(tmp_path: Path):
+    spf = tmp_path / "preamble.txt"
+    spf.write_text("SYS", encoding="utf-8")
+    assert headless._fold_system_prompt("codex", "BODY", str(spf)) == (None, "SYS\nBODY")
+
+
+def test_extract_result_codex_takes_the_last_agent_message_and_the_usage():
+    stream = _codex_stream(
+        "Hola.\n", usage=_CODEX_USAGE,
+        extra=[{"type": "item.completed",
+                "item": {"id": "item_x", "type": "agent_message", "text": "thinking aloud"}}],
+    )
+    text, used = headless._extract_result("codex", stream)
+    assert text == "Hola."
+    # Cached tokens are inside input_tokens on Codex; taken out, the three still sum to it.
+    assert used == {"input": 7350, "output": 67, "cache_creation": 0,
+                    "cache_read": 6912, "reasoning_output": 60}
+    assert used["input"] + used["cache_creation"] + used["cache_read"] == 14262
+
+
+@pytest.mark.parametrize("stdout", [
+    "plain prose from a stub runner",
+    '{"findings": [], "verdict": "pass"}',
+    '{"type": "result", "result": "an envelope from another family"}',
+])
+def test_extract_result_codex_passes_through_what_is_not_a_stream(stdout):
+    assert headless._extract_result("codex", stdout) == (stdout, None)
+
+
+def test_extract_result_codex_turn_failed_is_an_error():
+    stream = _codex_stream(
+        "partial", extra=[
+            {"type": "error", "message": "Reconnecting... 1/5"},
+            {"type": "turn.failed", "error": {"message": "usage_limit_reached"}},
+        ],
+    )
+    with pytest.raises(ValueError, match="usage_limit_reached"):
+        headless._extract_result("codex", stream)
+
+
+def test_extract_result_codex_survives_a_reconnect_notice():
+    stream = _codex_stream(
+        "Hola.", usage=_CODEX_USAGE,
+        extra=[{"type": "error", "message": "Reconnecting... 1/5"}],
+    )
+    assert headless._extract_result("codex", stream)[0] == "Hola."
+
+
+def test_extract_result_codex_with_no_answer_is_an_error():
+    with pytest.raises(ValueError, match="no agent_message"):
+        headless._extract_result("codex", _codex_stream(None, usage=_CODEX_USAGE))
+
+
+def test_failure_detail_codex_is_the_last_stream_error():
+    stream = _codex_stream(None, extra=[
+        {"type": "error", "message": json.dumps({"error": {"message": "The 'gpt-5.4' model is not supported"}})},
+    ])
+    assert headless._failure_detail("codex", stream) == "The 'gpt-5.4' model is not supported"
+    assert headless._failure_detail("codex", "codex: command exploded") == "codex: command exploded"
+
+
+def test_usage_from_codex_events_reads_the_last_turn_and_never_raises():
+    assert usage.usage_from_codex_events([]) is None
+    assert usage.usage_from_codex_events([{"type": "turn.completed"}]) is None
+    assert usage.usage_from_codex_events(None) is None  # type: ignore[arg-type]
+    used = usage.usage_from_codex_events([
+        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        {"type": "turn.completed", "usage": {"input_tokens": 13647, "cached_input_tokens": 11008,
+                                             "output_tokens": 5, "reasoning_output_tokens": 0}},
+    ])
+    assert used == {"input": 2639, "output": 5, "cache_read": 11008, "reasoning_output": 0}
+
+
+def test_run_headless_wave_codex_folds_spf_writes_draft_and_logs_usage(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(headless, "_CODEX_TRIM_FLAGS", ("--disable", "shell_tool"))
+    spf = tmp_path / "preamble.txt"
+    spf.write_text("SYS\n", encoding="utf-8")
+    out = tmp_path / "draft.txt"
+    log = tmp_path / "usage.jsonl"
+    seen: list[tuple[list[str], str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append((list(cmd), input_text))
+        assert Path(cwd).name == "claude-headless-empty"
+        return 0, _codex_stream("Hola.", usage=_CODEX_USAGE), "Reading prompt from stdin..."
+
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "BODY", "output_path": str(out),
+          "system_prompt_file": str(spf)}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex", runner=fake_runner,
+        usage_log=log, extra_flags=["--effort", "medium"], effort="medium",
+    )
+    assert result["counts"]["wrote"] == 1 and result["cli"] == "codex"
+    assert out.read_text(encoding="utf-8") == "Hola.\n"
+    cmd, stdin = seen[0]
+    assert cmd[:2] == ["codex", "exec"] and stdin == "SYS\nBODY"
+    assert "model_reasoning_effort=medium" in cmd and "--effort" not in cmd
+    assert result["usage"]["input"] == 7350 and result["usage"]["cache_read"] == 6912
+    row = json.loads(log.read_text(encoding="utf-8").strip())
+    assert (row["cli"], row["model"], row["effort"], row["cache"]) == (
+        "codex", "gpt-5.6-terra", "medium", None)
+    assert row["flags"] == ["--disable", "shell_tool"]
+    assert row["output"] == 67 and row["reasoning_output"] == 60
+
+
+def test_run_headless_wave_codex_takes_the_effort_from_the_flags_alone(tmp_path: Path):
+    seen: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append(list(cmd))
+        return 0, "prose", ""
+
+    log = tmp_path / "usage.jsonl"
+    headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex", runner=fake_runner,
+        usage_log=log, extra_flags=["--effort", "high"],
+    )
+    assert "model_reasoning_effort=high" in seen[0]
+    assert json.loads(log.read_text(encoding="utf-8").strip())["effort"] == "high"
+
+
+def test_run_headless_wave_codex_failed_turn_fails_the_job_and_keeps_its_usage(tmp_path: Path):
+    stream = _codex_stream(None, usage=_CODEX_USAGE, extra=[
+        {"type": "turn.failed", "error": {"message": "usage_limit_reached"}},
+    ])
+    out = tmp_path / "draft.txt"
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(out)}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex",
+        runner=lambda cmd, **k: (1, stream, "Reading prompt from stdin..."),
+    )
+    assert result["counts"]["failed"] == 1 and not out.exists()
+    assert "usage_limit_reached" in result["failed"][0]["error"]
+    assert result["usage"]["cache_read"] == 6912
+
+
+def test_run_headless_wave_codex_refuses_a_metered_login_with_no_job_run(tmp_path: Path):
+    def runner(cmd, *, input_text, cwd):
+        raise AssertionError("no job may run")
+
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex", runner=runner,
+        prober=_codex_probe("Logged in using an API key - sk-***"),
+    )
+    assert "subscription preflight failed" in result["error"] and "API key" in result["error"]
+    assert result["wrote"] == [] and result["failed"] == []
+
+
+@pytest.mark.parametrize("model, effort", [
+    ("gpt-5.6-terra & calc", None),
+    ("gpt 5.6", None),
+    ("gpt-5.6-terra", "medium;rm"),
+])
+def test_run_headless_wave_codex_refuses_argv_that_is_not_a_plain_id(tmp_path: Path, model, effort):
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model=model, concurrency=1, cli="codex", effort=effort,
+        runner=lambda *a, **k: pytest.fail("no job may run"),
+    )
+    assert "model preflight failed" in result["error"] and "plain" in result["error"]
+
+
+def test_codex_model_error_checks_the_list_codex_keeps(tmp_path: Path):
+    cache = tmp_path / "models_cache.json"
+    cache.write_text(json.dumps({"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+        {"slug": "gpt-5.5", "visibility": "hide"},
+    ]}), encoding="utf-8")
+    assert headless.codex_model_error("gpt-5.6-terra", cache_path=cache) is None
+    assert headless.codex_model_error("gpt-5.5", cache_path=cache) is None  # hidden, still allowed
+    assert headless.codex_model_error(headless.CODEX_DEFAULT_MODEL, cache_path=cache) is None
+    err = headless.codex_model_error("gpt-5.6-tera", cache_path=cache)
+    assert err and "Did you mean: gpt-5.6-terra" in err
+    assert headless.codex_known_models(cache, listed_only=True) == ["gpt-5.6-terra"]
+
+
+@pytest.mark.parametrize("content", [None, "not json", "{}", '{"models": "nope"}'])
+def test_codex_model_error_fails_open_on_a_list_it_cannot_read(tmp_path: Path, content):
+    cache = tmp_path / "models_cache.json"
+    if content is not None:
+        cache.write_text(content, encoding="utf-8")
+    assert headless.codex_model_error("anything-at-all", cache_path=cache) is None
+
+
+def test_codex_default_model_is_the_one_in_config_toml(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    config.write_text('model = "gpt-6-sol"\n[features]\nmemories = false\n', encoding="utf-8")
+    assert headless.codex_default_model(config) == "gpt-6-sol"
+
+
+@pytest.mark.parametrize("content", [None, "model = [", "approval_policy = 'never'\n", 'model = "a b"\n'])
+def test_codex_default_model_falls_back_to_codexs_own_choice(tmp_path: Path, content):
+    config = tmp_path / "config.toml"
+    if content is not None:
+        config.write_text(content, encoding="utf-8")
+    assert headless.codex_default_model(config) == headless.CODEX_DEFAULT_MODEL
+
+
+def test_default_worker_model_per_family(monkeypatch):
+    monkeypatch.setattr(headless, "codex_default_model", lambda: "gpt-6-sol")
+    assert headless.default_worker_model("codex") == "gpt-6-sol"
+    assert headless.default_worker_model("claude") == "sonnet"
+
+
+def test_a_claude_alias_on_codex_is_warned_about():
+    warning = headless.warn_cursor_claude_model("codex", "sonnet")
+    assert warning and "headless_cli=codex" in warning
+    assert headless.warn_cursor_claude_model("codex", "gpt-5.6-terra") is None
+
+
+def test_codex_baseline_default_is_its_own():
+    tokens, provenance = usage.default_baseline_tokens("codex")
+    assert tokens == 9800 and "Codex" in provenance
+
+
+# --- Codex: the gates in front of a real spawn --------------------------------
+
+def _codex_home_with(
+    tmp_path: Path, monkeypatch, *, dotenv: str | None = None, models: tuple[str, ...] = ()
+) -> Path:
+    """A Codex home of the test's own, set as ``CODEX_HOME``."""
+    home = tmp_path / "codex"
+    home.mkdir()
+    if dotenv is not None:
+        (home / ".env").write_text(dotenv, encoding="utf-8")
+    if models:
+        (home / "models_cache.json").write_text(
+            json.dumps({"models": [{"slug": slug, "visibility": "list"} for slug in models]}),
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
+
+
+def test_codex_home_honours_the_variable(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "from-process"))
+    assert headless.codex_home() == tmp_path / "from-process"
+    assert headless.codex_home({"CODEX_HOME": str(tmp_path / "from-env")}) == tmp_path / "from-env"
+
+
+@pytest.mark.parametrize("dotenv, name", [
+    ("OPENAI_API_KEY=sk-secret\n", "OPENAI_API_KEY"),
+    ("# keys\nexport CODEX_API_KEY = sk-secret\n", "CODEX_API_KEY"),
+    ('﻿openai_base_url="https://sk-secret.test"\n', "openai_base_url"),
+])
+def test_subscription_auth_error_codex_refuses_a_metered_name_in_dotenv(
+    tmp_path: Path, monkeypatch, dotenv, name
+):
+    """A key in the Codex home's `.env` would come back after the scrub."""
+    home = _codex_home_with(tmp_path, monkeypatch, dotenv=dotenv)
+    err = headless.subscription_auth_error(
+        "codex", "codex", {"CODEX_HOME": str(home)}, cwd=".",
+        prober=lambda *a, **k: pytest.fail("the probe must not run"),
+    )
+    assert err and name in err and ".env" in err
+    assert "sk-secret" not in err
+
+
+@pytest.mark.parametrize("dotenv", [
+    None,
+    "",
+    "# OPENAI_API_KEY=sk-commented-out\nHTTPS_PROXY=http://proxy.test\nnot a pair\n",
+])
+def test_subscription_auth_error_codex_passes_a_dotenv_with_nothing_metered(
+    tmp_path: Path, monkeypatch, dotenv
+):
+    home = _codex_home_with(tmp_path, monkeypatch, dotenv=dotenv)
+    assert headless.subscription_auth_error(
+        "codex", "codex", {"CODEX_HOME": str(home)}, cwd=".",
+        prober=_codex_probe("Logged in using ChatGPT"),
+    ) is None
+
+
+def test_subscription_auth_error_codex_fails_closed_on_a_dotenv_it_cannot_read(
+    tmp_path: Path, monkeypatch
+):
+    home = _codex_home_with(tmp_path, monkeypatch)
+    (home / ".env").mkdir()
+    err = headless.subscription_auth_error(
+        "codex", "codex", {"CODEX_HOME": str(home)}, cwd=".",
+        prober=_codex_probe("Logged in using ChatGPT"),
+    )
+    assert err and "could not read" in err
+
+
+def test_run_headless_wave_codex_refuses_a_metered_dotenv_with_no_job_run(
+    tmp_path: Path, monkeypatch
+):
+    _codex_home_with(tmp_path, monkeypatch, dotenv="OPENAI_API_KEY=sk-secret\n")
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex",
+        runner=lambda *a, **k: pytest.fail("no job may run"),
+        prober=_codex_probe("Logged in using ChatGPT"),
+    )
+    assert "subscription preflight failed" in result["error"]
+    assert "OPENAI_API_KEY" in result["error"] and "sk-secret" not in result["error"]
+    assert result["wrote"] == [] and result["failed"] == []
+
+
+def _real_codex_wave(tmp_path: Path, monkeypatch, model: str):
+    """One Codex job through the real-runner path, with the spawn itself stubbed."""
+    seen: list[dict] = []
+
+    def runner(cmd, **kwargs):
+        seen.append({"cmd": list(cmd), **kwargs})
+        return 0, _codex_stream("Hola."), "Reading prompt from stdin..."
+
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", _codex_probe("Logged in using ChatGPT"))
+    monkeypatch.setattr(headless, "default_claude_runner", runner)
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model=model, concurrency=1, cli="codex",
+    )
+    return result, seen
+
+
+def test_a_real_codex_wave_refuses_a_model_the_login_does_not_list(tmp_path: Path, monkeypatch):
+    _codex_home_with(tmp_path, monkeypatch, models=("gpt-5.6-terra",))
+    result, seen = _real_codex_wave(tmp_path, monkeypatch, "gpt-9-nope")
+    assert "model preflight failed" in result["error"] and "gpt-9-nope" in result["error"]
+    assert seen == []
+
+
+def test_a_real_codex_wave_hands_the_worker_a_scrubbed_env(tmp_path: Path, monkeypatch):
+    home = _codex_home_with(tmp_path, monkeypatch, models=("gpt-5.6-terra",))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("CODEX_API_KEY", "sk-should-not-leak")
+    result, seen = _real_codex_wave(tmp_path, monkeypatch, "gpt-5.6-terra")
+    assert result["counts"]["wrote"] == 1
+    env = seen[0]["env"]
+    assert "OPENAI_API_KEY" not in env and "CODEX_API_KEY" not in env
+    assert env["CODEX_HOME"] == str(home)
+    assert seen[0]["cmd"][0] == "/bin/codex" and seen[0]["cli"] == "codex"
+
+
+def test_a_real_codex_wave_reports_a_missing_binary(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda _name: None)
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex",
+    )
+    assert "codex not found" in result["error"] and "codex login" in result["error"]
+    assert result["wrote"] == [] and result["failed"] == []
+
+
+def _codex_preflight(monkeypatch, line: str = "Logged in using ChatGPT", rc: int = 0):
+    monkeypatch.setattr(headless.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(headless, "_default_auth_prober", _codex_probe(line, rc=rc))
+
+
+def test_preflight_error_codex_checks_the_model_after_the_login(tmp_path: Path, monkeypatch):
+    _codex_home_with(tmp_path, monkeypatch, models=("gpt-5.6-terra",))
+    _codex_preflight(monkeypatch)
+    assert headless.preflight_error("codex", model="gpt-5.6-terra") is None
+    assert headless.preflight_error("codex") is None
+    assert "not a plain id" in headless.preflight_error("codex", model="a b")
+    unlisted = headless.preflight_error("codex", model="gpt-9-nope")
+    assert "does not list" in unlisted and "gpt-5.6-terra" in unlisted
+
+
+def test_preflight_error_codex_reports_a_logged_out_cli_before_the_model(
+    tmp_path: Path, monkeypatch
+):
+    _codex_home_with(tmp_path, monkeypatch, models=("gpt-5.6-terra",))
+    _codex_preflight(monkeypatch, "Not logged in", rc=1)
+    err = headless.preflight_error("codex", model="gpt-9-nope")
+    assert "codex login" in err and "does not list" not in err
+
+
+def test_preflight_error_codex_fails_closed_on_a_missing_binary(monkeypatch):
+    monkeypatch.setattr(headless.shutil, "which", lambda _name: None)
+    err = headless.preflight_error("codex")
+    assert err and "codex not found" in err
+
+
+# --- Codex: what a broken job reports -----------------------------------------
+
+_UNKNOWN_CODEX_STREAM = "\n".join(json.dumps(event) for event in (
+    {"type": "session.created", "id": "s-1"},
+    {"type": "message.delta", "text": "Hola."},
+    {"type": "session.done"},
+))
+
+
+def test_extract_result_codex_refuses_a_stream_of_events_it_does_not_know():
+    with pytest.raises(ValueError, match="unrecognised codex event stream"):
+        headless._extract_result("codex", _UNKNOWN_CODEX_STREAM)
+    # One typed line is left alone: a verdict may carry a `type` of its own.
+    verdict = '{"type": "word_choice", "note": "ok"}'
+    assert headless._extract_result("codex", verdict) == (verdict, None)
+
+
+def test_run_headless_wave_codex_unknown_events_fail_the_job_and_write_no_draft(tmp_path: Path):
+    out = tmp_path / "draft.txt"
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(out)}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex",
+        runner=lambda cmd, **k: (0, _UNKNOWN_CODEX_STREAM, "Reading prompt from stdin..."),
+    )
+    assert result["counts"]["failed"] == 1 and not out.exists()
+    assert "unrecognised codex event stream" in result["failed"][0]["error"]
+
+
+@pytest.mark.parametrize("rc, stderr, expected", [
+    (124, "timeout after 900s\nReading prompt from stdin...", "timeout after 900s"),
+    (1, "Reading prompt from stdin...", "exit 1"),
+    (1, "Reading prompt from stdin...\nstream disconnected", "stream disconnected"),
+])
+def test_run_headless_wave_codex_failure_reason_leaves_out_the_stdin_line(
+    tmp_path: Path, rc, stderr, expected
+):
+    """Codex prints that line on every run, so it is never why a job failed."""
+    log = tmp_path / "usage.jsonl"
+    result = headless.run_headless_wave(
+        [{"id": "c0", "input_text": "x", "output_path": str(tmp_path / "d.txt")}],
+        model="gpt-5.6-terra", concurrency=1, cli="codex", usage_log=log,
+        runner=lambda cmd, **k: (rc, "", stderr),
+    )
+    assert result["failed"] == [{"id": "c0", "error": expected}]
+    row = json.loads(log.read_text(encoding="utf-8").strip())
+    assert row.get("timed_out", False) is (rc == 124)
+
+
+def test_a_timed_out_runner_leads_with_the_timeout(monkeypatch):
+    """stderr alone is often a warning the CLI prints on every run."""
+    monkeypatch.setattr(headless.subprocess, "Popen", lambda cmd, **kwargs: _FakeProc())
+    monkeypatch.setattr(
+        headless, "_communicate_bounded",
+        lambda proc, text, timeout: (-9, "", "claude.ai connectors are disabled\n", True),
+    )
+    rc, _out, err = headless.default_claude_runner(
+        ["claude", "-p"], input_text="x", cwd=Path("."), timeout=900
+    )
+    assert rc == 124
+    assert err == "timeout after 900s\nclaude.ai connectors are disabled"
+
+
+@pytest.mark.parametrize("flags, level", [
+    (["--effort", "high"], "high"),
+    (["--effort=high"], "high"),
+    (["--effort", "low", "--strict-mcp-config", "--effort=xhigh"], "xhigh"),
+    (["--strict-mcp-config", "--effort"], None),
+    ([], None),
+])
+def test_effort_from_flags_reads_the_last_level_in_either_form(flags, level):
+    assert headless._effort_from_flags(flags) == level
+
+
+def test_usage_from_codex_events_takes_a_cache_write_out_of_input_too():
+    used = usage.usage_from_codex_events([
+        {"type": "turn.completed", "usage": {"input_tokens": 10000, "cached_input_tokens": 6000,
+                                             "cache_write_input_tokens": 1500, "output_tokens": 5}},
+    ])
+    assert used == {"input": 2500, "output": 5, "cache_creation": 1500, "cache_read": 6000}
+    assert used["input"] + used["cache_creation"] + used["cache_read"] == 10000
+
+
+def test_usage_from_codex_events_never_reports_a_negative_input():
+    """A cached share above the total is not a shape Codex has sent; it must not go negative."""
+    used = usage.usage_from_codex_events([
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 400,
+                                             "output_tokens": 5}},
+    ])
+    assert used == {"input": 0, "output": 5, "cache_read": 400}
 
 
 def test_run_image_job_builds_exec_argv_and_sends_the_prompt_on_stdin(tmp_path: Path):

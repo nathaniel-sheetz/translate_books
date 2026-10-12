@@ -77,8 +77,8 @@ highest first:
 **The CLI rung ignores the book's `headless_cli`.** A book translated and judged
 on Claude still triages on Cursor: this pass filters checker findings, not prose,
 and the floor only holds where it was swept. Do not "fix" that by passing
-`--cli claude` — `DEFAULT_TRIAGE_MODEL["claude"]` is `None`, so that run is
-unpinned and uncalibrated. `triage_headless_cli: auto` un-pins the pass back to
+`--cli claude` or `--cli codex` — neither has a row in `DEFAULT_TRIAGE_MODEL`,
+so that run is unpinned and uncalibrated. `triage_headless_cli: auto` un-pins the pass back to
 the book if an operator asks for it.
 
 `status` reports `model_source` (which rung answered), `effective.cli_source`, and

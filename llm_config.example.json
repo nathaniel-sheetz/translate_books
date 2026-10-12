@@ -37,7 +37,17 @@
       "type": "headless",
       "cli": "cursor",
       "models": [
-        { "id": "grok-4.7-medium", "name": "Grok 4.7 (headless)" }
+        { "id": "grok-4.7-medium", "name": "Grok 4.7 (headless)" },
+        { "id": "gpt-5.6-terra-medium", "name": "GPT-5.6 Terra (Cursor)" }
+      ]
+    },
+    {
+      "id": "codex-headless",
+      "name": "Codex (ChatGPT subscription)",
+      "type": "headless",
+      "cli": "codex",
+      "models": [
+        { "id": "gpt-5.6-terra", "name": "GPT-5.6 Terra (Codex)", "effort": "medium" }
       ]
     },
     {
