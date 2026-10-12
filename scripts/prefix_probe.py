@@ -333,13 +333,18 @@ def run_arm(name: str, args: argparse.Namespace, out_root: Path) -> dict[str, An
     saved_trim = headless._CLAUDE_TRIM_FLAGS
     headless._CLAUDE_TRIM_FLAGS = tuple(flags)
     started = time.time()
+    if arm.shape == "wave":
+        log = arm_dir / "usage.jsonl"
+    else:
+        log = arm_dir / ".harness" / "retranslate" / "usage.jsonl"
+    # The folder is dated, not per run, and the log is appended to: rows an
+    # earlier run of this arm left there today ran under other flags or env.
+    earlier = len(_read_rows(log))
     try:
         if arm.shape == "wave":
             error = _run_wave(arm, arm_dir, args)
-            log = arm_dir / "usage.jsonl"
         else:
             error = _run_retranslate(arm, arm_dir, args)
-            log = arm_dir / ".harness" / "retranslate" / "usage.jsonl"
     finally:
         headless._CLAUDE_TRIM_FLAGS = saved_trim
         for key, value in saved.items():
@@ -352,7 +357,7 @@ def run_arm(name: str, args: argparse.Namespace, out_root: Path) -> dict[str, An
     if error:
         print(f"    refused before any job ran: {error}")
         summary["error"] = error
-    rows = [r for r in _read_rows(log) if r.get("rc") == 0 and _billed(r)]
+    rows = [r for r in _read_rows(log)[earlier:] if r.get("rc") == 0 and _billed(r)]
     overheads = [_billed(r) - int(r.get("prompt_sent") or 0) for r in rows]
     for row, overhead in zip(rows, overheads):
         print(

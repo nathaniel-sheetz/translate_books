@@ -736,6 +736,7 @@ def fanout(
     """
     from src.harness.headless import (
         _build_cmd,
+        _with_claude_trim,
         effective_wave_tokens,
         resolve_cache_mode,
         run_headless_wave,
@@ -1009,12 +1010,18 @@ def fanout(
                 "output_source": prof.output_ratio_source,
                 # The argv is here so a bad --headless-extra-flags entry is
                 # visible before a wave commits to it, not after N jobs fail.
+                # With the trim the wave merges in itself, or the argv quoted
+                # here is not the one that runs.
                 "argv": _build_cmd(
                     cli_name if cli_name in ("claude", "cursor") else "claude",
                     cli_bin or claude_bin or cli_name,
                     worker_model,
                     ready[0].get("system_prompt_file") if ready else None,
-                    extra_flags=extra_flags,
+                    extra_flags=(
+                        _with_claude_trim(extra_flags)
+                        if cli_name == "claude"
+                        else extra_flags
+                    ),
                 ),
                 "effort": resolved_effort,
                 "effort_source": effort_source,

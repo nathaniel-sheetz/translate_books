@@ -275,7 +275,8 @@ deliberately **not** relocated:
   and never from the config dir, so workers stay authenticated. Had auth lived under
   the config dir, the preflight would pass on the real directory and then every worker
   would run logged out.
-- **Chats and projects.** Those follow `CURSOR_DATA_DIR`, a different variable.
+- **Projects** (job transcripts). Those follow `CURSOR_DATA_DIR`, then the home
+  directory — so a worker with its own home (below) keeps them there.
 
 `statsig-cache.json` is never copied into a slot — duplicating a live file the
 interactive Cursor may be mid-rename on would mean handling torn reads. Each slot
@@ -363,9 +364,11 @@ list falls to the CLI's own 14 built-in skills and billed input from 15,671 to
 jobs four at a time ran 8 of 8 on four homes, three of them new.
 
 - **The login is unaffected.** It is read from `%APPDATA%`, a separate
-  variable. The auth and `--model` preflights run under the same kind of home
-  as the workers, so if a future CLI moved the login the wave would be refused
-  before any job ran.
+  variable. A launching environment that has none gets it set to the real
+  home's `AppData\Roaming`, which is where the CLI would have looked. The auth
+  and `--model` preflights run under the same kind of home as the workers, in
+  the wave and in the dashboard's gate before it, so if a future CLI moved the
+  login the wave would be refused before any job ran.
 - **Windows only.** On macOS and Linux the login lives under the home directory
   itself, so the switch does nothing there.
 - **What lands in it.** The CLI re-syncs its built-in skills into
@@ -523,7 +526,7 @@ honored, so argv can never carry two `--effort` pairs.
 
 ```bash
 python scripts/harness.py config-set --project projects/<slug> \
-    --key headless_extra_flags --value "--strict-mcp-config"
+    --key headless_extra_flags --value "--safe-mode"
 ```
 
 | flags | effect |
