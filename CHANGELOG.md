@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.72.0.0] - 2026-10-12
+
+### Added
+- **Codex is a headless wave family.** Translate, footnotes, judges, annotations, triage, the footnote scan and editorial verify all take `--cli codex`, and a book pins it with `headless_cli=codex`. Each job is `codex exec -c model_provider=openai -s read-only --skip-git-repo-check --ephemeral --json` with the prompt on stdin, and the answer is the last `agent_message` in the event stream. It runs on the `codex login` ChatGPT session and leaves nothing in the operator's Codex history.
+- **The reader's Retranslate reaches Codex** through a `headless` provider with `cli: "codex"`. `llm_config.example.json` carries one.
+- **Codex is subscription-only, as the other two are.** The whole `OPENAI_*` namespace, `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN` are scrubbed from the worker's environment, `codex login status` must answer `Logged in using ChatGPT`, and every job pins `model_provider=openai`. An API-key login, any other kind of login and an answer it does not recognise all refuse the wave with no job run. There is no override flag.
+- **A Codex `--worker-model` is checked before anything spawns.** It must be a plain id, and when `~/.codex/models_cache.json` is readable it must be listed there, or the wave is refused with the nearest listed ids. An unpinned wave uses the `model` in `~/.codex/config.toml`.
+- **Effort reaches Codex as `-c model_reasoning_effort=<level>`,** resolved on the same ladder as Claude. The dashboard and the estimate name that channel.
+- **Codex usage is logged in the same fields as the other families.** Codex counts the cached share inside `input_tokens`, so it is taken out and `input + cache_creation + cache_read` is billed input on every family. Reasoning tokens are logged beside the output as `reasoning_output`.
+- **Every Codex wave job switches twelve tool features off:** 13,550 → 9,844 billed input on an 87-token prompt (GPT-5.6 Terra, codex-cli 0.157.0). The list is in each usage row's `flags`.
+- **`scripts/prefix_probe.py` has Codex arms,** `X0` to `X6`. Codex jobs leave nothing on disk, so those arms report tokens only.
+
+### Changed
+- **A missing binary falls back to the first other family that is installed,** in the order `claude`, `cursor`, `codex`. It used to try only the one other family.
+- **A timed-out job's reason leads with the timeout** on every family. A line the CLI prints to stderr on each run used to stand in for it.
+
+### Fixed (found in pre-ship review)
+- **A failed or timed-out Codex job gave `Reading prompt from stdin...` as its reason.** Codex prints that line on every run. It is left out, so the reason is the stream's own error, the timeout, or the exit code.
+- **A Codex event stream of types this version does not know would have been written as the draft.** If a Codex release renamed its events, every job would have exited 0 with raw JSONL as its translation. Such a stream fails the job and writes nothing.
+- **A metered key in the Codex home's `.env` is refused.** Codex is understood to load that file at startup, which is after the scrub. A wave is refused when the file sets any name the scrub drops, and the message names the variable and never its value. Whether 0.157.0 loads the file is not confirmed; the check costs nothing when the file is absent.
+- **The probe's "every tool feature off" arms disabled eight features, not the twelve a wave does.** They take the wave's own list.
+- Help text and schema strings in seven commands listed only `claude|cursor`, and the skill and guide pages described two families.
+
 ## [0.71.0.0] - 2026-10-11
 
 ### Changed
