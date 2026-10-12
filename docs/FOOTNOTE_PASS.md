@@ -28,7 +28,7 @@ python scripts/footnote_pass.py scan-prepare --project fabre2 [--chapters 1-20] 
 
 # Then EITHER a headless wave …
 python scripts/footnote_pass.py scan-fanout --project fabre2 \
-    [--cli claude|cursor] [--cli-bin <path>] [--concurrency 5] \
+    [--cli claude|cursor|codex] [--cli-bin <path>] [--concurrency 5] \
     [--target-ids chapter_04,chapter_05] [--effort medium] [--prompt-cache auto]
 # … OR spawn footnote-scan-worker Task subagents against the manifest's paths.
 

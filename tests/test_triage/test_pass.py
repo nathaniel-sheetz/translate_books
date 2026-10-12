@@ -243,6 +243,29 @@ def test_fanout_folds_the_preamble_in_and_writes_a_draft(book: Path):
     assert seen and "Sigfridos" in seen[0]
 
 
+def test_fanout_on_codex_unwraps_the_answer_from_its_event_stream(book: Path):
+    assert tp.prepare(book, worker_model="gpt-5.6-terra", cli="codex")["status"] == "ok"
+    answer = _answering_runner()
+    seen: list[list[str]] = []
+
+    def runner(cmd, *, input_text, cwd, **kwargs):
+        seen.append(list(cmd))
+        _rc, verdicts, _err = answer(cmd, input_text=input_text, cwd=cwd)
+        stream = "\n".join(json.dumps(event) for event in (
+            {"type": "thread.started", "thread_id": "t-1"},
+            {"type": "item.completed",
+             "item": {"id": "item_0", "type": "agent_message", "text": verdicts}},
+            {"type": "turn.completed", "usage": {"input_tokens": 12000, "output_tokens": 90}},
+        ))
+        return 0, stream, "Reading prompt from stdin..."
+
+    out = tp.fanout(book, runner=runner, concurrency=1)
+    assert out["counts"]["wrote"] == 1 and not out["failed"]
+    assert seen[0][:2] == ["codex", "exec"]
+    committed = tp.commit(book)
+    assert committed["status"] == "ok" and committed["written"] == 2
+
+
 def test_fanout_resumes_past_written_drafts(book: Path):
     tp.prepare(book, worker_model="m", cli="cursor")
     tp.fanout(book, runner=_answering_runner(), concurrency=1)

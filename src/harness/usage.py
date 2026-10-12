@@ -59,9 +59,16 @@ _CHARS_PER_TOKEN = 4
 # GPT-5.6 Terra ~16.3k and Claude Sonnet 5 ~30.6k. So this constant fits the
 # non-Claude models and would quote a Claude-on-Cursor wave ~13k low per job.
 #
-# Both constants predate the 2026-10-10 cuts (`--strict-mcp-config` on every
-# Claude job, a neutral home per Cursor worker), which took about 3.7k and 4.6k
-# off a job on a short probe prompt. They are left as measured until real waves
+# codex — from the 2026-10-11 probe (codex-cli 0.157.0, GPT-5.6 Terra, an
+# 87-token prompt): 9,931 billed input on every job with the twelve tool
+# features in `headless._CODEX_TRIM_FLAGS` switched off, so 9,844 of fixed
+# context. Without them it was 13,637. One model only; `exec` has no
+# system-prompt flag and no cache-TTL knob.
+#
+# The claude and cursor constants predate the 2026-10-10 cuts
+# (`--strict-mcp-config` on every Claude job, a neutral home per Cursor worker),
+# which took about 3.7k and 4.6k off a job on a short probe prompt. They are left
+# as measured until real waves
 # have logged rows under the new prefix: a constant that overstates only makes
 # the gate quote high.
 #
@@ -72,10 +79,12 @@ _CHARS_PER_TOKEN = 4
 DEFAULT_BASELINE_TOKENS: dict[str, int] = {
     "claude": 3900,
     "cursor": 17200,
+    "codex": 9800,
 }
 _BASELINE_PROVENANCE: dict[str, str] = {
     "claude": "2026-07-30 baseline probe",
     "cursor": "2026-08-10 Cursor probe",
+    "codex": "2026-10-11 Codex probe",
 }
 # What an un-threaded caller (``cli=None``) gets. Claude is the default headless
 # family, and under-quoting the Claude path is the smaller error.
@@ -209,6 +218,58 @@ def usage_from_envelope(obj: Any, *, model: str | None = None) -> dict[str, Any]
     resolved = _resolved_model(obj.get("modelUsage"), model)
     if resolved:
         out["resolved_model"] = resolved
+    return out
+
+
+def usage_from_codex_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The reportable numbers from a ``codex exec --json`` event stream.
+
+    Reads the last ``turn.completed`` event. ``None`` when the stream has none,
+    and it never raises, for the reason :func:`usage_from_envelope` gives.
+
+    Codex counts the other way round from Claude and Cursor (observed 2026-10-11
+    on codex-cli 0.157.0, GPT-5.6 Terra: 14,262 ``input_tokens`` with 6,912
+    ``cached_input_tokens``, then 13,647 with 11,008 on the identical prompt).
+    ``input_tokens`` is the whole billed input and the cached share is inside
+    it, so the cached share is taken out here and ``input + cache_creation +
+    cache_read`` is billed input on every family. ``cache_write_input_tokens``
+    was 0 on every call measured; it is treated as inside ``input_tokens`` too.
+
+    ``output_tokens`` already includes ``reasoning_output_tokens`` (67 and 60
+    for a one-word answer), which is kept beside it as ``reasoning_output``.
+    """
+    usage: Mapping[str, Any] | None = None
+    try:
+        for event in events:
+            if (
+                isinstance(event, Mapping)
+                and event.get("type") == "turn.completed"
+                and isinstance(event.get("usage"), Mapping)
+            ):
+                usage = event["usage"]
+    except TypeError:
+        return None
+    if usage is None:
+        return None
+
+    total = _first_int(usage, "input_tokens")
+    cached = _first_int(usage, "cached_input_tokens")
+    written = _first_int(usage, "cache_write_input_tokens")
+    output = _first_int(usage, "output_tokens")
+    out: dict[str, Any] = {}
+    if total is not None:
+        out["input"] = max(0, total - (cached or 0) - (written or 0))
+    if output is not None:
+        out["output"] = output
+    if written is not None:
+        out["cache_creation"] = written
+    if cached is not None:
+        out["cache_read"] = cached
+    if not out:
+        return None
+    reasoning = _first_int(usage, "reasoning_output_tokens")
+    if reasoning is not None:
+        out["reasoning_output"] = reasoning
     return out
 
 

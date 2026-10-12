@@ -175,9 +175,9 @@ first place. (`status` and `profile` write nothing at all, by contract.)
 `prepare` (subagent backend) adds:
 - `--scope` is **repeatable** here — pass it multiple times to stage several
   chapters into one manifest for a single `commit` (see the multi-chapter note in B).
-- `--cli {claude,cursor}` — which CLI this manifest is for. **Pass it whenever the
+- `--cli {claude,cursor,codex}` — which CLI this manifest is for. **Pass it whenever the
   wave is not Claude.** It picks the default worker model *and* the per-job token
-  baseline the consent number is built from (Cursor's is ~4.4× Claude's), and it is
+  baseline the consent number is built from (Cursor's is ~4.4× Claude's, Codex's ~2.5×), and it is
   written into the manifest so `fanout` inherits it. **Don't pass it when `profile`
   already said `cli_source: config` for that same CLI** — the flag outranks the pin
   and rewrites `cli_source` to `cli`, so it changes nothing about the wave and
@@ -240,15 +240,18 @@ overhead note below. The **Task-worker** path (`prepare` → spawn `judge-worker
 `commit`) stays **Claude-only** — the Task tool spawns Claude subagents; Cursor
 is offered only on the headless `fanout` path.
 
-### Effort has two channels; only one is live per CLI
+### Effort has a channel per CLI; only one is live
 
 | CLI | channel | how it is set | what to relay |
 |---|---|---|---|
 | `claude` | `--effort` argv | `--effort`, `headless_effort_judges` | `effective.effort` |
+| `codex` | `-c model_reasoning_effort=<level>` argv | `--effort`, `headless_effort_judges` | `effective.effort` |
 | `cursor` | the model's `[effort=…]` bracket, or a flat id's `-<level>` suffix | `--effort` (rewrites the bracket / swaps the suffix), a level typed into the pinned id, `headless_effort_judges`, else whatever `~/.cursor/cli-config.json` already selected | `effective.effort` |
 
-`cursor-agent` **has no `--effort` flag** — it is dropped from the argv. Both
-channels now resolve to one number in `effective.effort`, with `effective.effort_channel`
+`cursor-agent` **has no `--effort` flag** — it is dropped from the argv. `codex exec`
+has none either: the launcher sends the same level as a config override, and reports
+the channel as `argv`. Every
+channel resolves to one number in `effective.effort`, with `effective.effort_channel`
 saying which knob carries it (`argv` / `model_bracket` / `model_id` / `none`).
 
 > **Never quote `headless_effort` beside a Cursor wave.** That field is the Claude
@@ -618,18 +621,26 @@ optional `--system-prompt-file <preamble_path>`, `--model <worker_model>`,
 `--tools ""`, `--output-format json` → `draft_path`. On `--cli cursor` it is
 `cursor-agent -p --trust --mode ask --model <worker_model> --output-format json`
 with the full prompt on stdin (no `--system-prompt-file`, no `--tools`, and
-`--effort` / `headless_extra_flags` are dropped — both are Claude argv).
+`--effort` / `headless_extra_flags` are dropped — both are Claude argv). On
+`--cli codex` it is `codex exec -c model_provider=openai -c
+model_reasoning_effort=<effort> -s read-only --skip-git-repo-check --ephemeral
+--json -m <worker_model>` plus a `--disable <tool>` pair for each of twelve tools,
+with the full prompt on stdin; the verdict is the last `agent_message` in the
+event stream. An unpinned Codex `worker_model` is the `model` in
+`~/.codex/config.toml`, so name one with `--worker-model` unless that is the model
+you mean to spend on.
 
 The child env is scrubbed of every metered credential first, and one auth
 preflight runs per wave — `claude auth status --json` (a *routing* probe: which
-credential would be billed) or `cursor-agent status --format json` (a *liveness*
+credential would be billed), `cursor-agent status --format json` (a *liveness*
 probe; Cursor has no metered path here, so the `CURSOR_API_KEY` scrub is the
-billing half). If it cannot confirm a login the command returns a top-level
-`error`, writes nothing, and spawns no jobs (relay that error — the fix is
-`claude` + `/login`, `cursor-agent login`, or `--backend api` if metered spend
-was actually intended). A Cursor wave additionally rejects an unusable
-`--model` up front, so a typo costs one message rather than one dead process per
-job.
+billing half) or `codex login status` (a *routing* probe in prose: only
+`Logged in using ChatGPT` passes). If it cannot confirm a login the command
+returns a top-level `error`, writes nothing, and spawns no jobs (relay that
+error — the fix is `claude` + `/login`, `cursor-agent login`, `codex login` with
+ChatGPT, or `--backend api` if metered spend was actually intended). A Cursor or
+Codex wave additionally rejects an unusable `--model` up front, so a typo costs
+one message rather than one dead process per job.
 After the wave, commit as below — the prepare→commit seam is unchanged
 (`committed`/`failed`/`missing`). On 529, re-run with a lower `--concurrency`.
 

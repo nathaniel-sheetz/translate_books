@@ -195,7 +195,7 @@ fan out every still-undrafted manifest entry (all-parallel batches):
 ```bash
 python scripts/harness.py translate-fanout --project projects/<slug> \
   [--chunk-ids <id1,id2,...>] [--concurrency <batch_size>] \
-  [--cli {claude,cursor}] [--cli-bin <bin>] \
+  [--cli {claude,cursor,codex}] [--cli-bin <bin>] \
   [--effort low|medium|high|xhigh|default] [--prompt-cache auto|5m|1h|off]
 ```
 Persist the CLI family once per book (optional; default `claude`):
@@ -259,6 +259,20 @@ defaults to your selected Cursor model; a Claude alias with cursor is almost cer
 misconfiguration (warning only), and an id the CLI outright rejects fails the wave before it
 spawns anything.
 
+**Codex profile (`--cli codex` / `headless_cli=codex`):** each process is
+`codex exec -c model_provider=openai -c model_reasoning_effort=<effort> -s read-only
+--skip-git-repo-check --ephemeral --json -m <worker_model>` plus a `--disable <tool>` pair
+for each of twelve tools, with the **full prompt on stdin**. The draft is the last
+`agent_message` in the event stream. Auth is the `codex login` ChatGPT session; an API-key
+login is refused before anything spawns. Effort follows the same ladder as Claude and is
+sent as a config override, so an unpinned translate wave runs at `high`, which is
+unmeasured on any Codex model. `worker_model` defaults to the `model` in
+`~/.codex/config.toml`; pin one at prepare time (`--worker-model gpt-5.6-terra`) unless
+that is the model you mean to translate with. No host implies Codex, so a book reaches it
+by `--cli codex`, by `config-set --key headless_cli --value codex`, or when the guessed
+family's binary is missing and `codex` is the one on PATH. About 9.8k fixed
+tokens per job (GPT-5.6 Terra, 2026-10-11), no prompt-cache control.
+
 Cursor waves report `usage` like Claude ones, but the shape differs sharply: **~17.2k fixed
 tokens per process** against Claude's ~3.9k (~30.6k when the Cursor model is Claude Sonnet 5;
 per-model table in `docs/LLM_PROVIDERS.md`), and no prompt cache to configure (no
@@ -267,13 +281,16 @@ the model — a `.cursor/rules` workspace-rule placement was probed and changed 
 processes or a smaller prompt are the only levers; the `overhead_ratio` on each wave is what
 that decision should rest on.
 
-**Subscription enforcement (both profiles).** The child env is scrubbed of every metered
-credential — the whole `ANTHROPIC_*` namespace, the `CLAUDE_CODE_USE_*` third-party switches,
-`CURSOR_API_KEY` — while `CLAUDE_CODE_OAUTH_TOKEN` survives, since that *is* subscription auth.
+**Subscription enforcement (all three profiles).** The child env is scrubbed of every metered
+credential — the whole `ANTHROPIC_*` and `OPENAI_*` namespaces, the `CLAUDE_CODE_USE_*`
+third-party switches, `CURSOR_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` — while
+`CLAUDE_CODE_OAUTH_TOKEN` and `CODEX_HOME` survive, since those *are* subscription auth.
 An auth preflight then runs once per wave and blocks it outright on failure, with no override
-flag: `claude auth status --json` (a *routing* probe — which credential gets billed) or
+flag: `claude auth status --json` (a *routing* probe — which credential gets billed),
 `cursor-agent status --format json` (a *liveness* probe; with no metered Cursor path in this
-repo, the scrub is the billing half). Full rationale in `docs/LLM_PROVIDERS.md`.
+repo, the scrub is the billing half) or `codex login status` (a *routing* probe in prose; only
+`Logged in using ChatGPT` passes, and it reads the login on file, so for a key in the
+environment the scrub is the whole guarantee). Full rationale in `docs/LLM_PROVIDERS.md`.
 
 Headless does **not** use extended "think hard" thinking. After the wave, commit as below — the
 prepare→commit seam is unchanged (`committed`/`failed`/`missing`).

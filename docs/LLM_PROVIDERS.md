@@ -4,18 +4,32 @@ This guide covers how to configure LLM providers and models, add new providers (
 
 ## Subscription CLIs (no metered API key)
 
-The translate-harness / judge-review **headless** backend can drive either:
+The translate-harness / judge-review **headless** backend can drive any of:
 
 | CLI | Binary | Auth | Config | Enforced by |
 |---|---|---|---|---|
 | Claude Code | `claude` | `claude` login session | `headless_cli=claude` | env scrub + auth preflight |
 | Cursor Agent | `cursor-agent` | `cursor-agent login` session | `headless_cli=cursor` | env scrub + auth preflight |
-| Codex (images only) | `codex` | `codex login` with ChatGPT | none — `scripts/image_pass.py generate` only | env scrub + auth preflight |
+| Codex | `codex` | `codex login` with ChatGPT | `headless_cli=codex` | env scrub + auth preflight |
 
-Codex is an **image family**, not a translate worker: it is absent from
-`headless_cli`, and `run_headless_wave(cli="codex")` is refused. It exists for
-the `image-pass` skill (`.claude/skills/image-pass/SKILL.md`), which drives
-`codex exec` with the built-in image tool on a ChatGPT plan.
+Codex is a wave family like the other two since 2026-10-11: translate,
+footnotes, judges, annotations, triage, the footnote scan and editorial verify
+all take `--cli codex`, and the reader's Retranslate reaches it through a
+`cli: "codex"` provider. It is also the **image family** for the `image-pass`
+skill (`.claude/skills/image-pass/SKILL.md`), which drives `codex exec` with the
+built-in image tool through its own entry point (`run_image_job`).
+
+A Codex wave job is `codex exec -c model_provider=openai -s read-only
+--skip-git-repo-check --ephemeral --json`, with the prompt on stdin, from the
+same empty directory the other families run in. It writes nothing, leaves no
+session in the operator's Codex history, and has every tool switched off (see
+*Wave telemetry*). The answer is the last `agent_message` in the event stream.
+
+**No host implies Codex.** `headless_cli=auto` follows the agent driving the
+harness, and only Claude Code and the Cursor agent have verified process
+markers. Codex is reached by `--cli codex`, by pinning `headless_cli=codex`, or
+by `automation.default_cli`. The one exception is the missing-binary fallback
+below, which can land on it.
 
 ### Which CLI a wave picks (`headless_cli=auto`, the default)
 
@@ -49,7 +63,7 @@ python scripts/run_judges.py profile --project <slug> [--command translate]
 ```
 
 A *guess* (tier 3 or 4) that names a CLI this machine does not have is corrected to the
-other family when that one **is** installed, with a warning and
+first other family that **is** installed (in the order `claude`, `cursor`, `codex`), with a warning and
 `cli_source: "fallback:<binary>-missing"` — quoting Cursor's 17.2k baseline for a wave that
 will run on Claude is the same consent error the profile exists to kill. A **decision** is
 never second-guessed — a flag (`cli`), a pin (`config`), or a prepared manifest (`manifest`,
@@ -86,7 +100,14 @@ what the probe adds is failing once instead of once per job. Both fail closed.
 parameters, composed as `grok-4.5[effort=low,fast=false]`; Cursor's own "Auto"
 becomes `auto`). That is the model the interactive Cursor orchestrator is already
 running on, so an unpinned wave no longer defaults to a Claude alias that only
-produced a warning.
+produced a warning. On codex it is the top-level `model` in
+`~/.codex/config.toml` (`worker_model_source: "codex-config"`), and when that
+file names none the job is launched with no `-m` and Codex picks (`default`).
+
+A Codex `--worker-model` is checked before anything spawns, without spending
+tokens: it must be a plain id, and if `~/.codex/models_cache.json` is readable
+it must be listed there, or the wave is refused with the nearest listed ids.
+Codex rewrites that file when it runs. An unreadable file passes every id.
 
 ```bash
 python scripts/harness.py config-set --project projects/<slug> --key headless_cli --value cursor
@@ -122,7 +143,7 @@ mirroring how `claude -p` uses the Claude subscription. Install the Cursor CLI
 separately (`https://cursor.com/install`) and run `cursor-agent login` once.
 See `references/translate-workers.md` and `judge-review/SKILL.md`.
 
-### Wave telemetry (both profiles)
+### Wave telemetry (every profile)
 
 Every `fanout` returns a `usage` rollup — `input`/`output`, the `cache_creation`
 vs `cache_read` split, `prompt_sent` (the content we meant to send) and
@@ -134,7 +155,7 @@ disk rather than entering an agent's context.
 This exists because the numbers were being computed and thrown away: the
 launcher asked for `--output-format text`, which discards the `usage` block, so a
 2026-07-30 judge wave spent ~56% of its input tokens on fixed per-process
-overhead with nothing able to report it. Both profiles now ask for `json` and
+overhead with nothing able to report it. Claude and Cursor now ask for `json` and
 unwrap the envelope; anything that is not an envelope still passes through as
 prose, so a CLI that ignores the flag degrades to the old behavior.
 
@@ -143,12 +164,23 @@ Cursor spells the same fields differently (`inputTokens`, `outputTokens`,
 Its `inputTokens` excludes cache reads, exactly as Claude's does, so the shared
 `input + cache_creation + cache_read` sum is billed input on either family.
 
+Codex has no envelope. `codex exec --json` prints one event per line and the
+usage rides on `turn.completed`: `input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`. It
+counts the other way round: `input_tokens` is the whole billed input with the
+cached share inside it (14,262 with 6,912 cached, then 13,647 with 11,008 on
+the identical prompt, 2026-10-11, codex-cli 0.157.0). The parser takes the
+cached share out, so the same three-field sum is billed input on Codex too.
+`output_tokens` includes reasoning, which is also logged on its own as
+`reasoning_output`. `cache_write_input_tokens` was 0 on every call measured.
+
 **Per-process overhead is per CLI, and far apart:**
 
 | CLI | fixed prefix per job | provenance |
 |---|---|---|
 | `claude` | ~3,900 tok | 2026-07-30 baseline probe |
 | `cursor` | ~17,200 tok | 2026-08-10 Cursor probe (confirmed at ~18.0k on a real 2026-08-11 wave, overhead ratio 0.78) |
+| `codex` | ~9,800 tok | 2026-10-11 Codex probe (GPT-5.6 Terra, tools off) |
 
 `baseline_tokens()` therefore medians **only the rows of the CLI being
 estimated** — one `usage.jsonl` holds every family's rows, and an unfiltered
@@ -172,6 +204,30 @@ number of tokens (3.7k on Claude, 4.6k on Cursor), not to the same total. The
 gate medians the last 40 rows per model, so its quote runs high until new rows
 outnumber old ones. `scripts/prefix_probe.py` re-runs any of these arms and
 reads the prefix's make-up back off disk.
+
+**The Codex prefix is mostly tool definitions, and they can be switched off.**
+Every Codex wave job carries `--disable <feature>` for twelve tools a prose job
+cannot use, which is what `--tools ""` does on Claude and `--mode ask` on
+Cursor. Measured 2026-10-11 on the same 87-token prompt (codex-cli 0.157.0,
+GPT-5.6 Terra, billed input identical within each arm):
+
+| Codex wave job | Overhead per job |
+|---|---:|
+| no flag | 13,550 |
+| `--ignore-user-config` | 13,550 |
+| `shell_tool` off | 12,700 |
+| also `multi_agent`, `plugins`, `apps`, `browser_use`, `computer_use`, `image_generation`, `skill_search` | 10,606 |
+| also `goals`, `sleep_tool`, `tool_suggest`, `view_image` (what ships) | 9,844 |
+| also `unified_exec`, `code_mode_host`, `in_app_browser`, `hooks`, `worktrees` | 9,844 |
+
+`--ignore-user-config` changed nothing on this machine's `config.toml` and is
+not used. The list is `_CODEX_TRIM_FLAGS` in `src/harness/headless.py` and is
+written into every usage row's `flags`. A feature name the installed CLI does
+not know is refused (`Unknown feature flag`), so a Codex release that drops one
+fails every job with that message until the name is removed from the list.
+Arms `X0`–`X6` of `scripts/prefix_probe.py` re-run these; `X3` carries the list
+that ships, so the eight-feature row has no arm of its own. Codex jobs are
+`--ephemeral` and leave nothing on disk, so those arms report tokens only.
 
 **On Cursor the prefix also depends on the model.** Measured by the 2026-09-14
 panel probe (cursor-agent 2026.09.10, the same audit prompt on every model,
@@ -223,9 +279,12 @@ To price one, multiply the token counts by the rates on
 rates the whole probe (24 processes across four models) came to $0.84, and the
 operator saw about 2% of the Pro allotment used.
 
+**Codex streams carry no cost either,** so `cost_equiv_usd` is 0 on a Codex
+wave too. The job bills the ChatGPT plan's usage limits.
+
 `headless_extra_flags` remains Claude-only: it is Claude argv and is dropped on a
-Cursor wave. **`headless_effort_<type>` no longer is** — see the two-channel note
-below.
+Cursor or Codex wave. **`headless_effort_<type>` no longer is** — see the
+effort-channel note below.
 
 #### There is no Cursor prompt cache to configure
 
@@ -257,6 +316,12 @@ Part of that is noise: the same model through the other CLI disagreed with
 itself on 4 of 20 rows.
 
 Cursor waves record `cache: null` on every row, since no mode was requested.
+
+Codex is the same in this respect. `exec` has no system-prompt flag and no
+cache knob, so the preamble is folded into stdin and rows record `cache: null`.
+The server caches opportunistically: identical jobs back to back on 2026-10-11
+read 0, 2,816, 4,864, 6,912 and 11,008 cached tokens with no pattern the client
+controls.
 
 #### Each Cursor worker gets its own config directory
 
@@ -391,16 +456,18 @@ before, with one warning per wave. Each usage row carries `neutral_home: true`
 when it applied and the rollup carries `neutral_home: "n/N"`, since rows with
 and without it are about 4.6k apart and must not be read as one population.
 
-#### Effort has two channels — one per CLI
+#### Effort has a channel per CLI
 
 `cursor-agent` has **no `--effort` flag**; it takes its knobs inside the model
 argument — as a bracket (`grok-4.5[effort=high,fast=false]`) or, for newer
-families, as part of the id itself (`grok-4.7-medium`). So the same setting is
-delivered three different ways:
+families, as part of the id itself (`grok-4.7-medium`). `codex exec` has none
+either and takes a config override. So the same setting is delivered four
+different ways:
 
 | CLI | channel | delivered as |
 |---|---|---|
 | `claude` | `argv` | `--effort <level>` |
+| `codex` | `argv` | `-c model_reasoning_effort=<level>` |
 | `cursor` | `model_bracket` | the `[effort=…]` parameter, rewritten into `--model` |
 | `cursor` | `model_id` | the id's own `-<level>` suffix, swapped in `--model`; no bracket |
 | either | `none` | nothing carries it (Cursor's `auto` model takes no bracket) |
@@ -418,6 +485,12 @@ already selects** → nothing. That fourth tier matters: the effort table below 
 measured on Claude, so the harness does **not** synthesize a bracket onto a bare
 `--model grok-4.5` from an unswept default — it leaves the argv alone and reports
 `effort_source: "cursor-default"`.
+
+Codex follows Claude's ladder (`--effort` → `headless_effort_<type>` → the
+per-type table), because an override on argv changes nothing the operator
+typed. The table's levels were measured on Claude and are unmeasured on any
+Codex model. `default` sends no override, and the model runs at the level
+Codex's own config or the model's default gives it.
 
 #### `headless_effort_<type>`
 
@@ -570,7 +643,12 @@ layers. Neither subsumes the other:
    access token, workload identity, Bedrock, and anything unrecognised are
    refused, and the line itself is never echoed (the API-key form ends in a
    masked key). That line names the login on file, not where `config.toml`
-   routes requests, so every image job also pins `-c model_provider=openai`.
+   routes requests, so every Codex job, wave or image, also pins `-c model_provider=openai`.
+   Before that probe, `.env` in the Codex home is read: if it sets any name the
+   scrub drops (`OPENAI_API_KEY`, say) the wave is refused and the message names
+   the variable, never its value. Codex is understood to load that file at
+   startup, which would put the key back after the scrub; that is not confirmed
+   on 0.157.0, and the check costs nothing when the file is absent.
    All **fail closed**: an `apiKeySource`, a third-party
    `apiProvider`, a logged-out CLI, a non-zero exit or an output shape it does
    not recognise all block the wave with a top-level `error` and zero jobs run.
@@ -658,14 +736,14 @@ The file lives at the project root. It defines which providers and models are av
 | `providers[].id` | Unique identifier (used in API calls and internally) |
 | `providers[].name` | Display name shown in the UI dropdown |
 | `providers[].type` | How the provider is reached: `"anthropic"` or `"openai-compatible"` (APIs), `"headless"` or `"local"` (see *Provider Types*) |
-| `providers[].cli` | `headless` providers only: `"claude"` or `"cursor"` |
+| `providers[].cli` | `headless` providers only: `"claude"`, `"cursor"` or `"codex"` |
 | `providers[].timeout_seconds` | Optional. Seconds to wait on one request before calling it stuck |
 | `providers[].api_key_env_var` | Name of the environment variable holding the API key |
 | `providers[].base_url` | API endpoint URL. `null` for native OpenAI; a URL string for third-party endpoints |
 | `providers[].models[].id` | Model identifier passed to the API |
 | `providers[].models[].name` | Display name in the model dropdown |
 | `providers[].models[].pricing` | `{ "input": X, "output": Y }` per 1M tokens, used for cost estimates. API providers only |
-| `providers[].models[].effort` | Optional, `headless` Claude models only: the `--effort` level |
+| `providers[].models[].effort` | Optional, `headless` Claude and Codex models only: the effort level (`--effort` on Claude, `-c model_reasoning_effort` on Codex) |
 | `providers[].models[].aliases` | Optional, `local` models only: other names the server may serve the model under |
 | `providers[].models[].sampling_params` | Optional, `anthropic` providers only. `true` / `false`: whether the model accepts `temperature`. Overrides the guess the code makes from the id |
 | `providers[].models[].thinking` | Optional, `anthropic` providers only. `"always"` (cannot be turned off), `"optional"` (can be toggled) or `"none"` (takes no `thinking` param). Overrides the guess |
@@ -688,12 +766,16 @@ When `base_url` is `null`, the OpenAI SDK uses its default endpoint (`https://ap
 
 Two more are not APIs. `call_llm()` refuses them, `--provider` does not accept them, and the dashboard dropdowns do not list them; a screen reaches them through `src/llm_mechanisms.py`. Today that is the reader's Retranslate ([`READER_RETRANSLATE.md`](READER_RETRANSLATE.md#model-flexibility)).
 
-- **`"headless"`** -- One subscription CLI process per call, through the same launcher as the harness waves (env scrub, login preflight). `cli` is `"claude"` or `"cursor"`. A model `id` is passed to the CLI's `--model` as written, so a Cursor id carries its effort (`grok-4.7-medium`); a Claude model may add `"effort"` (`low` | `medium` | `high` | `xhigh`), sent as `--effort`. Without it the CLI runs its own default, which is the high band. No pricing: the call bills the subscription.
+- **`"headless"`** -- One subscription CLI process per call, through the same launcher as the harness waves (env scrub, login preflight). `cli` is `"claude"`, `"cursor"` or `"codex"`. A model `id` is passed to the CLI's `--model` (`-m` on Codex) as written, so a Cursor id carries its effort (`grok-4.7-medium`); a Claude or Codex model may add `"effort"` (`low` | `medium` | `high` | `xhigh`), sent as `--effort` on Claude and as `-c model_reasoning_effort` on Codex. Without it the CLI runs its own default: the high band on Claude, and on Codex the level its own config or the model's default gives. No pricing: the call bills the subscription.
 - **`"local"`** -- A `llama-server` on the LAN, at `base_url` (ending in `/v1`), with the bearer key in `api_key_env_var` (`LOCAL_LLM_KEY`). Only a model the server already has loaded is used; nothing here loads or swaps one. A model's `id` is the name it is served under, and `"aliases"` lists other names the same model may be served as. `timeout_seconds` bounds one answer (default 120).
 
 ```json
 { "id": "claude-headless", "name": "Claude Code (subscription)", "type": "headless", "cli": "claude",
   "models": [ { "id": "claude-sonnet-5-5", "name": "Sonnet 5.5 (headless)", "effort": "medium" } ] },
+{ "id": "cursor-headless", "name": "Cursor Agent (subscription)", "type": "headless", "cli": "cursor",
+  "models": [ { "id": "gpt-5.6-terra-medium", "name": "GPT-5.6 Terra (Cursor)" } ] },
+{ "id": "codex-headless", "name": "Codex (ChatGPT subscription)", "type": "headless", "cli": "codex",
+  "models": [ { "id": "gpt-5.6-terra", "name": "GPT-5.6 Terra (Codex)", "effort": "medium" } ] },
 { "id": "local", "name": "Local (llama-server)", "type": "local",
   "base_url": "http://localhost:8080/v1", "api_key_env_var": "LOCAL_LLM_KEY", "timeout_seconds": 120,
   "models": [ { "id": "gemma-4-31b", "name": "Gemma 4 31B (local)", "aliases": ["gemma31"] } ] }

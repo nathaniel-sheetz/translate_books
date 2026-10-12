@@ -57,7 +57,8 @@ DEFAULTS: dict[str, object] = {
     # Stored as bool when the user sets --always-images / --no-always-images at
     # setup, or `config-set --key always_include_image_instructions`.
     "always_include_image_instructions": None,
-    # Which CLI family the headless backend drives (``claude -p`` vs ``cursor-agent``).
+    # Which CLI family the headless backend drives (``claude -p``, ``cursor-agent``
+    # or ``codex exec``).
     # Backend stays ``headless``; this only selects the launcher profile.
     #
     # ``auto`` (the default) means "follow whichever agent is driving" — see
@@ -68,7 +69,9 @@ DEFAULTS: dict[str, object] = {
     # book that had never chosen — and a Cursor operator therefore got a
     # Claude-shaped worker, baseline and effort with no way for the harness to
     # know better (2026-08-11 friction logs). Books that DO carry a literal
-    # ``claude``/``cursor`` keep it and outrank detection.
+    # ``claude``/``cursor``/``codex`` keep it and outrank detection. No host
+    # implies ``codex``, so that family is reached by a pin, a flag,
+    # ``automation.default_cli`` or the missing-binary fallback.
     #
     # Never read this raw when you need a launcher profile — ``auto`` is not one.
     # Use :func:`resolved_headless_cli`, which never returns it.
@@ -96,10 +99,11 @@ DEFAULTS: dict[str, object] = {
 # Headless launcher families, plus the ``auto`` sentinel that defers to the
 # detected host. ``auto`` is a *config* value only — it is never a launcher
 # profile, so it must not reach ``headless._normalize_cli``.
-HEADLESS_CLIS = ("claude", "cursor")
+HEADLESS_CLIS = ("claude", "cursor", "codex")
 CLI_VALUES = frozenset(HEADLESS_CLIS) | {"auto"}
 
 # Claude ``--effort`` levels the CLI accepts, plus the two harness sentinels.
+# Codex takes the same four words as ``model_reasoning_effort``.
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 # "auto" -> per-command table below; "default" -> pass no --effort at all.
 EFFORT_VALUES = frozenset(EFFORT_LEVELS) | {"auto", "default"}
@@ -146,9 +150,14 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
 # effort sweep has been run, so inventing different numbers would be fiction.
 # It exists as the seam a future Cursor measurement lands in without having to
 # re-thread a CLI argument through every caller first.
+#
+# The codex row is the same copy for the same reason. Unlike Cursor it is in
+# use: Codex takes a level on argv as Claude does, so an un-pinned Codex wave
+# runs at the level this row names.
 CLI_COMMAND_EFFORT_DEFAULTS: dict[str, dict[str, str | None]] = {
     "claude": COMMAND_EFFORT_DEFAULTS,
     "cursor": dict(COMMAND_EFFORT_DEFAULTS),
+    "codex": dict(COMMAND_EFFORT_DEFAULTS),
 }
 
 
@@ -167,7 +176,7 @@ def command_effort_default(command: str, *, cli: str | None = None) -> str | Non
 def resolved_headless_cli(
     cfg: Mapping[str, object] | None = None, override: str | None = None
 ) -> str:
-    """The launcher family to actually drive: ``claude`` or ``cursor``, never ``auto``.
+    """The launcher family to actually drive: one of ``HEADLESS_CLIS``, never ``auto``.
 
     ``override`` (a per-run ``--cli``) wins, then ``cfg["headless_cli"]`` when it
     names a real family, else ``claude``.
@@ -578,6 +587,8 @@ def resolve_headless_argv(
     effort from the model bracket instead, so on that path use the *level* this
     returns and ignore the argv — or, better, go through
     :func:`src.harness.profile.resolve_profile`, which picks the channel for you.
+    A Codex wave reads the level out of this argv and sends it as a config
+    override; the rest of the argv is not passed on.
 
     Each wave type reads its own key, so pinning judges never moves translate.
     ``"auto"`` defers to the table; ``"default"`` and ``None`` both mean *emit no

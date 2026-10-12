@@ -102,6 +102,14 @@ repo, so the new family *must* go through `run_headless_wave` — a direct
 
 Recipe used for Cursor: `headless_cli=cursor` → `cursor-agent -p --trust --mode ask`.
 
+Recipe used for Codex (2026-10-11): `headless_cli=codex` → `codex exec … --json`. Two
+things it needed beyond the steps above. Its output is an event stream, not an envelope,
+so `_extract_result` and `usage_from_codex_events` parse it. And its effort is neither a
+flag nor part of the model id, so the launcher reads the level out of the Claude argv
+every fan-out already composes and sends it as `-c model_reasoning_effort=`. Probe the
+real CLI for both before writing either parser (`scripts/prefix_probe.py` arms `X0`–`X6`);
+the token accounting ran the opposite way from the other two families.
+
 ## 4. New review type (judge)
 
 Lives in the **judge-review** skill, not here. Cross-link; do not duplicate.

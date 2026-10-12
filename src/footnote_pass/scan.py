@@ -477,7 +477,7 @@ _FANOUT_SCHEMA = {
     "skipped": "chapter ids that already had a non-empty draft",
     "worker_model": "model tier used for the headless CLI",
     "concurrency": "max parallel headless CLI processes",
-    "cli": "headless CLI used (claude|cursor)",
+    "cli": "headless CLI used (claude|cursor|codex)",
     "source_text": "which languages the prepared bodies carry ('es'|'both'), echoed "
     "from the manifest — fanout re-renders nothing, it ships what prepare wrote",
     "effective": "what the wave ran as, with provenance per field — the same "

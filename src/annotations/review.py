@@ -385,7 +385,7 @@ def prepare(
             "For each manifest entry spawn one `annotation-worker` subagent pinned to "
             "worker_model (Task tool, subagent_type=annotation-worker) that reads "
             "prompt_path and writes ONLY the JSON verdict to draft_path, in waves of "
-            "batch_size — or run `fanout` for a headless CLI wave (claude|cursor). "
+            "batch_size — or run `fanout` for a headless CLI wave (claude|cursor|codex). "
             "Then run `commit`. Nothing here spends or calls an API."
             if entries
             else "Nothing to review — no eligible annotations in scope."
@@ -405,7 +405,7 @@ _FANOUT_SCHEMA = {
     "worker_model": "model tier used for the headless CLI",
     "concurrency": "max parallel headless CLI processes per wave",
     "cwd": "neutral empty cwd used for the workers",
-    "cli": "headless CLI used (claude|cursor)",
+    "cli": "headless CLI used (claude|cursor|codex)",
     "warning": "optional non-fatal notice (e.g. Cursor paired with a Claude model alias)",
     "counts": "{wrote, failed, skipped, todo}",
     "usage": "what the wave actually consumed: {jobs, input, output, cache_creation, "

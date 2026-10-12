@@ -5,7 +5,7 @@ Three ways to reach a model, behind one call.
 
 - **api** (``anthropic``, ``openai-compatible``): a metered request through
   :func:`src.api_translator.call_llm`.
-- **headless** (``type: "headless"``, ``cli: "claude" | "cursor"``): one
+- **headless** (``type: "headless"``, ``cli: "claude" | "cursor" | "codex"``): one
   subscription CLI process through :func:`src.harness.headless.run_headless_wave`,
   which keeps the credential scrub and the fail-closed login preflight.
 - **local** (``type: "local"``): the LAN ``llama-server`` through
@@ -60,8 +60,8 @@ NOT_LOADED = "not_loaded"
 # ``--system-prompt-file`` gets the CLI's default instead: about 6.5k characters
 # of coding-assistant instructions, a third of them describing a memory
 # directory, on a call whose own prompt is often under 700 tokens. Empty turns
-# this off. Claude only: Cursor has no such flag, so there it would be folded
-# into the prompt and add tokens rather than replace any.
+# this off. Claude only: Cursor and Codex have no such flag, so there it would
+# be folded into the prompt and add tokens rather than replace any.
 HEADLESS_SYSTEM_PROMPT = (
     "You complete one self-contained text task. Follow the instructions in the "
     "user message exactly and reply with only what they ask for."
@@ -235,6 +235,8 @@ def _complete_headless(
     effort = entry.get("effort")
     # ``--effort`` is Claude argv. A Cursor model carries its effort in the id
     # (``grok-4.7-medium``), so there the catalog id is the whole instruction.
+    # Codex is told through ``effort=`` below, which the launcher sends as a
+    # config override.
     flags = ["--effort", str(effort)] if effort and cli == "claude" else []
     with tempfile.TemporaryDirectory(prefix="llm-headless-") as tmp:
         out = Path(tmp) / "reply.txt"

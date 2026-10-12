@@ -412,6 +412,33 @@ def test_fanout_passes_the_preamble_as_a_system_prompt(project, profile_file):
     assert seen[0]["input_text"].startswith("CHAPTER: ")
 
 
+def test_fanout_on_codex_folds_the_preamble_in_and_unwraps_the_answer(project, profile_file):
+    """Codex has no --system-prompt-file, and its answer arrives inside an event stream."""
+    _prepare(project, profile_file)
+    answer = json.dumps({"chapter_id": "x", "candidates": []})
+    stream = "\n".join(json.dumps(event) for event in (
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "item.completed",
+         "item": {"id": "item_0", "type": "agent_message", "text": answer}},
+        {"type": "turn.completed", "usage": {"input_tokens": 12000, "output_tokens": 90}},
+    ))
+    seen = []
+
+    def runner(cmd, *, input_text, cwd, **kwargs):
+        seen.append({"cmd": cmd, "input_text": input_text})
+        return 0, stream, "Reading prompt from stdin..."
+
+    out = fp_scan.scan_fanout(project, cli="codex", runner=runner, concurrency=1)
+    assert out["counts"]["wrote"] == 2
+    assert seen[0]["cmd"][:2] == ["codex", "exec"]
+    assert "--system-prompt-file" not in seen[0]["cmd"]
+    # The whole prompt goes on stdin, so the chapter body is no longer its start.
+    assert "CHAPTER: " in seen[0]["input_text"]
+    assert not seen[0]["input_text"].startswith("CHAPTER: ")
+    draft = footnotes_dir(project) / "chapter_01.scan.draft.json"
+    assert json.loads(draft.read_text(encoding="utf-8")) == json.loads(answer)
+
+
 def test_fanout_skips_chapters_that_already_have_a_draft(project, profile_file):
     _prepare(project, profile_file)
     _draft(project, "chapter_01", [])

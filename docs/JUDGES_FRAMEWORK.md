@@ -65,7 +65,7 @@ A judge runs one of two interchangeable ways (the same split as translate-harnes
   before spawning N workers, not dollars.
 - **Headless fan-out (opt-in)** — `run_judges.py fanout` after `prepare`, then
   `commit`. Same draft/commit seam as Task workers, but the harness shells out
-  to a logged-in CLI (`claude -p` or `cursor-agent -p`) with `--cli {claude,cursor}`.
+  to a logged-in CLI (`claude -p`, `cursor-agent -p` or `codex exec`) with `--cli {claude,cursor,codex}`.
   Cursor uses subscription auth (`cursor-agent login`); no `CURSOR_API_KEY` — now
   enforced by the launcher's env scrub rather than by convention. The shell-out
   runs with every metered credential stripped from the child environment, and an

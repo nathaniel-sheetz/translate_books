@@ -12,8 +12,11 @@ per-test tmp file rather than polluting the real run log.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
+from src.harness import headless
 from src.harness.host import HOST_OVERRIDE_ENV, HOST_UNKNOWN
 from src.utils import prompt_logger, run_logger
 
@@ -29,6 +32,25 @@ def _neutral_host(monkeypatch):
     developer's terminal. Tests that care about a host set the variable themselves.
     """
     monkeypatch.setenv(HOST_OVERRIDE_ENV, HOST_UNKNOWN)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_home(tmp_path, monkeypatch):
+    """Send an unset ``CODEX_HOME`` to an empty tmp directory, never ``~/.codex``.
+
+    The Codex preflight reads ``.env`` there, and the model and config readers
+    fall back to it. Without this a metered key in the developer's own Codex home
+    would fail every test that reaches the preflight. A test that sets
+    ``CODEX_HOME``, in the process or in the ``env`` it passes, still gets it.
+    """
+    fallback = tmp_path / "codex-home"
+    real = headless.codex_home
+
+    def codex_home(env=None):
+        source = os.environ if env is None else env
+        return real(env) if source.get("CODEX_HOME") else fallback
+
+    monkeypatch.setattr(headless, "codex_home", codex_home)
 
 
 @pytest.fixture(autouse=True)

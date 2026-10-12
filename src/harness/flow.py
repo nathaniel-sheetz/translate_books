@@ -1657,7 +1657,7 @@ def difficulty(project: str) -> dict:
 #                          Task workers: read prompt_path -> write draft_path
 #                          Headless:     CLI -p body + --system-prompt-file preamble
 #                                        (claude; cursor folds preamble into stdin)
-#   translate-fanout  ─► run one wave of headless CLI workers (claude|cursor; opt-in)
+#   translate-fanout  ─► run one wave of headless CLI workers (claude|cursor|codex; opt-in)
 #   translate-commit  ─► guard each draft -> apply_translation + save_chunk
 #        (idempotent)      + a provenance log per chunk; reports failed/missing
 #
@@ -2142,7 +2142,7 @@ def translate_prepare(
             "For each manifest entry, either (1) spawn a Task worker pinned to "
             "worker_model that reads prompt_path and writes ONLY the translated "
             "prose to draft_path, or (2) run `translate-fanout` for the headless "
-            "CLI path (claude|cursor; uses preamble_path/body_path when present). Then run "
+            "CLI path (claude|cursor|codex; uses preamble_path/body_path when present). Then run "
             "`translate-commit`. Nothing here spends or calls an API."
             if entries else
             "Nothing to translate — all chunks in scope already have translations."
@@ -2499,8 +2499,8 @@ def translate_fanout(
         return {"error": f"invalid concurrency {concurrency!r}; must be >= 1", "wrote": []}
 
     # Skip entries that already have a non-empty draft (idempotent / resume).
-    # Cursor cannot use --system-prompt-file — skip the cache split entirely.
-    use_cache_split = cli_name != "cursor"
+    # Only Claude has --system-prompt-file — skip the cache split elsewhere.
+    use_cache_split = cli_name == "claude"
     skipped: list[str] = []
     ready: list[dict] = []
     pre_failed: list[dict] = []
@@ -4337,7 +4337,7 @@ _CONFIG_SET_COERCE: dict[str, dict[str, object]] = {
 _CONFIG_SET_KEYS = {
     "backend": frozenset({"api", "subagent", "headless"}),
     "footnotes_decision": frozenset({"keep", "drop", "none"}),
-    # `auto` un-pins the book back to host detection; claude/cursor pin it, and a
+    # `auto` un-pins the book back to host detection; a family name pins it, and a
     # pin always outranks detection.
     "headless_cli": frozenset(state.CLI_VALUES),
     "headless_prompt_cache": frozenset(state.CACHE_VALUES),
@@ -5127,7 +5127,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "worker_model": "model passed to the headless CLI --model",
         "concurrency": "wave width used",
         "cwd": "neutral cwd used for headless CLI (avoids project CLAUDE.md)",
-        "cli": "headless CLI used (claude|cursor)",
+        "cli": "headless CLI used (claude|cursor|codex)",
         "warning": "optional non-fatal notice (e.g. Cursor Claude-model alias)",
         "counts": "dict {wrote, failed, skipped, todo}",
         "instructions": "what to do next (translate-commit, or re-fanout failed)",
@@ -5350,8 +5350,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "backend": "persisted translation backend (api | subagent | headless), or null if unset",
         "footnotes_decision": "persisted footnotes choice (keep | drop | none), or null if unset",
         "address_map_decision": "address-map beat outcome (built | skipped | no_dialogue), or null if not yet offered",
-        "headless_cli": "resolved headless launcher family (claude | cursor); never the auto sentinel",
-        "headless_cli_config": "raw configured value (auto | claude | cursor); auto = follow the detected host",
+        "headless_cli": "resolved headless launcher family (claude | cursor | codex); never the auto sentinel",
+        "headless_cli_config": "raw configured value (auto | claude | cursor | codex); auto = follow the detected host",
         "headless_cli_source": "where headless_cli came from (config | host:<host> | fallback)",
         "headless_profile": "resolved cli/worker_model/effort/effort_channel/baseline with provenance, for translate waves",
         "headless_effort": (

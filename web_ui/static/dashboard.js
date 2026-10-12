@@ -4252,7 +4252,10 @@
         var level = p.effort || 'none';
         var source = ' (' + (p.effort_source || '?') + ')';
         if (p.effort_channel === 'argv') {
-            return 'Resolved: ' + level + ' — passed as --effort' + source + '.';
+            // Codex has no --effort; the level goes on argv as a config override.
+            return 'Resolved: ' + level + ' — passed as ' +
+                (p.cli === 'codex' ? '-c model_reasoning_effort' : '--effort') +
+                source + '.';
         }
         if (p.effort_channel === 'model_bracket') {
             return 'Resolved: ' + level + ' — carried in the model bracket ' +
@@ -4310,8 +4313,8 @@
 
         document.getElementById('judges-effort-channel').textContent = judgesEffortHint(p);
 
-        // Claude-only: cursor-agent has no cache-TTL lever, so the control is
-        // hidden rather than shown and quietly ignored.
+        // Claude-only: neither cursor-agent nor codex has a cache-TTL lever, so
+        // the control is hidden rather than shown and quietly ignored.
         document.getElementById('judges-claude-only').style.display =
             p.prompt_cache_supported ? '' : 'none';
         document.getElementById('judges-cursor-cache-note').style.display =
@@ -4400,7 +4403,8 @@
                  eff.worker_model_resolved !== eff.worker_model ?
                     ' → ' + eff.worker_model_resolved + ' (last run)' : '')],
             ['Effort', (eff.effort || 'none') + ' · ' +
-                (eff.effort_channel === 'argv' ? '--effort' :
+                (eff.effort_channel === 'argv' ?
+                    (eff.cli === 'codex' ? '-c model_reasoning_effort' : '--effort') :
                  eff.effort_channel === 'model_bracket' ? 'model bracket' :
                  eff.effort_channel === 'model_id' ? 'model id' : 'not carried') +
                 ' (' + (eff.effort_source || '?') + ')']

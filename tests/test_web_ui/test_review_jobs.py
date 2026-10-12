@@ -606,7 +606,8 @@ def test_judges_profile_relays_the_resolved_payload_and_spawns_nothing(
     expected = resolve_profile(project, command="judges").to_payload()
     for key, value in expected.items():
         assert body[key] == value, key
-    assert body["binaries"] == {"claude": True, "cursor": False}
+    assert body["binaries"] == {"claude": True, "cursor": False, "codex": False}
+    assert body["cli_choices"] == ["claude", "cursor", "codex"]
     assert body["default_backend"] == "headless"
     assert body["prompt_cache_supported"] is True
     assert "sonnet" in body["worker_model_suggestions"]
@@ -1349,3 +1350,25 @@ def test_the_default_judge_set_leaves_the_editorial_judge_out(client, project, m
     body = rv.get_json()
     assert "editorial" not in body["judges"]
     assert body["adjudication_cost"] == 0.0
+
+
+def test_judges_profile_resolves_codex_when_asked_for_it(client, project, monkeypatch):
+    """Codex is a third family in the modal: its own model list, baseline and no cache lever."""
+    _no_spawn(monkeypatch)
+    _installed(monkeypatch, "claude", "codex")
+    import src.harness.headless as headless
+    import src.harness.profile as profile
+
+    monkeypatch.setattr(profile, "default_worker_model", lambda cli: "gpt-6-sol")
+    monkeypatch.setattr(headless, "codex_known_models", lambda *a, **k: ["gpt-5.6-terra"])
+    monkeypatch.setattr(headless, "codex_default_model", lambda *a, **k: "gpt-6-sol")
+
+    rv = client.get("/api/project/jobproj/judges/profile?cli=codex")
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert (body["cli"], body["cli_source"]) == ("codex", "cli")
+    assert (body["worker_model"], body["worker_model_source"]) == ("gpt-6-sol", "codex-config")
+    assert (body["effort"], body["effort_channel"]) == ("medium", "argv")
+    assert body["binaries"]["codex"] is True
+    assert body["prompt_cache_supported"] is False
+    assert body["worker_model_suggestions"] == ["gpt-5.6-terra", "gpt-6-sol"]

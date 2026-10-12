@@ -45,6 +45,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from src.actions import registry  # noqa: E402
 from src.actions import scope as ascope  # noqa: E402
 from src.harness import locks  # noqa: E402
+from src.harness import state as hstate  # noqa: E402
 
 _SCHEMA = {
     "scanned_at": "ISO timestamp of the scan",
@@ -223,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     scan.add_argument("--project", help="limit to one book by id")
     scan.add_argument(
-        "--default-cli", choices=["claude", "cursor"],
+        "--default-cli", choices=list(hstate.HEADLESS_CLIS),
         help="preview a different automation.default_cli without editing app_config.json",
     )
     scan.add_argument("--json", action="store_true", help="print the raw JSON object")

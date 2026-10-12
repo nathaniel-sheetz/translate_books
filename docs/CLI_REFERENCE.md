@@ -525,7 +525,7 @@ python scripts/daily_pass.py --max-books 3 --no-apply
 
 Per in-scope book, under that book's cross-process lock: `prepare(keep_drafts=True)`
 → `fanout` → `commit` → auto-apply the safe subset. Writes a digest to
-`reports/nightly/` and a row to `logs/nightly.jsonl`. `--cli` forces a family past
+`reports/nightly/` and a row to `logs/nightly.jsonl`. `--cli` (`claude`, `cursor` or `codex`) forces a family past
 every book's pin and is for debugging only; the scheduled task never passes it.
 Full reference: [`NIGHTLY_PASS.md`](NIGHTLY_PASS.md).
 

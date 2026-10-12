@@ -1096,6 +1096,89 @@ def test_fanout_estimate_on_cursor_reports_the_bracket_effort(tmp_path):
     assert "--strict-mcp-config" not in est["argv"]
 
 
+def _as_codex_stream(answer: str) -> str:
+    """What `codex exec --json` prints around one answer."""
+    return "\n".join(json.dumps(event) for event in (
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": answer}},
+        {"type": "turn.completed", "usage": {"input_tokens": 12000, "cached_input_tokens": 4000,
+                                             "output_tokens": 90, "reasoning_output_tokens": 40}},
+    ))
+
+
+def test_fanout_codex_sends_the_full_prompt_and_commits_the_verdict(tmp_path):
+    """Codex has no system-prompt flag, and its answer arrives inside an event stream."""
+    project, cid = _project_with_chunk(tmp_path)
+    prep = subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}", cli="codex", worker_model="gpt-5.6-terra"
+    )
+    full_prompt = Path(prep["manifest"][0]["prompt_path"]).read_text(encoding="utf-8")
+
+    seen: list[tuple[list[str], str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append((list(cmd), input_text))
+        return 0, _as_codex_stream(_GOOD_VERDICT), "Reading prompt from stdin..."
+
+    fan = subagent.fanout(project, runner=fake_runner)
+    assert fan["counts"]["wrote"] == 1 and fan["cli"] == "codex"
+    cmd, stdin = seen[0]
+    assert cmd[:2] == ["codex", "exec"] and cmd[-2:] == ["-m", "gpt-5.6-terra"]
+    assert "model_reasoning_effort=medium" in cmd
+    assert "--system-prompt-file" not in cmd and "--effort" not in cmd
+    assert stdin == full_prompt
+    assert fan["usage"]["cache_read"] == 4000 and fan["usage"]["input"] == 8000
+    out = subagent.commit(project, persist=False)
+    assert out["counts"]["committed"] == 1
+
+
+def test_fanout_codex_warns_on_a_manifest_prepared_for_claude(tmp_path, capsys):
+    """A manifest carries the other family's model; Codex is told so, not handed it quietly."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}", worker_model="sonnet")
+
+    seen: list[list[str]] = []
+
+    def fake_runner(cmd, *, input_text, cwd):
+        seen.append(list(cmd))
+        return 0, _as_codex_stream(_GOOD_VERDICT), ""
+
+    fan = subagent.fanout(project, cli="codex", runner=fake_runner)
+    assert fan["cli"] == "codex"
+    assert "headless_cli=codex" in fan["warning"]
+    assert "headless_cli=codex" in capsys.readouterr().err
+    assert seen[0][:2] == ["codex", "exec"] and seen[0][-2:] == ["-m", "sonnet"]
+
+
+def test_fanout_estimate_on_codex_quotes_its_own_argv_and_baseline(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(
+        project, ["dialogue"], f"chunk:{cid}", cli="codex", worker_model="gpt-5.6-terra"
+    )
+
+    def exploding_runner(*args, **kwargs):
+        raise AssertionError("--estimate must not spawn")
+
+    est = subagent.fanout(project, estimate=True, runner=exploding_runner)["estimate"]
+    assert (est["effort"], est["effort_channel"]) == ("medium", "argv")
+    assert est["baseline_tokens"] == usage.DEFAULT_BASELINE_TOKENS["codex"]
+    assert est["projected_tokens"] == (
+        est["prompt_tokens"] + est["jobs"] * usage.DEFAULT_BASELINE_TOKENS["codex"]
+    )
+    assert est["argv"][:2] == ["codex", "exec"]
+    assert "model_reasoning_effort=medium" in est["argv"]
+    assert "--effort" not in est["argv"] and "--strict-mcp-config" not in est["argv"]
+
+    ran: list[list[str]] = []
+
+    def runner(cmd, *, input_text, cwd):
+        ran.append(list(cmd))
+        return 1, "", "stop here"
+
+    subagent.fanout(project, runner=runner)
+    assert ran and ran[0] == est["argv"]
+
+
 def test_fanout_estimate_quotes_the_argv_the_wave_will_run(tmp_path):
     """The wave adds ``--strict-mcp-config`` to every Claude job itself, so an
     estimate built from the book's flags alone quoted an argv that never ran."""
