@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.71.0.0] - 2026-10-11
+
+### Changed
+- **Every `claude -p` job runs with `--strict-mcp-config`.** Since CLI 2.1.283 the account's claude.ai connectors rode on every headless job, about 3.7k tokens of tool definitions and instructions that `--tools ""` no longer kept out. With the flag none load: 4,378 → 701 billed input on an 87-token prompt (Sonnet 5.5, CLI 2.1.296). It shows in each usage row's `flags`; setting it in `headless_extra_flags` changes nothing.
+- **A Claude retranslate call sends a short system prompt of its own** in place of the CLI's default coding-assistant one. With the flag above, 7,481 → 1,707 billed on a 707-token prompt.
+- **Each Cursor worker on Windows runs under an empty home inside its slot.** `cursor-agent` lists every skill under the home directory in each job's prefix, 184 entries on this machine, none of which a translation job can use. Under its own home a worker lists the CLI's 14 built-ins: 15,671 → 11,026 billed input per job (Grok 4.7 medium). The login is read from `%APPDATA%` and is unaffected, and the auth and `--model` preflights run under the same kind of home as the workers.
+- **`HEADLESS_NEUTRAL_HOME=0` turns the neutral home off.** A worker that cannot have one (no seeded slot, the directory cannot be made, the path would cross 260 characters) runs as before, with one warning per wave.
+- The gate's baseline constants are left as measured until real waves have logged rows under the new prefix, so its quote runs high in the meantime.
+
+### Added
+- **Usage rows say which home a Cursor job ran under.** A row carries `neutral_home: true` when it applied and the rollup carries `neutral_home: "n/N"`; rows with and without it are about 4.6k apart on overhead.
+- **`scripts/prefix_probe.py`** re-runs any of the measured arms and reads the prefix's make-up back off disk.
+
+### Fixed (found in pre-ship review)
+- **A neutral-home warning and a slot-seed warning silenced each other.** They shared one once-per-wave latch, so a wave whose workers kept the operator's home never named the slot file that failed to seed. Each kind warns once per wave.
+- **A wave launched from an environment with no `APPDATA` was refused as not logged in.** The CLI then looks for its login under the home, which had moved. The worker is given the `AppData\Roaming` of the real home.
+- **The dashboard's preflight checked the login under the operator's home,** not the kind the workers get, so a login that did not survive the move would have passed the estimate and failed after `prepare`. Both of its probes run under a worker's home, and it checks the slot root's length first, as the wave does.
+- **`fanout --estimate` quoted a Claude argv without `--strict-mcp-config`.** It quotes the argv the wave runs.
+- **`prefix_probe.py` counted rows from an earlier run of the same arm that day** in its median. It counts its own.
+- A failure while making a worker's home could leave its slot taken for the rest of the process.
+
 ## [0.70.0.0] - 2026-10-10
 
 ### Added
