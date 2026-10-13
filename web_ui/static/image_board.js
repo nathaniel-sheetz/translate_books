@@ -683,7 +683,11 @@
        has it, and after that what the server says. */
     function designOf(row) {
         if (row.image in designWanted) return designWanted[row.image];
-        return (row.workspace && row.workspace.design) || null;
+        var said = (row.workspace && row.workspace.design) || null;
+        /* An approval that is in the book says nothing about the proof made
+           since: the buttons start over, and the note stays. */
+        if (said && said.spent) return { draft: null, approve: false, note: said.note };
+        return said;
     }
 
     function syncDesign(card, row) {

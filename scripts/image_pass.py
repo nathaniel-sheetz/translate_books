@@ -340,7 +340,11 @@ def _cover_overrides(args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, field)
         if value is not None:
             # `|` is a line break: "Edmund Spenser|Jeanie Lang" is two lines.
-            overrides[field] = value.replace("|", chr(10)) or None
+            # An empty one forgets the field, except the author: with none in
+            # the spec the project's is drawn, so "no author" is kept as "".
+            # `--unset author` goes back to the project's.
+            cleared = "" if field == "author" else None
+            overrides[field] = value.replace("|", chr(10)) or cleared
     if args.title_lines is not None:
         lines = [part.strip() for part in args.title_lines.split("|") if part.strip()]
         overrides["title_lines"] = lines or None
@@ -366,8 +370,10 @@ def _cover_try(text: str) -> dict[str, Any]:
     colours, and anything else is what ``--set`` takes.
     """
     overrides: dict[str, Any] = {}
-    # A comma inside brackets belongs to the value: `title.at=[0.03,0.02]`.
-    for part in re.split(r",(?![^\[]*\])", text):
+    # A comma starts a setting only where a `name=` follows it. One inside
+    # brackets (`title.at=[0.03,0.02]`) or a title (`title=Hola, mundo`) is
+    # part of the value.
+    for part in re.split(r",(?=\s*[\w.]+\s*=)(?![^\[]*\])", text):
         if not part.strip():
             continue
         name, sep, value = part.partition("=")
@@ -414,23 +420,43 @@ def _cmd_cover_compose(args: argparse.Namespace) -> int:
                 "lands only a cover they approved there. Without --from-board, --apply "
                 "is on their word in the conversation, as before."
             )
-        if from_draft is None:
+        # What they chose and has been done is not chosen again: going back to
+        # a draft that is already in the book would undo every proof since.
+        if not design["waiting"]:
+            _die(
+                "nothing is waiting on the board for the cover: what the user chose "
+                "there has been done. A proof composed since is one they have not "
+                "chosen or approved yet"
+            )
+        if args.apply and "not_applied" not in design["waiting"]:
+            _die(
+                "the draft the user approved on the board is already the book's "
+                "cover: there is nothing to apply. Show them the proof as it "
+                "stands and have them approve that."
+            )
+        outstanding = {"draft_not_adopted", "not_applied"} & set(design["waiting"])
+        if from_draft is None and outstanding:
             from_draft = design["draft"]
         if args.apply:
             approved_id = design["id"]
-    out = ip_cover.compose(
-        project_dir,
-        _cover_overrides(args),
-        art=Path(args.art) if args.art else None,
-        cover_is_art=args.cover_is_art,
-        swatches=args.swatches,
-        tries=[_cover_try(text) for text in args.tries or []] or None,
-        from_draft=from_draft,
-        approved_id=approved_id,
-        apply=args.apply,
-        dry_run=args.dry_run,
-        template=Path(args.template) if args.template else None,
-    )
+    overrides = _cover_overrides(args)
+    tries = [_cover_try(text) for text in args.tries or []] or None
+    try:
+        out = ip_cover.compose(
+            project_dir,
+            overrides,
+            art=Path(args.art) if args.art else None,
+            cover_is_art=args.cover_is_art,
+            swatches=args.swatches,
+            tries=tries,
+            from_draft=from_draft,
+            approved_id=approved_id,
+            apply=args.apply,
+            dry_run=args.dry_run,
+            template=Path(args.template) if args.template else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - one JSON error, never a traceback
+        _die(f"cover-compose failed: {type(exc).__name__}: {exc}")
     if design is not None:
         out["from_board"] = {
             field: design[field] for field in ("draft", "approve", "note", "waiting")
@@ -567,7 +593,7 @@ _COMPOSITE_SCHEMA = {
 }
 
 _COVER_COMPOSE_SCHEMA = {
-    "status": "'ok' | 'error' (nothing was written: read error)",
+    "status": "'ok' | 'error' (read error; images/ was not touched)",
     "dry_run": "true when no file was written",
     "applied": "true when images/cover.* is now the composed cover",
     "proof": "cover/proof.png: the composed cover. Read it before showing it",
@@ -641,10 +667,12 @@ _BOARD_SCHEMA = {
     "{art, colour, layout, book} with each one's state, proof (cover/proof.png, "
     "or null), proof_draft, book_draft, drafts (how many are kept), design}. "
     "design is what the user chose there, or null: {draft, approve, note, "
-    "waiting, stale, problems}. waiting: draft_not_adopted (run `cover-compose "
-    "--from-board`) | not_applied (they approved it: add --apply) | note_unread "
-    "(read note and act on it; the next proof clears it). stale: the draft is "
-    "gone or was approved on other art, and they have to choose again",
+    "waiting, spent, stale, problems}. waiting: draft_not_adopted (run "
+    "`cover-compose --from-board`) | not_applied (they approved it: add --apply) "
+    "| note_unread (read note and act on it; the next proof clears it). spent: "
+    "the draft they approved is in the book and a different cover has been "
+    "composed since, which they have not approved. stale: the draft is gone or "
+    "was approved on other art, and they have to choose again",
     "untriaged": "images nobody has recorded a verdict for",
     "proposed": "images that want a job and have none: {image, verdict, by}. by is "
     "'user' when the verdict is one they set on the page, over the triage or in "
@@ -888,7 +916,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="a line under the title in its own, smaller size (--set "
         "subtitle_size=0.04); an empty string takes it off again",
     )
-    p_cover.add_argument("--author", help="the author line; `|` between two authors")
+    p_cover.add_argument("--author", help='the author line; `|` between two authors, "" for none')
     p_cover.add_argument("--translator", help="the translator's name")
     p_cover.add_argument(
         "--color",

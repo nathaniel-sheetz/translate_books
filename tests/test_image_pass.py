@@ -1977,7 +1977,7 @@ def test_the_title_fits_inside_whatever_shape_the_band_is(tmp_path: Path):
     assert roomy["vars"]["title_size"] == 0.06
     # The same title under a band that ends higher on the left: no room at that size.
     _design, tight = _solved(template, (400, 600), title=title, vars={"band_left": 0.2})
-    assert tight["status"] != "ok" or tight["vars"]["title_size"] == 0.045
+    assert tight["status"] == "ok" and tight["vars"]["title_size"] == 0.045
 
 
 def test_a_layer_added_to_the_template_is_drawn_and_a_spec_can_change_it(tmp_path: Path):
@@ -2050,7 +2050,7 @@ def test_a_composed_cover_lands_behind_the_ledger_and_is_never_drawn_on_twice(
     assert row["compose"]["lines"]["title"] == ["Geografía del", "hogar"]
     report = ip_apply.verify(project)
     assert not [f for f in report["broken"] + report["warned"] if f["image"] == "cover.jpg"]
-    assert _board_row(project, "cover.jpg")["stage"]
+    assert _board_row(project, "cover.jpg")["stage"] == "replaced"
 
     # Again, with no --art: it starts from the kept art, not from its own output.
     again = ip_cover.compose(project, {"title": "Geografía"}, apply=True, template=template)
@@ -2493,3 +2493,181 @@ def test_cli_cover_compose_tries_goes_back_and_reads_the_board(
     assert code == 0 and back["band_color"] == "#703010"
     code, board, _ = _run(capsys, ["board", "--project", str(project)])
     assert board["cover"]["proof_draft"] == back["draft"]
+
+
+def test_an_approval_that_is_in_the_book_is_not_taken_a_second_time(
+    project: Path, capsys, tmp_path: Path
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    common = ["cover-compose", "--project", str(project), "--template", str(template)]
+    code, first, _ = _run(capsys, common + [
+        "--art", str(art), "--title", "Geografía", "--color", "band=#703010",
+    ])
+    ip_feedback.save_image(project, "cover.jpg", design={"draft": first["draft"], "approve": True})
+    code, landed, _ = _run(capsys, common + ["--from-board", "--apply"])
+    assert code == 0 and landed["applied"], landed
+    assert not ip_board.cover_design(project)["spent"]
+
+    # A proof made since: the approval was of the cover in the book, not of this.
+    code, newer, _ = _run(capsys, common + ["--title", "Otro"])
+    assert code == 0 and newer["draft"] != first["draft"]
+    design = ip_board.cover_design(project)
+    assert design["spent"] and design["waiting"] == []
+    for flags in (["--from-board"], ["--from-board", "--apply"]):
+        with pytest.raises(SystemExit, match="nothing is waiting"):
+            cli.main(common + flags)
+    assert _spec(project)["title"] == "Otro"
+
+    # A note on it is still to be read, and reading it does not go back either.
+    ip_feedback.save_image(project, "cover.jpg", now=LATER, design={
+        "draft": first["draft"], "approve": True, "note": "más aire",
+    })
+    with pytest.raises(SystemExit, match="already the book's cover"):
+        cli.main(common + ["--from-board", "--apply"])
+    code, read, _ = _run(capsys, common + ["--from-board"])
+    assert code == 0 and read["lines"]["title"] == ["Otro"]
+    assert _spec(project)["state"]["applied_draft"] == first["draft"]
+
+
+def test_keeping_new_art_replaces_the_old_picture_and_nothing_else(project: Path, tmp_path: Path):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    assert ip_cover.compose(project, BAND, art=art, template=template)["status"] == "ok"
+    folder = project / "cover"
+    (folder / "art.psd").write_bytes(b"layers")
+
+    newer = _image(tmp_path / "newer.jpg", (400, 600), (150, 90, 40))
+    assert ip_cover.compose(project, art=newer, template=template)["status"] == "ok"
+    assert sorted(path.name for path in folder.glob("art.*")) == ["art.jpg", "art.psd"]
+    assert ip_cover.kept_art(project) == folder / "art.jpg"
+
+    # A format the board cannot show is refused, and the art there was is kept.
+    scan = tmp_path / "scan.tif"
+    Image.new("RGB", (400, 600), ART_GREEN).save(scan)
+    refused = ip_cover.compose(project, art=scan, template=template)
+    assert refused["status"] == "error" and ".png" in refused["error"]
+    assert sorted(path.name for path in folder.glob("art.*")) == ["art.jpg", "art.psd"]
+
+    # What is not a picture is never taken for the art.
+    (folder / "art.jpg").unlink()
+    assert ip_cover.kept_art(project) is None
+
+
+def test_a_composed_cover_does_not_answer_a_pick_among_the_art(project: Path, tmp_path: Path):
+    ip_jobs.prepare(project, [COVER_JOB])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1024, 1536), color=ART_GREEN))
+    ip_feedback.save_image(project, "cover.jpg", pick={"verdict": "accept", "candidate": 1})
+    assert _board_row(project, "cover.jpg")["stage"] == "review"
+
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    out = ip_cover.compose(project, {"title": "Geografía", **BAND}, art=art, apply=True,
+                           template=_cover_template(tmp_path))
+    assert out["applied"], out
+    row = _board_row(project, "cover.jpg")
+    assert row["stage"] == "review" and row["pick"]["pending"]
+
+
+def test_an_apply_that_fails_keeps_what_was_asked_for(
+    project: Path, capsys, tmp_path: Path, monkeypatch
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    common = ["cover-compose", "--project", str(project), "--template", str(template)]
+    code, _out, _ = _run(capsys, common + [
+        "--art", str(art), "--title", "Geografía", "--color", "band=#703010",
+    ])
+    assert code == 0
+
+    def locked(*args, **kwargs):
+        raise PermissionError("images/cover.jpg is open in another program")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ip_cover, "install_image", locked)
+        with pytest.raises(SystemExit, match="PermissionError") as died:
+            cli.main(common + ["--title", "Otro", "--apply"])
+    # One JSON error, and the title given with it is not lost.
+    assert json.loads(str(died.value))["status"] == "error"
+    assert _spec(project)["title"] == "Otro"
+    assert not (project / "images" / "cover.jpg").exists()
+
+    # A value no cover can be drawn with is one JSON error too.
+    with pytest.raises(SystemExit) as died:
+        cli.main(common + ["--set", "title_size=0"])
+    assert json.loads(str(died.value))["status"] == "error"
+
+
+def test_the_projects_title_and_author_are_drawn_and_not_saved_as_the_books(
+    project: Path, capsys, tmp_path: Path
+):
+    (project / "project.json").write_text(
+        json.dumps({"title": "Home Geography", "author": "C. C. Long"}), encoding="utf-8"
+    )
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    common = ["cover-compose", "--project", str(project), "--template", str(template)]
+    # Said every time, not only the first: nobody has given the title yet.
+    for flags in (["--art", str(art), "--color", "band=#703010"], []):
+        code, out, _ = _run(capsys, common + flags)
+        assert code == 0 and out["title_from"] == "project", out
+        assert any("--title" in warning for warning in out["warnings"])
+        assert " ".join(out["lines"]["title"]) == "Home Geography"
+        assert out["lines"]["author"] == ["C. C. Long"]
+    spec = _spec(project)
+    assert "title" not in spec and "author" not in spec
+
+    # An author taken off on purpose stays off, until it is unset.
+    code, out, _ = _run(capsys, common + ["--author", ""])
+    assert code == 0 and "author" not in out["lines"] and _spec(project)["author"] == ""
+    code, out, _ = _run(capsys, common + ["--unset", "author"])
+    assert out["lines"]["author"] == ["C. C. Long"] and "author" not in _spec(project)
+
+
+def test_a_compose_that_cannot_have_its_turn_says_so_and_writes_nothing(
+    project: Path, tmp_path: Path, monkeypatch
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    asked = {"title": "Geografía", **BAND}
+    monkeypatch.setattr(ip_cover, "_LOCK_WAIT_S", 0.0)
+    with locks.cover_lock(project):
+        out = ip_cover.compose(project, asked, art=art, template=template)
+        assert out["status"] == "error" and "holds this book's cover" in out["error"]
+        assert not (project / "cover").exists()
+        # A dry run writes nothing, so it has nothing to wait for.
+        dry = ip_cover.compose(project, asked, art=art, dry_run=True, template=template)
+        assert dry["status"] == "ok"
+    assert ip_cover.compose(project, asked, art=art, template=template)["status"] == "ok"
+
+
+def test_a_note_is_read_by_the_next_compose_even_of_a_draft_already_kept(
+    project: Path, tmp_path: Path, monkeypatch
+):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    first = ip_cover.compose(project, {"title": "Geografía", **BAND}, art=art, template=template)
+    ip_cover.compose(project, {"title": "Otro"}, template=template)
+    ip_feedback.save_image(
+        project, "cover.jpg", design={"note": "vuelve al primer título"}, now=_stamp(5)
+    )
+    assert ip_board.cover_design(project)["waiting"] == ["note_unread"]
+
+    # Going back to it draws a cover that is on file: no new draft, no new stamp.
+    monkeypatch.setattr(ledger, "now_stamp", lambda: _stamp(10))
+    back = ip_cover.compose(project, {"title": "Geografía"}, template=template)
+    assert back["draft"] == first["draft"]
+    assert ip_board.cover_design(project)["waiting"] == []
+
+
+def test_cli_a_comma_in_a_tried_value_stays_in_the_value(project: Path, capsys, tmp_path: Path):
+    template = _cover_template(tmp_path)
+    art = _image(tmp_path / "art.png", (400, 600), ART_GREEN, fmt="PNG")
+    code, out, _ = _run(capsys, [
+        "cover-compose", "--project", str(project), "--template", str(template),
+        "--art", str(art), "--title", "Geografía", "--color", "band=#703010",
+        "--try", "title=Hola, mundo", "--try", "title=Hola, mundo,art_top=0.02",
+    ])
+    assert code == 0 and [tried["status"] for tried in out["tried"]] == ["ok", "ok"], out
+    one, two = (ip_drafts.find(project, tried["draft"])["spec"] for tried in out["tried"])
+    assert one["title"] == "Hola, mundo" and "art_top" not in one
+    assert two["title"] == "Hola, mundo" and two["art_top"] == 0.02

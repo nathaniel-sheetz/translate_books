@@ -7,7 +7,7 @@ deterministic half of that: it inventories the images a book references, renders
 one Codex job per image, harvests the candidates, shows them beside the
 original, and swaps the approved one in place behind a backup.
 
-Nine modules:
+Ten modules:
 
 - :mod:`inventory` — every image the book references, plus the cover.
 - :mod:`backfill`  — the publisher's larger scans, behind the filenames a book
@@ -24,6 +24,8 @@ Nine modules:
   the only code that writes into ``images/``.
 - :mod:`cover_compose` — the house cover from the art: the band with the title
   on it, the emblem. No Codex; it reaches ``images/`` through ``apply``.
+- :mod:`cover_drafts` — every cover ``cover_compose`` has drawn for a book, kept
+  as a preview with the settings it was drawn with.
 - :mod:`ledger`    — the append-only record of what was replaced with what.
 
 Two invariants the rest of the repo relies on:

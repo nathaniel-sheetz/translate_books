@@ -585,7 +585,8 @@ all of them side by side, and the lightbox flips between two in place.
   the cover once with those settings laid over the book's and keeps it as a draft;
   the spec is not changed. `--try "art_top=0.05" --try "art_top=0.1"` is two covers
   to choose between. A value starting `#` is a colour (`band=#874727`); everything
-  else is named as its own flag names it. One that does not fit is reported in
+  else is named as its own flag names it. A comma separates two settings only where
+  a `name=` follows it, so `--try "title=Hola, mundo"` is one. One that does not fit is reported in
   `tried` and is not a draft. Read each `path` before pointing the user at them.
 - **`--from-draft N`** starts from draft N's settings instead of the spec as it
   stands; other flags are laid over them. That is how "go back to the one before"
@@ -598,6 +599,11 @@ all of them side by side, and the lightbox flips between two in place.
   | `draft_not_adopted` | `cover-compose --from-board`: the draft they chose becomes the proof. Read it |
   | `note_unread` | Read `cover.design.note` and act on it with the flags above. No flag carries a note for you |
   | `not_applied` | They approved a draft: `cover-compose --from-board --apply`, then `verify` |
+
+  With nothing `waiting`, `--from-board` refuses: what they chose has been done, and
+  taking it again would undo every proof since. `spent: true` says the draft they
+  approved is in the book and you have composed a different cover since: that proof
+  is not approved, so show it to them.
 
   `--from-board --apply` lands a cover only if it is the very draft they approved:
   the same settings on the same art in the same design. Anything else is refused,
@@ -615,6 +621,7 @@ be chosen, which is why `--try` is the way.
 | break the title differently | `--title-lines "A|B"` (empty string: wrap again) |
 | the name big and the rest of the title smaller under it | `--title "Bambi" --subtitle "Una vida en el bosque"`, then a size for each: `--set title_size=0.0815 --set subtitle_size=0.0444` (44 pt over 24). `--subtitle ""` takes it off |
 | two authors, one per line | `--author "Edmund Spenser|Jeanie Lang"` |
+| no author line | `--author ""` (`--unset author` puts the project's back) |
 | another band colour | `--color band=#792706` |
 | move the art down / up | `--art-top 0.09` / `--art-top -0.05` (`auto` to reset) |
 | slide the art down without cropping it | `--aspect art --art-top 0.1`: the cover takes the picture's shape and grows taller by that much (`--aspect template` to go back; `--aspect 5:8` for a fixed shape) |
@@ -798,7 +805,7 @@ mostly lettering scores low (0.86) for the right reasons.
   the design's band; at 40 pt the translator line crosses its edge until `band_left`
   is about 0.445, and at 44 pt about 0.475. The steeper edge then runs through
   whatever is high in the middle of the picture (a rider's hat), so slide the art
-  down with it. Show the user a sheet of variants rather than one proof.
+  down with it. Show the user `--try` variants rather than one proof.
 - **A title with a subtitle is two layers, each with its own size.** (bambi,
   2026-10-11.) "Bambi: Una vida en el bosque" as one title is two lines of one
   size, and the second is too wide at 32 pt, so both step down to 28. As

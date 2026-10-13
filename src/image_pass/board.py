@@ -359,6 +359,10 @@ def _picture(kind: str, path: Path, **extra: Any) -> dict[str, Any]:
 def _last_decisions(project_dir: Path) -> dict[str, dict[str, Any]]:
     last: dict[str, dict[str, Any]] = {}
     for row in ledger.read_rows(project_dir):
+        # A composed cover is a decision about its lettering, not about the
+        # art candidates under it: a pick among those is still to be answered.
+        if row.get("compose"):
+            continue
         if row.get("action") in _DECISIONS and row.get("image"):
             last[str(row["image"])] = row
     return last
@@ -508,7 +512,9 @@ def _cover_facts(project_dir: Path, key: str) -> dict[str, Any]:
         "book_draft": book_draft,
         "proof_id": (by_number.get(proof_draft) or {}).get("id"),
         "book_id": (by_number.get(book_draft) or {}).get("id"),
-        "last_proof_ts": proofs[-1].get("ts") if proofs else None,
+        # The stamp of the last compose; a spec from before there was one has
+        # only the day its last proof was first kept.
+        "last_proof_ts": state.get("proof_at") or (proofs[-1].get("ts") if proofs else None),
     }
 
 
@@ -527,10 +533,15 @@ def _design_state(design: Optional[dict[str, Any]], facts: dict[str, Any]) -> Op
             # Its settings can be carried to new art; an approval cannot.
             problems.append("art_changed")
     waiting: list[str] = []
+    spent = False
     if row is not None and not problems:
         if design.get("approve"):
             if design.get("id") != facts["book_id"]:
                 waiting.append("not_applied")
+            else:
+                # In the book, and a different cover composed since: the
+                # approval was of that one and says nothing about this one.
+                spent = facts["proof_id"] is not None and facts["proof_id"] != design.get("id")
         elif design.get("id") != facts["proof_id"]:
             waiting.append("draft_not_adopted")
     if design.get("note") and _later(design.get("note_updated"), facts["last_proof_ts"]):
@@ -542,6 +553,7 @@ def _design_state(design: Optional[dict[str, Any]], facts: dict[str, Any]) -> Op
         "note": design.get("note") or "",
         "updated": design.get("updated"),
         "waiting": waiting,
+        "spent": spent,
         "stale": bool(problems),
         "problems": problems,
     }

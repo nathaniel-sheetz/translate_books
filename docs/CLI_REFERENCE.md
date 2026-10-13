@@ -502,8 +502,9 @@ size: `--set subtitle_size=0.04`), `--author`, `--translator`, `--color band=#rr
 `--art-top <fraction>`, `--aspect <W:H|art|template>` (`art`: the cover takes the
 picture's own shape and grows taller by `--art-top`, so sliding the picture down crops
 none of it), `--set <variable>=<value>` or `--set <layer>.<field>=<value>`,
-`--unset <key,...>`. A variable set with `--set` holds: a title size given this way is
-not stepped down. The art is scaled to the cover's full width and never stretched;
+`--unset <key,...>`. A size set with `--set` holds: a title size given this way is
+not stepped down. (The variable the band grows by is the exception: the band still
+deepens past a `--set` value when the title needs the room.) The art is scaled to the cover's full width and never stretched;
 the band deepens to hide the top edge of art too short for the cover, and the title
 steps down a size when it would cross the band's edge. Nothing is written if the text
 cannot fit. It writes `cover/proof.png` (and `cover/swatches.png` with `--swatches`:
@@ -512,7 +513,10 @@ the cover in each band colour suggested from the art); `--apply` puts the proof 
 band colour has been picked. The art without lettering is kept at `cover/art.<ext>`
 and reused, so a band is never drawn over a band: `images/cover.*` is taken as art
 only when the ledger says the image pass applied it, or on `--art <file>` /
-`--cover-is-art`.
+`--cover-is-art`. `--art` takes a `.jpg`, `.jpeg`, `.png`, `.gif` or `.webp`. The
+title and the author are the project's until one is given, and neither is saved as
+the book's choice: `--author ""` leaves the author off. Two `cover-compose` on one
+book take turns.
 
 Every cover it draws is also kept as a numbered draft: a preview in
 `cover/drafts/NNN.jpg` and, in `cover/drafts.json`, the settings it was drawn with.
@@ -524,7 +528,9 @@ keeps it as a draft to compare, leaving the spec as it was: `--try "art_top=0.05
 from the settings draft N was drawn with instead of the spec as it stands.
 `--from-board` takes the draft the user chose on the image board; with `--apply` it
 lands the cover only if it is the draft they approved there, and refuses when the
-art, the design or a setting has changed since.
+art, the design or a setting has changed since. It also refuses when nothing they
+chose is still waiting, so a draft already in the book is not taken a second time
+over the proofs made since.
 
 The user's side is the image board in the web UI, `/image-pass/<id>` (see
 [`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md#image-board)). `triage` records a verdict, a

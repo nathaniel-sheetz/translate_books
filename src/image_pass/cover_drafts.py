@@ -44,10 +44,6 @@ PREVIEW_SIDE = 1400
 _PREVIEW_QUALITY = 88
 
 
-def drafts_dir(project_dir: Path) -> Path:
-    return cover_dir(project_dir) / "drafts"
-
-
 def drafts_path(project_dir: Path) -> Path:
     return cover_dir(project_dir) / "drafts.json"
 

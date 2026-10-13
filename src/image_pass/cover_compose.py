@@ -41,15 +41,15 @@ import colorsys
 import json
 import os
 import re
-import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from src.image_pass import COVER_NAMES, MODE_COVER, cover_dir, images_dir
+from src.harness import locks
+from src.image_pass import COVER_NAMES, IMAGE_SUFFIXES, MODE_COVER, cover_dir, images_dir
 from src.image_pass import cover_drafts as drafts
 from src.image_pass import ledger
-from src.image_pass.apply import COVER_LONG_SIDE, has_original, install_image
+from src.image_pass.apply import COVER_LONG_SIDE, copy_atomic, has_original, install_image
 from src.image_pass.inventory import probe_image
 from src.image_pass.jobs import book_meta
 
@@ -1091,14 +1091,6 @@ def swatch_sheet(covers: list[Any], colors: list[str]) -> Any:
     return sheet
 
 
-def render_swatches(
-    art: Any, template: dict[str, Any], spec: dict[str, Any], colors: list[str], name: str
-) -> Any:
-    """One sheet: the cover in each of ``colors``, side by side, hex underneath."""
-    covers = swatch_covers(art, template, spec, colors, name)
-    return swatch_sheet([cover for _spec, cover in covers], colors)
-
-
 # ---------------------------------------------------------------------------
 # The book's side: where the art is, and the command
 # ---------------------------------------------------------------------------
@@ -1115,7 +1107,9 @@ def kept_art(project_dir: Path) -> Optional[Path]:
     folder = cover_dir(project_dir)
     if not folder.is_dir():
         return None
-    found = sorted(p for p in folder.glob("art.*") if p.is_file())
+    found = sorted(
+        p for p in folder.glob("art.*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+    )
     return found[0] if found else None
 
 
@@ -1138,6 +1132,10 @@ def _find_art(
         given = Path(given)
         if not given.is_file():
             return {"error": f"--art not found: {given}"}
+        if given.suffix.lower() not in IMAGE_SUFFIXES:
+            # It is kept as cover/art.<suffix>, and the board serves only these.
+            return {"error": f"--art takes {', '.join(IMAGE_SUFFIXES)}: save "
+                             f"{given.name} as one of those first"}
         return {"source": given, "seed": True, "why": "given with --art"}
     if cover is None:
         if kept is None:
@@ -1198,6 +1196,11 @@ def _spec_for_disk(spec: dict[str, Any]) -> str:
     return json.dumps(spec, ensure_ascii=False, indent=2) + "\n"
 
 
+# A compose is seconds of work: a second one started beside it waits its turn
+# rather than being refused.
+_LOCK_WAIT_S = 120.0
+
+
 def compose(
     project_dir: Path,
     overrides: Optional[dict[str, Any]] = None,
@@ -1223,9 +1226,42 @@ def compose(
     user approved on the board: ``apply`` then lands this cover only if it is
     that one.
     """
+    project_dir = Path(project_dir)
+    options: dict[str, Any] = {
+        "art": art, "cover_is_art": cover_is_art, "swatches": swatches, "tries": tries,
+        "from_draft": from_draft, "approved_id": approved_id, "apply": apply,
+        "dry_run": dry_run, "template": template,
+    }
+    if dry_run:
+        return _compose(project_dir, overrides, **options)
+    try:
+        # The spec and the drafts are read at the top and written at the bottom.
+        with locks.cover_lock(project_dir, timeout=_LOCK_WAIT_S):
+            return _compose(project_dir, overrides, **options)
+    except locks.LockBusy as busy:
+        return {
+            "status": "error",
+            "error": f"another cover-compose holds this book's cover; nothing was written. {busy}",
+            "instructions": "Wait for it to finish, then re-run.",
+        }
+
+
+def _compose(
+    project_dir: Path,
+    overrides: Optional[dict[str, Any]],
+    *,
+    art: Optional[Path],
+    cover_is_art: bool,
+    swatches: bool,
+    tries: Optional[list[dict[str, Any]]],
+    from_draft: Optional[int],
+    approved_id: Optional[str],
+    apply: bool,
+    dry_run: bool,
+    template: Optional[Path],
+) -> dict[str, Any]:
     from PIL import Image
 
-    project_dir = Path(project_dir)
     folder = cover_dir(project_dir)
     try:
         design = load_template(template)
@@ -1258,21 +1294,27 @@ def compose(
             "settings are carried over to the art it has now"
         )
 
+    # What the project says where the spec says nothing. Drawn, and not written
+    # to the spec: a title that was saved would read as given the next time, and
+    # the warning below would be said once and never again.
     meta = book_meta(project_dir)
+    fallback: dict[str, Any] = {}
     title_from = "spec"
     if not (spec.get("title") or "").strip():
         translated = _translated_title(project_dir)
         if translated:
-            spec["title"], title_from = translated, "project (translated title)"
+            fallback["title"], title_from = translated, "project (translated title)"
         else:
-            spec["title"], title_from = meta["title"], "project"
+            fallback["title"], title_from = meta["title"], "project"
             warnings.append(
                 f"no title given: using the project's, {meta['title']!r}, which may be "
                 "the source language's. Pass --title with the title as the cover "
                 "should print it."
             )
+    # An author of "" is one taken off the cover on purpose (`--author ""`).
     if "author" not in spec and meta["author"]:
-        spec["author"] = meta["author"]
+        fallback["author"] = meta["author"]
+    book = merge_spec(spec, fallback) if fallback else spec
     # A house design from before the subtitle had a layer has nowhere to put
     # one, and would leave it off without a word.
     if (spec.get("subtitle") or "").strip() and not _says(design, "subtitle"):
@@ -1290,7 +1332,7 @@ def compose(
     # in the first suggestion, which is not written to the spec: a guess that
     # was saved would read as their choice the next time.
     band_name = design.get("swatch_color", "band")
-    drawn = spec
+    drawn = book
     try:
         ink = parse_color("$ink", design.get("colors")) if "ink" in (design.get("colors") or {}) \
             else (255, 255, 255)
@@ -1299,7 +1341,7 @@ def compose(
         if band_name not in (spec.get("colors") or {}):
             color_from = "suggested" if suggestions else "template"
             if suggestions:
-                drawn = merge_spec(spec, {"colors": {band_name: suggestions[0]}})
+                drawn = merge_spec(book, {"colors": {band_name: suggestions[0]}})
         solved = solve(design, drawn, picture.size)
     except TemplateError as exc:
         return {"status": "error", "error": str(exc)}
@@ -1358,11 +1400,13 @@ def compose(
         state = dict(spec.get("state") or {})
         if found["seed"]:
             kept = folder / f"art{source.suffix.lower()}"
-            for old in folder.glob("art.*"):
-                if old != kept:
-                    old.unlink()
             if source.resolve() != kept.resolve():
-                shutil.copyfile(source, kept)
+                copy_atomic(source, kept)
+            # After the copy, so one that fails leaves the art there was; and
+            # pictures only, so an art.psd kept beside it is not this command's.
+            for old in folder.glob("art.*"):
+                if old != kept and old.suffix.lower() in IMAGE_SUFFIXES:
+                    old.unlink()
             state["art_sha"] = ledger.sha256_file(kept)
             out["art"]["kept_at"] = str(kept)
 
@@ -1382,7 +1426,7 @@ def compose(
             out["swatch_drafts"] = []
             for color, (trial, cover) in zip(suggestions, covers):
                 row, _new = drafts.record(
-                    project_dir, cover, kind=drafts.KIND_SWATCH, spec=trial, base=spec,
+                    project_dir, cover, kind=drafts.KIND_SWATCH, spec=trial, base=book,
                     set_id=set_id, label=color, color=color, **kept_as,
                 )
                 out["swatch_drafts"].append({"draft": row["n"], "color": color})
@@ -1399,7 +1443,7 @@ def compose(
                     else:
                         row, _new = drafts.record(
                             project_dir, render(picture, trial_solved, design),
-                            kind=drafts.KIND_VARIANT, spec=trial, base=spec,
+                            kind=drafts.KIND_VARIANT, spec=trial, base=book,
                             set_id=set_id, label=attempt.get("label"), **kept_as,
                         )
                         said.update({
@@ -1422,11 +1466,17 @@ def compose(
         )
         out["draft"] = proof_row["n"]
         state["proof_draft"] = proof_row["n"]
+        # When this cover was last composed, which is not when its draft was
+        # first kept: the same cover composed again keeps its draft and stamp.
+        state["proof_at"] = ledger.now_stamp()
         state["band"] = band_name
+        # Before images/ is touched: what this invocation asked for is kept
+        # even when putting it in the book fails.
+        spec["state"] = state
+        _write_atomic(spec_path(project_dir), _spec_for_disk(spec))
+        out["spec_path"] = str(spec_path(project_dir))
 
         if apply and approved_id is not None and proof_row["id"] != approved_id:
-            spec["state"] = state
-            _write_atomic(spec_path(project_dir), _spec_for_disk(spec))
             return {
                 **out,
                 "status": "error",
@@ -1479,10 +1529,8 @@ def compose(
                 "backup": f"images_original/{key}" if had_original else None,
                 "ledger_path": str(ledger_file),
             })
-
-        spec["state"] = state
-        _write_atomic(spec_path(project_dir), _spec_for_disk(spec))
-        out["spec_path"] = str(spec_path(project_dir))
+            spec["state"] = state
+            _write_atomic(spec_path(project_dir), _spec_for_disk(spec))
     except TemplateError as exc:
         return {**out, "status": "error", "error": str(exc)}
 
