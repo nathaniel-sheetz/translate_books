@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.74.0.0] - 2026-10-12
+
+### Added
+- **The reader's top bar has a third tour, flags.** It walks what a machine raised on the chapter: the review findings, while review is on and in the categories that are enabled, and the save-check warnings still open. A finding counts once and a warning counts once per sentence. Findings in the end-of-chapter bin have no sentence to stop on and are left out.
+- **The flag count follows the page.** Dismissing a finding, ignoring a term, and a Save that raises or clears a warning each move the counter without a reload.
+- **On a phone the top bar shows one tour and a caret to change it.** Under 480px only the active tour's counter shows. The caret opens a menu of the tours that have stops, with their counts, and picking one jumps to its next stop. The choice is kept per book, and a chapter with nothing of the chosen kind shows the first tour that has stops.
+
+### Fixed (found in pre-ship review)
+- **The phone's one tour button changed tours mid-walk.** Saving a note while walking the flags gave the annotations tour its first stop, and the button became that tour. The tour showing now holds while it has stops; only a pick from the menu moves it, and only a pick is stored.
+- **A saved sentence lost its highlights and stayed on the flag tour.** Its findings outlive the Save, so they are painted back on, the way a reload shows them.
+
 ## [0.73.0.0] - 2026-10-12
 
 ### Added
