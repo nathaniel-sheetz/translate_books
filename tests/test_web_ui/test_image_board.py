@@ -23,8 +23,10 @@ from PIL import Image
 from src.image_pass import apply as ip_apply
 from src.image_pass import board as ip_board
 from src.image_pass import composite as ip_composite
+from src.image_pass import cover_drafts as ip_drafts
 from src.image_pass import feedback as ip_feedback
 from src.image_pass import jobs as ip_jobs
+from src.image_pass import ledger
 from web_ui.app import app
 from web_ui.i18n import STRINGS
 
@@ -120,6 +122,7 @@ def test_every_string_has_its_spanish_twin():
     # The script looks these up by the server's own codes.
     assert set(en["imgboard_js"]["stages"]) == set(ip_board.STAGES)
     assert set(en["imgboard_js"]["verdicts"]) == set(ip_feedback.VERDICTS)
+    assert set(en["imgboard_js"]["tracks"]) == set(ip_board.TRACKS)
 
 
 # --- the state --------------------------------------------------------------
@@ -261,4 +264,113 @@ def test_a_label_map_keeps_the_order_it_was_listed_in(client, book):
 def test_a_bad_save_is_refused_and_writes_nothing(client, book, payload, status):
     reply = _post(client, payload)
     assert reply.status_code == status and reply.get_json()["error"]
+    assert not ip_feedback.feedback_path(book).exists()
+
+
+# --- the cover's workspace --------------------------------------------------
+
+@pytest.fixture
+def cover(book):
+    """What ``cover-compose`` leaves in ``cover/``: the art, a proof with its
+    draft, and a sheet somebody made by hand. Returns the draft's row."""
+    folder = book / "cover"
+    art = _image(folder / "art.png", (400, 600), (20, 160, 60))
+    _image(folder / "proof.png", (800, 1200))
+    _image(folder / "variants.png", (1600, 600))
+    row, _new = ip_drafts.record(
+        book, Image.new("RGB", (800, 1200), (90, 40, 20)), kind="proof",
+        spec={"title": "Img Book", "colors": {"band": "#703010"}},
+        art_sha=ledger.sha256_file(art),
+    )
+    (folder / "spec.json").write_text(json.dumps({
+        "title": "Img Book", "colors": {"band": "#703010"},
+        "state": {"proof_draft": row["n"]},
+    }), "utf-8")
+    return row
+
+
+def _workspace_pictures(workspace):
+    for step in workspace["steps"]:
+        yield from step["pictures"]
+        for group in step["more"]:
+            yield from group["pictures"]
+
+
+def test_the_two_tabs_are_counted_apart_and_the_cover_is_a_workspace(client, book, cover):
+    rows, data = _rows(client)
+    tracks = data["counts"]["tracks"]
+    assert tracks["existing"]["images"] == 2 and tracks["existing"]["review"] == 1
+    assert tracks["new"]["images"] == 1 and tracks["existing"]["waiting"] == 1
+    assert rows["map.jpg"]["track"] == "existing" and rows["map.jpg"]["workspace"] is None
+
+    row = rows["cover.jpg"]
+    workspace = row["workspace"]
+    assert row["track"] == "new" and workspace["status"] == "approve"
+    assert [step["id"] for step in workspace["steps"]] == ["art", "colour", "layout", "book"]
+    # Where the proof is on disk is for the agent's summary, not for the page.
+    assert "proof" not in workspace
+    pictures = [workspace["hero"], *_workspace_pictures(workspace)]
+    assert {picture["kind"] for picture in pictures} == {"art", "draft", "sheet"}
+    for picture in pictures:
+        assert "path" not in picture
+        served = client.get(picture["url"])
+        assert served.status_code == 200 and served.mimetype.startswith("image/"), picture
+    assert workspace["hero"]["url"].startswith("/projects/imgbook/image-pass/cover/drafts/001.jpg?v=")
+
+
+def test_candidates_of_an_earlier_prompt_are_served_from_where_they_were_moved(client, book):
+    ip_jobs.prepare(book, [{
+        "image": "map.jpg", "mode": "translate", "instruction": "Thinner strokes.",
+        "labels": {"NORTH": "NORTE"},
+    }])
+    (earlier,) = _rows(client)[0]["map.jpg"]["earlier"]
+    assert "/image-pass/earlier/map.jpg/" in earlier["url"] and "path" not in earlier
+    served = client.get(earlier["url"])
+    assert served.status_code == 200 and served.mimetype == "image/png"
+
+
+def test_the_cover_routes_serve_pictures_and_nothing_else(client, book, cover):
+    base = "/projects/imgbook/image-pass"
+    assert client.get(f"{base}/cover/drafts/001.jpg").status_code == 200
+    # The spec and the drafts' record are in that folder too.
+    assert client.get(f"{base}/cover/spec.json").status_code == 404
+    assert client.get(f"{base}/cover/drafts.json").status_code == 404
+    assert client.get(f"{base}/cover/../images/map.jpg").status_code == 404
+    assert client.get(f"{base}/cover/%2e%2e/images/map.jpg").status_code == 404
+    assert client.get(f"{base}/cover/nothing.png").status_code == 404
+    assert client.get(f"{base}/earlier/map.jpg/not-a-stamp/1").status_code == 400
+    assert client.get(f"{base}/earlier/map.jpg/20261005_182844/1").status_code == 404
+
+
+def test_a_design_lands_on_disk_tied_to_the_draft_it_was_made_on(client, book, cover):
+    reply = _post(client, {"image": "cover.jpg", "design": {
+        "draft": cover["n"], "approve": True, "note": "Title a little larger",
+    }})
+    assert reply.status_code == 200, reply.get_json()
+    design = reply.get_json()["image"]["workspace"]["design"]
+    assert design["draft"] == cover["n"] and design["approve"] and not design["stale"]
+    assert design["waiting"] == ["not_applied"]
+    on_disk = ip_feedback.load(book)["cover.jpg"]["design"]
+    assert on_disk["id"] == cover["id"] and on_disk["note"] == "Title a little larger"
+    assert reply.get_json()["counts"]["tracks"]["new"]["with_input"] == 1
+
+    # A request on the same image is its own section: neither drops the other.
+    _post(client, {"image": "cover.jpg", "request": {"note": "More sky"}})
+    said = ip_feedback.load(book)["cover.jpg"]
+    assert said["design"]["draft"] == cover["n"] and said["request"]["note"] == "More sky"
+
+    # Nothing chosen and no note is no design at all.
+    _post(client, {"image": "cover.jpg", "design": {"draft": None, "approve": False, "note": ""}})
+    assert "design" not in ip_feedback.load(book)["cover.jpg"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"image": "cover.jpg", "design": {"draft": 9}},
+    {"image": "cover.jpg", "design": {"approve": True}},
+    {"image": "cover.jpg", "design": {"draft": 1, "approve": "yes"}},
+    {"image": "map.jpg", "design": {"draft": 1}},
+])
+def test_a_design_that_names_no_real_draft_is_refused(client, book, cover, payload):
+    reply = _post(client, payload)
+    assert reply.status_code == 400 and reply.get_json()["error"]
     assert not ip_feedback.feedback_path(book).exists()

@@ -438,11 +438,12 @@ python scripts/image_pass.py generate  --project my-book --estimate
 python scripts/image_pass.py check     --project my-book --json-file check_rows.json
 python scripts/image_pass.py composite --project my-book --json-file composites.json --dry-run
 python scripts/image_pass.py apply     --project my-book --from-board --dry-run
+python scripts/image_pass.py cover-compose --project my-book --title "Mi libro" --swatches
 python scripts/image_pass.py verify    --project my-book
 ```
 
 Sub-verbs: `inventory`, `backfill`, `triage`, `board`, `prepare`, `generate`, `check`,
-`composite`, `apply`, `revert`, `verify`. `generate` runs the Codex CLI on a ChatGPT subscription (never a metered key —
+`composite`, `cover-compose`, `apply`, `revert`, `verify`. `generate` runs the Codex CLI on a ChatGPT subscription (never a metered key —
 see [`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)) to translate lettering, clean scans, make a
 cover or replace an illustration. `apply` keeps the original filename and format, so no
 `[IMAGE:…]` token changes, and backs the original up to `images_original/` first.
@@ -489,6 +490,48 @@ with a `cand_NN.composite.json` beside it. No Codex, no spend; all-or-nothing;
 `--dry-run` measures and writes nothing; `candidate` remakes an existing composite in
 place after an outline has been moved.
 
+`cover-compose` lays the house cover over a cover's art: a colour band across the top
+with the title, author and translator on it, and the emblem in the bottom corner. No
+Codex, no spend. The design is `assets/cover_template/template.json` (per-user and
+gitignored; without one the tracked `template.example.json` is used): an ordered list
+of `polygon`, `ellipse`, `text` and `image` layers in fractions of the cover, so a
+shape is changed or added by editing that file. The book's side is
+`<project>/cover/spec.json`, which every flag is merged into: `--title`,
+`--title-lines "A|B"`, `--subtitle` (a line under the title in its own, smaller
+size: `--set subtitle_size=0.04`), `--author`, `--translator`, `--color band=#rrggbb`,
+`--art-top <fraction>`, `--aspect <W:H|art|template>` (`art`: the cover takes the
+picture's own shape and grows taller by `--art-top`, so sliding the picture down crops
+none of it), `--set <variable>=<value>` or `--set <layer>.<field>=<value>`,
+`--unset <key,...>`. A size set with `--set` holds: a title size given this way is
+not stepped down. (The variable the band grows by is the exception: the band still
+deepens past a `--set` value when the title needs the room.) The art is scaled to the cover's full width and never stretched;
+the band deepens to hide the top edge of art too short for the cover, and the title
+steps down a size when it would cross the band's edge. Nothing is written if the text
+cannot fit. It writes `cover/proof.png` (and `cover/swatches.png` with `--swatches`:
+the cover in each band colour suggested from the art); `--apply` puts the proof in
+`images/cover.*` behind the same backup and ledger as `apply`, and refuses until a
+band colour has been picked. The art without lettering is kept at `cover/art.<ext>`
+and reused, so a band is never drawn over a band: `images/cover.*` is taken as art
+only when the ledger says the image pass applied it, or on `--art <file>` /
+`--cover-is-art`. `--art` takes a `.jpg`, `.jpeg`, `.png`, `.gif` or `.webp`. The
+title and the author are the project's until one is given, and neither is saved as
+the book's choice: `--author ""` leaves the author off. Two `cover-compose` on one
+book take turns.
+
+Every cover it draws is also kept as a numbered draft: a preview in
+`cover/drafts/NNN.jpg` and, in `cover/drafts.json`, the settings it was drawn with.
+The same cover composed twice keeps its number. `--swatches` keeps each colour as a
+draft of its own beside the sheet. `--try "<name>=<value>[,<name>=<value>]"`
+(repeatable) draws the cover once more with those settings laid over the book's and
+keeps it as a draft to compare, leaving the spec as it was: `--try "art_top=0.05"
+--try "band_right=0.2,title_size=0.06" --try "band=#874727"`. `--from-draft N` starts
+from the settings draft N was drawn with instead of the spec as it stands.
+`--from-board` takes the draft the user chose on the image board; with `--apply` it
+lands the cover only if it is the draft they approved there, and refuses when the
+art, the design or a setting has changed since. It also refuses when nothing they
+chose is still waiting, so a draft already in the book is not taken a second time
+over the proofs made since.
+
 The user's side is the image board in the web UI, `/image-pass/<id>` (see
 [`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md#image-board)). `triage` records a verdict, a
 finding and a label map for each image looked at, and `check` a finding for each
@@ -498,7 +541,10 @@ note, a corrected label map, a pick — is saved to `.harness/images/feedback.js
 default `http://127.0.0.1:5000`), the images that want a job, what the user asked for
 that no prepared job reflects yet, and their picks. `apply --from-board` applies those
 picks; `apply --json-file` still takes a hand-written list. A pick made on a candidate
-that has since been regenerated is refused, not applied.
+that has since been regenerated is refused, not applied. `board` also reports the
+cover (`cover`): which step it is at, how many drafts are kept, and the draft the
+user chose or approved on the page's New images tab, which `cover-compose
+--from-board` takes.
 
 *Skill equivalent:* `/image-pass`
 

@@ -40,6 +40,15 @@ the user answers you:
   they want an image done, correct or add to the label map, ask for more candidates.
 - **Once candidates exist:** accept one, send the image back with a note, or skip it.
 
+The page has two tabs. **Existing images** is everything above: the pictures the
+book came with, to be translated, restored or replaced. **New images** is for a
+picture that is made, which today is the cover. It is not a card but a workspace of
+four steps — art, band colour, layout drafts, in the book — with every candidate,
+swatch, proof and variant drawn for it kept and shown, the latest proof large beside
+them. There the user chooses a draft ("Use this"), approves one for the book, and
+leaves a note on the layout. `board` reports all of that under `cover` (step 5b).
+A link straight to it is the `url` with `#type=new` on the end.
+
 Everything typed there is saved to `.harness/images/feedback.json`, and you read it
 back with `board`. So at each gate you **give the user the board's `url` and end the
 turn**; when they come back, `board` tells you what they asked for. The chat is for
@@ -118,6 +127,16 @@ python scripts/image_pass.py composite --project home-geography \
 #    --from-board applies the picks the user made on the page.
 python scripts/image_pass.py apply --project home-geography --from-board --dry-run
 python scripts/image_pass.py apply --project home-geography --from-board [--max-side 1600]
+
+# 7b. The cover's lettering, once its art is applied: the band with the title on
+#     it and the emblem. No Codex, no spend. Writes cover/proof.png; --apply swaps
+#     it in for images/cover.* behind the same backup and ledger.
+python scripts/image_pass.py cover-compose --project home-geography \
+    [--title "Geografía del hogar"] [--title-lines "Geografía|del hogar"]     [--subtitle "Una vida en el bosque"] \
+    [--author "C. C. Long"] [--color band=#874727] [--art-top 0.05] \
+    [--set band_right=0.2] [--swatches] [--art <file>] [--dry-run] [--apply] \
+    [--try "art_top=0.05" --try "band_right=0.2,title_size=0.06"] \
+    [--from-draft 7] [--from-board]
 
 # 8. Undo, and audit.
 python scripts/image_pass.py revert --project home-geography --images 006.jpg   # or: all
@@ -522,6 +541,117 @@ and let in only the patch:
 A re-`prepare` archives a job's candidates, composites included. To let the user pick
 an archived one again, composite it (`base: previous/...`) rather than moving files.
 
+### 5b. The cover's lettering: `cover-compose`
+
+A `cover` job makes the picture and nothing else. The house cover is that picture
+with a colour band across the top (title, author, translator), deeper on the left,
+and the emblem in the bottom-right corner. `cover-compose` draws it from
+`assets/cover_template/template.json` (per-user and gitignored; a checkout without
+one uses the tracked `template.example.json`, which has no emblem graphic) and the
+book's `cover/spec.json`. No Codex, no usage, so no G2; `--apply` writes into
+`images/`, so it is behind the pick gate like any other.
+
+1. **Art first.** Apply the cover candidate the user picked. `cover-compose` takes
+   `images/cover.*` as the art only when the ledger says the image pass put that
+   very file there; it copies it to `cover/art.<ext>` and starts from that copy
+   ever after, so a band is never drawn over a band. For a picture from anywhere
+   else pass `--art <file>`. `--cover-is-art` is for a cover the book came with and
+   that you have looked at: it has no lettering on it.
+2. **Title, then swatches.** Pass `--title` with the title as the cover prints it
+   (the project's own may be the English one; `title_from: project` says it was
+   used) and `--swatches`. Read `cover/swatches.png` and send it to the user: the
+   cover once per colour taken from the art, numbered. **The band colour is theirs
+   to pick.** Until `--color band=#rrggbb` is given the proof is drawn in the first
+   suggestion, nothing is saved as the choice, and `--apply` refuses.
+3. **Read the proof and fix it before showing it.** `cover/proof.png`. The command
+   wraps the title greedily; a break that splits a phrase is yours to move with
+   `--title-lines "Cuentos de|La Reina de las Hadas"`. `reasons` says why a value
+   is not the template's own (a smaller title, a deeper band), `notes` what was
+   done to the art that was not asked for. Every flag is merged into
+   `cover/spec.json`, so one change is one flag.
+4. **STOP — show the proof.** Apply only on the user's word:
+   `cover-compose --project <id> --apply`, then `verify`.
+
+**Every cover drawn is kept as a draft**, numbered, in `cover/drafts/` with the
+settings it was drawn with (`cover/drafts.json`); the same cover composed twice
+keeps its number. `proof.png` is still the latest and what `--apply` lands. The
+drafts are what the board's New images tab shows, so with the proof give the user
+the board `url` (`#type=new`): the chat shows them one picture, the page shows them
+all of them side by side, and the lightbox flips between two in place.
+
+- **The swatches are drafts too**, one per colour (`swatch_drafts`). The user can
+  type a number in the chat or press "Use this" under one on the page.
+- **To compare layouts, use `--try`, never a sheet of your own.** Each `--try` draws
+  the cover once with those settings laid over the book's and keeps it as a draft;
+  the spec is not changed. `--try "art_top=0.05" --try "art_top=0.1"` is two covers
+  to choose between. A value starting `#` is a colour (`band=#874727`); everything
+  else is named as its own flag names it. A comma separates two settings only where
+  a `name=` follows it, so `--try "title=Hola, mundo"` is one. One that does not fit is reported in
+  `tried` and is not a draft. Read each `path` before pointing the user at them.
+- **`--from-draft N`** starts from draft N's settings instead of the spec as it
+  stands; other flags are laid over them. That is how "go back to the one before"
+  and "that swatch, but the title bigger" are done in one command.
+- **`--from-board`** takes what the user chose on the page. `board` says what is
+  waiting, under `cover.design.waiting`:
+
+  | `waiting` | Do |
+  |---|---|
+  | `draft_not_adopted` | `cover-compose --from-board`: the draft they chose becomes the proof. Read it |
+  | `note_unread` | Read `cover.design.note` and act on it with the flags above. No flag carries a note for you |
+  | `not_applied` | They approved a draft: `cover-compose --from-board --apply`, then `verify` |
+
+  With nothing `waiting`, `--from-board` refuses: what they chose has been done, and
+  taking it again would undo every proof since. `spent: true` says the draft they
+  approved is in the book and you have composed a different cover since: that proof
+  is not approved, so show it to them.
+
+  `--from-board --apply` lands a cover only if it is the very draft they approved:
+  the same settings on the same art in the same design. Anything else is refused,
+  the new proof is left for them to look at, and they approve that. A choice made on
+  art the book no longer has comes back `stale`: give them the url and have them
+  choose again. Without `--from-board`, `--apply` is on their word in the chat, as
+  it always was.
+
+A hand-made picture you do leave in `cover/` (any image that is not `art.*`) shows
+on the page under "Other sheets", so nothing put there is invisible; but it cannot
+be chosen, which is why `--try` is the way.
+
+| The user says | Flag |
+|---|---|
+| break the title differently | `--title-lines "A|B"` (empty string: wrap again) |
+| the name big and the rest of the title smaller under it | `--title "Bambi" --subtitle "Una vida en el bosque"`, then a size for each: `--set title_size=0.0815 --set subtitle_size=0.0444` (44 pt over 24). `--subtitle ""` takes it off |
+| two authors, one per line | `--author "Edmund Spenser|Jeanie Lang"` |
+| no author line | `--author ""` (`--unset author` puts the project's back) |
+| another band colour | `--color band=#792706` |
+| move the art down / up | `--art-top 0.09` / `--art-top -0.05` (`auto` to reset) |
+| slide the art down without cropping it | `--aspect art --art-top 0.1`: the cover takes the picture's shape and grows taller by that much (`--aspect template` to go back; `--aspect 5:8` for a fixed shape) |
+| a bigger title | `--set title_size=0.0741` (40 pt on the 540 pt slide; 0.0593 is 32). A size set this way is not stepped down: it fits or nothing is made |
+| the author lower | `--set author.gap=0.04` (the space under the title; 0.0285 in the design) |
+| a deeper band | `--set band_right=0.2`, or `--set band_left=0.44` for more room under a big title (empty value: back to the template's) |
+| anything else in one layer | `--set title.at=[0.03,0.02]` |
+| forget an override | `--unset title_lines,art_top` |
+
+**How the art is placed.** It is scaled to the cover's full width, never stretched.
+`art_top` is where its top edge sits, as a fraction of the cover's height: 0 at the
+top edge; more starts it lower, under the band, and loses more off the bottom; less
+than 0 loses its top instead. Art too short for the cover (wider than 2:3) stands on
+the bottom edge and the band's right side deepens to hide where it starts. Art too
+wide even for the deepest band is enlarged and loses its sides, and `side_crop` says
+how much. A value that would leave a gap is moved, with a note; the cover never has
+an uncovered row.
+
+**Changing the design** is editing `template.json`: layers are `polygon`,
+`ellipse`, `text` and `image`, drawn in order; x is a fraction of the width for a
+polygon's points, everything else a fraction of the cover's *height* from the
+layer's `anchor` corner. Moving the band is editing its points or the variable they
+name; another shape is another entry. A text layer stays inside the polygon its
+`fit_inside` names. A fill is `#rrggbb`, a `$name` from `colors`, or
+`{"gradient": [[position, colour, opacity], ...]}` running top to bottom. Only a
+new kind of shape or effect needs code (`src/image_pass/cover_compose.py`).
+
+A later `cover` job replaces the art: apply its candidate and `cover-compose`
+takes the new picture, because the ledger says the image pass put it there.
+
 ### 6. `verify`, then hand back
 
 ```bash
@@ -660,11 +790,30 @@ mostly lettering scores low (0.86) for the right reasons.
   only from the density of the lines; not coloured pencil, not a painting" produced
   one, on both `gpt-6-luna` and `gpt-6-sol`. One sample each: the two were closer to
   each other than to anything else, and the difference cannot be put down to the model.
-- **This house's covers are art only.** The finished covers in other projects carry a
-  typeset band (title, author, translator) across the top, deeper on the left, and a
-  round emblem in the bottom-right corner, both added outside this repo. So ask for no
-  lettering, sky and far hills in the top third, and plain ground in the bottom-right
-  corner. Confirm with the user before putting a title in the picture.
+- **This house's cover art carries no lettering.** The finished cover has a typeset
+  band (title, author, translator) across the top, deeper on the left, and a round
+  emblem in the bottom-right corner; `cover-compose` adds both (step 5b). So ask the
+  `cover` job for no lettering, sky and far hills in the top third, and plain ground
+  in the bottom-right corner. Confirm with the user before putting a title in the
+  picture.
+- **The band's geometry was read off the slides the covers used to be made in**
+  (2026-10-10, five books). Composed at the old covers' size, the lettering lands
+  within a pixel of theirs. The band's left depth is 37.8% of the height on all
+  five; its right depth is 16.2%, and 20.1% on the one whose art started that low.
+- **A bigger title needs the band deeper on the left, and that costs the picture.**
+  (horses-of-destiny and home-geography, 2026-10-10.) A two-line title at 36 pt fits
+  the design's band; at 40 pt the translator line crosses its edge until `band_left`
+  is about 0.445, and at 44 pt about 0.475. The steeper edge then runs through
+  whatever is high in the middle of the picture (a rider's hat), so slide the art
+  down with it. Show the user `--try` variants rather than one proof.
+- **A title with a subtitle is two layers, each with its own size.** (bambi,
+  2026-10-11.) "Bambi: Una vida en el bosque" as one title is two lines of one
+  size, and the second is too wide at 32 pt, so both step down to 28. As
+  `--title "Bambi" --subtitle "Una vida en el bosque"`, 44 pt over 24 pt fit the
+  design's band with nothing else moved. The colon goes: the line break does its
+  work. A house `template.json` made before 2026-10-11 has no `subtitle` layer;
+  `warnings` says so and the subtitle is left off until the layer is copied in
+  from `template.example.json`.
 
 ### Shaded drawings, wide strips and many labels (stormy-misty-s-foal, 2026-10-06)
 

@@ -138,6 +138,16 @@ def image_lock_path(project_dir: Path | str) -> Path:
     return hstate.harness_dir(Path(project_dir)) / "images" / ".generate.lock"
 
 
+def cover_lock_path(project_dir: Path | str) -> Path:
+    """``projects/<slug>/.harness/images/.cover.lock`` — one cover compose per book.
+
+    Not the image run's lock: a compose lasts seconds and touches only
+    ``cover/``, and must not be refused for the minutes a ``generate`` holds
+    the book.
+    """
+    return hstate.harness_dir(Path(project_dir)) / "images" / ".cover.lock"
+
+
 # ---------------------------------------------------------------------------
 # Liveness
 # ---------------------------------------------------------------------------
@@ -518,6 +528,32 @@ def image_lock(
     directories a run in flight is reading from.
     """
     path = image_lock_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = _acquire(
+        path, kind=kind, run_id=run_id, timeout=timeout, stale_after=stale_after
+    )
+    try:
+        yield path
+    finally:
+        _release(path, token)
+
+
+@contextlib.contextmanager
+def cover_lock(
+    project_dir: Path | str,
+    *,
+    kind: str = "cover-compose",
+    run_id: Optional[str] = None,
+    timeout: float = 0.0,
+    stale_after: float = DEFAULT_STALE_AFTER_S,
+) -> Iterator[Path]:
+    """Hold one book's ``cover/`` while a cover is composed.
+
+    ``cover-compose`` reads ``spec.json`` and ``drafts.json``, draws, and writes
+    both back. Two of them started on one book would each take the same draft
+    number and one would drop the other's row.
+    """
+    path = cover_lock_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     token = _acquire(
         path, kind=kind, run_id=run_id, timeout=timeout, stale_after=stale_after

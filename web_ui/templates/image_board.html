@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ t.imgboard_title }} — {{ project_title }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
-    <link rel="stylesheet" href="{{ url_for('static', filename='image_board.css') }}?v=2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='image_board.css') }}?v=3">
 </head>
 <body>
 <script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
@@ -26,6 +26,10 @@
     </div>
 
     <p class="ib-subtitle">{{ t.imgboard_subtitle }}</p>
+
+    {#- Two kinds of work, one at a time: images the book came with, to be
+        changed, and images that are made (the cover). -#}
+    <div class="ib-tabs" id="ib-tabs" role="tablist"></div>
 
     <div class="ib-filters" id="ib-filters">
         <div class="ib-chips" id="ib-stage-chips" role="group"></div>
@@ -54,6 +58,6 @@
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='image_board.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='image_board.js') }}?v=4"></script>
 </body>
 </html>

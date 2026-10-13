@@ -1,0 +1,71 @@
+{
+  "aspect": [2, 3],
+  "defaults": {"translator": ""},
+  "colors": {"band": "#874727", "ink": "#F2E2CA"},
+  "swatch_color": "band",
+  "vars": {
+    "band_left": 0.3781,
+    "band_right": 0.1619,
+    "veil_bottom": 0.2722,
+    "title_size": 0.05926,
+    "subtitle_size": 0.04444,
+    "text_left": 0.0302,
+    "emblem_margin": 0.0225,
+    "emblem_size": 0.1387
+  },
+  "fit": {
+    "try": [{"title_size": 0.05926}, {"title_size": 0.05185}],
+    "grow": {"var": "band_right", "max": 0.24, "step": 0.004},
+    "art_overlap": 0.004
+  },
+  "layers": [
+    {"id": "veil", "type": "polygon",
+     "fill": {"gradient": [[0, "$ink", 1], [0.62, "$ink", 0.9], [1, "$ink", 0]]},
+     "points": [[0, 0], [1, 0], [1, "$veil_bottom"], [0, "$veil_bottom"]]},
+
+    {"id": "band", "type": "polygon", "fill": "$band", "covers_art_top": true,
+     "points": [[0, 0], [1, 0], [1, "$band_right"], [0, "$band_left"]]},
+
+    {"id": "title", "type": "text", "field": "title",
+     "font": "fonts/LibreBaskerville[wght].ttf", "weight": 600,
+     "anchor": "top-left", "at": ["$text_left", 0.0214], "size": "$title_size",
+     "line_spacing": 1.072, "wrap": true, "margin_right": 0.0133,
+     "fill": "$ink", "fit_inside": "band", "margin": 0.012,
+     "glow": {"radius": 0.0037, "color": "$band"},
+     "shadow": {"blur": 0.0056, "offset": 0.0028, "alpha": 0.4}},
+
+    {"id": "subtitle", "type": "text", "field": "subtitle",
+     "font": "fonts/LibreBaskerville[wght].ttf", "weight": 600,
+     "anchor": "top-left", "at": ["$text_left", 0.09], "below": "title", "gap": 0,
+     "size": "$subtitle_size", "line_spacing": 1.072, "wrap": true, "margin_right": 0.0133,
+     "fill": "$ink", "fit_inside": "band", "margin": 0.012,
+     "glow": {"radius": 0.0037, "color": "$band"},
+     "shadow": {"blur": 0.0056, "offset": 0.0028, "alpha": 0.4}},
+
+    {"id": "author", "type": "text", "field": "author",
+     "font": "fonts/LibreBaskerville-Italic[wght].ttf", "weight": 600,
+     "anchor": "top-left", "at": ["$text_left", 0.16], "below": "subtitle", "gap": 0.0285,
+     "size": 0.02593, "wrap": true, "margin_right": 0.0133,
+     "fill": "$ink", "fit_inside": "band", "margin": 0.012,
+     "glow": {"radius": 0.0037, "color": "$band"},
+     "shadow": {"blur": 0.0056, "offset": 0.0028, "alpha": 0.4}},
+
+    {"id": "translator", "type": "text", "text": "Traducción por\n{translator}",
+     "font": "fonts/LibreBaskerville-Italic[wght].ttf", "weight": 400,
+     "anchor": "top-left", "at": ["$text_left", 0.262], "below": "author", "gap": 0.0157,
+     "min_top": 0.262, "size": 0.01481, "line_spacing": 0.9,
+     "fill": "$ink", "fit_inside": "band", "margin": 0.012,
+     "glow": {"radius": 0.0056, "color": "$band"},
+     "shadow": {"blur": 0.0056, "offset": 0.0056, "alpha": 0.43}},
+
+    {"id": "emblem_disc", "type": "ellipse", "fill": "$band",
+     "anchor": "bottom-right", "at": ["$emblem_margin", "$emblem_margin"],
+     "size": ["$emblem_size", "$emblem_size"]},
+
+    {"id": "emblem_text", "type": "text", "text": "Your\nImprint", "small_caps": true,
+     "font": "fonts/LibreBaskerville[wght].ttf", "weight": 400,
+     "anchor": "bottom-right", "at": [0.09185, 0.1154], "align": "center",
+     "size": 0.02037, "line_spacing": 1.321, "fill": "$ink",
+     "shadow": {"blur": 0.0056, "offset": 0.0056, "alpha": 0.43}}
+  ]
+}

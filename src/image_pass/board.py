@@ -11,6 +11,10 @@ joins what five files say about each image:
 - the ledger (replaced, reverted, skipped, sent back), and
 - ``feedback.json`` — what the user said on the page.
 
+The cover is a made image, not a changed one, and gets more than a row: a
+**workspace** of ordered steps (art, band colour, layout, into the book), read
+from ``<project>/cover/`` and the drafts ``cover-compose`` keeps there.
+
 Nothing is cached and nothing is remembered between calls: the page shows what
 is on disk now, which is the point of a page a published picture is approved
 from.
@@ -25,11 +29,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.image_pass import MODES, image_key, images_dir, is_safe_key, originals_dir, work_dir
+from src.image_pass import (
+    COVER_NAMES,
+    IMAGE_SUFFIXES,
+    MODES,
+    cover_dir,
+    image_key,
+    images_dir,
+    is_safe_key,
+    originals_dir,
+    work_dir,
+)
+from src.image_pass import cover_drafts
 from src.image_pass import feedback as fb
 from src.image_pass import ledger
 from src.image_pass.apply import (
@@ -40,7 +56,8 @@ from src.image_pass.apply import (
     aspect_drift,
 )
 from src.image_pass.composite import load_sidecar
-from src.image_pass.inventory import build_rows, probe_image
+from src.image_pass.cover_compose import TemplateError, kept_art, load_spec
+from src.image_pass.inventory import build_rows, find_cover, probe_image
 from src.image_pass.jobs import (
     candidate_models,
     candidate_path,
@@ -65,6 +82,14 @@ STAGES = (
     STAGE_UNTRIAGED,
     STAGE_LEAVE,
 )
+
+# The two halves of the page: images the book came with, and images that are made.
+TRACK_EXISTING = "existing"
+TRACK_NEW = "new"
+TRACKS = (TRACK_EXISTING, TRACK_NEW)
+
+# The folder a re-``prepare`` moves a job's candidates into, under ``previous/``.
+ARCHIVE_STAMP = re.compile(r"\d{8}_\d{6}(-\d+)?")
 
 # Ledger actions that are someone's answer about an image. A backfill is not
 # one: the picture is the publisher's before and after.
@@ -334,6 +359,10 @@ def _picture(kind: str, path: Path, **extra: Any) -> dict[str, Any]:
 def _last_decisions(project_dir: Path) -> dict[str, dict[str, Any]]:
     last: dict[str, dict[str, Any]] = {}
     for row in ledger.read_rows(project_dir):
+        # A composed cover is a decision about its lettering, not about the
+        # art candidates under it: a pick among those is still to be answered.
+        if row.get("compose"):
+            continue
         if row.get("action") in _DECISIONS and row.get("image"):
             last[str(row["image"])] = row
     return last
@@ -421,6 +450,311 @@ def _stage(
     return STAGE_UNTRIAGED
 
 
+def _track(row: dict[str, Any]) -> str:
+    """Which half of the page an image is on: one the book came with, to be
+    changed, or one that is made. Today the only made one is the cover; a new
+    kind of made image is one more line here."""
+    return TRACK_NEW if row["role"] == "cover" else TRACK_EXISTING
+
+
+def _earlier(job: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The candidates an earlier prompt of this job drew, newest first. A
+    re-``prepare`` moves them aside and never deletes them."""
+    folder = Path(job["job_dir"]) / "previous" if job else None
+    if folder is None or not folder.is_dir():
+        return []
+    found: list[dict[str, Any]] = []
+    for archive in sorted(folder.iterdir(), key=lambda path: path.name, reverse=True):
+        if not archive.is_dir() or not ARCHIVE_STAMP.fullmatch(archive.name):
+            continue
+        for number in existing_candidates(archive):
+            found.append(_picture(
+                "earlier", candidate_path(archive, number),
+                job_id=job["id"], stamp=archive.name, candidate=number,
+            ))
+    return found
+
+
+# ---------------------------------------------------------------------------
+# the cover's workspace
+# ---------------------------------------------------------------------------
+
+def _cover_facts(project_dir: Path, key: str) -> dict[str, Any]:
+    """What ``cover/`` and the book say about the cover now. Shared by the
+    workspace the page draws and by what ``cover-compose --from-board`` reads."""
+    try:
+        spec = load_spec(project_dir)
+    except TemplateError:
+        spec = {}
+    state = spec.get("state") or {}
+    rows = cover_drafts.load(project_dir)
+    by_number = {row["n"]: row for row in rows}
+    art = kept_art(project_dir)
+    current = images_dir(project_dir) / key
+    cover_sha = ledger.sha256_file(current) if current.is_file() else None
+    composed = cover_sha is not None and cover_sha == state.get("composed_sha")
+    proof_draft = state.get("proof_draft") if state.get("proof_draft") in by_number else None
+    book_draft = (
+        state.get("applied_draft") if composed and state.get("applied_draft") in by_number else None
+    )
+    proofs = [row for row in rows if row.get("kind") == cover_drafts.KIND_PROOF]
+    return {
+        "spec": spec,
+        "state": state,
+        "rows": rows,
+        "by_number": by_number,
+        "art": art,
+        "art_sha": ledger.sha256_file(art) if art else None,
+        "current": current if current.is_file() else None,
+        "cover_sha": cover_sha,
+        "composed": composed,
+        "proof_draft": proof_draft,
+        "book_draft": book_draft,
+        "proof_id": (by_number.get(proof_draft) or {}).get("id"),
+        "book_id": (by_number.get(book_draft) or {}).get("id"),
+        # The stamp of the last compose; a spec from before there was one has
+        # only the day its last proof was first kept.
+        "last_proof_ts": state.get("proof_at") or (proofs[-1].get("ts") if proofs else None),
+    }
+
+
+def _design_state(design: Optional[dict[str, Any]], facts: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """What the user chose for the cover, with two facts added: what of it is
+    still to be done, and whether it is still about a draft that exists."""
+    if not design:
+        return None
+    number = design.get("draft")
+    row = facts["by_number"].get(number) if number is not None else None
+    problems: list[str] = []
+    if number is not None:
+        if row is None or row.get("id") != design.get("id"):
+            problems.append("draft_gone")
+        elif design.get("approve") and row.get("art_sha") != facts["art_sha"]:
+            # Its settings can be carried to new art; an approval cannot.
+            problems.append("art_changed")
+    waiting: list[str] = []
+    spent = False
+    if row is not None and not problems:
+        if design.get("approve"):
+            if design.get("id") != facts["book_id"]:
+                waiting.append("not_applied")
+            else:
+                # In the book, and a different cover composed since: the
+                # approval was of that one and says nothing about this one.
+                spent = facts["proof_id"] is not None and facts["proof_id"] != design.get("id")
+        elif design.get("id") != facts["proof_id"]:
+            waiting.append("draft_not_adopted")
+    if design.get("note") and _later(design.get("note_updated"), facts["last_proof_ts"]):
+        waiting.append("note_unread")
+    return {
+        "draft": number,
+        "id": design.get("id"),
+        "approve": bool(design.get("approve")),
+        "note": design.get("note") or "",
+        "updated": design.get("updated"),
+        "waiting": waiting,
+        "spent": spent,
+        "stale": bool(problems),
+        "problems": problems,
+    }
+
+
+def cover_design(project_dir: Path) -> Optional[dict[str, Any]]:
+    """What the user chose on the board for this book's cover, or ``None``."""
+    project_dir = Path(project_dir)
+    key = find_cover(project_dir) or COVER_NAMES[0]
+    said = (fb.load(project_dir).get(key) or {}).get("design")
+    return _design_state(said, _cover_facts(project_dir, key))
+
+
+def _cover_picture(kind: str, project_dir: Path, path: Path, **extra: Any) -> dict[str, Any]:
+    name = path.relative_to(cover_dir(project_dir)).as_posix()
+    return _picture(kind, path, source="cover", name=name, **extra)
+
+
+def _draft_picture(
+    project_dir: Path, row: dict[str, Any], facts: dict[str, Any], picked: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    path = cover_drafts.preview_path(project_dir, row)
+    if not path.is_file():
+        return None
+    color = row.get("color")
+    tags = [
+        tag for tag, on in (
+            ("current", row["n"] == facts["proof_draft"]),
+            ("in_book", row["n"] == facts["book_draft"]),
+            ("picked", bool(color and picked) and str(color).lower() == str(picked).lower()),
+            ("old_art", bool(facts["art_sha"]) and row.get("art_sha") != facts["art_sha"]),
+        ) if on
+    ]
+    return _cover_picture(
+        "draft", project_dir, path,
+        draft=row["n"], draft_kind=row.get("kind"), set=row.get("set"), ts=row.get("ts"),
+        label=row.get("label"), color=color, changes=row.get("changes"), tags=tags,
+    )
+
+
+def _when(stamp: Any) -> Optional[str]:
+    return str(stamp)[:10] if stamp else None
+
+
+def _cover_workspace(
+    project_dir: Path,
+    *,
+    key: str,
+    job: Optional[dict[str, Any]],
+    pictures: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    earlier: list[dict[str, Any]],
+    stage: str,
+    design: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """The cover as the page shows it: a list of steps, each with where it
+    stands and the pictures made at it. The page draws whatever steps it is
+    given, so a made image of another kind is a different list, not new page
+    code."""
+    facts = _cover_facts(project_dir, key)
+    folder = cover_dir(project_dir)
+    spec, state, rows = facts["spec"], facts["state"], facts["rows"]
+
+    applied_art: Optional[dict[str, Any]] = None
+    applied_cover: Optional[dict[str, Any]] = None
+    for entry in ledger.read_rows(project_dir):
+        if entry.get("image") == key and entry.get("action") == ledger.ACTION_APPLY:
+            if entry.get("compose"):
+                applied_cover = entry
+            else:
+                applied_art = entry
+
+    def drafts_of(kinds: tuple[str, ...], picked: Optional[str] = None) -> list[dict[str, Any]]:
+        made = (
+            _draft_picture(project_dir, row, facts, picked)
+            for row in rows if row.get("kind") in kinds
+        )
+        return [picture for picture in made if picture]
+
+    def more(name: str, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"id": name, "pictures": found}] if found else []
+
+    # --- 1. the art: the picture with no lettering on it.
+    art = facts["art"]
+    art_pictures = [picture for picture in pictures if picture["kind"] == "reference"]
+    if art:
+        art_pictures.append(_cover_picture("art", project_dir, art))
+    art_pictures += candidates
+    art_values: dict[str, Any] = {}
+    if stage == STAGE_REVIEW:
+        art_state = "review"
+    elif art and applied_art and applied_art.get("sha256_after") == facts["art_sha"]:
+        art_state = "kept_candidate"
+        art_values = {"n": applied_art.get("candidate"), "when": _when(applied_art.get("ts"))}
+    elif art:
+        art_state = "kept"
+    elif job is not None:
+        art_state = "queued" if _owed(job, candidates) else "proposed"
+    else:
+        art_state = "none"
+    steps = [{
+        "id": "art", "done": bool(art), "state": art_state, "values": art_values,
+        "pictures": art_pictures, "more": more("earlier", earlier),
+    }]
+
+    # --- 2. the band colour: the user's, per book.
+    picked = (spec.get("colors") or {}).get(state.get("band") or "band")
+    swatches = drafts_of((cover_drafts.KIND_SWATCH,), picked)
+    latest_set = swatches[-1]["set"] if swatches else None
+    shown = [picture for picture in swatches if picture["set"] == latest_set]
+    older = [picture for picture in reversed(swatches) if picture["set"] != latest_set]
+    sheet = folder / "swatches.png"
+    if not shown and sheet.is_file():
+        shown = [_cover_picture("sheet", project_dir, sheet)]
+    steps.append({
+        "id": "colour", "done": bool(picked),
+        "state": "picked" if picked else "suggested" if shown else "none",
+        "values": {"color": picked},
+        "pictures": shown, "more": more("earlier_swatches", older),
+    })
+
+    # --- 3. the layout: every proof and every variant tried, newest first.
+    proof = folder / "proof.png"
+    layouts = list(reversed(drafts_of((cover_drafts.KIND_PROOF, cover_drafts.KIND_VARIANT))))
+    layout_state, shown_layouts = ("drafts", layouts) if layouts else ("none", [])
+    if not layouts and proof.is_file():
+        # A proof from before drafts were kept: there is the one picture.
+        layout_state, shown_layouts = "proof", [_cover_picture("proof", project_dir, proof)]
+    sheets = [
+        _cover_picture("sheet", project_dir, path)
+        for path in (sorted(folder.iterdir()) if folder.is_dir() else [])
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+        and path.stem != "art" and path.name not in ("proof.png", "swatches.png")
+    ]
+    steps.append({
+        "id": "layout", "done": proof.is_file(), "state": layout_state,
+        "values": {"n": len(layouts)},
+        "pictures": shown_layouts, "more": more("sheets", sheets),
+    })
+
+    # --- 4. the book: what images/cover.* is now.
+    current = facts["current"]
+    behind = (
+        facts["composed"] and facts["proof_draft"] is not None
+        and facts["proof_draft"] != facts["book_draft"]
+    )
+    book_values: dict[str, Any] = {"backup": (originals_dir(project_dir) / key).is_file()}
+    if facts["composed"]:
+        book_state = "behind" if behind else "applied" if facts["book_draft"] else "applied_plain"
+        book_values.update({"n": facts["book_draft"], "when": _when((applied_cover or {}).get("ts"))})
+    elif current is None:
+        book_state = "none"
+    elif facts["cover_sha"] in (facts["art_sha"], (applied_art or {}).get("sha256_after")):
+        book_state = "art"
+    else:
+        book_state = "other"
+    in_book = _picture("current", current, source="images", key=key) if current else None
+    steps.append({
+        "id": "book", "done": facts["composed"] and not behind, "state": book_state,
+        "values": book_values, "pictures": [in_book] if in_book else [], "more": [],
+    })
+
+    if stage == STAGE_REVIEW or not art:
+        status = "art"
+    elif not picked:
+        status = "colour"
+    elif not proof.is_file():
+        status = "layout"
+    elif not steps[-1]["done"]:
+        status = "approve"
+    else:
+        status = "done"
+
+    # The big picture: the proof as it stands. Its kept preview where there is
+    # one, which is a tenth of the PNG to fetch.
+    hero = next((picture for picture in layouts if picture["draft"] == facts["proof_draft"]), None)
+    if hero is None and proof.is_file():
+        hero = _cover_picture("proof", project_dir, proof)
+    if hero is None and art:
+        hero = _cover_picture("art", project_dir, art)
+
+    said = _design_state(design, facts)
+    # Something the user chose that has not been done yet is the agent's move.
+    with_agent = bool(said and said["waiting"] and not said["stale"])
+    waiting = stage == STAGE_REVIEW or (
+        not with_agent and (status == "approve" or (status == "colour" and bool(shown)))
+    )
+    return {
+        "kind": "cover",
+        "status": status,
+        "waiting": waiting,
+        "hero": hero,
+        "steps": steps,
+        "drafts": len(rows),
+        "proof": str(proof) if proof.is_file() else None,
+        "proof_draft": facts["proof_draft"],
+        "book_draft": facts["book_draft"],
+        "design": said,
+    }
+
+
 def build(project_dir: Path) -> dict[str, Any]:
     """One row per image, joined across every file that says something about it."""
     project_dir = Path(project_dir)
@@ -434,6 +768,12 @@ def build(project_dir: Path) -> dict[str, Any]:
 
     images: list[dict[str, Any]] = []
     counts = {stage: 0 for stage in STAGES}
+    # The page shows one track at a time, so its chips count that track's images.
+    tracks = {
+        track: {"images": 0, **{stage: 0 for stage in STAGES},
+                "lettering": 0, "with_input": 0, "flagged": 0, "waiting": 0}
+        for track in TRACKS
+    }
     for row in rows:
         key = row["image"]
         job = jobs.get(key)
@@ -470,6 +810,10 @@ def build(project_dir: Path) -> dict[str, Any]:
             flags: list[str] = []
             if picture["width"] is None:
                 flags.append("unreadable")
+            elif (decision or {}).get("compose"):
+                # The cover in the book is the composed one, which is taller
+                # than its art by the band: not a shape to hold the art to.
+                pass
             elif original and original["width"]:
                 drift = aspect_drift(
                     picture["width"], picture["height"], original["width"], original["height"]
@@ -508,6 +852,12 @@ def build(project_dir: Path) -> dict[str, Any]:
         stage = _stage(row, verdict, job, candidates, decision)
         counts[stage] += 1
         pick = _pick_state(said.get("pick"), job, decision)
+        track = _track(row)
+        earlier = _earlier(job)
+        workspace = _cover_workspace(
+            project_dir, key=key, job=job, pictures=pictures, candidates=candidates,
+            earlier=earlier, stage=stage, design=said.get("design"),
+        ) if track == TRACK_NEW else None
 
         flagged: list[str] = []
         if row["missing"] and row["role"] != "cover":
@@ -521,10 +871,22 @@ def build(project_dir: Path) -> dict[str, Any]:
                 flagged.append("check_failed")
         if pick and pick["stale"]:
             flagged.append("stale_pick")
+        if workspace and workspace["design"] and workspace["design"]["stale"]:
+            flagged.append("stale_design")
+
+        lettering = bool(labels) or bool((tri or {}).get("lettering"))
+        tally = tracks[track]
+        tally["images"] += 1
+        tally[stage] += 1
+        tally["lettering"] += lettering
+        tally["with_input"] += bool(request or pick or said.get("design"))
+        tally["flagged"] += bool(flagged)
+        tally["waiting"] += workspace["waiting"] if workspace else stage == STAGE_REVIEW
 
         images.append({
             "image": key,
             "role": row["role"],
+            "track": track,
             "chapter": row.get("chapter"),
             "alt": row.get("alt"),
             "missing": row["missing"],
@@ -534,7 +896,7 @@ def build(project_dir: Path) -> dict[str, Any]:
             "stage": stage,
             "verdict": verdict,
             "labels": labels,
-            "lettering": bool(labels) or bool((tri or {}).get("lettering")),
+            "lettering": lettering,
             "flagged": flagged,
             "triage": tri,
             "job": {
@@ -544,6 +906,8 @@ def build(project_dir: Path) -> dict[str, Any]:
             } if job else None,
             "pictures": pictures,
             "candidates": candidates,
+            "earlier": earlier,
+            "workspace": workspace,
             "decision": {
                 field: decision.get(field) for field in ("action", "ts", "note", "candidate")
             } if decision else None,
@@ -561,8 +925,9 @@ def build(project_dir: Path) -> dict[str, Any]:
             "images": len(images),
             **counts,
             "lettering": sum(1 for image in images if image["lettering"]),
-            "with_input": sum(1 for image in images if image["request"] or image["pick"]),
+            "with_input": sum(tally["with_input"] for tally in tracks.values()),
             "flagged": sum(1 for image in images if image["flagged"]),
+            "tracks": tracks,
         },
     }
 
@@ -659,11 +1024,28 @@ def summary(project_dir: Path) -> dict[str, Any]:
                 "job_mode": (job or {}).get("mode"),
             })
     decisions, stale = decisions_from_picks(board)
+    cover: Optional[dict[str, Any]] = None
+    for image in board["images"]:
+        workspace = image.get("workspace")
+        if workspace and workspace["kind"] == "cover":
+            cover = {
+                "image": image["image"],
+                "status": workspace["status"],
+                "steps": {step["id"]: step["state"] for step in workspace["steps"]},
+                "proof": workspace["proof"],
+                "proof_draft": workspace["proof_draft"],
+                "book_draft": workspace["book_draft"],
+                "drafts": workspace["drafts"],
+                "design": workspace["design"],
+            }
+    counts = {key: value for key, value in board["counts"].items() if key != "tracks"}
     return {
         "status": "ok",
         "project": board["project"],
+        "cover": cover,
         "counts": {
-            **board["counts"],
+            **counts,
+            "design_waiting": len(((cover or {}).get("design") or {}).get("waiting") or []),
             "requests": len(requests),
             "picks": len(decisions),
             "stale_picks": len(stale),

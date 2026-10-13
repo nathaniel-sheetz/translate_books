@@ -11,6 +11,11 @@ acts on by itself:
 - a **pick** — accept candidate N, redo, or skip. ``apply --from-board`` turns
   the outstanding ones into decisions.
 
+The cover has a third, because a cover is composed after its art is picked:
+
+- a **design** — which draft of the cover to go on from, whether it is approved
+  for the book, and a note on the layout. ``cover-compose --from-board`` reads it.
+
 Nothing here is ever marked as "handled". Whether a request still needs
 attention is worked out by :mod:`src.image_pass.board` from what the prepared
 job and the ledger say now, so a request that was folded into a job stops being
@@ -29,8 +34,8 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from src.image_pass import MODES, image_key, is_safe_key, work_dir
-from src.image_pass import ledger
+from src.image_pass import COVER_NAMES, MODES, image_key, is_safe_key, work_dir
+from src.image_pass import cover_drafts, ledger
 from src.image_pass.apply import VERDICT_ACCEPT, VERDICT_REDO, VERDICT_SKIP
 from src.image_pass.jobs import MAX_CANDIDATES, candidate_path, load_manifest
 
@@ -164,15 +169,53 @@ def validate_pick(
     }, []
 
 
+def validate_design(
+    project_dir: Path, image: str, raw: Any
+) -> tuple[Optional[dict[str, Any]], list[str]]:
+    """Return ``(design, problems)``: which draft of the cover the user chose,
+    whether they approved it for the book, and a note on the layout.
+
+    Stamped with the draft's ``id``, which is the settings, the art and the
+    design it was drawn from, so an approval is of that cover and no other. An
+    empty one comes back as ``None``.
+    """
+    if not isinstance(raw, dict):
+        return None, ["design is not an object"]
+    if image not in COVER_NAMES:
+        return None, ["only the cover has drafts to choose between"]
+    problems: list[str] = []
+    note = _note(raw.get("note"), problems)
+    approve = raw.get("approve") or False
+    if not isinstance(approve, bool):
+        problems.append("approve must be true or false")
+
+    number = raw.get("draft")
+    ident = None
+    if number is not None:
+        row = cover_drafts.find(project_dir, number)
+        if row is None:
+            problems.append(f"there is no draft {number!r} of this cover")
+        else:
+            ident = row.get("id")
+    elif approve is True:
+        problems.append("an approval needs `draft`: the number of the draft approved")
+    if problems:
+        return None, problems
+    if number is None and not note:
+        return None, []
+    return {"draft": number, "id": ident, "approve": approve, "note": note}, []
+
+
 def save_image(
     project_dir: Path,
     image: str,
     *,
     request: Any = KEEP,
     pick: Any = KEEP,
+    design: Any = KEEP,
     now: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Set one image's request and/or pick and return ``{status, feedback}``.
+    """Set one image's request, pick and/or design and return ``{status, feedback}``.
 
     A section passed as ``None`` is cleared; one left at :data:`KEEP` is not
     touched, so a save from the label table cannot drop a pick made in another
@@ -189,6 +232,9 @@ def save_image(
         problems += found
     if pick is not KEEP and pick is not None:
         pick, found = validate_pick(project_dir, key, pick)
+        problems += found
+    if design is not KEEP and design is not None:
+        design, found = validate_design(project_dir, key, design)
         problems += found
     if problems:
         return {"status": "error", "problems": problems}
@@ -217,6 +263,20 @@ def save_image(
             else:
                 pick["updated"] = stamp
                 row["pick"] = pick
+        if design is not KEEP:
+            if design is None:
+                row.pop("design", None)
+            else:
+                before = row.get("design") or {}
+                # As with a request: whether the note has been read must not
+                # flip because a different draft was clicked.
+                design["note_updated"] = (
+                    before.get("note_updated") or stamp
+                    if design["note"] == (before.get("note") or "")
+                    else stamp
+                )
+                design["updated"] = stamp
+                row["design"] = design
         if row:
             images[key] = row
         else:

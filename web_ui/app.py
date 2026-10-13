@@ -2116,6 +2116,11 @@ def _image_board_url(project_id: str, picture: dict) -> str:
     """Where the browser fetches one of a board row's pictures from."""
     if picture["kind"] == "candidate":
         path = f"image-pass/candidate/{quote(picture['job_id'])}/{picture['candidate']}"
+    elif picture["kind"] == "earlier":
+        path = (f"image-pass/earlier/{quote(picture['job_id'])}/"
+                f"{quote(picture['stamp'])}/{picture['candidate']}")
+    elif picture["source"] == "cover":
+        path = f"image-pass/cover/{quote(picture['name'])}"
     elif picture["source"] == "images_original":
         path = f"image-pass/original/{quote(picture['key'])}"
     else:
@@ -2134,14 +2139,31 @@ def _image_board_wire(project_id: str, row: dict) -> dict:
     to the front. The agent lists lettering in the order it reads it off the
     picture, which is the order the user checks it in.
     """
-    out = dict(row)
-    for field in ("pictures", "candidates"):
-        out[field] = [
+    def wire(pictures):
+        return [
             {**{k: v for k, v in picture.items() if k != "path"},
              "url": _image_board_url(project_id, picture)}
-            for picture in row[field]
+            for picture in pictures
         ]
+
+    out = dict(row)
+    for field in ("pictures", "candidates", "earlier"):
+        out[field] = wire(row[field])
     out["labels"] = [[source, target] for source, target in row["labels"].items()]
+    workspace = row.get("workspace")
+    if workspace:
+        out["workspace"] = {
+            # `proof` is where the file is on disk, for the agent's summary.
+            **{k: v for k, v in workspace.items() if k != "proof"},
+            "hero": wire([workspace["hero"]])[0] if workspace["hero"] else None,
+            "steps": [
+                {**step,
+                 "pictures": wire(step["pictures"]),
+                 "more": [{**group, "pictures": wire(group["pictures"])}
+                          for group in step["more"]]}
+                for step in workspace["steps"]
+            ],
+        }
     return out
 
 
@@ -2197,11 +2219,11 @@ def image_board_state(project_id):
 
 @app.route("/api/project/<project_id>/image-pass/feedback", methods=["POST"])
 def image_board_feedback(project_id):
-    """Save one image's request and/or pick.
+    """Save one image's request, pick and/or (the cover's) design.
 
-    The body is ``{image, request?, pick?}``. A section that is absent is left
-    alone and one sent as ``null`` is cleared, so the two halves of a card save
-    independently. The reply carries the image's row as rebuilt from disk —
+    The body is ``{image, request?, pick?, design?}``. A section that is absent
+    is left alone and one sent as ``null`` is cleared, so the halves of a card
+    save independently. The reply carries the image's row as rebuilt from disk —
     its stage and what is still outstanding can both change with a save.
     """
     from src.image_pass import board as image_board
@@ -2228,6 +2250,7 @@ def image_board_feedback(project_id):
             _image_board_labels(data["request"]) if "request" in data else image_feedback.KEEP
         ),
         pick=data["pick"] if "pick" in data else image_feedback.KEEP,
+        design=data["design"] if "design" in data else image_feedback.KEEP,
     )
     if saved["status"] != "ok":
         return jsonify({"error": "; ".join(saved["problems"]), "problems": saved["problems"]}), 400
@@ -2263,6 +2286,36 @@ def serve_image_board_candidate(project_id, job_id, number):
     if not job_dir.is_dir():
         return jsonify({"error": "No such job"}), 404
     return send_from_directory(str(job_dir), f"cand_{number:02d}.png")
+
+
+@app.route("/projects/<project_id>/image-pass/earlier/<job_id>/<stamp>/<int:number>")
+def serve_image_board_earlier(project_id, job_id, stamp, number):
+    """A candidate an earlier prompt of the job drew, from its ``previous/``."""
+    from src.image_pass import jobs_dir
+    from src.image_pass.board import ARCHIVE_STAMP
+
+    if not _safe_id(project_id) or not _safe_id(job_id) or not ARCHIVE_STAMP.fullmatch(stamp):
+        return "Bad request", 400
+    archive = jobs_dir(_resolve_project_dir(project_id)) / job_id / "previous" / stamp
+    if not archive.is_dir():
+        return jsonify({"error": "No such candidates"}), 404
+    return send_from_directory(str(archive), f"cand_{number:02d}.png")
+
+
+@app.route("/projects/<project_id>/image-pass/cover/<path:filename>")
+def serve_image_board_cover(project_id, filename):
+    """A picture from ``cover/``: the art, the proof, a draft, a sheet. Pictures
+    only: the spec and the drafts' record live there too."""
+    from src.image_pass import IMAGE_SUFFIXES, cover_dir
+
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    if Path(filename).suffix.lower() not in IMAGE_SUFFIXES:
+        return jsonify({"error": "Not a picture"}), 404
+    folder = cover_dir(_resolve_project_dir(project_id))
+    if not folder.is_dir():
+        return jsonify({"error": "No cover on file"}), 404
+    return send_from_directory(str(folder), filename)
 
 
 @app.route("/api/correction", methods=["POST"])

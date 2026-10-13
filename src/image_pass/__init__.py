@@ -7,7 +7,7 @@ deterministic half of that: it inventories the images a book references, renders
 one Codex job per image, harvests the candidates, shows them beside the
 original, and swaps the approved one in place behind a backup.
 
-Eight modules:
+Ten modules:
 
 - :mod:`inventory` — every image the book references, plus the cover.
 - :mod:`backfill`  — the publisher's larger scans, behind the filenames a book
@@ -22,6 +22,10 @@ Eight modules:
 - :mod:`feedback`  — what the user said on that page: the only file it writes.
 - :mod:`apply`     — ``apply``, ``revert`` and ``verify``. With ``backfill``,
   the only code that writes into ``images/``.
+- :mod:`cover_compose` — the house cover from the art: the band with the title
+  on it, the emblem. No Codex; it reaches ``images/`` through ``apply``.
+- :mod:`cover_drafts` — every cover ``cover_compose`` has drawn for a book, kept
+  as a preview with the settings it was drawn with.
 - :mod:`ledger`    — the append-only record of what was replaced with what.
 
 Two invariants the rest of the repo relies on:
@@ -77,6 +81,12 @@ def jobs_dir(project_dir: Path) -> Path:
     return work_dir(project_dir) / "jobs"
 
 
+def cover_dir(project_dir: Path) -> Path:
+    """The cover's art without lettering, and what was last composed over it.
+    Outside ``images/``, so none of it ships in the EPUB."""
+    return Path(project_dir) / "cover"
+
+
 def image_key(ref: str) -> str:
     """Canonical id of an image: its POSIX path relative to ``images/``.
 
@@ -107,6 +117,7 @@ __all__ = [
     "MODE_REPLACE",
     "MODE_RESTORE",
     "MODE_TRANSLATE",
+    "cover_dir",
     "image_key",
     "images_dir",
     "is_safe_key",
