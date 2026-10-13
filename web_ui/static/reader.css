@@ -2243,6 +2243,82 @@ body {
     color: var(--accent);
 }
 
+/* A finding's Apply/Edit button: the one action in the row that changes the
+   book, so it carries the accent the plain Resolved label used to. */
+.review-fix-btn {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+
+.review-fix-btn:hover {
+    background: var(--accent-dark);
+    color: #fff;
+}
+
+/* The finding being fixed, pinned above the edit box. Built once in reader.js
+   for both sheet skins, so it is styled here rather than in either skin. */
+.fix-note {
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--accent-border);
+    border-radius: 8px;
+    background: var(--accent-bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.fix-note-type {
+    font-weight: 700;
+}
+
+.fix-note-body {
+    margin-top: 6px;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+.fix-note-body del {
+    opacity: 0.6;
+}
+
+.fix-note-body ins {
+    text-decoration: none;
+    font-weight: 600;
+    background: var(--accent-border);
+    border-radius: 3px;
+    padding: 0 2px;
+    margin-left: 3px;
+}
+
+.fix-note-excerpt {
+    font-style: italic;
+}
+
+.fix-note-why,
+.fix-note-hint {
+    margin-top: 6px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    opacity: 0.75;
+}
+
+.fix-note-cancel {
+    margin-top: 8px;
+    font-size: 12px;
+    font-family: inherit;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-light);
+    background: var(--bg-btn);
+    color: var(--text-muted3);
+    cursor: pointer;
+}
+
 /* End-of-chapter overflow bin — findings and notes with no sentence to sit on.
    Reuses the .review-marker band idiom (rule above, generous top padding) so it
    reads as part of the same end-of-chapter furniture, and sits immediately

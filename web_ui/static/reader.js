@@ -156,6 +156,10 @@
     let reviewMap = {};   // es_idx (string) -> [finding, ...] filtered to enabled types
     let unanchoredList = [];  // findings the server could not place on any sentence
     let saveWarnMap = {};   // es_idx -> { id, hits }: save-check warnings still open
+    // The finding the next Save is fixing: { finding, mode: 'apply'|'edit',
+    // after }. Set by a finding's Apply/Edit button and read once by the Save
+    // handler, which marks the finding real only when the Save lands.
+    let pendingFix = null;
 
     // Load alignment data and annotations in parallel.
     // Exposed as a function so the removal flow can re-bootstrap after a
@@ -499,6 +503,8 @@
         if (el) el.classList.add('active');
 
         activeIdx = alignment.es_idx;
+        // A fix left open on the previous sentence must not ride this one's Save.
+        clearFix();
 
         // Capture the tapped word (if any) to pre-fill a new annotation below.
         const tappedWord = wordAtPoint(evt);
@@ -771,6 +777,7 @@
         if (prev) prev.classList.remove('active');
 
         activeIdx = null;
+        clearFix();
         resetAnnotationUI();
         resetReviewSheet();
         const warnRow = document.getElementById('save-warn-row');
@@ -895,6 +902,8 @@
 
     function setSheetTab(tab) {
         const errors = tab === 'errors';
+        // Going back to the findings list abandons the fix in progress.
+        if (errors && pendingFix) cancelFix();
         if (sheetErrors) sheetErrors.style.display = errors ? 'block' : 'none';
         if (sheetAnnotation) sheetAnnotation.style.display = errors ? 'none' : '';
         if (sheetEditArea) sheetEditArea.style.display = errors ? 'none' : '';
@@ -966,7 +975,19 @@
 
             const fb = document.createElement('div');
             fb.className = 'review-item-fb';
-            ['resolved', 'false_positive', 'bad_message', 'missing_context_gap']
+            // Apply or Edit stands where "Resolved" used to: a finding on a
+            // sentence is marked real by saving the sentence, so the mark and
+            // the fix cannot come apart. The bin keeps a plain Resolved,
+            // because a finding with no sentence has nothing to save.
+            const fix = document.createElement('button');
+            fix.type = 'button';
+            fix.className = 'review-fb-btn review-fix-btn';
+            fix.textContent = fixFor(f, sentenceEs(esIdx)) != null
+                ? (i.review_fix_apply || 'Apply')
+                : (i.review_fix_edit || 'Edit');
+            fix.addEventListener('click', () => startFix(esIdx, f));
+            fb.appendChild(fix);
+            ['false_positive', 'bad_message', 'missing_context_gap']
                 .forEach(ftype => {
                     const b = document.createElement('button');
                     b.type = 'button';
@@ -980,6 +1001,181 @@
 
             sheetErrors.appendChild(item);
         });
+    }
+
+    // ── Fixing a finding from its own row ─────────────────────────────────────
+    //
+    // A finding's primary button opens the sentence for editing with the
+    // finding still in view. When the judge's suggestion is a clean swap inside
+    // this sentence the box arrives holding the result (Apply); otherwise it
+    // holds the sentence as it stands (Edit). Either way nothing is written
+    // until Save, and Save is what marks the finding real.
+
+    function sentenceEs(esIdx) {
+        if (!alignmentData) return null;
+        const a = alignmentData.alignments.find(x => x.es_idx === esIdx);
+        return a ? a.es : null;
+    }
+
+    // The sentence with the finding's suggestion swapped in, or null when it
+    // cannot be. The server already ran the dry run's checks against the chunk
+    // (`fix` is absent otherwise); this asks the one thing only the page knows,
+    // which is whether the excerpt still stands once in the text on screen. An
+    // earlier Apply on this sentence can have removed it, or, when the
+    // suggestion keeps its excerpt, have already made the swap: the excerpt
+    // still stands once then, and swapping again would double what was added.
+    // split/join, not .replace(): `$&` in a suggestion must land as those two
+    // characters.
+    function fixFor(f, es) {
+        const fix = f && f.fix;
+        if (!fix || !fix.old || typeof es !== 'string') return null;
+        if (fix.new.includes(fix.old) && es.includes(fix.new)) return null;
+        const parts = es.split(fix.old);
+        return parts.length === 2 ? parts[0] + fix.new + parts[1] : null;
+    }
+
+    // The finding and what it proposes, for the top of the edit box. Shared by
+    // both sheet skins, so it styles itself (`.fix-note`, reader.css).
+    function buildFixNote(f, es) {
+        const note = document.createElement('div');
+        note.className = 'fix-note';
+
+        const head = document.createElement('div');
+        head.className = 'fix-note-head';
+        const type = document.createElement('span');
+        type.className = 'fix-note-type';
+        type.textContent = (i.review_types || {})[f.eval_name] || f.eval_name;
+        head.appendChild(type);
+        if (f.message) head.appendChild(document.createTextNode(' ' + f.message));
+        note.appendChild(head);
+
+        const fix = f.fix;
+        const body = document.createElement('div');
+        body.className = 'fix-note-body';
+        if (fixFor(f, es) != null) {
+            // The sentence as it reads now, with the swap drawn in place.
+            const parts = es.split(fix.old);
+            const del = document.createElement('del');
+            del.textContent = fix.old;
+            const ins = document.createElement('ins');
+            appendSuggestionText(ins, fix.new);
+            body.appendChild(document.createTextNode(parts[0]));
+            body.appendChild(del);
+            body.appendChild(ins);
+            body.appendChild(document.createTextNode(parts[1]));
+        } else {
+            if (f.excerpt) {
+                const ex = document.createElement('div');
+                ex.className = 'fix-note-excerpt';
+                ex.textContent = f.excerpt;
+                body.appendChild(ex);
+            }
+            if (f.suggestion) {
+                const sug = document.createElement('div');
+                sug.className = 'fix-note-suggestion';
+                sug.appendChild(document.createTextNode('→ '));
+                appendSuggestionText(sug, f.suggestion);
+                body.appendChild(sug);
+            }
+            // Only a judge finding carries a reason; say why it is Edit.
+            if (f.fix_reason) {
+                const why = i.review_fix_why || {};
+                const p = document.createElement('div');
+                p.className = 'fix-note-why';
+                p.textContent = why[f.fix_reason] || why.other || '';
+                if (p.textContent) body.appendChild(p);
+            }
+        }
+        note.appendChild(body);
+
+        const hint = document.createElement('div');
+        hint.className = 'fix-note-hint';
+        hint.textContent = i.review_fix_hint || 'Saving marks this finding resolved.';
+        note.appendChild(hint);
+        return note;
+    }
+
+    function fixContext(f, es) {
+        const after = fixFor(f, es);
+        return { finding: f, mode: after != null ? 'apply' : 'edit', after: after };
+    }
+
+    // Classic sheet: open the edit box on this finding.
+    function startFix(esIdx, f) {
+        const es = sentenceEs(esIdx);
+        if (es == null || !sheetEditArea) return;
+        clearFix();
+        const ctx = fixContext(f, es);
+        const note = buildFixNote(f, es);
+        note.id = 'sheet-fix-note';
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'fix-note-cancel';
+        cancel.textContent = i.review_fix_cancel || 'Cancel';
+        cancel.addEventListener('click', () => {
+            cancelFix();
+            setSheetTab('errors');
+        });
+        note.appendChild(cancel);
+        sheetEditArea.insertBefore(note, sheetEditArea.firstChild);
+        sheetTextarea.value = ctx.after != null ? ctx.after : es;
+        setSheetTab('annotate');
+        pendingFix = ctx;
+        bottomSheet.classList.add('expanded');
+        if (isDesktop) sheetTextarea.focus();
+    }
+
+    // Forget the fix in progress. The textarea is left alone: both callers that
+    // are not a cancel (close, next sentence) refill it themselves.
+    function clearFix() {
+        pendingFix = null;
+        const note = document.getElementById('sheet-fix-note');
+        if (note) note.remove();
+    }
+
+    function cancelFix() {
+        clearFix();
+        const es = sentenceEs(activeIdx);
+        if (es != null) sheetTextarea.value = es;
+    }
+
+    // What became of the suggestion on this Save (SUGGESTION_USED, server side).
+    function suggestionUsed(ctx, before, saved) {
+        if (saved === before) return 'none';
+        if (ctx.mode !== 'apply') return 'manual';
+        return saved === (ctx.after || '').trim() ? 'verbatim' : 'edited';
+    }
+
+    // Mark the finding a Save just fixed as real. Dropped from the map before
+    // the request, not after: the sheet has already closed, and the sentence
+    // must not still read as flagged if it is reopened within the round trip.
+    function resolveFromSave(ctx, used) {
+        const f = ctx.finding;
+        const url = `/api/project/${projectId}/evaluations/${f.chunk_id}/feedback`;
+        const payload = {
+            eval_name: f.eval_name,
+            issue_index: f.issue_index,
+            feedback_type: 'resolved',
+            via: ctx.mode === 'apply' ? 'reader_apply' : 'reader_edit',
+            suggestion_used: used,
+        };
+        dropFromReviewMap(x => (
+            x.eval_name === f.eval_name &&
+            x.issue_index === f.issue_index &&
+            x.chunk_id === f.chunk_id
+        ));
+        fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then(r => { if (!r.ok) throw new Error('http ' + r.status); })
+            .catch(() => {
+                try {
+                    enqueue(url, 'POST', payload);
+                } catch (e) { /* localStorage full — queue unavailable */ }
+                showToast(i.review_fb_failed || 'Feedback not saved; queued for retry.');
+            });
     }
 
     // Remove every finding matching `pred` from the review map and repaint the
@@ -1165,13 +1361,7 @@
             const remaining = reviewMap[esIdx] || [];
             renderErrorsList(esIdx, remaining);
             updateErrorsTabCount(remaining.length);
-            if (!remaining.length) {
-                if (feedbackType === 'resolved') {
-                    setSheetTab('annotate');
-                } else {
-                    closeSheet(esIdx);
-                }
-            }
+            if (!remaining.length) closeSheet(esIdx);
         };
 
         fetch(url, {
@@ -2034,8 +2224,14 @@
         const alignment = alignmentData.alignments.find(a => a.es_idx === savedIdx);
         if (!alignment) return;
 
+        // Read before anything below can close the sheet, which forgets it.
+        const fixCtx = pendingFix;
         const correctedEs = sheetTextarea.value.trim();
         if (!correctedEs || correctedEs === alignment.es) {
+            // Saving a finding's sentence unchanged still rules on the finding:
+            // it is real and there is nothing to change here. No correction is
+            // written, because nothing was corrected.
+            if (fixCtx && correctedEs) resolveFromSave(fixCtx, 'none');
             closeSheet();
             return;
         }
@@ -2053,6 +2249,19 @@
             chunk_offset_start: alignment.chunk_offset_start,
             chunk_offset_end: alignment.chunk_offset_end,
         };
+        const used = fixCtx ? suggestionUsed(fixCtx, alignment.es, correctedEs) : null;
+        if (fixCtx) {
+            const f = fixCtx.finding;
+            payload.from_finding = {
+                eval_name: f.eval_name,
+                chunk_id: f.chunk_id,
+                issue_key: f.issue_key,
+                category: f.category,
+                suggestion: f.suggestion,
+                mode: fixCtx.mode,
+                suggestion_used: used,
+            };
+        }
 
         fetch('/api/correction', {
             method: 'POST',
@@ -2072,9 +2281,11 @@
                         el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                         el.classList.add('corrected');
                     }
-                    // Its findings outlive the Save (the server still serves
-                    // them until the chunk is re-evaluated), so paint them
-                    // back on: the flag tour still stops here, and a stop
+                    // The Save landed, so the finding it was fixing is real.
+                    if (fixCtx) resolveFromSave(fixCtx, used);
+                    // Its other findings outlive the Save (the server still
+                    // serves them until the chunk is re-evaluated), so paint
+                    // them back on: the flag tour still stops here, and a stop
                     // should look flagged.
                     if (reviewMap[savedIdx]) refreshSentenceReview(savedIdx);
 
@@ -2100,6 +2311,8 @@
                     el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                     el.classList.add('corrected');
                 }
+                // Queued like the Save itself; both replay when back online.
+                if (fixCtx) resolveFromSave(fixCtx, used);
                 if (reviewMap[savedIdx]) refreshSentenceReview(savedIdx);
                 // The queued Save is checked when it is replayed; its warning,
                 // if any, arrives with the next load of the chapter.
@@ -3183,11 +3396,18 @@
         window.ReaderCore = {
             // Persist an edit to the active sentence (reuses the correction flow,
             // which updates the sentence, shows the realign nudge, and closes).
-            saveCorrection(text) {
+            // `fix` is the finding this Save is fixing, from `fixContext`; the
+            // Save marks it real when it lands. Absent for a plain edit.
+            saveCorrection(text, fix) {
                 if (activeIdx === null) return;
                 sheetTextarea.value = text;
+                pendingFix = fix || null;
                 btnSave.click();
             },
+            // The fix a finding's button would open on this sentence: whether
+            // it is an Apply or an Edit, and the text the box should hold.
+            fixContext(finding, es) { return fixContext(finding, es); },
+            buildFixNote(finding, es) { return buildFixNote(finding, es); },
             // Persist an annotation for the active sentence. A sub_id edits that
             // annotation; its absence creates a new one (several may coexist).
             saveAnnotation(type, content, subId) {

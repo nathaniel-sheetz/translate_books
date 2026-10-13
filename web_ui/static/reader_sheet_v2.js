@@ -44,6 +44,8 @@
         addIcons: el('rv2-add-icons'),
         editTa: el('rv2-edit-ta'),
         editSave: el('rv2-edit-save'),
+        fix: el('rv2-fix'),
+        fixCancel: el('rv2-fix-cancel'),
         expandBtn: el('rv2-expand-btn'),
         chipRe: el('rv2-chip-retranslate'),
         chipBound: el('rv2-chip-boundaries'),
@@ -414,6 +416,9 @@
 
     // ── State ──────────────────────────────────────────────────────────────────
     let cur = null;   // { esIdx, en, es, anns: [], findings, reviewOn, defaultErrors, saveWarned, tappedWord }
+    // The finding the Edit tab is open on, from ReaderCore.fixContext, or null
+    // for a plain edit. Handed to the Save, which marks the finding real.
+    let fixCtx = null;
 
     // ── Open / close ───────────────────────────────────────────────────────────
     function onOpen(data) {
@@ -421,6 +426,7 @@
         paintBookmark(!!data.bookmarked);
         renderSource(data.en);
         renderAnnotate();
+        endFix(false);
         renderEdit(data.es);
         renderIssues();
         updateCounts();
@@ -462,6 +468,7 @@
     }
     function hide() {
         setMenu(false);   // else the popup survives the close and reopens with it
+        endFix(false);
         overlay.hidden = true;
         sheet.hidden = true;
         sheet.classList.remove('editing', 'editfull', 'rv2-kb');
@@ -475,6 +482,9 @@
 
     // ── Tabs ───────────────────────────────────────────────────────────────────
     function setTab(name) {
+        // Leaving the Edit tab abandons a fix in progress: the box goes back to
+        // the sentence as it stands and the finding stays open.
+        if (name !== 'edit') endFix(true);
         els.tabs.forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
         Object.keys(panels).forEach((k) => panels[k].classList.toggle('active', k === name));
         const editing = name === 'edit';
@@ -756,7 +766,37 @@
         refreshSrcToggle();
     }
     els.expandBtn.addEventListener('click', () => setEditFull(!sheet.classList.contains('editfull')));
-    els.editSave.addEventListener('click', () => core().saveCorrection && core().saveCorrection(els.editTa.value));
+    els.editSave.addEventListener('click', () => core().saveCorrection && core().saveCorrection(els.editTa.value, fixCtx));
+
+    // ── Fixing a finding ───────────────────────────────────────────────────────
+    // A finding's Apply/Edit button lands here: the Edit tab, with the finding
+    // pinned above the box. Apply arrives with the judge's swap already made in
+    // the box; Edit arrives with the sentence as it stands. Nothing is written,
+    // and the finding is not marked, until Save.
+    function startFix(f) {
+        if (!cur || !core().fixContext) return;
+        const ctx = core().fixContext(f, cur.es);
+        els.editTa.value = ctx.after != null ? ctx.after : (cur.es || '');
+        if (els.fix) {
+            els.fix.replaceChildren(core().buildFixNote(f, cur.es));
+            els.fix.hidden = false;
+        }
+        if (els.fixCancel) els.fixCancel.hidden = false;
+        els.expandBtn.hidden = true;
+        setTab('edit');
+        fixCtx = ctx;
+    }
+    function endFix(restore) {
+        if (!fixCtx) return;
+        fixCtx = null;
+        if (els.fix) { els.fix.hidden = true; els.fix.replaceChildren(); }
+        if (els.fixCancel) els.fixCancel.hidden = true;
+        els.expandBtn.hidden = false;
+        if (restore && cur) els.editTa.value = cur.es || '';
+    }
+    if (els.fixCancel) {
+        els.fixCancel.addEventListener('click', () => setTab('issues'));
+    }
     els.chipRe.addEventListener('click', () => core().retranslate && core().retranslate());
     els.chipBound.addEventListener('click', () => core().editBoundaries && core().editBoundaries());
     els.chipRemove.addEventListener('click', () => core().removeText && core().removeText());
@@ -817,23 +857,24 @@
 
         const acts = document.createElement('div');
         acts.className = 'rv2-issue-actions';
-        // Primary "Apply" is the resolved-feedback action, promoted to first
-        // position and styled primary. It records the resolved signal and drops
-        // the issue, then sends the user to the Edit tab with the full
-        // translation intact so they can apply the fix by hand — it must NOT
-        // overwrite the translation with the raw suggestion.
-        const applyResolved = document.createElement('button');
-        applyResolved.type = 'button';
-        applyResolved.className = 'rv2-btn rv2-primary rv2-sm';
-        applyResolved.textContent = T('apply', 'Apply');
-        applyResolved.addEventListener('click', function (e) {
+        // Primary action, in the slot the resolved label used to hold. "Apply"
+        // when the judge's suggestion is a clean swap inside this sentence: the
+        // Edit tab opens with the swap made, to be read and changed before it
+        // is saved. "Edit" otherwise: the same tab on the sentence as it
+        // stands, the finding pinned above it. Neither writes anything here —
+        // the Save marks the finding real, so backing out leaves it open.
+        const fixBtn = document.createElement('button');
+        fixBtn.type = 'button';
+        fixBtn.className = 'rv2-btn rv2-primary rv2-sm';
+        const canApply = core().fixContext && core().fixContext(f, cur.es).mode === 'apply';
+        fixBtn.textContent = canApply
+            ? (I.review_fix_apply || 'Apply')
+            : (I.review_fix_edit || 'Edit');
+        fixBtn.addEventListener('click', function (e) {
             e.stopPropagation();
-            acts.querySelectorAll('button').forEach((x) => { x.disabled = true; });
-            if (core().submitFeedback) core().submitFeedback(cur.esIdx, f, 'resolved');
-            dropIssue(wrap, f);
-            setTab('edit');
+            startFix(f);
         });
-        acts.appendChild(applyResolved);
+        acts.appendChild(fixBtn);
         FB.filter((pair) => pair[0] !== 'resolved').forEach(function (pair) {
             const b = document.createElement('button');
             b.type = 'button';

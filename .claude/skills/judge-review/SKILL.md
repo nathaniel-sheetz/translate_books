@@ -794,6 +794,19 @@ python scripts/run_judges.py apply --project pollyanna \
 apply without an explicit pick.** Use `AskUserQuestion` (multiSelect, **≤4 options**) when there
 are ≤4; for more, present a numbered list and have the user reply with the ids.
 
+**Declining the bulk apply is a normal answer, not a dead end.** A user who has read the book
+often prefers to rule on the findings one at a time in the reader. Nothing has to be staged for
+that: every finding left unapplied shows there in Review Mode, and one the dry run called
+applicable carries an **Apply** button that opens the swap as an editable preview (it reads
+**Edit** when the swap is not a single-sentence drop-in). Saving it writes a human `resolved`
+mark, so do not also run `apply --select` or `mark-applied` for findings handled that way.
+The dry run cannot tell which those are: it reads the chunk, and a reader Save waits in
+`corrections.jsonl` until it is applied, so a finding fixed in the reader is still listed under
+`applicable[]`. Before any later dry run on that chapter, apply the pending corrections (the
+chapter list's **Apply Corrections** button, or `python scripts/apply_corrections.py
+projects/<slug>`); the finding's excerpt is then gone from the chunk and it drops out as
+`excerpt_not_found`.
+
 The *mechanical* hazards are the CLI's job now, and it withholds them: placeholder and
 instruction-shaped suggestions, ones that restate adjacent prose, elide with `...`, swing far in
 length, unbalance the paragraph's rayas, or normalize a register the rest of the chunk still uses
@@ -862,8 +875,10 @@ an applied fix keeps showing in the end-of-chapter bin, or still tints its sente
 machine label, **not** `resolved`: `resolved` is the human "real defect" label precision and the
 triage floor are scored from, so never write it on the user's behalf. For fixes applied before the
 mark existed, `run_judges.py mark-applied --project <slug> --dry-run` shows what the audit log can
-backfill; drop `--dry-run` to write it. A fix you made by hand (a reader correction for a finding
-apply withheld) is not in the judge rows it reads — the user marks that one *fixed* in the reader.
+backfill; drop `--dry-run` to write it. A fix made in the reader is not in the judge rows it reads
+and needs no backfill: a Save reached through the finding's Apply or Edit button marks it
+`resolved` itself. A sentence fixed by a plain edit is not marked, and its finding stays open;
+the user opens the finding's Edit there and saves the sentence unchanged.
 
 9c. **Refresh the badges.** Applying stale-marks each edited chunk's `evaluations/<chunk>.json`
 (a fixed finding must not keep asserting a failure). The marker is written at the **top level** of

@@ -474,6 +474,19 @@ STRINGS = {
             "review_load_failed": "Could not load review findings.",
             "review_fb_failed": "Feedback not saved; queued for retry.",
 
+            # A finding's primary button. "Apply" when the judge's suggestion
+            # drops into the sentence as a clean swap, "Edit" when it does not;
+            # both open the edit box, and the Save is what marks the finding.
+            "review_fix_apply": "Apply",
+            "review_fix_edit": "Edit",
+            "review_fix_cancel": "Cancel",
+            "review_fix_hint": "Saving marks this finding resolved.",
+            "review_fix_why": {
+                "spans_sentences": "The suggestion spans more than one sentence, so it has to be made by hand.",
+                "sentence_edited": "This sentence has changed since the review, so the suggestion no longer drops in.",
+                "other": "The suggestion is not a drop-in replacement, so it has to be made by hand.",
+            },
+
             # "Ignore for the whole book" -- a judgment about a TERM, not about
             # one finding, so the label names what it will silence. Spelling is
             # keyed on the word; grammar on the (rule, word) pair, because the
@@ -607,7 +620,6 @@ STRINGS = {
                 "save": "Save",
                 "cancel": "Cancel",
                 "delete": "Delete",
-                "apply": "Apply",
                 "note_placeholder": "Note text…",
                 "translation_label": "Translation",
                 "no_findings": "No findings on this sentence.",
@@ -1085,6 +1097,16 @@ STRINGS = {
             "review_load_failed": "No se pudieron cargar los hallazgos de revisi\u00f3n.",
             "review_fb_failed": "Comentario no guardado; en cola para reintentar.",
 
+            "review_fix_apply": "Aplicar",
+            "review_fix_edit": "Editar",
+            "review_fix_cancel": "Cancelar",
+            "review_fix_hint": "Al guardar, el hallazgo queda resuelto.",
+            "review_fix_why": {
+                "spans_sentences": "La sugerencia abarca más de una oración; hay que hacerla a mano.",
+                "sentence_edited": "La oración cambió desde la revisión; la sugerencia ya no encaja tal cual.",
+                "other": "La sugerencia no es un reemplazo directo; hay que hacerla a mano.",
+            },
+
             "review_ignore_word": "Ignorar «{term}» en este libro",
             "review_ignore_rule": "Ignorar {rule} en «{term}» en este libro",
             "review_ignore_title": "Dejar de señalarlo en todo el libro. Se puede quitar desde la etapa Revisión del panel.",
@@ -1208,7 +1230,6 @@ STRINGS = {
                 "save": "Guardar",
                 "cancel": "Cancelar",
                 "delete": "Eliminar",
-                "apply": "Aplicar",
                 "note_placeholder": "Texto de la nota…",
                 "translation_label": "Traducción",
                 "no_findings": "Sin hallazgos en esta frase.",

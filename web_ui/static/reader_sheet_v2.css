@@ -855,6 +855,29 @@
   justify-content: space-between;
   margin-bottom: 7px;
 }
+/* The finding the Edit tab was opened on (the note itself is .fix-note,
+   reader.css). Capped and scrollable so a long sentence cannot push the box,
+   which is what the tab is for, off the sheet. The note itself scrolls, not
+   this wrapper, so its border and the gap under it never scroll out of view. */
+.rv2-fix { flex: none; }
+/* Set tighter here than in the legacy sheet: on a phone every line the note
+   takes comes out of the box under it. */
+.rv2-fix .fix-note {
+  max-height: 22vh;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+/* Keyboard up: the sheet is already short, so the note gives way to the box
+   the same way the source drops to one line. It still scrolls. */
+.rv2-sheet.rv2-kb .rv2-fix .fix-note { max-height: 96px; }
+.rv2-fix .fix-note-body { margin-top: 4px; font-size: 13.5px; line-height: 1.45; }
+.rv2-fix .fix-note-why,
+.rv2-fix .fix-note-hint { margin-top: 4px; font-size: 11.5px; }
+/* `display: inline-flex` on .rv2-btn otherwise wins over the UA `[hidden]` rule. */
+.rv2-btn[hidden] { display: none; }
 .rv2-edit-kicker {
   font-size: 11px;
   text-transform: uppercase;
