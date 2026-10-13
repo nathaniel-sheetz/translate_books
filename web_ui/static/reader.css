@@ -1027,6 +1027,57 @@ body {
     font-size: 14px;
 }
 
+/* The tour counters, the phone's caret and the picker it opens. Relative so
+   the picker anchors under the group, the way .card-menu anchors its own. */
+.tour-group {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+/* Wide screens show every counter, so there is nothing to pick. Padding, not
+   icon size, makes the thumb target: the caret sits right beside a counter. */
+.tour-pick-btn {
+    display: none;
+    margin-left: 0;
+    padding: 10px 8px;
+}
+
+.tour-pick-btn svg {
+    transition: transform 0.15s ease;
+}
+
+.tour-pick-btn.popup-open svg {
+    transform: rotate(180deg);
+}
+
+.tour-pick-item[aria-checked="true"] {
+    font-weight: 600;
+}
+
+.tour-pick-item[aria-checked="true"] svg {
+    color: var(--accent);
+}
+
+.tour-pick-count {
+    margin-left: auto;
+    padding-left: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Phone: three counters do not fit beside search and align, so only the active
+   tour's counter shows and the caret switches which one that is. */
+@media (max-width: 480px) {
+    .tour-group .topbar-count-btn:not(.tour-active) {
+        display: none;
+    }
+
+    .tour-pick-btn:not([hidden]) {
+        display: inline-flex;
+    }
+}
+
 .topbar-icon-btn.aligning {
     animation: align-pulse 1.2s ease-in-out infinite;
 }

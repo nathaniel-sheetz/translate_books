@@ -71,8 +71,12 @@
     const sheetHandle = document.getElementById('sheet-handle');
     const btnAnnNav = document.getElementById('btn-ann-nav');
     const annNavCount = document.getElementById('ann-nav-count');
+    const btnFlagNav = document.getElementById('btn-flag-nav');
+    const flagNavCount = document.getElementById('flag-nav-count');
     const btnFnNav = document.getElementById('btn-fn-nav');
     const fnNavCount = document.getElementById('fn-nav-count');
+    const btnTourPick = document.getElementById('btn-tour-pick');
+    const tourPickPopup = document.getElementById('tour-pick-popup');
 
     // Annotation elements
     const annTypeButtons = document.querySelectorAll('.ann-type-btn');
@@ -596,6 +600,7 @@
         else delete saveWarnMap[esIdx];
         const el = content.querySelector(`[data-es-idx="${esIdx}"]`);
         if (el) el.classList.toggle('save-warn', !!saveWarnMap[esIdx]);
+        updateStats();
     }
 
     function toastSaveCheck(check) {
@@ -639,6 +644,7 @@
                 content.querySelectorAll('[data-es-idx]').forEach(el => {
                     el.classList.toggle('save-warn', !!saveWarnMap[el.dataset.esIdx]);
                 });
+                updateStats();
                 const fresh = Object.values(saveWarnMap).find(w => !known.has(w.id));
                 if (fresh) {
                     const hits = fresh.hits.filter(h => h.rule === 'model');
@@ -990,6 +996,7 @@
             if (!reviewMap[key].length) delete reviewMap[key];
         }
         affected.forEach(k => refreshSentenceReview(k));
+        if (affected.length) updateStats();
         return affected;
     }
 
@@ -1679,18 +1686,65 @@
         doRemoveAnnotation(activeIdx, activeRepSubId);
     });
 
-    // --- Top-bar tours: review notes and footnotes walk separately ---
+    // --- Top-bar tours: review notes, flags and footnotes walk separately ---
     //
     // Footnotes feed the endnote pipeline; word choice / inconsistency / Other
     // are things to resolve. One shared tour walking both drowned the review
     // notes on footnote-heavy books, so each class gets its own counter+button.
-    // `match` for the annotations tour is "not a footnote" rather than an
-    // allowlist so an unknown or legacy type still shows up somewhere — the same
-    // fallback ANN_RANK and app.py's type coercion make.
+    // The annotations tour matches "not a footnote" rather than an allowlist so
+    // an unknown or legacy type still shows up somewhere — the same fallback
+    // ANN_RANK and app.py's type coercion make.
     const tours = [
-        { btn: btnAnnNav, out: annNavCount, stops: [], pos: -1, match: a => a.type !== 'footnote' },
-        { btn: btnFnNav,  out: fnNavCount,  stops: [], pos: -1, match: a => a.type === 'footnote' },
+        { key: 'ann', btn: btnAnnNav, out: annNavCount, stops: [], pos: -1, count: 0,
+          label: i.nav_pick_annotations || 'Annotations',
+          collect: () => collectAnnotations(a => a.type !== 'footnote') },
+        { key: 'flag', btn: btnFlagNav, out: flagNavCount, stops: [], pos: -1, count: 0,
+          label: i.nav_pick_flags || 'Flags',
+          collect: collectFlags },
+        { key: 'fn', btn: btnFnNav, out: fnNavCount, stops: [], pos: -1, count: 0,
+          label: i.nav_pick_footnotes || 'Footnotes',
+          collect: () => collectAnnotations(a => a.type === 'footnote') },
     ];
+
+    // The count is matching *records* (mirroring the chapter-list badge); a
+    // stop is a sentence, so two footnotes on one sentence count 2 and stop
+    // once.
+    function collectAnnotations(match) {
+        let count = 0;
+        const stops = [];
+        for (const idx of Object.keys(annotationsMap)) {
+            // Orphans (anchored === false) have no sentence to jump to —
+            // counting them made the button promise a stop jumpTour could
+            // not make, and burned a tour position doing it.
+            const hits = (annotationsMap[idx] || [])
+                .filter(a => a.anchored !== false && match(a)).length;
+            if (!hits) continue;
+            count += hits;
+            stops.push(Number(idx));
+        }
+        return { count: count, stops: stops };
+    }
+
+    // Flags are what a machine raised: review findings (loaded only while
+    // review mode is on, already filtered to the enabled categories) and the
+    // save-check warnings still open. A finding counts once each; a warning
+    // counts once per sentence however many slips it lists. Findings in the
+    // end-of-chapter bin have no sentence, so like orphans they are left out:
+    // they live in unanchoredList, never in reviewMap.
+    function collectFlags() {
+        let count = 0;
+        const stops = new Set();
+        for (const idx of Object.keys(reviewMap)) {
+            count += reviewMap[idx].length;
+            stops.add(Number(idx));
+        }
+        for (const idx of Object.keys(saveWarnMap)) {
+            if (!Number.isFinite(Number(idx))) continue;
+            count += 1;
+            stops.add(Number(idx));
+        }
+        return { count: count, stops: Array.from(stops) };
+    }
 
     // Keep the reader's place across a save or delete: re-derive pos from the
     // sentence last landed on rather than restarting the tour. Pure — mirrored
@@ -1709,29 +1763,17 @@
     function updateStats() {
         for (const tour of tours) {
             if (!tour.btn || !tour.out) continue;
-            // The count is matching *records* (mirroring the chapter-list badge);
-            // a stop is a sentence, so two footnotes on one sentence count 2 and
-            // stop once.
-            let count = 0;
-            const stops = [];
-            for (const idx of Object.keys(annotationsMap)) {
-                // Orphans (anchored === false) have no sentence to jump to —
-                // counting them made the button promise a stop jumpTour could
-                // not make, and burned a tour position doing it.
-                const hits = (annotationsMap[idx] || [])
-                    .filter(a => a.anchored !== false && tour.match(a)).length;
-                if (!hits) continue;
-                count += hits;
-                stops.push(Number(idx));
-            }
-            stops.sort((a, b) => a - b);
+            const found = tour.collect();
+            const stops = found.stops.sort((a, b) => a - b);
 
             tour.pos = rederiveTourPos(tour.stops, tour.pos, stops);
             tour.stops = stops;
+            tour.count = found.count;
 
-            tour.out.textContent = count ? String(count) : '';
-            tour.btn.hidden = count === 0;
+            tour.out.textContent = found.count ? String(found.count) : '';
+            tour.btn.hidden = found.count === 0;
         }
+        updateTourPicker();
     }
 
     function jumpTour(tour) {
@@ -1746,6 +1788,97 @@
 
     for (const tour of tours) {
         if (tour.btn) tour.btn.addEventListener('click', () => jumpTour(tour));
+    }
+
+    // --- Phone: one tour slot and a picker ---
+    //
+    // Three counters do not fit a phone's top bar beside search and align, so
+    // under the phone breakpoint reader.css shows only the `.tour-active`
+    // button plus the caret that opens this picker. Which tour is active is a
+    // per-book preference, stored like the review switch. A chapter with
+    // nothing of the chosen kind shows the first tour that has stops, and the
+    // stored choice is left alone for the next chapter that does.
+    const TOUR_KEY = 'reader_tour:' + projectId;
+    let preferredTour = null;
+    try {
+        preferredTour = localStorage.getItem(TOUR_KEY);
+    } catch (e) {
+        preferredTour = null;
+    }
+    // The tour showing now. It holds while it has stops: a note saved halfway
+    // through the flags must not turn the one button into the annotations
+    // tour. Only a pick from the menu moves it, and only a pick is stored.
+    let activeTour = null;
+    let tourPickOpen = false;
+
+    function setTourPickOpen(next) {
+        if (!btnTourPick || !tourPickPopup) return;
+        tourPickOpen = next;
+        tourPickPopup.hidden = !next;
+        btnTourPick.setAttribute('aria-expanded', next ? 'true' : 'false');
+        btnTourPick.classList.toggle('popup-open', next);
+    }
+
+    function updateTourPicker() {
+        const live = tours.filter(t => t.btn && t.count > 0);
+        const active = (live.indexOf(activeTour) !== -1 ? activeTour : null) ||
+            live.find(t => t.key === preferredTour) || live[0] || null;
+        activeTour = active;
+        for (const tour of tours) {
+            if (tour.btn) tour.btn.classList.toggle('tour-active', tour === active);
+        }
+        if (!btnTourPick || !tourPickPopup) return;
+
+        // Nothing to choose between with fewer than two tours running.
+        btnTourPick.hidden = live.length < 2;
+        if (live.length < 2) setTourPickOpen(false);
+
+        tourPickPopup.textContent = '';
+        for (const tour of live) {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'card-menu-item tour-pick-item';
+            row.setAttribute('role', 'menuitemradio');
+            row.setAttribute('aria-checked', tour === active ? 'true' : 'false');
+            const icon = tour.btn.querySelector('svg');
+            if (icon) row.appendChild(icon.cloneNode(true));
+            const label = document.createElement('span');
+            label.textContent = tour.label;
+            row.appendChild(label);
+            const n = document.createElement('span');
+            n.className = 'tour-pick-count';
+            n.textContent = String(tour.count);
+            row.appendChild(n);
+            row.addEventListener('click', () => pickTour(tour));
+            tourPickPopup.appendChild(row);
+        }
+    }
+
+    // Picking a kind is asking to go to one, so it jumps as well as switching.
+    function pickTour(tour) {
+        activeTour = tour;
+        preferredTour = tour.key;
+        try {
+            localStorage.setItem(TOUR_KEY, tour.key);
+        } catch (e) { /* ignore */ }
+        setTourPickOpen(false);
+        updateTourPicker();
+        jumpTour(tour);
+    }
+
+    if (btnTourPick && tourPickPopup) {
+        btnTourPick.addEventListener('click', () => setTourPickOpen(!tourPickOpen));
+
+        // Capture, as the chapter list's menu does: a click that some other
+        // handler stops should still close this one.
+        document.addEventListener('click', e => {
+            if (tourPickOpen && !btnTourPick.contains(e.target) &&
+                !tourPickPopup.contains(e.target)) setTourPickOpen(false);
+        }, true);
+
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && tourPickOpen) setTourPickOpen(false);
+        });
     }
 
     // --- Toast (non-blocking notifications; minimal, no deps) ---
@@ -1939,6 +2072,11 @@
                         el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                         el.classList.add('corrected');
                     }
+                    // Its findings outlive the Save (the server still serves
+                    // them until the chunk is re-evaluated), so paint them
+                    // back on: the flag tour still stops here, and a stop
+                    // should look flagged.
+                    if (reviewMap[savedIdx]) refreshSentenceReview(savedIdx);
 
                     // A clean Save also clears the warning the sentence carried:
                     // the text it was raised on no longer stands.
@@ -1962,6 +2100,7 @@
                     el.textContent = displayEsOf(alignment, correctedEs) + ' ';
                     el.classList.add('corrected');
                 }
+                if (reviewMap[savedIdx]) refreshSentenceReview(savedIdx);
                 // The queued Save is checked when it is replayed; its warning,
                 // if any, arrives with the next load of the chapter.
                 setSaveWarn(savedIdx, null);

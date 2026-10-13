@@ -1,10 +1,13 @@
-"""Tests for the split annotation/footnote nav in the reader top bar.
+"""Tests for the split annotation/flag/footnote nav in the reader top bar.
 
 The single `#reader-stats` counter walked every annotated sentence, footnotes
-included. It is replaced by two buttons — `#btn-ann-nav` (review notes) and
-`#btn-fn-nav` (footnotes) — each cycling only its own class and hidden while its
-count is zero. JS has no runner here, so the behaviour that lives in reader.js is
-asserted by reading the source (the pattern in test_reader_ui_version.py).
+included. It is replaced by three buttons — `#btn-ann-nav` (review notes),
+`#btn-flag-nav` (review findings and open save-check warnings) and `#btn-fn-nav`
+(footnotes) — each cycling only its own class and hidden while its count is
+zero. On a phone only the active one shows, and `#btn-tour-pick` opens the
+picker that switches it. JS has no runner here, so the behaviour that lives in
+reader.js is asserted by reading the source (the pattern in
+test_reader_ui_version.py).
 """
 
 import json
@@ -15,6 +18,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from web_ui.app import app
+from web_ui.i18n import STRINGS
 
 
 @pytest.fixture
@@ -51,6 +55,19 @@ def project_with_alignment(tmp_path, monkeypatch):
 
 READ_URL = "/read/test-project/chapter_01"
 READER_JS = Path(__file__).resolve().parents[2] / "web_ui" / "static" / "reader.js"
+READER_CSS = Path(__file__).resolve().parents[2] / "web_ui" / "static" / "reader.css"
+
+
+def _js_function(js, name):
+    """The source of reader.js's top-level ``function <name>(``, to its closing brace."""
+    start = js.index(f"function {name}(")
+    return js[start:js.index("\n    }\n", start)]
+
+
+def _save_handler(js):
+    """The Save button's click handler, which is an arrow function with no name."""
+    start = js.index("btnSave.addEventListener('click'")
+    return js[start:js.index("\n    });", start)]
 
 
 def _topbar_button(html, button_id):
@@ -61,15 +78,23 @@ def _topbar_button(html, button_id):
 
 
 class TestTopbarMarkup:
-    def test_both_nav_buttons_render_hidden(self, client, project_with_alignment):
+    def test_nav_buttons_render_hidden(self, client, project_with_alignment):
         html = client.get(READ_URL).get_data(as_text=True)
-        for button_id in ("btn-ann-nav", "btn-fn-nav"):
+        for button_id in ("btn-ann-nav", "btn-flag-nav", "btn-fn-nav"):
             assert f'id="{button_id}"' in html
             # JS unhides each button when its count is non-zero, so the server
             # must ship them hidden — otherwise empty buttons flash on load.
             assert "hidden" in _topbar_button(html, button_id)
         assert 'id="ann-nav-count"' in html
+        assert 'id="flag-nav-count"' in html
         assert 'id="fn-nav-count"' in html
+
+    def test_picker_renders_hidden(self, client, project_with_alignment):
+        html = client.get(READ_URL).get_data(as_text=True)
+        # The caret only means something once two tours have stops.
+        assert "hidden" in _topbar_button(html, "btn-tour-pick")
+        popup = html[html.index('id="tour-pick-popup"'):]
+        assert "hidden" in popup[:popup.index(">")]
 
     def test_old_single_counter_is_gone(self, client, project_with_alignment):
         html = client.get(READ_URL).get_data(as_text=True)
@@ -78,13 +103,24 @@ class TestTopbarMarkup:
     def test_buttons_are_labelled(self, client, project_with_alignment):
         html = client.get(READ_URL).get_data(as_text=True)
         assert "Jump through annotations" in html
+        assert "Jump through flags" in html
         assert "Jump through footnotes" in html
+        assert "Choose what to jump through" in html
 
     def test_spanish_labels(self, client, project_with_alignment):
         client.set_cookie("reader_lang", "es")
         html = client.get(READ_URL).get_data(as_text=True)
         assert "Recorrer las anotaciones" in html
+        assert "Recorrer los avisos" in html
         assert "Recorrer las notas al pie" in html
+        assert "Elegir qué recorrer" in html
+
+    def test_picker_rows_are_labelled_in_both_languages(self):
+        # reader.js falls back to English when a key is missing, so a Spanish
+        # picker with English rows would not show up as a broken page.
+        for lang in ("en", "es"):
+            for key in ("nav_pick_annotations", "nav_pick_flags", "nav_pick_footnotes"):
+                assert STRINGS[lang]["js"].get(key), (lang, key)
 
     def test_css_cache_bust_present(self, client, project_with_alignment):
         html = client.get(READ_URL).get_data(as_text=True)
@@ -92,10 +128,63 @@ class TestTopbarMarkup:
 
 
 class TestReaderJsSource:
-    def test_js_drives_both_buttons(self):
+    def test_js_drives_the_nav_buttons(self):
         js = READER_JS.read_text(encoding="utf-8")
-        for element_id in ("btn-ann-nav", "ann-nav-count", "btn-fn-nav", "fn-nav-count"):
+        for element_id in ("btn-ann-nav", "ann-nav-count", "btn-flag-nav", "flag-nav-count",
+                           "btn-fn-nav", "fn-nav-count", "btn-tour-pick", "tour-pick-popup"):
             assert element_id in js
+
+    def test_flag_tour_walks_findings_and_save_warnings(self):
+        body = _js_function(READER_JS.read_text(encoding="utf-8"), "collectFlags")
+        assert "reviewMap" in body
+        assert "saveWarnMap" in body
+
+    def test_flag_changes_refresh_the_counters(self):
+        # Until the flag tour, nothing a dismissal or a Save did to these two
+        # maps reached a counter, so none of these paths called updateStats.
+        js = READER_JS.read_text(encoding="utf-8")
+        for name in ("setSaveWarn", "refreshSaveWarns", "dropFromReviewMap"):
+            assert "updateStats()" in _js_function(js, name), name
+
+    def test_active_tour_is_stored_per_book(self):
+        js = READER_JS.read_text(encoding="utf-8")
+        assert "'reader_tour:' + projectId" in js
+
+    def test_active_tour_holds_while_it_has_stops(self):
+        # Saving a note halfway through the flags gives the annotations tour
+        # its first stop. The one button a phone shows must not change tours
+        # under the reader, so the tour already showing is asked first.
+        js = READER_JS.read_text(encoding="utf-8")
+        body = _js_function(js, "updateTourPicker")
+        assert "live.indexOf(activeTour) !== -1 ? activeTour" in body
+        assert body.index("activeTour") < body.index("preferredTour")
+        assert "activeTour = tour;" in _js_function(js, "pickTour")
+
+    def test_only_a_pick_is_stored(self):
+        js = READER_JS.read_text(encoding="utf-8")
+        assert js.count("localStorage.setItem(TOUR_KEY") == 1
+        assert "localStorage.setItem(TOUR_KEY" in _js_function(js, "pickTour")
+
+    def test_picker_hidden_until_two_tours_have_stops(self):
+        body = _js_function(READER_JS.read_text(encoding="utf-8"), "updateTourPicker")
+        assert "btnTourPick.hidden = live.length < 2" in body
+
+    def test_save_repaints_the_findings_it_leaves_standing(self):
+        # A Save rewrites the sentence's text, which wipes its highlights, but
+        # its findings stay in reviewMap and so stay on the flag tour. Both the
+        # online branch and the offline one have to paint them back.
+        online, offline = _save_handler(READER_JS.read_text(encoding="utf-8")).split(".catch(")
+        assert "refreshSentenceReview(savedIdx)" in online
+        assert "refreshSentenceReview(savedIdx)" in offline
+
+    def test_phone_shows_only_the_active_tour(self):
+        css = READER_CSS.read_text(encoding="utf-8")
+        phone = css[css.index(".tour-group .topbar-count-btn:not(.tour-active)"):]
+        assert "display: none" in phone[:phone.index("}")]
+        # The rule has to sit under the phone breakpoint, or a wide screen
+        # would lose its separate counters too.
+        before = css[:css.index(".tour-group .topbar-count-btn:not(.tour-active)")]
+        assert before.rstrip().endswith("@media (max-width: 480px) {")
 
     def test_js_no_longer_references_old_counter(self):
         js = READER_JS.read_text(encoding="utf-8")

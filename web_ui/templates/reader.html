@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=10">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=11">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
     <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=23">
@@ -514,10 +514,13 @@
                 <line x1="21" y1="12" x2="14" y2="12"/>
             </svg>
         </button>
-        <!-- Two independent counters/tours: review notes (word choice,
-             inconsistency, Other) and footnotes. The numbers are annotation
-             records, so they match the chapter-list badges. JS unhides each one
-             when its count is non-zero. -->
+        <!-- Three independent counters/tours: review notes (word choice,
+             inconsistency, Other), flags (review findings and open save-check
+             warnings) and footnotes. The annotation numbers are records, so
+             they match the chapter-list badges. JS unhides each one when its
+             count is non-zero. On a phone only the active tour's button shows,
+             and the caret picks which tour that is. -->
+        <div class="tour-group">
         <button class="topbar-icon-btn topbar-count-btn" id="btn-ann-nav"
                 title="{{ t.js.nav_annotations }}"
                 aria-label="{{ t.js.nav_annotations }}" hidden>
@@ -528,6 +531,17 @@
                 <path d="M10 10v4"/>
             </svg>
             <span class="topbar-count" id="ann-nav-count"></span>
+        </button>
+        <button class="topbar-icon-btn topbar-count-btn" id="btn-flag-nav"
+                title="{{ t.js.nav_flags }}"
+                aria-label="{{ t.js.nav_flags }}" hidden>
+            <svg viewBox="0 0 16 16" width="16" height="16" fill="none"
+                 stroke="currentColor" stroke-width="1.2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 14.5V2"/>
+                <path d="M3 2.5h9.5l-2.2 3.2 2.2 3.3H3"/>
+            </svg>
+            <span class="topbar-count" id="flag-nav-count"></span>
         </button>
         <button class="topbar-icon-btn topbar-count-btn" id="btn-fn-nav"
                 title="{{ t.js.nav_footnotes }}"
@@ -540,6 +554,20 @@
             </svg>
             <span class="topbar-count" id="fn-nav-count"></span>
         </button>
+        <button class="topbar-icon-btn tour-pick-btn" id="btn-tour-pick" type="button"
+                title="{{ t.js.nav_pick }}"
+                aria-label="{{ t.js.nav_pick }}"
+                aria-haspopup="true"
+                aria-expanded="false"
+                aria-controls="tour-pick-popup" hidden>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+                 stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9"/>
+            </svg>
+        </button>
+        <div class="card-menu-popup tour-pick-popup" id="tour-pick-popup" role="menu" hidden></div>
+        </div>
     </div>
 
     <!-- Main reading area -->
@@ -899,7 +927,7 @@
 <script>window.REVIEW_TYPES = {{ review_types | tojson }};
 window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};
 window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=37"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=38"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
 <script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=14"></script>
