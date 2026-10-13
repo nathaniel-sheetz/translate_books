@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.73.0.0] - 2026-10-12
+
+### Added
+- **`image_pass.py cover-compose` draws the house cover over a cover's art.** The band with the title, subtitle, author and translator on it and the emblem come from a template of layers (polygon, ellipse, text, image, in fractions of the cover) and a per-book `cover/spec.json` that every flag is merged into. `--apply` puts the result in `images/cover.*` behind the same backup and ledger as `apply`, and refuses until a band colour has been picked.
+- **The art is scaled to the cover's full width and never stretched.** The band deepens to hide the top edge of art too short for the cover, the title steps down a size when it would cross the band's edge, and nothing is written when the text cannot fit. The art without lettering is kept at `cover/art.<ext>`, so a band is never drawn over a band.
+- **Every cover drawn is kept as a numbered draft** in `cover/drafts/`, with the settings it was drawn with: the proof, one per `--swatches` colour and one per `--try` variant. `--try name=value[,name=value]` draws the cover with settings laid over the book's and leaves the spec alone; `--from-draft N` starts from the settings a draft was drawn with.
+- **`--from-board` takes what the user chose on the image board,** and with `--apply` lands a cover only if it is the very draft they approved there: the same settings on the same art in the same design.
+- **The image board has two tabs, existing images and new images.** The cover is a workspace on the second: the latest proof large, beside the art and its candidates, the band colours, the layout drafts and what is in the book now, with *Use this* under each draft, *Approve for the book*, and a note for the layout.
+- **The house template and emblem are per-user and gitignored.** A checkout without them uses `assets/cover_template/template.example.json`. Libre Baskerville ships with it under the OFL.
+
+### Changed
+- `requirements.txt` asks for Pillow 10.1 or later, which the swatch sheet's labels need.
+
+### Fixed (found in pre-ship review)
+- **An approval already in the book was taken again.** After a new proof, `--from-board` went back to the approved draft, wrote its settings over the spec and reported success, and the page showed the new proof as approved. `--from-board` refuses when nothing the user chose is waiting, the board marks such an approval `spent`, and the page's Approve button starts over.
+- **A composed cover answered a pick among the art candidates.** The pick was dropped, neither applied nor flagged. A `cover-compose --apply` row in the ledger is no longer a decision about the candidates.
+- **The project's title and author were saved into the spec as the book's.** The warning that the title may be the source language's showed once and never again, and `--author ""` could not take the author off. Both are drawn and not saved; `--author ""` is kept, and `--unset author` puts the project's back.
+- **An `--apply` that could not write `images/cover.*` lost that run's flags,** and several inputs gave a traceback (`--set title_size=0`, a malformed template). The spec is written before `images/` is touched, and the command answers with one JSON error.
+- **`--art` deleted every other `art.*` in `cover/`,** a layered source file kept beside the art included, and removed the old art before the new one was copied. Only pictures are replaced, after the copy. An `--art` in a format the board cannot show (`.tif`) is refused.
+- **A note stayed "not looked at"** when the compose that answered it drew a cover already on file. Every compose is stamped.
+- **Two `cover-compose` on one book could take the same draft number.** They take turns on a lock of their own, so neither waits on a `generate`.
+- **`--try "title=Hola, mundo"` was refused.** A comma starts a new setting only where a `name=` follows it.
+- The docs said any variable set with `--set` holds; the one the band grows by still deepens when the title needs the room.
+
 ## [0.72.0.0] - 2026-10-12
 
 ### Added
