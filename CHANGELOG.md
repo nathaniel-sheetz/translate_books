@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.75.0.0] - 2026-10-13
+
+### Added
+- **A finding in the reader is fixed from its own button.** Where Resolved was, a finding on a sentence has **Apply** when the judge's suggestion drops into that sentence as one swap, and **Edit** when it does not. Both open the edit box with the finding pinned above it. Apply arrives with the swap made and drawn as a deletion and an insertion; Edit arrives with the sentence as it stands and the reason the swap could not be made. Nothing is written until Save, and the text can be changed first.
+- **Saving marks the finding resolved.** It is the human `resolved` label, scored by the precision scripts like a hand-clicked one, and it records which button the Save came from (`via`) and what became of the suggestion (`suggestion_used`: verbatim, edited, manual or none). Saving the sentence unchanged marks the finding too. The end-of-chapter bin keeps a plain Resolved, because a finding with no sentence has nothing to save.
+- **The review says whether a finding is a one-sentence swap.** Each judge finding on a sentence carries `fix` (`old`, `new`) or a `fix_reason`. The answer comes from the classifier behind the `run_judges.py apply` dry run, plus two checks of the reader's own: the swap has to lie inside the sentence, and the excerpt has to stand once in the sentence as it reads now, queued saves included.
+- **A correction row remembers the finding it came from.** A Save from a finding's button carries `from_finding`: the evaluator, chunk, issue key, category, suggestion and button. It is kept apart from `source: "judge:..."`, which means a suggestion spliced in unread.
+- **The recommendations screen keeps a finding fixed from the reader on its sentence.** The fix removes the text the finding quoted, which sent the card to the unanchored tail. The Save's row names the sentence, and the card goes back on it through later Saves on that sentence and a realign that merges or splits it.
+
+### Changed
+- The judge-review skill treats declining the bulk apply as a normal answer: the findings are ruled on one at a time in the reader. It says to apply pending reader corrections before a later dry run, and how a sentence fixed by a plain edit gets its mark.
+
+### Fixed (found in pre-ship review)
+- **Apply was offered on a sentence that already held the suggestion.** A suggestion that keeps its excerpt still finds it once after the swap, and a second swap gave "El perro grande y fuerte y fuerte." The server and the page both check for it now, and for a suggestion whose ending the sentence has since gained.
+- **A grouped row said its sentence had changed when it had not.** An excerpt crossing the line break inside the group is reported as spanning sentences.
+- **A value of the wrong type answered with a 500.** A list for the button or the suggestion's fate cost the Save; it is dropped and the Save kept. On the mark it is refused with a 400. A correction row whose finding ids are not text no longer breaks the recommendations screen for its chapter.
+
 ## [0.74.0.0] - 2026-10-12
 
 ### Added
