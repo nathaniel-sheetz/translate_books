@@ -7,9 +7,11 @@ content and a compact diff. Saves used to overwrite with no trace, so the
 question "when did this book's choices change, and why" had no answer.
 
 A row is skipped when nothing but a timestamp changed. Writes that bypass the
-save functions (an agent hand-editing ``style.json``) are caught later by
-``check_external_edits``, which compares each file with the last row logged for
-it. Logging is best-effort: a failure here is warned about and never fails the
+save functions (an agent hand-editing ``style.json``) are caught by comparing the
+file with the last row logged for it: ``record_change`` does so before every
+save, so the edit gets its own ``external`` row instead of riding in the save's
+diff, and ``check_external_edits`` does so at the start of each harness command.
+Logging is best-effort: a failure here is warned about and never fails the
 save it rides on.
 """
 
@@ -33,7 +35,7 @@ ARTIFACT_FILES = {
     "address_map.json": "address_map",
 }
 
-# Bumped on every save whether or not anything changed, so they never count.
+# Metadata, not content: a change to these alone never makes a history row.
 _VOLATILE_KEYS = ("updated_at", "created_at", "version")
 
 
@@ -64,7 +66,7 @@ def read_json(path: Path) -> Optional[dict]:
     try:
         with Path(path).open("r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -157,7 +159,7 @@ def read_history(project_dir: Path) -> list[dict]:
     if not path.exists():
         return []
     rows = []
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -195,13 +197,18 @@ def record_change(
     """Append a history row for a save that changed ``output_path``.
 
     ``before`` is the file's JSON as read just before the save (None for a new
-    file). Returns the row written, or None when the path is not an artifact or
-    nothing changed. Never raises.
+    file). If it is not what the log last recorded, the gap is logged first as
+    an ``external`` row (or a ``baseline`` one when the artifact has no row
+    yet), so this save's row holds only this save's change. Returns the row
+    written, or None when the path is not an artifact or nothing changed.
+    Never raises.
     """
     try:
         kind = artifact_kind(output_path)
         if kind is None:
             return None
+        if before is not None and writer not in ("external", "baseline"):
+            _catch_up(output_path, kind, before)
         before_hash, after_hash = content_hash(before), content_hash(after)
         if before_hash == after_hash:
             return None
@@ -221,6 +228,15 @@ def record_change(
     except Exception as exc:  # never fail the save over its log
         _log.warning("Could not log the change to %s: %s", output_path, exc)
         return None
+
+
+def _catch_up(output_path: Path, kind: str, on_disk: dict) -> None:
+    """Log what changed on disk since the last row for ``kind``, if anything."""
+    prev = _last_rows(Path(output_path).parent).get(kind)
+    if prev is None:
+        record_change(output_path, None, on_disk, writer="baseline")
+    elif prev.get("after_hash") != content_hash(on_disk):
+        record_change(output_path, prev.get("after"), on_disk, writer="external")
 
 
 def check_external_edits(project_dir: Path) -> list[dict]:

@@ -93,6 +93,49 @@ def test_hand_edit_is_caught_as_external(tmp_path):
     assert artifact_history.check_external_edits(tmp_path) == []
 
 
+def test_a_hand_edit_before_a_save_gets_its_own_row(tmp_path):
+    path = tmp_path / "style.json"
+    save_style_guide(_style("Use tú."), path, writer="harness")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["content"] = "Use usted."
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    save_style_guide(_style("Use vos."), path, writer="web_ui:style-guide")
+    rows = artifact_history.read_history(tmp_path)
+    assert [r["writer"] for r in rows] == ["harness", "external", "web_ui:style-guide"]
+    assert (rows[1]["before"]["content"], rows[1]["after"]["content"]) == ("Use tú.", "Use usted.")
+    assert rows[2]["before"]["content"] == "Use usted."
+
+
+def test_first_save_over_an_untracked_file_seeds_a_baseline(tmp_path):
+    path = tmp_path / "glossary.json"
+    path.write_text(json.dumps(_glossary(("elk", "alce")).model_dump(mode="json")),
+                    encoding="utf-8")
+    save_glossary(_glossary(("elk", "alce"), ("bay", "bayo")), path, writer="test")
+
+    rows = artifact_history.read_history(tmp_path)
+    assert [r["writer"] for r in rows] == ["baseline", "test"]
+    assert [t["english"] for t in rows[1]["diff"]["added"]] == ["bay"]
+    assert rows[1]["diff"]["removed"] == []
+
+
+def test_a_corrupt_byte_in_the_log_keeps_the_other_rows(tmp_path):
+    save_style_guide(_style("Use tú."), tmp_path / "style.json")
+    with artifact_history.history_path(tmp_path).open("ab") as f:
+        f.write(b"\xff\xfe torn line\n")
+    assert [r["artifact"] for r in artifact_history.read_history(tmp_path)] == ["style"]
+    assert artifact_history.check_external_edits(tmp_path) == []
+
+
+def test_web_ui_reason_must_be_a_string():
+    from web_ui.app import _change_reason
+
+    assert _change_reason({"reason": {"x": 1}}) is None
+    assert _change_reason({"reason": "   "}) is None
+    assert _change_reason({"reason": "  user prefers abeto "}) == "user prefers abeto"
+
+
 def test_untracked_artifacts_get_a_baseline_row(tmp_path):
     (tmp_path / "glossary.json").write_text(
         json.dumps(_glossary(("elk", "alce")).model_dump(mode="json")), encoding="utf-8")

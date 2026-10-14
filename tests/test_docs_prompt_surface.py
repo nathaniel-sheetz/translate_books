@@ -3,7 +3,7 @@
 Two enumerations in that document are load-bearing and silently rot:
 
 * the overridable-prompts table, which claims to be "exactly as listed in
-  ``.gitignore``" — the per-user prompt convention. A seventh per-user prompt
+  ``.gitignore``" — the per-user prompt convention. A new per-user prompt
   added to ``.gitignore`` without a table row leaves users unaware they can
   own it; a table row without a ``.gitignore`` line means their private copy
   gets committed. ``prompts/glossary_bootstrap_word.example.txt`` already sits

@@ -39,7 +39,7 @@ YOUR ROLE
 
 ## Customizing a prompt: the `.example.txt` rule
 
-Six prompts are meant to be edited per-user. Each ships as a checked-in
+These prompts are meant to be edited per-user. Each ships as a checked-in
 `<name>.example.txt`, and the loader prefers your own `<name>.txt` when it exists
 (`_resolve_prompt_path` in `src/style_guide_wizard.py`, `_resolve_dialogue_path` in
 `src/utils/text_utils.py`). Your copy is gitignored, so your edits never collide with an
@@ -63,7 +63,7 @@ The overridable prompts, exactly as listed in `.gitignore`:
 | `prompts/dialogue.txt` | `dialogue.example.txt` | Spanish dialogue formatting rules |
 | `prompts/translator_note_default.txt` | `translator_note_default.example.txt` | Pre-filled "Note from the Translator" |
 | `prompts/house_style_rules.json` | `house_style_rules.example.json` | The house rules every book is judged against |
-| `prompts/decisions_taxonomy.json` | `decisions_taxonomy.example.json` | The kinds of hard decision the decisions scan looks for, with your past examples and house defaults |
+| `prompts/decisions_taxonomy.json` | `decisions_taxonomy.example.json` | Reference data, not yet loaded by anything: the kinds of hard decision a planned decisions scan will look for, with your past examples and house defaults |
 
 Every other prompt in `prompts/` is tracked directly — edit it in place and the change is
 a normal commit.

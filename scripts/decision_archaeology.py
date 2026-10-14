@@ -47,6 +47,8 @@ from typing import Any, Iterable, Optional
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from src.annotations.store import load_active  # noqa: E402
+from src.style_guide_wizard import resolve_answer  # noqa: E402
 from src.utils.artifact_history import content_hash, diff_artifact  # noqa: E402
 
 HOME = Path.home()
@@ -115,7 +117,7 @@ def _date(ts: Any) -> Optional[str]:
         return m.group(0)
     try:  # epoch millis (history.jsonl)
         return datetime.fromtimestamp(float(s) / (1000 if float(s) > 1e11 else 1)).date().isoformat()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
@@ -269,10 +271,15 @@ class Versions:
                 continue
             seen_dates.add(date)
             n = 0
-            with zipfile.ZipFile(path) as zf:
+            try:
+                zf = zipfile.ZipFile(path)
+            except zipfile.BadZipFile:
+                notes.append(f"zip {date} ({path}): unreadable, skipped")
+                continue
+            with zf:
                 for name in zf.namelist():
                     m = pat.search(name)
-                    if not m or "/archive/" in name or "/.harness/" in name:
+                    if not m or any(s in name for s in ("/archive/", "/.harness/", "_recovery_backup/")):
                         continue
                     proj = Path(m.group(1)).name
                     base = base_project(proj)
@@ -359,9 +366,8 @@ class Versions:
             rows = sorted(rows, key=lambda r: (r["date"], not r["draft"], r["seen"], r["source"]))
             chain: list[dict] = []
             for r in rows:
-                dup = next((c for c in chain if c["hash"] == r["hash"] and c["draft"] == r["draft"]), None)
-                if dup is not None and dup is chain[-1]:
-                    dup.setdefault("also_in", []).append(r["source"])
+                if chain and chain[-1]["hash"] == r["hash"] and chain[-1]["draft"] == r["draft"]:
+                    chain[-1].setdefault("also_in", []).append(r["source"])
                     continue
                 chain.append(r)
             out[key] = chain
@@ -449,7 +455,11 @@ def version_events(chains: dict) -> list[dict]:
             events += _diff_events(base, kind, prev, cur, renderings)
         for d in drafts:
             after = next((c for c in commits if c["date"] >= d["date"]), None)
-            if after is None or after["hash"] == d["hash"]:
+            if after is None:
+                continue
+            if kind == "style":  # a draft holds only `content`; the commit adds `light_content`
+                after = {**after, "data": {k: (after["data"] or {}).get(k) for k in (d["data"] or {})}}
+            if content_hash(after["data"]) == d["hash"]:
                 continue
             base = {"project": project, "artifact": kind, "kind": "approval_edit",
                     "date": after["date"], "from": f'harness draft {d["date"]}',
@@ -519,9 +529,11 @@ def questionnaire_events(projects: dict[str, Path], wanted: Optional[set[str]]) 
             if fname == "style_questions.json" and qid in followup_ids:
                 continue  # the follow-up pass reports it
             ans = answers[qid]
-            if isinstance(ans, int) and 0 <= ans < len(labels):
-                chosen = labels[ans]
-            else:
+            chosen = None
+            if opts and all(isinstance(o, dict) for o in opts):
+                label, _, matched = resolve_answer(q, ans)
+                chosen = label if matched else None
+            if chosen is None:
                 a = _slug(str(ans))
                 chosen = next((lbl for lbl in labels if a and (_slug(lbl).startswith(a[:30])
                                or a.startswith(_slug(lbl)[:30]))), None)
@@ -685,17 +697,8 @@ def annotation_events(projects: dict[str, Path], wanted: Optional[set[str]]) -> 
             continue
         if wanted and proj not in wanted:
             continue
-        active: dict[tuple, dict] = {}
-        for row in _read_jsonl(d / "annotations.jsonl"):
-            key = (row.get("chapter_id"), row.get("es_idx"), row.get("sub_id"))
-            if row.get("removed"):
-                active.pop(key, None)
-            else:
-                active[key] = row
         groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
-        for row in active.values():
-            if row.get("type") not in _ANNOT_TYPES:
-                continue
+        for row in load_active(d, types=_ANNOT_TYPES):
             content = (row.get("content") or "").split("— IA:")[0].strip()
             m = re.match(r"\[([^\]]+)\]", content)
             subject = (m.group(1) if m else content[:60]).strip().lower()
@@ -769,7 +772,7 @@ def prompt_events(project_names: set[str], wanted: Optional[set[str]]) -> list[d
     events = []
     names = sorted(project_names, key=len, reverse=True)
     for row in _read_jsonl(PROMPT_HISTORY):
-        if "translate_books" not in str(row.get("project", "")):
+        if REPO.name not in str(row.get("project", "")):
             continue
         text = row.get("display") or ""
         if len(text) < 25 or not _PROMPT_KEYWORDS.search(text):
