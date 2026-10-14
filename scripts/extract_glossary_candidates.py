@@ -1719,10 +1719,10 @@ def main():
                     # Same reason as the web UI's merge save: the reader's
                     # staleness check reads updated_at, so a merge must move it.
                     existing.updated_at = datetime.now()
-                    save_glossary(existing, out_path)
+                    save_glossary(existing, out_path, writer="script:extract_glossary_candidates")
                     print(f"\nMerged {len(new_terms)} new terms into {out_path} ({len(existing.terms)} total)")
                 else:
-                    save_glossary(result_glossary, out_path)
+                    save_glossary(result_glossary, out_path, writer="script:extract_glossary_candidates")
                     print(f"\nSaved {len(accepted)} terms to {out_path}")
             else:
                 print("\nNo terms accepted.")

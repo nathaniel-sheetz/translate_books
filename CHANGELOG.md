@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.76.0.0] - 2026-10-14
+
+### Added
+- **Every change to a book's style guide, glossary and address map is logged.** Each save from the harness, the web UI or the scripts appends a row to `projects/<book>/decisions_history.jsonl`. The row holds who wrote it, an optional reason, the before and after content, and a compact diff: terms added, removed or changed, a text diff of the guide, or the address pairs that changed. A save that changes nothing but timestamps writes no row. Logging never fails the save it rides on.
+- **Edits made outside the save functions are logged too.** When an agent hand-edits `style.json`, the next save, or the next harness command, logs the edit as its own `external` row. A book that predates the log gets a `baseline` row on first contact.
+- **`style-guide commit`, `glossary commit` and `address-map commit` take `--reason`.** The harness skill now passes the user's approve-with-changes edits as the reason, so the log says why a decision changed.
+- **`scripts/decision_archaeology.py` mines every book's history for the decisions that were revisited.** It diffs artifact versions from dated backups, forks, `.bak` copies, harness drafts and the live files. It adds approval events, questionnaire answers that overrode the default, judge false positives, consistency rulings, reader annotations, transcript edits and the user's own prompts. Output is `events.jsonl`, `versions.json` and `summary.md` under `comparisons/decision-archaeology/`. Backup locations go in a gitignored `decision_archaeology_sources.json`; copy the `.example`.
+- **A sample taxonomy of hard translation decisions** ships as `prompts/decisions_taxonomy.example.json`: categories, detection cues, the artifact a ruling lands in, and invented examples. It is reference data for now, since nothing loads it yet.
+
+### Fixed (found in pre-ship review)
+- **Every style approval looked like an edit.** The miner compared the harness draft, which holds only the guide, with the commit, which also holds the light guide. It now compares only what the draft holds.
+- **A hand-edit was credited to the next save.** The edit and the save it preceded shared one row under the saver's name. They now get separate rows.
+- **A version that came back was counted twice.** A revert followed by an identical live copy made two versions. Copies of the latest version now merge.
+- **An answer given as an index (`"0"`) was mined as a free-text override.** The miner now resolves answers the way the questionnaire does.
+- **One bad source stopped the whole mining run.** An out-of-range timestamp or a corrupt backup zip is now skipped with a note. Recovery copies inside a zip are skipped like everywhere else.
+- **The annotation replay could count a removed note as live.** It now uses the annotation store's own reader.
+- **One corrupt byte in the history log turned off outside-edit detection for the book.** The log is now read with replacement characters.
+- **The web UI logged any JSON value as a save's reason.** Only a string is kept now.
+- **The prompt docs described a taxonomy loader and scan that don't exist, and their prompt counts were stale.** They now describe the taxonomy as reference data and give no count.
+
 ## [0.75.1.0] - 2026-10-13
 
 ### Added

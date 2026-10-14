@@ -1176,7 +1176,7 @@ def main():
             for q in questions:
                 answers[q["id"]] = q.get("default", 0)
             content = answers_to_style_guide_fallback(questions, answers)
-            save_style_guide_json(content, style_path)
+            save_style_guide_json(content, style_path, writer="script:translate_book")
             print(f"  Style guide saved to {style_path}")
             print(f"  ({len(content)} chars from {len(questions)} questions with default answers)")
 
@@ -1239,7 +1239,7 @@ def main():
                     proposals = parse_glossary_response(response)
                     terms = glossary_terms_from_proposals(proposals)
                     glossary = proposals_to_glossary(terms)
-                    save_glossary(glossary, glossary_path)
+                    save_glossary(glossary, glossary_path, writer="script:translate_book")
                     print(f"  Glossary saved: {len(terms)} terms to {glossary_path}")
 
     # Run pipeline stages

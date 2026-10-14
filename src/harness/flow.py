@@ -978,7 +978,8 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
 
 
 def style_guide_commit(project: str, *, draft: str | None = None,
-                       light_draft: str | None = None) -> dict:
+                       light_draft: str | None = None,
+                       reason: str | None = None) -> dict:
     """Parse, save, and validate the agent-drafted style guide -> style.json.
 
     Also settles ``light_content`` — the <=2-sentence guide the reader's
@@ -1014,7 +1015,8 @@ def style_guide_commit(project: str, *, draft: str | None = None,
     if not light:
         light = derive_light_style_guide(content)
 
-    save_style_guide_json(content, out, light_content=light)
+    save_style_guide_json(content, out, light_content=light,
+                          writer="harness:style-guide commit", reason=reason)
     validate_style_guide_file(out)  # raises HarnessValidationError -> re-draft
     return {
         "style_path": str(out),
@@ -1139,7 +1141,8 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     }
 
 
-def glossary_commit(project: str, *, draft: str | None = None) -> dict:
+def glossary_commit(project: str, *, draft: str | None = None,
+                    reason: str | None = None) -> dict:
     """Guard, build, save, and validate the agent-drafted glossary -> glossary.json."""
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
@@ -1165,7 +1168,7 @@ def glossary_commit(project: str, *, draft: str | None = None) -> dict:
     warnings.extend(glossary_convention_warnings(proposals))
     glossary = proposals_to_glossary(glossary_terms_from_proposals(proposals))
     out = project_dir / "glossary.json"
-    save_glossary(glossary, out)
+    save_glossary(glossary, out, writer="harness:glossary commit", reason=reason)
     validate_glossary_file(out)  # belt-and-suspenders
 
     # The address map is drafted before the glossary and carries English cast
@@ -1456,7 +1459,8 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
     }
 
 
-def address_map_commit(project: str, *, draft: str | None = None) -> dict:
+def address_map_commit(project: str, *, draft: str | None = None,
+                       reason: str | None = None) -> dict:
     """Parse, save, and validate the agent-drafted address map -> address_map.json."""
     project_dir = state.resolve_project_dir(project)
     hdir = state.harness_dir(project_dir)
@@ -1491,7 +1495,7 @@ def address_map_commit(project: str, *, draft: str | None = None) -> dict:
         )
 
     out = project_dir / "address_map.json"
-    save_address_map(address_map, out)
+    save_address_map(address_map, out, writer="harness:address-map commit", reason=reason)
     validate_address_map_file(out)  # belt-and-suspenders
 
     cfg = state.load_config(project_dir)

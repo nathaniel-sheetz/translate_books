@@ -491,6 +491,8 @@ def save_style_guide_json(
     output_path: Path,
     *,
     light_content: str | None = None,
+    writer: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Save a style guide to JSON, keeping the fields this call does not own.
 
@@ -530,4 +532,4 @@ def save_style_guide_json(
         created_at=created_at or now,
         updated_at=now,
     )
-    save_style_guide(guide, output_path)
+    save_style_guide(guide, output_path, writer=writer, reason=reason)

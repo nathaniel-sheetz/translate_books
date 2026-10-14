@@ -378,6 +378,14 @@ def _verified_by(data: dict) -> str:
     return value if isinstance(value, str) and value in _CLIENT_VERIFIED_BY else "self"
 
 
+def _change_reason(data: dict) -> Optional[str]:
+    """The optional ``reason`` a save logs to decisions_history; non-strings dropped."""
+    value = data.get("reason")
+    if not isinstance(value, str):
+        return None
+    return value.strip()[:500] or None
+
+
 def _get_ui_lang() -> str:
     """Read UI language from cookie, default to English."""
     return request.cookies.get("reader_lang", "en")
@@ -720,7 +728,8 @@ def setup_save_style_guide(project_id):
         created_at=created_at or now,
         updated_at=now,
     )
-    save_style_guide(guide, output_path)
+    save_style_guide(guide, output_path, writer="web_ui:style-guide",
+                     reason=_change_reason(data))
     return jsonify({"ok": True, "path": str(output_path)})
 
 
@@ -750,7 +759,8 @@ def setup_save_light_style_guide(project_id):
 
     guide.light_content = new_light
     guide.updated_at = datetime.now()
-    save_style_guide(guide, style_path)
+    save_style_guide(guide, style_path, writer="web_ui:light-style-guide",
+                     reason=_change_reason(data))
     return jsonify({"ok": True, "light_content": new_light or ""})
 
 
@@ -974,7 +984,8 @@ def setupsave_glossary(project_id):
 
     if mode == "replace":
         glossary = proposals_to_glossary(terms)
-        save_glossary(glossary, glossary_path)
+        save_glossary(glossary, glossary_path, writer="web_ui:glossary replace",
+                      reason=_change_reason(data))
         return jsonify({"ok": True, "total": len(terms), "mode": "replace"})
 
     # Merge with existing if present
@@ -986,11 +997,13 @@ def setupsave_glossary(project_id):
         # The loaded timestamp would otherwise be written straight back, leaving
         # the reader's staleness check blind to the most common glossary edit.
         existing.updated_at = datetime.now()
-        save_glossary(existing, glossary_path)
+        save_glossary(existing, glossary_path, writer="web_ui:glossary merge",
+                      reason=_change_reason(data))
         return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
     else:
         glossary = proposals_to_glossary(terms)
-        save_glossary(glossary, glossary_path)
+        save_glossary(glossary, glossary_path, writer="web_ui:glossary merge",
+                      reason=_change_reason(data))
         return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
 
 

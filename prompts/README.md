@@ -16,7 +16,7 @@ characters never reaches the model, so version notes and variable lists are free
 
 ## The `.example.txt` rule
 
-Seven prompts are meant to be edited per-user. Each ships as a checked-in
+These prompts are meant to be edited per-user. Each ships as a checked-in
 `<name>.example.txt`; the loader prefers your own `<name>.txt` when it exists, and your
 copy is gitignored so it never collides with an update to the shipped default.
 
@@ -33,6 +33,7 @@ cp translation.example.txt translation.txt   # now yours
 | `dialogue.txt` | `dialogue.example.txt` |
 | `translator_note_default.txt` | `translator_note_default.example.txt` |
 | `house_style_rules.json` | `house_style_rules.example.json` |
+| `decisions_taxonomy.json` | `decisions_taxonomy.example.json` |
 
 Every other file here is tracked directly — edit in place and commit.
 
@@ -43,7 +44,7 @@ Every other file here is tracked directly — edit in place and commit.
 | Translation | `translation.txt`, `retranslate_sentence.txt`, `dialogue.txt` |
 | Setup beats | `style_guide_questions.*`, `style_guide_generate.txt`, `glossary_bootstrap*.txt`, `address_map_generate.txt` |
 | Judges | `judge_dialogue*.txt`, `judge_address*.txt`, `address_forms.txt`, `judge_absolute*.txt`, `judge_pairwise*.txt` |
-| Standards | `house_style_rules.json` — the house rules every book is judged against (JSON data, not a template) |
+| Standards | `house_style_rules.json` — the house rules every book is judged against (JSON data, not a template); `decisions_taxonomy.json` — the kinds of hard decision a planned decisions scan will look for (JSON reference data; nothing loads it yet) |
 | Annotations | `annotation_word_choice.txt`, `annotation_inconsistency.txt`, `annotation_footnote.txt`, `annotation_flag.txt` |
 | End matter | `translator_note_default.txt` |
 | Archives | `history/`, `previous/` |

@@ -188,7 +188,7 @@ def main():
     print(content)
     print(f"\n--- End ---\n")
 
-    save_style_guide_json(content, output_path)
+    save_style_guide_json(content, output_path, writer="script:generate_style_guide")
     print(f"Saved to: {output_path}")
     return 0
 
