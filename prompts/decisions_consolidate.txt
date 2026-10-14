@@ -1,9 +1,10 @@
 # decisions — consolidate one category of scan candidates into a few questions
-# Version: 1.0
+# Version: 1.1
 # Reads every subject the chapter scan raised in ONE taxonomy category of one
 # book and folds them into the few questions the editor actually answers, each
 # sent to the step where it is naturally decided. Run after scan-commit.
-# Preamble variables: title, author, target_language, locale, house_rules.
+# Preamble variables: title, author, target_language, locale, house_rules,
+# dialogue_rules.
 # Body: the category's taxonomy entry and its merged subjects, rendered by
 # src/decisions/consolidate.py:render_body.
 
@@ -47,16 +48,24 @@ A good rule:
 Most categories need zero or one rule. Never more than three.
 
 **An item** (`items[]`): something no rule settles, decided on its own:
-- `glossary` — the rendering of a term or a name: a species, a trade word, a
-  coat colour, an invented term. Decided when the glossary is approved. Put
-  terms that must be decided together (stallion / stud / sire; three local
+- `glossary` — the rendering of a recurring term or name: a species, a trade
+  word, a coat colour, an invented term. Decided when the glossary is approved.
+  Put terms that must be decided together (stallion / stud / sire; three local
   names for small squirrels) into ONE item.
 - `address_map` — one speaker pair (both directions in one item) whose tú or
   usted no rule settles.
+- `translation_note` — a one-off choice inside one passage: a pun, a
+  mishearing, a cut-off word, a joke on an English word. It is not a glossary
+  term; the note travels with that chapter to the translator. When several
+  such instances share a principle, ask the principle as a rule and still list
+  each instance as a translation note so the translator sees it.
 
-**Settled** (`settled[]`): a house rule or the category's `house_default`
-already answers it and nothing in the book argues for departing. Never asked.
-Name the rule id or `house_default` in `by`, and state the answer.
+**Settled** (`settled[]`): a house rule, a house dialogue convention or the
+category's `house_default` already answers it and nothing in the book argues
+for departing. Never asked. Name the rule id, `dialogue` or `house_default` in
+`by`, and state the answer. A rule whose recommendation would simply be the
+house default is not a question: settle it. Ask only when something specific in
+this book argues for departing, and then say what in `why`.
 
 **A house-rule proposal** (`house_rule_proposals[]`): the editor would plainly
 give the same answer in every book, but no house rule says so yet. Never asked
@@ -75,6 +84,15 @@ checks this and reports anything lost or invented.
 <house_rules>
 {{house_rules}}
 </house_rules>
+
+## House dialogue conventions (bind every book)
+
+How speech, thoughts, quoted speech and letters are punctuated. A question
+these answer is settled, with `by: "dialogue"`.
+
+<dialogue_rules>
+{{dialogue_rules}}
+</dialogue_rules>
 
 ## Output
 
@@ -99,7 +117,7 @@ Respond with ONLY a JSON object, no other text, in exactly this shape:
       "question": "<the choice>",
       "options": [{"label": "<rendering>", "effect": "<one line>"}],
       "why": "<one line>",
-      "destination": "glossary | address_map"
+      "destination": "glossary | address_map | translation_note"
     }
   ],
   "settled": [{"subjects": ["<subject>"], "by": "<house rule id or house_default>", "answer": "<the answer>"}],

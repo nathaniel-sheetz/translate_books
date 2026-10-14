@@ -37,7 +37,7 @@ TEMPLATE = "decisions_consolidate.txt"
 COMMAND = "decisions_consolidate"
 
 RULE_DESTINATIONS = ("decisions_gate", "address_map")
-ITEM_DESTINATIONS = ("glossary", "address_map")
+ITEM_DESTINATIONS = ("glossary", "address_map", "translation_note")
 
 # What the subject list shows per subject; more is noise to a sorter.
 MAX_QUESTIONS = 2
@@ -59,6 +59,16 @@ def _report_path(project_dir: Path) -> Path:
 
 def _scan_candidates_path(project_dir: Path) -> Path:
     return decisions_dir(project_dir) / "candidates.json"
+
+
+def dialogue_rules_text() -> str:
+    """The house dialogue conventions every book is punctuated by, or a placeholder."""
+    from src.utils.text_utils import _resolve_dialogue_path
+
+    try:
+        return _resolve_dialogue_path().read_text(encoding="utf-8").strip()
+    except (OSError, FileNotFoundError):
+        return "(none)"
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +200,7 @@ def consolidate_prepare(
         "target_language": cfg.get("target_language") or "Spanish",
         "locale": cfg.get("locale") or "unspecified",
         "house_rules": house_rules_text(),
+        "dialogue_rules": dialogue_rules_text(),
     })
     prefix, marker, _ = rendered.partition(_CACHE_PREFIX_SPLIT_MARKER)
     preamble = prefix if marker else rendered.rstrip("\n") + "\n\n"
@@ -359,10 +370,59 @@ def check_draft(draft: dict[str, Any], subjects: dict[str, list[str]]) -> dict[s
     }
 
 
+def merge_items_across_categories(categories: list[dict[str, Any]], destination: str) -> list[dict[str, Any]]:
+    """``destination`` items from every category, merged where they share a subject.
+
+    Two categories can raise the same thing ("silvertip" as a name and as a
+    species; Phronsie's doll "Baby" under names and under grammatical sex), and
+    the glossary should flag it once. Items join when any of their subjects share
+    a ``subject_key``, transitively.
+    """
+    items = [
+        {**it, "category": cat["category"]}
+        for cat in categories for it in cat["items"] if it["destination"] == destination
+    ]
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: dict[str, int] = {}
+    for i, it in enumerate(items):
+        for name in it["subjects"]:
+            key = subject_key(name)
+            if key in owner:
+                parent[find(i)] = find(owner[key])
+            else:
+                owner[key] = i
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for i, it in enumerate(items):
+        groups.setdefault(find(i), []).append(it)
+
+    merged = []
+    for group in groups.values():
+        subjects = list(dict.fromkeys(n for it in group for n in it["subjects"]))
+        labels: dict[str, str] = {}
+        for it in group:
+            for o in it["options"]:
+                labels.setdefault(o["label"], o["effect"])
+        merged.append({
+            "subjects": subjects,
+            "categories": list(dict.fromkeys(it["category"] for it in group)),
+            "questions": list(dict.fromkeys(it["question"] for it in group if it["question"])),
+            "options": [{"label": k, "effect": v} for k, v in labels.items()],
+            "why": next((it["why"] for it in group if it["why"]), ""),
+        })
+    return merged
+
+
 _COMMIT_SCHEMA = {
     "status": "'ok' | 'partial' (some categories failed or missing) | 'error'",
-    "counts": "{gate_questions, address_map, glossary, settled, house_rule_proposals, "
-    "dropped, subjects}",
+    "counts": "{gate_questions, address_map, glossary, translation_notes, settled, "
+    "house_rule_proposals, dropped, subjects}; glossary and notes are merged across categories",
     "coverage": "{unaccounted, unknown, duplicated} totals — every subject must land once",
     "failed": "list of {id, problem}",
     "missing": "category jobs with no draft",
@@ -409,11 +469,14 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
             n += sum(1 for c in categories for i in c["items"] if i["destination"] == dest_items)
         return n
 
+    glossary = merge_items_across_categories(categories, "glossary")
+    notes = merge_items_across_categories(categories, "translation_note")
     counts = {
         "subjects": sum(len(c["subjects"]) for c in categories),
         "gate_questions": count("decisions_gate"),
         "address_map": count("address_map", "address_map"),
-        "glossary": sum(1 for c in categories for i in c["items"] if i["destination"] == "glossary"),
+        "glossary": len(glossary),
+        "translation_notes": len(notes),
         "settled": sum(len(s["subjects"]) for c in categories for s in c["settled"]),
         "house_rule_proposals": sum(len(c["proposals"]) for c in categories),
         "dropped": sum(len(c["dropped"]) for c in categories),
@@ -431,6 +494,8 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         "counts": counts,
         "coverage": coverage,
         "categories": categories,
+        "glossary": glossary,
+        "translation_notes": notes,
         "failed": failed,
         "missing": missing,
     }
@@ -473,7 +538,8 @@ def render_report(doc: dict[str, Any]) -> str:
         "",
         f"{c['subjects']} scanned subjects become **{c['gate_questions']} questions at the "
         f"decisions gate**, {c['address_map']} for the address map, {c['glossary']} glossary "
-        f"flags; {c['settled']} subjects settled by house rules, "
+        f"flags, {c['translation_notes']} translation notes; {c['settled']} subjects settled "
+        f"by house rules, "
         f"{c['house_rule_proposals']} house-rule proposals, {c['dropped']} dropped.",
         "",
         "## Decisions gate",
@@ -503,13 +569,13 @@ def render_report(doc: dict[str, Any]) -> str:
         for it in cat["items"]:
             if it["destination"] == "address_map":
                 lines.append(f"- {' / '.join(it['subjects'])}: {it['question']}")
-    lines += ["", "## Glossary flags", ""]
-    for cat in cats:
-        for it in cat["items"]:
-            if it["destination"] == "glossary":
-                opts = " / ".join(o["label"] for o in it["options"])
-                lines.append(f"- **{' / '.join(it['subjects'])}** ({cat['category']}): {it['question']}"
-                             + (f" — {opts}" if opts else ""))
+    for title, entries in (("Glossary flags", doc["glossary"]), ("Translation notes", doc["translation_notes"])):
+        lines += ["", f"## {title}", ""]
+        for it in entries:
+            opts = " / ".join(o["label"] for o in it["options"])
+            question = " | ".join(it["questions"])
+            lines.append(f"- **{' / '.join(it['subjects'])}** ({', '.join(it['categories'])}): {question}"
+                         + (f" — {opts}" if opts else ""))
     lines += ["", "## Never asked", ""]
     for cat in cats:
         for s in cat["settled"]:

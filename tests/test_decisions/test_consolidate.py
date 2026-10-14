@@ -130,3 +130,29 @@ def test_commit_routes_and_reports(project):
 
 def test_fanout_needs_a_manifest(project):
     assert "consolidate-prepare" in dcons.consolidate_fanout(project)["error"]
+
+
+def test_glossary_items_merge_across_categories():
+    categories = [
+        {"category": "names", "items": [
+            {"subjects": ["Baby"], "question": "Translate the doll's name?", "options": [{"label": "Bebé", "effect": "e"}], "why": "", "destination": "glossary"},
+        ]},
+        {"category": "grammatical-sex", "items": [
+            {"subjects": ["baby"], "question": "Which gender?", "options": [{"label": "la bebé", "effect": "f"}], "why": "w", "destination": "glossary"},
+            {"subjects": ["kittens"], "question": "q", "options": [], "why": "", "destination": "glossary"},
+            {"subjects": ["a pun"], "question": "q", "options": [], "why": "", "destination": "translation_note"},
+        ]},
+    ]
+    merged = dcons.merge_items_across_categories(categories, "glossary")
+    assert len(merged) == 2
+    baby = next(m for m in merged if "Baby" in m["subjects"])
+    assert baby["categories"] == ["names", "grammatical-sex"]
+    assert [o["label"] for o in baby["options"]] == ["Bebé", "la bebé"]
+    assert len(dcons.merge_items_across_categories(categories, "translation_note")) == 1
+
+
+def test_prepare_includes_the_house_dialogue_rules(project, monkeypatch):
+    monkeypatch.setattr(dcons, "dialogue_rules_text", lambda: "THOUGHTS take guillemets.")
+    dcons.consolidate_prepare(project)
+    preamble = (decisions_dir(project) / "preamble.consolidate.txt").read_text(encoding="utf-8")
+    assert "THOUGHTS take guillemets." in preamble
