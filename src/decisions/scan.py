@@ -219,6 +219,7 @@ def scan_prepare(
     *,
     chapters: Optional[list[str]] = None,
     worker_model: Optional[str] = None,
+    cli: Optional[str] = None,
     keep_drafts: bool = False,
 ) -> dict[str, Any]:
     """Render one prompt per chapter (or window) and a manifest. No spend."""
@@ -249,6 +250,7 @@ def scan_prepare(
     prof = resolve_profile(
         project_dir,
         command=COMMAND,
+        cli=cli,
         worker_model=worker_model,
         usage_log=usage_log_for(project_dir, COMMAND),
     )

@@ -100,6 +100,7 @@ def _cmd_scan_prepare(args: argparse.Namespace) -> int:
         project_dir,
         chapters=_parse_chapters(args.chapters),
         worker_model=args.worker_model,
+        cli=args.cli,
         keep_drafts=args.keep_drafts,
     )
     _emit(project_dir, out)
@@ -148,6 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_prepare.add_argument("--project", required=True, help="project id or path")
     p_prepare.add_argument("--chapters", help="chapters to scan (1-20, 3,7, chapter_04); default all")
     p_prepare.add_argument("--worker-model", default=None, help="model pin; default from the profile")
+    p_prepare.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None,
+                           help="headless CLI the manifest records (default: config, else host)")
     p_prepare.add_argument(
         "--keep-drafts", action="store_true", help="do not clear existing drafts"
     )
