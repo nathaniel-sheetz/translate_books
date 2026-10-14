@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.75.1.0] - 2026-10-13
+
+### Added
+- **The address judge can check singular against plural.** When a book's address map contains the words `NUMBER IS CHECKED` and names the pairs it covers, plural address aimed at a singular addressee (ustedes, plural commands such as *miren* or *piensen*, *les diré*, *sus pizarras*) is flagged as `wrong-number` at error severity, and so is the reverse. Without those words, number stays out of scope as before.
+- **An address map can bring a narrating voice into scope.** A voice that speaks to the reader directly, such as a teacher addressing the pupil, is checked like a quoted speaker even though its lines carry no rayas.
+
+### Changed
+- The address judge prompts are at 1.4 (single) and 1.3 (batched), and `docs/ADDRESS_JUDGE.md` describes the new scope and the `wrong-number` rule.
+
+### Fixed (found in pre-ship review)
+- **The batched address prompt left `wrong-number` out of its severity guidance.** The single-item prompt listed it as an error. Both prompts list it now, and a test checks that they match.
+- **Correct singular usted could have been flagged as plural.** *su*, *se* and *le* are the right forms for one person addressed as usted. The rubric now flags them only when a plural verb ending or *ustedes* shows the address is plural.
+
 ## [0.75.0.0] - 2026-10-13
 
 ### Added

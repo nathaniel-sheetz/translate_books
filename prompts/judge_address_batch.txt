@@ -71,7 +71,8 @@ For each violation choose the single most specific `rule` id from this list:
 - "other": a clear address violation none of the above describes.
 
 Severity guidance:
-- "error" for a clear violation of an EXPLICIT pair expectation.
+- "error" for a clear violation of an EXPLICIT pair expectation (including
+  wrong-number).
 - "warning" for a global-rule-violation inferred from the fallback rules.
 - "info" for ambiguous cases.
 

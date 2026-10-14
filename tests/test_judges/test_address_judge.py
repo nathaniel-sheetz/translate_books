@@ -186,6 +186,25 @@ def test_missing_map_uses_placeholder():
     assert shared["address_rubric"].strip()
 
 
+def test_both_templates_list_wrong_number_as_an_error():
+    """The batch template mirrors the single one: same rule id, same severity."""
+    from pathlib import Path
+
+    prompts = Path(__file__).resolve().parents[2] / "prompts"
+    for name in ("judge_address.txt", "judge_address_batch.txt"):
+        text = (prompts / name).read_text(encoding="utf-8")
+        assert '- "wrong-number":' in text, name
+        severity = text.split("Severity guidance:", 1)[1].split("\n\n", 1)[0]
+        assert "wrong-number" in severity.split('- "warning"', 1)[0], name
+
+
+def test_rubric_gates_number_on_the_map():
+    """Number is checked only when the map opts in; the default stays out of scope."""
+    rubric = AddressComplianceJudge().shared_prompt_variables({})["address_rubric"]
+    assert "NUMBER IS CHECKED" in rubric
+    assert "Without the words NUMBER IS CHECKED in the map, number is out of scope." in rubric
+
+
 def test_parse_failure_then_retry_succeeds(monkeypatch):
     calls = {"n": 0}
 

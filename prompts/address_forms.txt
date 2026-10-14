@@ -53,6 +53,9 @@ singular, any of these aimed at the addressee is plural drift:
   addressees ("les diré", "sus pizarras");
 - a plural object where the map says each addressee has one ("tus pizarras"
   for "your slates" when the map wants "tu pizarra").
+For a pair addressed in the singular with usted, se / su / le are the correct
+singular forms ("su pizarra", "siéntese"): flag them only when a plural verb
+ending or "ustedes" shows the address is plural.
 Rewrite to the singular form the map expects (Sabes…, Piensa…, tu pizarra).
 For a pair the map says is addressed in the plural, the reverse applies.
 NOT plural address: a 3rd-person plural about OTHER people ("que los alumnos

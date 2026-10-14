@@ -54,8 +54,12 @@ Key design points:
   any scene resolves — this is enforced by the model validator.
 - **Story evolution.** `since` / `until` (chapter ids) or an `after_event` note on
   a rule capture relationships that shift partway through the book.
-- **v1 scope.** tú/usted singular only. voseo (`vos`) and plural address
-  (`ustedes`/`vosotros`) are out of scope.
+- **Scope.** tú/usted in dialogue. voseo (`vos`) is out of scope. Plural address
+  (`ustedes`/`vosotros`) is out of scope unless the map's `content` contains the
+  words `NUMBER IS CHECKED` and names the pairs it covers; then singular/plural
+  drift is flagged as `wrong-number`. The map's `content` can also bring a
+  narrating voice into scope (e.g. a teacher's voice speaking to the pupil), and
+  that voice's unquoted lines are then checked like dialogue.
 
 The judge reads the human-readable `content` prose (so it must state the
 asymmetric/contextual rules plainly); `pairs` / `global_rules` are the structured
@@ -136,8 +140,8 @@ review type). Approved findings can be applied to the text with
 ## Severity policy (broad coverage)
 
 - **error** — a clear violation of an *explicit* pair expectation
-  (`wrong-form-usted-expected` / `wrong-form-tu-expected`, or a clear
-  `inconsistent-address`).
+  (`wrong-form-usted-expected` / `wrong-form-tu-expected` / `wrong-number`, or a
+  clear `inconsistent-address`).
 - **warning** — a likely violation inferred from the map's `global_rules` when no
   explicit pair covers the addressee (`global-rule-violation`).
 - **info** — `ambiguous` cases where the relationship or addressee is unclear.
