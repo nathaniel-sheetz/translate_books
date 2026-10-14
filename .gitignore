@@ -71,6 +71,10 @@ blacklist.json
 # Per-user forced glossary terms (copy from forced_glossary_terms.example.json)
 forced_glossary_terms.json
 
+# Per-user backup locations for scripts/decision_archaeology.py
+# (copy from decision_archaeology_sources.example.json)
+decision_archaeology_sources.json
+
 # Per-user prompt configs (copy from *.example.json / *.example.txt)
 prompts/style_guide_questions.json
 prompts/style_guide_questions.txt

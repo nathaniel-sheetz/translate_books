@@ -1,0 +1,10 @@
+{
+  "zip_backups": [
+    {"date": "2026-01-15", "paths": ["D:/backups/translate_books 2026-01-15.zip", "~/translate_books 2026-01-15.zip"]}
+  ],
+  "folder_backups": [
+    {"label": "backups/2026-02-01", "path": "backups/2026-02-01/projects", "date": "2026-02-01"},
+    {"label": "old checkout", "path": "~/old/translate_books/projects", "date": null}
+  ],
+  "transcripts_dir": null
+}
