@@ -73,7 +73,7 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
   *with specific changes* they should pick _Other_ and type the swaps directly** — e.g.
   `Gatito → Minino`, `keep "Granny Gray" untranslated`, or paste corrected JSON. A custom (_Other_)
   answer is approve-with-changes: apply exactly those swaps to the JSON at `draft_path`, re-run
-  `commit`, briefly confirm what changed, and continue (the swap submission *is* the approval — don't
+  `commit --reason "<the swaps, in a line>"` (recorded in the book's `decisions_history.jsonl`), briefly confirm what changed, and continue (the swap submission *is* the approval — don't
   loop back into this gate unless the user asks). Only continue once the user approves.
 - **Log the outcome:** `log-event --event approval --data '{"beat":"glossary",
   "decision":"approved_first_pass"|"reject_then_redraft"|"approve_with_changes","redrafts":<n>}'`.

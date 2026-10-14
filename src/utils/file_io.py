@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from src.utils import artifact_history
 from src.models import (
     AddressMap,
     Blacklist,
@@ -139,7 +140,8 @@ def load_glossary(glossary_path: Path) -> Glossary:
         raise ValueError(f"Invalid Glossary data in {glossary_path}: {e}")
 
 
-def save_glossary(glossary: Glossary, output_path: Path) -> None:
+def save_glossary(glossary: Glossary, output_path: Path, *,
+                  writer: Optional[str] = None, reason: Optional[str] = None) -> None:
     """
     Save a Glossary to JSON file with atomic write.
 
@@ -149,6 +151,8 @@ def save_glossary(glossary: Glossary, output_path: Path) -> None:
     Args:
         glossary: The Glossary object to save
         output_path: Path where the glossary JSON should be saved
+        writer: Who is saving (harness, web_ui, a script), for the change log
+        reason: Why, when the caller knows, for the change log
 
     Raises:
         OSError: If there are permission or disk space issues
@@ -161,6 +165,7 @@ def save_glossary(glossary: Glossary, output_path: Path) -> None:
 
     # Serialize glossary to JSON-compatible dict
     data = glossary.model_dump(mode='json')
+    before = artifact_history.read_json(output_path)
 
     # Write to temporary file first (atomic write pattern)
     temp_path = output_path.with_suffix('.tmp')
@@ -175,6 +180,7 @@ def save_glossary(glossary: Glossary, output_path: Path) -> None:
         # Clean up temp file on error
         temp_path.unlink(missing_ok=True)
         raise
+    artifact_history.record_change(output_path, before, data, writer=writer, reason=reason)
 
 
 def load_ignored_terms(path: Path) -> IgnoredTerms:
@@ -551,10 +557,12 @@ def load_address_map(path: Path) -> AddressMap:
         raise ValueError(f"Invalid AddressMap data in {path}: {e}")
 
 
-def save_address_map(address_map: AddressMap, output_path: Path) -> None:
+def save_address_map(address_map: AddressMap, output_path: Path, *,
+                     writer: Optional[str] = None, reason: Optional[str] = None) -> None:
     """Save an AddressMap to a JSON file with an atomic write."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     data = address_map.model_dump(mode='json')
+    before = artifact_history.read_json(output_path)
 
     temp_path = output_path.with_suffix('.tmp')
     try:
@@ -565,9 +573,11 @@ def save_address_map(address_map: AddressMap, output_path: Path) -> None:
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
+    artifact_history.record_change(output_path, before, data, writer=writer, reason=reason)
 
 
-def save_style_guide(style_guide: StyleGuide, output_path: Path) -> None:
+def save_style_guide(style_guide: StyleGuide, output_path: Path, *,
+                     writer: Optional[str] = None, reason: Optional[str] = None) -> None:
     """
     Save a StyleGuide to JSON file with atomic write.
 
@@ -577,6 +587,8 @@ def save_style_guide(style_guide: StyleGuide, output_path: Path) -> None:
     Args:
         style_guide: The StyleGuide object to save
         output_path: Path where the style guide JSON should be saved
+        writer: Who is saving (harness, web_ui, a script), for the change log
+        reason: Why, when the caller knows, for the change log
 
     Raises:
         OSError: If there are permission or disk space issues
@@ -589,6 +601,7 @@ def save_style_guide(style_guide: StyleGuide, output_path: Path) -> None:
 
     # Serialize style guide to JSON-compatible dict
     data = style_guide.model_dump(mode='json')
+    before = artifact_history.read_json(output_path)
 
     # Write to temporary file first (atomic write pattern)
     temp_path = output_path.with_suffix('.tmp')
@@ -603,6 +616,7 @@ def save_style_guide(style_guide: StyleGuide, output_path: Path) -> None:
         # Clean up temp file on error
         temp_path.unlink(missing_ok=True)
         raise
+    artifact_history.record_change(output_path, before, data, writer=writer, reason=reason)
 
 
 def load_state(project_path: Path) -> ProjectState:

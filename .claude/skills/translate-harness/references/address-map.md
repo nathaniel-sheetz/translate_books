@@ -95,7 +95,8 @@ it the style guide falls back to the single questionnaire answer and this beat i
 - **AskUserQuestion with exactly two predefined options** — **"Approve all"** and **"Reject &
   talk it through"**. **Remind the user in the question text that to approve *with specific
   changes* they should pick _Other_ and type the edits directly.** A custom (_Other_) answer is
-  approve-with-changes: apply the edits to `draft_path`, re-run `commit`, confirm what changed,
+  approve-with-changes: apply the edits to `draft_path`, re-run `commit --reason "<the edits, in a line>"`
+  (recorded in the book's `decisions_history.jsonl`), confirm what changed,
   and continue.
 - **Log the outcome:** `log-event --event approval --data '{"beat":"address_map",
   "decision":"approved_first_pass"|"reject_then_redraft"|"approve_with_changes","redrafts":<n>}'`.

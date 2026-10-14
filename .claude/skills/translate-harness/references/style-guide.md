@@ -113,7 +113,8 @@ rides on the same approval question. Then **AskUserQuestion with exactly
 two predefined options** — **"Approve all"** and **"Reject & talk it through"**. **Remind the user in
 the question text that to approve *with specific changes* they should pick _Other_ and type the edits
 directly** (e.g. "switch register to tú", "keep place names in English"). A custom (_Other_) answer is
-approve-with-changes: apply the edits to the draft, re-run `style-guide commit`, and continue —
+approve-with-changes: apply the edits to the draft, re-run `style-guide commit --reason "<the user's edits, in a line>"`
+(the reason lands in the book's `decisions_history.jsonl` change log), and continue —
 and when the edits touch dialect or tone, refresh `light_draft_path` before re-committing, or the
 light guide will still describe the guide they just changed. This is
 the user's chance to lock in the key decisions (dialect/locale, name conventions, register)

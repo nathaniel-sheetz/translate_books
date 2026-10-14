@@ -120,6 +120,11 @@ def _build_parser() -> argparse.ArgumentParser:
     def add_project(p):
         p.add_argument("--project", required=True, help="Project id (under projects/) or path")
 
+    def add_reason(p):
+        p.add_argument("--reason", default=None,
+                       help="What the user changed at approval and why; recorded in the "
+                            "book's decisions_history.jsonl change log")
+
     # setup -----------------------------------------------------------------
     sp = sub.add_parser("setup", help="Create project, persist config, run ingest + split")
     sp.add_argument("--project", default=None,
@@ -238,6 +243,7 @@ def _build_parser() -> argparse.ArgumentParser:
         if action == "commit":
             ap.add_argument("--light-draft", default=None,
                             help="Light style-guide draft (default: .harness/style_guide_light_draft.txt)")
+            add_reason(ap)
 
     # glossary <action> -----------------------------------------------------
     gl = sub.add_parser("glossary", help="Glossary beat (prepare/commit)")
@@ -248,6 +254,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gc = gl_sub.add_parser("commit")
     add_project(gc)
     gc.add_argument("--draft", default=None, help="Proposals JSON (default: .harness/glossary_draft.json)")
+    add_reason(gc)
 
     # address-map <action> --------------------------------------------------
     am = sub.add_parser("address-map",
@@ -266,6 +273,7 @@ def _build_parser() -> argparse.ArgumentParser:
     amc = am_sub.add_parser("commit")
     add_project(amc)
     amc.add_argument("--draft", default=None, help="Map JSON (default: .harness/address_map_draft.json)")
+    add_reason(amc)
     amr = am_sub.add_parser("rename",
                             help="Apply the approved glossary cast to the committed map "
                                  "(writes a draft; review, then commit)")
@@ -706,12 +714,13 @@ def _dispatch(args: argparse.Namespace):
             return flow.style_guide_prepare_draft(args.project, answers=args.answers)
         if args.action == "commit":
             return flow.style_guide_commit(args.project, draft=args.draft,
-                                           light_draft=args.light_draft)
+                                           light_draft=args.light_draft,
+                                           reason=args.reason)
     if cmd == "glossary":
         if args.action == "prepare":
             return flow.glossary_prepare(args.project, max_candidates=args.max_candidates)
         if args.action == "commit":
-            return flow.glossary_commit(args.project, draft=args.draft)
+            return flow.glossary_commit(args.project, draft=args.draft, reason=args.reason)
     if cmd == "address-map":
         if args.action == "precheck":
             return flow.address_map_precheck(args.project)
@@ -720,7 +729,7 @@ def _dispatch(args: argparse.Namespace):
         if args.action == "prepare":
             return flow.address_map_prepare(args.project, max_chapters=args.max_chapters)
         if args.action == "commit":
-            return flow.address_map_commit(args.project, draft=args.draft)
+            return flow.address_map_commit(args.project, draft=args.draft, reason=args.reason)
         if args.action == "rename":
             return flow.address_map_rename(args.project, draft=args.draft)
     if cmd == "difficulty":
@@ -1005,9 +1014,24 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
         pass
 
 
+def _log_outside_edits(args: argparse.Namespace) -> None:
+    """Log hand-edits to the book's style/glossary/address map before the
+    command runs, so a commit's change-log row diffs against what was really
+    on disk. Best-effort, like the run log."""
+    project = getattr(args, "project", None)
+    if not project:
+        return
+    try:
+        from src.utils import artifact_history
+        artifact_history.check_external_edits(state.resolve_project_dir(project))
+    except Exception:  # noqa: BLE001 - never block a command over its log
+        pass
+
+
 def main() -> None:
     args = _build_parser().parse_args()
     started = time.monotonic()
+    _log_outside_edits(args)
     try:
         result = _dispatch(args)
     except HarnessValidationError as e:
