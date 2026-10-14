@@ -2,7 +2,7 @@
 
 Two enumerations in that document are load-bearing and silently rot:
 
-* the "overridable six" table, which claims to be "exactly as listed in
+* the overridable-prompts table, which claims to be "exactly as listed in
   ``.gitignore``" — the per-user prompt convention. A seventh per-user prompt
   added to ``.gitignore`` without a table row leaves users unaware they can
   own it; a table row without a ``.gitignore`` line means their private copy
@@ -47,7 +47,7 @@ def _gitignored_prompts() -> set[str]:
 
 def _documented_overridable() -> set[str]:
     """Basenames in the 'Your copy (gitignored)' column of the overridable table."""
-    section = DOC.split("The overridable six, exactly as listed in", 1)
+    section = DOC.split("The overridable prompts, exactly as listed in", 1)
     assert len(section) == 2, "the overridable-prompts table moved; update this anchor"
     table = section[1].split("\n\n", 2)[1]
 

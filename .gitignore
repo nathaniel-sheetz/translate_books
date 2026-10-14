@@ -84,6 +84,7 @@ prompts/translation.txt
 prompts/translator_note_default.txt
 prompts/dialogue.txt
 prompts/house_style_rules.json
+prompts/decisions_taxonomy.json
 prompts/previous/
 
 # Prompt history logs (can be large)

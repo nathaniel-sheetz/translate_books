@@ -52,7 +52,7 @@ cp prompts/translation.example.txt prompts/translation.txt
 # Edit it — it is now the one that gets used
 ```
 
-The overridable six, exactly as listed in `.gitignore`:
+The overridable prompts, exactly as listed in `.gitignore`:
 
 | Your copy (gitignored) | Shipped default | Controls |
 |---|---|---|
@@ -63,6 +63,7 @@ The overridable six, exactly as listed in `.gitignore`:
 | `prompts/dialogue.txt` | `dialogue.example.txt` | Spanish dialogue formatting rules |
 | `prompts/translator_note_default.txt` | `translator_note_default.example.txt` | Pre-filled "Note from the Translator" |
 | `prompts/house_style_rules.json` | `house_style_rules.example.json` | The house rules every book is judged against |
+| `prompts/decisions_taxonomy.json` | `decisions_taxonomy.example.json` | The kinds of hard decision the decisions scan looks for, with your past examples and house defaults |
 
 Every other prompt in `prompts/` is tracked directly — edit it in place and the change is
 a normal commit.

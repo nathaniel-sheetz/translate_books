@@ -1,0 +1,224 @@
+{
+  "version": 1,
+  "about": "Kinds of translation decision that tend to be changed after the fact: overridden at the style questionnaire, corrected at an approval gate, or relitigated through judge false positives and reader notes. The decisions scan reads each chapter against this list and proposes decision cards. `detection_cues` are what to look for in the English source; `lands_in` is the artifact a ruling updates. A category may carry `house_default`, the answer you give in every book: the scan proposes it as the recommendation and asks only if the book gives a reason to depart. This is the shipped sample, with invented examples and no house defaults. Copy it to prompts/decisions_taxonomy.json and grow it from your own books (scripts/decision_archaeology.py mines them); tag each example with its `project` so a replay can hold that book's own examples out. Your copy wins when it exists.",
+  "categories": [
+    {
+      "id": "address-pairs",
+      "name": "tú / usted between particular characters",
+      "description": "Who says tú or usted to whom, where the general rule does not settle it: servants and staff, shopkeepers, social hierarchies among animals, feudal courts, strangers, criminals, deliberate distancing, public versus private settings.",
+      "detection_cues": [
+        "dialogue across a gap in age, rank, or familiarity",
+        "vocatives that mark status: sir, ma'am, my lord, boss, major, miss",
+        "servants, gardeners, shopkeepers, officials or captors who speak to the main characters",
+        "the same pair speaking both in private and before others",
+        "animal or non-human characters with an implied pecking order"
+      ],
+      "lands_in": ["address_map"],
+      "examples": [
+        {"text": "A gardener addressing the family's children: usted with señorita, while the children use tú back."},
+        {"text": "A prince and his father the king: usted at court, tú only when they are alone."}
+      ]
+    },
+    {
+      "id": "address-over-story",
+      "name": "Address that changes as the story moves",
+      "description": "A pair's form of address changes at an event: a family tie revealed, a death, a marriage, growing up, a change of rank. The map needs since/until/after_event rules instead of one default.",
+      "detection_cues": [
+        "revelations of kinship or identity late in the book",
+        "time skips, coming of age, change of station",
+        "a character who is a stranger early and intimate later"
+      ],
+      "lands_in": ["address_map"],
+      "examples": [
+        {"text": "Two adults learn in the last chapters that they are cousins; their usted becomes tú from that scene on."}
+      ]
+    },
+    {
+      "id": "address-number",
+      "name": "Singular or plural address; whom the narrator speaks to",
+      "description": "Whether 'you' is one listener or several, and how a narrator or teacher addresses the reader: tú, ustedes, or usted. Includes group teaching and lesson-book voices.",
+      "detection_cues": [
+        "a narrator or teacher speaking directly to the reader",
+        "a speaker addressing a group, a class, or 'you all'",
+        "lesson-book or catechism formats"
+      ],
+      "lands_in": ["address_map", "style"],
+      "examples": [
+        {"text": "A lesson book whose teacher speaks to 'you' throughout: one pupil (tú) or the class (ustedes)?"}
+      ]
+    },
+    {
+      "id": "names",
+      "name": "Which names to translate",
+      "description": "Personal names, animal names, epithets and bynames, places (real and invented-descriptive), boats and ships, and placeholder names. The rule varies by book and must be stated so it can be applied consistently to every name, not decided one by one.",
+      "detection_cues": [
+        "names that are ordinary English words (Thunder, Blackrock Island, Old Grey)",
+        "the text explaining or playing on a name",
+        "epithets of the form 'X the Y' or 'X of the Y'",
+        "historical or saga names with established Spanish forms",
+        "generic stand-in names in examples or parables (Mr. Smith)"
+      ],
+      "lands_in": ["style", "glossary"],
+      "examples": [
+        {"text": "A horse called Thunder and a dog called Rex in the same book: translate descriptive names only, or none?"},
+        {"text": "An invented 'Crooked Creek': translate by its common noun (arroyo Torcido) or keep the English?"}
+      ]
+    },
+    {
+      "id": "titles-honorifics",
+      "name": "Titles, honorifics and kinship terms with names",
+      "description": "How a title combines with a name in narration and in direct address, and which titles are translated: Mr., Mrs., Miss, Aunt, Grandpa, Doc, Dame, Monsignor, military and religious ranks.",
+      "detection_cues": [
+        "Title + surname or kinship + given name",
+        "foreign or archaic honorifics",
+        "titles used alone as vocatives"
+      ],
+      "lands_in": ["glossary", "style"],
+      "examples": [
+        {"text": "Mr. Brown in narration and in speech: el señor Brown, Sr. Brown, or Mr. Brown?"}
+      ]
+    },
+    {
+      "id": "grammatical-sex",
+      "name": "A figure's sex where Spanish must mark it",
+      "description": "Spanish nouns, adjectives and pronouns force a sex that English can leave open: animals of a stated or unstated sex, epicene species, babies, characters whose sex is unknown or disguised, and sex-neutral terms (yearling, foal) that have no neutral Spanish form.",
+      "detection_cues": [
+        "animal characters, especially named ones and species words like kitten, goose, colt",
+        "'it' or no pronoun for a baby or a creature",
+        "disguise, cross-dressing, or mistaken-identity plots",
+        "a sex revealed only later in the book"
+      ],
+      "lands_in": ["glossary", "style"],
+      "examples": [
+        {"text": "A kitten called only 'it' until chapter 9 reveals she is female: gatito or gatita from the start?"}
+      ]
+    },
+    {
+      "id": "house-vocabulary",
+      "name": "Terms already settled in sibling books",
+      "description": "Vocabulary already fixed in other books of the same domain or series, or in a prequel. A fresh choice relitigates it.",
+      "detection_cues": [
+        "the book shares a domain with existing projects",
+        "a sequel or series volume",
+        "terms the glossary of a sibling book already carries"
+      ],
+      "lands_in": ["glossary"],
+      "examples": [
+        {"text": "A sequel that uses 'stall' throughout, where the first volume's glossary already chose one rendering."}
+      ]
+    },
+    {
+      "id": "specialist-vocabulary",
+      "name": "Technical, regional and natural-history terms",
+      "description": "Species, plants, trades, ranching, sailing, science: the Spanish has several candidates that differ by region or precision. Verify against web sources rather than model memory.",
+      "detection_cues": [
+        "species and plant names, especially regional or foreign ones",
+        "trade or technical vocabulary repeated through the book",
+        "science or nature writing"
+      ],
+      "lands_in": ["glossary"],
+      "examples": [
+        {"text": "'spruce' in a forest setting: the botanically precise word or the one readers know?"}
+      ]
+    },
+    {
+      "id": "reader-vocabulary-level",
+      "name": "How hard the Spanish vocabulary may be",
+      "description": "How far word choice can stretch for the audience: rare, regional or bookish words a young reader stumbles on. Includes words the story itself discusses, whose Spanish must be equally hard.",
+      "detection_cues": [
+        "the target reader's age",
+        "a character asking what a word means, or mispronouncing it",
+        "dense regional or period vocabulary"
+      ],
+      "lands_in": ["style"],
+      "examples": [
+        {"text": "A child character asks what 'ambidextrous' means: the Spanish word must puzzle a child too."}
+      ]
+    },
+    {
+      "id": "dialect-register",
+      "name": "Dialect, slang, archaism and narrative register",
+      "description": "How eye-dialect, period slang, archaic speech and the narrator's register are carried into Spanish.",
+      "detection_cues": [
+        "apostrophe-dropped spellings (hoss, yuh, 'tisn't)",
+        "period slang and exclamations",
+        "thee/thou, archaic syntax, a deliberately elevated narrator"
+      ],
+      "lands_in": ["style"],
+      "examples": [
+        {"text": "A ranch hand who says 'I reckon yuh ain't seen him': dialect spelling, or colloquial vocabulary in standard spelling?"}
+      ]
+    },
+    {
+      "id": "wordplay",
+      "name": "Wordplay that lands only in English",
+      "description": "Puns, letter games, name jokes, rhymes and jokes that depend on English words. Each instance needs its own decision; a book that depends on them throughout may not be worth translating.",
+      "detection_cues": [
+        "puns and homophones, a joke explained in the text",
+        "acrostics and letter-based games",
+        "names whose meaning carries a joke",
+        "rhymed taunts and nonsense verse"
+      ],
+      "lands_in": ["style"],
+      "feasibility_signal": true,
+      "examples": [
+        {"text": "An alphabet rhyme ('A was an apple'): adapt each line to a Spanish word with the same letter."}
+      ]
+    },
+    {
+      "id": "quoted-works",
+      "name": "Quoted verse, songs, scripture and published works",
+      "description": "Poems, songs, hymns, scripture and quotations from other books: whether a public-domain Spanish translation exists, whether to write a new one, prose or verse, and which Bible version and citation format.",
+      "detection_cues": [
+        "lineated verse, song lyrics, hymn titles",
+        "scripture quotations and references",
+        "quotations attributed to other authors"
+      ],
+      "lands_in": ["style", "glossary"],
+      "examples": [
+        {"text": "Characters sing two verses of a well-known hymn: use an existing Spanish version or translate the English?"}
+      ]
+    },
+    {
+      "id": "sensitive-language",
+      "name": "Religion, disability, ethnicity and period attitudes",
+      "description": "Religious interjections, disability terms, ethnic labels and period attitudes: how faithfully to render them, and never to add what the English does not carry.",
+      "detection_cues": [
+        "interjections and oaths, religious or not",
+        "terms for disability, race or ethnicity",
+        "period attitudes the narrator voices"
+      ],
+      "lands_in": ["style", "house_rules"],
+      "examples": [
+        {"text": "'Oh dear!' rendered as '¡Dios mío!' adds a religious note the English does not carry."}
+      ]
+    },
+    {
+      "id": "units-and-culture",
+      "name": "Measurements, money and cultural references",
+      "description": "Units, currency, school grades, holidays, foods and institutions of the source culture: keep, convert or adapt.",
+      "detection_cues": [
+        "miles, feet, pounds, dollars",
+        "school grades, holidays, period institutions"
+      ],
+      "lands_in": ["style"],
+      "examples": [
+        {"text": "'Ten miles to town' and 'two bits': keep miles and American coins, or convert?"}
+      ]
+    },
+    {
+      "id": "speech-typography",
+      "name": "Nested speech, emphasis and other typography",
+      "description": "Speech inside framed stories, thoughts versus speech, letters, and typographic emphasis (italics, capitals): book-specific conventions the dialogue judge must know.",
+      "detection_cues": [
+        "a character telling a story with quoted dialogue inside it",
+        "italic or capital emphasis in speech",
+        "letters, signs, inscriptions"
+      ],
+      "lands_in": ["style"],
+      "examples": [
+        {"text": "A grandfather tells a story in which his characters speak: raya inside raya, or guillemets for the inner speech?"}
+      ]
+    }
+  ]
+}
