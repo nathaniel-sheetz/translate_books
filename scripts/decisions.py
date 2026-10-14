@@ -11,6 +11,9 @@ Subcommands, each printing exactly one JSON object with a ``_schema`` block:
     scan-prepare   render one prompt per chapter + a manifest       (no spend)
     scan-fanout    run a headless claude/cursor/codex wave          (no API spend)
     scan-commit    parse drafts, verify quotes, write candidates    (no spend)
+    consolidate-prepare  one prompt per category from the candidates (no spend)
+    consolidate-fanout   fold each category into a few questions    (no API spend)
+    consolidate-commit   audit coverage, write the routed questions  (no spend)
 
     python scripts/decisions.py scan-prepare --project midnight
     python scripts/decisions.py scan-fanout  --project midnight
@@ -36,6 +39,7 @@ for _stream in (sys.stdout, sys.stderr):
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 
 from src.decisions import decisions_dir  # noqa: E402
+from src.decisions import consolidate as dcons  # noqa: E402
 from src.decisions import scan as dscan  # noqa: E402
 from src.harness import state as hstate  # noqa: E402
 
@@ -131,10 +135,42 @@ def _cmd_scan_commit(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+def _cmd_consolidate_prepare(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = dcons.consolidate_prepare(
+        project_dir, worker_model=args.worker_model, cli=args.cli, keep_drafts=args.keep_drafts
+    )
+    _emit(project_dir, out)
+    return 0 if out.get("status") == "ok" else 1
+
+
+def _cmd_consolidate_fanout(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    job_ids = [j.strip() for j in args.job_ids.split(",") if j.strip()] if args.job_ids else None
+    out = dcons.consolidate_fanout(
+        project_dir, job_ids=job_ids, concurrency=args.concurrency, cli=args.cli,
+        cli_bin=args.cli_bin, effort=args.effort,
+    )
+    _emit(project_dir, out)
+    counts = out.get("counts") or {}
+    all_failed = bool(counts.get("failed")) and not counts.get("wrote")
+    return 1 if out.get("error") or all_failed else 0
+
+
+def _cmd_consolidate_commit(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = dcons.consolidate_commit(project_dir)
+    _emit(project_dir, out)
+    return 0 if out.get("status") == "ok" else 1
+
+
 _DISPATCH = {
     "scan-prepare": _cmd_scan_prepare,
     "scan-fanout": _cmd_scan_fanout,
     "scan-commit": _cmd_scan_commit,
+    "consolidate-prepare": _cmd_consolidate_prepare,
+    "consolidate-fanout": _cmd_consolidate_fanout,
+    "consolidate-commit": _cmd_consolidate_commit,
 }
 
 
@@ -170,6 +206,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_commit = sub.add_parser("scan-commit", help="parse drafts, verify quotes, write candidates")
     p_commit.add_argument("--project", required=True, help="project id or path")
+
+    c_prepare = sub.add_parser(
+        "consolidate-prepare", help="one prompt per category from the scan's candidates (no spend)"
+    )
+    c_prepare.add_argument("--project", required=True, help="project id or path")
+    c_prepare.add_argument("--worker-model", default=None, help="model pin; default from the profile")
+    c_prepare.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None)
+    c_prepare.add_argument("--keep-drafts", action="store_true", help="do not clear existing drafts")
+
+    c_fanout = sub.add_parser("consolidate-fanout", help="run the consolidate wave (no API spend)")
+    c_fanout.add_argument("--project", required=True, help="project id or path")
+    c_fanout.add_argument("--job-ids", help="comma-separated job ids (default: all undrafted)")
+    c_fanout.add_argument("--concurrency", type=int, default=None)
+    c_fanout.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None)
+    c_fanout.add_argument("--cli-bin", default=None)
+    c_fanout.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "xhigh", "default"],
+        help="per-run effort (default: config headless_effort_decisions_consolidate, else medium)",
+    )
+
+    c_commit = sub.add_parser(
+        "consolidate-commit", help="audit coverage, write consolidated.json and the report"
+    )
+    c_commit.add_argument("--project", required=True, help="project id or path")
     return parser
 
 

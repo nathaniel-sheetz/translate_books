@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 from src.decisions import decisions_dir
 from src.decisions.taxonomy import OTHER, category_ids, format_taxonomy, load_taxonomy
+from src.decisions.wave import fanout_error, has_draft, inside, load_manifest, run_wave
 from src.judges.base import _CACHE_PREFIX_SPLIT_MARKER
 from src.judges.llm_io import (
     JudgeParseError,
@@ -47,8 +48,6 @@ TEMPLATE = "decisions_scan.txt"
 
 # Wave type, for ``state.COMMAND_EFFORT_DEFAULTS`` / ``headless_effort_decisions_scan``.
 COMMAND = "decisions_scan"
-
-DEFAULT_CONCURRENCY = 5
 
 # A chapter longer than this is scanned in paragraph-aligned windows. The longest
 # chapter in the three replay books is 6.3k words, so this rarely fires.
@@ -342,54 +341,10 @@ def scan_prepare(
 # fanout
 # ---------------------------------------------------------------------------
 
-_FANOUT_SCHEMA = {
-    "wrote": "job ids whose drafts were written this wave",
-    "failed": "list of {id, error} — re-run scan-fanout for these",
-    "skipped": "job ids that already had a non-empty draft",
-    "counts": "{wrote, failed, skipped, todo}",
-    "effective": "what the wave ran as",
-    "usage": "what the wave consumed; per-job rows go to .harness/decisions/scan.usage.jsonl",
-    "instructions": "next step",
-}
-
-
-def _fanout_error(message: str) -> dict[str, Any]:
-    return {
-        "error": message,
-        "wrote": [],
-        "failed": [],
-        "skipped": [],
-        "counts": {"wrote": 0, "failed": 0, "skipped": 0, "todo": 0},
-        "_schema": _FANOUT_SCHEMA,
-    }
-
-
 def _load_manifest(project_dir: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    path = _manifest_path(project_dir)
-    if not path.exists():
-        return None, "no decisions scan manifest — run `scan-prepare` first"
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return None, f"unreadable manifest {path}: {exc}"
-    if not isinstance(doc.get("jobs"), list):
-        return None, f"manifest {path} has no 'jobs' list"
-    return doc, None
-
-
-def _inside(project_dir: Path, raw: str) -> Path:
-    """``raw`` resolved, refusing anything outside ``.harness/decisions/``."""
-    path = Path(raw).resolve()
-    if not path.is_relative_to(decisions_dir(project_dir).resolve()):
-        raise ValueError(f"path escapes the decisions dir: {raw}")
-    return path
-
-
-def _has_draft(path: Path) -> bool:
-    try:
-        return path.exists() and bool(path.read_text(encoding="utf-8").strip())
-    except (OSError, UnicodeDecodeError):
-        return False
+    return load_manifest(
+        _manifest_path(project_dir), missing="no decisions scan manifest — run `scan-prepare` first"
+    )
 
 
 def scan_fanout(
@@ -402,142 +357,14 @@ def scan_fanout(
     effort: Optional[str] = None,
     runner=None,
 ) -> dict[str, Any]:
-    """Run one headless wave over the prepared jobs.
-
-    ``runner`` is a test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
-    """
-    from src.harness import state as hstate
-    from src.harness.headless import run_headless_wave
-    from src.harness.profile import resolve_profile, usage_log_for
-
-    project_dir = Path(project_dir)
-    manifest, err = _load_manifest(project_dir)
+    """Run one headless wave over the prepared chapter jobs."""
+    manifest, err = _load_manifest(Path(project_dir))
     if err:
-        return _fanout_error(err)
-
-    concurrency = DEFAULT_CONCURRENCY if concurrency is None else int(concurrency)
-    if concurrency < 1:
-        return _fanout_error(f"concurrency must be at least 1, got {concurrency}")
-
-    cfg = hstate.load_config(project_dir)
-    # Inherit the consented effort only while the CLI family is unchanged; a
-    # level resolved for one CLI is that CLI's table number.
-    inherited_effort, inherited_effort_source = effort, "cli"
-    if not effort and (cli or manifest.get("cli")) == manifest.get("cli"):
-        inherited_effort = manifest.get("effort") or "default"
-        inherited_effort_source = "manifest"
-    prof = resolve_profile(
-        project_dir,
-        command=COMMAND,
-        cli=cli or manifest.get("cli"),
-        cli_source="cli" if cli else "manifest",
-        worker_model=manifest.get("worker_model"),
-        worker_model_source="manifest",
-        effort=inherited_effort,
-        effort_source=inherited_effort_source,
-        cfg=cfg,
-        usage_log=usage_log_for(project_dir, COMMAND),
+        return fanout_error(err)
+    return run_wave(
+        project_dir, manifest, command=COMMAND, job_ids=job_ids, concurrency=concurrency,
+        cli=cli, cli_bin=cli_bin, effort=effort, runner=runner,
     )
-    extra_flags = hstate.compose_headless_argv(
-        cfg, prof.effort if prof.effort_channel == "argv" else None
-    )
-
-    jobs = [j for j in manifest["jobs"] if isinstance(j, dict) and j.get("id")]
-    if job_ids is not None:
-        unknown = sorted(set(job_ids) - {j["id"] for j in jobs})
-        if unknown:
-            return _fanout_error(f"job ids not in the manifest: {unknown}")
-        jobs = [j for j in jobs if j["id"] in set(job_ids)]
-
-    try:
-        preamble = _inside(project_dir, manifest.get("preamble_path") or "")
-    except ValueError as exc:
-        return _fanout_error(str(exc))
-
-    ready: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    pre_failed: list[dict[str, str]] = []
-    for job in jobs:
-        try:
-            draft = _inside(project_dir, job.get("draft_path") or "")
-            if _has_draft(draft):
-                skipped.append(job["id"])
-                continue
-            body = _inside(project_dir, job.get("body_path") or "").read_text(encoding="utf-8")
-        except (OSError, ValueError) as exc:
-            pre_failed.append({"id": job["id"], "error": f"{type(exc).__name__}: {exc}"[:500]})
-            continue
-        ready.append(
-            {
-                "id": job["id"],
-                "input_text": body,
-                "output_path": str(draft),
-                "system_prompt_file": str(preamble),
-            }
-        )
-
-    base = {
-        "worker_model": prof.worker_model,
-        "cli": prof.cli,
-        "concurrency": concurrency,
-        "effective": prof.to_payload(),
-        "_schema": _FANOUT_SCHEMA,
-    }
-    if prof.warnings:
-        base["warnings"] = list(prof.warnings)
-    if not ready:
-        return {
-            **base,
-            "wrote": [],
-            "failed": pre_failed,
-            "skipped": skipped,
-            "counts": {
-                "wrote": 0, "failed": len(pre_failed),
-                "skipped": len(skipped), "todo": len(pre_failed),
-            },
-            "instructions": (
-                "Fix the failed jobs, then re-run scan-fanout." if pre_failed else "Run `scan-commit`."
-            ),
-        }
-
-    wave = run_headless_wave(
-        ready,
-        model=prof.worker_model,
-        concurrency=concurrency,
-        cli=prof.cli,
-        cli_bin=cli_bin,
-        runner=runner,
-        usage_log=usage_log_for(project_dir, COMMAND),
-        extra_flags=extra_flags,
-        effort=prof.effort,
-    )
-    if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
-        return {
-            **_fanout_error(wave["error"]),
-            **base,
-            "skipped": skipped,
-            "instructions": "Fix the launcher error, then re-run scan-fanout.",
-        }
-
-    failed = pre_failed + list(wave.get("failed") or [])
-    wrote = list(wave.get("wrote") or [])
-    out = {
-        **base,
-        "wrote": wrote,
-        "failed": failed,
-        "skipped": skipped,
-        "counts": {
-            "wrote": len(wrote), "failed": len(failed),
-            "skipped": len(skipped), "todo": len(ready) + len(pre_failed),
-        },
-        "instructions": (
-            "Re-run scan-fanout for the failed jobs, then scan-commit."
-            if failed else "Run `scan-commit`."
-        ),
-    }
-    if wave.get("usage"):
-        out["usage"] = wave["usage"]
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -651,11 +478,11 @@ def scan_commit(project_dir: Path) -> dict[str, Any]:
             failed.append({"id": str(job_id or "?"), "problem": "malformed manifest entry"})
             continue
         try:
-            draft = _inside(project_dir, job.get("draft_path") or "")
+            draft = inside(project_dir, job.get("draft_path") or "")
         except ValueError as exc:
             failed.append({"id": job_id, "problem": str(exc)})
             continue
-        if not _has_draft(draft):
+        if not has_draft(draft):
             missing.append(job_id)
             continue
         try:

@@ -141,6 +141,10 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # before anything is translated. Detection, the same shape as footnote_scan,
     # and named medium for the same reason. Unmeasured; re-measure and move the row.
     "decisions_scan": "medium",
+    # The decisions consolidate pass: one category's scan candidates for one
+    # book, folded into a few rule questions. Same detection-and-sort shape as
+    # the scan; unmeasured, re-measure and move the row.
+    "decisions_consolidate": "medium",
 }
 
 
