@@ -137,6 +137,10 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # the installed CLI defaults to (high, per
     # project_headless_effort_default_high). Re-measure and move the row.
     "triage": "medium",
+    # The decisions scan: one English chapter read against the decision taxonomy,
+    # before anything is translated. Detection, the same shape as footnote_scan,
+    # and named medium for the same reason. Unmeasured; re-measure and move the row.
+    "decisions_scan": "medium",
 }
 
 

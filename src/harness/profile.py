@@ -78,6 +78,8 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
     # chunk, so a baseline averaged with any other wave would describe neither —
     # the same reasoning as the footnote_scan split above.
     "triage": (".harness", "triage", "usage.jsonl"),
+    # The decisions scan reads whole English chapters, so its baseline is its own.
+    "decisions_scan": (".harness", "decisions", "scan.usage.jsonl"),
 }
 
 # How the resolved effort actually reaches the model.
