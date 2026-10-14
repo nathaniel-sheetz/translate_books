@@ -16,10 +16,10 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=11">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=12">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=23">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=26">
     {% endif %}
 </head>
 <body>
@@ -714,6 +714,10 @@
 
           <!-- Edit -->
           <div class="rv2-panel" id="rv2-panel-edit">
+            <!-- The finding being fixed, when the tab was opened from a finding's
+                 Apply/Edit button; filled by reader_sheet_v2.js, which also hides
+                 Expand while it shows. -->
+            <div class="rv2-fix" id="rv2-fix" hidden></div>
             <div class="rv2-edit-head">
               <span class="rv2-edit-kicker">{{ t.js.v2.translation_label }}</span>
               <button class="rv2-btn rv2-ghost rv2-sm" id="rv2-expand-btn" type="button">{{ t.js.v2.expand }}</button>
@@ -734,6 +738,7 @@
           <button class="rv2-chip" id="rv2-chip-boundaries" type="button" aria-label="{{ t.js.v2.aria_edit_boundaries }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 4H4v12h2M14 4h2v12h-2"/><path d="M9 7l2 3-2 3"/></svg></button>
           <button class="rv2-chip danger" id="rv2-chip-remove" type="button" aria-label="{{ t.js.v2.aria_remove }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg></button>
           <span class="rv2-spacer"></span>
+          <button class="rv2-btn rv2-ghost rv2-sm" id="rv2-fix-cancel" type="button" hidden>{{ t.js.review_fix_cancel }}</button>
           <button class="rv2-btn rv2-primary rv2-iconbtn" id="rv2-edit-save" type="button" aria-label="{{ t.js.v2.save }}" title="{{ t.js.v2.save }}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4.5 3.5h8L16 7v9.5H4.5z"/><path d="M7 3.5v3.5h5V3.5"/><rect x="7" y="10.5" width="6" height="4.5"/></svg></button>
         </div>
       </div>
@@ -927,10 +932,10 @@
 <script>window.REVIEW_TYPES = {{ review_types | tojson }};
 window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};
 window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=38"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=39"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
-<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=14"></script>
+<script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=16"></script>
 {% endif %}
 
 {% elif mode == "not_found" %}

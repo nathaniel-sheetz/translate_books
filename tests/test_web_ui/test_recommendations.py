@@ -737,6 +737,193 @@ def test_a_finding_you_fixed_shows_the_text_as_it_read_then(client, book):
     assert item["status"] == "fixed"
 
 
+def save_from_reader(proj_dir, old_text, new_text, *, es_idx=4, finding=True,
+                     ts="2026-10-13T16:26:10", queue="corrections_applied.jsonl"):
+    """Rewrite a sentence the way a reader Save does, leaving its correction row.
+
+    The Save patches the alignment row and, once the chapter is applied, the
+    chunk; the row it leaves behind names the finding only when the Save came
+    from that finding's Apply or Edit button.
+    """
+    edit_chunk(proj_dir, old_text, new_text)
+    realign(proj_dir, es_idx=es_idx, es=new_text)
+    record = reader_save_row(proj_dir, old_text, new_text, es_idx=es_idx, ts=ts)
+    if not finding:
+        del record["from_finding"]
+    with open(proj_dir / queue, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def reader_save_row(proj_dir, old_text="El perro ladro fuerte.",
+                    new_text="—El perro ladró fuerte.", *, es_idx=4,
+                    ts="2026-10-13T16:26:10"):
+    """The correction row a Save from the dialogue finding's button leaves."""
+    from web_ui.app import _resolve_issue_key
+
+    return {
+        "project_id": "recbook", "chapter_id": "chapter_01", "es_idx": es_idx,
+        "original_es": old_text, "corrected_es": new_text, "timestamp": ts,
+        "from_finding": {
+            "eval_name": "dialogue",
+            "chunk_id": "chapter_01_chunk_000",
+            "issue_key": _resolve_issue_key(
+                proj_dir, "chapter_01_chunk_000", "dialogue", 0
+            ),
+            "mode": "apply",
+        },
+    }
+
+
+def split_group(proj_dir, sentences, *, es_idx=1):
+    """Break the N:1 row at ``es_idx`` into one row per sentence, as a realign can."""
+    path = proj_dir / "alignments" / "chapter_01.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    whole = next(r for r in data["alignments"] if r["es_idx"] == es_idx)
+    parts = [
+        dict(whole, es_idx=es_idx + i, es=es, es_indices=[es_idx + i])
+        for i, es in enumerate(sentences)
+    ]
+    data["alignments"] = [
+        r for r in data["alignments"] if r["es_idx"] != es_idx
+    ] + parts
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("queue", ["corrections_applied.jsonl", "corrections.jsonl"])
+def test_a_finding_fixed_from_the_reader_keeps_its_sentence(client, book, queue):
+    """Apply removes the very text the finding quoted, so the builder can only
+    call it obsolete. The Save recorded which sentence it was, and the card goes
+    back on it - with its neighbours and the English, like any other."""
+    plant_judge(book)
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, "El perro ladro fuerte.", "—El perro ladró fuerte.",
+                     queue=queue)
+
+    (item,) = items_of(client)
+    assert item["status"] == "fixed"
+    assert item["es_idx"] == 4
+    assert item["unanchored_reason"] is None
+    assert item["context"]["current"]["es"] == "—El perro ladró fuerte."
+    assert item["context"]["current"]["en"] == "The dog barked loudly."
+    assert item["context"]["before"]["es_idx"] == 1
+    assert item["context"]["after"]["es"] == "Nadie respondio."
+    assert item["excerpt"] == "El perro ladro fuerte."
+
+
+def test_a_second_save_on_the_sentence_does_not_cost_the_first_its_place(client, book):
+    """Two findings fixed on one sentence is the common case: the first Save's
+    text is no longer what the row reads, but the second Save started from it."""
+    plant_judge(book)
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, "El perro ladro fuerte.", "—El perro ladró fuerte.")
+    save_from_reader(book, "—El perro ladró fuerte.", "—El perro ladró muy fuerte.",
+                     finding=False, ts="2026-10-13T16:26:43")
+
+    (item,) = items_of(client)
+    assert item["es_idx"] == 4
+    assert item["context"]["current"]["es"] == "—El perro ladró muy fuerte."
+
+
+def test_a_fix_on_a_group_since_split_lands_on_the_sentence_it_changed(client, book):
+    """A Save on an N:1 group records the whole group under one index. When a
+    realign splits the group, that index names only its first sentence - the
+    card belongs on the piece the edit fell in."""
+    group = "La casa era grande. Tenia dos pisos. Nadie vivia alli."
+    plant_judge(book, location="Tenia dos pisos.")
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, group, group.replace("Tenia", "Tenía"), es_idx=1)
+    split_group(book, ["La casa era grande.", "Tenía dos pisos.", "Nadie vivia alli."])
+
+    (item,) = items_of(client)
+    assert item["es_idx"] == 2
+    assert item["context"]["before"]["es"] == "La casa era grande."
+    assert item["context"]["current"]["es"] == "Tenía dos pisos."
+    assert item["context"]["after"]["es"] == "Nadie vivia alli."
+
+
+def test_an_edit_ahead_of_the_fix_moves_it_along_with_the_text(client, book):
+    """The fix sat 23 characters into the group. A later Save lengthened the
+    sentence before it, and the split has to be read against where the fix is
+    now, or the card lands one sentence early."""
+    group = "La casa era grande. Tenia dos pisos. Nadie vivia alli."
+    fixed = group.replace("Tenia", "Tenía")
+    plant_judge(book, location="Tenia dos pisos.")
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, group, fixed, es_idx=1)
+    save_from_reader(book, fixed, fixed.replace("era grande", "era muy grande"),
+                     es_idx=1, finding=False, ts="2026-10-13T16:26:43")
+    split_group(book, ["La casa era muy grande.", "Tenía dos pisos.", "Nadie vivia alli."])
+
+    (item,) = items_of(client)
+    assert item["es_idx"] == 2
+    assert item["context"]["current"]["es"] == "Tenía dos pisos."
+
+
+def test_a_save_does_not_place_a_quote_that_was_never_in_the_book(client, book):
+    """Only `obsolete` is undone by a Save: there the fix is what removed the
+    quote. An `unplaceable` quote was not prose to begin with."""
+    plant_judge(book, location="Una frase que no esta en el texto.")
+    mark_finding(book, "dialogue", "resolved")
+    realign(book, es_idx=4, es="—El perro ladró fuerte.")
+    with open(book / "corrections.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(reader_save_row(book), ensure_ascii=False) + "\n")
+
+    (item,) = items_of(client)
+    assert item["es_idx"] is None
+    assert item["unanchored_reason"] == "unplaceable"
+
+
+def test_correction_rows_that_make_no_sense_are_passed_over(client, book):
+    """The queue is a file people and older versions have written to. A row
+    that cannot be read costs that row its place and nothing else."""
+    plant_judge(book)
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, "El perro ladro fuerte.", "—El perro ladró fuerte.")
+    good = reader_save_row(book)
+    with open(book / "corrections.jsonl", "a", encoding="utf-8") as f:
+        f.write("not json\n")
+        for row in (
+            ["chapter_01"],
+            dict(good, es_idx="4"),
+            dict(good, corrected_es=None),
+            dict(good, from_finding="dialogue"),
+            dict(good, from_finding={"chunk_id": {"a": 1}, "issue_key": ["b"]}),
+        ):
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    (item,) = items_of(client)
+    assert item["es_idx"] == 4
+    assert item["context"]["current"]["es"] == "—El perro ladró fuerte."
+
+
+def test_a_fix_since_folded_into_a_group_stays_on_that_group(client, book):
+    """The other direction: a realign that merges the fixed sentence with its
+    neighbour. The row no longer reads what the Save wrote, but it holds it."""
+    plant_judge(book)
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, "El perro ladro fuerte.", "—El perro ladró fuerte.")
+    realign(book, es_idx=4, es="—El perro ladró fuerte. Nadie respondio.")
+
+    (item,) = items_of(client)
+    assert item["es_idx"] == 4
+    assert item["context"]["current"]["es"] == "—El perro ladró fuerte. Nadie respondio."
+
+
+def test_a_fixed_finding_is_not_put_on_a_sentence_that_moved(client, book):
+    """``es_idx`` is a position. Once the row there reads something the Save
+    never wrote, the card keeps its stored excerpt rather than a stranger."""
+    plant_judge(book)
+    mark_finding(book, "dialogue", "resolved")
+    save_from_reader(book, "El perro ladro fuerte.", "—El perro ladró fuerte.")
+    realign(book, es_idx=4, es="Un caballo relincho en el patio.")
+
+    (item,) = items_of(client)
+    assert item["es_idx"] is None
+    assert item["unanchored_reason"] == "obsolete"
+    assert item["original_text"] == "El perro ladro fuerte."
+    assert "Un caballo relincho" not in json.dumps(item, ensure_ascii=False)
+
+
 def test_an_unplaceable_quote_is_not_dressed_up_as_former_prose(client, book):
     """`unplaceable` means the quote was never in the book. Calling it "as it
     read then" would invent a history that never happened."""

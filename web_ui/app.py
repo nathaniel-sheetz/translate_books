@@ -77,6 +77,7 @@ from web_ui.evaluations import (
     JUDGE_STATUS_GROUPS,
     REVIEW_CODED_TYPES,
     REVIEW_JUDGE_TYPES,
+    SUGGESTION_USED,
     REVIEW_TYPES,
     IgnoreHits,
     append_feedback,
@@ -2318,6 +2319,42 @@ def serve_image_board_cover(project_id, filename):
     return send_from_directory(str(folder), filename)
 
 
+_FROM_FINDING_TEXT_KEYS = ("eval_name", "chunk_id", "issue_key", "category", "suggestion")
+_FROM_FINDING_MODES = frozenset({"apply", "edit"})
+_FROM_FINDING_MAX_CHARS = 2000
+
+
+def _clean_from_finding(raw) -> Optional[dict]:
+    """The finding a reader Save came from, reduced to the fields worth keeping.
+
+    Set when the Save was reached through a finding's Apply or Edit button. It
+    rides on the correction row under its own key and deliberately not as
+    ``source: "judge:..."``: that prefix means ``run_judges.py apply`` spliced a
+    suggestion in unread, and the splice guards in ``src/judges/fixes.py`` are
+    calibrated on exactly those rows. This one a person previewed and could
+    rewrite, so it must stay tellable apart.
+
+    Returns ``None`` for anything that does not name a finding; a malformed
+    value never costs the translator the Save it rode in on.
+    """
+    if not isinstance(raw, dict):
+        return None
+    out = {
+        key: raw[key][:_FROM_FINDING_MAX_CHARS]
+        for key in _FROM_FINDING_TEXT_KEYS
+        if isinstance(raw.get(key), str) and raw[key]
+    }
+    if not out.get("eval_name"):
+        return None
+    mode = raw.get("mode")
+    if isinstance(mode, str) and mode in _FROM_FINDING_MODES:
+        out["mode"] = mode
+    used = raw.get("suggestion_used")
+    if isinstance(used, str) and used in SUGGESTION_USED:
+        out["suggestion_used"] = used
+    return out
+
+
 @app.route("/api/correction", methods=["POST"])
 def save_correction():
     """Save a correction and patch the alignment file."""
@@ -2358,6 +2395,9 @@ def save_correction():
             "timestamp": datetime.now().isoformat(),
             "verified_by": _verified_by(data),
         }
+        from_finding = _clean_from_finding(data.get("from_finding"))
+        if from_finding:
+            correction_record["from_finding"] = from_finding
 
         # Persist client-supplied chunk offsets so apply_to_chunk can target
         # the exact span the user edited, even when original_es has a "twin"
@@ -6693,6 +6733,12 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
     # keeps them unchanged while making the stored mark survive a re-run.
     key = _resolve_issue_key(project_dir, chunk_id, eval_name, issue_index)
 
+    # Set by the reader's Apply/Edit button, which marks a finding real when
+    # the Save lands; `append_feedback` refuses an unknown value, which reaches
+    # the caller as a 400 below.
+    via = data.get("via") or None
+    suggestion_used = data.get("suggestion_used") or None
+
     try:
         append_feedback(
             project_dir,
@@ -6703,6 +6749,8 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
             message=message,
             note=note,
             key=key,
+            via=via,
+            suggestion_used=suggestion_used,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -6785,6 +6833,67 @@ def _anchor_judge_excerpt(
     return row["es_idx"] if row else None
 
 
+# Why the reader offers Edit rather than Apply on a finding the dry run itself
+# would have applied. The classifier's own ``ManualFinding.reason`` values pass
+# through unchanged; these two are the reader's, because its Save writes one
+# sentence where ``run_judges.py apply`` writes a chunk span.
+FIX_REASON_SPANS_SENTENCES = "spans_sentences"
+FIX_REASON_SENTENCE_EDITED = "sentence_edited"
+
+
+def _reader_fix(
+    issue: dict, chunk_text: str, row: Optional[dict],
+) -> tuple[Optional[dict], Optional[str]]:
+    """``(fix, reason)`` — can the reader apply this judge finding in one Save?
+
+    The same question ``run_judges.py apply`` asks in its dry run, answered by
+    the same classifier, plus the two things only the reader has to care about.
+    Its Save rewrites a single alignment row, so the span must lie inside the
+    row the finding is anchored to. And the row's ``es`` is what the sentence
+    reads *now* — it holds any save still queued in ``corrections.jsonl``, which
+    the chunk does not — so the excerpt has to stand exactly once there too, or
+    the swap would be built against text the reader is no longer showing.
+
+    ``fix`` is ``{"old", "new"}``; the reader splices it into the sentence it
+    has on screen rather than trusting a string computed here, because an
+    earlier Apply on the same sentence changes that text without a reload.
+    """
+    from src.judges.fixes import ProposedFix, classify_fix, restated_context
+
+    result = classify_fix(issue, chunk_text)
+    if not isinstance(result, ProposedFix):
+        return None, result.reason
+    if (
+        row is None
+        or row["chunk_offset_start"] > result.char_start
+        or result.char_end > row["chunk_offset_end"]
+    ):
+        return None, FIX_REASON_SPANS_SENTENCES
+    es = row.get("es") or ""
+    if es.count(result.excerpt) != 1:
+        # A grouped row joins its sentences with a space where the chunk has a
+        # line break, so an excerpt that crosses the break is not in ``es`` as
+        # written. Nothing was edited; the swap spans two of its sentences.
+        squeezed = " ".join(result.excerpt.split())
+        if squeezed != result.excerpt and " ".join(es.split()).count(squeezed) == 1:
+            return None, FIX_REASON_SPANS_SENTENCES
+        return None, FIX_REASON_SENTENCE_EDITED
+    # The classifier cleared the splice against the chunk, and the row can have
+    # moved on since. A suggestion that keeps its excerpt still finds it once
+    # after the swap has been made, and making it again doubles what it added;
+    # so does a suggestion whose ending the sentence has since gained.
+    start = es.find(result.excerpt)
+    if (
+        (result.excerpt in result.suggestion and result.suggestion in es)
+        or restated_context(
+            es, start, start + len(result.excerpt), result.suggestion,
+            baseline=result.excerpt,
+        )
+    ):
+        return None, FIX_REASON_SENTENCE_EDITED
+    return {"old": result.excerpt, "new": result.suggestion}, None
+
+
 def _unanchored_reason(freshness: dict, eval_name: str) -> str:
     """Why a finding could not be placed on a sentence, for the reader's bin.
 
@@ -6855,6 +6964,12 @@ def _build_chapter_review(
     is worse than not offering it. ``category`` is the issue's own defect class
     (the editorial judge's ``NATURALNESS``, ``STYLE_GUIDE``, ...) and is carried
     everywhere, because it is a label to read rather than an action to take.
+
+    An anchored judge finding also carries ``fix`` and ``fix_reason``
+    (:func:`_reader_fix`): ``{"old", "new"}`` when the reader can apply the
+    suggestion as one sentence Save, else ``None`` with the reason it cannot.
+    Derived on every read from the persisted finding and the text as it stands,
+    so nothing is stored and a book judged before this existed needs no re-run.
 
     A finding that cannot be placed on a sentence at all — a coded ``char_start``
     no row covers, or a judge excerpt that is not in the prose — goes to
@@ -7071,6 +7186,10 @@ def _build_chapter_review(
                         })
                         type_counts[judge_name] += 1
                         continue
+                    fix, fix_reason = _reader_fix(
+                        issue, raw_text,
+                        next((r for r in crows_sorted if r["es_idx"] == es_idx), None),
+                    )
                     by_es_idx[str(es_idx)].append({
                         "eval_name": judge_name,
                         "issue_index": issue_index,
@@ -7085,6 +7204,8 @@ def _build_chapter_review(
                         "match_end": None,
                         "category": issue.get("category"),
                         "feedback": mark,
+                        "fix": fix,
+                        "fix_reason": fix_reason,
                     })
                     type_counts[judge_name] += 1
 
@@ -9970,6 +10091,115 @@ def _recommendation_context_rows(project_dir: Path, chapter: str) -> list[dict]:
     return rows
 
 
+def _recommendation_fix_rows(
+    project_dir: Path, chapter: str, rows_in_order: list[dict],
+) -> dict[tuple, int]:
+    """Where a finding fixed from the reader still lives: ``(chunk_id, issue_key) -> es_idx``.
+
+    A finding the reader's Apply or Edit button fixed no longer quotes the
+    prose - the fix is what removed the quote - so :func:`_build_chapter_review`
+    can only bin it as ``obsolete``. The Save it rode in on knows better: its
+    correction row names the finding (``from_finding``) and the sentence
+    (``es_idx``), which is enough to put the card back on that sentence.
+
+    ``es_idx`` is a position, and a realign renumbers positions, so it is
+    trusted only while the text the Save wrote is still there to be found. One
+    row holding it is the usual case, and that row may be a group a realign
+    has since folded the sentence into. The other shape is several rows that
+    spell it out end to end - what a realign leaves when the Save was on an
+    N:1 group it has since split - and then the card goes on the piece the
+    edit fell in (the first, for a Save that changed nothing). Anything else
+    is dropped: the card keeps its stored excerpt rather than a stranger's
+    sentence.
+
+    Later Saves on the same sentence are followed forward - two findings fixed
+    on one sentence is the common case, and the first must not lose its place
+    to the second.
+
+    Reads the archive and the pending queue both, because a Save is in one or
+    the other depending on whether the chapter has been applied since.
+    """
+    def edit_at(before: str, after: str) -> int:
+        """Where the two first differ - the offset of the edit in ``after``."""
+        n = 0
+        for a, b in zip(before, after):
+            if a != b:
+                break
+            n += 1
+        return n
+
+    saves: list[dict] = []
+    for name in ("corrections_applied.jsonl", "corrections.jsonl"):
+        try:
+            lines = (project_dir / name).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and record.get("chapter_id") == chapter:
+                saves.append(record)
+    saves.sort(key=lambda r: str(r.get("timestamp") or ""))
+
+    position = {row["es_idx"]: i for i, row in enumerate(rows_in_order)}
+    placed: dict[tuple, int] = {}
+    for i, save in enumerate(saves):
+        origin = save.get("from_finding")
+        text = save.get("corrected_es")
+        if not isinstance(origin, dict) or not isinstance(text, str):
+            continue
+        es_idx = save.get("es_idx")
+        if not isinstance(es_idx, int):
+            continue
+        before = save.get("original_es")
+        changed = isinstance(before, str) and before != text
+        offset = edit_at(before, text) if changed else 0
+        for later in saves[i + 1:]:
+            if (
+                later.get("es_idx") == es_idx
+                and later.get("original_es") == text
+                and isinstance(later.get("corrected_es"), str)
+            ):
+                # An edit ahead of ours moves ours by however much it grew.
+                if edit_at(text, later["corrected_es"]) < offset:
+                    offset += len(later["corrected_es"]) - len(text)
+                text = later["corrected_es"]
+
+        key = (origin.get("chunk_id"), origin.get("issue_key"))
+        if not all(isinstance(part, str) for part in key):
+            continue
+        # The other direction: a realign that folded the sentence into a group.
+        # The group sits at the last index not past ours and holds the Save's
+        # text whole.
+        home = max((idx for idx in position if idx <= es_idx), default=None)
+        if home is None or not text.strip():
+            continue
+        if text.strip() in (rows_in_order[position[home]].get("es") or ""):
+            placed[key] = home
+            continue
+        if home != es_idx:
+            continue
+
+        pieces: list[tuple[int, int]] = []   # (offset in `text`, es_idx)
+        cursor = 0
+        for row in rows_in_order[position[es_idx]:]:
+            es = (row.get("es") or "").strip()
+            start = len(text) - len(text[cursor:].lstrip())
+            if not es or not text.startswith(es, start):
+                break
+            pieces.append((start, row["es_idx"]))
+            cursor = start + len(es)
+        if not pieces or text[cursor:].strip():
+            continue
+        placed[key] = next(
+            (idx for start, idx in reversed(pieces) if start <= offset),
+            pieces[0][1],
+        )
+    return placed
+
+
 def _finding_item(finding: dict, chapter: str, es_idx, context: dict,
                   *, unanchored_reason: Optional[str] = None,
                   favorites: frozenset = frozenset()) -> dict:
@@ -10299,7 +10529,10 @@ def _recommendation_items(
     prose moved on; ``unplaceable`` - the excerpt was never verbatim). They are
     kept rather than dropped for the same reason the reader keeps them in its
     overflow bin: an opinion you cannot place is still an opinion, and these are
-    the ones most likely to be worth a human's attention.
+    the ones most likely to be worth a human's attention. The exception is an
+    ``obsolete`` finding the reader's Apply or Edit button fixed: its Save says
+    which sentence it was on, so it is shown anchored there, on the sentence as
+    it reads now (:func:`_recommendation_fix_rows`).
 
     Returns ``{"ok": True, "chapter_id", "items", "type_counts",
     "stale_evaluators"}``, or :func:`_build_chapter_review`'s ``ok: False`` with
@@ -10349,6 +10582,21 @@ def _recommendation_items(
             favorites=favorites,
         ))
 
+    # A finding fixed from the reader is `obsolete` to the builder, but its Save
+    # recorded the sentence. Those go back on it, in document order with the
+    # rest; everything else unanchored keeps the tail.
+    fixed_at = _recommendation_fix_rows(project_dir, chapter, rows_in_order)
+    tail: list[dict] = []
+    for finding in review["unanchored"]:
+        es_idx = fixed_at.get((finding.get("chunk_id"), finding.get("issue_key")))
+        if es_idx is None or finding.get("reason") != "obsolete":
+            tail.append(finding)
+            continue
+        items.append(_finding_item(
+            finding, chapter, es_idx, _context_rows(rows_in_order, es_idx),
+            favorites=favorites,
+        ))
+
     # Unanchored findings have no sentence, so they sort nowhere: they are
     # appended below, after this sort, into the same end-of-chapter bin the
     # reader gives them. `_RECOMMENDATION_LAST` is not for them - it parks an
@@ -10359,7 +10607,7 @@ def _recommendation_items(
     ))
 
     empty_context = {"before": None, "current": None, "after": None}
-    for finding in review["unanchored"]:
+    for finding in tail:
         items.append(_finding_item(
             finding, chapter, None, empty_context,
             unanchored_reason=finding.get("reason") or "unplaceable",

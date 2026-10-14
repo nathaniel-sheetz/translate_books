@@ -58,6 +58,17 @@ MACHINE_FEEDBACK_TYPES = frozenset({"applied"})
 
 _ALLOWED_FEEDBACK_TYPES = HUMAN_FEEDBACK_TYPES | MACHINE_FEEDBACK_TYPES
 
+#: Where a ``resolved`` mark came from when the reader's Apply or Edit button
+#: wrote it on a Save. Still a human label — one finding, ruled on by a person —
+#: so it scores as ``resolved`` everywhere; this only says which button.
+RESOLVED_VIA = frozenset({"reader_apply", "reader_edit"})
+
+#: What became of the judge's suggestion on that Save. ``verbatim``: the
+#: previewed swap went in untouched. ``edited``: Apply, with the text changed
+#: first. ``manual``: Edit — there was no applicable swap, the fix was typed.
+#: ``none``: saved with the sentence unchanged, i.e. "real, nothing to do here".
+SUGGESTION_USED = frozenset({"verbatim", "edited", "manual", "none"})
+
 # ── Machine triage of the coded checkers ─────────────────────────────────────
 #
 # Deliberately a SEPARATE file from ``_feedback.jsonl``. That file is the
@@ -1050,6 +1061,8 @@ def append_feedback(
     message: Optional[str] = None,
     note: Optional[str] = None,
     key: Optional[str] = None,
+    via: Optional[str] = None,
+    suggestion_used: Optional[str] = None,
 ) -> Path:
     """Append a single feedback record to ``_feedback.jsonl``.
 
@@ -1058,13 +1071,30 @@ def append_feedback(
     as provenance, because it stops being meaningful the moment the evaluator
     re-runs.
 
+    ``via`` and ``suggestion_used`` (:data:`RESOLVED_VIA`,
+    :data:`SUGGESTION_USED`) are written only when given, and only on a
+    ``resolved`` mark, so every record written before they existed keeps the
+    shape it had.
+
     Raises:
-        ValueError: If ``feedback_type`` is not one of the allowed labels.
+        ValueError: If ``feedback_type`` is not one of the allowed labels, or
+            ``via``/``suggestion_used`` is unknown or rides on another label.
     """
     if feedback_type not in _ALLOWED_FEEDBACK_TYPES:
         raise ValueError(
             f"Unknown feedback_type {feedback_type!r}; "
             f"expected one of {sorted(_ALLOWED_FEEDBACK_TYPES)}"
+        )
+    if (via or suggestion_used) and feedback_type != "resolved":
+        raise ValueError("via and suggestion_used describe a 'resolved' mark only")
+    if via and (not isinstance(via, str) or via not in RESOLVED_VIA):
+        raise ValueError(f"Unknown via {via!r}; expected one of {sorted(RESOLVED_VIA)}")
+    if suggestion_used and (
+        not isinstance(suggestion_used, str) or suggestion_used not in SUGGESTION_USED
+    ):
+        raise ValueError(
+            f"Unknown suggestion_used {suggestion_used!r}; "
+            f"expected one of {sorted(SUGGESTION_USED)}"
         )
 
     record = {
@@ -1077,6 +1107,10 @@ def append_feedback(
         "message": message,
         "note": note,
     }
+    if via:
+        record["via"] = via
+    if suggestion_used:
+        record["suggestion_used"] = suggestion_used
 
     path = _feedback_file(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
