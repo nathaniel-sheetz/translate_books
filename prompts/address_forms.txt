@@ -2,7 +2,11 @@ HOW TO CHECK FORMS OF ADDRESS (usted vs. tú)
 
 You are checking whether characters address each other with the expected register
 (formal usted vs. informal tú) according to the book's ADDRESS MAP. This is about
-second-person address in dialogue, not narration.
+second-person address in dialogue. Narration is out of scope UNLESS the address
+map brings a narrating voice into scope (for example a teacher's voice that
+speaks to the pupil directly). Such a voice is checked exactly like a quoted
+speaker, even though its lines carry no quotation marks or rayas: every
+unquoted command, question or possessive aimed at the reader is an addressed line.
 
 IDENTIFYING THE FORM IN SPANISH
 - tú (informal): the pronoun tú/ti/contigo; object/reflexive te; possessive
@@ -35,11 +39,34 @@ APPLYING THE MAP (per addressed line)
 4. If no pair is listed, fall back to the map's GLOBAL RULES.
 5. Compare the form actually used against the expected form.
 
+NUMBER (singular vs. plural address) — ONLY WHEN THE MAP SAYS "NUMBER IS CHECKED"
+If the address map contains the words NUMBER IS CHECKED, the singular/plural
+choice is in scope for the pairs that section names, and a mismatch is a
+violation (rule "wrong-number"). For a pair the map says is addressed in the
+singular, any of these aimed at the addressee is plural drift:
+- the pronoun ustedes / vosotros, incl. "todos ustedes", "por ustedes mismos",
+  "detrás de ustedes";
+- 3rd-person-plural verb endings directed at the listener: plural commands
+  (miren, piensen, presten, lleven, observen, cuenten) and plural statements or
+  questions (ustedes saben, deben, ¿han visto?);
+- object/reflexive les / los / se and possessive su / sus standing for the
+  addressees ("les diré", "sus pizarras");
+- a plural object where the map says each addressee has one ("tus pizarras"
+  for "your slates" when the map wants "tu pizarra").
+Rewrite to the singular form the map expects (Sabes…, Piensa…, tu pizarra).
+For a pair the map says is addressed in the plural, the reverse applies.
+NOT plural address: a 3rd-person plural about OTHER people ("que los alumnos
+observen", "los niños vean"), lines that speak to someone the number rule does
+not cover (instructions to the teacher, a character addressing a group the map
+licenses), and a plural object that is genuinely plural ("tus manos").
+Without the words NUMBER IS CHECKED in the map, number is out of scope.
+
 OUT OF SCOPE (do not flag)
-- voseo (vos / tenés / querés) and plural address (ustedes / vosotros) — v1 only
-  checks the tú-vs-usted singular choice.
-- Narration, quoted thoughts about a third party, and lines whose addressee you
-  cannot determine.
+- voseo (vos / tenés / querés).
+- plural address (ustedes / vosotros), unless the NUMBER section above applies.
+- Narration the map does not bring into scope, quoted thoughts about a third
+  party, and lines whose addressee you cannot determine.
 
 Every finding must record the resolved direction and situation, e.g.
-"public setting, Astrida→Ricardo: expected usted, found tú".
+"public setting, Astrida→Ricardo: expected usted, found tú" or "teacher→pupil:
+expected singular tú, found plural ustedes".
