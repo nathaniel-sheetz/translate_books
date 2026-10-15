@@ -13,7 +13,8 @@ merged by ``subject_key`` across chapters; the worker returns rules (one
 question, many subjects settled), items (a subject decided on its own, routed to
 the glossary or the address map), settled subjects, house-rule proposals and
 drops. ``consolidate_commit`` checks that every subject is accounted for exactly
-once, so a merge can never silently lose a decision.
+once, so a merge can never silently lose a decision, then
+``reconcile_across_categories`` stops one category asking what another settled.
 """
 
 from __future__ import annotations
@@ -370,6 +371,100 @@ def check_draft(draft: dict[str, Any], subjects: dict[str, list[str]]) -> dict[s
     }
 
 
+# Categories whose answer is what a term is called in Spanish. A subject one of
+# them settles answers the same question another of them asks ("pony" settled
+# as the series term under house-vocabulary, then flagged for the glossary
+# under specialist-vocabulary). A subject shared with any other category is
+# usually a different decision about the same word: Grandpa's dialect is not
+# his title.
+RENDERING_CATEGORIES = frozenset({
+    "house-vocabulary", "specialist-vocabulary", "names", "titles-honorifics", "units-and-culture",
+})
+
+
+def reconcile_across_categories(categories: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Stop one category asking what another has settled; report other overlaps.
+
+    Each category is consolidated by its own job, and ``check_draft`` audits a
+    category against its own subjects only, so nothing else sees the same word
+    settled in one category and asked in another. Matching is by
+    ``subject_key``. Edits ``categories`` in place:
+
+    - a subject settled in a rendering category comes off any item of another
+      rendering category, and the item keeps a ``settled_elsewhere`` note (an
+      item left with no subjects goes);
+    - an item gets ``see_gate``, the gate questions of other categories that
+      cover one of its subjects, so the editor is not asked twice.
+
+    Returns ``{resolved, check}``: the subjects taken off items, and the overlaps
+    left for a person (settled in one category and asked in another outside the
+    rendering group, or covered by rules in two categories).
+    """
+    settled_at: dict[str, list[dict[str, str]]] = {}
+    ruled_at: dict[str, list[dict[str, str]]] = {}
+    for cat in categories:
+        for s in cat["settled"]:
+            for name in s["subjects"]:
+                settled_at.setdefault(subject_key(name), []).append(
+                    {"category": cat["category"], "by": s["by"], "answer": s["answer"]}
+                )
+        for r in cat["rules"]:
+            for name in r["covers"]:
+                ruled_at.setdefault(subject_key(name), []).append(
+                    {"category": cat["category"], "question": r["question"], "destination": r["destination"]}
+                )
+
+    resolved: list[dict[str, Any]] = []
+    check: dict[tuple, dict[str, Any]] = {}
+
+    def flag(name: str, asked_in: str, asked_as: str, other: str, detail: str) -> None:
+        check.setdefault((subject_key(name), asked_in, asked_as, other), {
+            "subject": name, "asked_in": asked_in, "asked_as": asked_as, "other": other, "detail": detail,
+        })
+
+    for cat in categories:
+        category = cat["category"]
+        rendering = category in RENDERING_CATEGORIES
+        kept = []
+        for it in cat["items"]:
+            remaining, notes = [], []
+            for name in it["subjects"]:
+                elsewhere = [s for s in settled_at.get(subject_key(name), []) if s["category"] != category]
+                answer = next(
+                    (s for s in elsewhere if rendering and s["category"] in RENDERING_CATEGORIES), None
+                )
+                if answer:
+                    note = {"subject": name, "settled_in": answer["category"],
+                            "by": answer["by"], "answer": answer["answer"]}
+                    notes.append(note)
+                    resolved.append({**note, "category": category, "destination": it["destination"]})
+                    continue
+                remaining.append(name)
+                for s in elsewhere:
+                    flag(name, category, it["destination"], s["category"], f"settled: {s['answer']}")
+            if not remaining:
+                continue
+            see_gate = list(dict.fromkeys(
+                r["question"]
+                for name in remaining for r in ruled_at.get(subject_key(name), [])
+                if r["category"] != category and r["destination"] == "decisions_gate"
+            ))
+            kept.append({**it, "subjects": remaining, "settled_elsewhere": notes, "see_gate": see_gate})
+        cat["items"] = kept
+
+        for r in cat["rules"]:
+            for name in r["covers"]:
+                key = subject_key(name)
+                for s in settled_at.get(key, []):
+                    if s["category"] != category:
+                        flag(name, category, "rule", s["category"], f"settled: {s['answer']}")
+                for o in ruled_at.get(key, []):
+                    # Once per pair of categories, from the first in sort order.
+                    if o["category"] > category:
+                        flag(name, category, "rule", o["category"], f"also a rule: {o['question']}")
+    return {"resolved": resolved, "check": list(check.values())}
+
+
 def merge_items_across_categories(categories: list[dict[str, Any]], destination: str) -> list[dict[str, Any]]:
     """``destination`` items from every category, merged where they share a subject.
 
@@ -415,6 +510,8 @@ def merge_items_across_categories(categories: list[dict[str, Any]], destination:
             "questions": list(dict.fromkeys(it["question"] for it in group if it["question"])),
             "options": [{"label": k, "effect": v} for k, v in labels.items()],
             "why": next((it["why"] for it in group if it["why"]), ""),
+            "settled_elsewhere": [n for it in group for n in it.get("settled_elsewhere") or []],
+            "see_gate": list(dict.fromkeys(q for it in group for q in it.get("see_gate") or [])),
         })
     return merged
 
@@ -424,6 +521,8 @@ _COMMIT_SCHEMA = {
     "counts": "{gate_questions, address_map, glossary, translation_notes, settled, "
     "house_rule_proposals, dropped, subjects}; glossary and notes are merged across categories",
     "coverage": "{unaccounted, unknown, duplicated} totals — every subject must land once",
+    "cross_category": "{resolved, check}: subjects taken off a flag because another category "
+    "settled them, and overlaps left for a person (listed in the report)",
     "failed": "list of {id, problem}",
     "missing": "category jobs with no draft",
     "report_path": "consolidated.md — the gate questions and the routed items; READ THIS",
@@ -469,6 +568,7 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
             n += sum(1 for c in categories for i in c["items"] if i["destination"] == dest_items)
         return n
 
+    cross = reconcile_across_categories(categories)
     glossary = merge_items_across_categories(categories, "glossary")
     notes = merge_items_across_categories(categories, "translation_note")
     counts = {
@@ -486,6 +586,7 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         "unknown": sum(len(c["unknown"]) for c in categories),
         "duplicated": sum(len(c["duplicated"]) for c in categories),
     }
+    cross_counts = {"resolved": len(cross["resolved"]), "check": len(cross["check"])}
     doc = {
         "project": project_dir.name,
         "committed_at": datetime.now().isoformat(),
@@ -493,6 +594,7 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         "worker_model": manifest.get("worker_model"),
         "counts": counts,
         "coverage": coverage,
+        "cross_category": cross,
         "categories": categories,
         "glossary": glossary,
         "translation_notes": notes,
@@ -506,6 +608,7 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         "status": "partial" if failed or missing else "ok",
         "counts": counts,
         "coverage": coverage,
+        "cross_category": cross_counts,
         "failed": failed,
         "missing": missing,
         "report_path": str(report_path),
@@ -530,6 +633,14 @@ def _option_lines(options: list[dict[str, str]], recommendation: Optional[str] =
     return out
 
 
+def _cross_note(item: dict[str, Any], gate_number: dict[str, int]) -> str:
+    parts = [f"{n['subject']} settled under {n['settled_in']}" for n in item.get("settled_elsewhere") or []]
+    gates = sorted({gate_number[q] for q in item.get("see_gate") or [] if q in gate_number})
+    if gates:
+        parts.append("follows gate question " + ", ".join(str(g) for g in gates))
+    return f" _({'; '.join(parts)})_" if parts else ""
+
+
 def render_report(doc: dict[str, Any]) -> str:
     c = doc["counts"]
     cats = doc["categories"]
@@ -546,11 +657,13 @@ def render_report(doc: dict[str, Any]) -> str:
         "",
     ]
     n = 0
+    gate_number: dict[str, int] = {}
     for cat in cats:
         for r in cat["rules"]:
             if r["destination"] != "decisions_gate":
                 continue
             n += 1
+            gate_number.setdefault(r["question"], n)
             lines.append(f"{n}. **{r['question']}** _({cat['category']}; settles {len(r['covers'])} subjects)_")
             lines += _option_lines(r["options"], r["recommendation"])
             if r["why"]:
@@ -575,7 +688,7 @@ def render_report(doc: dict[str, Any]) -> str:
             opts = " / ".join(o["label"] for o in it["options"])
             question = " | ".join(it["questions"])
             lines.append(f"- **{' / '.join(it['subjects'])}** ({', '.join(it['categories'])}): {question}"
-                         + (f" — {opts}" if opts else ""))
+                         + (f" — {opts}" if opts else "") + _cross_note(it, gate_number))
     lines += ["", "## Never asked", ""]
     for cat in cats:
         for s in cat["settled"]:
@@ -588,6 +701,20 @@ def render_report(doc: dict[str, Any]) -> str:
     for cat in cats:
         for d in cat["dropped"]:
             lines.append(f"- {d['subject']} ({cat['category']}): {d['reason']}")
+    cross = doc.get("cross_category") or {}
+    if cross.get("resolved") or cross.get("check"):
+        lines += ["", "## Across categories", ""]
+        if cross.get("resolved"):
+            lines += ["Taken off a flag because another category settled it:", ""]
+            for r in cross["resolved"]:
+                lines.append(f"- {r['subject']}: off the {r['category']} {r['destination']} flag; "
+                             f"settled under {r['settled_in']} ({r['by']}): {r['answer']}")
+            lines.append("")
+        if cross.get("check"):
+            lines += ["Check these — the same subject in two categories, left as is:", ""]
+            for c in cross["check"]:
+                lines.append(f"- {c['subject']}: {c['asked_as']} in {c['asked_in']}; "
+                             f"under {c['other']}, {c['detail']}")
     problems = [
         (cat["category"], key, cat[key])
         for cat in cats for key in ("unaccounted", "unknown", "duplicated") if cat[key]

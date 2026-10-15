@@ -151,6 +151,59 @@ def test_glossary_items_merge_across_categories():
     assert len(dcons.merge_items_across_categories(categories, "translation_note")) == 1
 
 
+def _category(category, *, rules=(), items=(), settled=()):
+    return {"category": category, "rules": list(rules), "items": list(items), "settled": list(settled)}
+
+
+def _item(subjects, destination="glossary"):
+    return {"subjects": list(subjects), "question": "q", "options": [], "why": "", "destination": destination}
+
+
+def test_reconcile_takes_a_settled_term_off_another_categorys_flag():
+    categories = [
+        _category("house-vocabulary", settled=[
+            {"subjects": ["ponies", "the roundup"], "by": "house_default", "answer": "the series term"},
+        ]),
+        _category("specialist-vocabulary", items=[
+            _item(["Ponies", "filly"]),
+            _item(["roundup"]),
+        ]),
+    ]
+    cross = dcons.reconcile_across_categories(categories)
+    items = categories[1]["items"]
+    assert [it["subjects"] for it in items] == [["filly"]]  # the roundup-only item is gone
+    assert items[0]["settled_elsewhere"][0]["settled_in"] == "house-vocabulary"
+    assert {r["subject"] for r in cross["resolved"]} == {"Ponies", "roundup"}
+    assert cross["check"] == []
+
+
+def test_reconcile_leaves_a_different_decision_about_the_same_word():
+    categories = [
+        _category("dialect-register", settled=[
+            {"subjects": ["Grandpa"], "by": "house_default", "answer": "standard spelling"},
+        ]),
+        _category("titles-honorifics", items=[_item(["Grandpa"])]),
+    ]
+    cross = dcons.reconcile_across_categories(categories)
+    assert categories[1]["items"][0]["subjects"] == ["Grandpa"]
+    assert cross["resolved"] == []
+    assert [(c["asked_in"], c["other"]) for c in cross["check"]] == [("titles-honorifics", "dialect-register")]
+
+
+def test_reconcile_points_a_flag_at_the_gate_question_that_covers_it():
+    rule = {"question": "What sex is Misty's filly?", "options": [], "recommendation": None,
+            "why": "", "examples": [], "covers": ["filly"], "destination": "decisions_gate"}
+    categories = [
+        _category("grammatical-sex", rules=[rule]),
+        _category("specialist-vocabulary", items=[_item(["filly", "stallion"])]),
+        _category("names", rules=[{**rule, "question": "Translate filly names?"}]),
+    ]
+    cross = dcons.reconcile_across_categories(categories)
+    assert categories[1]["items"][0]["see_gate"] == ["What sex is Misty's filly?", "Translate filly names?"]
+    two_rules = [c for c in cross["check"] if c["detail"].startswith("also a rule")]
+    assert len(two_rules) == 1
+
+
 def test_prepare_includes_the_house_dialogue_rules(project, monkeypatch):
     monkeypatch.setattr(dcons, "dialogue_rules_text", lambda: "THOUGHTS take guillemets.")
     dcons.consolidate_prepare(project)
