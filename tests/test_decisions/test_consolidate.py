@@ -204,6 +204,42 @@ def test_reconcile_points_a_flag_at_the_gate_question_that_covers_it():
     assert len(two_rules) == 1
 
 
+def _gate_rule(question, covers, recommendation="a"):
+    return {"question": question, "options": [{"label": "a", "effect": "e"}],
+            "recommendation": recommendation, "why": "", "examples": covers[:1],
+            "covers": covers, "destination": "decisions_gate"}
+
+
+def test_rank_puts_reach_first_and_keeps_the_rest_below_the_cut():
+    chapters = {f"s{i}": [f"chapter_{i:02d}"] for i in range(10)}
+    chapters["dialect"] = ["chapter_01"]
+    chapters["drawl"] = ["chapter_01"]
+    categories = [
+        _category("dialect-register", rules=[_gate_rule("Grandpa's speech?", ["dialect", "drawl"])]),
+        _category("names", rules=[
+            _gate_rule("Names?", ["s0", "s1", "s2"]),
+            _gate_rule("Rhymes?", ["s3"], recommendation=None),
+        ]),
+    ]
+    for cat in categories:
+        cat["subjects"] = chapters
+    ranked = dcons.rank_gate_questions(categories, cap=2)
+    assert [r["question"] for r in ranked] == ["Names?", "Grandpa's speech?", "Rhymes?"]
+    assert [r["chapters"] for r in ranked] == [3, 1, 1]
+    assert [r["in_gate"] for r in ranked] == [True, True, False]
+
+    doc = {"project": "p", "counts": {"subjects": 12, "gate_questions": 2, "below_cut": 1,
+           "address_map": 0, "glossary": 0, "translation_notes": 0, "settled": 0,
+           "house_rule_proposals": 0, "dropped": 0},
+           "gate": ranked, "categories": [{**c, "items": [], "settled": [], "proposals": [],
+           "dropped": [], "unaccounted": [], "unknown": [], "duplicated": []} for c in categories],
+           "glossary": [], "translation_notes": []}
+    report = dcons.render_report(doc)
+    gate, below = report.split("## Answered by default")
+    assert "2. **Grandpa's speech?**" in gate and "Rhymes?" not in gate
+    assert "3. **Rhymes?**" in below and "needs an answer" in below
+
+
 def test_prepare_includes_the_house_dialogue_rules(project, monkeypatch):
     monkeypatch.setattr(dcons, "dialogue_rules_text", lambda: "THOUGHTS take guillemets.")
     dcons.consolidate_prepare(project)

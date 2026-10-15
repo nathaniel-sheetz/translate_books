@@ -1,5 +1,5 @@
 # decisions — consolidate one category of scan candidates into a few questions
-# Version: 1.1
+# Version: 1.2
 # Reads every subject the chapter scan raised in ONE taxonomy category of one
 # book and folds them into the few questions the editor actually answers, each
 # sent to the step where it is naturally decided. Run after scan-commit.
@@ -38,12 +38,21 @@ A good rule:
   depends on the word", it is not a rule; send those subjects to the glossary;
 - has two or three options, each a rule the translator can apply ("translate
   every descriptive name; keep personal names in English"), and a
-  `recommendation` (one option's exact label) when the house default, a house
-  rule or the book itself points one way — else null;
+  `recommendation` (one option's exact label). Give one whenever the house
+  default, a house rule or the book itself points any way at all: the editor
+  sees only the questions that reach furthest into the book, and every other
+  question is answered with its recommendation unless the editor opens it.
+  Null only when nothing points either way;
 - shows 2 to 4 `examples`: the subjects that best show the question, the
   most-raised first;
 - lists in `covers` every subject its answer settles. Nicknames and diminutives
   follow their main name, so they are covered by the same rule.
+
+A question that settles only one or two subjects is still a rule when it is a
+real choice of principle that no glossary entry, address-map pair or
+translation note can carry (how to render the grandparents' homemade rhymes).
+Do not inflate it and do not demote it; the commit step ranks every rule by how
+much of the book it reaches.
 
 Most categories need zero or one rule. Never more than three.
 
@@ -67,9 +76,15 @@ for departing. Never asked. Name the rule id, `dialogue` or `house_default` in
 house default is not a question: settle it. Ask only when something specific in
 this book argues for departing, and then say what in `why`.
 
-**A house-rule proposal** (`house_rule_proposals[]`): the editor would plainly
-give the same answer in every book, but no house rule says so yet. Never asked
-in this book; proposed as a house rule instead. Use sparingly.
+**A house-rule proposal** (`house_rule_proposals[]`): the editor would give
+the same answer in every book, because nothing about this book bears on it, but
+no house rule says so yet: a typographic convention (how italics, small
+capitals or emphasis are set), which published Bible translation scripture is
+quoted from, how a title is combined with a surname in narration. Never asked
+in this book; proposed as a house rule instead, whatever the number of
+subjects. Write `rule` as the house rule would read, with the answer you
+recommend. If something in this book argues for a different answer here, it is
+a rule for this book instead, and `why` says what.
 
 **Dropped** (`dropped[]`): only a subject that duplicates another under a
 different spelling, or that is not actually a choice. Give the reason.

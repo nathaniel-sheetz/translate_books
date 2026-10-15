@@ -14,7 +14,9 @@ question, many subjects settled), items (a subject decided on its own, routed to
 the glossary or the address map), settled subjects, house-rule proposals and
 drops. ``consolidate_commit`` checks that every subject is accounted for exactly
 once, so a merge can never silently lose a decision, then
-``reconcile_across_categories`` stops one category asking what another settled.
+``reconcile_across_categories`` stops one category asking what another settled,
+and ``rank_gate_questions`` puts the ``GATE_CAP`` questions that reach furthest
+in front of the editor and answers the rest by their recommendation.
 """
 
 from __future__ import annotations
@@ -39,6 +41,11 @@ COMMAND = "decisions_consolidate"
 
 RULE_DESTINATIONS = ("decisions_gate", "address_map")
 ITEM_DESTINATIONS = ("glossary", "address_map", "translation_note")
+
+# How many questions the editor answers before drafting. The rest are still
+# questions: they go in the report below the cut and take their recommendation
+# unless the editor opens them, so nothing is lost to the cap.
+GATE_CAP = 6
 
 # What the subject list shows per subject; more is noise to a sorter.
 MAX_QUESTIONS = 2
@@ -465,6 +472,29 @@ def reconcile_across_categories(categories: list[dict[str, Any]]) -> dict[str, l
     return {"resolved": resolved, "check": list(check.values())}
 
 
+def rank_gate_questions(categories: list[dict[str, Any]], cap: int = GATE_CAP) -> list[dict[str, Any]]:
+    """Every decisions-gate rule across categories, ranked by how far it reaches.
+
+    Chapters spanned first, subjects covered second. Subject counts alone
+    mislead: the scan raises each spelling of a dialect word as its own subject,
+    so one grandfather's speech can count as 16 subjects while reaching no
+    further than the chapters he talks in. The first ``cap`` are ``in_gate``;
+    the rest are answered by their recommendation unless the editor opens them.
+    """
+    ranked = []
+    for cat in categories:
+        for r in cat["rules"]:
+            if r["destination"] != "decisions_gate":
+                continue
+            chapters = {ch for name in r["covers"] for ch in cat["subjects"].get(name, [])}
+            ranked.append({**r, "category": cat["category"], "chapters": len(chapters)})
+    ranked.sort(key=lambda r: (-r["chapters"], -len(r["covers"])))
+    for i, r in enumerate(ranked):
+        r["rank"] = i + 1
+        r["in_gate"] = i < cap
+    return ranked
+
+
 def merge_items_across_categories(categories: list[dict[str, Any]], destination: str) -> list[dict[str, Any]]:
     """``destination`` items from every category, merged where they share a subject.
 
@@ -518,8 +548,9 @@ def merge_items_across_categories(categories: list[dict[str, Any]], destination:
 
 _COMMIT_SCHEMA = {
     "status": "'ok' | 'partial' (some categories failed or missing) | 'error'",
-    "counts": "{gate_questions, address_map, glossary, translation_notes, settled, "
-    "house_rule_proposals, dropped, subjects}; glossary and notes are merged across categories",
+    "counts": "{gate_questions, below_cut, address_map, glossary, translation_notes, settled, "
+    "house_rule_proposals, dropped, subjects}; gate_questions is capped at GATE_CAP, the rest "
+    "are below_cut; glossary and notes are merged across categories",
     "coverage": "{unaccounted, unknown, duplicated} totals — every subject must land once",
     "cross_category": "{resolved, check}: subjects taken off a flag because another category "
     "settled them, and overlaps left for a person (listed in the report)",
@@ -569,11 +600,13 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         return n
 
     cross = reconcile_across_categories(categories)
+    gate = rank_gate_questions(categories)
     glossary = merge_items_across_categories(categories, "glossary")
     notes = merge_items_across_categories(categories, "translation_note")
     counts = {
         "subjects": sum(len(c["subjects"]) for c in categories),
-        "gate_questions": count("decisions_gate"),
+        "gate_questions": sum(1 for r in gate if r["in_gate"]),
+        "below_cut": sum(1 for r in gate if not r["in_gate"]),
         "address_map": count("address_map", "address_map"),
         "glossary": len(glossary),
         "translation_notes": len(notes),
@@ -595,6 +628,7 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         "counts": counts,
         "coverage": coverage,
         "cross_category": cross,
+        "gate": gate,
         "categories": categories,
         "glossary": glossary,
         "translation_notes": notes,
@@ -648,31 +682,42 @@ def render_report(doc: dict[str, Any]) -> str:
         f"# Decisions — {doc['project']}",
         "",
         f"{c['subjects']} scanned subjects become **{c['gate_questions']} questions at the "
-        f"decisions gate**, {c['address_map']} for the address map, {c['glossary']} glossary "
+        f"decisions gate** and {c.get('below_cut', 0)} more answered by default, "
+        f"{c['address_map']} for the address map, {c['glossary']} glossary "
         f"flags, {c['translation_notes']} translation notes; {c['settled']} subjects settled "
         f"by house rules, "
         f"{c['house_rule_proposals']} house-rule proposals, {c['dropped']} dropped.",
-        "",
-        "## Decisions gate",
-        "",
     ]
-    n = 0
-    gate_number: dict[str, int] = {}
-    for cat in cats:
-        for r in cat["rules"]:
-            if r["destination"] != "decisions_gate":
-                continue
-            n += 1
-            gate_number.setdefault(r["question"], n)
-            lines.append(f"{n}. **{r['question']}** _({cat['category']}; settles {len(r['covers'])} subjects)_")
-            lines += _option_lines(r["options"], r["recommendation"])
-            if r["why"]:
-                lines.append(f"   _Why:_ {r['why']}")
-            if r["examples"]:
-                lines.append(f"   _Examples:_ {_chapters_note(r['examples'], cat['subjects'])}")
-            lines.append("")
-    if not n:
+    subjects_of = {cat["category"]: cat["subjects"] for cat in cats}
+    gate = doc.get("gate") or []
+    gate_number = {}
+    for r in gate:
+        gate_number.setdefault(r["question"], r["rank"])
+
+    def gate_entry(r: dict[str, Any]) -> list[str]:
+        out = [f"{r['rank']}. **{r['question']}** _({r['category']}; settles {len(r['covers'])} "
+               f"subjects in {r['chapters']} chapters)_"]
+        out += _option_lines(r["options"], r["recommendation"])
+        if not r["in_gate"] and not r["recommendation"]:
+            out.append("   _No recommendation: this one needs an answer before drafting._")
+        if r["why"]:
+            out.append(f"   _Why:_ {r['why']}")
+        if r["examples"]:
+            out.append(f"   _Examples:_ {_chapters_note(r['examples'], subjects_of[r['category']])}")
+        return out + [""]
+
+    lines += ["", "## Decisions gate", ""]
+    top = [r for r in gate if r["in_gate"]]
+    for r in top:
+        lines += gate_entry(r)
+    if not top:
         lines += ["(none)", ""]
+    below = [r for r in gate if not r["in_gate"]]
+    if below:
+        lines += ["## Answered by default", "",
+                  "Below the cut: each takes its recommendation unless you open it.", ""]
+        for r in below:
+            lines += gate_entry(r)
 
     lines += ["## Address map", ""]
     for cat in cats:
