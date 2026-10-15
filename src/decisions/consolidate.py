@@ -489,10 +489,60 @@ def rank_gate_questions(categories: list[dict[str, Any]], cap: int = GATE_CAP) -
             chapters = {ch for name in r["covers"] for ch in cat["subjects"].get(name, [])}
             ranked.append({**r, "category": cat["category"], "chapters": len(chapters)})
     ranked.sort(key=lambda r: (-r["chapters"], -len(r["covers"])))
+    ranked = link_overlapping_gate_questions(ranked)
     for i, r in enumerate(ranked):
         r["rank"] = i + 1
         r["in_gate"] = i < cap
     return ranked
+
+
+def link_overlapping_gate_questions(ranked: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give each subject to one gate question, and seat the questions that shared it together.
+
+    Each category job sees only its own subjects, so a word that belongs to two
+    categories can be asked twice, with recommendations that contradict:
+    *mamsie* as a form of address under titles and as a pet name under names.
+    Answered by default, both would reach the translator. The higher-ranked
+    question keeps the subject; the other loses it from ``covers`` and
+    ``examples``, records it in ``shares`` and moves to sit right after the
+    question that kept it, so the editor answers the two together. Its own
+    text is left as written, since only a model could reword it.
+
+    Only between ``RENDERING_CATEGORIES``, as in ``reconcile_across_categories``:
+    a horse's name under names and its sex under grammatical-sex are two
+    decisions, and both questions keep it.
+    """
+    owner: dict[str, int] = {}
+    anchor: dict[int, int] = {}
+    for i, r in enumerate(ranked):
+        if r["category"] not in RENDERING_CATEGORIES:
+            continue
+        kept, shares = [], []
+        for name in r["covers"]:
+            key = subject_key(name)
+            if key in owner and owner[key] != i:
+                shares.append({"subject": name, "question": ranked[owner[key]]["question"]})
+                anchor.setdefault(i, owner[key])
+            else:
+                owner.setdefault(key, i)
+                kept.append(name)
+        if shares:
+            lost = {s["subject"] for s in shares}
+            r["covers"] = kept
+            r["examples"] = [e for e in r["examples"] if e not in lost]
+            r["shares"] = shares
+
+    order: list[int] = []
+
+    def seat(i: int) -> None:
+        order.append(i)
+        for j in sorted(j for j, a in anchor.items() if a == i):
+            seat(j)
+
+    for i in range(len(ranked)):
+        if i not in anchor:
+            seat(i)
+    return [ranked[i] for i in order]
 
 
 def merge_items_across_categories(categories: list[dict[str, Any]], destination: str) -> list[dict[str, Any]]:
@@ -700,6 +750,14 @@ def render_report(doc: dict[str, Any]) -> str:
         out += _option_lines(r["options"], r["recommendation"])
         if not r["in_gate"] and not r["recommendation"]:
             out.append("   _No recommendation: this one needs an answer before drafting._")
+        if r.get("shares"):
+            by_question: dict[str, list[str]] = {}
+            for s in r["shares"]:
+                by_question.setdefault(s["question"], []).append(s["subject"])
+            for question, names in by_question.items():
+                out.append(f"   _Overlaps question {gate_number.get(question, '?')}: "
+                           f"{', '.join(names)} follow{'s' if len(names) == 1 else ''} that answer, "
+                           f"not this one; answer the two together._")
         if r["why"]:
             out.append(f"   _Why:_ {r['why']}")
         if r["examples"]:

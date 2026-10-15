@@ -240,6 +240,43 @@ def test_rank_puts_reach_first_and_keeps_the_rest_below_the_cut():
     assert "3. **Rhymes?**" in below and "needs an answer" in below
 
 
+def test_overlapping_gate_questions_share_out_the_subject_and_sit_together():
+    chapters = {f"c{i}": [f"chapter_{i:02d}" for i in range(n)] for i, n in ((0, 9), (1, 5), (2, 1), (3, 1))}
+    chapters["mamsie"] = ["chapter_01"]
+    categories = [
+        _category("titles-honorifics", rules=[_gate_rule("Mother words?", ["mamsie", "c0"])]),
+        _category("names", rules=[_gate_rule("Big names?", ["c1"]), _gate_rule("Pet names?", ["Mamsie", "c3"])]),
+        _category("wordplay", rules=[_gate_rule("Puns?", ["c2"])]),
+    ]
+    for cat in categories:
+        cat["subjects"] = {**chapters, "Mamsie": ["chapter_01"]}
+    ranked = dcons.rank_gate_questions(categories, cap=2)
+    assert [r["question"] for r in ranked] == ["Mother words?", "Pet names?", "Big names?", "Puns?"]
+    pets = ranked[1]
+    assert pets["covers"] == ["c3"] and pets["in_gate"]
+    assert pets["shares"] == [{"subject": "Mamsie", "question": "Mother words?"}]
+    assert "mamsie" in ranked[0]["covers"]
+
+    doc = {"project": "p", "counts": {"subjects": 6, "gate_questions": 2, "below_cut": 2,
+           "address_map": 0, "glossary": 0, "translation_notes": 0, "settled": 0,
+           "house_rule_proposals": 0, "dropped": 0},
+           "gate": ranked, "categories": [{**c, "items": [], "settled": [], "proposals": [],
+           "dropped": [], "unaccounted": [], "unknown": [], "duplicated": []} for c in categories],
+           "glossary": [], "translation_notes": []}
+    assert "Overlaps question 1: Mamsie follows that answer" in dcons.render_report(doc)
+
+
+def test_a_name_and_its_sex_are_two_questions():
+    categories = [
+        _category("names", rules=[_gate_rule("Translate animal names?", ["Skipper", "Misty"])]),
+        _category("grammatical-sex", rules=[_gate_rule("Sex of unnamed creatures?", ["Skipper"])]),
+    ]
+    for cat in categories:
+        cat["subjects"] = {"Skipper": ["chapter_01"], "Misty": ["chapter_02"]}
+    ranked = dcons.rank_gate_questions(categories)
+    assert all(r["covers"] and "shares" not in r for r in ranked)
+
+
 def test_prepare_includes_the_house_dialogue_rules(project, monkeypatch):
     monkeypatch.setattr(dcons, "dialogue_rules_text", lambda: "THOUGHTS take guillemets.")
     dcons.consolidate_prepare(project)
