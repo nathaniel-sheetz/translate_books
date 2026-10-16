@@ -1,10 +1,10 @@
 # decisions — consolidate one category of scan candidates into a few questions
-# Version: 1.2
+# Version: 1.3
 # Reads every subject the chapter scan raised in ONE taxonomy category of one
 # book and folds them into the few questions the editor actually answers, each
 # sent to the step where it is naturally decided. Run after scan-commit.
 # Preamble variables: title, author, target_language, locale, house_rules,
-# dialogue_rules.
+# house_vocabulary, dialogue_rules.
 # Body: the category's taxonomy entry and its merged subjects, rendered by
 # src/decisions/consolidate.py:render_body.
 
@@ -69,10 +69,11 @@ Most categories need zero or one rule. Never more than three.
   such instances share a principle, ask the principle as a rule and still list
   each instance as a translation note so the translator sees it.
 
-**Settled** (`settled[]`): a house rule, a house dialogue convention or the
-category's `house_default` already answers it and nothing in the book argues
-for departing. Never asked. Name the rule id, `dialogue` or `house_default` in
-`by`, and state the answer. A rule whose recommendation would simply be the
+**Settled** (`settled[]`): a house rule, a house dialogue convention, the
+category's `house_default`, the house lexicon or an earlier book in this
+book's groups already answers it and nothing in the book argues for
+departing. Never asked. Name the rule id, `dialogue`, `house_default`,
+`house_lexicon` or `precedent` in `by`, and state the answer. A rule whose recommendation would simply be the
 house default is not a question: settle it. Ask only when something specific in
 this book argues for departing, and then say what in `why`.
 
@@ -99,6 +100,19 @@ checks this and reports anything lost or invented.
 <house_rules>
 {{house_rules}}
 </house_rules>
+
+## House vocabulary and earlier books in this book's groups
+
+Renderings the house lexicon fixes, and renderings and style answers the
+editor already chose in earlier books of the same series or domain. A subject
+one of these covers is settled, with `by: "house_lexicon"` or
+`by: "precedent"`, unless something in this book argues for departing; then
+send it on as usual and say what in `why`. Never ask whether to reuse the
+earlier books' vocabulary: that is standing practice.
+
+<house_vocabulary>
+{{house_vocabulary}}
+</house_vocabulary>
 
 ## House dialogue conventions (bind every book)
 
@@ -135,7 +149,7 @@ Respond with ONLY a JSON object, no other text, in exactly this shape:
       "destination": "glossary | address_map | translation_note"
     }
   ],
-  "settled": [{"subjects": ["<subject>"], "by": "<house rule id or house_default>", "answer": "<the answer>"}],
+  "settled": [{"subjects": ["<subject>"], "by": "<house rule id | dialogue | house_default | house_lexicon | precedent>", "answer": "<the answer>"}],
   "house_rule_proposals": [{"subjects": ["<subject>"], "rule": "<the rule as it would be written>"}],
   "dropped": [{"subject": "<subject>", "reason": "<duplicate of X | not a choice>"}]
 }

@@ -69,6 +69,37 @@ def _isolate_run_log(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _house_files_are_the_examples(tmp_path, monkeypatch):
+    """Every house file reads as its tracked ``.example`` twin.
+
+    The operator's own house rules, lexicon and book groups are per-user and
+    change what prompts carry; a test must see the same house on every machine.
+    Proposals are written to a per-test file. Tests that want a different house
+    point these at their own files.
+    """
+    from src.house import groups, lexicon, proposals
+    from src.judges import context
+
+    absent = tmp_path / "_house_absent"
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_FILE", absent / "house_style_rules.json")
+    monkeypatch.setattr(lexicon, "LEXICON_FILE", absent / "house_lexicon.json")
+    monkeypatch.setattr(lexicon, "LEGACY_FORCED_FILE", absent / "forced_glossary_terms.json")
+    monkeypatch.setattr(groups, "GROUPS_FILE", absent / "book_groups.json")
+    monkeypatch.setattr(proposals, "PROPOSALS_FILE", tmp_path / "house_rules.proposals.jsonl")
+
+
+@pytest.fixture
+def no_house_rules(tmp_path, monkeypatch):
+    """A house with no rules at all, for tests of what happens without one."""
+    from src.judges import context
+
+    empty = tmp_path / "empty_house_rules.json"
+    empty.write_text('{"every_book": []}', encoding="utf-8")
+    monkeypatch.setattr(context, "HOUSE_STYLE_RULES_FILE", empty)
+    return empty
+
+
+@pytest.fixture(autouse=True)
 def _no_save_check_config(monkeypatch):
     """Keep the developer's ``save_check`` section out of every test.
 

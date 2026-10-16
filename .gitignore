@@ -68,7 +68,8 @@ app_config.json
 # Per-user blacklist (copy from blacklist.example.json)
 blacklist.json
 
-# Per-user forced glossary terms (copy from forced_glossary_terms.example.json)
+# Legacy per-user forced glossary terms, replaced by prompts/house_lexicon.json
+# (still read while no lexicon exists)
 forced_glossary_terms.json
 
 # Per-user backup locations for scripts/decision_archaeology.py
@@ -84,6 +85,9 @@ prompts/translation.txt
 prompts/translator_note_default.txt
 prompts/dialogue.txt
 prompts/house_style_rules.json
+prompts/house_lexicon.json
+prompts/book_groups.json
+prompts/proposals/
 prompts/decisions_taxonomy.json
 prompts/previous/
 

@@ -1,11 +1,11 @@
 # decisions — chapter scan (DETECTION ONLY)
-# Version: 1.0
+# Version: 1.1
 # Reads one English chapter, before translation, and lists the translation
 # decisions in it that must be made once for the whole book. It does not
 # translate and does not decide; a later step merges the candidates across
 # chapters into ranked decision cards for the user to rule on.
 # Preamble variables: title, author, target_language, locale, book_signals,
-# taxonomy, house_rules, ruled.
+# taxonomy, house_rules, house_vocabulary, ruled.
 # Body: the chapter's English source, rendered by src/decisions/scan.py:render_body.
 
 You are reading one chapter of an English book that is about to be translated
@@ -60,6 +60,15 @@ The house rules below bind every book. A decision they settle is not a decision.
 <house_rules>
 {{house_rules}}
 </house_rules>
+
+The house lexicon and the earlier books in this book's series or domain
+already fix these renderings and answers. A subject they cover is not a
+decision unless something in this chapter argues for departing from them;
+then report it and say what in `why_hard`:
+
+<house_vocabulary>
+{{house_vocabulary}}
+</house_vocabulary>
 
 The editor has already ruled on these subjects for this book:
 

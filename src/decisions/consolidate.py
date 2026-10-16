@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.decisions import decisions_dir
-from src.decisions.scan import house_rules_text, subject_key
+from src.decisions.scan import house_defaults, house_rules_text, house_vocabulary_text, subject_key
 from src.decisions.taxonomy import OTHER, format_taxonomy, load_taxonomy
 from src.decisions.wave import fanout_error, has_draft, inside, load_manifest, run_wave
 from src.judges.base import _CACHE_PREFIX_SPLIT_MARKER
@@ -128,11 +128,17 @@ def merge_subjects(candidates: list[dict[str, Any]]) -> dict[str, list[dict[str,
     return out
 
 
-def render_body(category: str, subjects: list[dict[str, Any]], taxonomy: dict[str, Any]) -> str:
+def render_body(
+    category: str,
+    subjects: list[dict[str, Any]],
+    taxonomy: dict[str, Any],
+    *,
+    house_defaults: Optional[dict[str, dict]] = None,
+) -> str:
     entry = next((c for c in taxonomy.get("categories") or [] if c["id"] == category), None)
     lines = [f"CATEGORY: {category}", ""]
     if entry:
-        lines += [format_taxonomy({"categories": [entry]}), ""]
+        lines += [format_taxonomy({"categories": [entry]}, house_defaults=house_defaults), ""]
     else:
         lines += ["(no taxonomy entry: the scan placed these under 'other')", ""]
     lines.append(f"SUBJECTS ({len(subjects)}, most-raised first):")
@@ -207,9 +213,11 @@ def consolidate_prepare(
         "author": cfg.get("author") or "an unknown author",
         "target_language": cfg.get("target_language") or "Spanish",
         "locale": cfg.get("locale") or "unspecified",
-        "house_rules": house_rules_text(),
+        "house_rules": house_rules_text(project_dir),
+        "house_vocabulary": house_vocabulary_text(project_dir),
         "dialogue_rules": dialogue_rules_text(),
     })
+    defaults = house_defaults(project_dir)
     prefix, marker, _ = rendered.partition(_CACHE_PREFIX_SPLIT_MARKER)
     preamble = prefix if marker else rendered.rstrip("\n") + "\n\n"
 
@@ -222,7 +230,7 @@ def consolidate_prepare(
     for category in sorted(merged, key=lambda c: -len(merged[c])):
         subjects = merged[category]
         job_id = f"consolidate.{category}"
-        body = render_body(category, subjects, taxonomy)
+        body = render_body(category, subjects, taxonomy, house_defaults=defaults)
         body_path = ddir / f"{job_id}.body.txt"
         prompt_path = ddir / f"{job_id}.prompt.txt"
         draft_path = ddir / f"{job_id}.draft.json"
@@ -685,6 +693,11 @@ def consolidate_commit(project_dir: Path) -> dict[str, Any]:
         "failed": failed,
         "missing": missing,
     }
+    # House-rule proposals land in the shared proposals file, where the gate's
+    # "adopt as house rule?" picks them up (scripts/decisions.py adopt-proposal).
+    from src.house.proposals import record_proposals
+
+    doc["house_rule_proposal_ids"] = record_proposals(project_dir.name, categories)
     _out_path(project_dir).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     report_path = _report_path(project_dir)
     report_path.write_text(render_report(doc), encoding="utf-8")

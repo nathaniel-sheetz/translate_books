@@ -67,12 +67,21 @@ def category_ids(taxonomy: dict[str, Any]) -> list[str]:
     return [c["id"] for c in taxonomy.get("categories") or []]
 
 
-def format_taxonomy(taxonomy: dict[str, Any]) -> str:
+def format_taxonomy(
+    taxonomy: dict[str, Any], *, house_defaults: Optional[dict[str, dict]] = None
+) -> str:
     """The categories as prompt text: id, description, cues, default, examples.
 
     Examples go in without their ``project`` tag. The scanner needs the shape of
     the decision, not which book it came from.
+
+    A category's ``house_default`` comes from the house rule that settles
+    ``decisions:<category>`` when there is one (``house_defaults``, from
+    :func:`src.judges.context.settled_by_house`), naming the rule; the
+    taxonomy's own ``house_default`` field is the fallback for a taxonomy that
+    predates the move of those defaults into the house rules.
     """
+    house_defaults = house_defaults or {}
     blocks: list[str] = []
     for cat in taxonomy.get("categories") or []:
         lines = [f"### {cat['id']} — {cat.get('name') or cat['id']}"]
@@ -82,7 +91,12 @@ def format_taxonomy(taxonomy: dict[str, Any]) -> str:
         if cues:
             lines.append("detection_cues:")
             lines += [f"- {c}" for c in cues]
-        if cat.get("house_default"):
+        settled = house_defaults.get(cat["id"])
+        if settled:
+            lines.append(
+                f"house_default (house rule `{settled['rule_id']}`): {str(settled['answer']).strip()}"
+            )
+        elif cat.get("house_default"):
             lines.append(f"house_default: {str(cat['house_default']).strip()}")
         examples = [
             str(e.get("text") or "").strip()

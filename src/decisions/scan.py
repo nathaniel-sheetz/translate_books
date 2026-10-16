@@ -131,10 +131,101 @@ def book_signals(project_dir: Path) -> str:
     return "\n".join(lines) or "(no text features measured for this book)"
 
 
-def house_rules_text() -> str:
-    from src.judges.context import format_style_rules, load_house_rules
+def house_rules_text(project_dir: Optional[Path] = None) -> str:
+    """Every house rule in scope for the book, whatever its ``enforce`` mode.
 
-    return format_style_rules(load_house_rules()) or "(none)"
+    The decisions stage reads the whole house layer: a draft-only default or a
+    mechanical fix settles a question as surely as a prompt rule does. Never the
+    book's own sidecar rules (see the module docstring).
+    """
+    from src.judges.context import AUDIENCE_DECISIONS, rules_for
+
+    lines = []
+    for rule in rules_for(project_dir, None, audience=AUDIENCE_DECISIONS):
+        rule_id = str(rule.get("id") or "").strip()
+        text = str(rule.get("rule") or "").strip()
+        if not rule_id or not text:
+            continue
+        note = str(rule.get("note") or "").strip()
+        scope = str(rule.get("scope") or "").strip()
+        line = f'- "{rule_id}": {text}' + (f" ({note})" if note else "")
+        if scope and scope != "every_book":
+            line += f" [{scope}]"
+        lines.append(line)
+    return "\n".join(lines) or "(none)"
+
+
+#: How many sibling-glossary renderings the decisions prompts list. The
+#: lexicon is listed whole; precedent is evidence, so a long series is capped.
+MAX_PRECEDENT_TERMS = 80
+
+
+def house_vocabulary_text(project_dir: Optional[Path]) -> str:
+    """The house lexicon and the group siblings' choices that bear on this book.
+
+    A subject they cover is settled (``by: "house_lexicon"`` or
+    ``by: "precedent"``) unless something in this book argues for departing:
+    "copy the sibling books' horse vocabulary?" is a standing practice, not a
+    question.
+    """
+    if project_dir is None:
+        return "(no book given)"
+    from src.house import book_slug, read_source
+    from src.house.groups import group_ids_of
+    from src.house.lexicon import entries_for, format_entry
+    from src.house.precedent import format_concordance, leading_rendering, load_precedent, style_votes
+
+    source = read_source(project_dir)
+    parts: list[str] = []
+    lexicon = entries_for(group_ids_of(book_slug(project_dir)), source)
+    if lexicon:
+        parts.append(
+            "House lexicon (every book in scope renders these the same way; a word with "
+            "no house rendering yet is still decided per book):\n"
+            + "\n".join(f"- {format_entry(e)}" for e in lexicon)
+        )
+    try:
+        precedent = load_precedent(project_dir)
+    except Exception as exc:  # noqa: BLE001 - precedent is evidence, not a prerequisite
+        logger.warning("No precedent for %s: %s", project_dir, exc)
+        precedent = {}
+    sibs = precedent.get("siblings") or []
+    if sibs:
+        names = ", ".join(f"{s['slug']} ({s['kind']})" for s in sibs)
+        lines = []
+        for entry in list((precedent.get("glossary") or {}).values())[:MAX_PRECEDENT_TERMS]:
+            lead = leading_rendering(entry)
+            if lead is None:
+                continue
+            line = f"- {entry['english']} → {lead['spanish']} ({', '.join(lead['slugs'])})"
+            if entry.get("divergent"):
+                others = sorted({r["spanish"] for r in entry["renderings"]} - {lead["spanish"]})
+                line += f"; also rendered {', '.join(others)}"
+            evidence = format_concordance(entry)
+            if evidence:
+                line += f"; {evidence}"
+            lines.append(line)
+        style_lines = []
+        for qid in sorted(precedent.get("style") or {}):
+            votes = style_votes(precedent, qid)
+            total = sum(len(v["slugs"]) for v in votes)
+            style_lines.append(
+                f"- {qid}: " + "; ".join(f"{v['label']} ({len(v['slugs'])} of {total})" for v in votes)
+            )
+        block = f"Earlier books in this book's groups: {names}."
+        if lines:
+            block += "\nRenderings already in use there, for terms this book also has:\n" + "\n".join(lines)
+        if style_lines:
+            block += "\nStyle answers there:\n" + "\n".join(style_lines)
+        parts.append(block)
+    return "\n\n".join(parts) or "(none: the book is in no group and no house lexicon entry occurs in it)"
+
+
+def house_defaults(project_dir: Optional[Path]) -> dict[str, dict]:
+    """``{category: {answer, rule_id}}`` for every taxonomy category a house rule settles."""
+    from src.judges.context import settled_by_house
+
+    return settled_by_house(project_dir, "decisions")
 
 
 def load_rulings(project_dir: Path) -> list[dict[str, Any]]:
@@ -174,8 +265,9 @@ def build_preamble(project_dir: Path, *, taxonomy: dict[str, Any]) -> str:
             "target_language": cfg.get("target_language") or "Spanish",
             "locale": cfg.get("locale") or "unspecified",
             "book_signals": book_signals(project_dir),
-            "taxonomy": format_taxonomy(taxonomy),
-            "house_rules": house_rules_text(),
+            "taxonomy": format_taxonomy(taxonomy, house_defaults=house_defaults(project_dir)),
+            "house_rules": house_rules_text(project_dir),
+            "house_vocabulary": house_vocabulary_text(project_dir),
             "ruled": ruled_text(load_rulings(project_dir)),
         },
     )

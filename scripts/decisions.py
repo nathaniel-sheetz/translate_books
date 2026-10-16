@@ -14,6 +14,9 @@ Subcommands, each printing exactly one JSON object with a ``_schema`` block:
     consolidate-prepare  one prompt per category from the candidates (no spend)
     consolidate-fanout   fold each category into a few questions    (no API spend)
     consolidate-commit   audit coverage, write the routed questions  (no spend)
+    proposals            list house-rule proposals from every book
+    adopt-proposal       write one into the house rules (scope, triggers)
+    decline-proposal     record that one is not a house rule
 
     python scripts/decisions.py scan-prepare --project midnight
     python scripts/decisions.py scan-fanout  --project midnight
@@ -164,6 +167,67 @@ def _cmd_consolidate_commit(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+_PROPOSALS_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "proposals": "list of {id, rule, category, books, subjects, why, status}; status open | adopted | declined",
+    "path": "prompts/proposals/house_rules.jsonl (per-user, append-only)",
+}
+
+_ADOPT_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "rule": "the house rule as written into prompts/house_style_rules.json",
+    "instructions": "next step",
+}
+
+
+def _print(payload: dict) -> int:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def _cmd_proposals(args: argparse.Namespace) -> int:
+    from src.house import proposals
+
+    return _print({
+        "status": "ok",
+        "proposals": proposals.load_proposals(status=args.status),
+        "path": str(proposals.PROPOSALS_FILE),
+        "_schema": _PROPOSALS_SCHEMA,
+    })
+
+
+def _cmd_adopt_proposal(args: argparse.Namespace) -> int:
+    from src.house import proposals
+
+    try:
+        rule = proposals.adopt(
+            args.id, scope=args.scope, triggers=args.triggers, rule_id=args.rule_id,
+            note=args.note or "", enforce=args.enforce, rule_text=args.rule,
+        )
+    except ValueError as exc:
+        return _print({"status": "error", "error": str(exc), "_schema": _ADOPT_SCHEMA})
+    return _print({
+        "status": "ok",
+        "rule": rule,
+        "instructions": (
+            "Adopted. Books already drafted are not re-settled: run "
+            "`python scripts/house_check.py <slug>` on books in progress to see where "
+            "they depart from the new rule."
+        ),
+        "_schema": _ADOPT_SCHEMA,
+    })
+
+
+def _cmd_decline_proposal(args: argparse.Namespace) -> int:
+    from src.house import proposals
+
+    try:
+        declined = proposals.decline(args.id, reason=args.reason or "")
+    except ValueError as exc:
+        return _print({"status": "error", "error": str(exc)})
+    return _print({"status": "ok", "proposal": declined})
+
+
 _DISPATCH = {
     "scan-prepare": _cmd_scan_prepare,
     "scan-fanout": _cmd_scan_fanout,
@@ -171,6 +235,9 @@ _DISPATCH = {
     "consolidate-prepare": _cmd_consolidate_prepare,
     "consolidate-fanout": _cmd_consolidate_fanout,
     "consolidate-commit": _cmd_consolidate_commit,
+    "proposals": _cmd_proposals,
+    "adopt-proposal": _cmd_adopt_proposal,
+    "decline-proposal": _cmd_decline_proposal,
 }
 
 
@@ -230,6 +297,26 @@ def build_parser() -> argparse.ArgumentParser:
         "consolidate-commit", help="audit coverage, write consolidated.json and the report"
     )
     c_commit.add_argument("--project", required=True, help="project id or path")
+
+    p_props = sub.add_parser("proposals", help="list house-rule proposals from every book")
+    p_props.add_argument("--status", choices=["open", "adopted", "declined"], default=None)
+
+    p_adopt = sub.add_parser("adopt-proposal", help="write a proposal into the house rules")
+    p_adopt.add_argument("--id", required=True, help="proposal id (p-xxxxxxxx)")
+    p_adopt.add_argument("--scope", default="every_book", help="every_book or group:<id>")
+    p_adopt.add_argument("--trigger", dest="triggers", action="append", default=None,
+                         help="English source form that brings the rule into a chunk "
+                              "(repeatable; 're:<regex>' for a pattern). None = global")
+    p_adopt.add_argument("--rule-id", default=None, help="stable rule id (default: from the text)")
+    p_adopt.add_argument("--rule", default=None,
+                         help="the rule as the house should word it (default: the proposal's text)")
+    p_adopt.add_argument("--note", default=None, help="example or clarification for the rule")
+    p_adopt.add_argument("--enforce", choices=["prompt", "draft"], default=None,
+                         help="prompt (translator + judges, default) or draft (drafting steps only)")
+
+    p_decline = sub.add_parser("decline-proposal", help="record that a proposal is not a house rule")
+    p_decline.add_argument("--id", required=True)
+    p_decline.add_argument("--reason", default=None)
     return parser
 
 

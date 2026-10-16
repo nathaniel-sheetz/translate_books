@@ -1,8 +1,15 @@
 {
-  "version": 1,
+  "version": 2,
   "approved_at": "2026-09-14",
-  "about": "The house rule set every book is judged against. `every_book` is merged into every book's rules by src/judges/context.py::load_style_rules, so the editorial judge, the audit panel and the triage pass all cite these ids whether or not a book has a style_rules.json sidecar. `where_the_guide_agrees` is NOT injected: a book adopts one of those by copying the rule into its own sidecar, because a book whose style guide disagrees must not be held to it. Only rules the editorial judge's first pass can check from the Spanish alone belong here. Dialogue punctuation is left to the dialogue judge, and tú/usted to the address judge and address map. Rule ids and wording stay identical across books so findings aggregate by rule; a book's note may vary, and a book's sidecar note overrides the one here.",
+  "about": "The house rule set. Copy to house_style_rules.json (gitignored) to make it your own; this example is what a clone without one reads. Rules in `every_book` apply to every book unless `scope` narrows one to a group (`group:<id>`, see book_groups.example.json). Optional fields: `enforce` is `prompt` (default; the translator and the judges read it), `mechanical` (a named `fixer` in src/house/mechanical.py applies it at chunk commit, logs each change, and no prompt carries it) or `draft` (a house default for the drafting steps only: it pre-answers the questions it settles and reaches no translator or judge prompt). `triggers` are English source forms (plain, matched like a glossary term, or `re:<regex>`, case-sensitive): a rule with triggers reaches only the chunks that contain one, a rule without is global and sits in the translator's cached prefix. `settles` maps `style:<question id>`, `decisions:<taxonomy category>` or `address:global_rules` to the answer the rule gives, so that question is pre-answered (confirm/override) instead of asked. A book turns a rule off with {\"id\": ..., \"off\": true, \"reason\": ...} in its style_rules.json, which drops it from that book's translator prefix and judge context. `where_the_guide_agrees` is NOT injected: a book adopts one of those by copying the rule into its own sidecar, because a book whose style guide disagrees must not be held to it. Dialogue punctuation is left to the dialogue judge, and tú/usted to the address judge and address map. Rule ids and wording stay identical across books so findings aggregate by rule; a book's note may vary, and a book's sidecar note overrides the one here.",
   "every_book": [
+    {
+      "id": "mexican-spanish",
+      "rule": "Write Mexican Spanish for a present-day Mexican reader.",
+      "settles": {
+        "style:dialect": "mexican_spanish"
+      }
+    },
     {
       "id": "no-iberianisms",
       "rule": "No Iberian vocabulary, idiom or grammar.",
@@ -21,7 +28,57 @@
     {
       "id": "rio-no-tilde",
       "rule": "Write the preterite of reír as rio, never rió.",
-      "note": "Current RAE orthography counts it a monosyllable, so it takes no tilde: —Eso es muy cierto —rio Ben. The noun río (river) is a different word and keeps its accent on the i."
+      "note": "Current RAE orthography counts it a monosyllable, so it takes no tilde: —Eso es muy cierto —rio Ben. The noun río (river) is a different word and keeps its accent on the i.",
+      "enforce": "mechanical",
+      "fixer": "rio_no_tilde"
+    },
+    {
+      "id": "title-article-narration",
+      "rule": "A title before a name takes the article and a lowercase title in narration, and no article with a capitalised title in direct address.",
+      "note": "la tía Frances salió / —Tía Frances, ¿puedo ir?",
+      "triggers": [
+        "re:\\b(?:Aunt|Uncle|Cousin|Grandma|Grandpa|Mr\\.|Mrs\\.|Miss|Dr\\.|Doctor|Captain|Colonel|Judge|Sister|Brother) [A-Z]"
+      ],
+      "settles": {
+        "decisions:titles-honorifics": "Article + lowercase title in narration, bare title in direct address (la tía Frances / Tía Frances)."
+      }
+    },
+    {
+      "id": "italics-underscores",
+      "rule": "Words wrapped in single underscores are italic in the source (_Victory_, _ad hoc_); wrap the matching Spanish words in the same underscores, adding no pair and dropping none.",
+      "note": "Stressed words, commands and coined words keep their italics: never move the emphasis into quotation marks, bold or small capitals.",
+      "triggers": [
+        "re:(?<![\\w])_[^_\\s][^_\\n]*_(?![\\w])"
+      ],
+      "settles": {
+        "decisions:speech-typography": "Words wrapped in single underscores are italic in the source (_Victory_, _ad hoc_); wrap the matching Spanish words in the same underscores, adding no pair and dropping none."
+      }
+    },
+    {
+      "id": "no-raised-interjections",
+      "rule": "Never raise the religiosity of an interjection.",
+      "note": "A non-religious 'oh dear' or 'goodness' is never 'Dios mío'.",
+      "triggers": [
+        "re:(?i)\\b(?:oh,? dear|dear me|goodness|gracious|my word|heavens|oh,? my|mercy)\\b"
+      ]
+    },
+    {
+      "id": "keep-imperial",
+      "rule": "Keep imperial units and the original currency; never convert to metric.",
+      "enforce": "draft",
+      "settles": {
+        "style:measurement_handling": "keep_imperial",
+        "style:currency_handling": "keep_period_currency"
+      }
+    },
+    {
+      "id": "adult-usted",
+      "rule": "Two adults who are not family or close friends say usted to each other in both directions.",
+      "note": "Strangers, or a professional and a client such as a visiting doctor. A child who is not of the household says usted to the household's adults, unlike the household's own children.",
+      "enforce": "draft",
+      "settles": {
+        "address:global_rules": "Two adults who are not family or close friends address each other with usted in both directions (strangers; a professional and a client). A child who is not of the household says usted to the household's adults."
+      }
     }
   ],
   "where_the_guide_agrees": [

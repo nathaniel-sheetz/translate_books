@@ -399,28 +399,12 @@ def filter_glossary_for_chunk(glossary: Glossary, source_text: str) -> Glossary:
     if not glossary.terms:
         return glossary
 
-    text_lower = source_text.lower()
+    # The shared matcher: house-rule triggers and the house lexicon decide
+    # "does this chunk need it" the same way.
+    from src.house.match import term_occurs
 
-    matching_terms = []
-    for term in glossary.terms:
-        english_lower = term.english.lower()
-        if english_lower in text_lower:
-            matching_terms.append(term)
-            continue
-        # Check common variants: plural, possessive, past tense
-        variants = [
-            english_lower + "s",
-            english_lower + "es",
-            english_lower + "'s",
-            english_lower + "\u2019s",  # curly apostrophe
-        ]
-        # Past tense variants (only if not already ending in e/d)
-        if not english_lower.endswith("e"):
-            variants.append(english_lower + "ed")
-        if not english_lower.endswith("d"):
-            variants.append(english_lower + "d")
-        if any(v in text_lower for v in variants):
-            matching_terms.append(term)
+    text_lower = source_text.lower()
+    matching_terms = [t for t in glossary.terms if term_occurs(t.english, text_lower)]
 
     return Glossary(
         terms=matching_terms,

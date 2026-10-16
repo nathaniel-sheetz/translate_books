@@ -18,6 +18,15 @@ rather than term pairs. Those terms are already injected as candidates and their
 the prompt's guidance block. **Define every one of them**; they were flagged precisely because
 frequency-ranked extraction can bury a rare-but-critical term.
 
+`prefilled` lists renderings the house already has for terms in this source: the house lexicon
+(`origin: house lexicon (...)`, e.g. stall → casilla in the horse group) and the group siblings'
+glossaries (`origin: siblings: ...`), each with `evidence` counted from the siblings' committed
+translations. Propose each one as-is unless the book argues otherwise, and say why in `context`
+when you depart. Show `divergence` (lexicon vs siblings, or two siblings) at the gate as a
+decision for the user. At commit, `house_departures` lists the pre-filled renderings the approved
+glossary changed or left out, and `house_check` points at `reports/house_check.md`. This replaces
+reading sibling glossaries by hand.
+
 **Read the printed `prompt_path`** and draft the glossary proposals yourself — the thinking-mode
 step. Produce a JSON array of `{english, translation, type, context, alternatives}` objects and
 **Write** it to the printed `draft_path`. **Write the target language WITH its diacritics**

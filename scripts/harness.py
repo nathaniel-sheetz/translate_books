@@ -189,6 +189,30 @@ def _build_parser() -> argparse.ArgumentParser:
                          "'import' (default) captures them as translatable [FOOTNOTE:N] "
                          "tokens + footnotes.json; 'drop' removes them. Detected either way "
                          "and reported as footnotes_detected/footnotes_mode.")
+    sp.add_argument("--group", dest="groups", action="append", default=None, metavar="ID",
+                    help="Join an existing book group (prompts/book_groups.json; repeatable). "
+                         "Siblings pre-fill the style guide, address map and glossary")
+
+    # group <action> / precedent -----------------------------------------------
+    grp = sub.add_parser("group", help="Book groups: which books share a cast or a vocabulary")
+    grp_sub = grp.add_subparsers(dest="action", required=True)
+    grl = grp_sub.add_parser("list", help="List the groups (and which ones --project is in)")
+    grl.add_argument("--project", default=None)
+    grj = grp_sub.add_parser("join", help="Add the book to a group")
+    add_project(grj)
+    grj.add_argument("--group", required=True)
+    grj.add_argument("--kind", choices=["series", "domain"], default=None,
+                     help="Create the group with this kind if it does not exist")
+    grj.add_argument("--about", default=None, help="One line on what the group shares")
+    grle = grp_sub.add_parser("leave", help="Remove the book from a group")
+    add_project(grle)
+    grle.add_argument("--group", required=True)
+
+    prp = sub.add_parser("precedent",
+                         help="(Re)build the book's sibling-precedent snapshot (.harness/precedent.json)")
+    add_project(prp)
+    prp.add_argument("--keep", action="store_true",
+                     help="Show the existing snapshot instead of rebuilding it")
 
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
@@ -688,7 +712,18 @@ def _dispatch(args: argparse.Namespace):
             min_chapter_size=args.min_chapter_size,
             auto_strip_boilerplate=args.auto_strip_boilerplate,
             footnotes=args.footnotes,
+            groups=args.groups,
         )
+    if cmd == "group":
+        if args.action == "list":
+            return flow.group_list(args.project)
+        if args.action == "join":
+            return flow.group_join(args.project, group=args.group, kind=args.kind,
+                                   about=args.about)
+        if args.action == "leave":
+            return flow.group_leave(args.project, group=args.group)
+    if cmd == "precedent":
+        return flow.precedent(args.project, rebuild=not args.keep)
     if cmd in ("split-preview", "split"):
         fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
         return fn(

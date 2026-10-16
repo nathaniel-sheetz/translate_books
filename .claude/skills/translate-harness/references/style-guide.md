@@ -16,9 +16,15 @@ This prints `detected_features`, the `questions` (the 4 **standard** fixed quest
 **deterministic** feature-detected ones, each with `id`, `question`, `options`, and a `hint`),
 and an `answers_path`. Each option is an `{id, label}` pair — the `id` is a stable slug you pass
 straight through, so you never count positions. Nothing here is answered yet — these are
-*for the user*. Two notes: (a) the `dialect` question may arrive with a `prefilled` id +
-`prefilled_reason` derived from the setup locale (es-mx → `mexican_spanish`) — present it as a
-confirm/override default, not a blank ask. (b) `forms_of_address` has a first-class informal-tú
+*for the user*. Two notes: (a) any question may arrive with a `prefilled` id +
+`prefilled_reason` + `prefilled_source` — from this book's own answer, a house rule that settles it
+(`house rule \`mexican-spanish\``), the series or domain siblings' most common answer ("3 of 4
+domain siblings"), or the setup locale (es-mx → `mexican_spanish`). Present each as a
+confirm/override default, not a blank ask, and show its `divergence` (other sources that answered
+differently) beside it. If the user answers a house-rule question differently, that rule is turned
+off for this book only at `prepare-draft` (its `house_overrides`); relay that. `house_covered`
+lists questions a global house rule answers: the translator already reads that rule with every
+chunk, so the guide must not restate it. (b) `forms_of_address` has a first-class informal-tú
 option (id `t_dominates_informal` — the `ú` is dropped by the slug rule); prefer that id over
 inventing custom text when the user wants tú to dominate.
 

@@ -62,7 +62,7 @@ python scripts/extract_glossary_candidates.py projects/mybook/source.txt \
 5. **Collapse possessive variants** (`Nelson's` → `Nelson`, summing frequencies).
 6. **Prune contained terms** — drop candidates whose every occurrence sits inside a longer candidate (leftmost-longest overlap resolution).
 7. **Filter demonyms** — drop single-word nationality words and demonym-led adjectival phrases.
-8. **Inject forced terms** — merge any terms from `forced_glossary_terms.json` that appear in the source, bypassing steps 4–7 entirely. Detection reason: `forced_user_term`.
+8. **Inject forced terms** — merge any every-book house-lexicon terms (`prompts/house_lexicon.json`) that appear in the source, bypassing steps 4–7 entirely. Detection reason: `forced_user_term`.
 9. **Exclude glossary terms** that already exist in the optional `-g glossary.json`.
 10. **Score and rank**, then cap at `--max-candidates`.
 
@@ -280,15 +280,16 @@ Multi-word phrases with at least one capitalized non-demonym token survive: `Bri
 
 ### Forced glossary candidates (`build_forced_candidates`)
 
-After demonym filtering, the pipeline injects any terms listed in `forced_glossary_terms.json` that actually occur in the source. This lets you pin domain words that extraction heuristics would otherwise bury — for example, "stall" (*establo* vs *casilla*) or "gobbler" (*pavo macho* vs *guajolote*) — so they always appear in the candidate report.
+After demonym filtering, the pipeline injects the every-book entries of the **house lexicon** (`prompts/house_lexicon.json`, gitignored; `house_lexicon.example.json` is the tracked default) that actually occur in the source. This lets you pin domain words that extraction heuristics would otherwise bury — for example, "stall" (*establo* vs *casilla*) or "gobbler" (*pavo macho* vs *guajolote*) — so they always appear in the candidate report.
 
-**Setup:** copy `forced_glossary_terms.example.json` to `forced_glossary_terms.json` (gitignored) in the project root and add your terms:
+The lexicon replaced `forced_glossary_terms.json`, which is still read while no `house_lexicon.json` exists:
 
 ```json
 {
-  "terms": [
-    { "term": "stall", "type_guess": "TECHNICAL" },
-    { "term": "gobbler", "type_guess": "OTHER" }
+  "entries": [
+    { "english": "deer", "spanish": "venado", "scope": "every_book" },
+    { "english": "stall", "spanish": "casilla", "scope": "group:horses", "type_guess": "technical" },
+    { "english": "gobbler", "spanish": null }
   ]
 }
 ```
@@ -297,9 +298,11 @@ Fields per entry:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `term` | yes | Word or phrase to force. |
-| `type_guess` | no | `CHARACTER`, `PLACE`, `TECHNICAL`, `CONCEPT`, or `OTHER` (default `OTHER`). |
-| `detection_reasons` | no | Extra reasons merged with `forced_user_term`. |
+| `english` | yes | Word or phrase to force. |
+| `spanish` | no | The house rendering. `null` only forces the candidate; a rendering also pre-fills the book glossary at the harness glossary step. |
+| `alternatives`, `why`, `origin` | no | Shown in the glossary prompt beside the pre-fill. |
+| `scope` | no | `every_book` (default) or `group:<id>` from `prompts/book_groups.json`. Only every-book entries are forced here; the harness glossary step adds a book's group entries. |
+| `type_guess` | no | `character`, `place`, `technical`, `concept`, or `other` (default `other`). |
 
 **Matching rules:**
 - Case-insensitive, whole-word.
@@ -311,7 +314,7 @@ Fields per entry:
 
 Detection reason added to every forced candidate: `forced_user_term`.
 
-The feature is implemented in `build_forced_candidates()` (`scripts/extract_glossary_candidates.py`) and `load_forced_glossary_terms()` (`src/app_config.py`).
+The feature is implemented in `build_forced_candidates()` (`scripts/extract_glossary_candidates.py`) and `load_forced_glossary_terms()` (`src/app_config.py`, a shim over `src/house/lexicon.py`).
 
 ### Glossary exclusion (`exclude_glossary_terms`)
 
@@ -500,7 +503,7 @@ A candidate's `detection_reasons` list is the union of reasons across every extr
 | `frequent_ngram` | n-grams | Survived all n-gram filters. |
 | `always_capitalized` | repeated-cap safety net | Word appears capitalized in 100% of occurrences. |
 | `rare_in_literary_english` | repeated-cap / rare-literary | Literary Zipf below the relevant threshold. |
-| `forced_user_term` | forced glossary candidates | Term was listed in `forced_glossary_terms.json` and matched in the source. |
+| `forced_user_term` | forced glossary candidates | Term is an every-book entry of the house lexicon (`prompts/house_lexicon.json`) and matched in the source. |
 
 ## Requirements
 

@@ -66,6 +66,11 @@ python scripts/harness.py address-map prepare --project projects/<slug>
 This samples the book's highest interpersonal-dialogue chapters (a spread across the whole book,
 not just the openers) and renders a prompt at `prompt_path`. Check `forms_of_address_loaded` is
 `true` — if it is `false` the answer never landed; fix `answers_path` and re-run.
+`house_address_rules: true` means a house rule (adult usted, for one) is in the prompt and the map's
+`global_rules` must state it. `precedent_pairs > 0` means the book's **series** siblings pre-filled
+pairs for characters who also appear here (tagged `from`); keep them unless the sample shows the
+relationship changed. Show `divergence` (two siblings disagreeing) at the gate, and at commit show
+the commit's `divergence` (this map against the siblings).
 
 Read the prompt and draft the map JSON to the printed `draft_path`:
 `{content, style_guide_summary, pairs, global_rules}`. Three things the prompt spells out that

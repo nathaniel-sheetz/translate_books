@@ -1033,7 +1033,10 @@ def test_translate_prepare_emits_byte_identical_preamble_and_body(tmp_path: Path
         prompt = Path(entry["prompt_path"]).read_text(encoding="utf-8")
         assert preamble + body == prompt
 
-    # First chunk has no predecessor context — full prompt must match the API builder.
+    # First chunk has no predecessor context — full prompt must match the API builder
+    # given the same book's house rules.
+    from src.house.prompt import load_translator_house
+
     first = prep["manifest"][0]
     chunk0 = load_chunk(Path(first["chunk_path"]))
     expected = build_translation_prompt(
@@ -1043,6 +1046,7 @@ def test_translate_prepare_emits_byte_identical_preamble_and_body(tmp_path: Path
         target_language="Spanish",
         always_include_dialogue=True,
         always_include_image_instructions=False,
+        house=load_translator_house(tmp_path),
     )
     assert Path(first["prompt_path"]).read_text(encoding="utf-8") == expected
 

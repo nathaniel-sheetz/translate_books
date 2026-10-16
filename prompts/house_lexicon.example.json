@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "about": "The house lexicon: words rendered the same way in every book that has them. Copy to house_lexicon.json (gitignored) and edit; this example is what a clone without one reads. It replaces forced_glossary_terms.json, which is still read while no house_lexicon.json exists. Each entry: english (required), spanish (null = always raise the word as a glossary candidate with no house rendering yet; set = pre-fill the book glossary whenever the word occurs in the source, overridable at the glossary gate), alternatives, scope (every_book, the default, or group:<id> from book_groups.json), why, origin, type_guess (character|place|concept|technical|other). Matching is case-insensitive with simple plural, possessive and past-tense variants, the same as the glossary filter. An entry reaches the translator only through the book glossary, so only in the chunks that contain the word.",
+  "entries": [
+    {
+      "english": "deer",
+      "spanish": "venado",
+      "scope": "every_book",
+      "why": "The everyday Mexican word; ciervo reads as Iberian or literary.",
+      "type_guess": "other"
+    },
+    {
+      "english": "gobbler",
+      "spanish": null,
+      "scope": "every_book",
+      "why": "Rendered inconsistently (pavo macho vs guajolote); decide it per book.",
+      "type_guess": "other"
+    },
+    {
+      "english": "stall",
+      "spanish": "casilla",
+      "scope": "group:horses",
+      "why": "A horse's stall in the barn; not establo or caballeriza (the whole building).",
+      "type_guess": "technical"
+    }
+  ]
+}

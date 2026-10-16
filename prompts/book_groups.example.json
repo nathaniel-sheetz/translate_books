@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "about": "Book groups. Copy to book_groups.json (gitignored) and edit, or let `harness.py group join` write it. A group is {kind, about, members: [project slugs]}. kind 'series' shares characters, so a sibling pre-fills names, address pairs, style answers and vocabulary; kind 'domain' shares vocabulary and style answers but not address pairs. A group id is also a scope: a house rule or lexicon entry with scope 'group:<id>' applies only to that group's books. Precedent from siblings is derived (src/house/precedent.py), never authored here.",
+  "groups": {
+    "horses": {
+      "kind": "domain",
+      "about": "Horse books: barn, tack and racing vocabulary.",
+      "members": []
+    }
+  }
+}
