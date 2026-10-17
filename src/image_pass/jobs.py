@@ -45,8 +45,10 @@ from src.image_pass import (
     COVER_NAMES,
     IMAGE_SUFFIXES,
     MODE_COVER,
+    MODE_REPLACE,
     MODE_TRANSLATE,
     MODES,
+    cover_dir,
     image_key,
     images_dir,
     is_safe_key,
@@ -81,6 +83,14 @@ INPUT_CURRENT = "current"
 # A cover drawn from another of the book's images: that image is attached as
 # source material, not as the thing being edited.
 INPUT_REFERENCE = "reference"
+
+# A reference from outside images/: the cover's art (`cover/art.jpg`) or a
+# candidate a job drew (`jobs/<id>/cand_01.png`, or one under its previous/).
+# prepare copies it into the job's folder as reference.<ext>, because a
+# candidate is archived the moment its job's prompt changes and the art is
+# replaced by the next cover job; the run must still find what was prepared.
+_SNAPSHOT_ROOTS = ("cover", "jobs")
+REFERENCE_STEM = "reference"
 
 # A file of this name in the run dir is harvested if one ever appears, but the
 # prompt no longer asks for it: see _CONTRACT_EDIT.
@@ -125,6 +135,13 @@ _CONTRACT_EDIT = """Output:
 _CONTRACT_REFERENCE = """Output:
 - Use the built-in image generation tool, with `{input_name}`, the attached image, as its source (it is also in the working directory). Never use the CLI fallback or any script that needs an API key; if the built-in tool is unavailable, stop and say so.
 - The result is a new picture in a cover's portrait proportions, not the attached image's ({width} wide by {height} high).
+""" + _CONTRACT_TAIL
+
+# A replacement drawn from a picture that is not the one it replaces: the
+# slot's shape still rules, whatever the attached picture's is.
+_CONTRACT_REPLACE_FROM = """Output:
+- Use the built-in image generation tool, with `{input_name}`, the attached image, as its source (it is also in the working directory). Never use the CLI fallback or any script that needs an API key; if the built-in tool is unavailable, stop and say so.
+- The result takes the proportions of the illustration it replaces, {slot_width} wide by {slot_height} high, not the attached image's ({width} wide by {height} high) where the two differ.
 """ + _CONTRACT_TAIL
 
 _CONTRACT_NEW = """Output:
@@ -240,7 +257,26 @@ def render_prompt(job: dict[str, Any], meta: dict[str, str]) -> str:
     """Fill ``prompts/image_pass/<mode>.txt`` for one validated job."""
     labels = job.get("labels") or {}
     input_name = job.get("input_name")
-    if input_name and job.get("reference"):
+    replace_task = (
+        f'The attached image, `{input_name or ""}`, is an illustration from the book '
+        f'"{meta["title"]}". Make a new illustration to take its place.'
+    )
+    cover_task = ""
+    if input_name and job.get("reference") and job["mode"] == MODE_REPLACE:
+        contract = _CONTRACT_REPLACE_FROM.format(
+            input_name=input_name,
+            width=job.get("width"),
+            height=job.get("height"),
+            slot_width=job.get("slot_width"),
+            slot_height=job.get("slot_height"),
+        )
+        replace_task = (
+            f"The attached image, `{input_name}`, is the editor's chosen starting point "
+            f'for a new illustration in the book "{meta["title"]}". The new illustration '
+            "takes the place of one of the book's original pictures, which is not "
+            'attached; where the points below say "the original", they mean that picture.'
+        )
+    elif input_name and job.get("reference"):
         contract = _CONTRACT_REFERENCE.format(
             input_name=input_name,
             width=job.get("width"),
@@ -275,6 +311,7 @@ def render_prompt(job: dict[str, Any], meta: dict[str, str]) -> str:
         "labels_block": labels_block,
         "instruction": job["instruction"],
         "cover_task": cover_task,
+        "replace_task": replace_task,
         "contract": contract,
     }
     text = load_template(job["mode"])
@@ -296,6 +333,55 @@ def render_prompt(job: dict[str, Any], meta: dict[str, str]) -> str:
             + ", ".join(sorted(set(missing)))
         )
     return rendered.strip() + "\n"
+
+
+def _reference_snapshot(job_dir: Path) -> Optional[Path]:
+    for suffix in IMAGE_SUFFIXES:
+        path = job_dir / f"{REFERENCE_STEM}{suffix}"
+        if path.is_file():
+            return path
+    return None
+
+
+def _outside_reference(
+    project_dir: Path, key: str, ref: str
+) -> tuple[Optional[Path], Optional[str], Optional[str]]:
+    """Resolve a ``cover/...`` or ``jobs/...`` reference: ``(path, name, problem)``.
+
+    A candidate named here is archived by the very prepare that names it (its
+    job's prompt changes), so when the file has gone the copy an earlier
+    prepare took for this job is used, if it was taken of the same name.
+    """
+    name = ref.strip().replace("\\", "/")
+    root, _, rest = name.partition("/")
+    if not is_safe_key(rest):
+        return None, None, f"reference {ref!r} is not a path inside {root}/"
+    if Path(rest).suffix.lower() not in IMAGE_SUFFIXES:
+        return None, None, f"reference {ref!r} is not an image file ({', '.join(IMAGE_SUFFIXES)})"
+    path = (cover_dir(project_dir) if root == "cover" else jobs_dir(project_dir)) / rest
+    if path.is_file():
+        return path, name, None
+    job_dir = jobs_dir(project_dir) / job_id_for(key)
+    kept = _reference_snapshot(job_dir)
+    try:
+        previous = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous = None
+    if kept is not None and isinstance(previous, dict) and previous.get("reference") == name:
+        return kept, name, None
+    return None, None, f"reference {name}: no such file"
+
+
+def _take_snapshot(job_dir: Path, source: Path) -> Path:
+    """Copy an outside reference into the job's folder; return the copy."""
+    target = job_dir / f"{REFERENCE_STEM}{source.suffix.lower()}"
+    if source.resolve() != target.resolve():
+        for suffix in IMAGE_SUFFIXES:
+            stale = job_dir / f"{REFERENCE_STEM}{suffix}"
+            if stale != target and stale.is_file():
+                stale.unlink()
+        shutil.copy2(source, target)
+    return target
 
 
 def _validate_job(
@@ -372,13 +458,25 @@ def _validate_job(
         source = current
 
     reference: Optional[str] = None
-    if raw.get("reference") is not None:
-        wanted = image_key(raw["reference"]) if isinstance(raw["reference"], str) else ""
-        if mode != MODE_COVER:
-            problems.append(
-                "reference is for a cover job: the image a new cover is drawn from"
-            )
-        elif not is_safe_key(wanted):
+    snapshot = False
+    ref_raw = raw.get("reference")
+    ref_root = (
+        ref_raw.strip().replace("\\", "/").split("/", 1)[0] if isinstance(ref_raw, str) else ""
+    )
+    if ref_raw is not None and mode not in (MODE_COVER, MODE_REPLACE):
+        problems.append(
+            "reference is for a cover job (the image a new cover is drawn from) "
+            "or a replace job (the picture its replacement starts from)"
+        )
+    elif ref_raw is not None and ref_root in _SNAPSHOT_ROOTS:
+        found, reference, problem = _outside_reference(project_dir, key, ref_raw)
+        if problem:
+            problems.append(problem)
+        else:
+            source, snapshot = found, True
+    elif ref_raw is not None:
+        wanted = image_key(ref_raw) if isinstance(ref_raw, str) else ""
+        if not is_safe_key(wanted):
             problems.append(f"reference {raw['reference']!r} is not a path inside images/")
         else:
             ref_backup = originals_dir(project_dir) / wanted
@@ -405,6 +503,16 @@ def _validate_job(
             )
     elif source is None:
         problems.append(f"{key}: no such file in images/")
+
+    # The shape the replacement must take when it is drawn from another picture.
+    slot_width = slot_height = None
+    if reference and mode == MODE_REPLACE:
+        slot = backup if backup.is_file() else current
+        slot_info = probe_image(slot) if slot.is_file() else {"error": "no such file in images/"}
+        if slot_info.get("error"):
+            problems.append(f"{key}: {slot_info['error']}")
+        else:
+            slot_width, slot_height = slot_info["width"], slot_info["height"]
 
     width = height = None
     if source is not None:
@@ -441,8 +549,11 @@ def _validate_job(
             else f"{'reference' if reference else 'input'}{source.suffix.lower()}"
         ),
         "reference": reference,
+        "reference_snapshot": snapshot,
         "width": width,
         "height": height,
+        "slot_width": slot_width,
+        "slot_height": slot_height,
         "status_at_prepare": ledger.status_of(state.get(key)),
     }, []
 
@@ -622,6 +733,10 @@ def _prepare(project_dir: Path, jobs: list[Any], *, replace: bool) -> dict[str, 
         prompt = prompts[job["id"]]
         prompt_file = job_dir / "prompt.txt"
         archived = 0
+        # Before any archiving: the reference may be one of this job's own
+        # candidates, which the archive below is about to move.
+        if job.get("reference_snapshot"):
+            job["input"] = str(_take_snapshot(job_dir, Path(job["input"])))
         if (
             prompt_file.exists() and prompt_file.read_text(encoding="utf-8") != prompt
         ) or _input_changed(job_dir, job):

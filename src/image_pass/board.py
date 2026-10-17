@@ -794,7 +794,13 @@ def build(project_dir: Path) -> dict[str, Any]:
         elif current.is_file():
             original = _picture("original", current, source="images", key=key)
             pictures.append(original)
-        if job and job.get("reference") and job.get("input") and Path(job["input"]).is_file():
+        if job and job.get("reference_snapshot") and job.get("input") and Path(job["input"]).is_file():
+            # The cover's art or an earlier candidate, copied into the job's folder.
+            pictures.append(_picture(
+                "reference", Path(job["input"]), source="job", job_id=job["id"],
+                key=job["reference"],
+            ))
+        elif job and job.get("reference") and job.get("input") and Path(job["input"]).is_file():
             drawn_from = Path(job["input"])
             ref_backup = originals_dir(project_dir) / job["reference"]
             from_backup = ref_backup.is_file() and ref_backup.resolve() == drawn_from.resolve()
