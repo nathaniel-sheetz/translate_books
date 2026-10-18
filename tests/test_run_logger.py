@@ -206,3 +206,12 @@ class TestLogCommand:
         e = _read_events()[0]
         assert e["status"] == "validation_error"
         assert e["cmd"] == "glossary commit"
+
+    def test_failed_setup_with_only_a_title_is_attributed_to_its_book(self, tmp_path):
+        cli = self._import_cli()
+        args = SimpleNamespace(command="setup", action=None, project=None,
+                               title="Hunting for Hidden Gold")
+        cli._log_command(args, status="error", duration=3.4)
+        e = _read_events()[0]
+        assert e["status"] == "error"
+        assert e["project"] == "hunting-for-hidden-gold"

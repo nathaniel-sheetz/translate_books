@@ -1037,6 +1037,9 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
                 run_id = state.ensure_run_id(project_dir)
             except Exception:  # noqa: BLE001
                 slug = project_dir_str
+        elif getattr(args, "title", None):
+            # A `setup --title` that failed before naming its folder: still the book's row.
+            slug = state.slugify(args.title)
 
         fields = {"cmd": label, "status": status, "dur_s": round(duration, 3)}
         if isinstance(result, dict):
@@ -1074,8 +1077,14 @@ def main() -> None:
         print(f"VALIDATION ERROR — fix every issue below and re-draft:\n{e}", file=sys.stderr)
         sys.exit(1)
     except (json.JSONDecodeError, ValueError) as e:
-        _log_command(args, status="parse_error", duration=time.monotonic() - started)
-        print(f"DRAFT PARSE ERROR — fix the JSON/format and re-run:\n{e}", file=sys.stderr)
+        # Only a command that reads an agent draft has a draft to fix; a setup
+        # that found no chapters is not a JSON problem.
+        if isinstance(e, json.JSONDecodeError) or hasattr(args, "draft"):
+            _log_command(args, status="parse_error", duration=time.monotonic() - started)
+            print(f"DRAFT PARSE ERROR — fix the JSON/format and re-run:\n{e}", file=sys.stderr)
+        else:
+            _log_command(args, status="error", duration=time.monotonic() - started)
+            print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
     except FileNotFoundError as e:
         _log_command(args, status="not_found", duration=time.monotonic() - started)

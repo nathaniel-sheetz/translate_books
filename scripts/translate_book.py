@@ -151,11 +151,14 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
         find_book_body,
         _normalize_whitespace,
         build_chapter_report,
+        normalize_gutenberg_url,
         suggest_split_pattern,
         write_heading_outline,
     )
 
-    url = args.url
+    url = normalize_gutenberg_url(args.url)
+    if url != args.url:
+        print(f"  {args.url} is the catalog page; using the book file {url}")
     if not url:
         # Check if source.txt already exists
         source_path = project_dir / "source.txt"

@@ -433,3 +433,27 @@ class TestLinkedLargerScans:
         for base in ("https://pg.example/book/", ""):
             with pytest.raises(ValueError, match="local file"):
                 fetch_bytes(scan.as_uri(), base_url=base)
+
+
+class TestNormalizeGutenbergUrl:
+    BOOK = "https://www.gutenberg.org/cache/epub/72958/pg72958-images.html"
+
+    @pytest.mark.parametrize("url", [
+        "https://www.gutenberg.org/ebooks/72958",
+        "https://gutenberg.org/ebooks/72958/",
+        "http://www.gutenberg.org/ebooks/72958.html.images",
+        "https://www.gutenberg.org/ebooks/72958#download",
+    ])
+    def test_catalog_page_becomes_the_book_file(self, url):
+        from scripts.ingest_gutenberg import normalize_gutenberg_url
+        assert normalize_gutenberg_url(url) == self.BOOK
+
+    @pytest.mark.parametrize("url", [
+        "https://www.gutenberg.org/cache/epub/72958/pg72958-images.html",
+        "https://www.gutenberg.org/files/1234/1234-h/1234-h.htm",
+        "https://www.gutenberg.org/ebooks/72958.epub3.images",
+        "https://gutenberg.net.au/ebooks/fr100001.html",
+    ])
+    def test_other_urls_are_left_alone(self, url):
+        from scripts.ingest_gutenberg import normalize_gutenberg_url
+        assert normalize_gutenberg_url(url) == url
